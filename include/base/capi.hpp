@@ -54,8 +54,8 @@ public:
         }
         return it->second;
     }
-    const TypeInfo& GetTypeInfo(int32_t index){
-        return type_info_list[index];
+    TypeInfo* GetTypeInfo(int32_t index){
+        return &type_info_list[index];
     }
 private:
     std::unordered_map<std::string, int32_t> key_to_index;
@@ -80,7 +80,14 @@ public:
     int32_t GetTypeIndex(){
         return header.type_index;
     }
-    std::string GetTypeName(){}
+    
+    std::string GetTypeInfo(){
+        if (TypeInfo* info = TypeRegistry::Global()->GetTypeInfo(header.type_index)){
+            return info->type_key;
+        }
+        return "Unknown";
+
+    }
     void IncRef() {
         header.ref_counter.fetch_add(1, std::memory_order_relaxed);
     }
@@ -101,9 +108,65 @@ public:
         header.deleter = deleter;
     }
 };
+template<typename T>
+class objectPtr{
+public:
+    objectPtr():data_(nullptr){};
+    explicit objectPtr(T* data):data_(data){
+        if(data_) data_->InRef();
+    }
+    objectPtr(const objectPtr& other):data_(other.data_){
+        if(data_) data_->IncRef();
+    }
+    objectPtr(objectPtr&& other)noexcept:data_(other.data_){
+        if(data_) data_->IncRef();
+    }
+    ~objectPtr(){
+        if(data_) data_->DecRef();
+    }
+    T* operator->() const { return data_; }
+    T& operator*() const { return *data_; }
+    explicit operator bool() const {return data_!=nullptr;}
+    T* get() const {return data_;}
+    T* release(){
+        T* ptr = data_;
+        data_ = nullptr;
+        return ptr;
+    }
 
-class kstruct{};
-class objectPtr{};
+    void reset(T* ptr = nullptr){
+        if(data_) data_->DecRef();
+        data_ = ptr;
+        if(data_) data_->IncRef();
+    }
+private:
+    T* data_;
+}
 
+#define SIMPLE_REGISTER_TYPE(T) \
+    template <> struct TypeRegistration<T> { \
+        static int32_t Register() { \
+            static TypeInfo info(T::_type_key); \
+            static int32_t index = kInvalidIndex; \
+            if (index == kInvalidIndex) { \
+                index = TypeRegistry::Global()->RegisterType(info); \
+                T::_type_static_index = index; \
+            } \
+            return index; \
+        } \
+    };
+
+
+#define SIMPLE_DECLARE_TYPE(ClassName, ParentType) \
+    public: \
+        static constexpr const char* _type_key = #ClassName; \
+        static int32_t _type_static_index; \
+        static int32_t RuntimeTypeIndex() { \
+            if (_type_static_index == kDynamicIndex) { \
+                return TypeRegistration<ClassName>::Register(); \
+            } \
+            return _type_static_index; \
+        } \
+        SIMPLE_REGISTER_TYPE(ClassName);
 }
 }
