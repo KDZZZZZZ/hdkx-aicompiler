@@ -13,7 +13,7 @@
 #include <cstdio>
 
 namespace kxcomp {
-namespace base {
+
 
 // 前向声明
 class object;
@@ -210,7 +210,7 @@ struct TypeRegistration {
         static TypeInfo info(T::_type_key);
         static int32_t index = kInvalidIndex;
         if (index == kInvalidIndex) {
-            info.constructor = []() -> object* { return new T(); };
+     0       info.constructor = []() -> object* { return new T(); };
             info.deleter = [](object* obj) { delete static_cast<T*>(obj); };
             index = TypeRegistry::Global()->RegisterType(info);
             T::_type_static_index = index;
@@ -259,8 +259,8 @@ objectPtr<T> make_object(Args&&... args) {
                 return TypeRegistration<ClassName>::Register(); \
             } \
             return _type_static_index; \
-        } \
-        SIMPLE_REGISTER_TYPE(ClassName)
+         } 
 
-} // namespace base
+
+
 } // namespace kxcomp
