@@ -22,6 +22,23 @@ SIMPLE_REGISTER_TYPE(Cast)
 SIMPLE_REGISTER_TYPE(ReduceMean)
 SIMPLE_REGISTER_TYPE(Softmax)
 SIMPLE_REGISTER_TYPE(Split)
+class NodePtr:public objectPtr<Node>{
+public:
+    std::vector<objectPtr<Node>> next_nodes;
+    std::vector<objectPtr<Node>> prev_nodes;
+    std::uint32_t node_hash_value;
+    std::uint32_t node_hash_value_func(const std::vector<objectPtr<Node>>& next_nodes,const std::vector<objectPtr<Node>>& prev_nodes){
+        std::uint32_t hash_value = 0;
+        for(auto& node:next_nodes){
+            hash_value += node->node_hash_value;
+        }
+        return hash_value;
+    }
+    //结构等价性验证、类型转换、节点查询
+    NodePtr(std::vector<objectPtr<Node>> next_nodes,std::vector<objectPtr<Node>> prev_nodes = {}):next_nodes(next_nodes),prev_nodes(prev_nodes){
+        this->node_hash_value = node_hash_value_func(next_nodes,prev_nodes);
+    }
+};
 class Node:public object{
 SIMPLE_DECLARE_TYPE(Node,object)
 public:
