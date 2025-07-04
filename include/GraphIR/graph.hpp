@@ -1,3 +1,5 @@
+#pragma once
+
 #include "base/capi.hpp"
 #include "node.hpp"
 #include <vector>
@@ -63,6 +65,20 @@ static void parse_args(const std::string& args_str,
             current_arg += c;
         }
     }
+}
+
+class GraphPtr:public objectPtr<Graph>{//TODO:支持子图replace
+    SIMPLE_DECLARE_TYPE(GraphPtr,objectPtr<Graph>)
+public:
+    GraphPtr() = default;
+};
+
+template<> GraphPtr make_object<graph>(const std::string& data) {
+    graph* ptr = new graph(data);
+    const int32_t type_index = graph::RuntimeTypeIndex();
+    ptr->SetTypeIndex(type_index);
+    ptr->SetDeleter([](void* obj) { delete static_cast<graph*>(obj); });
+    return Graphptr(ptr);
 }
 
 SIMPLE_REGISTER_TYPE(Graph)
@@ -166,7 +182,7 @@ public:
             }
         }
     }
-    void replace_node(NodePtr node_to_replace,NodePtr new_node){
+    void replace_node(NodePtr node_to_replace,NodePtr new_node){//TODO:增加结构哈希验证
         // 为了方便操作，将 objectPtr<Node> 转换为 NodePtr
 
         // 1. 获取被替换节点的进出边信息
@@ -226,7 +242,7 @@ public:
     std::string graph_name;
     Graph() = default;
 
-    Graph(const std::string& file_path) {
+    Graph(const std::string& file_path) {//TODO：检查命名规则
         this->graph_name = file_path;
         std::string content = file_op::read_file(file_path);
         if (content.empty()) {
