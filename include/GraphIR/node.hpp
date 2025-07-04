@@ -56,7 +56,7 @@ public:
         return this->get()->node_hash_value_func(name,op_type);
     }
 };
-template<> NodePtr make_object<node>(const std::string& data) {
+template<> NodePtr make_object<node>(const std::string& data) {//TODO:检查这里
     node* ptr = new node(data);
     const int32_t type_index = node::RuntimeTypeIndex();
     ptr->SetTypeIndex(type_index);
