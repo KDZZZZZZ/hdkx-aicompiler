@@ -22,23 +22,47 @@ SIMPLE_REGISTER_TYPE(Cast)
 SIMPLE_REGISTER_TYPE(ReduceMean)
 SIMPLE_REGISTER_TYPE(Softmax)
 SIMPLE_REGISTER_TYPE(Split)
+SIMPLE_REGISTER_TYPE(Input)
+SIMPLE_REGISTER_TYPE(Output)
+SIMPLE_REGISTER_TYPE(Shape)
+SIMPLE_REGISTER_TYPE(Sub)
 class NodePtr:public objectPtr<Node>{
 public:
-    std::vector<objectPtr<Node>> next_nodes;
-    std::vector<objectPtr<Node>> prev_nodes;
-    std::uint32_t node_hash_value;
-    std::uint32_t node_hash_value_func(const std::vector<objectPtr<Node>>& next_nodes,const std::vector<objectPtr<Node>>& prev_nodes){
+    std::vector<NodePtr> next_nodes;
+    std::vector<NodePtr> prev_nodes;
+    std::uint32_t hash_value;
+    std::uint32_t structure_hash_value;
+
+    NodePtr() = default;
+
+    explicit NodePtr(Node* node_raw_ptr) : objectPtr<Node>(node_raw_ptr) {
+        if (get()) {
+            this->hash_value = get_node_hash_value(get()->name, get()->op_type);
+            this->structure_hash_value = calcul_structure_hash_value();
+        }
+    }
+
+    std::uint32_t calcul_structure_hash_value(){
         std::uint32_t hash_value = 0;
-        for(auto& node:next_nodes){
+        for(auto& node:this->next_nodes){
+            hash_value += node->node_hash_value;
+        }
+        for(auto& node:this->prev_nodes){
             hash_value += node->node_hash_value;
         }
         return hash_value;
     }
-    //结构等价性验证、类型转换、节点查询
-    NodePtr(std::vector<objectPtr<Node>> next_nodes,std::vector<objectPtr<Node>> prev_nodes = {}):next_nodes(next_nodes),prev_nodes(prev_nodes){
-        this->node_hash_value = node_hash_value_func(next_nodes,prev_nodes);
+    std::uint32_t get_node_hash_value(const std::string& name,const std::string& op_type){
+        return this->get()->node_hash_value_func(name,op_type);
     }
 };
+template<> NodePtr make_object<node>(const std::string& data) {
+    node* ptr = new node(data);
+    const int32_t type_index = node::RuntimeTypeIndex();
+    ptr->SetTypeIndex(type_index);
+    ptr->SetDeleter([](void* obj) { delete static_cast<node*>(obj); });
+    return nodeptr(ptr);
+}
 class Node:public object{
 SIMPLE_DECLARE_TYPE(Node,object)
 public:
@@ -75,13 +99,13 @@ class Gather:public Node{
 public:
     std::string op_type = "Gather";
     std::string inputs_name;
-    Tensor* indices;
+    std::string indices_name;
     Gather() = default;
-    Gather(std::string name,std::string inputs_name,Tensor* indices):Node(){
+    Gather(std::string name,std::string inputs_name,std::string indices_name):Node(){
         this->node_hash_value = node_hash_value_func(name,op_type);
         this->name = name;
         this->inputs_name = inputs_name;
-        this->indices = indices;
+        this->indices_name = indices_name;
     }
 };
 class Add:public Node{
@@ -174,6 +198,32 @@ public:
         this->steps = steps;
     }
 };
+class Sub:public Node{
+    SIMPLE_DECLARE_TYPE(Sub,Node)
+public:
+    std::string op_type = "Sub";
+    std::string inputs_name;
+    std::string inputs2_name;
+    Sub() = default;
+    Sub(std::string name,std::string inputs_name,std::string inputs2_name):Node(){
+        this->node_hash_value = node_hash_value_func(name,op_type);
+        this->name = name;
+        this->inputs_name = inputs_name;
+        this->inputs2_name = inputs2_name;
+    }
+};
+class Shape:public Node{
+    SIMPLE_DECLARE_TYPE(Shape,Node)
+public:
+    std::string op_type = "Shape";
+    std::string inputs_name;
+    Shape() = default;
+    Shape(std::string name,std::string inputs_name):Node(){
+        this->node_hash_value = node_hash_value_func(name,op_type);
+        this->name = name;
+        this->inputs_name = inputs_name;
+    }
+};
 class Reshape:public Node{
     SIMPLE_DECLARE_TYPE(Reshape,Node)
 public:
@@ -208,13 +258,13 @@ class Concat:public Node{
     SIMPLE_DECLARE_TYPE(Concat,Node)
 public:
     std::string op_type = "Concat";
-    std::string inputs_name;
+    std::vector<std::string> inputs_names;
     std::int32_t axis;
     Concat() = default;
-    Concat(std::string name,std::string inputs_name,std::int32_t axis):Node(){
+    Concat(std::string name,std::vector<std::string> inputs_names,std::int32_t axis):Node(){
         this->node_hash_value = node_hash_value_func(name,op_type);
         this->name = name;
-        this->inputs_name = inputs_name;
+        this->inputs_names = inputs_names;
         this->axis = axis;
     }
 };
@@ -296,12 +346,36 @@ public:
     std::vector<std::int32_t> split;
     std::int32_t axis;
     Split() = default;
-    Split(std::string name,std::string inputs_name,std::vector<std::int32_t> split_sizes):Node(){
+    Split(std::string name,std::string inputs_name,std::vector<std::int32_t> split, std::int32_t axis):Node(){
         this->node_hash_value = node_hash_value_func(name,op_type);
         this->name = name;
         this->inputs_name = inputs_name;
         this->split = split;
         this->axis = axis;
+    }
+};
+class Input:public Node{
+    SIMPLE_DECLARE_TYPE(Input,Node)
+public:
+    std::string op_type = "Input";
+    Tensor* value;
+    Input() = default;
+    Input(std::string name,Tensor* value):Node(){
+        this->node_hash_value = node_hash_value_func(name,op_type);
+        this->name = name;
+        this->value = value;
+    }
+};
+class Output:public Node{
+    SIMPLE_DECLARE_TYPE(Output,Node)
+public:
+    std::string op_type = "Output";
+    Tensor* value;
+    Output() = default;
+    Output(std::string name,Tensor* value):Node(){
+        this->node_hash_value = node_hash_value_func(name,op_type);
+        this->name = name;
+        this->value = value;
     }
 };
 }

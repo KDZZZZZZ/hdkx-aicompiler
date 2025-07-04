@@ -2,7 +2,7 @@
 #include <cstdio>
 
 namespace kxcomp {
-namespace base {
+
 
 // file_op类的实现
 std::string file_op::read_file(const std::string& path) {
@@ -30,5 +30,4 @@ void file_op::delete_file(const std::string& path) {
     std::remove(path.c_str());
 }
 
-} // namespace base
 } // namespace kxcomp
