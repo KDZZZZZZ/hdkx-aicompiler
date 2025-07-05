@@ -70,16 +70,16 @@ static void parse_args(const std::string& args_str,
 class GraphPtr:public objectPtr<Graph>{//TODO:支持子图replace
     SIMPLE_DECLARE_TYPE(GraphPtr,objectPtr<Graph>)
 public:
+    std::string graph_name;
     GraphPtr() = default;
+    explicit GraphPtr(Graph* ptr):objectPtr<Graph>(ptr){
+        if(get()){
+            this->graph_name = get()->graph_name;
+        }
+    }
 };
 
-template<> GraphPtr make_object<graph>(const std::string& data) {
-    graph* ptr = new graph(data);
-    const int32_t type_index = graph::RuntimeTypeIndex();
-    ptr->SetTypeIndex(type_index);
-    ptr->SetDeleter([](void* obj) { delete static_cast<graph*>(obj); });
-    return Graphptr(ptr);
-}
+
 
 SIMPLE_REGISTER_TYPE(Graph)
 class Graph:public object{
@@ -333,7 +333,7 @@ public:
         }
     }
 
-    void save_graph(const std::string& file_path) {
+    void save_graph(const std::string& file_path) {//实现函数式中间层代码生成，改成按图结构遍历
         std::string content = "";
         
         // For simplicity, we iterate through nodes as they are.

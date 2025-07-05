@@ -1,31 +1,31 @@
 #include <vector>
 #include "base/capi.hpp"
+#include <optional>
 namespace kxcomp{
 
 class Tensor;
 
-SIMPLE_REGISTER_TYPE(Node)
-SIMPLE_REGISTER_TYPE(Constent)
-SIMPLE_REGISTER_TYPE(Gather)
-SIMPLE_REGISTER_TYPE(Add)
-SIMPLE_REGISTER_TYPE(Mul)
-SIMPLE_REGISTER_TYPE(MatMul)
-SIMPLE_REGISTER_TYPE(Div)
-SIMPLE_REGISTER_TYPE(Pow)
-SIMPLE_REGISTER_TYPE(Slice)
-SIMPLE_REGISTER_TYPE(Reshape)
-SIMPLE_REGISTER_TYPE(Transpose)
-SIMPLE_REGISTER_TYPE(Concat)
-SIMPLE_REGISTER_TYPE(Unsqueeze)
-SIMPLE_REGISTER_TYPE(Sqrt)
-SIMPLE_REGISTER_TYPE(Cast)
-SIMPLE_REGISTER_TYPE(ReduceMean)
-SIMPLE_REGISTER_TYPE(Softmax)
-SIMPLE_REGISTER_TYPE(Split)
-SIMPLE_REGISTER_TYPE(Input)
-SIMPLE_REGISTER_TYPE(Output)
-SIMPLE_REGISTER_TYPE(Shape)
-SIMPLE_REGISTER_TYPE(Sub)
+class Node:public object{
+SIMPLE_DECLARE_TYPE(Node,object)
+public:
+    std::string name;
+    std::string op_type;
+    std::uint32_t node_hash_value;
+    std::optional<std::uint32_t> cse_hash; // Annotation for CSE
+    
+    Node() = default;
+
+    explicit Node(const std::string& name) {
+        this->name = name;
+        this->op_type = "Node";
+        this->node_hash_value = this->node_hash_value_func(this->name, this->op_type);
+    }
+    
+    std::uint32_t node_hash_value_func(const std::string& name,const std::string& op_type){
+        return std::hash<std::string>{}(name + op_type);
+    }
+};
+
 class NodePtr:public objectPtr<Node>{
 public:
     std::vector<NodePtr> next_nodes;
@@ -56,26 +56,7 @@ public:
         return this->get()->node_hash_value_func(name,op_type);
     }
 };
-template<> NodePtr make_object<node>(const std::string& data) {//TODO:检查这里
-    node* ptr = new node(data);
-    const int32_t type_index = node::RuntimeTypeIndex();
-    ptr->SetTypeIndex(type_index);
-    ptr->SetDeleter([](void* obj) { delete static_cast<node*>(obj); });
-    return nodeptr(ptr);
-}
-class Node:public object{
-SIMPLE_DECLARE_TYPE(Node,object)
-public:
-    std::string name;
-    std::string op_type;
-    std::uint32_t node_hash_value;
-    
-    Node() = default;
-    
-    std::uint32_t node_hash_value_func(const std::string& name,const std::string& op_type){
-        return std::hash<std::string>{}(name + op_type);
-    }
-};
+
 //value类型待实现
 class Constent:public Node{
     SIMPLE_DECLARE_TYPE(Constent,Node)
@@ -378,4 +359,27 @@ public:
         this->value = value;
     }
 };
+
+SIMPLE_REGISTER_TYPE(Node)
+SIMPLE_REGISTER_TYPE(Constent)
+SIMPLE_REGISTER_TYPE(Gather)
+SIMPLE_REGISTER_TYPE(Add)
+SIMPLE_REGISTER_TYPE(Mul)
+SIMPLE_REGISTER_TYPE(MatMul)
+SIMPLE_REGISTER_TYPE(Div)
+SIMPLE_REGISTER_TYPE(Pow)
+SIMPLE_REGISTER_TYPE(Slice)
+SIMPLE_REGISTER_TYPE(Reshape)
+SIMPLE_REGISTER_TYPE(Transpose)
+SIMPLE_REGISTER_TYPE(Concat)
+SIMPLE_REGISTER_TYPE(Unsqueeze)
+SIMPLE_REGISTER_TYPE(Sqrt)
+SIMPLE_REGISTER_TYPE(Cast)
+SIMPLE_REGISTER_TYPE(ReduceMean)
+SIMPLE_REGISTER_TYPE(Softmax)
+SIMPLE_REGISTER_TYPE(Split)
+SIMPLE_REGISTER_TYPE(Input)
+SIMPLE_REGISTER_TYPE(Output)
+SIMPLE_REGISTER_TYPE(Shape)
+SIMPLE_REGISTER_TYPE(Sub)
 }
