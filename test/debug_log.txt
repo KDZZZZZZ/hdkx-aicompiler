@@ -1,0 +1,7 @@
+Testing Device...
+Created Device via constructor: Device(CPU, id=0)
+Calling kxc_runtime.device(gpu_type, 1)...
+Returned from kxc_runtime.device
+Type of dev2: <class 'kxc_runtime.Device'>
+Representation of dev2: Device(GPU, id=1)
+dev2.device_type = DeviceTypeCode.GPU
