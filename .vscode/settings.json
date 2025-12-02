@@ -84,7 +84,20 @@
         "charconv": "cpp",
         "chrono": "cpp",
         "format": "cpp",
-        "__string": "cpp"
+        "__string": "cpp",
+        "target": "cpp",
+        "ciso646": "cpp",
+        "cstdarg": "cpp",
+        "iomanip": "cpp",
+        "string_view": "cpp",
+        "version": "cpp",
+        "__cccl_config": "cpp",
+        "__new_": "cpp",
+        "__config": "cpp",
+        "__preprocessor": "cpp",
+        "__target_macros": "cpp",
+        "complex": "cpp",
+        "any": "cpp"
     },
     "cmake.sourceDirectory": "C:/Users/Administrator/Desktop/hdkx-aicompiler-1/test"
 }

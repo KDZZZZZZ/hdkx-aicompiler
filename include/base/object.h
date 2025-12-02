@@ -11,7 +11,7 @@ using AttrVisitor = std::function<void(const char* key, void* value)>;
 constexpr TypeIndex kKXC_OBJECT_TYPE = 0;
 class Object{
 public:
-    virtual void VisitAttrs(AttrVisitor visitor) {}
+    virtual void VisitAttrs(AttrVisitor& visitor) {}
     virtual ~Object() = default;
     static void* operator new(size_t size){
         if (current_arena) {
@@ -85,12 +85,13 @@ public:
     const Object* get() const { return object_; }
     const Object* operator->() const { return object_; }
     explicit operator bool() const { return object_ != nullptr; }
+    bool defined() const { return object_ != nullptr; }
     template<typename T>
     const T* As() const {
         // dynamic_cast 用于安全地向下转型
         return dynamic_cast<const T*>(object_);
     }
-private:
+protected:
     const Object* object_;
 };
 
