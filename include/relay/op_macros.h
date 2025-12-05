@@ -18,8 +18,20 @@ public:
     }
 
     OpRegEntry& set_num_inputs(int n) {
-        // In a real implementation, we would set this in OpNode
-        // op_->num_inputs = n;
+        OpNode* node = const_cast<OpNode*>(op_.operator->());
+        node->num_inputs = n;
+        return *this;
+    }
+
+    OpRegEntry& add_argument(const std::string& name, const std::string& type, const std::string& description, bool is_optional = false, const std::string& default_val = "") {
+        OpNode* node = const_cast<OpNode*>(op_.operator->());
+        ArgumentInfo arg;
+        arg.name = name;
+        arg.type = type;
+        arg.description = description;
+        arg.is_optional = is_optional;
+        arg.default_value_desc = default_val;
+        node->arguments.push_back(arg);
         return *this;
     }
 

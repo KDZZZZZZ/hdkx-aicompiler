@@ -97,7 +97,9 @@
         "__preprocessor": "cpp",
         "__target_macros": "cpp",
         "complex": "cpp",
-        "any": "cpp"
+        "any": "cpp",
+        "ccomplex": "cpp",
+        "coroutine": "cpp"
     },
     "cmake.sourceDirectory": "C:/Users/Administrator/Desktop/hdkx-aicompiler-1/test"
 }
