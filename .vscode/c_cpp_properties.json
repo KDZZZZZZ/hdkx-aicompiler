@@ -6,7 +6,7 @@
                 "${workspaceFolder}/include",
                 "D:/Anaconda/Include",
                 "D:/Anaconda/Lib/site-packages/pybind11/include",
-                "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/include"
+                "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1/include"
             ],
             "defines": [
                 "_DEBUG",
