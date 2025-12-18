@@ -230,7 +230,7 @@ def analyze_model(model_path, output_dir):
 
 if __name__ == "__main__":
     # Default path from user script
-    default_model = r"C:\Users\Administrator\Desktop\model.onnx"
+    default_model = r"C:\Users\Administrator\Desktop\hdkx-aicompiler-1\resnet18.onnx"
     
     parser = argparse.ArgumentParser(description="Analyze ONNX Model")
     parser.add_argument("--model", type=str, default=default_model, help="Path to ONNX model")

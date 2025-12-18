@@ -331,8 +331,8 @@ class RelayCppCodegen:
 
 if __name__ == "__main__":
     # Assuming model.onnx is on Desktop
-    desktop_path = r"C:\Users\Administrator\Desktop"
-    model_path = os.path.join(desktop_path, "model.onnx")
+    desktop_path = r"C:\Users\Administrator\Desktop\hdkx-aicompiler-1"
+    model_path = os.path.join(desktop_path, "resnet18.onnx")
     output_path = os.path.join(desktop_path, "hdkx-aicompiler-1", "test", "generated_network.cpp")
     
     if os.path.exists(model_path):
