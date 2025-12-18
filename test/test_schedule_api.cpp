@@ -102,11 +102,37 @@ void test_schedule_fuse_parallel() {
     std::cout << "Fuse & Parallel passed." << std::endl;
 }
 
+void test_schedule_bind_thread_axis() {
+    std::cout << "\nTesting Schedule Bind (Thread Axis)..." << std::endl;
+
+    Var n("n");
+    Tensor A = placeholder({n}, DataType::Float(32), "A");
+    Tensor B = compute({n}, [&](const std::vector<Var>& i) { return A(i); }, "B");
+
+    Schedule s = create_schedule({B->op});
+    Stage stage = s[B];
+
+    assert(stage->leaf_iter_vars.size() == 1);
+    IterVar axis0 = stage->leaf_iter_vars[0];
+
+    IterVar outer, inner;
+    stage.split(axis0, 64, &outer, &inner);
+
+    IterVar tx = thread_axis(IntImm(64), "threadIdx.x");
+    stage.bind(inner, tx);
+
+    assert(inner->iter_type == IterVarType::kThreadIndex);
+    assert(inner->thread_tag == "threadIdx.x");
+
+    std::cout << "Bind passed." << std::endl;
+}
+
 int main() {
     try {
         test_schedule_split();
         test_schedule_tile_vectorize();
         test_schedule_fuse_parallel();
+        test_schedule_bind_thread_axis();
         std::cout << "\nAll Schedule API tests passed!" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

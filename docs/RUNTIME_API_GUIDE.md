@@ -209,3 +209,115 @@ free(cpu, cpu_ptr)
 1.  **继承 `DeviceAPI`**: 实现 `AllocDataSpace`, `FreeDataSpace`, `CopyDataFromTo` 等纯虚函数。
 2.  **注册 API**: 在 `DeviceAPIManager::GetAPI` 中添加新的 `DeviceTypeCode` 分支，返回新的 API 单例。
 3.  **编译**: 将新的 `.cc` 文件加入构建系统（如 `build_pybind.bat`）。
+
+---
+
+## 6. 编译优化：设备通用 vs 设备特定（三个位置）
+
+在 KXC 里，你可以把“优化/调度”放在三层来做：
+
+1. **Relay（图级/算子级）Pass**：改写计算图结构，适合做算子融合、代数化简、布局变换等。
+2. **TE（算子级）Schedule**：固定算子语义不变，只改变循环与并行策略，适合做 `tile/vectorize/unroll/bind`。
+3. **TIR（低层语句）Pass**：直接改写 `Stmt`/`PrimExpr`，适合做 loop 标注、内存/线程域注入、低层 canonicalization。
+
+下面分别说明“怎么注册/怎么实现”以及如何区分 **设备通用** 和 **设备特定**。
+
+### 6.1 Relay Pass：注册与实现
+
+**入口/基类**
+
+- Relay 的 IR 节点定义见 `include/base/relay.h:1`。
+- Pass 基础设施见 `include/base/pass.h:1`：`RelayPassFunctor` 负责按节点类型分发，`RelayPass` 默认做 copy-on-write 的 Mutator。
+
+**实现方式（无需全局注册，直接在 pipeline 里调用）**
+
+你可以像 `test/test_pass.cpp:15` 那样继承 `kxc::RelayPass`，覆盖你关心的 `Visit*`：
+
+```cpp
+class MyPass : public kxc::RelayPass {
+protected:
+  kxc::Expr VisitCall(const kxc::CallNode* op, const kxc::Expr& ref) override {
+    // 1) 先递归改写子节点
+    // 2) 判断是否需要改写
+    // 3) changed==false 时返回 ref，实现 copy-on-write
+  }
+};
+```
+
+**设备通用优化（示例：代数化简 / 常量折叠）**
+
+- 这类 Pass 不需要 target 信息；例如“`x + 0 -> x`”、“`mul(const, const)` 预计算”等。
+- 参考已有的 Pass 文档：`docs/FoldConstant.md`。
+
+**设备特定优化（示例：标注/分派）**
+
+当你需要做“针对某设备的改写”，你需要把 target/device 信息带到 Relay 上。
+
+当前代码库里 `CallNode` 有一个 `ObjectRef attrs` 字段（见 `include/base/relay.h:90`），这使得你可以把“目标信息”作为 `ObjectRef` 附着在 `Call` 上。
+
+- 示例 Pass：`AnnotateDevice` 在 `test/test_pass.cpp:74`。
+- 它的行为是：如果 `Call.attrs` 为空，就写入一个目标对象；如果已存在，则保持不变。
+
+这种做法的作用类似 TVM 的“pass context/target”，但目前是用 `attrs` 临时承载。后续如果你引入显式的 `Target`/`PassContext`，可以把这条链路替换掉。
+
+### 6.2 TE Schedule：注册与实现
+
+**入口/对象模型**
+
+- TE 算子与 Tensor 表达：`include/te/te.h`。
+- Schedule 关键类型：`te::Schedule` / `te::Stage` / `te::IterVar`（见 `include/te/te.h:20`、`include/te/te.h:98`）。
+
+**“注册”是什么意思**
+
+在 TE 层，通常不做“全局注册某个 schedule”。惯用方式是：
+
+1. 在 build/lowering pipeline 里，根据 `target` 选择一个 schedule 函数。
+2. schedule 函数对 `Schedule s` 做原语调用（split/tile/bind/...）。
+
+当前仓库已经提供了若干 schedule 原语：
+
+- `Stage::split/fuse/reorder/tile`：`include/te/te.h:394` 起。
+- `Stage::vectorize/unroll/parallel/bind`：`include/te/te.h:503` 起。
+
+**设备通用 schedule（示例：CPU 友好的 tile + vectorize）**
+
+- 典型策略：外层 `tile` 改善 cache locality，内层 `vectorize` 触发 SIMD。
+- 示例见 `test/test_schedule_api.cpp:43`。
+
+**设备特定 schedule（示例：GPU thread 绑定）**
+
+- GPU 常见策略：把 innermost 轴 `bind(threadIdx.x)`，并配合 `blockIdx.x`/`vthread` 等。
+- 当前最小示例：`test/test_schedule_api.cpp:105`，其中：
+  - `thread_axis(IntImm(64), "threadIdx.x")` 创建 thread 轴。
+  - `stage.bind(inner, tx)` 将 `inner` 设为 `IterVarType::kThreadIndex` 并写入 `thread_tag`。
+
+注意：这一步只是“标注”与“意图表达”。要真正生成 CUDA kernel，还需要后续 lowering/codegen 支持把 `IterVarType::kThreadIndex` 翻译为 `tir::AttrStmt(thread_extent=...)` 或等价结构。
+
+### 6.3 TIR Pass：注册与实现
+
+**入口/IR 结构**
+
+- TIR `Stmt` 节点：`include/tir/stmt.h:1`。
+- 典型 loop 结构：`ForNode` 带 `ForType`（见 `include/tir/stmt.h:71`）。
+
+**实现方式（当前是“函数式 pass”）**
+
+仓库目前没有完整的 `StmtMutator`/`PassManager` 基础设施，所以建议按“纯函数改写”的方式写 pass：
+
+```cpp
+kxc::tir::Stmt MyTIRPass(const kxc::tir::Stmt& s);
+```
+
+示例 `VectorizeSerialLoops`：`test/test_tir_structure.cpp:68`。
+
+**设备通用 TIR 优化**
+
+- 例如：对 `ForType` 做规范化、对表达式做常量传播、把 `SeqStmt` 扁平化等。
+
+**设备特定 TIR 优化**
+
+- CPU：把热点 loop 标注为 `ForType::Parallel`（对应 OpenMP/pthreads 的 lowering）。
+- GPU：把 loop/iter 绑定到 thread/block，并用 `AttrStmt(thread_extent, ...)` 注入线程域信息。
+  - `AttrStmtNode` 定义见 `include/tir/stmt.h:154`。
+
+在 TVM 的典型链路里，TE 的 `bind(threadIdx.x)` 会在 lowering 时生成 TIR 的 `AttrStmt(thread_extent=...)`；在本仓库里你可以先用 TIR Pass 直接生成/校正这些标注，作为后续 codegen 的输入。
