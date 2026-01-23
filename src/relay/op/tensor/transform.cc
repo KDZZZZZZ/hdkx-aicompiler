@@ -19,6 +19,14 @@ The input is a tuple of tensors.
     .add_argument("data", "Tuple", "The tuple of tensors to concatenate.")
     .set_attr<std::string>("TAttrs", "ConcatAttrs");
 
+// Flatten
+KXC_REGISTER_OP(nn_flatten)
+    .describe(R"doc(Flattens the input tensor into a 2D tensor.
+)doc")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "FlattenAttrs");
+
 // Reshape
 KXC_REGISTER_OP(reshape)
     .describe(R"doc(Reshapes the input tensor.

@@ -55,14 +55,41 @@ public:
 };
 
 // --- Attribute System ---
+#define KXC_DECLARE_ATTRS_NODE(TypeId) \
+    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + TypeId; }
+
+#define KXC_DECLARE_ATTRS_REF(TypeName, NodeName) \
+public: \
+    using Attrs::Attrs; \
+    const NodeName* operator->() const { return static_cast<const NodeName*>(object_); } \
+private: \
+    friend class TypeName; \
+    static TypeName InternalCreate(NodeName* node) { \
+        TypeName attrs; \
+        attrs.object_ = node; \
+        if (attrs.object_) attrs.object_->IncRef(); \
+        return attrs; \
+    }
+
+#define KXC_DEFINE_SIMPLE_ATTRS(TypeName, TypeId) \
+    class TypeName##Node : public BaseAttrsNode { \
+    public: \
+        KXC_DECLARE_ATTRS_NODE(TypeId) \
+    }; \
+    class TypeName : public Attrs { \
+        KXC_DECLARE_ATTRS_REF(TypeName, TypeName##Node) \
+    public: \
+        static TypeName Create() { \
+            return InternalCreate(new TypeName##Node()); \
+        } \
+    };
+
 // Base class for all attributes
 class BaseAttrsNode : public Object {
 public:
     virtual void VisitAttrs(AttrVisitor& visitor) {}
     
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 12; 
-    }
+    KXC_DECLARE_ATTRS_NODE(12)
 };
 
 class Attrs : public ObjectRef {
@@ -91,30 +118,19 @@ public:
         // ...
     }
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 13;
-    }
+    KXC_DECLARE_ATTRS_NODE(13)
 };
 
 class Conv2DAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(Conv2DAttrs, Conv2DAttrsNode)
 public:
-    using Attrs::Attrs;
-    
     static Conv2DAttrs Create(std::vector<int64_t> strides, std::vector<int64_t> padding, std::string layout = "NCHW") {
         Conv2DAttrsNode* node = new Conv2DAttrsNode();
         node->strides = std::move(strides);
         node->padding = std::move(padding);
         node->groups = 1;
         node->data_layout = std::move(layout);
-        
-        Conv2DAttrs attrs;
-        attrs.object_ = node;
-        if (attrs.object_) attrs.object_->IncRef();
-        return attrs;
-    }
-    
-    const Conv2DAttrsNode* operator->() const {
-        return static_cast<const Conv2DAttrsNode*>(object_);
+        return InternalCreate(node);
     }
 };
 
@@ -122,25 +138,17 @@ public:
 class DenseAttrsNode : public BaseAttrsNode {
 public:
     int64_t units; // Output dimension
-    // std::string out_dtype;
-
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 18;
-    }
+    KXC_DECLARE_ATTRS_NODE(18)
 };
 
 class DenseAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(DenseAttrs, DenseAttrsNode)
 public:
-    using Attrs::Attrs;
     static DenseAttrs Create(int64_t units) {
         DenseAttrsNode* node = new DenseAttrsNode();
-        node->units = units;
-        DenseAttrs attrs;
-        attrs.object_ = node;
-        if (attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->units = std::move(units);
+        return InternalCreate(node);
     }
-    const DenseAttrsNode* operator->() const { return static_cast<const DenseAttrsNode*>(object_); }
 };
 
 // 3. MaxPool2DAttrs
@@ -150,319 +158,242 @@ public:
     std::vector<int64_t> strides;
     std::vector<int64_t> padding;
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 19; }
+    KXC_DECLARE_ATTRS_NODE(19)
 };
 
 class MaxPool2DAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(MaxPool2DAttrs, MaxPool2DAttrsNode)
 public:
-    using Attrs::Attrs;
     static MaxPool2DAttrs Create(std::vector<int64_t> pool_size, std::vector<int64_t> strides, std::vector<int64_t> padding) {
         MaxPool2DAttrsNode* node = new MaxPool2DAttrsNode();
         node->pool_size = std::move(pool_size);
         node->strides = std::move(strides);
         node->padding = std::move(padding);
-        MaxPool2DAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        return InternalCreate(node);
     }
-    const MaxPool2DAttrsNode* operator->() const { return static_cast<const MaxPool2DAttrsNode*>(object_); }
 };
 
 // 4. SoftmaxAttrs
 class SoftmaxAttrsNode : public BaseAttrsNode {
 public:
     int axis;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 20; }
+    KXC_DECLARE_ATTRS_NODE(20)
 };
 
 class SoftmaxAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(SoftmaxAttrs, SoftmaxAttrsNode)
 public:
-    using Attrs::Attrs;
     static SoftmaxAttrs Create(int axis) {
         SoftmaxAttrsNode* node = new SoftmaxAttrsNode();
-        node->axis = axis;
-        SoftmaxAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->axis = std::move(axis);
+        return InternalCreate(node);
     }
-    const SoftmaxAttrsNode* operator->() const { return static_cast<const SoftmaxAttrsNode*>(object_); }
 };
 
-// 5. BatchNormAttrs (New Example)
+// 5. BatchNormAttrs
 class BatchNormAttrsNode : public BaseAttrsNode {
 public:
     double epsilon = 1e-5;
     bool center = true;
     bool scale = true;
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 21; }
+    KXC_DECLARE_ATTRS_NODE(21)
 };
 
 class BatchNormAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(BatchNormAttrs, BatchNormAttrsNode)
 public:
-    using Attrs::Attrs;
     static BatchNormAttrs Create(double epsilon = 1e-5, bool center = true, bool scale = true) {
         BatchNormAttrsNode* node = new BatchNormAttrsNode();
-        node->epsilon = epsilon;
-        node->center = center;
-        node->scale = scale;
-        BatchNormAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->epsilon = std::move(epsilon);
+        node->center = std::move(center);
+        node->scale = std::move(scale);
+        return InternalCreate(node);
     }
-    const BatchNormAttrsNode* operator->() const { return static_cast<const BatchNormAttrsNode*>(object_); }
-};
-class AddAttrsNode : public BaseAttrsNode {
-public:
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 22; }
 };
 
+// Simple Attributes (no fields)
+KXC_DEFINE_SIMPLE_ATTRS(AddAttrs, 22)
 
-class AddAttrs : public Attrs {
-public:
-    using Attrs::Attrs;
-    static AddAttrs Create() {
-        AddAttrsNode* node = new AddAttrsNode();
-        AddAttrs attrs;
-        attrs.object_ = node;
-    }
-    const AddAttrsNode* operator->() const { return static_cast<const AddAttrsNode*>(object_); }
-};
+// Attributes with fields
 class CastAttrsNode : public BaseAttrsNode {
 public:
     int to;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 23; }
+    KXC_DECLARE_ATTRS_NODE(23)
 };
 class CastAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(CastAttrs, CastAttrsNode)
 public:
-    using Attrs::Attrs;
     static CastAttrs Create(int to = 0) {
         CastAttrsNode* node = new CastAttrsNode();
-        node->to = to;
-        CastAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->to = std::move(to);
+        return InternalCreate(node);
     }
-    const CastAttrsNode* operator->() const { return static_cast<const CastAttrsNode*>(object_); }
 };
+
 class ConcatAttrsNode : public BaseAttrsNode {
 public:
     int axis;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 24; }
+    KXC_DECLARE_ATTRS_NODE(24)
 };
 class ConcatAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ConcatAttrs, ConcatAttrsNode)
 public:
-    using Attrs::Attrs;
     static ConcatAttrs Create(int axis = 0) {
         ConcatAttrsNode* node = new ConcatAttrsNode();
-        node->axis = axis;
-        ConcatAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->axis = std::move(axis);
+        return InternalCreate(node);
     }
-    const ConcatAttrsNode* operator->() const { return static_cast<const ConcatAttrsNode*>(object_); }
 };
+
 class ConstantAttrsNode : public BaseAttrsNode {
 public:
     Tensor value;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 25; }
+    KXC_DECLARE_ATTRS_NODE(25)
 };
 class ConstantAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ConstantAttrs, ConstantAttrsNode)
 public:
-    using Attrs::Attrs;
     static ConstantAttrs Create(Tensor value) {
         ConstantAttrsNode* node = new ConstantAttrsNode();
-        node->value = value;
-        ConstantAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->value = std::move(value);
+        return InternalCreate(node);
     }
-    const ConstantAttrsNode* operator->() const { return static_cast<const ConstantAttrsNode*>(object_); }
 };
+
 class ConstantOfShapeAttrsNode : public BaseAttrsNode {
 public:
     Tensor value;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 26; }
+    KXC_DECLARE_ATTRS_NODE(26)
 };
 class ConstantOfShapeAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ConstantOfShapeAttrs, ConstantOfShapeAttrsNode)
 public:
-    using Attrs::Attrs;
     static ConstantOfShapeAttrs Create(Tensor value) {
         ConstantOfShapeAttrsNode* node = new ConstantOfShapeAttrsNode();
-        node->value = value;
-        ConstantOfShapeAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->value = std::move(value);
+        return InternalCreate(node);
     }
-    const ConstantOfShapeAttrsNode* operator->() const { return static_cast<const ConstantOfShapeAttrsNode*>(object_); }
-};
-class DivAttrsNode : public BaseAttrsNode {
-public:
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 27; }
-};
-class DivAttrs : public Attrs {
-public:
-    using Attrs::Attrs;
-    static DivAttrs Create() {
-        DivAttrsNode* node = new DivAttrsNode();
-        DivAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
-    }
-    const DivAttrsNode* operator->() const { return static_cast<const DivAttrsNode*>(object_); }
-};
-class EqualAttrsNode : public BaseAttrsNode {
-public:
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 28; }
-};
-class EqualAttrs : public Attrs {
-public:
-    using Attrs::Attrs;
-    static EqualAttrs Create() {
-        EqualAttrsNode* node = new EqualAttrsNode();
-        EqualAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
-    }
-    const EqualAttrsNode* operator->() const { return static_cast<const EqualAttrsNode*>(object_); }
-};
-class ErfAttrsNode : public BaseAttrsNode {
-public:
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 29; }
-};
-class ErfAttrs : public Attrs {
-public:
-    using Attrs::Attrs;
-    static ErfAttrs Create() {
-        ErfAttrsNode* node = new ErfAttrsNode();
-        ErfAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
-    }
-    const ErfAttrsNode* operator->() const { return static_cast<const ErfAttrsNode*>(object_); }
 };
 
-class ExpandAttrsNode : public BaseAttrsNode {
-public:
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 30; }
-};
-class ExpandAttrs : public Attrs {
-public:
-    using Attrs::Attrs;
-    static ExpandAttrs Create() {
-        ExpandAttrsNode* node = new ExpandAttrsNode();
-        ExpandAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
-    }
-    const ExpandAttrsNode* operator->() const { return static_cast<const ExpandAttrsNode*>(object_); }
-};
+KXC_DEFINE_SIMPLE_ATTRS(DivAttrs, 27)
+KXC_DEFINE_SIMPLE_ATTRS(EqualAttrs, 28)
+KXC_DEFINE_SIMPLE_ATTRS(ErfAttrs, 29)
+KXC_DEFINE_SIMPLE_ATTRS(ExpandAttrs, 30)
+
 class GatherAttrsNode : public BaseAttrsNode {
 public:
-    int axis;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 31; }
+    int axis = 0;
+    KXC_DECLARE_ATTRS_NODE(31)
 };
 class GatherAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(GatherAttrs, GatherAttrsNode)
 public:
-    using Attrs::Attrs;
     static GatherAttrs Create(int axis = 0) {
         GatherAttrsNode* node = new GatherAttrsNode();
-        node->axis = axis;
-        GatherAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->axis = std::move(axis);
+        return InternalCreate(node);
     }
-    const GatherAttrsNode* operator->() const { return static_cast<const GatherAttrsNode*>(object_); }
 };
 
 class ReduceMeanAttrsNode : public BaseAttrsNode {
 public:
     std::vector<int64_t> axes;
     int64_t keepdims = 1; 
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 32; }
+    KXC_DECLARE_ATTRS_NODE(32)
 };
 class ReduceMeanAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ReduceMeanAttrs, ReduceMeanAttrsNode)
 public:
-    using Attrs::Attrs;
     static ReduceMeanAttrs Create(std::vector<int64_t> axes, int64_t keepdims = 1) {
         ReduceMeanAttrsNode* node = new ReduceMeanAttrsNode();
         node->axes = std::move(axes);
-        node->keepdims = keepdims;
-        ReduceMeanAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->keepdims = std::move(keepdims);
+        return InternalCreate(node);
     }
-    const ReduceMeanAttrsNode* operator->() const { return static_cast<const ReduceMeanAttrsNode*>(object_); }
 };
 
 class ReshapeAttrsNode : public BaseAttrsNode {
 public:
     int allowzero = 0;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 33; }
+    KXC_DECLARE_ATTRS_NODE(33)
 };
 class ReshapeAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ReshapeAttrs, ReshapeAttrsNode)
 public:
-    using Attrs::Attrs;
     static ReshapeAttrs Create(int allowzero = 0) {
         ReshapeAttrsNode* node = new ReshapeAttrsNode();
-        node->allowzero = allowzero;
-        ReshapeAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->allowzero = std::move(allowzero);
+        return InternalCreate(node);
     }
-    const ReshapeAttrsNode* operator->() const { return static_cast<const ReshapeAttrsNode*>(object_); }
 };
 
 class SplitAttrsNode : public BaseAttrsNode {
 public:
     int axis = 0;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 34; }
+    KXC_DECLARE_ATTRS_NODE(34)
 };
 class SplitAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(SplitAttrs, SplitAttrsNode)
 public:
-    using Attrs::Attrs;
     static SplitAttrs Create(int axis = 0) {
         SplitAttrsNode* node = new SplitAttrsNode();
-        node->axis = axis;
-        SplitAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        node->axis = std::move(axis);
+        return InternalCreate(node);
     }
-    const SplitAttrsNode* operator->() const { return static_cast<const SplitAttrsNode*>(object_); }
 };
 
 class TransposeAttrsNode : public BaseAttrsNode {
 public:
     std::vector<int64_t> perm;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 35; }
+    KXC_DECLARE_ATTRS_NODE(35)
 };
 class TransposeAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(TransposeAttrs, TransposeAttrsNode)
 public:
-    using Attrs::Attrs;
     static TransposeAttrs Create(std::vector<int64_t> perm) {
         TransposeAttrsNode* node = new TransposeAttrsNode();
         node->perm = std::move(perm);
-        TransposeAttrs attrs;
-        attrs.object_ = node;
-        if(attrs.object_) attrs.object_->IncRef();
-        return attrs;
+        return InternalCreate(node);
     }
-    const TransposeAttrsNode* operator->() const { return static_cast<const TransposeAttrsNode*>(object_); }
 };
 
+KXC_DEFINE_SIMPLE_ATTRS(ReluAttrs, 36)
+KXC_DEFINE_SIMPLE_ATTRS(GlobalAvgPool2DAttrs, 37)
+
+class FlattenAttrsNode : public BaseAttrsNode {
+public:
+    int axis = 1;
+    KXC_DECLARE_ATTRS_NODE(38)
+};
+class FlattenAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(FlattenAttrs, FlattenAttrsNode)
+public:
+    static FlattenAttrs Create(int axis = 1) {
+        FlattenAttrsNode* node = new FlattenAttrsNode();
+        node->axis = std::move(axis);
+        return InternalCreate(node);
+    }
+};
+
+class GemmAttrsNode : public BaseAttrsNode {
+public:
+    float alpha = 1.0f;
+    float beta = 1.0f;
+    int transA = 0;
+    int transB = 0;
+    KXC_DECLARE_ATTRS_NODE(39)
+};
+class GemmAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(GemmAttrs, GemmAttrsNode)
+public:
+    static GemmAttrs Create(float alpha = 1.0f, float beta = 1.0f, int transA = 0, int transB = 0) {
+        GemmAttrsNode* node = new GemmAttrsNode();
+        node->alpha = std::move(alpha);
+        node->beta = std::move(beta);
+        node->transA = std::move(transA);
+        node->transB = std::move(transB);
+        return InternalCreate(node);
+    }
+};
 } // namespace kxc

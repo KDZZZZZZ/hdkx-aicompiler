@@ -36,8 +36,8 @@ KXC_REGISTER_OP(nn_global_avg_pool2d)
 Reduces the spatial dimensions (H, W) to 1x1 by averaging.
 )doc")
     .set_num_inputs(1)
-    .add_argument("data", "Tensor", "The input tensor.");
-    // No specific attributes needed for global pool usually, or just layout.
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "GlobalAvgPool2DAttrs");
 
 } // namespace relay
 } // namespace kxc

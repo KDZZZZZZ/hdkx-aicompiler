@@ -102,8 +102,8 @@ inline Tensor conv2d_nchw(const Tensor& Input, const Tensor& Filter, int stride,
     // Actually, handling padding in TE usually involves a separate "pad" compute or `if` condition.
     // For this example, let's assume padding=0, stride=1 for simplicity
     
-    auto OH = (H - KH) + 1;
-    auto OW = (W - KW) + 1;
+    auto OH = (H - KH)/ stride + 1;
+    auto OW = (W - KW)/ stride + 1;
     
     IterVar rc = reduce_axis(0, CI, "rc");
     IterVar ry = reduce_axis(0, KH, "ry");

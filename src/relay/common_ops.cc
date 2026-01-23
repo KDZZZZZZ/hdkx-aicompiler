@@ -13,12 +13,24 @@ KXC_REGISTER_OP(nn_conv2d)
 
 KXC_REGISTER_OP(nn_relu)
     .describe("Rectified Linear Unit activation")
-    .set_num_inputs(1);
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "ReluAttrs");
 
 KXC_REGISTER_OP(nn_dense)
     .describe("Dense (fully connected) layer")
     .set_num_inputs(2) // data, weight
     .set_attr<std::string>("TAttrs", "DenseAttrs");
+
+// Gemm
+KXC_REGISTER_OP(nn_gemm)
+    .describe(R"doc(General matrix multiplication.
+)doc")
+    .set_num_inputs(3)
+    .add_argument("A", "Tensor", "The first input tensor.")
+    .add_argument("B", "Tensor", "The second input tensor.")
+    .add_argument("C", "Tensor", "The third input tensor (bias).")
+    .set_attr<std::string>("TAttrs", "GemmAttrs");
 
 KXC_REGISTER_OP(nn_max_pool2d)
     .describe("2D max pooling")
