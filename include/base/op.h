@@ -29,10 +29,10 @@ public:
     // Attribute Map: stores metadata like "TAttrs" -> "Conv2DAttrs"
     std::unordered_map<std::string, std::any> attrs;
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 11; // Unique TypeIndex
-    }
+    KXC_OBJECT_DECLARE
 };
+
+KXC_OBJECT_DEFINE(OpNode)
 
 class Op : public Relay {
 public:
@@ -42,8 +42,7 @@ public:
         OpNode* node = new OpNode();
         node->name = std::move(name);
         node->description = std::move(description);
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
 
     const OpNode* operator->() const {
@@ -55,8 +54,8 @@ public:
 };
 
 // --- Attribute System ---
-#define KXC_DECLARE_ATTRS_NODE(TypeId) \
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + TypeId; }
+#define KXC_DECLARE_ATTRS_NODE \
+    KXC_OBJECT_DECLARE
 
 #define KXC_DECLARE_ATTRS_REF(TypeName, NodeName) \
 public: \
@@ -66,16 +65,16 @@ private: \
     friend class TypeName; \
     static TypeName InternalCreate(NodeName* node) { \
         TypeName attrs; \
-        attrs.object_ = node; \
-        if (attrs.object_) attrs.object_->IncRef(); \
+        attrs.SetData(node); \
         return attrs; \
     }
 
-#define KXC_DEFINE_SIMPLE_ATTRS(TypeName, TypeId) \
+#define KXC_DEFINE_SIMPLE_ATTRS(TypeName) \
     class TypeName##Node : public BaseAttrsNode { \
     public: \
-        KXC_DECLARE_ATTRS_NODE(TypeId) \
+        KXC_DECLARE_ATTRS_NODE \
     }; \
+    KXC_OBJECT_DEFINE(TypeName##Node) \
     class TypeName : public Attrs { \
         KXC_DECLARE_ATTRS_REF(TypeName, TypeName##Node) \
     public: \
@@ -89,8 +88,10 @@ class BaseAttrsNode : public Object {
 public:
     virtual void VisitAttrs(AttrVisitor& visitor) {}
     
-    KXC_DECLARE_ATTRS_NODE(12)
+    KXC_DECLARE_ATTRS_NODE
 };
+
+KXC_OBJECT_DEFINE(BaseAttrsNode)
 
 class Attrs : public ObjectRef {
 public:
@@ -118,8 +119,10 @@ public:
         // ...
     }
 
-    KXC_DECLARE_ATTRS_NODE(13)
+    KXC_DECLARE_ATTRS_NODE
 };
+
+KXC_OBJECT_DEFINE(Conv2DAttrsNode)
 
 class Conv2DAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(Conv2DAttrs, Conv2DAttrsNode)
@@ -138,8 +141,9 @@ public:
 class DenseAttrsNode : public BaseAttrsNode {
 public:
     int64_t units; // Output dimension
-    KXC_DECLARE_ATTRS_NODE(18)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(DenseAttrsNode)
 
 class DenseAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(DenseAttrs, DenseAttrsNode)
@@ -158,8 +162,9 @@ public:
     std::vector<int64_t> strides;
     std::vector<int64_t> padding;
     
-    KXC_DECLARE_ATTRS_NODE(19)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(MaxPool2DAttrsNode)
 
 class MaxPool2DAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(MaxPool2DAttrs, MaxPool2DAttrsNode)
@@ -177,8 +182,9 @@ public:
 class SoftmaxAttrsNode : public BaseAttrsNode {
 public:
     int axis;
-    KXC_DECLARE_ATTRS_NODE(20)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(SoftmaxAttrsNode)
 
 class SoftmaxAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(SoftmaxAttrs, SoftmaxAttrsNode)
@@ -197,8 +203,9 @@ public:
     bool center = true;
     bool scale = true;
     
-    KXC_DECLARE_ATTRS_NODE(21)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(BatchNormAttrsNode)
 
 class BatchNormAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(BatchNormAttrs, BatchNormAttrsNode)
@@ -213,14 +220,15 @@ public:
 };
 
 // Simple Attributes (no fields)
-KXC_DEFINE_SIMPLE_ATTRS(AddAttrs, 22)
+KXC_DEFINE_SIMPLE_ATTRS(AddAttrs)
 
 // Attributes with fields
 class CastAttrsNode : public BaseAttrsNode {
 public:
     int to;
-    KXC_DECLARE_ATTRS_NODE(23)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(CastAttrsNode)
 class CastAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(CastAttrs, CastAttrsNode)
 public:
@@ -234,8 +242,9 @@ public:
 class ConcatAttrsNode : public BaseAttrsNode {
 public:
     int axis;
-    KXC_DECLARE_ATTRS_NODE(24)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(ConcatAttrsNode)
 class ConcatAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ConcatAttrs, ConcatAttrsNode)
 public:
@@ -249,8 +258,9 @@ public:
 class ConstantAttrsNode : public BaseAttrsNode {
 public:
     Tensor value;
-    KXC_DECLARE_ATTRS_NODE(25)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(ConstantAttrsNode)
 class ConstantAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ConstantAttrs, ConstantAttrsNode)
 public:
@@ -264,8 +274,9 @@ public:
 class ConstantOfShapeAttrsNode : public BaseAttrsNode {
 public:
     Tensor value;
-    KXC_DECLARE_ATTRS_NODE(26)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(ConstantOfShapeAttrsNode)
 class ConstantOfShapeAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ConstantOfShapeAttrs, ConstantOfShapeAttrsNode)
 public:
@@ -276,16 +287,17 @@ public:
     }
 };
 
-KXC_DEFINE_SIMPLE_ATTRS(DivAttrs, 27)
-KXC_DEFINE_SIMPLE_ATTRS(EqualAttrs, 28)
-KXC_DEFINE_SIMPLE_ATTRS(ErfAttrs, 29)
-KXC_DEFINE_SIMPLE_ATTRS(ExpandAttrs, 30)
+KXC_DEFINE_SIMPLE_ATTRS(DivAttrs)
+KXC_DEFINE_SIMPLE_ATTRS(EqualAttrs)
+KXC_DEFINE_SIMPLE_ATTRS(ErfAttrs)
+KXC_DEFINE_SIMPLE_ATTRS(ExpandAttrs)
 
 class GatherAttrsNode : public BaseAttrsNode {
 public:
     int axis = 0;
-    KXC_DECLARE_ATTRS_NODE(31)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(GatherAttrsNode)
 class GatherAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(GatherAttrs, GatherAttrsNode)
 public:
@@ -300,8 +312,9 @@ class ReduceMeanAttrsNode : public BaseAttrsNode {
 public:
     std::vector<int64_t> axes;
     int64_t keepdims = 1; 
-    KXC_DECLARE_ATTRS_NODE(32)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(ReduceMeanAttrsNode)
 class ReduceMeanAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ReduceMeanAttrs, ReduceMeanAttrsNode)
 public:
@@ -316,8 +329,9 @@ public:
 class ReshapeAttrsNode : public BaseAttrsNode {
 public:
     int allowzero = 0;
-    KXC_DECLARE_ATTRS_NODE(33)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(ReshapeAttrsNode)
 class ReshapeAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ReshapeAttrs, ReshapeAttrsNode)
 public:
@@ -331,8 +345,9 @@ public:
 class SplitAttrsNode : public BaseAttrsNode {
 public:
     int axis = 0;
-    KXC_DECLARE_ATTRS_NODE(34)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(SplitAttrsNode)
 class SplitAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(SplitAttrs, SplitAttrsNode)
 public:
@@ -346,8 +361,9 @@ public:
 class TransposeAttrsNode : public BaseAttrsNode {
 public:
     std::vector<int64_t> perm;
-    KXC_DECLARE_ATTRS_NODE(35)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(TransposeAttrsNode)
 class TransposeAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(TransposeAttrs, TransposeAttrsNode)
 public:
@@ -358,14 +374,15 @@ public:
     }
 };
 
-KXC_DEFINE_SIMPLE_ATTRS(ReluAttrs, 36)
-KXC_DEFINE_SIMPLE_ATTRS(GlobalAvgPool2DAttrs, 37)
+KXC_DEFINE_SIMPLE_ATTRS(ReluAttrs)
+KXC_DEFINE_SIMPLE_ATTRS(GlobalAvgPool2DAttrs)
 
 class FlattenAttrsNode : public BaseAttrsNode {
 public:
     int axis = 1;
-    KXC_DECLARE_ATTRS_NODE(38)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(FlattenAttrsNode)
 class FlattenAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(FlattenAttrs, FlattenAttrsNode)
 public:
@@ -382,8 +399,9 @@ public:
     float beta = 1.0f;
     int transA = 0;
     int transB = 0;
-    KXC_DECLARE_ATTRS_NODE(39)
+    KXC_DECLARE_ATTRS_NODE
 };
+KXC_OBJECT_DEFINE(GemmAttrsNode)
 class GemmAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(GemmAttrs, GemmAttrsNode)
 public:

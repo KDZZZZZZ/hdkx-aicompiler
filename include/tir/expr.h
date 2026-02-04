@@ -30,8 +30,9 @@ struct DataType {
 class PrimExprNode : public ExprNode {
 public:
     DataType dtype;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 100; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(PrimExprNode)
 
 class PrimExpr : public Expr {
 public:
@@ -51,9 +52,10 @@ public:
 class IntImmNode : public PrimExprNode {
 public:
     int64_t value;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 101; }
+    KXC_OBJECT_DECLARE
     void VisitAttrs(AttrVisitor& visitor) override {}
 };
+KXC_OBJECT_DEFINE(IntImmNode)
 
 class IntImm : public PrimExpr {
 public:
@@ -62,8 +64,7 @@ public:
         auto* node = new IntImmNode();
         node->value = value;
         node->dtype = dtype;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const IntImmNode* operator->() const { return static_cast<const IntImmNode*>(object_); }
 };
@@ -71,8 +72,9 @@ public:
 class FloatImmNode : public PrimExprNode {
 public:
     double value;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 102; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(FloatImmNode)
 
 class FloatImm : public PrimExpr {
 public:
@@ -81,8 +83,7 @@ public:
         auto* node = new FloatImmNode();
         node->value = value;
         node->dtype = dtype;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
 };
 
@@ -97,8 +98,9 @@ inline PrimExpr::PrimExpr(bool value) : PrimExpr(IntImm(value, DataType::Bool())
 class VarNode : public PrimExprNode {
 public:
     std::string name_hint;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 103; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(VarNode)
 
 class Var : public PrimExpr {
 public:
@@ -107,8 +109,7 @@ public:
         auto* node = new VarNode();
         node->name_hint = std::move(name_hint);
         node->dtype = dtype;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const VarNode* operator->() const { return static_cast<const VarNode*>(object_); }
 };
@@ -123,11 +124,12 @@ public:
 };
 
 // Helper macro for defining binary ops
-#define DEFINE_BINARY_OP(OpName, TypeIdOffset) \
+#define DEFINE_BINARY_OP(OpName) \
     class OpName##Node : public BinaryOpNode { \
     public: \
-        const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + TypeIdOffset; } \
+        KXC_OBJECT_DECLARE \
     }; \
+    KXC_OBJECT_DEFINE(OpName##Node) \
     class OpName : public PrimExpr { \
     public: \
         using PrimExpr::PrimExpr; \
@@ -136,27 +138,27 @@ public:
             node->a = a; \
             node->b = b; \
             node->dtype = a.dtype(); /* Simplified type inference */ \
-            object_ = node; \
-            if (object_) object_->IncRef(); \
+            SetData(node); \
         } \
     };
 
 // Arithmetic
-DEFINE_BINARY_OP(Add, 104)
-DEFINE_BINARY_OP(Sub, 105)
-DEFINE_BINARY_OP(Mul, 106)
-DEFINE_BINARY_OP(Div, 107)
-DEFINE_BINARY_OP(Mod, 108)
-DEFINE_BINARY_OP(Min, 109)
-DEFINE_BINARY_OP(Max, 110)
+DEFINE_BINARY_OP(Add)
+DEFINE_BINARY_OP(Sub)
+DEFINE_BINARY_OP(Mul)
+DEFINE_BINARY_OP(Div)
+DEFINE_BINARY_OP(Mod)
+DEFINE_BINARY_OP(Min)
+DEFINE_BINARY_OP(Max)
 
 // Logic (Return Bool)
 // Need specialized constructor for Bool return type
-#define DEFINE_LOGIC_OP(OpName, TypeIdOffset) \
+#define DEFINE_LOGIC_OP(OpName) \
     class OpName##Node : public BinaryOpNode { \
     public: \
-        const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + TypeIdOffset; } \
+        KXC_OBJECT_DECLARE \
     }; \
+    KXC_OBJECT_DEFINE(OpName##Node) \
     class OpName : public PrimExpr { \
     public: \
         using PrimExpr::PrimExpr; \
@@ -166,20 +168,20 @@ DEFINE_BINARY_OP(Max, 110)
             node->b = b; \
             node->dtype = DataType::Bool(); \
             object_ = node; \
-            if (object_) object_->IncRef(); \
         } \
     };
 
-DEFINE_LOGIC_OP(EQ, 111)
-DEFINE_LOGIC_OP(LT, 112)
-DEFINE_LOGIC_OP(And, 113)
-DEFINE_LOGIC_OP(Or, 114)
+DEFINE_LOGIC_OP(EQ)
+DEFINE_LOGIC_OP(LT)
+DEFINE_LOGIC_OP(And)
+DEFINE_LOGIC_OP(Or)
 
 class NotNode : public PrimExprNode {
 public:
     PrimExpr value;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 115; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(NotNode)
 
 class Not : public PrimExpr {
 public:
@@ -188,8 +190,7 @@ public:
         auto* node = new NotNode();
         node->value = value;
         node->dtype = DataType::Bool();
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
 };
 
@@ -200,8 +201,9 @@ public:
     PrimExpr index;
     PrimExpr predicate; // For predicated load (optional)
 
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 116; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(LoadNode)
 
 class Load : public PrimExpr {
 public:
@@ -213,7 +215,6 @@ public:
         node->predicate = predicate;
         node->dtype = buffer_var->dtype; // Load type is buffer element type
         object_ = node;
-        if (object_) object_->IncRef();
     }
 };
 
@@ -224,8 +225,9 @@ public:
     std::string name;
     std::vector<PrimExpr> args;
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 117; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(CallNode)
 
 class Call : public PrimExpr {
 public:
@@ -236,7 +238,6 @@ public:
         node->name = std::move(name);
         node->args = std::move(args);
         object_ = node;
-        if (object_) object_->IncRef();
     }
 };
 
@@ -246,8 +247,9 @@ public:
     PrimExpr true_value;
     PrimExpr false_value;
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 118; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(SelectNode)
 
 class Select : public PrimExpr {
 public:
@@ -258,8 +260,7 @@ public:
         node->true_value = true_value;
         node->false_value = false_value;
         node->dtype = true_value.dtype();
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
 };
 

@@ -6,6 +6,7 @@
 #include "packedfunc.h"
 #include "registry.h"
 #include "device.h"
+#include "typemanager.h"
 
 namespace py = pybind11;
 
@@ -81,11 +82,14 @@ inline void InitKXCRuntime(py::module_& m) {
             values.reserve(args.size());
             type_codes.reserve(args.size());
 
+            // 保持 string 的生命周期
+            std::vector<std::string> str_holders;
+            str_holders.reserve(args.size());
+
             for (const auto& arg : args) {
                 if (py::isinstance<Object>(arg)) {
                     ObjectRef obj_ref = arg.cast<ObjectRef>(); 
                     // 增加引用计数，因为 Value 只持有裸指针
-                    if (obj_ref.get()) obj_ref.get()->IncRef();
                     values.push_back(MakeValue(obj_ref.get()));
                     type_codes.push_back(kObjectRef);
                 } else if (py::isinstance<py::int_>(arg)) {
@@ -95,9 +99,8 @@ inline void InitKXCRuntime(py::module_& m) {
                     values.push_back(MakeValue(arg.cast<double>()));
                     type_codes.push_back(kFloat);
                 } else if (py::isinstance<py::str>(arg)) {
-                    // 警告：这里直接取 c_str 依赖于 py::str 临时对象的生命周期
-                    // 在实际调用 func 之前，arg 仍然存活，所以 c_str 指针有效
-                    values.push_back(MakeValue(arg.cast<std::string>().c_str()));
+                    str_holders.push_back(arg.cast<std::string>());
+                    values.push_back(MakeValue(str_holders.back().c_str()));
                     type_codes.push_back(kString);
                 } else if (arg.is_none()) {
                     values.push_back(MakeNullValue());
@@ -167,6 +170,19 @@ inline void InitKXCRuntime(py::module_& m) {
          ref.get()->IncRef(); // Add a ref for Python
          return (DeviceCls*)ref.get();
     }, py::arg("type_code"), py::arg("device_id"));
+
+    // 绑定 create_object 工厂函数
+    // 使用 TypeManager 通过字符串键创建对象
+    m.def("create_object", [](const std::string& type_key) -> py::object {
+        ObjectRef obj = TypeManager::Get()->CreateObject(type_key);
+        if (!obj.defined()) {
+            // 如果创建失败（未注册的类型），返回 None
+            return py::none();
+        }
+        // 返回 ObjectRef，pybind11 会自动转换为对应的 Python 对象
+        // 注意：这里利用了 type_caster<ObjectRef> 的特化
+        return py::cast(obj);
+    }, py::arg("type_key"));
 }
 
 } // namespace kxc

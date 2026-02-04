@@ -20,8 +20,10 @@ public:
 class IdNode : public Object {
 public:
     std::string name_hint;
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 4; }
+    KXC_OBJECT_DECLARE
 };
+
+KXC_OBJECT_DEFINE(IdNode)
 
 class Id : public ObjectRef {
 public:
@@ -29,8 +31,7 @@ public:
     explicit Id(std::string name) {
         auto* node = new IdNode();
         node->name_hint = std::move(name);
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const IdNode* operator->() const { return static_cast<const IdNode*>(object_); }
 };
@@ -40,13 +41,14 @@ public:
     Id vid;
     // Type type_annotation;
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 5;
-    }
+    KXC_OBJECT_DECLARE
+
     void VisitAttrs(AttrVisitor& visitor) override {
         // visitor("vid", &vid);
     }
 };
+
+KXC_OBJECT_DEFINE(VarNode)
 
 class Var : public Relay {
 public:
@@ -54,8 +56,7 @@ public:
     explicit Var(std::string name) { 
         VarNode* node = new VarNode();
         node->vid = Id(std::move(name));
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const VarNode* operator->() const {
         return static_cast<const VarNode*>(object_);
@@ -67,10 +68,10 @@ class ConstantNode : public RelayNode {
 public:
     Tensor data;
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 6;
-    }
+    KXC_OBJECT_DECLARE
 };
+
+KXC_OBJECT_DEFINE(ConstantNode)
 
 class Constant : public Relay {
 public:
@@ -78,8 +79,7 @@ public:
     explicit Constant(Tensor data) {
         ConstantNode* node = new ConstantNode();
         node->data = data;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const ConstantNode* operator->() const {
         return static_cast<const ConstantNode*>(object_);
@@ -93,10 +93,10 @@ public:
     std::vector<Expr> args;
     ObjectRef attrs; // Changed from Attrs to ObjectRef to allow any Attrs type
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 8;
-    }
+    KXC_OBJECT_DECLARE
 };
+
+KXC_OBJECT_DEFINE(CallNode)
 
 class Call : public Relay {
 public:
@@ -106,8 +106,7 @@ public:
         node->op = op;
         node->args = std::move(args);
         node->attrs = attrs;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const CallNode* operator->() const {
         return static_cast<const CallNode*>(object_);
@@ -121,10 +120,10 @@ public:
     Expr body;
     // Type ret_type;
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 9;
-    }
+    KXC_OBJECT_DECLARE
 };
+
+KXC_OBJECT_DEFINE(FunctionNode)
 
 class Function : public Relay {
 public:
@@ -133,8 +132,7 @@ public:
         FunctionNode* node = new FunctionNode();
         node->params = std::move(params);
         node->body = body;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const FunctionNode* operator->() const {
         return static_cast<const FunctionNode*>(object_);
@@ -146,10 +144,10 @@ class TupleNode : public RelayNode {
 public:
     std::vector<Expr> fields;
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 14;
-    }
+    KXC_OBJECT_DECLARE
 };
+
+KXC_OBJECT_DEFINE(TupleNode)
 
 class Tuple : public Relay {
 public:
@@ -157,8 +155,7 @@ public:
     explicit Tuple(std::vector<Expr> fields) {
         TupleNode* node = new TupleNode();
         node->fields = std::move(fields);
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const TupleNode* operator->() const {
         return static_cast<const TupleNode*>(object_);
@@ -171,10 +168,10 @@ public:
     Expr tuple;
     int index;
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 15;
-    }
+    KXC_OBJECT_DECLARE
 };
+
+KXC_OBJECT_DEFINE(TupleGetItemNode)
 
 class TupleGetItem : public Relay {
 public:
@@ -183,8 +180,7 @@ public:
         TupleGetItemNode* node = new TupleGetItemNode();
         node->tuple = tuple;
         node->index = index;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const TupleGetItemNode* operator->() const {
         return static_cast<const TupleGetItemNode*>(object_);
@@ -198,10 +194,10 @@ public:
     Expr true_branch;
     Expr false_branch;
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 16;
-    }
+    KXC_OBJECT_DECLARE
 };
+
+KXC_OBJECT_DEFINE(IfNode)
 
 class If : public Relay {
 public:
@@ -211,8 +207,7 @@ public:
         node->cond = cond;
         node->true_branch = true_branch;
         node->false_branch = false_branch;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const IfNode* operator->() const {
         return static_cast<const IfNode*>(object_);
@@ -226,10 +221,10 @@ public:
     Expr value;
     Expr body;
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 17;
-    }
+    KXC_OBJECT_DECLARE
 };
+
+KXC_OBJECT_DEFINE(LetNode)
 
 class Let : public Relay {
 public:
@@ -239,8 +234,7 @@ public:
         node->var = var;
         node->value = value;
         node->body = body;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
     const LetNode* operator->() const {
         return static_cast<const LetNode*>(object_);

@@ -12,8 +12,9 @@ class BiasAddAttrsNode : public BaseAttrsNode {
 public:
     int axis = 1; // Default value
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 30; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(BiasAddAttrsNode)
 
 class BiasAddAttrs : public Attrs {
 public:
@@ -22,8 +23,7 @@ public:
         BiasAddAttrsNode* node = new BiasAddAttrsNode();
         node->axis = axis;
         BiasAddAttrs attrs;
-        attrs.object_ = node;
-        if (attrs.object_) attrs.object_->IncRef();
+        attrs.SetData(node);
         return attrs;
     }
     const BiasAddAttrsNode* operator->() const { return static_cast<const BiasAddAttrsNode*>(object_); }

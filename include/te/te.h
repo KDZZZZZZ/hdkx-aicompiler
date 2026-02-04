@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <functional>
+#include <algorithm>
 
 namespace kxc {
 namespace te {
@@ -28,8 +29,9 @@ public:
     virtual DataType output_dtype(int i) const = 0;
     virtual std::vector<PrimExpr> output_shape(int i) const = 0;
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 50; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(OperationNode)
 
 class Operation : public ObjectRef {
 public:
@@ -63,8 +65,9 @@ public:
     IterVarType iter_type;
     std::string thread_tag; // For thread binding
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 57; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(IterVarNode)
 
 class IterVar : public ObjectRef {
 public:
@@ -76,8 +79,7 @@ public:
         node->dom_extent = extent;
         node->iter_type = type;
         node->thread_tag = thread_tag;
-        object_ = node;
-        if(object_) object_->IncRef();
+        SetData(node);
     }
     const IterVarNode* operator->() const { return static_cast<const IterVarNode*>(object_); }
     operator PrimExpr() const { return operator->()->var; }
@@ -101,8 +103,9 @@ public:
     std::vector<IterVar> leaf_iter_vars;
     std::vector<IterVar> all_iter_vars;
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 55; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(StageNode)
 
 class Stage : public ObjectRef {
 public:
@@ -131,8 +134,9 @@ public:
     std::vector<PrimExpr> source;
     // Combiner combiner; // Simplified: Assume Sum
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 58; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(ReduceNode)
 
 class Reduce : public PrimExpr {
 public:
@@ -142,8 +146,7 @@ public:
         node->axis = axis;
         node->source = source;
         if(!source.empty()) node->dtype = source[0].dtype();
-        object_ = node;
-        if(object_) object_->IncRef();
+        SetData(node);
     }
 };
 
@@ -165,8 +168,9 @@ public:
     Operation op;
     int value_index;
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 51; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(TensorNode)
 
 class Tensor : public ObjectRef {
 public:
@@ -194,8 +198,9 @@ public:
     Tensor tensor;
     std::vector<PrimExpr> indices;
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 52; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(ProducerLoadNode)
 
 class ProducerLoad : public PrimExpr {
 public:
@@ -205,8 +210,7 @@ public:
         node->tensor = tensor;
         node->indices = indices;
         node->dtype = tensor->dtype;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
 };
 
@@ -223,8 +227,7 @@ inline Tensor::Tensor(std::vector<PrimExpr> shape, DataType dtype, Operation op,
             node->name += ".v" + std::to_string(value_index);
         }
     }
-    object_ = node;
-    if (object_) object_->IncRef();
+    SetData(node);
 }
 
 inline PrimExpr Tensor::operator()(const std::vector<PrimExpr>& indices) const {
@@ -253,8 +256,9 @@ public:
     DataType output_dtype(int i) const override { return dtype; }
     std::vector<PrimExpr> output_shape(int i) const override { return shape; }
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 53; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(PlaceholderOpNode)
 
 class PlaceholderOp : public Operation {
 public:
@@ -264,8 +268,7 @@ public:
         node->name = name;
         node->shape = shape;
         node->dtype = dtype;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
 };
 
@@ -286,8 +289,9 @@ public:
 
     std::vector<PrimExpr> output_shape(int i) const override { return shape; }
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 54; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(ComputeOpNode)
 
 class ComputeOp : public Operation {
 public:
@@ -316,15 +320,14 @@ public:
             // PrimExpr-> returns PrimExprNode.
             // But we can check type.
             const PrimExprNode* node_ptr = body[0].operator->();
-            if (node_ptr->GetTypeId() == kKXC_OBJECT_TYPE + 58) { // ReduceNode
+            if (node_ptr->GetTypeId() == ReduceNode::_type_index) { // ReduceNode
                   const ReduceNode* reduce = static_cast<const ReduceNode*>(node_ptr);
                   // this->reduce_axis = reduce->axis; // Error: ComputeOp wrapper has no reduce_axis member, ComputeOpNode does.
                   node->reduce_axis = reduce->axis;
              }
         }
         
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
 };
 
@@ -387,8 +390,7 @@ inline Stage::Stage(Operation op) {
         }
     }
     
-    object_ = node;
-    if(object_) object_->IncRef();
+    SetData(node);
 }
 
 inline IterVar Stage::split(IterVar parent, PrimExpr factor, IterVar* p_outer, IterVar* p_inner) {
@@ -544,7 +546,7 @@ public:
     std::unordered_map<OperationNode*, Stage, OpNodeHash, OpNodeEqual> op_to_stage;
     std::vector<Operation> outputs;
     
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 56; }
+    KXC_OBJECT_DECLARE
     
     // Helper to get stage for op
     Stage operator[](Operation op) {
@@ -559,6 +561,7 @@ public:
         return Stage(Operation());
     }
 };
+KXC_OBJECT_DEFINE(ScheduleNode)
 
 class Schedule : public ObjectRef {
 public:
@@ -575,8 +578,7 @@ public:
             node->op_to_stage[op.operator->()] = stage;
         }
         
-        object_ = node;
-        if(object_) object_->IncRef();
+        SetData(node);
     }
     const ScheduleNode* operator->() const { return static_cast<const ScheduleNode*>(object_); }
     ScheduleNode* operator->() { return static_cast<ScheduleNode*>(const_cast<Object*>(object_)); }

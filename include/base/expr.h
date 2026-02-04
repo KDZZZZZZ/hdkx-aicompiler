@@ -23,8 +23,7 @@ public:
         node->source_name = std::move(source_name);
         node->line = line;
         node->column = column;
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
 };
 

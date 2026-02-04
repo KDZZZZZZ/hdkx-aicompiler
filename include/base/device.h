@@ -7,9 +7,11 @@
 
 namespace kxc {
 
-// 为 Device 类型分配一个唯一的 TypeIndex
-// 假设 kKXC_OBJECT_TYPE 是 0，PackedFunc 是 +2，那么 Device 可以是 +1
-constexpr TypeIndex kKXC_DEVICE_TYPE = kKXC_OBJECT_TYPE + 1;
+class Device; // Forward declaration
+
+// Device will use automatic registration.
+// Use a macro to maintain source compatibility for kKXC_DEVICE_TYPE
+#define kKXC_DEVICE_TYPE (Device::_type_index)
 
 /**
  * @brief 枚举类型：DeviceTypeCode，用于表示设备类型
@@ -25,14 +27,15 @@ enum DeviceTypeCode : int {
 /**
  * @brief Device 对象，继承自 Object
  */
+// Avoid conflict with Windows Device macro if present
+#ifdef Device
+#undef Device
+#endif
 class Device : public Object {
 public:
     Device(DeviceTypeCode type, int id) : device_type_(type), device_id_(id) {}
 
-    // 覆盖 Object 的 GetTypeId()
-    const TypeIndex GetTypeId() const override {
-        return kKXC_DEVICE_TYPE;
-    }
+    KXC_OBJECT_DECLARE
 
     // 获取设备类型
     DeviceTypeCode device_type() const { return device_type_; }
@@ -64,6 +67,8 @@ private:
     DeviceTypeCode device_type_;
     int device_id_;
 };
+
+KXC_OBJECT_DEFINE(Device)
 
 /**
  * @brief DeviceManager 管理 Device 实例的创建和缓存

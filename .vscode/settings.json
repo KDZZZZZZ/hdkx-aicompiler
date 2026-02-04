@@ -100,7 +100,9 @@
         "any": "cpp",
         "ccomplex": "cpp",
         "coroutine": "cpp",
-        "numbers": "cpp"
+        "numbers": "cpp",
+        "mdspan": "cpp",
+        "source_location": "cpp"
     },
     "cmake.sourceDirectory": "C:/Users/Administrator/Desktop/hdkx-aicompiler-1/test"
 }

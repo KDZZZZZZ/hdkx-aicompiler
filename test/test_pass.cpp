@@ -105,15 +105,15 @@ public:
 
     explicit TestTargetNode(std::string kind, int id) : kind(std::move(kind)), id(id) {}
 
-    const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 901; }
+    KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(TestTargetNode)
 
 class TestTarget : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
     TestTarget(std::string kind, int id) {
-        object_ = new TestTargetNode(std::move(kind), id);
-        if (object_) object_->IncRef();
+        SetData(new TestTargetNode(std::move(kind), id));
     }
     const TestTargetNode* operator->() const { return static_cast<const TestTargetNode*>(object_); }
 };

@@ -3,12 +3,47 @@
 #include <atomic>
 #include <utility>
 #include <iostream>
+#include <mutex>
+#include <unordered_map>
+#include <string>
 #include "base/arena.h"
 namespace kxc{
 extern thread_local Arena* current_arena;
 using TypeIndex = uint32_t;
 using AttrVisitor = std::function<void(const char* key, void* value)>;
+
+// Legacy base type index, kept for backward compatibility.
+// New code should use the automatic registration mechanism.
 constexpr TypeIndex kKXC_OBJECT_TYPE = 0;
+
+class TypeRegistry {
+public:
+    static uint32_t Register(const std::string& name) {
+        static std::mutex mutex;
+        static std::unordered_map<std::string, uint32_t> type_map;
+        // Start from 1000 to avoid collision with legacy manual IDs (usually < 1000)
+        static uint32_t next_index = 1000; 
+        
+        std::lock_guard<std::mutex> lock(mutex);
+        if (type_map.find(name) == type_map.end()) {
+            if (name == "Object") {
+                type_map[name] = kKXC_OBJECT_TYPE;
+            } else {
+                type_map[name] = next_index++;
+            }
+        }
+        return type_map[name];
+    }
+};
+
+#define KXC_OBJECT_DECLARE \
+    static const uint32_t _type_index; \
+    const uint32_t GetTypeId() const override { return _type_index; }
+
+#define KXC_OBJECT_DEFINE(TypeName) \
+    inline const uint32_t TypeName::_type_index = \
+        kxc::TypeRegistry::Register(#TypeName);
+
 class Object{
 public:
     virtual void VisitAttrs(AttrVisitor& visitor) {}
@@ -47,10 +82,16 @@ public:
     // 允许赋值，但不改变引用计数
     Object& operator=(const Object&) { return *this; }
     
-    virtual const TypeIndex GetTypeId() const { return kKXC_OBJECT_TYPE; }
+    // Ensure Object has a static type index as well
+    static const uint32_t _type_index;
+    virtual const TypeIndex GetTypeId() const { return _type_index; }
 private:
     mutable std::atomic<TypeIndex> _refCount;
 };
+
+// Define Object's type index (should be 0)
+KXC_OBJECT_DEFINE(Object)
+
 class ObjectRef {
 public:
     ObjectRef() : object_(nullptr) {}
@@ -93,6 +134,14 @@ public:
     }
 protected:
     const Object* object_;
+    
+    // Helper to assign object and increment reference count
+    // Used by subclasses to safely adopt new objects
+    void SetData(const Object* obj) {
+        if (object_) object_->DecRef();
+        object_ = obj;
+        if (object_) object_->IncRef();
+    }
 };
 
 } // namespace base

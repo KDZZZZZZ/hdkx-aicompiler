@@ -25,8 +25,7 @@ public:
         TensorNode* node = new TensorNode();
         node->shape = std::move(shape);
         node->dtype = std::move(dtype);
-        object_ = node;
-        if (object_) object_->IncRef();
+        SetData(node);
     }
 
     const TensorNode* operator->() const {

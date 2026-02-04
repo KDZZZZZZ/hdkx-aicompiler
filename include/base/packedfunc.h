@@ -66,60 +66,44 @@ public:
         return type_codes[index];
     }
 };
-
-/*
-@brief 声明类型别名：PackedFunc，参数为Args，返回值为RetValue*
-*/
-// 注意：PackedFunc 自身也需要能够作为 ObjectRef 传入和传出
-// 为了简化，我们暂时让 PackedFunc 接受非 ObjectRef 的参数，
-// 但实际中 PackedFunc 也应该是一个 Object 的子类
-class PackedFunc_Internal {
+class PackedFuncObj : public Object {
 public:
-    // 包装 std::function
-    PackedFunc_Internal(std::function<void(Args, RetValue*)> f) : func_(f) {}
+    std::function<void(Args, RetValue*)> func_;
+    PackedFuncObj(const std::function<void(Args, RetValue*)>& f)
+        : func_(f) {}
+    KXC_OBJECT_DECLARE
+};
 
-    // 重载操作符以便像函数一样调用
+KXC_OBJECT_DEFINE(PackedFuncObj)
+
+class PackedFunc : public ObjectRef {
+public:
+    // 默认构造：空指针
+    PackedFunc() {}
+    // 构造函数：接受一个 std::function，自动创建一个 PackedFuncObj 并管理它
+    // 注意：这里完成了从 std::function 到 ObjectRef 的自动转换
+    PackedFunc(std::function<void(Args, RetValue*)> f) {
+        // new 一个对象放到堆上，ObjectRef 会接管它的引用计数
+        object_ = new PackedFuncObj(f);
+    }
+
+    // 【核心】重载 ()，让这个对象看起来像个函数
     void operator()(Args args, RetValue* rv) const {
-        if (func_) {
-            func_(args, rv);
+        // 1. 获取内部指针 (ObjectRef::data_)
+        // 2. 强转为 PackedFuncObj* (static_cast 即可，因为我们确信它是这个类型)
+        const PackedFuncObj* obj = static_cast<const PackedFuncObj*>(object_);
+        
+        // 3. 调用真正的函数
+        if (obj && obj->func_) {
+            obj->func_(args, rv);
         } else {
-            throw std::runtime_error("PackedFunc is not set.");
+            throw std::runtime_error("PackedFunc is empty");
         }
     }
-
-    explicit operator bool() const {
-        return func_ != nullptr;
-    }
-
-private:
-    std::function<void(Args, RetValue*)> func_;
-};
-
-// 实际暴露给外部的 PackedFunc 是 ObjectRef，包装了 PackedFunc_Internal
-// 但为了保持你的原始 PackedFunc 类型定义，我们这里稍微调整下
-// 如果 PackedFunc 要作为 Object 传递，它本身需要是一个 Object 子类
-// 假设 PackedFunc 作为一个 Object 的子类
-class PackedFunc : public Object {
-public:
-    PackedFunc(std::function<void(Args, RetValue*)> f = nullptr) : internal_func_(f) {}
-
-    void operator()(Args args, RetValue* rv) const {
-        internal_func_(args, rv);
-    }
     
-    explicit operator bool() const {
-        return (bool)internal_func_;
-    }
-
-    const TypeIndex GetTypeId() const override {
-        // 为 PackedFunc 分配一个唯一的 TypeIndex
-        return kKXC_OBJECT_TYPE + 2; // 假设 Device 是 +1
-    }
-
-private:
-    PackedFunc_Internal internal_func_;
+    // 定义类型别名，方便 ObjectRef 里的 As<T> 系统工作
+    using ContainerType = PackedFuncObj;
 };
-
 /*
 @brief 声明类：RetValue，用于表示函数返回值，包含返回值和返回值类型，
     提供赋值运算符和类型查询方法
@@ -247,36 +231,36 @@ public:
     // As<T> 辅助函数
     template<typename T>
     T As() const;
-
-    template<>
-    int64_t As<int64_t>() const {
-        if (type_code_ == kInt) return value_.v_int;
-        if (type_code_ == kFloat) return static_cast<int64_t>(value_.v_float);
-        throw std::runtime_error("Type mismatch: expected int");
-    }
-    template<>
-    double As<double>() const {
-        if (type_code_ == kFloat) return value_.v_float;
-        if (type_code_ == kInt) return static_cast<double>(value_.v_int);
-        throw std::runtime_error("Type mismatch: expected double");
-    }
-    template<>
-    std::string As<std::string>() const {
-        if (type_code_ == kString) return value_.v_str;
-        throw std::runtime_error("Type mismatch: expected string");
-    }
-    template<>
-    const char* As<const char*>() const {
-        if (type_code_ == kString) return value_.v_str;
-        throw std::runtime_error("Type mismatch: expected string");
-    }
-    template<>
-    ObjectRef As<ObjectRef>() const {
-        if (type_code_ == kObjectRef) return obj_holder_;
-        if (type_code_ == kNull) return ObjectRef(nullptr);
-        throw std::runtime_error("Type mismatch: expected ObjectRef");
-    }
 };
+
+template<>
+inline int64_t RetValue::As<int64_t>() const {
+    if (type_code_ == kInt) return value_.v_int;
+    if (type_code_ == kFloat) return static_cast<int64_t>(value_.v_float);
+    throw std::runtime_error("Type mismatch: expected int");
+}
+template<>
+inline double RetValue::As<double>() const {
+    if (type_code_ == kFloat) return value_.v_float;
+    if (type_code_ == kInt) return static_cast<double>(value_.v_int);
+    throw std::runtime_error("Type mismatch: expected double");
+}
+template<>
+inline std::string RetValue::As<std::string>() const {
+    if (type_code_ == kString) return value_.v_str;
+    throw std::runtime_error("Type mismatch: expected string");
+}
+template<>
+inline const char* RetValue::As<const char*>() const {
+    if (type_code_ == kString) return value_.v_str;
+    throw std::runtime_error("Type mismatch: expected string");
+}
+template<>
+inline ObjectRef RetValue::As<ObjectRef>() const {
+    if (type_code_ == kObjectRef) return obj_holder_;
+    if (type_code_ == kNull) return ObjectRef(nullptr);
+    throw std::runtime_error("Type mismatch: expected ObjectRef");
+}
 
 /*
 @brief 声明结构体：ArgConverter，用于将Args中的参数值转换为指定类型，
