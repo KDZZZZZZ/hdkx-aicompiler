@@ -6,6 +6,7 @@
 #include <any>
 
 namespace kxc {
+namespace relay {
 
 // Argument Information structure
 struct ArgumentInfo {
@@ -96,6 +97,7 @@ KXC_OBJECT_DEFINE(BaseAttrsNode)
 class Attrs : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
+    Attrs(ObjectRef n) : ObjectRef(n) {}
     
     const BaseAttrsNode* operator->() const {
         return static_cast<const BaseAttrsNode*>(object_);
@@ -111,7 +113,12 @@ public:
     std::vector<int64_t> padding;
     std::vector<int64_t> dilation;
     int groups;
+    int channels;
+    std::vector<int64_t> kernel_size;
     std::string data_layout;
+    std::string kernel_layout;
+    std::string out_layout;
+    std::string out_dtype;
 
     void VisitAttrs(AttrVisitor& visitor) override {
         // visitor("strides", &strides);
@@ -127,12 +134,21 @@ KXC_OBJECT_DEFINE(Conv2DAttrsNode)
 class Conv2DAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(Conv2DAttrs, Conv2DAttrsNode)
 public:
-    static Conv2DAttrs Create(std::vector<int64_t> strides, std::vector<int64_t> padding, std::string layout = "NCHW") {
+    static Conv2DAttrs Create(std::vector<int64_t> strides, std::vector<int64_t> padding, 
+                             std::vector<int64_t> dilation, int groups, int channels, 
+                             std::vector<int64_t> kernel_size, std::string data_layout, 
+                             std::string kernel_layout, std::string out_layout, std::string out_dtype) {
         Conv2DAttrsNode* node = new Conv2DAttrsNode();
         node->strides = std::move(strides);
         node->padding = std::move(padding);
-        node->groups = 1;
-        node->data_layout = std::move(layout);
+        node->dilation = std::move(dilation);
+        node->groups = groups;
+        node->channels = channels;
+        node->kernel_size = std::move(kernel_size);
+        node->data_layout = std::move(data_layout);
+        node->kernel_layout = std::move(kernel_layout);
+        node->out_layout = std::move(out_layout);
+        node->out_dtype = std::move(out_dtype);
         return InternalCreate(node);
     }
 };
@@ -141,6 +157,7 @@ public:
 class DenseAttrsNode : public BaseAttrsNode {
 public:
     int64_t units; // Output dimension
+    std::string out_dtype;
     KXC_DECLARE_ATTRS_NODE
 };
 KXC_OBJECT_DEFINE(DenseAttrsNode)
@@ -148,9 +165,10 @@ KXC_OBJECT_DEFINE(DenseAttrsNode)
 class DenseAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(DenseAttrs, DenseAttrsNode)
 public:
-    static DenseAttrs Create(int64_t units) {
+    static DenseAttrs Create(int64_t units, std::string out_dtype) {
         DenseAttrsNode* node = new DenseAttrsNode();
         node->units = std::move(units);
+        node->out_dtype = std::move(out_dtype);
         return InternalCreate(node);
     }
 };
@@ -161,6 +179,9 @@ public:
     std::vector<int64_t> pool_size;
     std::vector<int64_t> strides;
     std::vector<int64_t> padding;
+    std::vector<int64_t> dilation;
+    std::string layout;
+    bool ceil_mode;
     
     KXC_DECLARE_ATTRS_NODE
 };
@@ -169,11 +190,16 @@ KXC_OBJECT_DEFINE(MaxPool2DAttrsNode)
 class MaxPool2DAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(MaxPool2DAttrs, MaxPool2DAttrsNode)
 public:
-    static MaxPool2DAttrs Create(std::vector<int64_t> pool_size, std::vector<int64_t> strides, std::vector<int64_t> padding) {
+    static MaxPool2DAttrs Create(std::vector<int64_t> strides, std::vector<int64_t> padding, 
+                                std::vector<int64_t> dilation, std::vector<int64_t> pool_size,
+                                std::string layout, bool ceil_mode) {
         MaxPool2DAttrsNode* node = new MaxPool2DAttrsNode();
-        node->pool_size = std::move(pool_size);
         node->strides = std::move(strides);
         node->padding = std::move(padding);
+        node->dilation = std::move(dilation);
+        node->pool_size = std::move(pool_size);
+        node->layout = std::move(layout);
+        node->ceil_mode = ceil_mode;
         return InternalCreate(node);
     }
 };
@@ -285,6 +311,10 @@ public:
         node->value = std::move(value);
         return InternalCreate(node);
     }
+    static ConstantOfShapeAttrs Create() {
+        ConstantOfShapeAttrsNode* node = new ConstantOfShapeAttrsNode();
+        return InternalCreate(node);
+    }
 };
 
 KXC_DEFINE_SIMPLE_ATTRS(DivAttrs)
@@ -328,6 +358,7 @@ public:
 
 class ReshapeAttrsNode : public BaseAttrsNode {
 public:
+    std::vector<int64_t> newshape;
     int allowzero = 0;
     KXC_DECLARE_ATTRS_NODE
 };
@@ -335,8 +366,9 @@ KXC_OBJECT_DEFINE(ReshapeAttrsNode)
 class ReshapeAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ReshapeAttrs, ReshapeAttrsNode)
 public:
-    static ReshapeAttrs Create(int allowzero = 0) {
+    static ReshapeAttrs Create(std::vector<int64_t> newshape, int allowzero = 0) {
         ReshapeAttrsNode* node = new ReshapeAttrsNode();
+        node->newshape = std::move(newshape);
         node->allowzero = std::move(allowzero);
         return InternalCreate(node);
     }
@@ -344,6 +376,7 @@ public:
 
 class SplitAttrsNode : public BaseAttrsNode {
 public:
+    std::vector<int64_t> split; // indices_or_sections
     int axis = 0;
     KXC_DECLARE_ATTRS_NODE
 };
@@ -351,8 +384,9 @@ KXC_OBJECT_DEFINE(SplitAttrsNode)
 class SplitAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(SplitAttrs, SplitAttrsNode)
 public:
-    static SplitAttrs Create(int axis = 0) {
+    static SplitAttrs Create(std::vector<int64_t> split, int axis = 0) {
         SplitAttrsNode* node = new SplitAttrsNode();
+        node->split = std::move(split);
         node->axis = std::move(axis);
         return InternalCreate(node);
     }
@@ -414,4 +448,5 @@ public:
         return InternalCreate(node);
     }
 };
+} // namespace relay
 } // namespace kxc

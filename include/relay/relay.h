@@ -1,6 +1,6 @@
 #pragma once
-#include "expr.h"
-#include "tensor.h"
+#include "base/expr.h"
+#include "base/tensor.h"
 #include <vector>
 #include <string>
 
@@ -15,6 +15,9 @@ class Relay : public Expr {
 public:
     using Expr::Expr;
 };
+
+// --- Type ---
+// Moved to base/expr.h
 
 // --- Var ---
 class IdNode : public Object {
@@ -39,7 +42,7 @@ public:
 class VarNode : public RelayNode {
 public:
     Id vid;
-    // Type type_annotation;
+    Type type_annotation;
 
     KXC_OBJECT_DECLARE
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "te/te.h"
+#include "te/topi/broadcast.h"
 #include "te/topi/tags.h"
 #include "te/topi/utils.h"
 #include <vector>
@@ -66,17 +67,7 @@ inline Tensor dense(const Tensor& A, const Tensor& B, const Tensor& bias = Tenso
     if (bias.defined()) {
         // Bias add: [M, N] + [N] (broadcast)
         // Using generic add from broadcast (need to include broadcast.h or re-implement)
-        // Or manually:
-        return compute(
-            {M, N},
-            [&](const std::vector<Var>& indices) {
-                Var i = indices[0];
-                Var j = indices[1];
-                return matmul(i, j) + bias(j);
-            },
-            name,
-            kBroadcast
-        );
+        return add(matmul, bias, name, kBroadcast);
     }
     
     return matmul;

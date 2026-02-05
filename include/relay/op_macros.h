@@ -1,10 +1,11 @@
 #pragma once
-#include "../base/op.h"
+#include "op.h"
 #include <string>
 #include <functional>
 #include <any>
 
 namespace kxc {
+namespace relay {
 
 // Helper class for fluent operator registration
 class OpRegEntry {
@@ -53,7 +54,8 @@ private:
 
 // Macro for operator registration
 #define KXC_REGISTER_OP(OpName) \
-    static ::kxc::OpRegEntry __make_OpEntry_##OpName##__ = \
-        ::kxc::OpRegEntry(::kxc::Op::Get(#OpName))
+    static ::kxc::relay::OpRegEntry __make_OpEntry_##OpName##__ = \
+        ::kxc::relay::OpRegEntry(::kxc::relay::Op::Get(#OpName))
 
+} // namespace relay
 } // namespace kxc

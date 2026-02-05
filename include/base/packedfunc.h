@@ -5,8 +5,9 @@
 #include <memory>
 #include <stdexcept>
 #include <tuple>
-#include "object.h" // 确保引用的是最新的 object.h
-#include <iostream> // 用于调试信息
+#include <type_traits>
+#include <iostream>
+#include "object.h"
 
 namespace kxc {
 
@@ -24,8 +25,7 @@ enum TypeCode : int {
     kString = 2,
     kObjectRef = 3,
     kNull = 4,
-    // KDeviceRef 现在不需要了，所有 Object 都通过 kObjectRef 传递，
-    // 具体类型在 C++ 端通过 Object::GetTypeId() 或 As<T>() 判断
+    kHandle = 5
 };
 /*
 @brief 声明联合体：Value，在同一时间每个实例只存在一个成员，省内存不出错，类型切换方便
@@ -35,6 +35,7 @@ union Value {
     double v_float;
     const char* v_str;
     const Object* v_object; // 指向 const Object*
+    void* v_handle;
     // 注意：联合体不能包含非平凡类型（如 std::string, ObjectRef），
     // 只能包含 POD 类型或具有平凡构造/析构/拷贝的类型。
     // 所以 v_str 和 v_object 都是裸指针，生命周期由外部管理。
@@ -78,22 +79,12 @@ KXC_OBJECT_DEFINE(PackedFuncObj)
 
 class PackedFunc : public ObjectRef {
 public:
-    // 默认构造：空指针
     PackedFunc() {}
-    // 构造函数：接受一个 std::function，自动创建一个 PackedFuncObj 并管理它
-    // 注意：这里完成了从 std::function 到 ObjectRef 的自动转换
-    PackedFunc(std::function<void(Args, RetValue*)> f) {
-        // new 一个对象放到堆上，ObjectRef 会接管它的引用计数
-        object_ = new PackedFuncObj(f);
+    PackedFunc(std::function<void(Args, RetValue*)> f) : ObjectRef(new PackedFuncObj(f)) {
     }
 
-    // 【核心】重载 ()，让这个对象看起来像个函数
     void operator()(Args args, RetValue* rv) const {
-        // 1. 获取内部指针 (ObjectRef::data_)
-        // 2. 强转为 PackedFuncObj* (static_cast 即可，因为我们确信它是这个类型)
         const PackedFuncObj* obj = static_cast<const PackedFuncObj*>(object_);
-        
-        // 3. 调用真正的函数
         if (obj && obj->func_) {
             obj->func_(args, rv);
         } else {
@@ -101,7 +92,10 @@ public:
         }
     }
     
-    // 定义类型别名，方便 ObjectRef 里的 As<T> 系统工作
+    // Variadic call template
+    template <typename... Args>
+    RetValue operator()(Args&&... args) const;
+
     using ContainerType = PackedFuncObj;
 };
 /*
@@ -122,11 +116,6 @@ public:
     
     // 析构函数：确保正确减少 Object 的引用计数
     ~RetValue() {
-        if (type_code_ == kObjectRef) {
-            // obj_holder_ 的析构会自动 DecRef
-            // 如果 obj_holder_ 持有的是 value_.v_object, 那么不需要额外操作
-            // 如果 obj_holder_ 是通过 ObjectRef(value_.v_object) 构造的，它会管理
-        }
     }
 
     // 拷贝构造和赋值运算符：确保 ObjectRef 的引用计数正确
@@ -143,37 +132,27 @@ public:
 
     RetValue& operator=(const RetValue& other) {
         if (this == &other) return *this;
-        
-        // 先清理当前持有的 Object
-        if (type_code_ == kObjectRef && obj_holder_.get()) {
-            // obj_holder_ 赋值前会自动 DecRef
-        }
-
         value_ = other.value_;
         type_code_ = other.type_code_;
         str_holder_ = other.str_holder_;
-        
         if (type_code_ == kObjectRef) {
-            obj_holder_ = other.obj_holder_; // 拷贝 ObjectRef，IncRef
+            obj_holder_ = other.obj_holder_;
             value_.v_object = obj_holder_.get();
         }
         return *this;
     }
 
-
     RetValue& operator=(int64_t v) {
-        // 清理旧的 ObjectRef
         if (type_code_ == kObjectRef) obj_holder_ = ObjectRef(); 
         value_.v_int = v;
         type_code_ = kInt;
         return *this;
     }
     RetValue& operator=(int v) {
-        // 清理旧的 ObjectRef
-        if (type_code_ == kObjectRef) obj_holder_ = ObjectRef(); 
-        value_.v_int = v;
-        type_code_ = kInt;
-        return *this;
+        return operator=((int64_t)v);
+    }
+    RetValue& operator=(bool v) {
+        return operator=((int64_t)v);
     }
     RetValue& operator=(double v) {
         // 清理旧的 ObjectRef
@@ -183,31 +162,26 @@ public:
         return *this;
     }
     RetValue& operator=(const ObjectRef& v) {
-        // 清理旧的 ObjectRef
-        if (type_code_ == kObjectRef) obj_holder_ = ObjectRef(); 
-        obj_holder_ = v; // 让 obj_holder_ 管理引用计数
-        value_.v_object = obj_holder_.get(); // value_.v_object 指向 obj_holder_ 持有的对象
+        obj_holder_ = v;
+        value_.v_object = obj_holder_.get();
         type_code_ = kObjectRef;
         return *this;
     }
     RetValue& operator=(const std::string& v) {
-        // 清理旧的 ObjectRef
         if (type_code_ == kObjectRef) obj_holder_ = ObjectRef(); 
-        str_holder_ = v; // 复制字符串到成员变量
-        value_.v_str = str_holder_.c_str(); // 指向内部存储
+        str_holder_ = v;
+        value_.v_str = str_holder_.c_str();
         type_code_ = kString;
         return *this;
     }
     RetValue& operator=(const char* v) {
-        // 清理旧的 ObjectRef
         if (type_code_ == kObjectRef) obj_holder_ = ObjectRef(); 
-        str_holder_ = v; // 复制字符串到成员变量
-        value_.v_str = str_holder_.c_str(); // 指向内部存储
+        str_holder_ = v;
+        value_.v_str = str_holder_.c_str();
         type_code_ = kString;
         return *this;
     }
 
-    // 类型转换操作符 (As<T> 更好，但为了兼容你的现有结构)
     operator int64_t() const {
         if (type_code_ == kInt) return value_.v_int;
         if (type_code_ == kFloat) return static_cast<int64_t>(value_.v_float);
@@ -223,51 +197,46 @@ public:
         throw std::runtime_error("Type mismatch: expected string");
     }
     operator ObjectRef() const {
-        if (type_code_ == kObjectRef) return obj_holder_; // 直接返回内部 ObjectRef 副本
+        if (type_code_ == kObjectRef) return obj_holder_;
         if (type_code_ == kNull) return ObjectRef(nullptr);
         throw std::runtime_error("Type mismatch: expected ObjectRef");
     }
     
-    // As<T> 辅助函数
     template<typename T>
     T As() const;
 };
 
 template<>
 inline int64_t RetValue::As<int64_t>() const {
-    if (type_code_ == kInt) return value_.v_int;
-    if (type_code_ == kFloat) return static_cast<int64_t>(value_.v_float);
-    throw std::runtime_error("Type mismatch: expected int");
+    return (int64_t)(*this);
 }
 template<>
 inline double RetValue::As<double>() const {
-    if (type_code_ == kFloat) return value_.v_float;
-    if (type_code_ == kInt) return static_cast<double>(value_.v_int);
-    throw std::runtime_error("Type mismatch: expected double");
+    return (double)(*this);
 }
 template<>
 inline std::string RetValue::As<std::string>() const {
-    if (type_code_ == kString) return value_.v_str;
-    throw std::runtime_error("Type mismatch: expected string");
+    return (std::string)(*this);
+}
+template<>
+inline ObjectRef RetValue::As<ObjectRef>() const {
+    return (ObjectRef)(*this);
 }
 template<>
 inline const char* RetValue::As<const char*>() const {
     if (type_code_ == kString) return value_.v_str;
     throw std::runtime_error("Type mismatch: expected string");
 }
-template<>
-inline ObjectRef RetValue::As<ObjectRef>() const {
-    if (type_code_ == kObjectRef) return obj_holder_;
-    if (type_code_ == kNull) return ObjectRef(nullptr);
-    throw std::runtime_error("Type mismatch: expected ObjectRef");
+
+template<typename T>
+inline typename std::enable_if<std::is_base_of<ObjectRef, T>::value, T>::type 
+CastTo(const RetValue& rv) {
+    ObjectRef ref = rv.As<ObjectRef>();
+    return T(ref);
 }
 
-/*
-@brief 声明结构体：ArgConverter，用于将Args中的参数值转换为指定类型，
-    提供静态方法From，参数为参数值和参数类型，返回值为转换后的参数值，
-    抛出运行时错误如果类型不匹配
-*/
-template <typename T>
+// ArgConverter
+template <typename T, typename = void>
 struct ArgConverter;
 
 template <typename T>
@@ -296,6 +265,12 @@ template<> struct ArgConverter<int64_t> {
         return v.v_int;
     }
 };
+template<> struct ArgConverter<bool> {
+    static bool From(const Value& v, TypeCode t) {
+        if (t != kInt) throw std::runtime_error("Type mismatch, expected bool (int)");
+        return (bool)v.v_int;
+    }
+};
 template<> struct ArgConverter<double> {
     static double From(const Value& v, TypeCode t) {
         if (t != kFloat) throw std::runtime_error("Type mismatch, expected double");
@@ -305,21 +280,36 @@ template<> struct ArgConverter<double> {
 template<> struct ArgConverter<std::string> {
     static std::string From(const Value& v, TypeCode t) {
         if (t != kString) throw std::runtime_error("Type mismatch, expected string");
-        // 注意：v.v_str 的生命周期由外部控制，这里复制到 std::string 是安全的
         return std::string(v.v_str);
     }
 };
 template<> struct ArgConverter<ObjectRef> {
     static ObjectRef From(const Value& v, TypeCode t) {
         if (t != kObjectRef) throw std::runtime_error("Type mismatch, expected ObjectRef");
-        // 从 Value 构造 ObjectRef，ObjectRef 会增加引用计数
         return ObjectRef(v.v_object);
     }
 };
-template<> struct ArgConverter<const char*> { // 支持直接传入 const char*
+template<> struct ArgConverter<const char*> {
     static const char* From(const Value& v, TypeCode t) {
         if (t != kString) throw std::runtime_error("Type mismatch, expected const char*");
         return v.v_str;
+    }
+};
+// Subclass of ObjectRef
+template <typename T>
+struct ArgConverter<T, typename std::enable_if<std::is_base_of<ObjectRef, T>::value>::type> {
+    static T From(const Value& v, TypeCode t) {
+        if (t != kObjectRef) throw std::runtime_error("Type mismatch, expected ObjectRef");
+        // Ensure T has constructor from ObjectRef or implicit conversion
+        return T(ObjectRef(v.v_object));
+    }
+};
+// Vector (Handle)
+template <typename T>
+struct ArgConverter<std::vector<T>> {
+    static std::vector<T> From(const Value& v, TypeCode t) {
+        if (t != kHandle) throw std::runtime_error("Type mismatch, expected Handle for vector");
+        return *(std::vector<T>*)v.v_handle;
     }
 };
 
@@ -370,38 +360,85 @@ public:
     >;
 };
 
-// 重载 unpack_call 以便 WrappedFunc 可以返回 ObjectRef
-template<typename Traits, typename F, size_t... I>
+    template<typename Traits, typename F, size_t... I>
     void unpack_call(F&& f, Args args, RetValue* rv, std::index_sequence<I...>) {
         if (args.num_args != Traits::Arity) {
-             throw std::runtime_error("Function arity mismatch: expected " + std::to_string(Traits::Arity) +
-                                         ", got " + std::to_string(args.num_args));
+             throw std::runtime_error("Function arity mismatch");
         }
-
-        // 解包参数并调用函数
         if constexpr (std::is_void_v<typename Traits::ReturnType>) {
             std::invoke(std::forward<F>(f),
-                ArgConverter<typename Traits::template ArgType<I>>::From(args[I], args.type_code(I))...
+                ArgConverter<typename std::decay<typename Traits::template ArgType<I>>::type>::From(args[I], args.type_code(I))...
             );
-            *rv = kNull; // void 返回值设置为 Null
+            *rv = kNull;
         } else {
             *rv = std::invoke(std::forward<F>(f),
-                ArgConverter<typename Traits::template ArgType<I>>::From(args[I], args.type_code(I))...
+                ArgConverter<typename std::decay<typename Traits::template ArgType<I>>::type>::From(args[I], args.type_code(I))...
             );
         }
     }
 
     template<typename F>
     PackedFunc Wrap(F&& f) {
-        /*@brief TFunctionTraits结构体的别名*/
         using Traits = typename TFunctionTraits<std::decay_t<F>>::type;
         return PackedFunc([f_moved = std::forward<F>(f)](kxc::Args args, kxc::RetValue* rv) {
             constexpr size_t Arity = Traits::Arity;
-            // 内部的 unpack_call 会处理参数数量检查
             unpack_call<Traits>(f_moved, args, rv, std::make_index_sequence<Arity>{});
         });
     }
-} // namespace detail
+
+    // ArgsSetter
+    struct ArgsSetter {
+        Value* values;
+        TypeCode* type_codes;
+        ArgsSetter(Value* values, TypeCode* type_codes) : values(values), type_codes(type_codes) {}
+
+        template <typename T>
+        void operator()(size_t i, T&& value) const {
+            Set(i, std::forward<T>(value));
+        }
+        
+        void Set(size_t i, int v) const { values[i].v_int = v; type_codes[i] = kInt; }
+        void Set(size_t i, int64_t v) const { values[i].v_int = v; type_codes[i] = kInt; }
+        void Set(size_t i, bool v) const { values[i].v_int = v; type_codes[i] = kInt; }
+        void Set(size_t i, double v) const { values[i].v_float = v; type_codes[i] = kFloat; }
+        void Set(size_t i, const char* v) const { values[i].v_str = v; type_codes[i] = kString; }
+        void Set(size_t i, const std::string& v) const { values[i].v_str = v.c_str(); type_codes[i] = kString; }
+        
+        template <typename T>
+        typename std::enable_if<std::is_base_of<ObjectRef, T>::value>::type
+        Set(size_t i, const T& v) const {
+            values[i].v_object = v.get();
+            type_codes[i] = kObjectRef;
+        }
+        
+        // Handle vector
+        template<typename T>
+        void Set(size_t i, const std::vector<T>& v) const {
+            values[i].v_handle = (void*)&v;
+            type_codes[i] = kHandle;
+        }
+    };
+    
+    template <typename Setter, typename... Args>
+    void for_each(Setter& setter, Args&&... args) {
+        size_t i = 0;
+        (setter(i++, std::forward<Args>(args)), ...);
+    }
+}
+
+template <typename... Args>
+RetValue PackedFunc::operator()(Args&&... args) const {
+    const int kNumArgs = sizeof...(Args);
+    const int kArraySize = kNumArgs > 0 ? kNumArgs : 1;
+    Value values[kArraySize];
+    TypeCode type_codes[kArraySize];
+    detail::ArgsSetter setter(values, type_codes);
+    detail::for_each(setter, std::forward<Args>(args)...);
+    RetValue rv;
+    (*this)(kxc::Args(values, type_codes, kNumArgs), &rv);
+    return rv;
+}
+
 template<typename F>
 PackedFunc ToPackedFunc(F&& f) {
     return detail::Wrap(std::forward<F>(f));

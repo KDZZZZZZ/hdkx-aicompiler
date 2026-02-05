@@ -1,5 +1,5 @@
 #include "../include/relay/op_macros.h"
-#include "../include/base/op.h" // Need this for Attrs definitions if we want to verify or use them here
+#include "../include/relay/op.h" // Need this for Attrs definitions if we want to verify or use them here
 #include <iostream>
 
 namespace kxc {

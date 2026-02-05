@@ -1,5 +1,5 @@
 #pragma once
-#include "relay.h"
+#include "relay/relay.h"
 #include <vector>
 
 namespace kxc {

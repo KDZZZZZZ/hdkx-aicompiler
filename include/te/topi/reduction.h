@@ -71,30 +71,11 @@ inline Tensor sum(const Tensor& data, const std::vector<int>& axis, bool keepdim
 // We can define custom reducer locally.
 
 inline PrimExpr max_reducer(PrimExpr expr, std::vector<IterVar> axis) {
-    // Standard Reduce with "max" logic? 
-    // Since te::sum is hardcoded to Reduce with "sum" implicit (maybe),
-    // let's look at te::Reduce implementation again.
-    // te::Reduce takes source. Combiner is implicit or missing in the snippet.
-    // The snippet comment said: // Combiner combiner; // Simplified: Assume Sum
-    // So likely only Sum is supported in this simplified te.h
-    // But I should try to support Max if I can specify it.
-    // If ReduceNode doesn't have combiner, then it's hard.
-    // However, I can still generate the code and assume the compiler handles it 
-    // or maybe I should stick to sum for now or add a comment.
-    // Given user role, I should try to be complete.
-    // I will assume Reduce supports a property or I can't do it.
-    // But wait, te::sum just calls Reduce(axis, {expr}).
-    // If I want max, I might need a different Node or field.
-    // For this task, I will implement 'sum' and leave 'max/min' as 'sum' with TODO or just not implement them if unsafe.
-    // But actually, for "Deep Learning Compiler", max/min are essential.
-    // I'll assume for now that Reduce implies Sum, and I can't easily change it without editing te.h.
-    // So I will only provide sum.
-    return kxc::te::sum(expr, axis);
+    return kxc::te::max(expr, axis);
 }
 
 inline Tensor max(const Tensor& data, const std::vector<int>& axis, bool keepdims = false, std::string name = "max") {
-    // WARNING: Using sum as placeholder for max due to simplified TE
-    return comm_reduce(data, axis, keepdims, kxc::te::sum, name); 
+    return comm_reduce(data, axis, keepdims, kxc::te::max, name); 
 }
 
 inline Tensor min(const Tensor& data, const std::vector<int>& axis, bool keepdims = false, std::string name = "min") {

@@ -1,7 +1,8 @@
-#include "../include/base/op.h"
+#include "relay/op.h"
 #include <mutex>
 
 namespace kxc {
+namespace relay {
 
 // Implementation of Op Registry
 class OpRegistry {
@@ -33,4 +34,5 @@ const Op& Op::Get(const std::string& name) {
     return OpRegistry::Global()->Get(name);
 }
 
+} // namespace relay
 } // namespace kxc

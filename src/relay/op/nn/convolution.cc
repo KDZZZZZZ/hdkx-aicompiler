@@ -1,5 +1,5 @@
 #include "relay/op_macros.h"
-#include "base/relay.h"
+#include "relay/relay.h"
 #include <vector>
 #include <string>
 
@@ -12,10 +12,10 @@ namespace relay {
 // Conv2D attributes (strides, padding, dilation, etc.)
 // Note: Ideally, this definition should be in a header file (e.g., include/relay/attrs/nn.h)
 // so that other parts of the system (like Pass) can access it.
-// For this example, we assume it's defined in include/base/op.h or we re-use the one there.
+// For this example, we assume it's defined in include/relay/op.h or we re-use the one there.
 // But for completeness of a standalone op file, we often define local helpers or refer to shared ones.
 
-// Since Conv2DAttrs is already defined in include/base/op.h, we just use it.
+// Since Conv2DAttrs is already defined in include/relay/op.h, we just use it.
 // In a real large project, you would include "include/relay/attrs/nn.h".
 
 // ---------------------------------------------------------------------------

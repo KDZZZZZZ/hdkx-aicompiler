@@ -26,11 +26,16 @@ class MyOpAttrsNode : public BaseAttrsNode {
 public:
     int axis;
     float scale;
+
+    void VisitAttrs(AttrVisitor* v) {
+        v->Visit("axis", &axis);
+        v->Visit("scale", &scale);
+    }
     
     // 分配唯一的 TypeIndex (请确保不冲突，参考现有代码)
     const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 99; }
 };
-
+```
 // 2. 定义属性引用类 (RefWrapper)
 class MyOpAttrs : public Attrs {
 public:

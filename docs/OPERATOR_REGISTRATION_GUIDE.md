@@ -26,10 +26,10 @@ src/relay/op/
 
 如果算子有配置参数（如 `strides`, `axis`, `epsilon`），首先需要在 C++ 中定义一个继承自 `Attrs` 的结构体。
 
-**位置**: `include/base/op.h` (或者新建 `include/relay/attrs/nn.h` 并在 `op.h` 中包含)
+**位置**: `include/relay/op.h` (或者新建 `include/relay/attrs/nn.h` 并在 `op.h` 中包含)
 
 ```cpp
-// include/base/op.h
+// include/relay/op.h
 
 // 1. 定义 Node (存储数据)
 class SoftmaxAttrsNode : public BaseAttrsNode {
@@ -71,7 +71,7 @@ public:
 
 ```cpp
 #include "../../../include/relay/op_macros.h"
-#include "../../../include/base/relay.h"
+#include "../../../include/relay/relay.h"
 
 namespace kxc {
 namespace relay {

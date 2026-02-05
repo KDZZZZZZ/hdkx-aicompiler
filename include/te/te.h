@@ -10,7 +10,7 @@
 namespace kxc {
 namespace te {
 
-using namespace kxc::tir;
+// using namespace kxc::tir; // Removed to avoid ambiguity
 
 // Forward declarations
 class Operation;
@@ -26,8 +26,8 @@ public:
     std::unordered_map<std::string, ObjectRef> attrs;
     
     virtual int num_outputs() const = 0;
-    virtual DataType output_dtype(int i) const = 0;
-    virtual std::vector<PrimExpr> output_shape(int i) const = 0;
+    virtual tir::DataType output_dtype(int i) const = 0;
+    virtual std::vector<tir::PrimExpr> output_shape(int i) const = 0;
     
     KXC_OBJECT_DECLARE
 };
@@ -40,9 +40,23 @@ public:
     OperationNode* operator->() { return static_cast<OperationNode*>(const_cast<Object*>(object_)); }
     
     int num_outputs() const { return operator->()->num_outputs(); }
-    DataType output_dtype(int i) const { return operator->()->output_dtype(i); }
-    std::vector<PrimExpr> output_shape(int i) const { return operator->()->output_shape(i); }
+    tir::DataType output_dtype(int i) const { return operator->()->output_dtype(i); }
+    std::vector<tir::PrimExpr> output_shape(int i) const { return operator->()->output_shape(i); }
 };
+
+} // namespace te
+} // namespace kxc
+
+namespace std {
+    template<> struct hash<kxc::te::Operation> {
+        size_t operator()(const kxc::te::Operation& k) const {
+            return std::hash<const kxc::Object*>()(k.get());
+        }
+    };
+}
+
+namespace kxc {
+namespace te {
 
 // --- IterVar (Iteration Variable for Reduction) ---
 
@@ -59,9 +73,9 @@ enum class IterVarType : int {
 
 class IterVarNode : public Object {
 public:
-    Var var;
-    PrimExpr dom_min;
-    PrimExpr dom_extent;
+    tir::Var var;
+    tir::PrimExpr dom_min;
+    tir::PrimExpr dom_extent;
     IterVarType iter_type;
     std::string thread_tag; // For thread binding
     
@@ -72,9 +86,9 @@ KXC_OBJECT_DEFINE(IterVarNode)
 class IterVar : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
-    explicit IterVar(PrimExpr min, PrimExpr extent, IterVarType type = IterVarType::kDataPar, std::string thread_tag = "", std::string name = "rv") {
+    explicit IterVar(tir::PrimExpr min, tir::PrimExpr extent, IterVarType type = IterVarType::kDataPar, std::string thread_tag = "", std::string name = "rv") {
         auto* node = new IterVarNode();
-        node->var = Var(name);
+        node->var = tir::Var(name);
         node->dom_min = min;
         node->dom_extent = extent;
         node->iter_type = type;
@@ -82,16 +96,21 @@ public:
         SetData(node);
     }
     const IterVarNode* operator->() const { return static_cast<const IterVarNode*>(object_); }
-    operator PrimExpr() const { return operator->()->var; }
-    operator Var() const { return operator->()->var; }
+    operator tir::PrimExpr() const { return operator->()->var; }
+    operator tir::Var() const { return operator->()->var; }
     
     // operator== for std::find
     bool operator==(const IterVar& other) const {
         return object_ == other.object_;
     }
+    
+    // Define !=
+    bool operator!=(const IterVar& other) const {
+        return !(*this == other);
+    }
 };
 
-inline IterVar reduce_axis(PrimExpr min, PrimExpr extent, std::string name = "rv") {
+inline IterVar reduce_axis(tir::PrimExpr min, tir::PrimExpr extent, std::string name = "rv") {
     return IterVar(min, extent, IterVarType::kCommReduce, "", name);
 }
 
@@ -116,10 +135,10 @@ public:
     StageNode* operator->() { return static_cast<StageNode*>(const_cast<Object*>(object_)); }
     
     // Schedule Primitives
-    IterVar split(IterVar parent, PrimExpr factor, IterVar* p_outer = nullptr, IterVar* p_inner = nullptr);
+    IterVar split(IterVar parent, tir::PrimExpr factor, IterVar* p_outer = nullptr, IterVar* p_inner = nullptr);
     IterVar fuse(IterVar outer, IterVar inner);
     void reorder(const std::vector<IterVar>& order);
-    void tile(IterVar x_parent, IterVar y_parent, PrimExpr x_factor, PrimExpr y_factor, 
+    void tile(IterVar x_parent, IterVar y_parent, tir::PrimExpr x_factor, tir::PrimExpr y_factor, 
               IterVar* x_outer, IterVar* y_outer, IterVar* x_inner, IterVar* y_inner);
     void vectorize(IterVar var);
     void unroll(IterVar var);
@@ -128,30 +147,41 @@ public:
 };
 
 // --- Reduce (Expression) ---
-class ReduceNode : public PrimExprNode {
+enum class ReduceType : int {
+    kSum = 0,
+    kMax = 1,
+    kMin = 2
+};
+
+class ReduceNode : public tir::PrimExprNode {
 public:
     std::vector<IterVar> axis;
-    std::vector<PrimExpr> source;
-    // Combiner combiner; // Simplified: Assume Sum
+    std::vector<tir::PrimExpr> source;
+    ReduceType reduce_type = ReduceType::kSum;
     
     KXC_OBJECT_DECLARE
 };
 KXC_OBJECT_DEFINE(ReduceNode)
 
-class Reduce : public PrimExpr {
+class Reduce : public tir::PrimExpr {
 public:
     using PrimExpr::PrimExpr;
-    Reduce(std::vector<IterVar> axis, std::vector<PrimExpr> source) {
+    Reduce(std::vector<IterVar> axis, std::vector<tir::PrimExpr> source, ReduceType type = ReduceType::kSum) {
         auto* node = new ReduceNode();
         node->axis = axis;
         node->source = source;
+        node->reduce_type = type;
         if(!source.empty()) node->dtype = source[0].dtype();
         SetData(node);
     }
 };
 
-inline PrimExpr sum(PrimExpr expr, std::vector<IterVar> axis) {
-    return Reduce(axis, {expr});
+inline tir::PrimExpr sum(tir::PrimExpr expr, std::vector<IterVar> axis) {
+    return Reduce(axis, {expr}, ReduceType::kSum);
+}
+
+inline tir::PrimExpr max(tir::PrimExpr expr, std::vector<IterVar> axis) {
+    return Reduce(axis, {expr}, ReduceType::kMax);
 }
 
 // --- Operation ---
@@ -163,8 +193,8 @@ inline PrimExpr sum(PrimExpr expr, std::vector<IterVar> axis) {
 class TensorNode : public Object {
 public:
     std::string name;
-    std::vector<PrimExpr> shape;
-    DataType dtype;
+    std::vector<tir::PrimExpr> shape;
+    tir::DataType dtype;
     Operation op;
     int value_index;
     
@@ -176,36 +206,36 @@ class Tensor : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
     
-    Tensor(std::vector<PrimExpr> shape, DataType dtype, Operation op, int value_index);
+    Tensor(std::vector<tir::PrimExpr> shape, tir::DataType dtype, Operation op, int value_index);
     
     const TensorNode* operator->() const { return static_cast<const TensorNode*>(object_); }
     
     // Operator() for indexing - Defined later
-    PrimExpr operator()(const std::vector<PrimExpr>& indices) const;
+    tir::PrimExpr operator()(const std::vector<tir::PrimExpr>& indices) const;
     
     // Overload for vector<Var>
-    PrimExpr operator()(const std::vector<Var>& indices) const;
+    tir::PrimExpr operator()(const std::vector<tir::Var>& indices) const;
 
     template<typename... Args>
-    PrimExpr operator()(Args... args) const {
-        return (*this)(std::vector<PrimExpr>{PrimExpr(args)...});
+    tir::PrimExpr operator()(Args... args) const {
+        return (*this)(std::vector<tir::PrimExpr>{tir::PrimExpr(args)...});
     }
 };
 
 // --- ProducerLoad (Expression for Tensor Access) ---
-class ProducerLoadNode : public PrimExprNode {
+class ProducerLoadNode : public tir::PrimExprNode {
 public:
     Tensor tensor;
-    std::vector<PrimExpr> indices;
+    std::vector<tir::PrimExpr> indices;
     
     KXC_OBJECT_DECLARE
 };
 KXC_OBJECT_DEFINE(ProducerLoadNode)
 
-class ProducerLoad : public PrimExpr {
+class ProducerLoad : public tir::PrimExpr {
 public:
     using PrimExpr::PrimExpr;
-    ProducerLoad(Tensor tensor, std::vector<PrimExpr> indices) {
+    ProducerLoad(Tensor tensor, std::vector<tir::PrimExpr> indices) {
         auto* node = new ProducerLoadNode();
         node->tensor = tensor;
         node->indices = indices;
@@ -215,7 +245,7 @@ public:
 };
 
 // --- Tensor Implementation ---
-inline Tensor::Tensor(std::vector<PrimExpr> shape, DataType dtype, Operation op, int value_index) {
+inline Tensor::Tensor(std::vector<tir::PrimExpr> shape, tir::DataType dtype, Operation op, int value_index) {
     auto* node = new TensorNode();
     node->shape = shape;
     node->dtype = dtype;
@@ -230,12 +260,12 @@ inline Tensor::Tensor(std::vector<PrimExpr> shape, DataType dtype, Operation op,
     SetData(node);
 }
 
-inline PrimExpr Tensor::operator()(const std::vector<PrimExpr>& indices) const {
+inline tir::PrimExpr Tensor::operator()(const std::vector<tir::PrimExpr>& indices) const {
     return ProducerLoad(*this, indices);
 }
 
-inline PrimExpr Tensor::operator()(const std::vector<Var>& indices) const {
-    std::vector<PrimExpr> prim_indices;
+inline tir::PrimExpr Tensor::operator()(const std::vector<tir::Var>& indices) const {
+    std::vector<tir::PrimExpr> prim_indices;
     prim_indices.reserve(indices.size());
     for(const auto& v : indices) {
         prim_indices.push_back(v);
@@ -249,12 +279,12 @@ inline PrimExpr Tensor::operator()(const std::vector<Var>& indices) const {
 // PlaceholderOp
 class PlaceholderOpNode : public OperationNode {
 public:
-    std::vector<PrimExpr> shape;
-    DataType dtype;
+    std::vector<tir::PrimExpr> shape;
+    tir::DataType dtype;
     
     int num_outputs() const override { return 1; }
-    DataType output_dtype(int i) const override { return dtype; }
-    std::vector<PrimExpr> output_shape(int i) const override { return shape; }
+    tir::DataType output_dtype(int i) const override { return dtype; }
+    std::vector<tir::PrimExpr> output_shape(int i) const override { return shape; }
     
     KXC_OBJECT_DECLARE
 };
@@ -263,7 +293,7 @@ KXC_OBJECT_DEFINE(PlaceholderOpNode)
 class PlaceholderOp : public Operation {
 public:
     using Operation::Operation;
-    PlaceholderOp(std::string name, std::vector<PrimExpr> shape, DataType dtype) {
+    PlaceholderOp(std::string name, std::vector<tir::PrimExpr> shape, tir::DataType dtype) {
         auto* node = new PlaceholderOpNode();
         node->name = name;
         node->shape = shape;
@@ -275,19 +305,15 @@ public:
 // ComputeOp
 class ComputeOpNode : public OperationNode {
 public:
-    std::vector<Var> axis;
+    std::vector<tir::Var> axis;
     std::vector<IterVar> reduce_axis; // Added reduce axis
-    std::vector<PrimExpr> body; 
+    std::vector<tir::PrimExpr> body; 
     
     int num_outputs() const override { return body.size(); }
-    DataType output_dtype(int i) const override { return body[i].dtype(); }
-    // Shape is determined by iteration domain, usually assumed to be the bounding box of axes
-    // For simplicity, we store shape explicitly or infer it? 
-    // In TVM, ComputeOp stores the output shape logic. 
-    // Here we'll simplify and store expected shape in the node for now.
-    std::vector<PrimExpr> shape;
+    tir::DataType output_dtype(int i) const override { return body[i].dtype(); }
+    std::vector<tir::PrimExpr> shape;
 
-    std::vector<PrimExpr> output_shape(int i) const override { return shape; }
+    std::vector<tir::PrimExpr> output_shape(int i) const override { return shape; }
     
     KXC_OBJECT_DECLARE
 };
@@ -297,7 +323,7 @@ class ComputeOp : public Operation {
 public:
     using Operation::Operation;
     ComputeOp(std::string name, std::string tag, std::unordered_map<std::string, ObjectRef> attrs, 
-              std::vector<Var> axis, std::vector<PrimExpr> body, std::vector<PrimExpr> shape) {
+              std::vector<tir::Var> axis, std::vector<tir::PrimExpr> body, std::vector<tir::PrimExpr> shape) {
         auto* node = new ComputeOpNode();
         node->name = name;
         node->tag = tag;
@@ -306,25 +332,55 @@ public:
         node->body = body;
         node->shape = shape;
         
-        // Extract reduce_axis from body if possible
-        // This is a simplified analysis. In real TVM, this is done by traversing the body.
-        // For our demo, we can try to find Reduce nodes in body.
-        // Or we just assume the user provided body correctly.
-        // We'll leave reduce_axis empty here or implement a visitor to find it.
-        // Let's implement a simple visitor later if needed.
-        // Quick hack: if body[0] is Reduce, extract axes.
-        if (!body.empty()) {
-            // Need to cast PrimExpr to Reduce. 
-            // PrimExpr -> PrimExprNode. ReduceNode inherits PrimExprNode.
-            // As<ReduceNode> won't work on PrimExpr directly unless PrimExpr::operator-> returns ReduceNode.
-            // PrimExpr-> returns PrimExprNode.
-            // But we can check type.
-            const PrimExprNode* node_ptr = body[0].operator->();
-            if (node_ptr->GetTypeId() == ReduceNode::_type_index) { // ReduceNode
-                  const ReduceNode* reduce = static_cast<const ReduceNode*>(node_ptr);
-                  // this->reduce_axis = reduce->axis; // Error: ComputeOp wrapper has no reduce_axis member, ComputeOpNode does.
-                  node->reduce_axis = reduce->axis;
+        // Extract reduce_axis from body
+        // Visitor to find Reduce nodes in body
+        class ReduceAxisVisitor : public AttrVisitor { // Simplified, we don't have full IR visitor yet
+        public:
+            std::vector<IterVar> axes;
+            void Visit(const ObjectRef& obj) {
+                if (auto* reduce = obj.As<ReduceNode>()) {
+                     axes.insert(axes.end(), reduce->axis.begin(), reduce->axis.end());
+                }
+                // Recursive visit would be needed for real IR
+                // Here we assume simple structure or manual check
+            }
+        };
+
+        // Manual recursive check for simple expressions (BinaryOp, Call, Reduce)
+        std::function<void(const tir::PrimExpr&)> find_reduce = [&](const tir::PrimExpr& expr) {
+             if (auto* reduce = expr.As<ReduceNode>()) {
+                 for(auto& ax : reduce->axis) {
+                     // Check duplicates
+                     bool exists = false;
+                     for(auto& exist_ax : node->reduce_axis) if(exist_ax == ax) exists = true;
+                     if(!exists) node->reduce_axis.push_back(ax);
+                 }
+                 // Visit source
+                 for(auto& src : reduce->source) find_reduce(src);
+             } else if (auto* bin = expr.As<tir::BinaryOpNode>()) {
+                 find_reduce(bin->a);
+                 find_reduce(bin->b);
+             } else if (auto* call = expr.As<tir::CallNode>()) {
+                 for(auto& arg : call->args) find_reduce(arg);
+             } else if (auto* sel = expr.As<tir::SelectNode>()) {
+                 find_reduce(sel->condition);
+                 find_reduce(sel->true_value);
+                 find_reduce(sel->false_value);
+             } else if (auto* not_node = expr.As<tir::NotNode>()) {
+                 find_reduce(not_node->value);
              }
+             /*
+             } else if (auto* cast = expr.As<tir::CastNode>()) {
+                 find_reduce(cast->value);
+             } 
+             */
+             else if (auto* load = expr.As<ProducerLoadNode>()) {
+                 for (auto& idx : load->indices) find_reduce(idx);
+             }
+        };
+
+        for(auto& expr : body) {
+            find_reduce(expr);
         }
         
         SetData(node);
@@ -333,7 +389,7 @@ public:
 
 // --- Helper Functions ---
 
-inline Tensor placeholder(std::vector<PrimExpr> shape, DataType dtype = DataType::Float(32), std::string name = "placeholder") {
+inline Tensor placeholder(std::vector<tir::PrimExpr> shape, tir::DataType dtype = tir::DataType::Float(32), std::string name = "placeholder") {
     PlaceholderOp op(name, shape, dtype);
     return Tensor(shape, dtype, op, 0);
 }
@@ -341,17 +397,17 @@ inline Tensor placeholder(std::vector<PrimExpr> shape, DataType dtype = DataType
 // FCompute: std::function<PrimExpr(const std::vector<Var>&)>
 // or FCompute: std::function<PrimExpr(Var, Var...)>
 // We'll support varargs via a helper later, for now vector version
-using FCompute = std::function<PrimExpr(const std::vector<Var>&)>;
+using FCompute = std::function<tir::PrimExpr(const std::vector<tir::Var>&)>;
 
-inline Tensor compute(std::vector<PrimExpr> shape, FCompute fcompute, std::string name = "compute", std::string tag = "", std::unordered_map<std::string, ObjectRef> attrs = {}) {
+inline Tensor compute(std::vector<tir::PrimExpr> shape, FCompute fcompute, std::string name = "compute", std::string tag = "", std::unordered_map<std::string, ObjectRef> attrs = {}) {
     // 1. Create IterVars for the shape
-    std::vector<Var> axis;
+    std::vector<tir::Var> axis;
     for (size_t i = 0; i < shape.size(); ++i) {
-        axis.push_back(Var("ax" + std::to_string(i)));
+        axis.push_back(tir::Var("ax" + std::to_string(i)));
     }
     
     // 2. Compute body
-    PrimExpr body = fcompute(axis);
+    tir::PrimExpr body = fcompute(axis);
     
     // 3. Create Op
     ComputeOp op(name, tag, attrs, axis, {body}, shape);
@@ -393,7 +449,7 @@ inline Stage::Stage(Operation op) {
     SetData(node);
 }
 
-inline IterVar Stage::split(IterVar parent, PrimExpr factor, IterVar* p_outer, IterVar* p_inner) {
+inline IterVar Stage::split(IterVar parent, tir::PrimExpr factor, IterVar* p_outer, IterVar* p_inner) {
     // 1. Create new IterVars
     IterVar outer(0, 0, IterVarType::kDataPar, "", parent->var->name_hint + ".outer");
     IterVar inner(0, factor, IterVarType::kDataPar, "", parent->var->name_hint + ".inner");
@@ -457,7 +513,7 @@ inline void Stage::reorder(const std::vector<IterVar>& order) {
     node->leaf_iter_vars = order;
 }
 
-inline void Stage::tile(IterVar x_parent, IterVar y_parent, PrimExpr x_factor, PrimExpr y_factor, 
+inline void Stage::tile(IterVar x_parent, IterVar y_parent, tir::PrimExpr x_factor, tir::PrimExpr y_factor, 
           IterVar* x_outer, IterVar* y_outer, IterVar* x_inner, IterVar* y_inner) {
     split(x_parent, x_factor, x_outer, x_inner);
     split(y_parent, y_factor, y_outer, y_inner);
@@ -483,8 +539,10 @@ inline void Stage::tile(IterVar x_parent, IterVar y_parent, PrimExpr x_factor, P
     std::vector<IterVar> new_leaves = node->leaf_iter_vars; // Should be just the reordered ones
     
     for(auto& iv : current_leaves) {
+        // Skip parent axes that were split
+        if (iv == x_parent || iv == y_parent) continue;
+
         // If iv is not in new_leaves, append it?
-        // Wait, x_parent and y_parent are gone (replaced by split).
         // The current leaves contain x_outer, x_inner, y_outer, y_inner, and k.
         // We want [xo, yo, xi, yi, k] (or similar tiling order).
         // Let's find any leaf not in the new order and append it.
@@ -525,75 +583,38 @@ inline void Stage::bind(IterVar var, IterVar thread_axis) {
      const_cast<IterVarNode*>(var.operator->())->thread_tag = thread_axis->thread_tag;
 }
 
-inline IterVar thread_axis(PrimExpr dom, std::string tag) {
+inline IterVar thread_axis(tir::PrimExpr dom, std::string tag) {
     return IterVar(0, dom, IterVarType::kThreadIndex, tag, tag);
 }
-struct OpNodeHash {
-    size_t operator()(const OperationNode* k) const {
-        return std::hash<const OperationNode*>()(k);
-    }
-};
-
-struct OpNodeEqual {
-    bool operator()(const OperationNode* lhs, const OperationNode* rhs) const {
-        return lhs == rhs;
-    }
-};
-
 class ScheduleNode : public Object {
 public:
     std::vector<Stage> stages;
-    std::unordered_map<OperationNode*, Stage, OpNodeHash, OpNodeEqual> op_to_stage;
-    std::vector<Operation> outputs;
+    std::unordered_map<Operation, Stage> op_map;
     
     KXC_OBJECT_DECLARE
-    
-    // Helper to get stage for op
-    Stage operator[](Operation op) {
-        if(op_to_stage.find(op.operator->()) != op_to_stage.end()) {
-            return op_to_stage[op.operator->()];
-        }
-        // Fallback: Linear search in stages (if op_to_stage not fully populated)
-        for(auto s : stages) {
-            if(s->op.operator->() == op.operator->()) return s;
-        }
-        // Should not happen if constructed correctly
-        return Stage(Operation());
-    }
 };
 KXC_OBJECT_DEFINE(ScheduleNode)
 
 class Schedule : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
-    explicit Schedule(std::vector<Operation> ops) {
-        auto* node = new ScheduleNode();
-        node->outputs = ops;
-        
-        // Simplified traversal: just add output ops as stages
-        // Real impl does DFS traversal
-        for(auto op : ops) {
-            Stage stage(op);
-            node->stages.push_back(stage);
-            node->op_to_stage[op.operator->()] = stage;
-        }
-        
-        SetData(node);
+    
+    Stage operator[](const Operation& op) {
+        return operator->()->op_map.at(op);
     }
+    
     const ScheduleNode* operator->() const { return static_cast<const ScheduleNode*>(object_); }
     ScheduleNode* operator->() { return static_cast<ScheduleNode*>(const_cast<Object*>(object_)); }
-    
-    Stage operator[](Operation op) {
-        return operator->()->operator[](op);
-    }
-    
-    Stage operator[](Tensor t) {
-        return operator[](t->op);
-    }
 };
 
-inline Schedule create_schedule(std::vector<Operation> ops) {
-    return Schedule(ops);
+inline Schedule create_schedule(const std::vector<Operation>& ops) {
+    auto* node = new ScheduleNode();
+    for(auto& op : ops) {
+        Stage stage(op);
+        node->stages.push_back(stage);
+        node->op_map[op] = stage;
+    }
+    return Schedule(node);
 }
 
 } // namespace te

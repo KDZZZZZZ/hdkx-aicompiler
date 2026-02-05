@@ -1,5 +1,5 @@
 #include "relay/op_macros.h"
-#include "base/relay.h"
+#include "relay/relay.h"
 #include <vector>
 #include <string>
 

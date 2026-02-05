@@ -132,6 +132,14 @@ public:
         // dynamic_cast 用于安全地向下转型
         return dynamic_cast<const T*>(object_);
     }
+    
+    bool operator==(const ObjectRef& other) const {
+        return object_ == other.object_;
+    }
+    bool operator!=(const ObjectRef& other) const {
+        return object_ != other.object_;
+    }
+    
 protected:
     const Object* object_;
     

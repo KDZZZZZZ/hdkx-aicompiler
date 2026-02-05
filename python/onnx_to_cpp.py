@@ -29,8 +29,8 @@ class RelayCppCodegen:
 
     def generate(self):
         # Header
-        self.statements.append('#include "../include/base/relay.h"')
-        self.statements.append('#include "../include/base/op.h"')
+        self.statements.append('#include "../include/relay/relay.h"')
+        self.statements.append('#include "../include/relay/op.h"')
         self.statements.append('#include <vector>')
         self.statements.append('#include <iostream>')
         self.statements.append('#include <string>')

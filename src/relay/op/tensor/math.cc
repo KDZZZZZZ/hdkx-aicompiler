@@ -1,12 +1,30 @@
 #include "relay/op_macros.h"
-#include "base/relay.h"
+#include "relay/relay.h"
+#include "relay/op_attr_types.h"
+#include "te/te.h"
 
 namespace kxc {
 namespace relay {
 
+// FTVMCompute for Add
+te::Tensor AddCompute(const Attrs& attrs, const std::vector<te::Tensor>& inputs, const kxc::Type& out_type) {
+    return te::compute(inputs[0]->shape, [&](const std::vector<kxc::tir::Var>& axes) {
+        return inputs[0](axes) + inputs[1](axes);
+    }, "T_add");
+}
+
 // ---------------------------------------------------------------------------
 // Math/Arithmetic Operators
 // ---------------------------------------------------------------------------
+
+// Add
+KXC_REGISTER_OP(add)
+    .describe(R"doc(Element-wise addition.
+)doc")
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The left hand side input tensor.")
+    .add_argument("rhs", "Tensor", "The right hand side input tensor.")
+    .set_attr<FTVMCompute>("FTVMCompute", AddCompute);
 
 // MatMul
 KXC_REGISTER_OP(matmul)
@@ -65,6 +83,14 @@ KXC_REGISTER_OP(equal)
     .add_argument("lhs", "Tensor", "The left hand side input tensor.")
     .add_argument("rhs", "Tensor", "The right hand side input tensor.")
     .set_attr<std::string>("TAttrs", "EqualAttrs");
+
+// Greater
+KXC_REGISTER_OP(greater)
+    .describe(R"doc(Element-wise greater than comparison.
+)doc")
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The left hand side input tensor.")
+    .add_argument("rhs", "Tensor", "The right hand side input tensor.");
 
 // Erf
 KXC_REGISTER_OP(erf)
