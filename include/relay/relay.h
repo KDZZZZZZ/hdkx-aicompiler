@@ -1,6 +1,8 @@
 #pragma once
 #include "base/expr.h"
 #include "base/tensor.h"
+#include "base/ndarray.h"
+#include "base/container.h"
 #include <vector>
 #include <string>
 
@@ -69,7 +71,7 @@ public:
 // --- Constant ---
 class ConstantNode : public RelayNode {
 public:
-    Tensor data;
+    runtime::NDArray data;
 
     KXC_OBJECT_DECLARE
 };
@@ -79,7 +81,7 @@ KXC_OBJECT_DEFINE(ConstantNode)
 class Constant : public Relay {
 public:
     using Relay::Relay;
-    explicit Constant(Tensor data) {
+    explicit Constant(runtime::NDArray data) {
         ConstantNode* node = new ConstantNode();
         node->data = data;
         SetData(node);
@@ -93,7 +95,7 @@ public:
 class CallNode : public RelayNode {
 public:
     Expr op;
-    std::vector<Expr> args;
+    Array<Expr> args;
     ObjectRef attrs; // Changed from Attrs to ObjectRef to allow any Attrs type
 
     KXC_OBJECT_DECLARE
@@ -104,7 +106,7 @@ KXC_OBJECT_DEFINE(CallNode)
 class Call : public Relay {
 public:
     using Relay::Relay;
-    Call(Expr op, std::vector<Expr> args, ObjectRef attrs = ObjectRef()) {
+    Call(Expr op, Array<Expr> args, ObjectRef attrs = ObjectRef()) {
         CallNode* node = new CallNode();
         node->op = op;
         node->args = std::move(args);
@@ -119,7 +121,7 @@ public:
 // --- Function ---
 class FunctionNode : public RelayNode {
 public:
-    std::vector<Var> params;
+    Array<Var> params;
     Expr body;
     // Type ret_type;
 
@@ -131,7 +133,7 @@ KXC_OBJECT_DEFINE(FunctionNode)
 class Function : public Relay {
 public:
     using Relay::Relay;
-    Function(std::vector<Var> params, Expr body) {
+    Function(Array<Var> params, Expr body) {
         FunctionNode* node = new FunctionNode();
         node->params = std::move(params);
         node->body = body;
@@ -145,7 +147,7 @@ public:
 // --- Tuple ---
 class TupleNode : public RelayNode {
 public:
-    std::vector<Expr> fields;
+    Array<Expr> fields;
 
     KXC_OBJECT_DECLARE
 };
@@ -155,7 +157,7 @@ KXC_OBJECT_DEFINE(TupleNode)
 class Tuple : public Relay {
 public:
     using Relay::Relay;
-    explicit Tuple(std::vector<Expr> fields) {
+    explicit Tuple(Array<Expr> fields) {
         TupleNode* node = new TupleNode();
         node->fields = std::move(fields);
         SetData(node);

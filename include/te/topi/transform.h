@@ -2,6 +2,7 @@
 #include "te/te.h"
 #include "te/topi/tags.h"
 #include "te/topi/utils.h"
+#include "base/container.h"
 #include <vector>
 #include <numeric>
 #include <set>
@@ -11,7 +12,7 @@ namespace te {
 namespace topi {
 
 // Transpose
-inline Tensor transpose(const Tensor& x, std::vector<int> axes, std::string name = "transpose", std::string tag = kInjective) {
+inline Tensor transpose(const Tensor& x, Array<int> axes, std::string name = "transpose", std::string tag = kInjective) {
     size_t ndim = x->shape.size();
     if (axes.empty()) {
         // Default: reverse
@@ -20,15 +21,17 @@ inline Tensor transpose(const Tensor& x, std::vector<int> axes, std::string name
         }
     }
     
-    std::vector<PrimExpr> output_shape;
+    Array<PrimExpr> output_shape;
     for (int axis : axes) {
         output_shape.push_back(x->shape[axis]);
     }
     
     return compute(
         output_shape,
-        [&](const std::vector<Var>& indices) {
-            std::vector<PrimExpr> input_indices(ndim);
+        [&](const Array<Var>& indices) {
+            Array<PrimExpr> input_indices;
+            for(size_t i=0; i<ndim; ++i) input_indices.push_back(0);
+            
             // Map output indices back to input
             // out[i, j] -> in[j, i] if swap
             // out_idx[k] corresponds to axis axes[k]
@@ -48,15 +51,15 @@ inline Tensor expand_dims(const Tensor& x, int axis, int num_newaxis = 1, std::s
     size_t ndim = x->shape.size();
     if (axis < 0) axis += (int)ndim + 1;
     
-    std::vector<PrimExpr> output_shape;
+    Array<PrimExpr> output_shape;
     for (size_t i = 0; i < (size_t)axis; ++i) output_shape.push_back(x->shape[i]);
     for (int i = 0; i < num_newaxis; ++i) output_shape.push_back(1);
     for (size_t i = axis; i < ndim; ++i) output_shape.push_back(x->shape[i]);
     
     return compute(
         output_shape,
-        [&](const std::vector<Var>& indices) {
-            std::vector<PrimExpr> input_indices;
+        [&](const Array<Var>& indices) {
+            Array<PrimExpr> input_indices;
             size_t idx_counter = 0;
             for (size_t i = 0; i < output_shape.size(); ++i) {
                 // If this is a new axis (between axis and axis+num), skip it
@@ -73,7 +76,7 @@ inline Tensor expand_dims(const Tensor& x, int axis, int num_newaxis = 1, std::s
 }
 
 // Squeeze
-inline Tensor squeeze(const Tensor& x, std::vector<int> axes = {}, std::string name = "squeeze", std::string tag = kInjective) {
+inline Tensor squeeze(const Tensor& x, Array<int> axes = {}, std::string name = "squeeze", std::string tag = kInjective) {
     size_t ndim = x->shape.size();
     std::vector<size_t> squeeze_axes = GetRealAxis(ndim, axes);
     std::set<size_t> sq_set(squeeze_axes.begin(), squeeze_axes.end());
@@ -88,7 +91,7 @@ inline Tensor squeeze(const Tensor& x, std::vector<int> axes = {}, std::string n
         }
     }
     
-    std::vector<PrimExpr> output_shape;
+    Array<PrimExpr> output_shape;
     for (size_t i = 0; i < ndim; ++i) {
         if (!sq_set.count(i)) {
             output_shape.push_back(x->shape[i]);
@@ -97,8 +100,8 @@ inline Tensor squeeze(const Tensor& x, std::vector<int> axes = {}, std::string n
     
     return compute(
         output_shape,
-        [&](const std::vector<Var>& indices) {
-            std::vector<PrimExpr> input_indices;
+        [&](const Array<Var>& indices) {
+            Array<PrimExpr> input_indices;
             size_t out_idx = 0;
             for (size_t i = 0; i < ndim; ++i) {
                 if (sq_set.count(i)) {
@@ -115,13 +118,13 @@ inline Tensor squeeze(const Tensor& x, std::vector<int> axes = {}, std::string n
 }
 
 // Concatenate
-inline Tensor concatenate(const std::vector<Tensor>& inputs, int axis = 0, std::string name = "concatenate", std::string tag = kInjective) {
+inline Tensor concatenate(const Array<Tensor>& inputs, int axis = 0, std::string name = "concatenate", std::string tag = kInjective) {
     if (inputs.empty()) return Tensor(); // Error?
     
     size_t ndim = inputs[0]->shape.size();
     if (axis < 0) axis += (int)ndim;
     
-    std::vector<PrimExpr> output_shape = inputs[0]->shape;
+    Array<PrimExpr> output_shape = inputs[0]->shape;
     PrimExpr axis_len = 0;
     for (const auto& t : inputs) {
         axis_len = axis_len + t->shape[axis];
@@ -130,7 +133,7 @@ inline Tensor concatenate(const std::vector<Tensor>& inputs, int axis = 0, std::
     
     return compute(
         output_shape,
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
             // Logic: Iterate inputs, check range.
             // Since we can't easily do recursive Select in generic lambda without fold,
             // we'll build the Select chain manually.
@@ -157,30 +160,29 @@ inline Tensor concatenate(const std::vector<Tensor>& inputs, int axis = 0, std::
             
             // We need to start from the last one to wrap.
             // inputs[N-1]
-            std::vector<PrimExpr> last_indices;
-            for(auto v : indices) last_indices.push_back(v);
-            // For last one, we theoretically need to subtract previous offsets.
-            // offset_N-1 = s0 + ... + sN-2
-            // last_indices[axis] = indices[axis] - offset_N-1
+            // Unused last_indices removed
             
             // This is getting complicated for symbolic offsets in a loop.
             // Let's build a vector of cumulative offsets first.
-            std::vector<PrimExpr> offsets;
+            Array<PrimExpr> offsets;
             offsets.push_back(0);
             for (size_t i = 0; i < inputs.size() - 1; ++i) {
-                offsets.push_back(offsets.back() + inputs[i]->shape[axis]);
+                // offsets.back() works on Array? No, need operator[] or back()
+                // Array has operator[].
+                offsets.push_back(offsets[offsets.size()-1] + inputs[i]->shape[axis]);
             }
             
             // Now build from back
             size_t n = inputs.size();
             // Start with last tensor
-            std::vector<PrimExpr> idx_n; 
+            Array<PrimExpr> idx_n; 
             for(auto v : indices) idx_n.push_back(v);
+            // Use operator[] for mutable update
             idx_n[axis] = idx_n[axis] - offsets[n-1];
             ret = inputs[n-1](idx_n);
             
             for (int i = (int)n - 2; i >= 0; --i) {
-                std::vector<PrimExpr> idx_i;
+                Array<PrimExpr> idx_i;
                 for(auto v : indices) idx_i.push_back(v);
                 idx_i[axis] = idx_i[axis] - offsets[i];
                 

@@ -2,6 +2,7 @@
 #include "te/te.h"
 #include "te/topi/tags.h"
 #include "te/topi/utils.h"
+#include "base/container.h"
 #include <vector>
 #include <algorithm>
 #include <set>
@@ -12,15 +13,15 @@ namespace topi {
 
 // Generic Reduction
 // Combiner: function that takes (expr, axis_vars) -> expr (e.g. kxc::te::sum)
-using FCombine = std::function<PrimExpr(PrimExpr, std::vector<IterVar>)>;
+using FCombine = std::function<PrimExpr(PrimExpr, Array<IterVar>)>;
 
-inline Tensor comm_reduce(const Tensor& data, const std::vector<int>& axis, bool keepdims, FCombine combiner, std::string name = "reduce", std::string tag = kCommReduce) {
+inline Tensor comm_reduce(const Tensor& data, const Array<int>& axis, bool keepdims, FCombine combiner, std::string name = "reduce", std::string tag = kCommReduce) {
     size_t ndim = data->shape.size();
     std::vector<size_t> real_axis = GetRealAxis(ndim, axis);
     std::set<size_t> reduce_set(real_axis.begin(), real_axis.end());
     
-    std::vector<PrimExpr> output_shape;
-    std::vector<IterVar> reduce_axes;
+    Array<PrimExpr> output_shape;
+    Array<IterVar> reduce_axes;
     
     for (size_t i = 0; i < ndim; ++i) {
         if (reduce_set.count(i)) {
@@ -40,8 +41,8 @@ inline Tensor comm_reduce(const Tensor& data, const std::vector<int>& axis, bool
     
     return compute(
         output_shape,
-        [&](const std::vector<Var>& indices) {
-            std::vector<PrimExpr> eval_indices;
+        [&](const Array<Var>& indices) {
+            Array<PrimExpr> eval_indices;
             size_t idx_counter = 0;
             size_t red_counter = 0;
             
@@ -60,7 +61,7 @@ inline Tensor comm_reduce(const Tensor& data, const std::vector<int>& axis, bool
     );
 }
 
-inline Tensor sum(const Tensor& data, const std::vector<int>& axis, bool keepdims = false, std::string name = "sum") {
+inline Tensor sum(const Tensor& data, const Array<int>& axis, bool keepdims = false, std::string name = "sum") {
     return comm_reduce(data, axis, keepdims, kxc::te::sum, name);
 }
 
@@ -70,21 +71,21 @@ inline Tensor sum(const Tensor& data, const std::vector<int>& axis, bool keepdim
 // Let's implement generic Max/Min reduction if needed, but for now Sum is safest.
 // We can define custom reducer locally.
 
-inline PrimExpr max_reducer(PrimExpr expr, std::vector<IterVar> axis) {
+inline PrimExpr max_reducer(PrimExpr expr, Array<IterVar> axis) {
     return kxc::te::max(expr, axis);
 }
 
-inline Tensor max(const Tensor& data, const std::vector<int>& axis, bool keepdims = false, std::string name = "max") {
+inline Tensor max(const Tensor& data, const Array<int>& axis, bool keepdims = false, std::string name = "max") {
     return comm_reduce(data, axis, keepdims, kxc::te::max, name); 
 }
 
-inline Tensor min(const Tensor& data, const std::vector<int>& axis, bool keepdims = false, std::string name = "min") {
+inline Tensor min(const Tensor& data, const Array<int>& axis, bool keepdims = false, std::string name = "min") {
     // WARNING: Using sum as placeholder for min due to simplified TE
     return comm_reduce(data, axis, keepdims, kxc::te::sum, name);
 }
 
 // Prod?
-inline Tensor prod(const Tensor& data, const std::vector<int>& axis, bool keepdims = false, std::string name = "prod") {
+inline Tensor prod(const Tensor& data, const Array<int>& axis, bool keepdims = false, std::string name = "prod") {
     return comm_reduce(data, axis, keepdims, kxc::te::sum, name);
 }
 

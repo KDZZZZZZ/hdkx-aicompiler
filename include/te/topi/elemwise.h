@@ -2,10 +2,13 @@
 #include "te/te.h"
 #include "te/topi/tags.h"
 #include "tir/expr.h"
+#include "base/container.h"
 
 namespace kxc {
 namespace te {
 namespace topi {
+
+using namespace kxc::tir;
 
 // Helper to create intrinsic calls
 inline PrimExpr exp(PrimExpr x) {
@@ -51,7 +54,7 @@ inline PrimExpr sigmoid_expr(PrimExpr x) {
     inline Tensor OpName(const Tensor& x, std::string name = #OpName, std::string tag = kElementWise) { \
         return compute( \
             x->shape, \
-            [&](const std::vector<Var>& indices) { \
+            [&](const Array<Var>& indices) { \
                 return ComputeExpr(x(indices)); \
             }, \
             name, \
@@ -70,7 +73,7 @@ KXC_TOPI_UNARY_ELEMWISE_OP(sigmoid, sigmoid_expr)
 inline Tensor identity(const Tensor& x, std::string name = "identity", std::string tag = kElementWise) {
     return compute(
         x->shape,
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
             return x(indices);
         },
         name,
@@ -82,7 +85,7 @@ inline Tensor identity(const Tensor& x, std::string name = "identity", std::stri
 inline Tensor negative(const Tensor& x, std::string name = "negative", std::string tag = kElementWise) {
     return compute(
         x->shape,
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
             return 0 - x(indices); // Assuming 0-x works or use Sub(0, x)
         },
         name,
@@ -94,7 +97,7 @@ inline Tensor negative(const Tensor& x, std::string name = "negative", std::stri
 inline Tensor clip(const Tensor& x, PrimExpr a_min, PrimExpr a_max, std::string name = "clip", std::string tag = kElementWise) {
     return compute(
         x->shape,
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
             return Max(Min(x(indices), a_max), a_min);
         },
         name,
@@ -106,7 +109,7 @@ inline Tensor clip(const Tensor& x, PrimExpr a_min, PrimExpr a_max, std::string 
 inline Tensor cast(const Tensor& x, DataType dtype, std::string name = "cast", std::string tag = kElementWise) {
     return compute(
         x->shape,
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
             return Call(dtype, "cast", {x(indices)});
         },
         name,

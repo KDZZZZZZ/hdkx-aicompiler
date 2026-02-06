@@ -152,5 +152,37 @@ protected:
     }
 };
 
+template<typename T, typename... Args>
+inline ObjectRef make_object(Args&&... args) {
+    return ObjectRef(new T(std::forward<Args>(args)...));
+}
+
+// Special macro for template classes where standard registration might be tricky
+// or we just reuse the same logic but need template syntax support in user code.
+// Actually KXC_OBJECT_DECLARE works fine for templates if _type_index is static member.
+// But defining it for templates requires template<...> syntax.
+#define KXC_OBJECT_DECLARE_TEMPLATE_NODE \
+    static const uint32_t _type_index; \
+    const uint32_t GetTypeId() const override { return _type_index; }
+
+// For template definitions, we can't easily auto-register all instantiations with unique names
+// unless we use RTTI typeid(T).name() or similar.
+// For simplicity in this project, let's assume specific instantiations or use a generic "Array" type index?
+// But Array<Int> and Array<Float> are different C++ types.
+// If we use KXC_OBJECT_DECLARE, we need to define _type_index for each T.
+// Alternative: ArrayNode<T> returns TypeRegistry::Register("Array") shared?
+// No, GetTypeId should ideally distinguish types if we do strict checking.
+// But ObjectRef::As<T> uses dynamic_cast, so _type_index is mostly for serialization/reflection.
+// Let's implement a simple version where all Arrays share same ID or we use RTTI-based name.
+
+template<typename T>
+struct TypeNameTraits {
+    static std::string Get() { return "Object"; }
+};
+
+// Helper to register template types on demand?
+// For now, let's just make KXC_OBJECT_DECLARE_TEMPLATE work by specializing or just
+// returning a hash of typeid(T).name() if possible, or just standard Register.
+
 } // namespace base
 

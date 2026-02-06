@@ -28,7 +28,7 @@ void test_compute() {
     Var n("n"), m("m");
     Tensor A = placeholder({n, m}, DataType::Float(32), "A");
     
-    Tensor B = compute({n, m}, [&](const std::vector<Var>& axis) {
+    Tensor B = compute({n, m}, [&](const Array<Var>& axis) {
         Var i = axis[0];
         Var j = axis[1];
         // B[i, j] = A[i, j] + 1.0
@@ -50,7 +50,7 @@ void test_schedule() {
     std::cout << "Testing Schedule..." << std::endl;
     Var n("n"), m("m");
     Tensor A = placeholder({n, m}, DataType::Float(32), "A");
-    Tensor B = compute({n, m}, [&](const std::vector<Var>& axis) {
+    Tensor B = compute({n, m}, [&](const Array<Var>& axis) {
         return A(axis) + 1.0f;
     }, "B");
     

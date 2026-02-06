@@ -7,6 +7,7 @@
 #include "registry.h"
 #include "device.h"
 #include "typemanager.h"
+#include "ndarray.h"
 
 namespace py = pybind11;
 
@@ -75,7 +76,7 @@ inline void InitKXCRuntime(py::module_& m) {
     object_base.def("get_type_id", &Object::GetTypeId, "Get the type ID of the object.");
     
     // 绑定 PackedFunc
-    py::class_<PackedFunc, Object, std::unique_ptr<PackedFunc, py::nodelete>>(m, "PackedFunc")
+    py::class_<PackedFunc, ObjectRef>(m, "PackedFunc")
         .def("__call__", [](const PackedFunc& func, py::args args) -> py::object {
             std::vector<Value> values;
             std::vector<TypeCode> type_codes;
@@ -124,6 +125,41 @@ inline void InitKXCRuntime(py::module_& m) {
                 case kNull: return py::none();
                 default: throw py::type_error("Unsupported return type");
             }
+        });
+        
+    // Bind NDArrayNode
+    py::class_<runtime::NDArrayNode, Object, std::unique_ptr<runtime::NDArrayNode, py::nodelete>>(m, "NDArrayNode")
+        .def_readonly("shape", &runtime::NDArrayNode::shape);
+
+    // Bind NDArray
+    py::class_<runtime::NDArray, ObjectRef>(m, "NDArray", py::buffer_protocol())
+        .def(py::init<std::vector<int64_t>, std::string>())
+        .def_buffer([](runtime::NDArray& m) -> py::buffer_info {
+            const runtime::NDArrayNode* node = m.operator->();
+            std::string format;
+            if (node->dl_tensor.dtype.code == kDLFloat) format = "f";
+            else if (node->dl_tensor.dtype.code == kDLInt) format = "i"; 
+            else format = "B"; // fallback
+
+            std::vector<py::ssize_t> strides;
+            std::vector<py::ssize_t> shape;
+            for(auto s : node->shape) shape.push_back(s);
+            
+            // Calc strides (row-major)
+            py::ssize_t stride = node->dl_tensor.dtype.bits / 8;
+            for (int i = node->dl_tensor.ndim - 1; i >= 0; --i) {
+                strides.insert(strides.begin(), stride);
+                stride *= node->dl_tensor.shape[i];
+            }
+            
+            return py::buffer_info(
+                node->dl_tensor.data,
+                node->dl_tensor.dtype.bits / 8,
+                format,
+                node->dl_tensor.ndim,
+                shape,
+                strides
+            );
         });
 
     // 绑定 get_global_func

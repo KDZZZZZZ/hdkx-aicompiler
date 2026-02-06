@@ -1,6 +1,7 @@
 #pragma once
 #include "tir/expr.h"
 #include "base/expr.h"
+#include "base/container.h"
 #include <vector>
 #include <string>
 
@@ -131,7 +132,7 @@ class AllocateNode : public StmtNode {
 public:
     Var buffer_var;
     DataType dtype;
-    std::vector<PrimExpr> extents;
+    Array<PrimExpr> extents;
     PrimExpr condition; // Optional condition
     Stmt body;
 
@@ -142,7 +143,7 @@ KXC_OBJECT_DEFINE(AllocateNode)
 class Allocate : public Stmt {
 public:
     using Stmt::Stmt;
-    Allocate(Var buffer_var, DataType dtype, std::vector<PrimExpr> extents, PrimExpr condition, Stmt body) {
+    Allocate(Var buffer_var, DataType dtype, Array<PrimExpr> extents, PrimExpr condition, Stmt body) {
         auto* node = new AllocateNode();
         node->buffer_var = buffer_var;
         node->dtype = dtype;
@@ -246,8 +247,8 @@ class BufferNode : public Object {
 public:
     Var data;
     DataType dtype;
-    std::vector<PrimExpr> shape;
-    std::vector<PrimExpr> strides;
+    Array<PrimExpr> shape;
+    Array<PrimExpr> strides;
     PrimExpr elem_offset;
     std::string name;
     int data_alignment;
@@ -260,7 +261,7 @@ KXC_OBJECT_DEFINE(BufferNode)
 class Buffer : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
-    Buffer(Var data, DataType dtype, std::vector<PrimExpr> shape, std::vector<PrimExpr> strides, PrimExpr elem_offset, std::string name, int data_alignment, int offset_factor) {
+    Buffer(Var data, DataType dtype, Array<PrimExpr> shape, Array<PrimExpr> strides, PrimExpr elem_offset, std::string name, int data_alignment, int offset_factor) {
         auto* node = new BufferNode();
         node->data = data;
         node->dtype = dtype;
@@ -279,7 +280,7 @@ public:
 class BufferRegionNode : public Object {
 public:
     Buffer buffer;
-    std::vector<Range> region;
+    Array<Range> region;
     KXC_OBJECT_DECLARE
 };
 KXC_OBJECT_DEFINE(BufferRegionNode)
@@ -287,7 +288,7 @@ KXC_OBJECT_DEFINE(BufferRegionNode)
 class BufferRegion : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
-    BufferRegion(Buffer buffer, std::vector<Range> region) {
+    BufferRegion(Buffer buffer, Array<Range> region) {
         auto* node = new BufferRegionNode();
         node->buffer = buffer;
         node->region = std::move(region);
@@ -299,9 +300,9 @@ public:
 // 7. Block (TensorIR)
 class BlockNode : public StmtNode {
 public:
-    std::vector<IterVar> iter_vars;
-    std::vector<BufferRegion> reads;
-    std::vector<BufferRegion> writes;
+    Array<IterVar> iter_vars;
+    Array<BufferRegion> reads;
+    Array<BufferRegion> writes;
     std::string name_hint;
     Stmt body;
     Stmt init; // Optional
@@ -313,7 +314,7 @@ KXC_OBJECT_DEFINE(BlockNode)
 class Block : public Stmt {
 public:
     using Stmt::Stmt;
-    Block(std::vector<IterVar> iter_vars, std::vector<BufferRegion> reads, std::vector<BufferRegion> writes, std::string name_hint, Stmt body, Stmt init = Stmt()) {
+    Block(Array<IterVar> iter_vars, Array<BufferRegion> reads, Array<BufferRegion> writes, std::string name_hint, Stmt body, Stmt init = Stmt()) {
         auto* node = new BlockNode();
         node->iter_vars = std::move(iter_vars);
         node->reads = std::move(reads);
@@ -330,7 +331,7 @@ public:
 // Here we implement a simple sequence block (SeqStmt style).
 class SeqStmtNode : public StmtNode {
 public:
-    std::vector<Stmt> seq;
+    Array<Stmt> seq;
     KXC_OBJECT_DECLARE
 };
 KXC_OBJECT_DEFINE(SeqStmtNode)
@@ -338,7 +339,7 @@ KXC_OBJECT_DEFINE(SeqStmtNode)
 class SeqStmt : public Stmt {
 public:
     using Stmt::Stmt;
-    explicit SeqStmt(std::vector<Stmt> seq) {
+    explicit SeqStmt(Array<Stmt> seq) {
         auto* node = new SeqStmtNode();
         node->seq = std::move(seq);
         SetData(node);

@@ -1,5 +1,6 @@
 #pragma once
 #include "relay/relay.h"
+#include "base/container.h"
 #include <vector>
 
 namespace kxc {
@@ -60,7 +61,7 @@ protected:
 
     Expr VisitCall(const CallNode* op, const Expr& ref) override {
         auto new_op = Mutate(op->op);
-        std::vector<Expr> new_args;
+        Array<Expr> new_args;
         bool changed = (new_op.get() != op->op.get());
         
         for (const auto& arg : op->args) {
@@ -104,7 +105,7 @@ protected:
     }
 
     Expr VisitTuple(const TupleNode* op, const Expr& ref) override {
-        std::vector<Expr> new_fields;
+        Array<Expr> new_fields;
         bool changed = false;
         for (const auto& field : op->fields) {
             auto new_field = Mutate(field);

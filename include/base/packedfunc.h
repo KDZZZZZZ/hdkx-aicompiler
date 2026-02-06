@@ -8,6 +8,7 @@
 #include <type_traits>
 #include <iostream>
 #include "object.h"
+#include "tensor.h"
 
 namespace kxc {
 
@@ -313,6 +314,13 @@ struct ArgConverter<std::vector<T>> {
     }
 };
 
+template<> struct ArgConverter<Tensor> {
+    static Tensor From(const Value& v, TypeCode t) {
+        if (t != kObjectRef) throw std::runtime_error("Type mismatch, expected ObjectRef for Tensor");
+        return Tensor(runtime::NDArray(v.v_object));
+    }
+};
+
 
 namespace detail {
 template <typename T>
@@ -416,6 +424,11 @@ public:
         void Set(size_t i, const std::vector<T>& v) const {
             values[i].v_handle = (void*)&v;
             type_codes[i] = kHandle;
+        }
+
+        void Set(size_t i, const Tensor& v) const {
+            values[i].v_object = v.data_.get();
+            type_codes[i] = kObjectRef;
         }
     };
     

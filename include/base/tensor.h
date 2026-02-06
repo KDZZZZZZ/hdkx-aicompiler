@@ -1,36 +1,35 @@
 #pragma once
-#include "object.h"
+#include "ndarray.h"
+#include "base/container.h"
 #include <vector>
 #include <string>
 
 namespace kxc {
 
-class TensorNode : public Object {
+// Simple Tensor class wrapping NDArray
+class Tensor {
 public:
-    // Minimal tensor representation
-    std::vector<int64_t> shape;
-    std::string dtype;
-    void* data = nullptr;
+    runtime::NDArray data_;
 
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 10; // Arbitrary offset
-    }
-};
-
-class Tensor : public ObjectRef {
-public:
-    using ObjectRef::ObjectRef;
+    Tensor() = default;
     
-    Tensor(std::vector<int64_t> shape, std::string dtype) {
-        TensorNode* node = new TensorNode();
-        node->shape = std::move(shape);
-        node->dtype = std::move(dtype);
-        SetData(node);
-    }
+    // Construct from NDArray
+    Tensor(runtime::NDArray data) : data_(data) {}
+    
+    // Construct new tensor with shape and dtype
+    Tensor(Array<int64_t> shape, std::string dtype = "float32") 
+        : data_(shape, dtype) {}
 
-    const TensorNode* operator->() const {
-        return static_cast<const TensorNode*>(object_);
+    // Allow implicit conversion to NDArray for convenience?
+    // operator runtime::NDArray() const { return data_; }
+    
+    // Access underlying DLTensor
+    const DLTensor* operator->() const {
+        return *data_;
     }
+    
+    // Check if defined
+    bool defined() const { return data_.defined(); }
 };
 
-}
+} // namespace kxc

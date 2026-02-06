@@ -45,9 +45,18 @@ protected:
         std::vector<tir::PrimExpr> shape;
         for(auto d : op->data->shape) shape.push_back(d);
         tir::DataType dtype = tir::DataType::Float(32); 
-        // Simplified mapping
-        if (op->data->dtype == "float32") dtype = tir::DataType::Float(32);
-        else if (op->data->dtype == "int32") dtype = tir::DataType::Int(32);
+        
+        // Map DLTensor dtype to TIR DataType
+        auto& dl_dtype = op->data->dl_tensor.dtype;
+        if (dl_dtype.code == kDLFloat && dl_dtype.bits == 32) {
+            dtype = tir::DataType::Float(32);
+        } else if (dl_dtype.code == kDLInt && dl_dtype.bits == 32) {
+            dtype = tir::DataType::Int(32);
+        } else if (dl_dtype.code == kDLFloat && dl_dtype.bits == 64) {
+             dtype = tir::DataType::Float(64);
+        } else if (dl_dtype.code == kDLInt && dl_dtype.bits == 64) {
+             dtype = tir::DataType::Int(64);
+        }
         
         return {te::placeholder(shape, dtype, "const")};
     }

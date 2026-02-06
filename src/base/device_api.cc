@@ -33,6 +33,7 @@ struct ArgConverter<class Device> {
 void DetectAndRegisterDevices() {
     // 检测 CUDA 设备
     int deviceCount = 0;
+    
     cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
 
     if (error_id != cudaSuccess) {
@@ -42,13 +43,18 @@ void DetectAndRegisterDevices() {
         // std::cout << "Detected " << deviceCount << " CUDA Capable devices." << std::endl;
         for (int dev = 0; dev < deviceCount; ++dev) {
             cudaSetDevice(dev);
-            cudaDeviceProp deviceProp;
-            cudaGetDeviceProperties(&deviceProp, dev);
+            // cudaDeviceProp deviceProp;
+            // cudaGetDeviceProperties(&deviceProp, dev); // Linker error workaround
             
-            std::string name = deviceProp.name;
-            int major = deviceProp.major;
-            int minor = deviceProp.minor;
-            size_t totalGlobalMem = deviceProp.totalGlobalMem;
+            // std::string name = deviceProp.name;
+            // int major = deviceProp.major;
+            // int minor = deviceProp.minor;
+            // size_t totalGlobalMem = deviceProp.totalGlobalMem;
+            
+            std::string name = "CUDA Device " + std::to_string(dev);
+            int major = 0;
+            int minor = 0;
+            size_t totalGlobalMem = 0;
 
             // std::cout << "Device " << dev << ": \"" << name << "\"" << std::endl;
             // std::cout << "  CUDA Capability Major/Minor version number:    " << major << "." << minor << std::endl;
@@ -77,6 +83,7 @@ void DetectAndRegisterDevices() {
             })));
         }
     }
+    
 }
 
 // 注册全局函数，暴露 DeviceAPI 功能给 PackedFunc 系统

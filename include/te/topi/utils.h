@@ -1,5 +1,6 @@
 #pragma once
 #include "te/te.h"
+#include "base/container.h"
 #include <vector>
 #include "tir/expr.h"
 #include <algorithm>
@@ -8,9 +9,11 @@ namespace kxc {
 namespace te {
 namespace topi {
 
+using namespace kxc::tir;
+
 // Helper to get real axis indices from input
 // Handles negative indices and conversion to size_t
-inline std::vector<size_t> GetRealAxis(size_t ndim, const std::vector<int>& axis) {
+inline std::vector<size_t> GetRealAxis(size_t ndim, const Array<int>& axis) {
     std::vector<size_t> real_axis;
     if (axis.empty()) {
         for (size_t i = 0; i < ndim; ++i) real_axis.push_back(i);
@@ -27,7 +30,7 @@ inline std::vector<size_t> GetRealAxis(size_t ndim, const std::vector<int>& axis
 }
 
 // Check if a shape is empty
-inline bool IsScalar(const std::vector<PrimExpr>& shape) {
+inline bool IsScalar(const Array<PrimExpr>& shape) {
     return shape.empty();
 }
 

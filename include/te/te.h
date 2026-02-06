@@ -1,6 +1,7 @@
 #pragma once
 #include "tir/expr.h"
 #include "base/object.h"
+#include "base/container.h"
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -10,24 +11,22 @@
 namespace kxc {
 namespace te {
 
-// using namespace kxc::tir; // Removed to avoid ambiguity
-
 // Forward declarations
-class Operation;
-class Tensor;
 class Schedule;
 class Stage;
+class Operation;
+class Tensor;
 
 // --- Operation ---
 class OperationNode : public Object {
 public:
     std::string name;
     std::string tag;
-    std::unordered_map<std::string, ObjectRef> attrs;
+    Map<String, ObjectRef> attrs;
     
     virtual int num_outputs() const = 0;
     virtual tir::DataType output_dtype(int i) const = 0;
-    virtual std::vector<tir::PrimExpr> output_shape(int i) const = 0;
+    virtual Array<tir::PrimExpr> output_shape(int i) const = 0;
     
     KXC_OBJECT_DECLARE
 };
@@ -41,7 +40,7 @@ public:
     
     int num_outputs() const { return operator->()->num_outputs(); }
     tir::DataType output_dtype(int i) const { return operator->()->output_dtype(i); }
-    std::vector<tir::PrimExpr> output_shape(int i) const { return operator->()->output_shape(i); }
+    Array<tir::PrimExpr> output_shape(int i) const { return operator->()->output_shape(i); }
 };
 
 } // namespace te
@@ -57,6 +56,91 @@ namespace std {
 
 namespace kxc {
 namespace te {
+
+
+// --- Tensor ---
+class TensorNode : public Object {
+public:
+    std::string name;
+    Array<tir::PrimExpr> shape;
+    tir::DataType dtype;
+    Operation op;
+    int value_index;
+    
+    KXC_OBJECT_DECLARE
+};
+KXC_OBJECT_DEFINE(TensorNode)
+
+class Tensor : public ObjectRef {
+public:
+    using ObjectRef::ObjectRef;
+    
+    Tensor(Array<tir::PrimExpr> shape, tir::DataType dtype, Operation op, int value_index);
+    
+    const TensorNode* operator->() const { return static_cast<const TensorNode*>(object_); }
+    
+    // Operator() for indexing - Defined later
+    tir::PrimExpr operator()(const Array<tir::PrimExpr>& indices) const;
+    
+    // Overload for vector<Var>
+    tir::PrimExpr operator()(const Array<tir::Var>& indices) const;
+
+    template<typename... Args>
+    tir::PrimExpr operator()(Args... args) const {
+        return (*this)(Array<tir::PrimExpr>{tir::PrimExpr(args)...});
+    }
+};
+
+// --- ProducerLoad (Expression for Tensor Access) ---
+class ProducerLoadNode : public tir::PrimExprNode {
+public:
+    Tensor tensor;
+    Array<tir::PrimExpr> indices;
+    
+    KXC_OBJECT_DECLARE
+};
+KXC_OBJECT_DEFINE(ProducerLoadNode)
+
+class ProducerLoad : public tir::PrimExpr {
+public:
+    using PrimExpr::PrimExpr;
+    ProducerLoad(Tensor tensor, Array<tir::PrimExpr> indices) {
+        auto* node = new ProducerLoadNode();
+        node->tensor = tensor;
+        node->indices = indices;
+        node->dtype = tensor->dtype;
+        SetData(node);
+    }
+};
+
+// --- Tensor Implementation ---
+inline Tensor::Tensor(Array<tir::PrimExpr> shape, tir::DataType dtype, Operation op, int value_index) {
+    auto* node = new TensorNode();
+    node->shape = shape;
+    node->dtype = dtype;
+    node->op = op;
+    node->value_index = value_index;
+    if (op.defined()) {
+        node->name = op->name;
+        if (op->num_outputs() > 1) {
+            node->name += ".v" + std::to_string(value_index);
+        }
+    }
+    SetData(node);
+}
+
+inline tir::PrimExpr Tensor::operator()(const Array<tir::PrimExpr>& indices) const {
+    return ProducerLoad(*this, indices);
+}
+
+inline tir::PrimExpr Tensor::operator()(const Array<tir::Var>& indices) const {
+    Array<tir::PrimExpr> prim_indices;
+    // prim_indices.reserve(indices.size()); // Array doesn't support reserve yet
+    for(const auto& v : indices) {
+        prim_indices.push_back(v);
+    }
+    return ProducerLoad(*this, prim_indices);
+}
 
 // --- IterVar (Iteration Variable for Reduction) ---
 
@@ -119,8 +203,8 @@ inline IterVar reduce_axis(tir::PrimExpr min, tir::PrimExpr extent, std::string 
 class StageNode : public Object {
 public:
     Operation op;
-    std::vector<IterVar> leaf_iter_vars;
-    std::vector<IterVar> all_iter_vars;
+    Array<IterVar> leaf_iter_vars;
+    Array<IterVar> all_iter_vars;
     
     KXC_OBJECT_DECLARE
 };
@@ -137,7 +221,7 @@ public:
     // Schedule Primitives
     IterVar split(IterVar parent, tir::PrimExpr factor, IterVar* p_outer = nullptr, IterVar* p_inner = nullptr);
     IterVar fuse(IterVar outer, IterVar inner);
-    void reorder(const std::vector<IterVar>& order);
+    void reorder(const Array<IterVar>& order);
     void tile(IterVar x_parent, IterVar y_parent, tir::PrimExpr x_factor, tir::PrimExpr y_factor, 
               IterVar* x_outer, IterVar* y_outer, IterVar* x_inner, IterVar* y_inner);
     void vectorize(IterVar var);
@@ -155,8 +239,8 @@ enum class ReduceType : int {
 
 class ReduceNode : public tir::PrimExprNode {
 public:
-    std::vector<IterVar> axis;
-    std::vector<tir::PrimExpr> source;
+    Array<IterVar> axis;
+    Array<tir::PrimExpr> source;
     ReduceType reduce_type = ReduceType::kSum;
     
     KXC_OBJECT_DECLARE
@@ -166,7 +250,7 @@ KXC_OBJECT_DEFINE(ReduceNode)
 class Reduce : public tir::PrimExpr {
 public:
     using PrimExpr::PrimExpr;
-    Reduce(std::vector<IterVar> axis, std::vector<tir::PrimExpr> source, ReduceType type = ReduceType::kSum) {
+    Reduce(Array<IterVar> axis, Array<tir::PrimExpr> source, ReduceType type = ReduceType::kSum) {
         auto* node = new ReduceNode();
         node->axis = axis;
         node->source = source;
@@ -176,115 +260,25 @@ public:
     }
 };
 
-inline tir::PrimExpr sum(tir::PrimExpr expr, std::vector<IterVar> axis) {
+inline tir::PrimExpr sum(tir::PrimExpr expr, Array<IterVar> axis) {
     return Reduce(axis, {expr}, ReduceType::kSum);
 }
 
-inline tir::PrimExpr max(tir::PrimExpr expr, std::vector<IterVar> axis) {
+inline tir::PrimExpr max(tir::PrimExpr expr, Array<IterVar> axis) {
     return Reduce(axis, {expr}, ReduceType::kMax);
 }
-
-// --- Operation ---
-// (Moved to top)
-
-// --- Tensor ---
-
-// --- Tensor ---
-class TensorNode : public Object {
-public:
-    std::string name;
-    std::vector<tir::PrimExpr> shape;
-    tir::DataType dtype;
-    Operation op;
-    int value_index;
-    
-    KXC_OBJECT_DECLARE
-};
-KXC_OBJECT_DEFINE(TensorNode)
-
-class Tensor : public ObjectRef {
-public:
-    using ObjectRef::ObjectRef;
-    
-    Tensor(std::vector<tir::PrimExpr> shape, tir::DataType dtype, Operation op, int value_index);
-    
-    const TensorNode* operator->() const { return static_cast<const TensorNode*>(object_); }
-    
-    // Operator() for indexing - Defined later
-    tir::PrimExpr operator()(const std::vector<tir::PrimExpr>& indices) const;
-    
-    // Overload for vector<Var>
-    tir::PrimExpr operator()(const std::vector<tir::Var>& indices) const;
-
-    template<typename... Args>
-    tir::PrimExpr operator()(Args... args) const {
-        return (*this)(std::vector<tir::PrimExpr>{tir::PrimExpr(args)...});
-    }
-};
-
-// --- ProducerLoad (Expression for Tensor Access) ---
-class ProducerLoadNode : public tir::PrimExprNode {
-public:
-    Tensor tensor;
-    std::vector<tir::PrimExpr> indices;
-    
-    KXC_OBJECT_DECLARE
-};
-KXC_OBJECT_DEFINE(ProducerLoadNode)
-
-class ProducerLoad : public tir::PrimExpr {
-public:
-    using PrimExpr::PrimExpr;
-    ProducerLoad(Tensor tensor, std::vector<tir::PrimExpr> indices) {
-        auto* node = new ProducerLoadNode();
-        node->tensor = tensor;
-        node->indices = indices;
-        node->dtype = tensor->dtype;
-        SetData(node);
-    }
-};
-
-// --- Tensor Implementation ---
-inline Tensor::Tensor(std::vector<tir::PrimExpr> shape, tir::DataType dtype, Operation op, int value_index) {
-    auto* node = new TensorNode();
-    node->shape = shape;
-    node->dtype = dtype;
-    node->op = op;
-    node->value_index = value_index;
-    if (op.defined()) {
-        node->name = op->name;
-        if (op->num_outputs() > 1) {
-            node->name += ".v" + std::to_string(value_index);
-        }
-    }
-    SetData(node);
-}
-
-inline tir::PrimExpr Tensor::operator()(const std::vector<tir::PrimExpr>& indices) const {
-    return ProducerLoad(*this, indices);
-}
-
-inline tir::PrimExpr Tensor::operator()(const std::vector<tir::Var>& indices) const {
-    std::vector<tir::PrimExpr> prim_indices;
-    prim_indices.reserve(indices.size());
-    for(const auto& v : indices) {
-        prim_indices.push_back(v);
-    }
-    return ProducerLoad(*this, prim_indices);
-}
-
 
 // --- Concrete Operations ---
 
 // PlaceholderOp
 class PlaceholderOpNode : public OperationNode {
 public:
-    std::vector<tir::PrimExpr> shape;
+    Array<tir::PrimExpr> shape;
     tir::DataType dtype;
     
     int num_outputs() const override { return 1; }
     tir::DataType output_dtype(int i) const override { return dtype; }
-    std::vector<tir::PrimExpr> output_shape(int i) const override { return shape; }
+    Array<tir::PrimExpr> output_shape(int i) const override { return shape; }
     
     KXC_OBJECT_DECLARE
 };
@@ -293,7 +287,7 @@ KXC_OBJECT_DEFINE(PlaceholderOpNode)
 class PlaceholderOp : public Operation {
 public:
     using Operation::Operation;
-    PlaceholderOp(std::string name, std::vector<tir::PrimExpr> shape, tir::DataType dtype) {
+    PlaceholderOp(std::string name, Array<tir::PrimExpr> shape, tir::DataType dtype) {
         auto* node = new PlaceholderOpNode();
         node->name = name;
         node->shape = shape;
@@ -305,15 +299,15 @@ public:
 // ComputeOp
 class ComputeOpNode : public OperationNode {
 public:
-    std::vector<tir::Var> axis;
-    std::vector<IterVar> reduce_axis; // Added reduce axis
-    std::vector<tir::PrimExpr> body; 
+    Array<tir::Var> axis;
+    Array<IterVar> reduce_axis; // Added reduce axis
+    Array<tir::PrimExpr> body; 
     
     int num_outputs() const override { return body.size(); }
     tir::DataType output_dtype(int i) const override { return body[i].dtype(); }
-    std::vector<tir::PrimExpr> shape;
+    Array<tir::PrimExpr> shape;
 
-    std::vector<tir::PrimExpr> output_shape(int i) const override { return shape; }
+    Array<tir::PrimExpr> output_shape(int i) const override { return shape; }
     
     KXC_OBJECT_DECLARE
 };
@@ -322,8 +316,8 @@ KXC_OBJECT_DEFINE(ComputeOpNode)
 class ComputeOp : public Operation {
 public:
     using Operation::Operation;
-    ComputeOp(std::string name, std::string tag, std::unordered_map<std::string, ObjectRef> attrs, 
-              std::vector<tir::Var> axis, std::vector<tir::PrimExpr> body, std::vector<tir::PrimExpr> shape) {
+    ComputeOp(std::string name, std::string tag, Map<String, ObjectRef> attrs, 
+              Array<tir::Var> axis, Array<tir::PrimExpr> body, Array<tir::PrimExpr> shape) {
         auto* node = new ComputeOpNode();
         node->name = name;
         node->tag = tag;
@@ -339,7 +333,9 @@ public:
             std::vector<IterVar> axes;
             void Visit(const ObjectRef& obj) {
                 if (auto* reduce = obj.As<ReduceNode>()) {
-                     axes.insert(axes.end(), reduce->axis.begin(), reduce->axis.end());
+                     for (const auto& ax : reduce->axis) {
+                        axes.push_back(ax);
+                     }
                 }
                 // Recursive visit would be needed for real IR
                 // Here we assume simple structure or manual check
@@ -389,7 +385,7 @@ public:
 
 // --- Helper Functions ---
 
-inline Tensor placeholder(std::vector<tir::PrimExpr> shape, tir::DataType dtype = tir::DataType::Float(32), std::string name = "placeholder") {
+inline Tensor placeholder(Array<tir::PrimExpr> shape, tir::DataType dtype = tir::DataType::Float(32), std::string name = "placeholder") {
     PlaceholderOp op(name, shape, dtype);
     return Tensor(shape, dtype, op, 0);
 }
@@ -397,11 +393,11 @@ inline Tensor placeholder(std::vector<tir::PrimExpr> shape, tir::DataType dtype 
 // FCompute: std::function<PrimExpr(const std::vector<Var>&)>
 // or FCompute: std::function<PrimExpr(Var, Var...)>
 // We'll support varargs via a helper later, for now vector version
-using FCompute = std::function<tir::PrimExpr(const std::vector<tir::Var>&)>;
+using FCompute = std::function<tir::PrimExpr(const Array<tir::Var>&)>;
 
-inline Tensor compute(std::vector<tir::PrimExpr> shape, FCompute fcompute, std::string name = "compute", std::string tag = "", std::unordered_map<std::string, ObjectRef> attrs = {}) {
+inline Tensor compute(Array<tir::PrimExpr> shape, FCompute fcompute, std::string name = "compute", std::string tag = "", Map<String, ObjectRef> attrs = {}) {
     // 1. Create IterVars for the shape
-    std::vector<tir::Var> axis;
+    Array<tir::Var> axis;
     for (size_t i = 0; i < shape.size(); ++i) {
         axis.push_back(tir::Var("ax" + std::to_string(i)));
     }
@@ -505,7 +501,7 @@ inline IterVar Stage::fuse(IterVar outer, IterVar inner) {
     return fused;
 }
 
-inline void Stage::reorder(const std::vector<IterVar>& order) {
+inline void Stage::reorder(const Array<IterVar>& order) {
     auto* node = this->operator->();
     // Validate all vars in order exist in leaves
     // Then replace leaves with order
@@ -520,7 +516,7 @@ inline void Stage::tile(IterVar x_parent, IterVar y_parent, tir::PrimExpr x_fact
     
     auto* node = this->operator->();
     // Capture current leaves before reorder overwrites them
-    std::vector<IterVar> current_leaves = node->leaf_iter_vars;
+    Array<IterVar> current_leaves = node->leaf_iter_vars;
     
     reorder({*x_outer, *y_outer, *x_inner, *y_inner});
     
@@ -536,7 +532,7 @@ inline void Stage::tile(IterVar x_parent, IterVar y_parent, tir::PrimExpr x_fact
     // If we lose 'k', verify fails.
     
     // Let's try to recover missing axes for this simple implementation.
-    std::vector<IterVar> new_leaves = node->leaf_iter_vars; // Should be just the reordered ones
+    Array<IterVar> new_leaves = node->leaf_iter_vars; // Should be just the reordered ones
     
     for(auto& iv : current_leaves) {
         // Skip parent axes that were split
@@ -588,8 +584,9 @@ inline IterVar thread_axis(tir::PrimExpr dom, std::string tag) {
 }
 class ScheduleNode : public Object {
 public:
-    std::vector<Stage> stages;
-    std::unordered_map<Operation, Stage> op_map;
+    Array<Operation> outputs;
+    Array<Stage> stages;
+    Map<Operation, Stage> op_map;
     
     KXC_OBJECT_DECLARE
 };
@@ -607,15 +604,17 @@ public:
     ScheduleNode* operator->() { return static_cast<ScheduleNode*>(const_cast<Object*>(object_)); }
 };
 
-inline Schedule create_schedule(const std::vector<Operation>& ops) {
+inline Schedule create_schedule(const Array<Operation>& ops) {
     auto* node = new ScheduleNode();
+    node->outputs = ops;
     for(auto& op : ops) {
         Stage stage(op);
         node->stages.push_back(stage);
-        node->op_map[op] = stage;
+        node->op_map.Set(op, stage);
     }
     return Schedule(node);
 }
 
 } // namespace te
 } // namespace kxc
+

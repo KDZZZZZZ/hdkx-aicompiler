@@ -3,6 +3,7 @@
 #include "te/topi/broadcast.h"
 #include "te/topi/tags.h"
 #include "te/topi/utils.h"
+#include "base/container.h"
 #include <vector>
 
 namespace kxc {
@@ -13,7 +14,7 @@ namespace topi {
 inline Tensor relu(const Tensor& x, std::string name = "relu", std::string tag = kElementWise) {
     return compute(
         x->shape,
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
             // max(x, 0)
             return Max(x(indices), make_const(x->dtype, 0)); 
             // make_const might need implementation or use 0 casted
@@ -27,7 +28,7 @@ inline Tensor relu(const Tensor& x, std::string name = "relu", std::string tag =
 inline Tensor leaky_relu(const Tensor& x, double alpha, std::string name = "leaky_relu", std::string tag = kElementWise) {
     return compute(
         x->shape,
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
             PrimExpr val = x(indices);
             return Select(val > make_const(x->dtype, 0), val, val * make_const(x->dtype, alpha));
         },
@@ -55,7 +56,7 @@ inline Tensor dense(const Tensor& A, const Tensor& B, const Tensor& bias = Tenso
     
     Tensor matmul = compute(
         {M, N},
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
             Var i = indices[0];
             Var j = indices[1];
             return kxc::te::sum(A(i, k) * B(j, k), {k});
@@ -71,6 +72,27 @@ inline Tensor dense(const Tensor& A, const Tensor& B, const Tensor& bias = Tenso
     }
     
     return matmul;
+}
+
+// MatMul (Standard)
+// A: [M, K], B: [K, N] -> Output: [M, N]
+inline Tensor matmul(const Tensor& A, const Tensor& B, std::string name = "matmul", std::string tag = kMatMul) {
+    PrimExpr M = A->shape[0];
+    PrimExpr K = A->shape[1];
+    PrimExpr N = B->shape[1];
+    
+    IterVar k = reduce_axis(0, K, "k");
+    
+    return compute(
+        {M, N},
+        [&](const Array<Var>& indices) {
+            Var i = indices[0];
+            Var j = indices[1];
+            return kxc::te::sum(A(i, k) * B(k, j), {k});
+        },
+        name,
+        tag
+    );
 }
 
 // Conv2D NCHW
@@ -102,7 +124,7 @@ inline Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h
     
     return compute(
         {N, O, OH, OW},
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
             Var n = indices[0];
             Var o = indices[1];
             Var h = indices[2];
@@ -131,7 +153,7 @@ inline Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h
 }
 
 // Pool2D
-inline Tensor pool2d(const Tensor& data, std::vector<int> kernel_size, std::vector<int> stride, std::vector<int> padding, std::string pool_type, bool ceil_mode = false, std::string name = "pool2d", std::string tag = kPool) {
+inline Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Array<int> padding, std::string pool_type, bool ceil_mode = false, std::string name = "pool2d", std::string tag = kPool) {
     // Assuming NCHW
     PrimExpr N = data->shape[0];
     PrimExpr C = data->shape[1];
@@ -153,7 +175,7 @@ inline Tensor pool2d(const Tensor& data, std::vector<int> kernel_size, std::vect
     
     return compute(
         {N, C, OH, OW},
-        [&](const std::vector<Var>& indices) {
+        [&](const Array<Var>& indices) {
              Var n = indices[0];
              Var c = indices[1];
              Var h = indices[2];

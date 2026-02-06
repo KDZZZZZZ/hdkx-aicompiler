@@ -1,5 +1,6 @@
 #pragma once
 #include "relay.h"
+#include "base/container.h"
 #include <string>
 #include <unordered_map>
 #include <memory>
@@ -24,7 +25,7 @@ public:
     std::string description;
     
     // Inputs/Arguments metadata
-    std::vector<ArgumentInfo> arguments;
+    Array<ArgumentInfo> arguments;
     int num_inputs = -1; // -1 means variable or undefined
     
     // Attribute Map: stores metadata like "TAttrs" -> "Conv2DAttrs"
@@ -283,14 +284,14 @@ public:
 
 class ConstantAttrsNode : public BaseAttrsNode {
 public:
-    Tensor value;
+    runtime::NDArray value;
     KXC_DECLARE_ATTRS_NODE
 };
 KXC_OBJECT_DEFINE(ConstantAttrsNode)
 class ConstantAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ConstantAttrs, ConstantAttrsNode)
 public:
-    static ConstantAttrs Create(Tensor value) {
+    static ConstantAttrs Create(runtime::NDArray value) {
         ConstantAttrsNode* node = new ConstantAttrsNode();
         node->value = std::move(value);
         return InternalCreate(node);
@@ -299,14 +300,14 @@ public:
 
 class ConstantOfShapeAttrsNode : public BaseAttrsNode {
 public:
-    Tensor value;
+    runtime::NDArray value;
     KXC_DECLARE_ATTRS_NODE
 };
 KXC_OBJECT_DEFINE(ConstantOfShapeAttrsNode)
 class ConstantOfShapeAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ConstantOfShapeAttrs, ConstantOfShapeAttrsNode)
 public:
-    static ConstantOfShapeAttrs Create(Tensor value) {
+    static ConstantOfShapeAttrs Create(runtime::NDArray value) {
         ConstantOfShapeAttrsNode* node = new ConstantOfShapeAttrsNode();
         node->value = std::move(value);
         return InternalCreate(node);

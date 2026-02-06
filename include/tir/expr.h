@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include "base/expr.h"
+#include "base/container.h"
 
 namespace kxc {
 namespace tir {
@@ -223,7 +224,7 @@ class CallNode : public PrimExprNode {
 public:
     // Function name or Op
     std::string name;
-    std::vector<PrimExpr> args;
+    Array<PrimExpr> args;
     
     KXC_OBJECT_DECLARE
 };
@@ -232,7 +233,7 @@ KXC_OBJECT_DEFINE(CallNode)
 class Call : public PrimExpr {
 public:
     using PrimExpr::PrimExpr;
-    Call(DataType dtype, std::string name, std::vector<PrimExpr> args) {
+    Call(DataType dtype, std::string name, Array<PrimExpr> args) {
         auto* node = new CallNode();
         node->dtype = dtype;
         node->name = std::move(name);

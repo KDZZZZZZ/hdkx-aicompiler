@@ -58,8 +58,8 @@ KXC_REGISTER_OP(sqrt)
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.");
 
-// Sub
-KXC_REGISTER_OP(sub)
+// Subtract
+KXC_REGISTER_OP(subtract)
     .describe(R"doc(Element-wise subtraction.
 )doc")
     .set_num_inputs(2)
@@ -71,30 +71,22 @@ KXC_REGISTER_OP(divide)
     .describe(R"doc(Element-wise division.
 )doc")
     .set_num_inputs(2)
-    .add_argument("lhs", "Tensor", "The dividend.")
-    .add_argument("rhs", "Tensor", "The divisor.")
+    .add_argument("lhs", "Tensor", "The left hand side input tensor.")
+    .add_argument("rhs", "Tensor", "The right hand side input tensor.")
     .set_attr<std::string>("TAttrs", "DivAttrs");
 
 // Equal
 KXC_REGISTER_OP(equal)
-    .describe(R"doc(Element-wise equality comparison.
+    .describe(R"doc(Element-wise equal comparison.
 )doc")
     .set_num_inputs(2)
     .add_argument("lhs", "Tensor", "The left hand side input tensor.")
     .add_argument("rhs", "Tensor", "The right hand side input tensor.")
     .set_attr<std::string>("TAttrs", "EqualAttrs");
 
-// Greater
-KXC_REGISTER_OP(greater)
-    .describe(R"doc(Element-wise greater than comparison.
-)doc")
-    .set_num_inputs(2)
-    .add_argument("lhs", "Tensor", "The left hand side input tensor.")
-    .add_argument("rhs", "Tensor", "The right hand side input tensor.");
-
 // Erf
 KXC_REGISTER_OP(erf)
-    .describe(R"doc(Computes the error function.
+    .describe(R"doc(Error function.
 )doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
