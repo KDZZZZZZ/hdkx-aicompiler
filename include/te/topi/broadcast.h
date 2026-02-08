@@ -12,7 +12,7 @@ namespace topi {
 namespace detail {
     // Helper to map output indices to input indices for broadcasting
     inline Array<PrimExpr> GetBroadcastIndices(
-        const Array<Var>& output_indices,
+        const Array<tir::Var>& output_indices,
         const Array<PrimExpr>& input_shape,
         const Array<PrimExpr>& output_shape) {
         
@@ -73,7 +73,7 @@ namespace detail {
 inline Tensor broadcast_to(const Tensor& t, const Array<PrimExpr>& output_shape, std::string name = "broadcast_to", std::string tag = kBroadcast) {
     return compute(
         output_shape,
-        [&](const Array<Var>& indices) {
+        [&](const Array<tir::Var>& indices) {
             auto input_indices = detail::GetBroadcastIndices(indices, t->shape, output_shape);
             return t(input_indices);
         },
@@ -88,7 +88,7 @@ inline Tensor broadcast_to(const Tensor& t, const Array<PrimExpr>& output_shape,
         auto output_shape = detail::InferBroadcastShape(A->shape, B->shape); \
         return compute( \
             output_shape, \
-            [&](const Array<Var>& indices) { \
+            [&](const Array<tir::Var>& indices) { \
                 auto a_indices = detail::GetBroadcastIndices(indices, A->shape, output_shape); \
                 auto b_indices = detail::GetBroadcastIndices(indices, B->shape, output_shape); \
                 return ComputeFunc(A(a_indices), B(b_indices)); \
@@ -111,7 +111,7 @@ inline Tensor maximum(const Tensor& A, const Tensor& B, std::string name = "maxi
      auto output_shape = detail::InferBroadcastShape(A->shape, B->shape); 
         return compute( 
             output_shape, 
-            [&](const Array<Var>& indices) { 
+            [&](const Array<tir::Var>& indices) { 
                 auto idx_a = detail::GetBroadcastIndices(indices, A->shape, output_shape); 
                 auto idx_b = detail::GetBroadcastIndices(indices, B->shape, output_shape); 
                 // Assuming Max exists in tir or as a function
@@ -129,7 +129,7 @@ inline Tensor minimum(const Tensor& A, const Tensor& B, std::string name = "mini
      auto output_shape = detail::InferBroadcastShape(A->shape, B->shape); 
         return compute( 
             output_shape, 
-            [&](const Array<Var>& indices) { 
+            [&](const Array<tir::Var>& indices) { 
                 auto idx_a = detail::GetBroadcastIndices(indices, A->shape, output_shape); 
                 auto idx_b = detail::GetBroadcastIndices(indices, B->shape, output_shape); 
                 return Min(A(idx_a), B(idx_b)); 

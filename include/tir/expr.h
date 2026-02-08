@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <string>
 #include <vector>
+#include <functional>
 #include "base/expr.h"
 #include "base/container.h"
 
@@ -113,6 +114,8 @@ public:
         SetData(node);
     }
     const VarNode* operator->() const { return static_cast<const VarNode*>(object_); }
+    bool operator==(const Var& other) const { return object_ == other.object_; }
+    bool operator!=(const Var& other) const { return !(*this == other); }
 };
 
 // --- 3. Arithmetic & Logic Operations ---
@@ -168,7 +171,7 @@ DEFINE_BINARY_OP(Max)
             node->a = a; \
             node->b = b; \
             node->dtype = DataType::Bool(); \
-            object_ = node; \
+            SetData(node); \
         } \
     };
 
@@ -215,7 +218,7 @@ public:
         node->index = index;
         node->predicate = predicate;
         node->dtype = buffer_var->dtype; // Load type is buffer element type
-        object_ = node;
+        SetData(node);
     }
 };
 
@@ -238,7 +241,7 @@ public:
         node->dtype = dtype;
         node->name = std::move(name);
         node->args = std::move(args);
-        object_ = node;
+        SetData(node);
     }
 };
 
@@ -279,3 +282,12 @@ inline PrimExpr operator!(PrimExpr a) { return Not(a); }
 
 } // namespace tir
 } // namespace kxc
+
+namespace std {
+template <>
+struct hash<kxc::tir::Var> {
+    size_t operator()(const kxc::tir::Var& k) const {
+        return std::hash<const kxc::Object*>()(k.get());
+    }
+};
+}

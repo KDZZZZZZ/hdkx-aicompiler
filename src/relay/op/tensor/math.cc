@@ -1,16 +1,17 @@
 #include "relay/op_macros.h"
-#include "relay/relay.h"
 #include "relay/op_attr_types.h"
-#include "te/te.h"
+#include "te/topi/broadcast.h"
+#include <stdexcept>
 
 namespace kxc {
 namespace relay {
 
-// FTVMCompute for Add
-te::Tensor AddCompute(const Attrs& attrs, const std::vector<te::Tensor>& inputs, const kxc::Type& out_type) {
-    return te::compute(inputs[0]->shape, [&](const std::vector<kxc::tir::Var>& axes) {
-        return inputs[0](axes) + inputs[1](axes);
-    }, "T_add");
+// FRelayToTE for Add
+te::Tensor AddCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
+    if (inputs.size() != 2) {
+        throw std::runtime_error("add expects exactly 2 inputs");
+    }
+    return te::topi::add(inputs[0], inputs[1], "T_add");
 }
 
 // ---------------------------------------------------------------------------
@@ -24,7 +25,7 @@ KXC_REGISTER_OP(add)
     .set_num_inputs(2)
     .add_argument("lhs", "Tensor", "The left hand side input tensor.")
     .add_argument("rhs", "Tensor", "The right hand side input tensor.")
-    .set_attr<FTVMCompute>("FTVMCompute", AddCompute);
+    .set_attr<FRelayToTE>("FRelayToTE", AddCompute);
 
 // MatMul
 KXC_REGISTER_OP(matmul)

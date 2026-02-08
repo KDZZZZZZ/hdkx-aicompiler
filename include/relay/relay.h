@@ -5,6 +5,7 @@
 #include "base/container.h"
 #include <vector>
 #include <string>
+#include <cstdint>
 
 namespace kxc {
 
@@ -19,7 +20,31 @@ public:
 };
 
 // --- Type ---
-// Moved to base/expr.h
+class TensorTypeNode : public TypeNode {
+public:
+    Array<int64_t> shape;
+    std::string dtype;
+
+    KXC_OBJECT_DECLARE
+};
+
+KXC_OBJECT_DEFINE(TensorTypeNode)
+
+class TensorType : public Type {
+public:
+    using Type::Type;
+
+    TensorType(Array<int64_t> shape, std::string dtype) {
+        auto* node = new TensorTypeNode();
+        node->shape = std::move(shape);
+        node->dtype = std::move(dtype);
+        SetData(node);
+    }
+
+    const TensorTypeNode* operator->() const {
+        return static_cast<const TensorTypeNode*>(object_);
+    }
+};
 
 // --- Var ---
 class IdNode : public Object {
@@ -61,6 +86,12 @@ public:
     explicit Var(std::string name) { 
         VarNode* node = new VarNode();
         node->vid = Id(std::move(name));
+        SetData(node);
+    }
+    Var(std::string name, Type type_annotation) {
+        VarNode* node = new VarNode();
+        node->vid = Id(std::move(name));
+        node->type_annotation = std::move(type_annotation);
         SetData(node);
     }
     const VarNode* operator->() const {

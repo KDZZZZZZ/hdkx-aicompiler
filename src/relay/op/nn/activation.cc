@@ -1,14 +1,24 @@
 #include "relay/op_macros.h"
-#include "relay/relay.h"
+#include "relay/op_attr_types.h"
+#include "te/topi/nn.h"
+#include <stdexcept>
 
 namespace kxc {
 namespace relay {
+
+te::Tensor ReluCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
+    if (inputs.size() != 1) {
+        throw std::runtime_error("nn_relu expects exactly 1 input");
+    }
+    return te::topi::relu(inputs[0], "T_relu");
+}
 
 KXC_REGISTER_OP(nn_relu)
     .describe("Rectified Linear Unit activation")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
-    .set_attr<std::string>("TAttrs", "ReluAttrs");
+    .set_attr<std::string>("TAttrs", "ReluAttrs")
+    .set_attr<FRelayToTE>("FRelayToTE", ReluCompute);
 
 } // namespace relay
 } // namespace kxc

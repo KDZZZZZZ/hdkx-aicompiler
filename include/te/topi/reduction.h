@@ -41,7 +41,7 @@ inline Tensor comm_reduce(const Tensor& data, const Array<int>& axis, bool keepd
     
     return compute(
         output_shape,
-        [&](const Array<Var>& indices) {
+        [&](const Array<tir::Var>& indices) {
             Array<PrimExpr> eval_indices;
             size_t idx_counter = 0;
             size_t red_counter = 0;

@@ -14,7 +14,7 @@ namespace topi {
 inline Tensor relu(const Tensor& x, std::string name = "relu", std::string tag = kElementWise) {
     return compute(
         x->shape,
-        [&](const Array<Var>& indices) {
+        [&](const Array<tir::Var>& indices) {
             // max(x, 0)
             return Max(x(indices), make_const(x->dtype, 0)); 
             // make_const might need implementation or use 0 casted
@@ -28,7 +28,7 @@ inline Tensor relu(const Tensor& x, std::string name = "relu", std::string tag =
 inline Tensor leaky_relu(const Tensor& x, double alpha, std::string name = "leaky_relu", std::string tag = kElementWise) {
     return compute(
         x->shape,
-        [&](const Array<Var>& indices) {
+        [&](const Array<tir::Var>& indices) {
             PrimExpr val = x(indices);
             return Select(val > make_const(x->dtype, 0), val, val * make_const(x->dtype, alpha));
         },
@@ -56,9 +56,9 @@ inline Tensor dense(const Tensor& A, const Tensor& B, const Tensor& bias = Tenso
     
     Tensor matmul = compute(
         {M, N},
-        [&](const Array<Var>& indices) {
-            Var i = indices[0];
-            Var j = indices[1];
+        [&](const Array<tir::Var>& indices) {
+            tir::Var i = indices[0];
+            tir::Var j = indices[1];
             return kxc::te::sum(A(i, k) * B(j, k), {k});
         },
         name + "_matmul",
@@ -85,9 +85,9 @@ inline Tensor matmul(const Tensor& A, const Tensor& B, std::string name = "matmu
     
     return compute(
         {M, N},
-        [&](const Array<Var>& indices) {
-            Var i = indices[0];
-            Var j = indices[1];
+        [&](const Array<tir::Var>& indices) {
+            tir::Var i = indices[0];
+            tir::Var j = indices[1];
             return kxc::te::sum(A(i, k) * B(k, j), {k});
         },
         name,
@@ -124,11 +124,11 @@ inline Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h
     
     return compute(
         {N, O, OH, OW},
-        [&](const Array<Var>& indices) {
-            Var n = indices[0];
-            Var o = indices[1];
-            Var h = indices[2];
-            Var w = indices[3];
+        [&](const Array<tir::Var>& indices) {
+            tir::Var n = indices[0];
+            tir::Var o = indices[1];
+            tir::Var h = indices[2];
+            tir::Var w = indices[3];
             
             // Input indices
             PrimExpr h_in = h * stride_h + rh * dilation_h - pad_h;
@@ -175,11 +175,11 @@ inline Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stri
     
     return compute(
         {N, C, OH, OW},
-        [&](const Array<Var>& indices) {
-             Var n = indices[0];
-             Var c = indices[1];
-             Var h = indices[2];
-             Var w = indices[3];
+        [&](const Array<tir::Var>& indices) {
+             tir::Var n = indices[0];
+             tir::Var c = indices[1];
+             tir::Var h = indices[2];
+             tir::Var w = indices[3];
              
              PrimExpr h_in = h * SH + rh - PH;
              PrimExpr w_in = w * SW + rw - PW;

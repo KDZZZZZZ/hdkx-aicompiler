@@ -2,7 +2,6 @@
 #include <functional>
 #include <atomic>
 #include <utility>
-#include <iostream>
 #include <mutex>
 #include <unordered_map>
 #include <string>
@@ -50,17 +49,16 @@ public:
     virtual ~Object() = default;
     static void* operator new(size_t size){
         if (current_arena) {
-            std::cout << "Allocating " << size << " bytes from Arena." << std::endl;
-            // 默认对齐到void*大小
-            return current_arena->Allocate(size, alignof(void*));
-        } else {
-            std::cout << "Warning: No Arena active. Falling back to global new." << std::endl;
-            return ::operator new(size); // 如果没有Arena，则回退到全局new
+            // Prefer arena allocation; silently fall back to global new on exhaustion.
+            if (void* p = current_arena->Allocate(size, alignof(void*))) {
+                return p;
+            }
         }
+        return ::operator new(size);
     }
     static void operator delete(void* ptr, size_t size) {
         // 因为Arena是批量释放，所以单个对象的delete是一个空操作(no-op)
-        // 我们什么都不用做，这正是Arena高效的原因之一！
+        // 我们什么都不用做，这正是Arena高效的原因之一�?
         if (current_arena) {
             // std::cout << "Arena handles deallocation." << std::endl;
         } else {
@@ -77,7 +75,7 @@ public:
         }
     }
     Object() : _refCount(0) {}
-    // 允许拷贝构造，但新对象的引用计数初始化为 0
+    // 允许拷贝构造，但新对象的引用计数初始化�?0
     Object(const Object&) : _refCount(0) {}
     // 允许赋值，但不改变引用计数
     Object& operator=(const Object&) { return *this; }
@@ -116,10 +114,10 @@ public:
         return *this;
     }
     ObjectRef& operator=(const ObjectRef& other) {
-        if (this != &other) { // 防止自我赋值
-            if (object_) object_->DecRef(); // 减少当前对象所持有的引用
+        if (this != &other) { // 防止自我赋�?
+            if (object_) object_->DecRef(); // 减少当前对象所持有的引�?
             object_ = other.object_;        // 复制指针
-            if (object_) object_->IncRef(); // 增加新对象所持有的引用
+            if (object_) object_->IncRef(); // 增加新对象所持有的引�?
         }
         return *this;
     }
@@ -129,7 +127,7 @@ public:
     bool defined() const { return object_ != nullptr; }
     template<typename T>
     const T* As() const {
-        // dynamic_cast 用于安全地向下转型
+        // dynamic_cast 用于安全地向下转�?
         return dynamic_cast<const T*>(object_);
     }
     
@@ -185,4 +183,5 @@ struct TypeNameTraits {
 // returning a hash of typeid(T).name() if possible, or just standard Register.
 
 } // namespace base
+
 

@@ -28,7 +28,7 @@ inline Tensor transpose(const Tensor& x, Array<int> axes, std::string name = "tr
     
     return compute(
         output_shape,
-        [&](const Array<Var>& indices) {
+        [&](const Array<tir::Var>& indices) {
             Array<PrimExpr> input_indices;
             for(size_t i=0; i<ndim; ++i) input_indices.push_back(0);
             
@@ -58,7 +58,7 @@ inline Tensor expand_dims(const Tensor& x, int axis, int num_newaxis = 1, std::s
     
     return compute(
         output_shape,
-        [&](const Array<Var>& indices) {
+        [&](const Array<tir::Var>& indices) {
             Array<PrimExpr> input_indices;
             size_t idx_counter = 0;
             for (size_t i = 0; i < output_shape.size(); ++i) {
@@ -100,7 +100,7 @@ inline Tensor squeeze(const Tensor& x, Array<int> axes = {}, std::string name = 
     
     return compute(
         output_shape,
-        [&](const Array<Var>& indices) {
+        [&](const Array<tir::Var>& indices) {
             Array<PrimExpr> input_indices;
             size_t out_idx = 0;
             for (size_t i = 0; i < ndim; ++i) {
@@ -133,7 +133,7 @@ inline Tensor concatenate(const Array<Tensor>& inputs, int axis = 0, std::string
     
     return compute(
         output_shape,
-        [&](const Array<Var>& indices) {
+        [&](const Array<tir::Var>& indices) {
             // Logic: Iterate inputs, check range.
             // Since we can't easily do recursive Select in generic lambda without fold,
             // we'll build the Select chain manually.

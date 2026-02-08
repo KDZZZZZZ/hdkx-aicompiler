@@ -1,161 +1,507 @@
 #include "relay/transforms/lower.h"
 #include "relay/op_attr_types.h"
 #include "relay/op.h"
-#include "te/te.h"
 #include "base/pass.h"
+#include "te/te.h"
 #include "tir/expr.h"
-#include <unordered_map>
+
 #include <iostream>
+#include <cstdio>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace kxc {
 namespace relay {
 
-using namespace kxc::relay;
-// using namespace kxc::tir; // Removed to avoid ambiguity
+namespace {
 
-class RelayToTEConverter : public RelayPassFunctor<std::vector<te::Tensor>> {
+tir::DataType DTypeFromString(const std::string& dtype) {
+    if (dtype == "float32") return tir::DataType::Float(32);
+    if (dtype == "float64") return tir::DataType::Float(64);
+    if (dtype == "int32") return tir::DataType::Int(32);
+    if (dtype == "int64") return tir::DataType::Int(64);
+    if (dtype == "int8") return tir::DataType::Int(8);
+    if (dtype == "uint8") return tir::DataType::UInt(8);
+    if (dtype == "bool") return tir::DataType::Bool();
+    throw std::runtime_error("Unsupported dtype string: " + dtype);
+}
+
+tir::DataType DTypeFromDL(const DLDataType& dl_dtype) {
+    if (dl_dtype.code == kDLFloat) return tir::DataType::Float(dl_dtype.bits, dl_dtype.lanes);
+    if (dl_dtype.code == kDLInt) return tir::DataType::Int(dl_dtype.bits, dl_dtype.lanes);
+    if (dl_dtype.code == kDLUint) return tir::DataType::UInt(dl_dtype.bits, dl_dtype.lanes);
+    throw std::runtime_error("Unsupported DLDataType code in constant");
+}
+
+Array<tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type) {
+    Array<tir::PrimExpr> shape;
+    for (const auto dim : type->shape) {
+        shape.push_back(tir::IntImm(dim, tir::DataType::Int(64)));
+    }
+    return shape;
+}
+
+tir::PrimExpr FlattenIndex(const Array<tir::PrimExpr>& indices, const Array<tir::PrimExpr>& shape) {
+    if (shape.empty()) {
+        return tir::IntImm(0);
+    }
+    if (indices.size() != shape.size()) {
+        throw std::runtime_error("Index rank mismatch during flattening");
+    }
+    tir::PrimExpr linear = indices[0];
+    for (size_t i = 1; i < indices.size(); ++i) {
+        linear = linear * shape[i] + indices[i];
+    }
+    return linear;
+}
+
+tir::PrimExpr MakeIdentityForReduce(te::ReduceType rtype, tir::DataType dtype) {
+    if (rtype == te::ReduceType::kSum) {
+        if (dtype.code == 2) {
+            return dtype.bits == 64 ? tir::FloatImm(0.0, dtype) : tir::FloatImm(0.0f, dtype);
+        }
+        return tir::IntImm(0, dtype);
+    }
+    if (rtype == te::ReduceType::kMax) {
+        if (dtype.code == 2) {
+            if (dtype.bits == 64) return tir::FloatImm(-std::numeric_limits<double>::infinity(), dtype);
+            return tir::FloatImm(-std::numeric_limits<float>::infinity(), dtype);
+        }
+        return tir::IntImm(std::numeric_limits<int64_t>::min(), dtype);
+    }
+    if (rtype == te::ReduceType::kMin) {
+        if (dtype.code == 2) {
+            if (dtype.bits == 64) return tir::FloatImm(std::numeric_limits<double>::infinity(), dtype);
+            return tir::FloatImm(std::numeric_limits<float>::infinity(), dtype);
+        }
+        return tir::IntImm(std::numeric_limits<int64_t>::max(), dtype);
+    }
+    throw std::runtime_error("Unsupported reduce type");
+}
+
+class RelayToTEConverter : public RelayPassFunctor<Array<te::Tensor>> {
 public:
-    std::vector<te::Tensor> Convert(const Expr& expr) {
-        return Visit(expr);
+    explicit RelayToTEConverter(const Function& func) {
+        for (const auto& param : func->params) {
+            const TensorTypeNode* ttype = param->type_annotation.As<TensorTypeNode>();
+            if (!ttype) {
+                throw std::runtime_error("LowerToTIR requires TensorType on function parameters: " +
+                                         param->vid->name_hint);
+            }
+            tir::DataType dtype = DTypeFromString(ttype->dtype);
+            Array<tir::PrimExpr> shape = ShapeFromTensorType(ttype);
+            te::Tensor tensor = te::placeholder(shape, dtype, param->vid->name_hint);
+            var_map_[param.get()] = tensor;
+            input_tensors_.push_back(tensor);
+        }
     }
 
-protected:
-    // Cache for visited nodes (Memoization)
-    std::unordered_map<const Object*, std::vector<te::Tensor>> memo_;
+    Array<te::Tensor> Convert(const Expr& expr) { return Visit(expr); }
 
-    std::vector<te::Tensor> Visit(const Expr& expr) override {
-        if (memo_.count(expr.get())) {
-            return memo_.at(expr.get());
-        }
+    const Array<te::Tensor>& input_tensors() const { return input_tensors_; }
+    const Array<te::Tensor>& constant_tensors() const { return constant_tensors_; }
+
+protected:
+    std::unordered_map<const Object*, Array<te::Tensor>> memo_;
+    std::unordered_map<const Object*, te::Tensor> var_map_;
+    Array<te::Tensor> input_tensors_;
+    Array<te::Tensor> constant_tensors_;
+    int constant_counter_ = 0;
+    int call_counter_ = 0;
+
+    Array<te::Tensor> Visit(const Expr& expr) override {
+        auto it = memo_.find(expr.get());
+        if (it != memo_.end()) return it->second;
         auto res = RelayPassFunctor::Visit(expr);
         memo_[expr.get()] = res;
         return res;
     }
 
-    std::vector<te::Tensor> VisitVar(const VarNode* op, const Expr& ref) override {
-        // Var -> Placeholder
-        // We assume simple static shape [1, 1] if not provided, for testing purposes.
-        std::vector<tir::PrimExpr> shape = {1, 1}; 
-        tir::DataType dtype = tir::DataType::Float(32); 
-        
-        return {te::placeholder(shape, dtype, op->vid->name_hint)};
-    }
-    
-    std::vector<te::Tensor> VisitConstant(const ConstantNode* op, const Expr& ref) override {
-        std::vector<tir::PrimExpr> shape;
-        for(auto d : op->data->shape) shape.push_back(d);
-        tir::DataType dtype = tir::DataType::Float(32); 
-        
-        // Map DLTensor dtype to TIR DataType
-        auto& dl_dtype = op->data->dl_tensor.dtype;
-        if (dl_dtype.code == kDLFloat && dl_dtype.bits == 32) {
-            dtype = tir::DataType::Float(32);
-        } else if (dl_dtype.code == kDLInt && dl_dtype.bits == 32) {
-            dtype = tir::DataType::Int(32);
-        } else if (dl_dtype.code == kDLFloat && dl_dtype.bits == 64) {
-             dtype = tir::DataType::Float(64);
-        } else if (dl_dtype.code == kDLInt && dl_dtype.bits == 64) {
-             dtype = tir::DataType::Int(64);
+    Array<te::Tensor> VisitVar(const VarNode* op, const Expr& ref) override {
+        auto it = var_map_.find(ref.get());
+        if (it == var_map_.end()) {
+            throw std::runtime_error("Unexpected free var in LowerToTIR: " + op->vid->name_hint);
         }
-        
-        return {te::placeholder(shape, dtype, "const")};
+        return {it->second};
     }
 
-    std::vector<te::Tensor> VisitCall(const CallNode* op, const Expr& ref) override {
-        // 1. Visit Args
-        std::vector<te::Tensor> inputs;
+    Array<te::Tensor> VisitConstant(const ConstantNode* op, const Expr& ref) override {
+        Array<tir::PrimExpr> shape;
+        for (const auto dim : op->data->shape) {
+            shape.push_back(tir::IntImm(dim, tir::DataType::Int(64)));
+        }
+        tir::DataType dtype = DTypeFromDL(op->data->dl_tensor.dtype);
+        std::string name = "const_" + std::to_string(constant_counter_++);
+        te::Tensor t = te::placeholder(shape, dtype, name);
+        constant_tensors_.push_back(t);
+        return {t};
+    }
+
+    Array<te::Tensor> VisitCall(const CallNode* op, const Expr& ref) override {
+        std::string op_name = "<non-op>";
+        if (auto* on = op->op.As<OpNode>()) {
+            op_name = on->name;
+        }
+        ++call_counter_;
+        std::fprintf(stderr, "[lower] VisitCall #%d op=%s (enter)\n", call_counter_, op_name.c_str());
+
+        Array<te::Tensor> inputs;
         for (const auto& arg : op->args) {
-            auto res = Visit(arg);
-            inputs.insert(inputs.end(), res.begin(), res.end());
+            auto arg_tensors = Visit(arg);
+            for (const auto& t : arg_tensors) inputs.push_back(t);
+        }
+        std::fprintf(stderr, "[lower] VisitCall #%d op=%s inputs=%zu\n", call_counter_, op_name.c_str(), inputs.size());
+        if (op_name == "nn_conv2d") {
+            for (size_t i = 0; i < inputs.size(); ++i) {
+                std::fprintf(stderr, "[lower]   conv input[%zu] name=%s rank=%zu\n",
+                             i, inputs[i]->name.c_str(), inputs[i]->shape.size());
+            }
         }
 
-        // 2. Get Op and FTVMCompute
-        if (auto* op_node = op->op.As<OpNode>()) {
-             auto it = op_node->attrs.find("FTVMCompute");
-             if (it != op_node->attrs.end()) {
-                 if (auto* fcompute_ptr = std::any_cast<FTVMCompute>(&it->second)) {
-                     kxc::Type out_type = ref.checked_type();
-                     Attrs attrs(op->attrs); 
-                     return {(*fcompute_ptr)(attrs, inputs, out_type)};
-                 } else {
-                     std::cerr << "Error: Failed to cast FTVMCompute (bad type) for " << op_node->name << std::endl;
-                 }
-             } else {
-                 std::cerr << "Warning: No FTVMCompute found for " << op_node->name << std::endl;
-             }
+        auto* op_node = op->op.As<OpNode>();
+        if (!op_node) {
+            throw std::runtime_error("Call.op is not OpNode in LowerToTIR");
         }
-        return {};
+
+        auto it = op_node->attrs.find("FRelayToTE");
+        if (it == op_node->attrs.end()) {
+            throw std::runtime_error("No FRelayToTE registered for op: " + op_node->name);
+        }
+        auto* lower_ptr = std::any_cast<FRelayToTE>(&it->second);
+        if (!lower_ptr) {
+            throw std::runtime_error("Bad FRelayToTE type for op: " + op_node->name);
+        }
+
+        Attrs attrs = op->attrs.defined() ? Attrs(op->attrs) : Attrs();
+        kxc::Type out_type = ref.checked_type();
+        te::Tensor out = (*lower_ptr)(attrs, inputs, out_type);
+        std::fprintf(stderr, "[lower] VisitCall #%d op=%s out_name=%s out_rank=%zu\n",
+                     call_counter_, op_name.c_str(), out->name.c_str(), out->shape.size());
+        std::fprintf(stderr, "[lower] VisitCall #%d op=%s (done)\n", call_counter_, op_name.c_str());
+        return {out};
     }
-    
-    // Basic implementations for others
-    std::vector<te::Tensor> VisitDefault(const Expr& expr) override {
-        return {};
+
+    Array<te::Tensor> VisitDefault(const Expr& expr) override {
+        throw std::runtime_error("Unsupported Relay node in LowerToTIR");
     }
 };
 
-// Simple TE -> TIR Generator (Simplified)
-tir::Stmt BuildLoopNest(te::Tensor output) {
-    if (!output.defined()) return tir::Stmt();
-    auto op = output->op.As<te::ComputeOpNode>();
-    
-    // If it's a placeholder, no computation
-    if (output->op.As<te::PlaceholderOpNode>()) {
-        return tir::Stmt();
+void FindProducerLoads(const tir::PrimExpr& expr, std::vector<te::Tensor>* deps) {
+    if (!expr.defined()) return;
+    if (auto* pl = expr.As<te::ProducerLoadNode>()) {
+        deps->push_back(pl->tensor);
+        for (const auto& idx : pl->indices) FindProducerLoads(idx, deps);
+        return;
     }
-    
-    if (!op) {
-        // Handle other ops?
-        return tir::Stmt();
+    if (auto* red = expr.As<te::ReduceNode>()) {
+        for (const auto& src : red->source) FindProducerLoads(src, deps);
+        return;
+    }
+    if (auto* n = expr.As<tir::BinaryOpNode>()) {
+        FindProducerLoads(n->a, deps);
+        FindProducerLoads(n->b, deps);
+        return;
+    }
+    if (auto* n = expr.As<tir::CallNode>()) {
+        for (const auto& arg : n->args) FindProducerLoads(arg, deps);
+        return;
+    }
+    if (auto* n = expr.As<tir::SelectNode>()) {
+        FindProducerLoads(n->condition, deps);
+        FindProducerLoads(n->true_value, deps);
+        FindProducerLoads(n->false_value, deps);
+        return;
+    }
+    if (auto* n = expr.As<tir::NotNode>()) {
+        FindProducerLoads(n->value, deps);
+        return;
+    }
+    if (auto* n = expr.As<tir::LoadNode>()) {
+        FindProducerLoads(n->index, deps);
+        if (n->predicate.defined()) FindProducerLoads(n->predicate, deps);
+    }
+}
+
+void CollectOpsDFS(const te::Tensor& t,
+                   std::unordered_set<const Object*>* visited,
+                   std::unordered_map<const Object*, te::Tensor>* op_output,
+                   std::vector<te::Operation>* topo) {
+    if (!t.defined() || !t->op.defined()) return;
+    const Object* op_ptr = t->op.get();
+    if (visited->count(op_ptr)) return;
+
+    if (auto* cop = t->op.As<te::ComputeOpNode>()) {
+        for (const auto& body_expr : cop->body) {
+            std::vector<te::Tensor> deps;
+            FindProducerLoads(body_expr, &deps);
+            for (const auto& dep : deps) {
+                CollectOpsDFS(dep, visited, op_output, topo);
+            }
+        }
     }
 
-    // 1. Create inner body: Store(output, value, index)
-    // We assume 1D flat index for simplicity or just 0 for scalar test
-    // Real implementation would flatten indices based on shape
-    
-    // For this demo, let's assume we just want to generate the structure:
-    // for (ax0, 0, shape[0]) {
-    //   for (ax1, 0, shape[1]) {
-    //     output[ax0, ax1] = ...
-    //   }
-    // }
-    
-    // Inner Store
-    tir::PrimExpr value = op->body[0];
-    
-    tir::PrimExpr index = 0;
-    // Simple flatten logic
-    if (!op->axis.empty()) {
-        index = op->axis.back(); 
-        // Iterate backwards to build stride?
-        // Let's keep it simple: just use the last axis as index for visual verification
+    visited->insert(op_ptr);
+    (*op_output)[op_ptr] = t;
+    topo->push_back(t->op);
+}
+
+class ExprLowerer {
+public:
+    explicit ExprLowerer(const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor)
+        : buffer_var_by_tensor_(buffer_var_by_tensor) {}
+
+    tir::PrimExpr Lower(const tir::PrimExpr& expr) const {
+        if (!expr.defined()) return expr;
+
+        if (auto* n = expr.As<te::ProducerLoadNode>()) {
+            auto it = buffer_var_by_tensor_.find(n->tensor.get());
+            if (it == buffer_var_by_tensor_.end()) {
+                throw std::runtime_error("Missing buffer var for tensor in ProducerLoad");
+            }
+            Array<tir::PrimExpr> lowered_indices;
+            for (const auto& idx : n->indices) lowered_indices.push_back(Lower(idx));
+            tir::PrimExpr linear = FlattenIndex(lowered_indices, n->tensor->shape);
+            return tir::Load(it->second, linear);
+        }
+
+        if (auto* n = expr.As<tir::AddNode>()) return tir::Add(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::SubNode>()) return tir::Sub(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::MulNode>()) return tir::Mul(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::DivNode>()) return tir::Div(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::ModNode>()) return tir::Mod(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::MinNode>()) return tir::Min(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::MaxNode>()) return tir::Max(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::EQNode>()) return tir::EQ(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::LTNode>()) return tir::LT(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::AndNode>()) return tir::And(Lower(n->a), Lower(n->b));
+        if (auto* n = expr.As<tir::OrNode>()) return tir::Or(Lower(n->a), Lower(n->b));
+
+        if (auto* n = expr.As<tir::NotNode>()) return tir::Not(Lower(n->value));
+        if (auto* n = expr.As<tir::SelectNode>()) return tir::Select(Lower(n->condition), Lower(n->true_value), Lower(n->false_value));
+
+        if (auto* n = expr.As<tir::CallNode>()) {
+            Array<tir::PrimExpr> args;
+            for (const auto& arg : n->args) args.push_back(Lower(arg));
+            return tir::Call(n->dtype, n->name, args);
+        }
+
+        if (auto* n = expr.As<tir::LoadNode>()) {
+            tir::PrimExpr pred = n->predicate.defined() ? Lower(n->predicate) : tir::PrimExpr();
+            return tir::Load(n->buffer_var, Lower(n->index), pred);
+        }
+
+        if (expr.As<te::ReduceNode>()) {
+            throw std::runtime_error("Reduce must be lowered at statement level");
+        }
+
+        return expr;
     }
-    
-    // Use Var(output->name) to represent the buffer variable in Store
-    tir::Stmt body = tir::Store(tir::Var(output->name), value, index);
-    
-    // Wrap in Loops (Reverse order: inner to outer)
-    for (int i = op->axis.size() - 1; i >= 0; --i) {
-        tir::Var loop_var = op->axis[i];
-        tir::PrimExpr extent = op->shape[i];
-        body = tir::For(loop_var, 0, extent, tir::ForType::Serial, body);
+
+private:
+    const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor_;
+};
+
+tir::Stmt WrapDataLoops(const te::ComputeOpNode* op, tir::Stmt body) {
+    for (int i = static_cast<int>(op->axis.size()) - 1; i >= 0; --i) {
+        body = tir::For(op->axis[i], tir::IntImm(0), op->shape[i], tir::ForType::Serial, body);
     }
-    
     return body;
 }
 
-tir::Stmt LowerToTIR(Function func) {
-    RelayToTEConverter converter;
-    auto outputs = converter.Convert(func->body);
-    if (outputs.empty()) return tir::Stmt();
-    
-    te::Tensor out = outputs[0];
-    
-    // Recursive build?
-    // A real Lower would topologically sort the graph and build Stmts for all Tensors.
-    // Here we just build the output tensor's loop nest.
-    
-    return BuildLoopNest(out);
+tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
+                           const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor,
+                           const ExprLowerer& expr_lowerer) {
+    auto* op = out_tensor->op.As<te::ComputeOpNode>();
+    if (!op) {
+        throw std::runtime_error("LowerComputeStmt expects ComputeOpNode");
+    }
+    if (op->body.empty()) {
+        throw std::runtime_error("ComputeOp body is empty");
+    }
+    if (op->body.size() != 1) {
+        throw std::runtime_error("Only single-output compute is supported");
+    }
+
+    auto out_it = buffer_var_by_tensor.find(out_tensor.get());
+    if (out_it == buffer_var_by_tensor.end()) {
+        throw std::runtime_error("Missing output buffer var for compute tensor");
+    }
+    tir::Var out_var = out_it->second;
+
+    Array<tir::PrimExpr> data_indices;
+    for (const auto& ax : op->axis) data_indices.push_back(ax);
+    tir::PrimExpr out_index = FlattenIndex(data_indices, op->shape);
+
+    tir::PrimExpr body_expr = op->body[0];
+    if (auto* red = body_expr.As<te::ReduceNode>()) {
+        if (red->source.size() != 1) {
+            throw std::runtime_error("Only single-source reduce is supported");
+        }
+        tir::PrimExpr init_value = MakeIdentityForReduce(red->reduce_type, out_tensor->dtype);
+        tir::Stmt init_store = tir::Store(out_var, init_value, out_index);
+
+        tir::PrimExpr src = expr_lowerer.Lower(red->source[0]);
+        tir::PrimExpr old = tir::Load(out_var, out_index);
+        tir::PrimExpr update_value;
+        if (red->reduce_type == te::ReduceType::kSum) {
+            update_value = old + src;
+        } else if (red->reduce_type == te::ReduceType::kMax) {
+            update_value = tir::Max(old, src);
+        } else if (red->reduce_type == te::ReduceType::kMin) {
+            update_value = tir::Min(old, src);
+        } else {
+            throw std::runtime_error("Unsupported reduce type in update");
+        }
+        tir::Stmt update_store = tir::Store(out_var, update_value, out_index);
+
+        for (int i = static_cast<int>(red->axis.size()) - 1; i >= 0; --i) {
+            const auto& rax = red->axis[i];
+            update_store = tir::For(rax->var, rax->dom_min, rax->dom_extent, tir::ForType::Serial, update_store);
+        }
+
+        tir::Stmt seq = tir::SeqStmt({init_store, update_store});
+        return WrapDataLoops(op, seq);
+    }
+
+    tir::PrimExpr lowered = expr_lowerer.Lower(body_expr);
+    tir::Stmt store = tir::Store(out_var, lowered, out_index);
+    return WrapDataLoops(op, store);
 }
 
+}  // namespace
+
+tir::PrimFunc LowerToTIR(Function func) {
+    std::fprintf(stderr, "[lower] enter LowerToTIR\n");
+    if (!func.defined()) {
+        throw std::runtime_error("LowerToTIR expects a defined function");
+    }
+    if (!func->body.defined()) {
+        throw std::runtime_error("LowerToTIR expects function body to be defined");
+    }
+
+    RelayToTEConverter converter(func);
+    std::fprintf(stderr, "[lower] converter ready\n");
+    Array<te::Tensor> outputs = converter.Convert(func->body);
+    std::fprintf(stderr, "[lower] relay->te converted, outputs=%zu\n", outputs.size());
+    if (outputs.empty()) {
+        throw std::runtime_error("LowerToTIR produced no output tensors");
+    }
+    if (outputs.size() != 1) {
+        throw std::runtime_error("LowerToTIR currently supports single output only");
+    }
+    te::Tensor out_tensor = outputs[0];
+    if (!out_tensor.defined()) {
+        throw std::runtime_error("LowerToTIR output tensor is undefined");
+    }
+    if (!out_tensor->op.As<te::ComputeOpNode>()) {
+        throw std::runtime_error("LowerToTIR requires function body to lower to a compute tensor");
+    }
+
+    std::unordered_set<const Object*> visited_ops;
+    std::unordered_map<const Object*, te::Tensor> op_output_tensor;
+    std::vector<te::Operation> topo_ops;
+    CollectOpsDFS(out_tensor, &visited_ops, &op_output_tensor, &topo_ops);
+    std::fprintf(stderr, "[lower] topo collected, ops=%zu\n", topo_ops.size());
+
+    Array<tir::Var> params;
+    Map<tir::Var, tir::Buffer> buffer_map;
+    std::unordered_map<const Object*, tir::Var> buffer_var_by_tensor;
+
+    // Function input params.
+    for (const auto& t : converter.input_tensors()) {
+        tir::Var data_var(t->name, t->dtype);
+        tir::Buffer buf(data_var, t->dtype, t->shape, {}, tir::IntImm(0), t->name, 0, 0);
+        params.push_back(data_var);
+        buffer_map.Set(data_var, buf);
+        buffer_var_by_tensor[t.get()] = data_var;
+    }
+
+    // Constant params.
+    for (const auto& t : converter.constant_tensors()) {
+        tir::Var data_var(t->name, t->dtype);
+        tir::Buffer buf(data_var, t->dtype, t->shape, {}, tir::IntImm(0), t->name, 0, 0);
+        params.push_back(data_var);
+        buffer_map.Set(data_var, buf);
+        buffer_var_by_tensor[t.get()] = data_var;
+    }
+
+    // Output param.
+    tir::Var out_var(out_tensor->name + "_out", out_tensor->dtype);
+    tir::Buffer out_buf(out_var, out_tensor->dtype, out_tensor->shape, {}, tir::IntImm(0), out_tensor->name + "_out", 0, 0);
+    params.push_back(out_var);
+    buffer_map.Set(out_var, out_buf);
+    buffer_var_by_tensor[out_tensor.get()] = out_var;
+
+    // Intermediate buffers for compute tensors.
+    std::vector<te::Tensor> intermediates;
+    std::fprintf(stderr, "[lower] input_tensors=%zu constant_tensors=%zu\n",
+                 converter.input_tensors().size(), converter.constant_tensors().size());
+    for (const auto& op : topo_ops) {
+        if (!op.As<te::ComputeOpNode>()) continue;
+        auto t_it = op_output_tensor.find(op.get());
+        if (t_it == op_output_tensor.end()) continue;
+        te::Tensor t = t_it->second;
+        if (t.get() == out_tensor.get()) continue;
+        tir::Var local_var(t->name, t->dtype);
+        buffer_var_by_tensor[t.get()] = local_var;
+        intermediates.push_back(t);
+    }
+
+    ExprLowerer expr_lowerer(buffer_var_by_tensor);
+
+    Array<tir::Stmt> compute_seq;
+    int lowered_compute_ops = 0;
+    for (const auto& op : topo_ops) {
+        if (op.As<te::PlaceholderOpNode>()) {
+            continue;
+        }
+        auto t_it = op_output_tensor.find(op.get());
+        if (t_it == op_output_tensor.end()) {
+            throw std::runtime_error("Missing tensor for operation during statement lowering");
+        }
+        te::Tensor t = t_it->second;
+        if (!t->op.As<te::ComputeOpNode>()) {
+            throw std::runtime_error("Unsupported non-compute operation in TIR lowering");
+        }
+        try {
+            compute_seq.push_back(LowerComputeStmt(t, buffer_var_by_tensor, expr_lowerer));
+        } catch (const std::exception& e) {
+            throw std::runtime_error("LowerComputeStmt failed for tensor '" + t->name + "': " + e.what());
+        }
+        ++lowered_compute_ops;
+        if ((lowered_compute_ops % 10) == 0) {
+            std::fprintf(stderr, "[lower] lowered compute ops: %d\n", lowered_compute_ops);
+        }
+    }
+    std::fprintf(stderr, "[lower] total lowered compute ops: %d\n", lowered_compute_ops);
+
+    tir::Stmt body;
+    if (compute_seq.empty()) {
+        body = tir::Stmt();
+    } else if (compute_seq.size() == 1) {
+        body = compute_seq[0];
+    } else {
+        body = tir::SeqStmt(compute_seq);
+    }
+
+    // Allocate all intermediates in outer scopes.
+    for (int i = static_cast<int>(intermediates.size()) - 1; i >= 0; --i) {
+        const auto& t = intermediates[i];
+        tir::Var data_var = buffer_var_by_tensor[t.get()];
+        body = tir::Allocate(data_var, t->dtype, t->shape, tir::IntImm(1, tir::DataType::Bool()), body);
+    }
+
+    Map<String, ObjectRef> attrs;
+    attrs.Set(String("global_symbol"), String("main"));
+    attrs.Set(String("tir.noalias"), tir::IntImm(1, tir::DataType::Bool()));
+
+    std::fprintf(stderr, "[lower] build PrimFunc done\n");
+    return tir::PrimFunc(params, body, buffer_map, attrs);
 }
-}
+
+}  // namespace relay
+}  // namespace kxc

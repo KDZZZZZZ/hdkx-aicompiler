@@ -364,5 +364,31 @@ public:
     }
 };
 
+// 9. PrimFunc: top-level TIR function container.
+class PrimFuncNode : public Object {
+public:
+    Array<Var> params;
+    Stmt body;
+    Map<Var, Buffer> buffer_map;
+    Map<String, ObjectRef> attrs;
+
+    KXC_OBJECT_DECLARE
+};
+KXC_OBJECT_DEFINE(PrimFuncNode)
+
+class PrimFunc : public ObjectRef {
+public:
+    using ObjectRef::ObjectRef;
+    PrimFunc(Array<Var> params, Stmt body, Map<Var, Buffer> buffer_map = {}, Map<String, ObjectRef> attrs = {}) {
+        auto* node = new PrimFuncNode();
+        node->params = std::move(params);
+        node->body = body;
+        node->buffer_map = std::move(buffer_map);
+        node->attrs = std::move(attrs);
+        SetData(node);
+    }
+    const PrimFuncNode* operator->() const { return static_cast<const PrimFuncNode*>(object_); }
+};
+
 } // namespace tir
 } // namespace kxc

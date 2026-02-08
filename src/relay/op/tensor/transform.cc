@@ -1,8 +1,71 @@
 #include "relay/op_macros.h"
-#include "relay/relay.h"
+#include "relay/op.h"
+#include "relay/op_attr_types.h"
+#include "te/te.h"
+#include <stdexcept>
 
 namespace kxc {
 namespace relay {
+
+namespace {
+Array<kxc::tir::PrimExpr> UnflattenIndex(
+    kxc::tir::PrimExpr flat,
+    const Array<kxc::tir::PrimExpr>& dims) {
+    Array<kxc::tir::PrimExpr> out;
+    for (size_t i = 0; i < dims.size(); ++i) {
+        out.push_back(0);
+    }
+    kxc::tir::PrimExpr cur = flat;
+    for (int i = static_cast<int>(dims.size()) - 1; i >= 0; --i) {
+        out[i] = cur % dims[i];
+        cur = cur / dims[i];
+    }
+    return out;
+}
+}
+
+te::Tensor FlattenCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
+    if (inputs.size() != 1) {
+        throw std::runtime_error("nn_flatten expects exactly 1 input");
+    }
+    auto* p = attrs.As<FlattenAttrsNode>();
+    int axis = p ? p->axis : 1;
+    int ndim = static_cast<int>(inputs[0]->shape.size());
+    if (ndim <= 0) {
+        throw std::runtime_error("nn_flatten requires rank >= 1");
+    }
+    if (axis < 0) {
+        axis += ndim;
+    }
+    if (axis < 0 || axis > ndim) {
+        throw std::runtime_error("nn_flatten axis out of range");
+    }
+
+    kxc::tir::PrimExpr outer = 1;
+    kxc::tir::PrimExpr inner = 1;
+    Array<kxc::tir::PrimExpr> outer_dims;
+    Array<kxc::tir::PrimExpr> inner_dims;
+    for (int i = 0; i < axis; ++i) {
+        outer = outer * inputs[0]->shape[i];
+        outer_dims.push_back(inputs[0]->shape[i]);
+    }
+    for (int i = axis; i < ndim; ++i) {
+        inner = inner * inputs[0]->shape[i];
+        inner_dims.push_back(inputs[0]->shape[i]);
+    }
+
+    return te::compute({outer, inner}, [&](const Array<kxc::tir::Var>& indices) {
+        Array<kxc::tir::PrimExpr> in_indices;
+        auto outer_idx = UnflattenIndex(indices[0], outer_dims);
+        auto inner_idx = UnflattenIndex(indices[1], inner_dims);
+        for (const auto& v : outer_idx) in_indices.push_back(v);
+        for (const auto& v : inner_idx) in_indices.push_back(v);
+        if (in_indices.empty()) {
+            in_indices.push_back(0);
+        }
+        return inputs[0](in_indices);
+    }, "T_flatten");
+}
 
 // ---------------------------------------------------------------------------
 // Tensor Transformation Operators
@@ -25,7 +88,8 @@ KXC_REGISTER_OP(nn_flatten)
 )doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
-    .set_attr<std::string>("TAttrs", "FlattenAttrs");
+    .set_attr<std::string>("TAttrs", "FlattenAttrs")
+    .set_attr<FRelayToTE>("FRelayToTE", FlattenCompute);
 
 // Reshape
 KXC_REGISTER_OP(reshape)
