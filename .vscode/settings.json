@@ -104,5 +104,7 @@
         "mdspan": "cpp",
         "source_location": "cpp"
     },
-    "cmake.sourceDirectory": "C:/Users/Administrator/Desktop/hdkx-aicompiler-1/test"
+    "cmake.sourceDirectory": "C:/Users/Administrator/Desktop/hdkx-aicompiler",
+    "chatgpt.openOnStartup": true,
+    "C_Cpp.errorSquiggles": "disabled"
 }

@@ -6,9 +6,7 @@ namespace kxc {
 
 class TypeNode : public Object {
 public:
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 10; // Arbitrary offset
-    }
+    KXC_OBJECT_DECLARE
 };
 
 class Type : public ObjectRef {
@@ -23,9 +21,7 @@ public:
     int line;
     int column;
     
-    const TypeIndex GetTypeId() const override {
-        return kKXC_OBJECT_TYPE + 2; 
-    }
+    KXC_OBJECT_DECLARE
 };
 
 class Span : public ObjectRef {
@@ -45,9 +41,7 @@ public:
     Span span;
     Type checked_type_; 
 
-    const TypeIndex GetTypeId() const override { 
-        return kKXC_OBJECT_TYPE + 3; 
-    }
+    KXC_OBJECT_DECLARE
     virtual bool StructualEqual(const ExprNode* other) const {
         return this->GetTypeId() == other->GetTypeId();
     }

@@ -1,8 +1,7 @@
 #include "relay/op_macros.h"
 #include "relay/op.h"
 #include "relay/op_attr_types.h"
-#include "te/te.h"
-#include "te/topi/utils.h"
+#include "te/topi/nn.h"
 #include <vector>
 #include <string>
 #include <stdexcept>
@@ -11,34 +10,40 @@ namespace kxc {
 namespace relay {
 
 namespace {
-int Read2DValue(const std::vector<int64_t>& v, int idx, int default_value) {
-    if (idx < 0 || static_cast<size_t>(idx) >= v.size()) {
-        return default_value;
+Array<int> Read2DPair(const std::vector<int64_t>& values, int default_value) {
+    Array<int> out;
+    if (values.size() >= 2) {
+        out.push_back(static_cast<int>(values[0]));
+        out.push_back(static_cast<int>(values[1]));
+    } else {
+        out.push_back(default_value);
+        out.push_back(default_value);
     }
-    return static_cast<int>(v[idx]);
+    return out;
 }
 
-struct Padding2D {
-    int top = 0;
-    int left = 0;
-    int bottom = 0;
-    int right = 0;
-};
-
-Padding2D ParsePadding2D(const std::vector<int64_t>& padding) {
-    if (padding.size() == 2) {
-        return {static_cast<int>(padding[0]), static_cast<int>(padding[1]),
-                static_cast<int>(padding[0]), static_cast<int>(padding[1])};
+Array<int> ReadPadding(const std::vector<int64_t>& values) {
+    Array<int> out;
+    if (values.size() >= 4) {
+        out.push_back(static_cast<int>(values[0]));
+        out.push_back(static_cast<int>(values[1]));
+        out.push_back(static_cast<int>(values[2]));
+        out.push_back(static_cast<int>(values[3]));
+    } else if (values.size() >= 2) {
+        out.push_back(static_cast<int>(values[0]));
+        out.push_back(static_cast<int>(values[1]));
+        out.push_back(static_cast<int>(values[0]));
+        out.push_back(static_cast<int>(values[1]));
+    } else {
+        out.push_back(0);
+        out.push_back(0);
     }
-    if (padding.size() >= 4) {
-        return {static_cast<int>(padding[0]), static_cast<int>(padding[1]),
-                static_cast<int>(padding[2]), static_cast<int>(padding[3])};
-    }
-    return {};
+    return out;
 }
 }
 
 te::Tensor MaxPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
+    (void)out_type;
     if (inputs.size() != 1) {
         throw std::runtime_error("nn_max_pool2d expects exactly 1 input");
     }
@@ -46,45 +51,18 @@ te::Tensor MaxPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     if (!p) {
         throw std::runtime_error("nn_max_pool2d expects MaxPool2DAttrs");
     }
-    if (inputs[0]->shape.size() != 4) {
+    if ((p->layout != "NCHW" && !p->layout.empty()) || inputs[0]->shape.size() != 4) {
         throw std::runtime_error("nn_max_pool2d expects NCHW rank-4 input");
     }
 
-    int kh = Read2DValue(p->pool_size, 0, 1);
-    int kw = Read2DValue(p->pool_size, 1, 1);
-    int sh = Read2DValue(p->strides, 0, 1);
-    int sw = Read2DValue(p->strides, 1, 1);
-    Padding2D pad = ParsePadding2D(p->padding);
-
-    tir::PrimExpr n = inputs[0]->shape[0];
-    tir::PrimExpr c = inputs[0]->shape[1];
-    tir::PrimExpr h = inputs[0]->shape[2];
-    tir::PrimExpr w = inputs[0]->shape[3];
-    tir::PrimExpr oh = (h + pad.top + pad.bottom - kh) / sh + 1;
-    tir::PrimExpr ow = (w + pad.left + pad.right - kw) / sw + 1;
-
-    te::IterVar rh = te::reduce_axis(0, kh, "rh");
-    te::IterVar rw = te::reduce_axis(0, kw, "rw");
-
-    te::Tensor sum_out = te::compute({n, c, oh, ow}, [&](const Array<kxc::tir::Var>& axis) {
-        tir::Var bn = axis[0];
-        tir::Var bc = axis[1];
-        tir::Var by = axis[2];
-        tir::Var bx = axis[3];
-
-        tir::PrimExpr in_y = by * sh + rh - pad.top;
-        tir::PrimExpr in_x = bx * sw + rw - pad.left;
-        tir::PrimExpr in_bounds = (!(in_y < 0)) && (in_y < h) && (!(in_x < 0)) && (in_x < w);
-        tir::PrimExpr val = tir::Select(
-            in_bounds,
-            inputs[0](bn, bc, in_y, in_x),
-            te::topi::make_const(inputs[0]->dtype, -1e30));
-        return te::sum(val, {rh, rw});
-    }, "T_max_pool2d");
-    return sum_out;
+    Array<int> pool_size = Read2DPair(p->pool_size, 1);
+    Array<int> strides = Read2DPair(p->strides, 1);
+    Array<int> padding = ReadPadding(p->padding);
+    return te::topi::pool2d(inputs[0], pool_size, strides, padding, "max", p->ceil_mode, "T_max_pool2d");
 }
 
 te::Tensor AvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
+    (void)out_type;
     if (inputs.size() != 1) {
         throw std::runtime_error("nn_avg_pool2d expects exactly 1 input");
     }
@@ -92,71 +70,26 @@ te::Tensor AvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     if (!p) {
         throw std::runtime_error("nn_avg_pool2d expects MaxPool2DAttrs");
     }
-    if (inputs[0]->shape.size() != 4) {
+    if ((p->layout != "NCHW" && !p->layout.empty()) || inputs[0]->shape.size() != 4) {
         throw std::runtime_error("nn_avg_pool2d expects NCHW rank-4 input");
     }
 
-    int kh = Read2DValue(p->pool_size, 0, 1);
-    int kw = Read2DValue(p->pool_size, 1, 1);
-    int sh = Read2DValue(p->strides, 0, 1);
-    int sw = Read2DValue(p->strides, 1, 1);
-    Padding2D pad = ParsePadding2D(p->padding);
-
-    tir::PrimExpr n = inputs[0]->shape[0];
-    tir::PrimExpr c = inputs[0]->shape[1];
-    tir::PrimExpr h = inputs[0]->shape[2];
-    tir::PrimExpr w = inputs[0]->shape[3];
-    tir::PrimExpr oh = (h + pad.top + pad.bottom - kh) / sh + 1;
-    tir::PrimExpr ow = (w + pad.left + pad.right - kw) / sw + 1;
-
-    te::IterVar rh = te::reduce_axis(0, kh, "rh");
-    te::IterVar rw = te::reduce_axis(0, kw, "rw");
-
-    te::Tensor sum_out = te::compute({n, c, oh, ow}, [&](const Array<kxc::tir::Var>& axis) {
-        tir::Var bn = axis[0];
-        tir::Var bc = axis[1];
-        tir::Var by = axis[2];
-        tir::Var bx = axis[3];
-
-        tir::PrimExpr in_y = by * sh + rh - pad.top;
-        tir::PrimExpr in_x = bx * sw + rw - pad.left;
-        tir::PrimExpr in_bounds = (!(in_y < 0)) && (in_y < h) && (!(in_x < 0)) && (in_x < w);
-        tir::PrimExpr val = tir::Select(
-            in_bounds,
-            inputs[0](bn, bc, in_y, in_x),
-            te::topi::make_const(inputs[0]->dtype, 0));
-        return te::sum(val, {rh, rw});
-    }, "T_avg_pool2d_sum");
-
-    return te::compute(sum_out->shape, [&](const Array<kxc::tir::Var>& axis) {
-        return sum_out(axis) / (kh * kw);
-    }, "T_avg_pool2d");
+    Array<int> pool_size = Read2DPair(p->pool_size, 1);
+    Array<int> strides = Read2DPair(p->strides, 1);
+    Array<int> padding = ReadPadding(p->padding);
+    return te::topi::pool2d(inputs[0], pool_size, strides, padding, "avg", p->ceil_mode, "T_avg_pool2d");
 }
 
 te::Tensor GlobalAvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
+    (void)attrs;
+    (void)out_type;
     if (inputs.size() != 1) {
         throw std::runtime_error("nn_global_avg_pool2d expects exactly 1 input");
     }
     if (inputs[0]->shape.size() != 4) {
         throw std::runtime_error("nn_global_avg_pool2d expects NCHW rank-4 input");
     }
-    tir::PrimExpr n = inputs[0]->shape[0];
-    tir::PrimExpr c = inputs[0]->shape[1];
-    tir::PrimExpr h = inputs[0]->shape[2];
-    tir::PrimExpr w = inputs[0]->shape[3];
-
-    te::IterVar rh = te::reduce_axis(0, h, "rh");
-    te::IterVar rw = te::reduce_axis(0, w, "rw");
-
-    te::Tensor sum_out = te::compute({n, c, 1, 1}, [&](const Array<kxc::tir::Var>& axis) {
-        tir::Var bn = axis[0];
-        tir::Var bc = axis[1];
-        return te::sum(inputs[0](bn, bc, rh, rw), {rh, rw});
-    }, "T_global_avg_pool2d_sum");
-
-    return te::compute(sum_out->shape, [&](const Array<kxc::tir::Var>& axis) {
-        return sum_out(axis) / (h * w);
-    }, "T_global_avg_pool2d");
+    return te::topi::global_avg_pool2d(inputs[0], "T_global_avg_pool2d");
 }
 
 // ---------------------------------------------------------------------------

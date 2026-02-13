@@ -26,6 +26,7 @@ set(KXC_RUNTIME_SOURCES
   src/base/device_api.cc
   src/base/device/cpu_device_api.cc
   src/base/device/cuda_device_api.cc
+  src/tir/pass/print_ir.cc
   src/relay/backend/lower.cc
   src/relay/common_ops.cc
   src/relay/op/tensor/math.cc

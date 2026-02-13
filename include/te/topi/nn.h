@@ -5,6 +5,7 @@
 #include "te/topi/utils.h"
 #include "base/container.h"
 #include <vector>
+#include <stdexcept>
 
 namespace kxc {
 namespace te {
@@ -153,57 +154,106 @@ inline Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h
 }
 
 // Pool2D
-inline Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Array<int> padding, std::string pool_type, bool ceil_mode = false, std::string name = "pool2d", std::string tag = kPool) {
+inline Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Array<int> padding,
+                     std::string pool_type, bool ceil_mode = false, std::string name = "pool2d",
+                     std::string tag = kPool) {
+    if (kernel_size.size() < 2) {
+        throw std::runtime_error("topi::pool2d expects kernel_size with at least 2 elements");
+    }
+    if (stride.size() < 2) {
+        throw std::runtime_error("topi::pool2d expects stride with at least 2 elements");
+    }
+    if (pool_type != "max" && pool_type != "avg") {
+        throw std::runtime_error("topi::pool2d only supports pool_type=max/avg");
+    }
+
     // Assuming NCHW
     PrimExpr N = data->shape[0];
     PrimExpr C = data->shape[1];
     PrimExpr H = data->shape[2];
     PrimExpr W = data->shape[3];
-    
+
     int KH = kernel_size[0];
     int KW = kernel_size[1];
     int SH = stride[0];
     int SW = stride[1];
-    int PH = padding[0];
-    int PW = padding[1];
-    
-    PrimExpr OH = (H + 2 * PH - KH) / SH + 1;
-    PrimExpr OW = (W + 2 * PW - KW) / SW + 1;
-    
+
+    int pad_top = 0;
+    int pad_left = 0;
+    int pad_bottom = 0;
+    int pad_right = 0;
+    if (padding.size() >= 4) {
+        pad_top = padding[0];
+        pad_left = padding[1];
+        pad_bottom = padding[2];
+        pad_right = padding[3];
+    } else if (padding.size() >= 2) {
+        pad_top = padding[0];
+        pad_left = padding[1];
+        pad_bottom = padding[0];
+        pad_right = padding[1];
+    }
+
+    PrimExpr h_numerator = H + pad_top + pad_bottom - KH;
+    PrimExpr w_numerator = W + pad_left + pad_right - KW;
+    PrimExpr OH = ceil_mode ? ((h_numerator + SH - 1) / SH + 1) : (h_numerator / SH + 1);
+    PrimExpr OW = ceil_mode ? ((w_numerator + SW - 1) / SW + 1) : (w_numerator / SW + 1);
+
     IterVar rh = reduce_axis(0, KH, "rh");
     IterVar rw = reduce_axis(0, KW, "rw");
-    
+
     return compute(
         {N, C, OH, OW},
         [&](const Array<tir::Var>& indices) {
-             tir::Var n = indices[0];
-             tir::Var c = indices[1];
-             tir::Var h = indices[2];
-             tir::Var w = indices[3];
-             
-             PrimExpr h_in = h * SH + rh - PH;
-             PrimExpr w_in = w * SW + rw - PW;
-             
-             PrimExpr in_val = Select(
+            tir::Var n = indices[0];
+            tir::Var c = indices[1];
+            tir::Var h = indices[2];
+            tir::Var w = indices[3];
+
+            PrimExpr h_in = h * SH + rh - pad_top;
+            PrimExpr w_in = w * SW + rw - pad_left;
+
+            PrimExpr in_val = Select(
                 (h_in >= 0) && (h_in < H) && (w_in >= 0) && (w_in < W),
                 data(n, c, h_in, w_in),
-                (pool_type == "max") ? make_const(data->dtype, -1e30) : make_const(data->dtype, 0) // Min value for max pool
-             );
-             
-             if (pool_type == "max") {
-                 // return kxc::te::max(in_val, {rh, rw}); // Assuming max exists
-                 // Using sum as placeholder if max not available, but user wants code.
-                 // I will assume te::sum for now as in reduction.h
-                 return kxc::te::sum(in_val, {rh, rw}); 
-             } else {
-                 // Avg pool
-                 // sum / count
-                 return kxc::te::sum(in_val, {rh, rw}) / (KH * KW);
-             }
+                (pool_type == "max") ? make_const(data->dtype, -1e30) : make_const(data->dtype, 0));
+
+            if (pool_type == "max") {
+                return kxc::te::max(in_val, {rh, rw});
+            }
+            return kxc::te::sum(in_val, {rh, rw}) / (KH * KW);
         },
         name,
-        tag
-    );
+        tag);
+}
+
+inline Tensor global_avg_pool2d(const Tensor& data, std::string name = "global_avg_pool2d",
+                                std::string tag = kPool) {
+    PrimExpr N = data->shape[0];
+    PrimExpr C = data->shape[1];
+    PrimExpr H = data->shape[2];
+    PrimExpr W = data->shape[3];
+
+    IterVar rh = reduce_axis(0, H, "rh");
+    IterVar rw = reduce_axis(0, W, "rw");
+
+    Tensor sum_out = compute(
+        {N, C, 1, 1},
+        [&](const Array<tir::Var>& indices) {
+            tir::Var n = indices[0];
+            tir::Var c = indices[1];
+            return kxc::te::sum(data(n, c, rh, rw), {rh, rw});
+        },
+        name + "_sum",
+        tag);
+
+    return compute(
+        sum_out->shape,
+        [&](const Array<tir::Var>& indices) {
+            return sum_out(indices) / (H * W);
+        },
+        name,
+        tag);
 }
 
 } // namespace topi

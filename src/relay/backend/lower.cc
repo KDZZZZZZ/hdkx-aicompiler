@@ -5,8 +5,6 @@
 #include "te/te.h"
 #include "tir/expr.h"
 
-#include <iostream>
-#include <cstdio>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -111,7 +109,6 @@ protected:
     Array<te::Tensor> input_tensors_;
     Array<te::Tensor> constant_tensors_;
     int constant_counter_ = 0;
-    int call_counter_ = 0;
 
     Array<te::Tensor> Visit(const Expr& expr) override {
         auto it = memo_.find(expr.get());
@@ -142,24 +139,10 @@ protected:
     }
 
     Array<te::Tensor> VisitCall(const CallNode* op, const Expr& ref) override {
-        std::string op_name = "<non-op>";
-        if (auto* on = op->op.As<OpNode>()) {
-            op_name = on->name;
-        }
-        ++call_counter_;
-        std::fprintf(stderr, "[lower] VisitCall #%d op=%s (enter)\n", call_counter_, op_name.c_str());
-
         Array<te::Tensor> inputs;
         for (const auto& arg : op->args) {
             auto arg_tensors = Visit(arg);
             for (const auto& t : arg_tensors) inputs.push_back(t);
-        }
-        std::fprintf(stderr, "[lower] VisitCall #%d op=%s inputs=%zu\n", call_counter_, op_name.c_str(), inputs.size());
-        if (op_name == "nn_conv2d") {
-            for (size_t i = 0; i < inputs.size(); ++i) {
-                std::fprintf(stderr, "[lower]   conv input[%zu] name=%s rank=%zu\n",
-                             i, inputs[i]->name.c_str(), inputs[i]->shape.size());
-            }
         }
 
         auto* op_node = op->op.As<OpNode>();
@@ -179,9 +162,6 @@ protected:
         Attrs attrs = op->attrs.defined() ? Attrs(op->attrs) : Attrs();
         kxc::Type out_type = ref.checked_type();
         te::Tensor out = (*lower_ptr)(attrs, inputs, out_type);
-        std::fprintf(stderr, "[lower] VisitCall #%d op=%s out_name=%s out_rank=%zu\n",
-                     call_counter_, op_name.c_str(), out->name.c_str(), out->shape.size());
-        std::fprintf(stderr, "[lower] VisitCall #%d op=%s (done)\n", call_counter_, op_name.c_str());
         return {out};
     }
 
@@ -375,7 +355,6 @@ tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
 }  // namespace
 
 tir::PrimFunc LowerToTIR(Function func) {
-    std::fprintf(stderr, "[lower] enter LowerToTIR\n");
     if (!func.defined()) {
         throw std::runtime_error("LowerToTIR expects a defined function");
     }
@@ -384,9 +363,7 @@ tir::PrimFunc LowerToTIR(Function func) {
     }
 
     RelayToTEConverter converter(func);
-    std::fprintf(stderr, "[lower] converter ready\n");
     Array<te::Tensor> outputs = converter.Convert(func->body);
-    std::fprintf(stderr, "[lower] relay->te converted, outputs=%zu\n", outputs.size());
     if (outputs.empty()) {
         throw std::runtime_error("LowerToTIR produced no output tensors");
     }
@@ -405,7 +382,6 @@ tir::PrimFunc LowerToTIR(Function func) {
     std::unordered_map<const Object*, te::Tensor> op_output_tensor;
     std::vector<te::Operation> topo_ops;
     CollectOpsDFS(out_tensor, &visited_ops, &op_output_tensor, &topo_ops);
-    std::fprintf(stderr, "[lower] topo collected, ops=%zu\n", topo_ops.size());
 
     Array<tir::Var> params;
     Map<tir::Var, tir::Buffer> buffer_map;
@@ -438,8 +414,6 @@ tir::PrimFunc LowerToTIR(Function func) {
 
     // Intermediate buffers for compute tensors.
     std::vector<te::Tensor> intermediates;
-    std::fprintf(stderr, "[lower] input_tensors=%zu constant_tensors=%zu\n",
-                 converter.input_tensors().size(), converter.constant_tensors().size());
     for (const auto& op : topo_ops) {
         if (!op.As<te::ComputeOpNode>()) continue;
         auto t_it = op_output_tensor.find(op.get());
@@ -454,7 +428,6 @@ tir::PrimFunc LowerToTIR(Function func) {
     ExprLowerer expr_lowerer(buffer_var_by_tensor);
 
     Array<tir::Stmt> compute_seq;
-    int lowered_compute_ops = 0;
     for (const auto& op : topo_ops) {
         if (op.As<te::PlaceholderOpNode>()) {
             continue;
@@ -472,12 +445,7 @@ tir::PrimFunc LowerToTIR(Function func) {
         } catch (const std::exception& e) {
             throw std::runtime_error("LowerComputeStmt failed for tensor '" + t->name + "': " + e.what());
         }
-        ++lowered_compute_ops;
-        if ((lowered_compute_ops % 10) == 0) {
-            std::fprintf(stderr, "[lower] lowered compute ops: %d\n", lowered_compute_ops);
-        }
     }
-    std::fprintf(stderr, "[lower] total lowered compute ops: %d\n", lowered_compute_ops);
 
     tir::Stmt body;
     if (compute_seq.empty()) {
@@ -499,7 +467,6 @@ tir::PrimFunc LowerToTIR(Function func) {
     attrs.Set(String("global_symbol"), String("main"));
     attrs.Set(String("tir.noalias"), tir::IntImm(1, tir::DataType::Bool()));
 
-    std::fprintf(stderr, "[lower] build PrimFunc done\n");
     return tir::PrimFunc(params, body, buffer_map, attrs);
 }
 
