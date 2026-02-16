@@ -1,0 +1,259 @@
+#include "base/disco/executor.h"
+
+#include <stdexcept>
+#include <string>
+
+#include "base/device.h"
+#include "base/packedfunc.h"
+#include "base/registry.h"
+#include "relay/op.h"
+
+namespace kxc {
+namespace disco {
+
+namespace {
+
+Array<int> EffectiveWorkerSet(const Array<int>& worker_set, int fallback_worker) {
+    if (!worker_set.empty()) {
+        return worker_set;
+    }
+    return {fallback_worker >= 0 ? fallback_worker : 0};
+}
+
+}  // namespace
+
+ExecutionPlanExecutor::ExecutionPlanExecutor(DiscoSession session,
+                                             std::shared_ptr<CCLBackend> ccl_backend)
+    : session_(std::move(session)), ccl_backend_(std::move(ccl_backend)) {
+    if (!session_.defined()) {
+        throw std::runtime_error("ExecutionPlanExecutor requires a defined DiscoSession");
+    }
+    if (!ccl_backend_) {
+        throw std::runtime_error("ExecutionPlanExecutor requires a CCL backend");
+    }
+}
+
+Map<int, DRef> ExecutionPlanExecutor::Execute(const ExecutionPlan& plan,
+                                              const Map<int, DRef>& initial_values) {
+    if (!plan.defined()) {
+        throw std::runtime_error("Execute requires a defined ExecutionPlan");
+    }
+    values_ = initial_values;
+
+    for (const auto& node_ref : plan->nodes) {
+        if (!node_ref.defined()) {
+            continue;
+        }
+        if (node_ref.get()->GetTypeId() == KernelExecNode::_type_index) {
+            ExecuteKernel(plan, static_cast<const KernelExecNode*>(node_ref.get()));
+            continue;
+        }
+        if (node_ref.get()->GetTypeId() == CommExecNode::_type_index) {
+            ExecuteComm(plan, static_cast<const CommExecNode*>(node_ref.get()));
+            continue;
+        }
+        if (node_ref.get()->GetTypeId() == BarrierExecNode::_type_index) {
+            const auto* barrier = static_cast<const BarrierExecNode*>(node_ref.get());
+            for (int worker : EffectiveWorkerSet(barrier->worker_set, 0)) {
+                ccl_backend_->SyncWorker(session_, worker);
+            }
+            continue;
+        }
+        throw std::runtime_error("ExecutionPlan contains unknown node type");
+    }
+    return values_;
+}
+
+DRef ExecutionPlanExecutor::ExecuteForOutput(const ExecutionPlan& plan,
+                                             const Map<int, DRef>& initial_values) {
+    Execute(plan, initial_values);
+    int output = plan->output_value;
+    if (output < 0 || !values_.count(output)) {
+        throw std::runtime_error("ExecutionPlan output value is missing after execution");
+    }
+    return values_.at(output);
+}
+
+DRef ExecutionPlanExecutor::EnsureValue(const ExecutionPlan& plan, int value_id,
+                                        const DRef& prototype) {
+    if (values_.count(value_id)) {
+        return values_.at(value_id);
+    }
+    DRef ref = session_.NewDRef();
+    values_.Set(value_id, ref);
+    if (!prototype.valid()) {
+        return ref;
+    }
+    for (int worker = 0; worker < session_.num_workers(); ++worker) {
+        runtime::NDArray src = session_.Get(worker, prototype);
+        if (!src.defined()) continue;
+        ccl_backend_->Copy(session_, prototype, ref, worker, worker);
+    }
+    return ref;
+}
+
+void ExecutionPlanExecutor::ExecuteKernel(const ExecutionPlan& plan, const KernelExecNode* kernel) {
+    if (!kernel || kernel->output_values.empty()) {
+        return;
+    }
+
+    if (kernel->input_values.empty()) {
+        for (int out_id : kernel->output_values) {
+            DRef out = EnsureValue(plan, out_id, DRef());
+            Array<int64_t> scalar_shape = {1};
+            for (int worker : EffectiveWorkerSet(kernel->worker_set, 0)) {
+                session_.Set(worker, out, runtime::NDArray(scalar_shape, "float32"));
+            }
+        }
+        return;
+    }
+
+    int input_id = kernel->input_values[0];
+    if (!values_.count(input_id)) {
+        throw std::runtime_error("Kernel input value is not available");
+    }
+    DRef input = values_.at(input_id);
+    for (int out_id : kernel->output_values) {
+        DRef output = EnsureValue(plan, out_id, input);
+        for (int worker : EffectiveWorkerSet(kernel->worker_set,
+                                             ResolveWorkerForValue(plan, input_id))) {
+            ccl_backend_->Copy(session_, input, output, worker, worker);
+        }
+        values_.Set(out_id, output);
+    }
+}
+
+void ExecutionPlanExecutor::ExecuteComm(const ExecutionPlan& plan, const CommExecNode* comm) {
+    if (!comm || comm->output_values.empty()) {
+        return;
+    }
+    if (comm->input_values.empty()) {
+        throw std::runtime_error("Communication node requires at least one input");
+    }
+
+    int input_id = comm->input_values[0];
+    if (!values_.count(input_id)) {
+        throw std::runtime_error("Communication input value is missing");
+    }
+
+    DRef src = values_.at(input_id);
+    int output_id = comm->output_values[0];
+    DRef dst = EnsureValue(plan, output_id, src);
+
+    if (comm->op_name == "device.copy") {
+        int src_worker = ResolveWorkerForValue(plan, input_id);
+        int dst_worker = ResolveWorkerForValue(plan, output_id);
+        if (comm->attrs.defined()) {
+            if (auto* attrs = comm->attrs.As<relay::DeviceCopyAttrsNode>()) {
+                if (attrs->src_virtual_device.defined()) {
+                    src_worker =
+                        ResolveWorkerForVirtualDevice(plan, attrs->src_virtual_device);
+                }
+                if (attrs->dst_virtual_device.defined()) {
+                    dst_worker =
+                        ResolveWorkerForVirtualDevice(plan, attrs->dst_virtual_device);
+                }
+            }
+        }
+        ccl_backend_->Copy(session_, src, dst, src_worker, dst_worker);
+    } else if (comm->op_name == "device.allreduce") {
+        std::string reduce_kind = "sum";
+        bool in_group = true;
+        if (comm->attrs.defined()) {
+            if (auto* attrs = comm->attrs.As<relay::CollectiveAttrsNode>()) {
+                reduce_kind = attrs->reduce_kind;
+                in_group = attrs->in_group;
+            }
+        }
+        ccl_backend_->AllReduce(session_, src, dst, reduce_kind, in_group);
+    } else if (comm->op_name == "device.broadcast_from_worker0") {
+        bool in_group = true;
+        if (comm->attrs.defined()) {
+            if (auto* attrs = comm->attrs.As<relay::CollectiveAttrsNode>()) {
+                in_group = attrs->in_group;
+            }
+        }
+        ccl_backend_->BroadcastFromWorker0(session_, src, dst, in_group);
+    } else if (comm->op_name == "device.scatter_from_worker0") {
+        bool in_group = true;
+        if (comm->attrs.defined()) {
+            if (auto* attrs = comm->attrs.As<relay::CollectiveAttrsNode>()) {
+                in_group = attrs->in_group;
+            }
+        }
+        ccl_backend_->ScatterFromWorker0(session_, src, dst, in_group);
+    } else if (comm->op_name == "device.gather_to_worker0") {
+        bool in_group = true;
+        if (comm->attrs.defined()) {
+            if (auto* attrs = comm->attrs.As<relay::CollectiveAttrsNode>()) {
+                in_group = attrs->in_group;
+            }
+        }
+        ccl_backend_->GatherToWorker0(session_, src, dst, in_group);
+    } else if (comm->op_name == "device.send_to_worker") {
+        int receiver_worker = 0;
+        if (comm->attrs.defined()) {
+            if (auto* attrs = comm->attrs.As<relay::CollectiveAttrsNode>()) {
+                receiver_worker = attrs->root_worker;
+            }
+        }
+        ccl_backend_->SendToWorker(session_, src, dst, receiver_worker);
+    } else if (comm->op_name == "device.recv_from_worker") {
+        int sender_worker = 0;
+        if (comm->attrs.defined()) {
+            if (auto* attrs = comm->attrs.As<relay::CollectiveAttrsNode>()) {
+                sender_worker = attrs->root_worker;
+            }
+        }
+        ccl_backend_->RecvFromWorker(session_, src, dst, sender_worker);
+    } else {
+        throw std::runtime_error("Unsupported communication op in executor: " + comm->op_name);
+    }
+
+    values_.Set(output_id, dst);
+    for (size_t i = 1; i < comm->output_values.size(); ++i) {
+        values_.Set(comm->output_values[i], dst);
+    }
+}
+
+int ExecutionPlanExecutor::ResolveWorkerForValue(const ExecutionPlan& plan, int value_id) const {
+    if (!plan.defined()) return 0;
+    if (!plan->value_virtual_devices.count(value_id)) {
+        return 0;
+    }
+    return ResolveWorkerForVirtualDevice(plan, plan->value_virtual_devices.at(value_id));
+}
+
+int ExecutionPlanExecutor::ResolveWorkerForVirtualDevice(const ExecutionPlan& plan,
+                                                         const VirtualDevice& vd) const {
+    if (!plan.defined() || !vd.defined()) {
+        return 0;
+    }
+    if (plan->pass_ctx.has_disco_placement()) {
+        int worker = FindWorkerForVirtualDevice(plan->pass_ctx.disco_placement(), vd);
+        if (worker >= 0) return worker;
+    }
+    if (vd->device_obj.defined()) {
+        const auto* dev = static_cast<const class Device*>(vd->device_obj.get());
+        if (dev) return dev->device_id();
+    }
+    if (vd->target.defined()) {
+        return vd->target->device_id;
+    }
+    return 0;
+}
+
+KXC_REGISTER_GLOBAL("kxc.disco.execute_plan")
+    .set_body(ToPackedFunc([](DiscoSession session, ExecutionPlan plan) -> ObjectRef {
+        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
+        return ObjectRef(executor.Execute(plan, Map<int, DRef>()));
+    }));
+
+KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_output")
+    .set_body(ToPackedFunc([](DiscoSession session, ExecutionPlan plan) -> ObjectRef {
+        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
+        return ObjectRef(executor.ExecuteForOutput(plan, Map<int, DRef>()));
+    }));
+
+}  // namespace disco
+}  // namespace kxc

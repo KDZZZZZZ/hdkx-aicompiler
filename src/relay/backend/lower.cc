@@ -17,6 +17,10 @@ namespace relay {
 
 namespace {
 
+bool IsDeviceCommunicationOpName(const std::string& op_name) {
+    return op_name.rfind("device.", 0) == 0;
+}
+
 tir::DataType DTypeFromString(const std::string& dtype) {
     if (dtype == "float32") return tir::DataType::Float(32);
     if (dtype == "float64") return tir::DataType::Float(64);
@@ -148,6 +152,11 @@ protected:
         auto* op_node = op->op.As<OpNode>();
         if (!op_node) {
             throw std::runtime_error("Call.op is not OpNode in LowerToTIR");
+        }
+        if (IsDeviceCommunicationOpName(op_node->name)) {
+            throw std::runtime_error(
+                "LowerToTIR does not lower device communication ops. "
+                "Run LowerRelayToExecPlanPass before LowerToTIR.");
         }
 
         auto it = op_node->attrs.find("FRelayToTE");
@@ -362,6 +371,12 @@ tir::PrimFunc LowerToTIR(Function func) {
         throw std::runtime_error("LowerToTIR expects function body to be defined");
     }
 
+    PassContext inferred_pass_ctx = PassContext::Current();
+    if (!inferred_pass_ctx.defined()) {
+        inferred_pass_ctx = PassContext::FromRelay(func);
+    }
+    PassContext::Scope pass_scope(inferred_pass_ctx);
+
     RelayToTEConverter converter(func);
     Array<te::Tensor> outputs = converter.Convert(func->body);
     if (outputs.empty()) {
@@ -466,6 +481,7 @@ tir::PrimFunc LowerToTIR(Function func) {
     Map<String, ObjectRef> attrs;
     attrs.Set(String("global_symbol"), String("main"));
     attrs.Set(String("tir.noalias"), tir::IntImm(1, tir::DataType::Bool()));
+    attrs = AttachPassContextAttrs(attrs, PassContext::Current());
 
     return tir::PrimFunc(params, body, buffer_map, attrs);
 }

@@ -1,0 +1,34 @@
+#pragma once
+
+#include <string>
+
+#include "base/device_api.h"
+
+namespace kxc {
+
+class TargetNode : public Object {
+public:
+    std::string kind;
+    DeviceTypeCode device_type{kUnknown};
+    int device_id{-1};
+    DeviceAttributes attrs;
+
+    KXC_OBJECT_DECLARE
+};
+
+KXC_OBJECT_DEFINE(TargetNode)
+
+class Target : public ObjectRef {
+public:
+    using ObjectRef::ObjectRef;
+    Target(const ObjectRef& ref) : ObjectRef(ref) {}
+
+    const TargetNode* operator->() const;
+    std::string ToString() const;
+};
+
+Target BuildTarget(const class Device& device);
+Target BuildTarget(DeviceTypeCode type, int device_id = 0);
+
+}  // namespace kxc
+

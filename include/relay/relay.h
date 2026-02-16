@@ -1,25 +1,38 @@
 #pragma once
-#include "base/expr.h"
-#include "base/tensor.h"
-#include "base/ndarray.h"
-#include "base/container.h"
-#include <vector>
-#include <string>
+
 #include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "base/container.h"
+#include "base/expr.h"
+#include "base/ndarray.h"
+#include "base/tensor.h"
+#include "base/virtual_device.h"
 
 namespace kxc {
 
 class RelayNode : public ExprNode {
 public:
-    // Relay specific metadata can go here
+    // Device planning metadata, similar to TVM's virtual_device_ on relay::ExprNode.
+    VirtualDevice virtual_device_;
 };
 
 class Relay : public Expr {
 public:
     using Expr::Expr;
+
+    VirtualDevice virtual_device() const {
+        return static_cast<const RelayNode*>(object_)->virtual_device_;
+    }
+
+    void set_virtual_device(VirtualDevice virtual_device) const {
+        const_cast<RelayNode*>(static_cast<const RelayNode*>(object_))->virtual_device_ =
+            std::move(virtual_device);
+    }
 };
 
-// --- Type ---
 class TensorTypeNode : public TypeNode {
 public:
     Array<int64_t> shape;
@@ -34,19 +47,10 @@ class TensorType : public Type {
 public:
     using Type::Type;
 
-    TensorType(Array<int64_t> shape, std::string dtype) {
-        auto* node = new TensorTypeNode();
-        node->shape = std::move(shape);
-        node->dtype = std::move(dtype);
-        SetData(node);
-    }
-
-    const TensorTypeNode* operator->() const {
-        return static_cast<const TensorTypeNode*>(object_);
-    }
+    TensorType(Array<int64_t> shape, std::string dtype);
+    const TensorTypeNode* operator->() const;
 };
 
-// --- Var ---
 class IdNode : public Object {
 public:
     std::string name_hint;
@@ -58,12 +62,8 @@ KXC_OBJECT_DEFINE(IdNode)
 class Id : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
-    explicit Id(std::string name) {
-        auto* node = new IdNode();
-        node->name_hint = std::move(name);
-        SetData(node);
-    }
-    const IdNode* operator->() const { return static_cast<const IdNode*>(object_); }
+    explicit Id(std::string name);
+    const IdNode* operator->() const;
 };
 
 class VarNode : public RelayNode {
@@ -74,7 +74,7 @@ public:
     KXC_OBJECT_DECLARE
 
     void VisitAttrs(AttrVisitor& visitor) override {
-        // visitor("vid", &vid);
+        (void)visitor;
     }
 };
 
@@ -83,23 +83,11 @@ KXC_OBJECT_DEFINE(VarNode)
 class Var : public Relay {
 public:
     using Relay::Relay;
-    explicit Var(std::string name) { 
-        VarNode* node = new VarNode();
-        node->vid = Id(std::move(name));
-        SetData(node);
-    }
-    Var(std::string name, Type type_annotation) {
-        VarNode* node = new VarNode();
-        node->vid = Id(std::move(name));
-        node->type_annotation = std::move(type_annotation);
-        SetData(node);
-    }
-    const VarNode* operator->() const {
-        return static_cast<const VarNode*>(object_);
-    }
+    explicit Var(std::string name);
+    Var(std::string name, Type type_annotation);
+    const VarNode* operator->() const;
 };
 
-// --- Constant ---
 class ConstantNode : public RelayNode {
 public:
     runtime::NDArray data;
@@ -112,22 +100,15 @@ KXC_OBJECT_DEFINE(ConstantNode)
 class Constant : public Relay {
 public:
     using Relay::Relay;
-    explicit Constant(runtime::NDArray data) {
-        ConstantNode* node = new ConstantNode();
-        node->data = data;
-        SetData(node);
-    }
-    const ConstantNode* operator->() const {
-        return static_cast<const ConstantNode*>(object_);
-    }
+    explicit Constant(runtime::NDArray data);
+    const ConstantNode* operator->() const;
 };
 
-// --- Call ---
 class CallNode : public RelayNode {
 public:
     Expr op;
     Array<Expr> args;
-    ObjectRef attrs; // Changed from Attrs to ObjectRef to allow any Attrs type
+    ObjectRef attrs;
 
     KXC_OBJECT_DECLARE
 };
@@ -137,24 +118,14 @@ KXC_OBJECT_DEFINE(CallNode)
 class Call : public Relay {
 public:
     using Relay::Relay;
-    Call(Expr op, Array<Expr> args, ObjectRef attrs = ObjectRef()) {
-        CallNode* node = new CallNode();
-        node->op = op;
-        node->args = std::move(args);
-        node->attrs = attrs;
-        SetData(node);
-    }
-    const CallNode* operator->() const {
-        return static_cast<const CallNode*>(object_);
-    }
+    Call(Expr op, Array<Expr> args, ObjectRef attrs = ObjectRef());
+    const CallNode* operator->() const;
 };
 
-// --- Function ---
 class FunctionNode : public RelayNode {
 public:
     Array<Var> params;
     Expr body;
-    // Type ret_type;
 
     KXC_OBJECT_DECLARE
 };
@@ -164,18 +135,10 @@ KXC_OBJECT_DEFINE(FunctionNode)
 class Function : public Relay {
 public:
     using Relay::Relay;
-    Function(Array<Var> params, Expr body) {
-        FunctionNode* node = new FunctionNode();
-        node->params = std::move(params);
-        node->body = body;
-        SetData(node);
-    }
-    const FunctionNode* operator->() const {
-        return static_cast<const FunctionNode*>(object_);
-    }
+    Function(Array<Var> params, Expr body);
+    const FunctionNode* operator->() const;
 };
 
-// --- Tuple ---
 class TupleNode : public RelayNode {
 public:
     Array<Expr> fields;
@@ -188,17 +151,10 @@ KXC_OBJECT_DEFINE(TupleNode)
 class Tuple : public Relay {
 public:
     using Relay::Relay;
-    explicit Tuple(Array<Expr> fields) {
-        TupleNode* node = new TupleNode();
-        node->fields = std::move(fields);
-        SetData(node);
-    }
-    const TupleNode* operator->() const {
-        return static_cast<const TupleNode*>(object_);
-    }
+    explicit Tuple(Array<Expr> fields);
+    const TupleNode* operator->() const;
 };
 
-// --- TupleGetItem ---
 class TupleGetItemNode : public RelayNode {
 public:
     Expr tuple;
@@ -212,18 +168,10 @@ KXC_OBJECT_DEFINE(TupleGetItemNode)
 class TupleGetItem : public Relay {
 public:
     using Relay::Relay;
-    TupleGetItem(Expr tuple, int index) {
-        TupleGetItemNode* node = new TupleGetItemNode();
-        node->tuple = tuple;
-        node->index = index;
-        SetData(node);
-    }
-    const TupleGetItemNode* operator->() const {
-        return static_cast<const TupleGetItemNode*>(object_);
-    }
+    TupleGetItem(Expr tuple, int index);
+    const TupleGetItemNode* operator->() const;
 };
 
-// --- If ---
 class IfNode : public RelayNode {
 public:
     Expr cond;
@@ -238,19 +186,10 @@ KXC_OBJECT_DEFINE(IfNode)
 class If : public Relay {
 public:
     using Relay::Relay;
-    If(Expr cond, Expr true_branch, Expr false_branch) {
-        IfNode* node = new IfNode();
-        node->cond = cond;
-        node->true_branch = true_branch;
-        node->false_branch = false_branch;
-        SetData(node);
-    }
-    const IfNode* operator->() const {
-        return static_cast<const IfNode*>(object_);
-    }
+    If(Expr cond, Expr true_branch, Expr false_branch);
+    const IfNode* operator->() const;
 };
 
-// --- Let ---
 class LetNode : public RelayNode {
 public:
     Var var;
@@ -265,16 +204,8 @@ KXC_OBJECT_DEFINE(LetNode)
 class Let : public Relay {
 public:
     using Relay::Relay;
-    Let(Var var, Expr value, Expr body) {
-        LetNode* node = new LetNode();
-        node->var = var;
-        node->value = value;
-        node->body = body;
-        SetData(node);
-    }
-    const LetNode* operator->() const {
-        return static_cast<const LetNode*>(object_);
-    }
+    Let(Var var, Expr value, Expr body);
+    const LetNode* operator->() const;
 };
 
-}
+}  // namespace kxc

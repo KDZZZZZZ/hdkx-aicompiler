@@ -1,5 +1,5 @@
-#include "../include/relay/op_macros.h"
-#include "../include/relay/op.h" // Need this for Attrs definitions if we want to verify or use them here
+#include "relay/op.h"
+#include "relay/op_macros.h"
 #include <iostream>
 
 namespace kxc {
@@ -59,6 +59,49 @@ KXC_REGISTER_OP(multiply)
 KXC_REGISTER_OP(greater)
     .describe("Element-wise greater than comparison")
     .set_num_inputs(2);
+
+// --- Device/Communication Ops ---
+static OpRegEntry __make_OpEntry_device_copy__ =
+    OpRegEntry(Op::Get("device.copy"))
+        .describe("Copy tensor value across virtual devices")
+        .set_num_inputs(1)
+        .set_attr<std::string>("TAttrs", "DeviceCopyAttrs");
+
+static OpRegEntry __make_OpEntry_device_allreduce__ =
+    OpRegEntry(Op::Get("device.allreduce"))
+        .describe("Collective allreduce on distributed workers")
+        .set_num_inputs(1)
+        .set_attr<std::string>("TAttrs", "CollectiveAttrs");
+
+static OpRegEntry __make_OpEntry_device_broadcast_from_worker0__ =
+    OpRegEntry(Op::Get("device.broadcast_from_worker0"))
+        .describe("Collective broadcast from worker0")
+        .set_num_inputs(1)
+        .set_attr<std::string>("TAttrs", "CollectiveAttrs");
+
+static OpRegEntry __make_OpEntry_device_scatter_from_worker0__ =
+    OpRegEntry(Op::Get("device.scatter_from_worker0"))
+        .describe("Collective scatter from worker0")
+        .set_num_inputs(1)
+        .set_attr<std::string>("TAttrs", "CollectiveAttrs");
+
+static OpRegEntry __make_OpEntry_device_gather_to_worker0__ =
+    OpRegEntry(Op::Get("device.gather_to_worker0"))
+        .describe("Collective gather to worker0")
+        .set_num_inputs(1)
+        .set_attr<std::string>("TAttrs", "CollectiveAttrs");
+
+static OpRegEntry __make_OpEntry_device_send_to_worker__ =
+    OpRegEntry(Op::Get("device.send_to_worker"))
+        .describe("Point-to-point send to worker")
+        .set_num_inputs(1)
+        .set_attr<std::string>("TAttrs", "CollectiveAttrs");
+
+static OpRegEntry __make_OpEntry_device_recv_from_worker__ =
+    OpRegEntry(Op::Get("device.recv_from_worker"))
+        .describe("Point-to-point recv from worker")
+        .set_num_inputs(1)
+        .set_attr<std::string>("TAttrs", "CollectiveAttrs");
 
 } // namespace relay
 } // namespace kxc

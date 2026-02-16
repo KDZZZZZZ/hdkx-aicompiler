@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "dev-ninja",
+      "displayName": "Dev Ninja (Debug, CUDA ON)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "KXC_ENABLE_CUDA": "ON",
+        "KXC_BUILD_RESNET18_IR_DUMP": "ON",
+        "KXC_BUILD_DEBUG_EXAMPLES": "OFF"
+      }
+    },
+    {
+      "name": "dev-ninja-cpu",
+      "displayName": "Dev Ninja (Debug, CPU only)",
+      "inherits": "dev-ninja",
+      "cacheVariables": {
+        "KXC_ENABLE_CUDA": "OFF"
+      }
+    },
+    {
+      "name": "dev-ninja-debug-examples",
+      "displayName": "Dev Ninja (Debug, extra examples)",
+      "inherits": "dev-ninja",
+      "cacheVariables": {
+        "KXC_BUILD_DEBUG_EXAMPLES": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev-ninja",
+      "configurePreset": "dev-ninja"
+    },
+    {
+      "name": "dev-ninja-cpu",
+      "configurePreset": "dev-ninja-cpu"
+    },
+    {
+      "name": "dev-ninja-debug-examples",
+      "configurePreset": "dev-ninja-debug-examples"
+    }
+  ]
+}

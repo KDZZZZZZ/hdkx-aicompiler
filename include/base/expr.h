@@ -8,6 +8,7 @@ class TypeNode : public Object {
 public:
     KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(TypeNode)
 
 class Type : public ObjectRef {
 public:
@@ -23,17 +24,12 @@ public:
     
     KXC_OBJECT_DECLARE
 };
+KXC_OBJECT_DEFINE(SpanNode)
 
 class Span : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
-    Span(std::string source_name, int line, int column) {
-        auto* node = new SpanNode();
-        node->source_name = std::move(source_name);
-        node->line = line;
-        node->column = column;
-        SetData(node);
-    }
+    Span(std::string source_name, int line, int column);
 };
 
 class ExprNode : public Object {
@@ -49,6 +45,7 @@ public:
         return std::hash<TypeIndex>()(this->GetTypeId());
     }
 };
+KXC_OBJECT_DEFINE(ExprNode)
 
 class Expr : public ObjectRef {
 public:

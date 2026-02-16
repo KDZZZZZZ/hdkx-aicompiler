@@ -1,35 +1,22 @@
 #pragma once
-#include "ndarray.h"
-#include "base/container.h"
-#include <vector>
+
 #include <string>
+
+#include "base/container.h"
+#include "ndarray.h"
 
 namespace kxc {
 
-// Simple Tensor class wrapping NDArray
 class Tensor {
 public:
     runtime::NDArray data_;
 
     Tensor() = default;
-    
-    // Construct from NDArray
-    Tensor(runtime::NDArray data) : data_(data) {}
-    
-    // Construct new tensor with shape and dtype
-    Tensor(Array<int64_t> shape, std::string dtype = "float32") 
-        : data_(shape, dtype) {}
+    explicit Tensor(runtime::NDArray data);
+    Tensor(Array<int64_t> shape, std::string dtype = "float32");
 
-    // Allow implicit conversion to NDArray for convenience?
-    // operator runtime::NDArray() const { return data_; }
-    
-    // Access underlying DLTensor
-    const DLTensor* operator->() const {
-        return *data_;
-    }
-    
-    // Check if defined
-    bool defined() const { return data_.defined(); }
+    const DLTensor* operator->() const;
+    bool defined() const;
 };
 
-} // namespace kxc
+}  // namespace kxc
