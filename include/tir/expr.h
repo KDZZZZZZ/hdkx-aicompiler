@@ -85,7 +85,8 @@ KXC_OBJECT_DEFINE(VarNode)
 
 class Var : public PrimExpr {
 public:
-    using PrimExpr::PrimExpr;
+    Var() = default;
+    Var(const ObjectRef& n) : PrimExpr(n) {}
     explicit Var(std::string name_hint, DataType dtype = DataType::Int(32));
     const VarNode* operator->() const { return static_cast<const VarNode*>(object_); }
     bool operator==(const Var& other) const { return object_ == other.object_; }

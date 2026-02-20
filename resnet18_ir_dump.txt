@@ -303,7 +303,7 @@ Relay Expression DAG (from body):
                                                                                                                                                                     arg[2]:
                                                                                                                                                                       Constant(shape=[64], dtype=float32)
                                                                                                                                                                 arg[1]:
-                                                                                                                                                                  <visited node=0000027D625325F0>
+                                                                                                                                                                  <visited node=00000128392D49F0>
                                                                                                                                                         arg[1]:
                                                                                                                                                           Constant(shape=[64, 64, 3, 3], dtype=float32)
                                                                                                                                                         arg[2]:
@@ -313,7 +313,7 @@ Relay Expression DAG (from body):
                                                                                                                                                 arg[2]:
                                                                                                                                                   Constant(shape=[64], dtype=float32)
                                                                                                                                             arg[1]:
-                                                                                                                                              <visited node=0000027D625326A0>
+                                                                                                                                              <visited node=00000128390F34F0>
                                                                                                                                     arg[1]:
                                                                                                                                       Constant(shape=[128, 64, 3, 3], dtype=float32)
                                                                                                                                     arg[2]:
@@ -325,7 +325,7 @@ Relay Expression DAG (from body):
                                                                                                                         arg[1]:
                                                                                                                           Call(op=nn_conv2d, attrs=Conv2D(strides=2,2; padding=0,0; groups=1), args=3)
                                                                                                                             arg[0]:
-                                                                                                                              <visited node=0000027D62532C20>
+                                                                                                                              <visited node=00000128390F3B60>
                                                                                                                             arg[1]:
                                                                                                                               Constant(shape=[128, 64, 1, 1], dtype=float32)
                                                                                                                             arg[2]:
@@ -339,7 +339,7 @@ Relay Expression DAG (from body):
                                                                                                         arg[2]:
                                                                                                           Constant(shape=[128], dtype=float32)
                                                                                                     arg[1]:
-                                                                                                      <visited node=0000027D62532AC0>
+                                                                                                      <visited node=0000012838D2E520>
                                                                                             arg[1]:
                                                                                               Constant(shape=[256, 128, 3, 3], dtype=float32)
                                                                                             arg[2]:
@@ -351,7 +351,7 @@ Relay Expression DAG (from body):
                                                                                 arg[1]:
                                                                                   Call(op=nn_conv2d, attrs=Conv2D(strides=2,2; padding=0,0; groups=1), args=3)
                                                                                     arg[0]:
-                                                                                      <visited node=0000027D62925AF0>
+                                                                                      <visited node=0000012838D2E3C0>
                                                                                     arg[1]:
                                                                                       Constant(shape=[256, 128, 1, 1], dtype=float32)
                                                                                     arg[2]:
@@ -365,7 +365,7 @@ Relay Expression DAG (from body):
                                                                 arg[2]:
                                                                   Constant(shape=[256], dtype=float32)
                                                             arg[1]:
-                                                              <visited node=0000027D62925BA0>
+                                                              <visited node=0000012838D2DEF0>
                                                     arg[1]:
                                                       Constant(shape=[512, 256, 3, 3], dtype=float32)
                                                     arg[2]:
@@ -377,7 +377,7 @@ Relay Expression DAG (from body):
                                         arg[1]:
                                           Call(op=nn_conv2d, attrs=Conv2D(strides=2,2; padding=0,0; groups=1), args=3)
                                             arg[0]:
-                                              <visited node=0000027D62925C50>
+                                              <visited node=0000012838D2E1B0>
                                             arg[1]:
                                               Constant(shape=[512, 256, 1, 1], dtype=float32)
                                             arg[2]:
@@ -391,7 +391,7 @@ Relay Expression DAG (from body):
                         arg[2]:
                           Constant(shape=[512], dtype=float32)
                     arg[1]:
-                      <visited node=0000027D629256D0>
+                      <visited node=00000128390F96E0>
     arg[1]:
       Constant(shape=[1000, 512], dtype=float32)
     arg[2]:
@@ -444,50 +444,50 @@ params(44):
   [42] const_41 : float32
   [43] T_gemm_out_out : float32
 buffer_map(44):
-  const_34 -> const_34 shape=[512, 256, 1, 1] dtype=float32
-  const_5 -> const_5 shape=[64] dtype=float32
-  const_33 -> const_33 shape=[512] dtype=float32
-  const_4 -> const_4 shape=[64, 64, 3, 3] dtype=float32
-  const_37 -> const_37 shape=[512] dtype=float32
-  input -> input shape=[1, 3, 224, 224] dtype=float32
-  const_35 -> const_35 shape=[512] dtype=float32
-  const_6 -> const_6 shape=[64, 64, 3, 3] dtype=float32
-  const_3 -> const_3 shape=[64] dtype=float32
-  const_0 -> const_0 shape=[64, 3, 7, 7] dtype=float32
-  const_11 -> const_11 shape=[128] dtype=float32
   const_1 -> const_1 shape=[64] dtype=float32
+  const_20 -> const_20 shape=[256, 128, 3, 3] dtype=float32
+  input -> input shape=[1, 3, 224, 224] dtype=float32
+  const_0 -> const_0 shape=[64, 3, 7, 7] dtype=float32
   const_2 -> const_2 shape=[64, 64, 3, 3] dtype=float32
-  const_7 -> const_7 shape=[64] dtype=float32
+  const_4 -> const_4 shape=[64, 64, 3, 3] dtype=float32
+  const_3 -> const_3 shape=[64] dtype=float32
   const_8 -> const_8 shape=[64, 64, 3, 3] dtype=float32
+  const_6 -> const_6 shape=[64, 64, 3, 3] dtype=float32
+  const_5 -> const_5 shape=[64] dtype=float32
+  const_7 -> const_7 shape=[64] dtype=float32
   const_9 -> const_9 shape=[64] dtype=float32
   const_10 -> const_10 shape=[128, 64, 3, 3] dtype=float32
+  const_30 -> const_30 shape=[512, 256, 3, 3] dtype=float32
+  const_11 -> const_11 shape=[128] dtype=float32
+  const_27 -> const_27 shape=[256] dtype=float32
   const_12 -> const_12 shape=[128, 128, 3, 3] dtype=float32
   const_13 -> const_13 shape=[128] dtype=float32
   const_14 -> const_14 shape=[128, 64, 1, 1] dtype=float32
   const_15 -> const_15 shape=[128] dtype=float32
+  const_31 -> const_31 shape=[512] dtype=float32
   const_16 -> const_16 shape=[128, 128, 3, 3] dtype=float32
-  T_gemm_out_out -> T_gemm_out_out shape=[(1 * 1), 1000] dtype=float32
   const_17 -> const_17 shape=[128] dtype=float32
-  const_39 -> const_39 shape=[512] dtype=float32
   const_18 -> const_18 shape=[128, 128, 3, 3] dtype=float32
+  const_38 -> const_38 shape=[512, 512, 3, 3] dtype=float32
   const_19 -> const_19 shape=[128] dtype=float32
-  const_20 -> const_20 shape=[256, 128, 3, 3] dtype=float32
   const_21 -> const_21 shape=[256] dtype=float32
   const_22 -> const_22 shape=[256, 256, 3, 3] dtype=float32
-  const_27 -> const_27 shape=[256] dtype=float32
   const_23 -> const_23 shape=[256] dtype=float32
   const_24 -> const_24 shape=[256, 128, 1, 1] dtype=float32
   const_25 -> const_25 shape=[256] dtype=float32
   const_26 -> const_26 shape=[256, 256, 3, 3] dtype=float32
   const_28 -> const_28 shape=[256, 256, 3, 3] dtype=float32
   const_29 -> const_29 shape=[256] dtype=float32
-  const_30 -> const_30 shape=[512, 256, 3, 3] dtype=float32
-  const_31 -> const_31 shape=[512] dtype=float32
-  const_32 -> const_32 shape=[512, 512, 3, 3] dtype=float32
-  const_36 -> const_36 shape=[512, 512, 3, 3] dtype=float32
-  const_38 -> const_38 shape=[512, 512, 3, 3] dtype=float32
   const_40 -> const_40 shape=[1000, 512] dtype=float32
+  const_32 -> const_32 shape=[512, 512, 3, 3] dtype=float32
   const_41 -> const_41 shape=[1000] dtype=float32
+  const_33 -> const_33 shape=[512] dtype=float32
+  const_34 -> const_34 shape=[512, 256, 1, 1] dtype=float32
+  const_35 -> const_35 shape=[512] dtype=float32
+  const_36 -> const_36 shape=[512, 512, 3, 3] dtype=float32
+  const_37 -> const_37 shape=[512] dtype=float32
+  const_39 -> const_39 shape=[512] dtype=float32
+  T_gemm_out_out -> T_gemm_out_out shape=[(1 * 1), 1000] dtype=float32
 attrs(2):
   global_symbol
   tir.noalias

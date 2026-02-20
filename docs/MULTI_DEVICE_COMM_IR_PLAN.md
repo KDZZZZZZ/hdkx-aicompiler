@@ -148,3 +148,40 @@ The following components are now implemented in-tree:
   - `kxc.disco.recv_from_worker`
   - `kxc.disco.execute_plan`
   - `kxc.disco.execute_plan_output`
+
+## 9. ExecutionPlan JSON (Phase-1)
+
+Phase-1 now includes a stable JSON representation for ExecutionPlan:
+
+- C++ API:
+  - `SerializeExecutionPlanToJson`
+  - `DeserializeExecutionPlanFromJson`
+  - `LoadExecutionPlanFromJsonFile`
+  - `SaveExecutionPlanToJsonFile`
+- Relay compile-time registry:
+  - `kxc.relay.transform.lower_to_exec_plan_json`
+  - `kxc.relay.transform.lower_to_exec_plan_json_file`
+- Runtime registry:
+  - `kxc.disco.execute_plan_json`
+  - `kxc.disco.execute_plan_json_output`
+  - `kxc.disco.execute_plan_json_file`
+  - `kxc.disco.execute_plan_json_file_output`
+
+The JSON schema carries:
+
+- `schema_version=1`
+- topology (`nodes`, `num_values`, `output_value`)
+- device metadata (`value_virtual_devices`, `disco_placement`)
+- IO/constant metadata (`input_value_ids`, `constant_value_ids`, `value_info`)
+
+Phase-1 keeps `KernelExec` as placeholder execution (copy-style behavior in executor).
+`kernel_symbol` is reserved in schema for Phase-2 without breaking compatibility.
+
+## 10. Phase-2 Boundary
+
+Not included in Phase-1:
+
+- binding `kernel_symbol` to real low-level TIR-generated kernels
+- replacing placeholder `ExecuteKernel` behavior with real compute invocation
+
+Phase-2 should focus only on kernel dispatch/runtime ABI while keeping JSON schema stable.

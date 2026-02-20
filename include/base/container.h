@@ -49,6 +49,7 @@ public:
 
     // Constructors
     Array() : ObjectRef(new ArrayNode<T>()) {}
+    Array(const ObjectRef& n) : ObjectRef(n) {}
     
     Array(std::vector<T> data) {
         auto ptr = new ArrayNode<T>(std::move(data));
@@ -132,6 +133,7 @@ template <typename K, typename V>
 class Map : public ObjectRef {
 public:
     Map() : ObjectRef(new MapNode<K, V>()) {}
+    Map(const ObjectRef& n) : ObjectRef(n) {}
     
     Map(std::unordered_map<K, V> data) {
         SetData(new MapNode<K, V>(std::move(data)));

@@ -255,5 +255,33 @@ KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_output")
         return ObjectRef(executor.ExecuteForOutput(plan, Map<int, DRef>()));
     }));
 
+KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_json")
+    .set_body(ToPackedFunc([](DiscoSession session, std::string json_text) -> ObjectRef {
+        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
+        ExecutionPlan plan = DeserializeExecutionPlanFromJson(json_text);
+        return ObjectRef(executor.Execute(plan, Map<int, DRef>()));
+    }));
+
+KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_json_output")
+    .set_body(ToPackedFunc([](DiscoSession session, std::string json_text) -> ObjectRef {
+        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
+        ExecutionPlan plan = DeserializeExecutionPlanFromJson(json_text);
+        return ObjectRef(executor.ExecuteForOutput(plan, Map<int, DRef>()));
+    }));
+
+KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_json_file")
+    .set_body(ToPackedFunc([](DiscoSession session, std::string path) -> ObjectRef {
+        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
+        ExecutionPlan plan = LoadExecutionPlanFromJsonFile(path);
+        return ObjectRef(executor.Execute(plan, Map<int, DRef>()));
+    }));
+
+KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_json_file_output")
+    .set_body(ToPackedFunc([](DiscoSession session, std::string path) -> ObjectRef {
+        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
+        ExecutionPlan plan = LoadExecutionPlanFromJsonFile(path);
+        return ObjectRef(executor.ExecuteForOutput(plan, Map<int, DRef>()));
+    }));
+
 }  // namespace disco
 }  // namespace kxc

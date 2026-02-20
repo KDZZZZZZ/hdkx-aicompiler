@@ -95,6 +95,24 @@ Array<int> WorkerSetFromVirtualDevice(const PassContext& pass_ctx, const Virtual
     return {worker};
 }
 
+std::string DTypeToString(const DLDataType& dtype) {
+    std::string prefix = "unknown";
+    if (dtype.code == kDLFloat) {
+        prefix = "float";
+    } else if (dtype.code == kDLInt) {
+        prefix = "int";
+    } else if (dtype.code == kDLUint) {
+        prefix = dtype.bits == 1 ? "bool" : "uint";
+    }
+    if (prefix == "bool") {
+        return "bool";
+    }
+    if (dtype.lanes > 1) {
+        return prefix + std::to_string(dtype.bits) + "x" + std::to_string(dtype.lanes);
+    }
+    return prefix + std::to_string(dtype.bits);
+}
+
 std::string GetCallOpName(const CallNode* call) {
     if (!call) {
         return "";
@@ -220,8 +238,19 @@ public:
     explicit RelayToExecPlanBuilder(PassContext pass_ctx) : pass_ctx_(std::move(pass_ctx)) {}
 
     ExecutionPlan Build(const Function& func) {
+        for (const auto& param : func->params) {
+            int value_id = AllocateValue(param);
+            var_bindings_[param.get()] = value_id;
+            input_value_ids_.push_back(value_id);
+            CaptureValueInfoFromType(value_id, param->type_annotation);
+        }
         int out = Visit(func->body);
-        return ExecutionPlan(nodes_, value_virtual_devices_, next_value_id_, pass_ctx_, out);
+        for (const auto& param : func->params) {
+            var_bindings_.erase(param.get());
+        }
+        return ExecutionPlan(nodes_, value_virtual_devices_, input_value_ids_,
+                             constant_value_ids_, value_shapes_, value_dtypes_, next_value_id_,
+                             pass_ctx_, out);
     }
 
 protected:
@@ -249,8 +278,17 @@ protected:
     }
 
     int VisitConstant(const ConstantNode* op, const Expr& ref) override {
-        (void)op;
-        return AllocateValue(ref);
+        int value_id = AllocateValue(ref);
+        constant_value_ids_.push_back(value_id);
+        Array<int64_t> shape;
+        if (op && op->data.defined()) {
+            for (const auto& dim : op->data->shape) {
+                shape.push_back(dim);
+            }
+            value_shapes_.Set(value_id, shape);
+            value_dtypes_.Set(value_id, DTypeToString(op->data->dl_tensor.dtype));
+        }
+        return value_id;
     }
 
     int VisitCall(const CallNode* op, const Expr& ref) override {
@@ -337,6 +375,19 @@ protected:
     }
 
 private:
+    void CaptureValueInfoFromType(int value_id, const Type& type) {
+        const auto* tensor_type = type.As<TensorTypeNode>();
+        if (!tensor_type) {
+            return;
+        }
+        Array<int64_t> shape;
+        for (const auto& dim : tensor_type->shape) {
+            shape.push_back(dim);
+        }
+        value_shapes_.Set(value_id, shape);
+        value_dtypes_.Set(value_id, tensor_type->dtype);
+    }
+
     int AllocateValue(const Expr& expr) {
         int value_id = next_value_id_++;
         const VirtualDevice vd = GetVirtualDeviceFromExpr(expr);
@@ -413,6 +464,10 @@ private:
     PassContext pass_ctx_;
     Array<ObjectRef> nodes_;
     Map<int, VirtualDevice> value_virtual_devices_;
+    Array<int> input_value_ids_;
+    Array<int> constant_value_ids_;
+    Map<int, Array<int64_t>> value_shapes_;
+    Map<int, std::string> value_dtypes_;
     std::unordered_map<const Object*, int> memo_;
     std::unordered_map<const Object*, int> var_bindings_;
     int next_value_id_{0};
@@ -465,6 +520,18 @@ KXC_REGISTER_GLOBAL("kxc.relay.transform.lower_compute_to_tir")
 KXC_REGISTER_GLOBAL("kxc.relay.transform.lower_to_exec_plan")
     .set_body(ToPackedFunc([](Function func) -> ObjectRef {
         return ObjectRef(LowerRelayToExecPlanPass(func));
+    }));
+
+KXC_REGISTER_GLOBAL("kxc.relay.transform.lower_to_exec_plan_json")
+    .set_body(ToPackedFunc([](Function func) -> std::string {
+        return SerializeExecutionPlanToJson(LowerRelayToExecPlanPass(func));
+    }));
+
+KXC_REGISTER_GLOBAL("kxc.relay.transform.lower_to_exec_plan_json_file")
+    .set_body(ToPackedFunc([](Function func, std::string path) -> std::string {
+        ExecutionPlan plan = LowerRelayToExecPlanPass(func);
+        SaveExecutionPlanToJsonFile(plan, path);
+        return path;
     }));
 
 }  // namespace relay

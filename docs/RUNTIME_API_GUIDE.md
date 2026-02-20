@@ -321,3 +321,99 @@ kxc::tir::Stmt MyTIRPass(const kxc::tir::Stmt& s);
   - `AttrStmtNode` 定义见 `include/tir/stmt.h:154`。
 
 在 TVM 的典型链路里，TE 的 `bind(threadIdx.x)` 会在 lowering 时生成 TIR 的 `AttrStmt(thread_extent=...)`；在本仓库里你可以先用 TIR Pass 直接生成/校正这些标注，作为后续 codegen 的输入。
+
+## 7. ExecutionPlan JSON Workflow (Phase-1)
+
+Phase-1 supports exporting ExecutionPlan to JSON at compile time, then loading JSON at runtime.
+
+### 7.1 Compile-side APIs
+
+- `kxc.relay.transform.lower_to_exec_plan_json(func) -> string`
+- `kxc.relay.transform.lower_to_exec_plan_json_file(func, path) -> string`
+
+### 7.2 Runtime-side APIs
+
+- `kxc.disco.execute_plan_json(session, json_text) -> Map<int, DRef>`
+- `kxc.disco.execute_plan_json_output(session, json_text) -> DRef`
+- `kxc.disco.execute_plan_json_file(session, path) -> Map<int, DRef>`
+- `kxc.disco.execute_plan_json_file_output(session, path) -> DRef`
+
+### 7.3 C++ Serialization APIs
+
+- `SerializeExecutionPlanToJson(const ExecutionPlan&)`
+- `DeserializeExecutionPlanFromJson(const std::string&)`
+- `LoadExecutionPlanFromJsonFile(const std::string&)`
+- `SaveExecutionPlanToJsonFile(const ExecutionPlan&, const std::string&)`
+
+### 7.4 Notes
+
+- `schema_version` is fixed to `1` in Phase-1.
+- `kernel_symbol` is reserved for Phase-2 kernel dispatch integration.
+- Phase-1 keeps `KernelExec` runtime behavior as placeholder.
+
+## Pass Pipeline APIs (2026-02 update)
+
+The repository provides lightweight pass pipelines for Relay and TIR.
+
+### Relay Pipeline Entry
+
+- `kxc.relay.transform.run_pipeline(func, pass_names)`
+
+### Relay Single Pass Entry
+
+- `kxc.relay.transform.fold_tuple_get_item(func)`
+- `kxc.relay.transform.fold_constant(func)`
+- `kxc.relay.transform.simplify_expr(func)`
+- `kxc.relay.transform.canonicalize_cast(func)`
+- `kxc.relay.transform.remove_standalone_reshapes(func)`
+- `kxc.relay.transform.eliminate_common_subexpr(func)`
+- `kxc.relay.transform.eliminate_dead_let(func)`
+- `kxc.relay.transform.annotate_memory_scope(func)`
+- `kxc.relay.transform.capture_post_dfs_index_in_spans(func)`
+
+Relay default alias:
+
+- `optimize_default` ->
+  `fold_tuple_get_item` ->
+  `fold_constant` ->
+  `simplify_expr` ->
+  `canonicalize_cast` ->
+  `remove_standalone_reshapes` ->
+  `eliminate_common_subexpr` ->
+  `eliminate_dead_let` ->
+  `annotate_memory_scope` ->
+  `capture_post_dfs_index_in_spans`
+
+### TIR Pipeline Entry
+
+- `kxc.tir.transform.run_pipeline(func, pass_names)`
+
+### TIR Single Pass Entry
+
+- `kxc.tir.transform.fold_constant(func)`
+- `kxc.tir.transform.simplify_expr(func)`
+- `kxc.tir.transform.force_narrow_index_to_i32(func)`
+- `kxc.tir.transform.convert_for_loops_serial(func)`
+- `kxc.tir.transform.loop_partition(func)`
+- `kxc.tir.transform.unroll_loop(func)`
+- `kxc.tir.transform.vectorize_loop(func)`
+- `kxc.tir.transform.remove_no_op(func)`
+
+TIR default alias:
+
+- `optimize_default` ->
+  `fold_constant` ->
+  `simplify_expr` ->
+  `force_narrow_index_to_i32` ->
+  `convert_for_loops_serial` ->
+  `loop_partition` ->
+  `unroll_loop` ->
+  `vectorize_loop` ->
+  `remove_no_op`
+
+### C++ APIs
+
+- `kxc::relay::RunRelayPassPipeline(const Function&, const Array<String>&)`
+- `kxc::tir::RunTIRPassPipeline(const tir::PrimFunc&, const Array<String>&)`
+
+The pipeline throws a runtime error when pass names are unknown.

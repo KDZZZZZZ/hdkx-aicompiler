@@ -365,6 +365,11 @@ Expr RelayPass::VisitVar(const VarNode* op, const Expr& ref) {
     return ref;
 }
 
+Expr RelayPass::VisitOp(const relay::OpNode* op, const Expr& ref) {
+    (void)op;
+    return ref;
+}
+
 Expr RelayPass::VisitCall(const CallNode* op, const Expr& ref) {
     auto new_op = Mutate(op->op);
     Array<Expr> new_args;
@@ -762,7 +767,8 @@ tir::Stmt TIRPass::VisitEvaluate(const tir::EvaluateNode* op, const tir::Stmt& r
 
 tir::Var TIRPass::MutateToVar(const tir::Var& var) {
     if (!var.defined()) return var;
-    tir::PrimExpr new_var_expr = Mutate(tir::PrimExpr(var));
+    const tir::PrimExpr& var_expr = static_cast<const tir::PrimExpr&>(var);
+    tir::PrimExpr new_var_expr = Mutate(var_expr);
     if (!new_var_expr.defined()) {
         throw std::runtime_error("TIRPass mutated Var into undefined expression");
     }

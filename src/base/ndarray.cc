@@ -14,6 +14,8 @@ DLDataType ParseDType(const std::string& dtype_str) {
     if (dtype_str == "float64") return {kDLFloat, 64, 1};
     if (dtype_str == "int64") return {kDLInt, 64, 1};
     if (dtype_str == "int8") return {kDLInt, 8, 1};
+    if (dtype_str == "uint8") return {kDLUint, 8, 1};
+    if (dtype_str == "bool") return {kDLUint, 1, 1};
     return {kDLFloat, 32, 1};
 }
 
@@ -44,7 +46,8 @@ NDArray::NDArray(Array<int64_t> shape, std::string dtype_str) {
     for (auto dim : node->shape) {
         elements *= dim;
     }
-    size_t bytes = static_cast<size_t>(elements) * (node->dl_tensor.dtype.bits / 8);
+    size_t bytes = static_cast<size_t>(elements) *
+                   ((node->dl_tensor.dtype.bits + 7) / 8);
     if (bytes == 0) {
         bytes = 1;
     }
@@ -64,4 +67,3 @@ const DLTensor* NDArray::operator*() const {
 
 }  // namespace runtime
 }  // namespace kxc
-

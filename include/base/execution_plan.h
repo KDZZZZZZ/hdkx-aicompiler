@@ -38,6 +38,7 @@ public:
 class KernelExecNode : public ExecNodeBaseNode {
 public:
     std::string op_name;
+    std::string kernel_symbol;
     tir::PrimFunc primfunc;
 
     KXC_OBJECT_DECLARE
@@ -49,7 +50,8 @@ public:
     using ExecNodeBase::ExecNodeBase;
     explicit KernelExec(const ObjectRef& ref) : ExecNodeBase(ref) {}
     KernelExec(std::string op_name, tir::PrimFunc primfunc, Array<int> input_values,
-               Array<int> output_values, Array<int> worker_set);
+               Array<int> output_values, Array<int> worker_set,
+               std::string kernel_symbol = "");
     const KernelExecNode* operator->() const {
         return static_cast<const KernelExecNode*>(object_);
     }
@@ -97,6 +99,10 @@ class ExecutionPlanNode : public Object {
 public:
     Array<ObjectRef> nodes;
     Map<int, VirtualDevice> value_virtual_devices;
+    Array<int> input_value_ids;
+    Array<int> constant_value_ids;
+    Map<int, Array<int64_t>> value_shapes;
+    Map<int, std::string> value_dtypes;
     int num_values{0};
     PassContext pass_ctx;
     int output_value{-1};
@@ -110,6 +116,8 @@ public:
     using ObjectRef::ObjectRef;
     explicit ExecutionPlan(const ObjectRef& ref) : ObjectRef(ref) {}
     ExecutionPlan(Array<ObjectRef> nodes, Map<int, VirtualDevice> value_virtual_devices,
+                  Array<int> input_value_ids, Array<int> constant_value_ids,
+                  Map<int, Array<int64_t>> value_shapes, Map<int, std::string> value_dtypes,
                   int num_values, PassContext pass_ctx, int output_value);
     const ExecutionPlanNode* operator->() const {
         return static_cast<const ExecutionPlanNode*>(object_);
@@ -119,5 +127,9 @@ public:
 
 bool IsCommunicationOpName(const std::string& op_name);
 
-}  // namespace kxc
+std::string SerializeExecutionPlanToJson(const ExecutionPlan& plan);
+ExecutionPlan DeserializeExecutionPlanFromJson(const std::string& json_text);
+ExecutionPlan LoadExecutionPlanFromJsonFile(const std::string& path);
+void SaveExecutionPlanToJsonFile(const ExecutionPlan& plan, const std::string& path);
 
+}  // namespace kxc

@@ -7,6 +7,7 @@
 
 #include "base/container.h"
 #include "base/disco_placement.h"
+#include "relay/op.h"
 #include "relay/relay.h"
 #include "tir/stmt.h"
 
@@ -80,6 +81,7 @@ public:
 
         if (auto* n = expr.As<ConstantNode>()) return VisitConstant(n, expr);
         if (auto* n = expr.As<VarNode>()) return VisitVar(n, expr);
+        if (auto* n = expr.As<relay::OpNode>()) return VisitOp(n, expr);
         if (auto* n = expr.As<CallNode>()) return VisitCall(n, expr);
         if (auto* n = expr.As<FunctionNode>()) return VisitFunction(n, expr);
         if (auto* n = expr.As<IfNode>()) return VisitIf(n, expr);
@@ -93,6 +95,7 @@ public:
 protected:
     virtual R VisitConstant(const ConstantNode* op, const Expr& ref) { return VisitDefault(ref); }
     virtual R VisitVar(const VarNode* op, const Expr& ref) { return VisitDefault(ref); }
+    virtual R VisitOp(const relay::OpNode* op, const Expr& ref) { return VisitDefault(ref); }
     virtual R VisitCall(const CallNode* op, const Expr& ref) { return VisitDefault(ref); }
     virtual R VisitFunction(const FunctionNode* op, const Expr& ref) { return VisitDefault(ref); }
     virtual R VisitIf(const IfNode* op, const Expr& ref) { return VisitDefault(ref); }
@@ -115,6 +118,7 @@ public:
 protected:
     Expr VisitConstant(const ConstantNode* op, const Expr& ref) override;
     Expr VisitVar(const VarNode* op, const Expr& ref) override;
+    Expr VisitOp(const relay::OpNode* op, const Expr& ref) override;
     Expr VisitCall(const CallNode* op, const Expr& ref) override;
     Expr VisitFunction(const FunctionNode* op, const Expr& ref) override;
     Expr VisitIf(const IfNode* op, const Expr& ref) override;

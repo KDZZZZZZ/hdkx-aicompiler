@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(KXC_ENABLE_CUDA "Enable CUDA support when toolkit is available" ON)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build test/resnet18_ir_dump.cpp" ON)
 option(KXC_BUILD_DEBUG_EXAMPLES "Build temporary debug examples in test/" OFF)
+option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 
 if(MSVC)
   add_compile_options(/utf-8 /EHsc)
@@ -54,10 +55,22 @@ set(KXC_RUNTIME_SOURCES
   src/base/device/cpu_device_api.cc
   src/base/device/cuda_device_api.cc
   src/relay/relay.cc
+  src/relay/pass_utils.cc
   src/relay/op_attrs.cc
   src/relay/op_macros.cc
   src/relay/common_ops.cc
   src/relay/backend/lower.cc
+  src/relay/pass/print_ir.cc
+  src/relay/transforms/pipeline.cc
+  src/relay/transforms/fold_constant.cc
+  src/relay/transforms/simplify_expr.cc
+  src/relay/transforms/canonicalize_cast.cc
+  src/relay/transforms/remove_standalone_reshapes.cc
+  src/relay/transforms/fold_tuple_get_item.cc
+  src/relay/transforms/eliminate_common_subexpr.cc
+  src/relay/transforms/eliminate_dead_let.cc
+  src/relay/transforms/capture_post_dfs_index_in_spans.cc
+  src/relay/transforms/annotate_memory_scope.cc
   src/relay/transforms/multi_device.cc
   src/relay/op/tensor/math.cc
   src/relay/op/tensor/reduce.cc
@@ -70,7 +83,17 @@ set(KXC_RUNTIME_SOURCES
   src/relay/op/op_ffi.cc
   src/tir/expr.cc
   src/tir/stmt.cc
+  src/tir/pass_utils.cc
   src/tir/pass/print_ir.cc
+  src/tir/transforms/pipeline.cc
+  src/tir/transforms/fold_constant.cc
+  src/tir/transforms/force_narrow_index_to_i32.cc
+  src/tir/transforms/simplify_expr.cc
+  src/tir/transforms/loop_partition.cc
+  src/tir/transforms/unroll_loop.cc
+  src/tir/transforms/vectorize_loop.cc
+  src/tir/transforms/remove_no_op.cc
+  src/tir/transforms/convert_for_loops_serial.cc
   src/te/te.cc
 )
 
@@ -122,4 +145,16 @@ endif()
 if(KXC_BUILD_DEBUG_EXAMPLES)
   kxc_add_runtime_exe(tmp_conv_lower test/tmp_conv_lower.cpp)
   kxc_add_runtime_exe(tmp_maxpool_compute test/tmp_maxpool_compute.cpp)
+endif()
+
+if(KXC_BUILD_PASS_TESTS)
+  kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
+
+  add_custom_target(run_pass_pipeline_test
+    COMMAND "$<TARGET_FILE:pass_pipeline_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS pass_pipeline_test
+    USES_TERMINAL
+    COMMENT "Run pass_pipeline_test"
+  )
 endif()

@@ -1,7 +1,9 @@
 # Build directories
 build/
 build-*/
+build_*/
 cmake-build-*/
+out/
 
 # CMake generated files
 CMakeCache.txt
@@ -11,6 +13,7 @@ compile_commands.json
 
 # IDE folders
 .idea/
+.vscode/
 
 # Binary/artifact outputs
 *.obj
@@ -27,6 +30,11 @@ compile_commands.json
 *.ilk
 *.log
 
-# Local test and temporary workspace
-test/
-tests/
+# Test and temporary artifacts (keep test sources tracked)
+test/*.exe
+test/*.obj
+test/*.log
+test/*stdout.txt
+test/*stderr.txt
+test/resnet18_ir_dump.txt
+test/resnet18_all_output.txt
