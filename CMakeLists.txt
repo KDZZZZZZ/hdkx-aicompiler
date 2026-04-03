@@ -8,9 +8,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(KXC_ENABLE_CUDA "Enable CUDA support when toolkit is available" ON)
+option(KXC_ENABLE_LLVM "Enable LLVM backend for codegen" ON)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build test/resnet18_ir_dump.cpp" ON)
 option(KXC_BUILD_DEBUG_EXAMPLES "Build temporary debug examples in test/" OFF)
 option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
+option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
 
 if(MSVC)
   add_compile_options(/utf-8 /EHsc)
@@ -32,6 +34,50 @@ elseif(KXC_ENABLE_CUDA AND NOT CUDAToolkit_FOUND)
 else()
   set(KXC_USE_CUDA 0)
   message(STATUS "CUDA support: disabled by KXC_ENABLE_CUDA=OFF")
+endif()
+
+# ==================== LLVM Support ====================
+if(KXC_ENABLE_LLVM)
+  find_package(LLVM QUIET CONFIG)
+endif()
+
+if(KXC_ENABLE_LLVM AND LLVM_FOUND)
+  set(KXC_USE_LLVM 1)
+  message(STATUS "LLVM support: enabled (version ${LLVM_PACKAGE_VERSION})")
+
+  # Use llvm-config to get proper link flags
+  execute_process(
+    COMMAND llvm-config --link-static --ldflags
+    OUTPUT_VARIABLE LLVM_LDFLAGS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  execute_process(
+    COMMAND llvm-config --link-static --libs core support irreader executionengine orcjit aarch64asmparser aarch64codegen aarch64desc aarch64info passes
+    OUTPUT_VARIABLE LLVM_LIBS_STR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  execute_process(
+    COMMAND llvm-config --system-libs
+    OUTPUT_VARIABLE LLVM_SYSTEM_LIBS_STR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+
+  # Convert to list
+  string(REPLACE " " ";" LLVM_LIBS ${LLVM_LIBS_STR})
+  string(REPLACE " " ";" LLVM_LDFLAGS_LIST ${LLVM_LDFLAGS})
+  string(REPLACE " " ";" LLVM_SYSTEM_LIBS ${LLVM_SYSTEM_LIBS_STR})
+  # Remove -lxml2 if not available (optional LLVM dependency)
+  list(REMOVE_ITEM LLVM_SYSTEM_LIBS "-lxml2")
+
+  set(KXC_LLVM_INCLUDE_DIRS ${LLVM_INCLUDE_DIRS})
+  set(KXC_LLVM_DEFINITIONS ${LLVM_DEFINITIONS})
+  set(KXC_LLVM_LINK_FLAGS "${LLVM_LDFLAGS}")
+elseif(KXC_ENABLE_LLVM AND NOT LLVM_FOUND)
+  set(KXC_USE_LLVM 0)
+  message(WARNING "KXC_ENABLE_LLVM=ON but LLVM was not found. Codegen will be disabled.")
+else()
+  set(KXC_USE_LLVM 0)
+  message(STATUS "LLVM support: disabled by KXC_ENABLE_LLVM=OFF")
 endif()
 
 set(KXC_RUNTIME_SOURCES
@@ -97,18 +143,50 @@ set(KXC_RUNTIME_SOURCES
   src/te/te.cc
 )
 
+# ==================== Codegen Sources (conditional) ====================
+# C codegen and runtime are always available
+list(APPEND KXC_RUNTIME_SOURCES
+  src/codegen/codegen_c.cc
+  src/api/compile_config.cc
+  src/api/compiler.cc
+  src/runtime/shape_predictor.cc
+  src/runtime/kernel_cache.cc
+  src/runtime/kernel_runner.cc
+  src/runtime/background_compiler.cc
+  src/runtime/runtime_session.cc
+)
+if(KXC_USE_LLVM)
+  list(APPEND KXC_RUNTIME_SOURCES
+    src/codegen/compiled_kernel.cc
+    src/codegen/codegen_llvm.cc
+    src/codegen/llvm_jit.cc
+  )
+endif()
+
 add_library(kxc_runtime_obj OBJECT ${KXC_RUNTIME_SOURCES})
 target_include_directories(kxc_runtime_obj PUBLIC "${KXC_INCLUDE_DIR}")
-target_compile_definitions(kxc_runtime_obj PUBLIC KXC_USE_CUDA=${KXC_USE_CUDA})
+target_compile_definitions(kxc_runtime_obj PUBLIC KXC_USE_CUDA=${KXC_USE_CUDA} KXC_USE_LLVM=${KXC_USE_LLVM})
 if(KXC_USE_CUDA)
   target_link_libraries(kxc_runtime_obj PUBLIC ${KXC_CUDA_LIBS})
+endif()
+if(KXC_USE_LLVM)
+  target_include_directories(kxc_runtime_obj SYSTEM PUBLIC ${KXC_LLVM_INCLUDE_DIRS})
+  target_compile_definitions(kxc_runtime_obj PUBLIC ${KXC_LLVM_DEFINITIONS})
 endif()
 
 add_library(kxc_runtime STATIC $<TARGET_OBJECTS:kxc_runtime_obj>)
 target_include_directories(kxc_runtime PUBLIC "${KXC_INCLUDE_DIR}")
-target_compile_definitions(kxc_runtime PUBLIC KXC_USE_CUDA=${KXC_USE_CUDA})
+target_compile_definitions(kxc_runtime PUBLIC KXC_USE_CUDA=${KXC_USE_CUDA} KXC_USE_LLVM=${KXC_USE_LLVM})
 if(KXC_USE_CUDA)
   target_link_libraries(kxc_runtime PUBLIC ${KXC_CUDA_LIBS})
+endif()
+if(KXC_USE_LLVM)
+  target_include_directories(kxc_runtime SYSTEM PUBLIC ${KXC_LLVM_INCLUDE_DIRS})
+  target_compile_definitions(kxc_runtime PUBLIC ${KXC_LLVM_DEFINITIONS})
+  target_link_libraries(kxc_runtime PUBLIC ${LLVM_LIBS} ${LLVM_SYSTEM_LIBS})
+  target_link_options(kxc_runtime PUBLIC ${LLVM_LDFLAGS_LIST})
+  # LLVM archives contain bitcode (LTO), use lld to handle them
+  target_link_options(kxc_runtime PUBLIC -fuse-ld=lld)
 endif()
 
 function(kxc_add_runtime_exe target source_file)
@@ -121,9 +199,16 @@ function(kxc_add_runtime_exe target source_file)
     $<TARGET_OBJECTS:kxc_runtime_obj>
   )
   target_include_directories(${target} PRIVATE "${KXC_INCLUDE_DIR}")
-  target_compile_definitions(${target} PRIVATE KXC_USE_CUDA=${KXC_USE_CUDA})
+  target_compile_definitions(${target} PRIVATE KXC_USE_CUDA=${KXC_USE_CUDA} KXC_USE_LLVM=${KXC_USE_LLVM})
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
+  endif()
+  if(KXC_USE_LLVM)
+    target_include_directories(${target} SYSTEM PRIVATE ${KXC_LLVM_INCLUDE_DIRS})
+    target_compile_definitions(${target} PRIVATE ${KXC_LLVM_DEFINITIONS})
+    target_link_libraries(${target} PRIVATE ${LLVM_LIBS} ${LLVM_SYSTEM_LIBS})
+    target_link_options(${target} PRIVATE ${LLVM_LDFLAGS_LIST})
+    target_link_options(${target} PRIVATE -fuse-ld=lld)
   endif()
   if(MSVC)
     target_compile_options(${target} PRIVATE /utf-8 /EHsc)
@@ -156,5 +241,17 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS pass_pipeline_test
     USES_TERMINAL
     COMMENT "Run pass_pipeline_test"
+  )
+endif()
+
+if(KXC_BUILD_CODEGEN_TESTS AND KXC_USE_LLVM)
+  kxc_add_runtime_exe(codegen_llvm_test test/codegen_llvm_test.cpp)
+
+  add_custom_target(run_codegen_llvm_test
+    COMMAND "$<TARGET_FILE:codegen_llvm_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS codegen_llvm_test
+    USES_TERMINAL
+    COMMENT "Run codegen_llvm_test"
   )
 endif()

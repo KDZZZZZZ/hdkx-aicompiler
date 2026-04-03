@@ -24,7 +24,7 @@ public:
     PackedFunc Get(const std::string& name) const {
         auto it = functions_.find(name);
         if (it == functions_.end()) {
-            return nullptr; // or WrappedFunc()
+            return PackedFunc();
         }
         return it->second;
     }

@@ -50,8 +50,8 @@ KXC_OBJECT_DEFINE(ExprNode)
 class Expr : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
-    Expr(ObjectRef n) : ObjectRef(n) {}
-    
+    explicit Expr(ObjectRef n) : ObjectRef(n) {}
+
     Type checked_type() const {
         return static_cast<const ExprNode*>(object_)->checked_type_;
     }

@@ -79,7 +79,7 @@ void CollectRelayVirtualDevices(const Expr& expr, std::unordered_set<const Objec
     }
     if (auto* fn = expr.As<FunctionNode>()) {
         for (const auto& param : fn->params) {
-            CollectRelayVirtualDevices(Expr(param), visited_exprs, visited_virtual_devices,
+            CollectRelayVirtualDevices(Expr(ObjectRef(param)), visited_exprs, visited_virtual_devices,
                                        out_virtual_devices);
         }
         CollectRelayVirtualDevices(fn->body, visited_exprs, visited_virtual_devices, out_virtual_devices);
@@ -94,7 +94,7 @@ void CollectRelayVirtualDevices(const Expr& expr, std::unordered_set<const Objec
         return;
     }
     if (auto* let_node = expr.As<LetNode>()) {
-        CollectRelayVirtualDevices(Expr(let_node->var), visited_exprs, visited_virtual_devices,
+        CollectRelayVirtualDevices(Expr(ObjectRef(let_node->var)), visited_exprs, visited_virtual_devices,
                                    out_virtual_devices);
         CollectRelayVirtualDevices(let_node->value, visited_exprs, visited_virtual_devices,
                                    out_virtual_devices);
@@ -201,7 +201,7 @@ PassContext PassContext::FromRelay(const Expr& expr) {
 }
 
 PassContext PassContext::FromRelay(const Function& func) {
-    return FromRelay(Expr(func));
+    return FromRelay(Expr(ObjectRef(func)));
 }
 
 PassContext PassContext::FromTIR(const tir::PrimFunc& func) {
@@ -331,7 +331,7 @@ PassContext BuildDiscoPlacementPass(const Expr& expr) {
 }
 
 PassContext BuildDiscoPlacementPass(const Function& func) {
-    return BuildDiscoPlacementPass(Expr(func));
+    return BuildDiscoPlacementPass(Expr(ObjectRef(func)));
 }
 
 Expr RelayPass::Mutate(const Expr& expr) {
@@ -345,7 +345,7 @@ Expr RelayPass::Mutate(const Expr& expr) {
 
 Function RelayPass::Mutate(const Function& func) {
     if (!func.defined()) return func;
-    Expr out = Mutate(Expr(func));
+    Expr out = Mutate(Expr(ObjectRef(func)));
     if (!out.defined()) return Function();
     if (!out.As<FunctionNode>()) {
         throw std::runtime_error("RelayPass expected Function result when mutating Function");
@@ -446,7 +446,7 @@ Expr RelayPass::VisitTupleGetItem(const TupleGetItemNode* op, const Expr& ref) {
 
 Var RelayPass::MutateToVar(const Var& var) {
     if (!var.defined()) return var;
-    Expr new_var = Mutate(Expr(var));
+    Expr new_var = Mutate(Expr(ObjectRef(var)));
     if (!new_var.defined()) {
         throw std::runtime_error("RelayPass mutated Var into undefined expression");
     }

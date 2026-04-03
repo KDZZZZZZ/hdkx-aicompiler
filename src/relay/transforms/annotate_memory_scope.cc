@@ -21,7 +21,7 @@ void VisitRelayExpr(const Expr& expr, const std::function<void(const Expr&)>& f,
 
     if (const auto* fn = expr.As<FunctionNode>()) {
         for (const auto& param : fn->params) {
-            VisitRelayExpr(Expr(param), f, visited);
+            VisitRelayExpr(Expr(ObjectRef(param)), f, visited);
         }
         VisitRelayExpr(fn->body, f, visited);
         return;
@@ -40,7 +40,7 @@ void VisitRelayExpr(const Expr& expr, const std::function<void(const Expr&)>& f,
         return;
     }
     if (const auto* let_node = expr.As<LetNode>()) {
-        VisitRelayExpr(Expr(let_node->var), f, visited);
+        VisitRelayExpr(Expr(ObjectRef(let_node->var)), f, visited);
         VisitRelayExpr(let_node->value, f, visited);
         VisitRelayExpr(let_node->body, f, visited);
         return;
@@ -64,7 +64,7 @@ Function AnnotateMemoryScopePass(const Function& func) {
     }
 
     std::unordered_set<const Object*> visited;
-    VisitRelayExpr(Expr(func),
+    VisitRelayExpr(Expr(ObjectRef(func)),
                    [](const Expr& expr) {
                        if (!expr.defined()) {
                            return;

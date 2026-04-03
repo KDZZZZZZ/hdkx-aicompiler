@@ -124,7 +124,7 @@ void IRPrinterPass::Run(const Expr& expr, std::ostream& os) const {
 }
 
 void IRPrinterPass::Run(const Function& func, std::ostream& os) const {
-    Run(Expr(func), os);
+    Run(Expr(ObjectRef(func)), os);
 }
 
 void DumpExpr(const Expr& expr, std::ostream& os, int indent_spaces) {
@@ -133,7 +133,7 @@ void DumpExpr(const Expr& expr, std::ostream& os, int indent_spaces) {
 }
 
 void DumpFunction(const Function& func, std::ostream& os, int indent_spaces) {
-    DumpExpr(Expr(func), os, indent_spaces);
+    DumpExpr(Expr(ObjectRef(func)), os, indent_spaces);
 }
 
 std::string ToText(const Expr& expr, int indent_spaces) {

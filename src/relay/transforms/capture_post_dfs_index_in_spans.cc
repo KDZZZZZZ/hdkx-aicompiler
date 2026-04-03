@@ -20,7 +20,7 @@ std::vector<Expr> GetChildren(const Expr& expr) {
     }
     if (const auto* fn = expr.As<FunctionNode>()) {
         for (const auto& param : fn->params) {
-            children.push_back(Expr(param));
+            children.push_back(Expr(ObjectRef(param)));
         }
         children.push_back(fn->body);
         return children;
@@ -38,7 +38,7 @@ std::vector<Expr> GetChildren(const Expr& expr) {
         return children;
     }
     if (const auto* let_node = expr.As<LetNode>()) {
-        children.push_back(Expr(let_node->var));
+        children.push_back(Expr(ObjectRef(let_node->var)));
         children.push_back(let_node->value);
         children.push_back(let_node->body);
         return children;
@@ -74,7 +74,7 @@ Function CapturePostDfsIndexInSpansPass(const Function& func) {
         return func;
     }
 
-    Expr root = Expr(func);
+    Expr root = Expr(ObjectRef(func));
     std::unordered_set<const Object*> visited;
     std::unordered_map<const Object*, Expr> node_to_expr;
     std::unordered_map<const Object*, std::vector<const Object*>> succ;
