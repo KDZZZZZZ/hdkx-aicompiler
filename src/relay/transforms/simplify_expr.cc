@@ -1,3 +1,7 @@
+/*! \file src/relay/transforms/simplify_expr.cc
+ * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
+ */
+
 #include "relay/transforms/simplify_expr.h"
 
 #include "base/pass.h"

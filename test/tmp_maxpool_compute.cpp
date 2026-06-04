@@ -1,3 +1,7 @@
+/*! \file test/tmp_maxpool_compute.cpp
+ * \brief 定义编译器核心路径、pass、codegen 和 profiling 的 C++ 测试入口。
+ */
+
 #include "relay/op.h"
 #include "te/te.h"
 #include <iostream>

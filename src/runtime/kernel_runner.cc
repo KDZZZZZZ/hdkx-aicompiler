@@ -1,3 +1,7 @@
+/*! \file src/runtime/kernel_runner.cc
+ * \brief 实现 adaptive runtime、kernel cache、shape 统计和后台编译。
+ */
+
 #include "runtime/kernel_runner.h"
 
 #include <stdexcept>

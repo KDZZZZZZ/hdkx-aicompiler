@@ -1,3 +1,7 @@
+/*! \file src/tir/transforms/force_narrow_index_to_i32.cc
+ * \brief 实现 TIR 优化 pass 和 pipeline。
+ */
+
 #include "tir/transforms/force_narrow_index_to_i32.h"
 
 #include "base/pass.h"

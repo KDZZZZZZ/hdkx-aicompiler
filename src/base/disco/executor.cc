@@ -1,9 +1,14 @@
+/*! \file src/base/disco/executor.cc
+ * \brief 实现 Disco 线程会话、执行计划解释器和 CPU/NCCL 通信后端。
+ */
+
 #include "base/disco/executor.h"
 
 #include <stdexcept>
 #include <string>
 
 #include "base/device.h"
+#include "base/profiling.h"
 #include "base/packedfunc.h"
 #include "base/registry.h"
 #include "relay/op.h"
@@ -18,6 +23,13 @@ Array<int> EffectiveWorkerSet(const Array<int>& worker_set, int fallback_worker)
         return worker_set;
     }
     return {fallback_worker >= 0 ? fallback_worker : 0};
+}
+
+profiling::EventSpec MakeExecutorSpec(const std::string& event_type) {
+    profiling::EventSpec spec;
+    spec.component = "execution_plan";
+    spec.event_type = event_type;
+    return spec;
 }
 
 }  // namespace
@@ -38,22 +50,37 @@ Map<int, DRef> ExecutionPlanExecutor::Execute(const ExecutionPlan& plan,
     if (!plan.defined()) {
         throw std::runtime_error("Execute requires a defined ExecutionPlan");
     }
+    profiling::ScopedSpan execute_span(profiling::CurrentContext(),
+                                       MakeExecutorSpec("execute_plan"));
+    execute_span.AddMetric("node_count", static_cast<double>(plan->nodes.size()));
+    execute_span.AddMetric("value_count", static_cast<double>(plan->num_values));
     values_ = initial_values;
 
-    for (const auto& node_ref : plan->nodes) {
+    for (size_t node_index = 0; node_index < plan->nodes.size(); ++node_index) {
+        const auto& node_ref = plan->nodes[node_index];
         if (!node_ref.defined()) {
             continue;
         }
         if (node_ref.get()->GetTypeId() == KernelExecNode::_type_index) {
+            profiling::ScopedSpan node_span(profiling::CurrentContext(),
+                                            MakeExecutorSpec("execute_kernel_node"));
+            node_span.AddField("node_index", std::to_string(node_index));
             ExecuteKernel(plan, static_cast<const KernelExecNode*>(node_ref.get()));
             continue;
         }
         if (node_ref.get()->GetTypeId() == CommExecNode::_type_index) {
+            profiling::ScopedSpan node_span(profiling::CurrentContext(),
+                                            MakeExecutorSpec("execute_comm_node"));
+            node_span.AddField("node_index", std::to_string(node_index));
             ExecuteComm(plan, static_cast<const CommExecNode*>(node_ref.get()));
             continue;
         }
         if (node_ref.get()->GetTypeId() == BarrierExecNode::_type_index) {
             const auto* barrier = static_cast<const BarrierExecNode*>(node_ref.get());
+            profiling::ScopedSpan node_span(profiling::CurrentContext(),
+                                            MakeExecutorSpec("execute_barrier_node"));
+            node_span.AddField("node_index", std::to_string(node_index));
+            node_span.AddField("tag", barrier->tag);
             for (int worker : EffectiveWorkerSet(barrier->worker_set, 0)) {
                 ccl_backend_->SyncWorker(session_, worker);
             }
@@ -96,6 +123,12 @@ void ExecutionPlanExecutor::ExecuteKernel(const ExecutionPlan& plan, const Kerne
     if (!kernel || kernel->output_values.empty()) {
         return;
     }
+    profiling::ScopedSpan kernel_span(profiling::CurrentContext(),
+                                      MakeExecutorSpec("kernel_exec"));
+    kernel_span.AddField("op_name", kernel->op_name);
+    kernel_span.AddField("kernel_symbol", kernel->kernel_symbol);
+    kernel_span.AddMetric("input_count", static_cast<double>(kernel->input_values.size()));
+    kernel_span.AddMetric("output_count", static_cast<double>(kernel->output_values.size()));
 
     if (kernel->input_values.empty()) {
         for (int out_id : kernel->output_values) {
@@ -127,6 +160,11 @@ void ExecutionPlanExecutor::ExecuteComm(const ExecutionPlan& plan, const CommExe
     if (!comm || comm->output_values.empty()) {
         return;
     }
+    profiling::ScopedSpan comm_span(profiling::CurrentContext(),
+                                    MakeExecutorSpec("comm_exec"));
+    comm_span.AddField("op_name", comm->op_name);
+    comm_span.AddMetric("input_count", static_cast<double>(comm->input_values.size()));
+    comm_span.AddMetric("output_count", static_cast<double>(comm->output_values.size()));
     if (comm->input_values.empty()) {
         throw std::runtime_error("Communication node requires at least one input");
     }

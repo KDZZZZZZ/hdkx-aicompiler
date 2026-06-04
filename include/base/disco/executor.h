@@ -1,3 +1,7 @@
+/*! \file include/base/disco/executor.h
+ * \brief 定义 Disco 分布式会话、DRef、执行器和通信后端接口。
+ */
+
 #pragma once
 
 #include <memory>

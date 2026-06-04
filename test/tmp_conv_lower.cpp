@@ -1,3 +1,7 @@
+/*! \file test/tmp_conv_lower.cpp
+ * \brief 定义编译器核心路径、pass、codegen 和 profiling 的 C++ 测试入口。
+ */
+
 #include "relay/relay.h"
 #include "relay/op.h"
 #include "relay/transforms/lower.h"

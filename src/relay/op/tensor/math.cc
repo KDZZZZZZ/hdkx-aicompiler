@@ -1,3 +1,7 @@
+/*! \file src/relay/op/tensor/math.cc
+ * \brief 注册 Relay 算子及其 FRelayToTE compute。
+ */
+
 #include "relay/op_macros.h"
 #include "relay/op_attr_types.h"
 #include "te/topi/broadcast.h"

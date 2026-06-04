@@ -1,3 +1,7 @@
+/*! \file include/base/container.h
+ * \brief 定义基础对象系统、容器、设备、NDArray、Target、PassContext 和 profiling 公共类型。
+ */
+
 #pragma once
 #include "object.h"
 #include <vector>

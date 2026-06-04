@@ -1,3 +1,7 @@
+/*! \file src/relay/common_ops.cc
+ * \brief 实现 Relay 节点、算子元数据、pass 工具和公共注册。
+ */
+
 #include "relay/op.h"
 #include "relay/op_macros.h"
 #include <iostream>

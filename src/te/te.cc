@@ -1,3 +1,7 @@
+/*! \file src/te/te.cc
+ * \brief 实现 TE tensor、compute、reduce 和 schedule helper。
+ */
+
 #include "te/te.h"
 
 #include <algorithm>

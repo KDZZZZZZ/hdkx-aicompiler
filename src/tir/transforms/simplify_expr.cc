@@ -1,3 +1,7 @@
+/*! \file src/tir/transforms/simplify_expr.cc
+ * \brief 实现 TIR 优化 pass 和 pipeline。
+ */
+
 #include "tir/transforms/simplify_expr.h"
 
 #include "base/pass.h"

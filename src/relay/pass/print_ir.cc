@@ -1,3 +1,7 @@
+/*! \file src/relay/pass/print_ir.cc
+ * \brief 实现 Relay IR 文本打印和调试工具。
+ */
+
 #include "relay/pass/print_ir.h"
 
 #include <sstream>

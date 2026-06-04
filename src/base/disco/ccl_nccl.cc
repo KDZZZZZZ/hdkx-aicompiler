@@ -1,3 +1,7 @@
+/*! \file src/base/disco/ccl_nccl.cc
+ * \brief 实现 Disco 线程会话、执行计划解释器和 CPU/NCCL 通信后端。
+ */
+
 #include "base/disco/ccl_backend.h"
 
 #include <memory>

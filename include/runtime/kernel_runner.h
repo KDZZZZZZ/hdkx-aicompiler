@@ -1,3 +1,7 @@
+/*! \file include/runtime/kernel_runner.h
+ * \brief 定义 adaptive runtime、shape predictor、kernel cache 和后台编译器。
+ */
+
 #pragma once
 
 #include <atomic>
@@ -10,19 +14,18 @@
 namespace kxc {
 namespace runtime {
 
-// Kernel执行器：支持热替换
-// Run路径使用shared_ptr + atomic load，几乎无锁
+/*! \brief Kernel 执行器，封装当前可执行模块并支持线程安全热替换。 */
 class KernelRunner {
 public:
     KernelRunner() = default;
 
-    // 热替换kernel（线程安全）
+    /*! \brief 替换当前执行用 kernel。 */
     void SwapKernel(std::shared_ptr<api::CompiledModule> module);
 
-    // 执行kernel
+    /*! \brief 使用当前 kernel 执行一次调用。 */
     void Run(const std::vector<void*>& args);
 
-    // 是否有可用kernel
+    /*! \brief 判断当前是否已有可执行 kernel。 */
     bool HasKernel() const;
 
 private:

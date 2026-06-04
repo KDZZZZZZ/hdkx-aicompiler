@@ -1,3 +1,7 @@
+/*! \file include/tir/pass/print_ir.h
+ * \brief 声明 TIR IR 文本打印工具。
+ */
+
 #pragma once
 
 #include "tir/stmt.h"

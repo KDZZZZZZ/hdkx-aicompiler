@@ -1,3 +1,7 @@
+/*! \file src/relay/op_attrs.cc
+ * \brief 实现 Relay 节点、算子元数据、pass 工具和公共注册。
+ */
+
 #include "relay/op.h"
 
 namespace kxc {

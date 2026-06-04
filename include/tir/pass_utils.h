@@ -1,3 +1,7 @@
+/*! \file include/tir/pass_utils.h
+ * \brief 定义 TIR PrimExpr、Stmt、PrimFunc 和 pass 工具。
+ */
+
 #pragma once
 
 #include "tir/stmt.h"

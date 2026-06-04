@@ -1,3 +1,7 @@
+/*! \file src/relay/op/nn/softmax.cc
+ * \brief 注册 Relay 算子及其 FRelayToTE compute。
+ */
+
 #include "relay/op_macros.h"
 #include "relay/relay.h"
 

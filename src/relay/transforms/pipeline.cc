@@ -1,12 +1,19 @@
+/*! \file src/relay/transforms/pipeline.cc
+ * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
+ */
+
 #include "relay/transforms/pipeline.h"
 
 #include <functional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 
+#include "base/profiling.h"
 #include "base/packedfunc.h"
 #include "base/registry.h"
+#include "relay/pass/print_ir.h"
 #include "relay/transforms/annotate_memory_scope.h"
 #include "relay/transforms/canonicalize_cast.h"
 #include "relay/transforms/capture_post_dfs_index_in_spans.h"
@@ -23,6 +30,70 @@ namespace relay {
 namespace {
 
 using RelayPassFunc = std::function<Function(const Function&)>;
+
+std::string SanitizeArtifactName(const std::string& pass_name) {
+    std::string out;
+    out.reserve(pass_name.size());
+    for (char ch : pass_name) {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
+            out.push_back(ch);
+        } else {
+            out.push_back('_');
+        }
+    }
+    return out;
+}
+
+Function RunSinglePass(const Function& func, const std::string& pass_name);
+
+Function RunInstrumentedPass(const Function& func, const std::string& pass_name) {
+    auto profile_context = profiling::CurrentContext();
+    profiling::EventSpec spec;
+    spec.component = "relay_pass";
+    spec.event_type = "run_pass";
+    spec.pass_name = pass_name;
+    profiling::ScopedSpan span(profile_context, std::move(spec));
+
+    const std::string before_text = relay::pass::ToText(func);
+    const std::string before_hash = profiling::HashText(before_text);
+    span.AddField("ir_before_hash", before_hash);
+    span.AddMetric("ir_before_bytes", static_cast<double>(before_text.size()));
+
+    try {
+        Function updated = RunSinglePass(func, pass_name);
+        const std::string after_text = relay::pass::ToText(updated);
+        const std::string after_hash = profiling::HashText(after_text);
+        const bool changed = before_hash != after_hash;
+        span.AddField("ir_after_hash", after_hash);
+        span.AddField("ir_changed", changed ? "true" : "false");
+        span.AddMetric("ir_after_bytes", static_cast<double>(after_text.size()));
+
+        if (profiling::ShouldCaptureIR(profile_context, changed, false)) {
+            const std::string prefix = profiling::CurrentRunId() + "/relay/" +
+                                       SanitizeArtifactName(pass_name);
+            profile_context->WriteArtifact(prefix + ".before.relay.txt", before_text);
+            profile_context->WriteArtifact(prefix + ".after.relay.txt", after_text);
+        }
+        return updated;
+    } catch (const std::exception& e) {
+        span.SetStatus("error");
+        span.SetMessage(e.what());
+        if (profile_context) {
+            const std::string prefix = profiling::CurrentRunId() + "/relay/" +
+                                       SanitizeArtifactName(pass_name);
+            if (profiling::ShouldCaptureIR(profile_context, true, true)) {
+                profile_context->WriteArtifact(prefix + ".failed.before.relay.txt", before_text);
+            }
+            profile_context->RecordLog(profiling::LogSeverity::kError, "relay_pass", e.what(),
+                                       profiling::MakeFields({
+                                           {"pass_name", pass_name},
+                                           {"ir_before_hash", before_hash},
+                                       }));
+        }
+        throw;
+    }
+}
 
 const std::unordered_map<std::string, RelayPassFunc>& GetRelayPassTable() {
     static const std::unordered_map<std::string, RelayPassFunc> table = {
@@ -63,16 +134,21 @@ Function RunRelayPassPipeline(const Function& func, const Array<String>& pass_na
         throw std::runtime_error("RunRelayPassPipeline expects a defined Function");
     }
 
+    profiling::EventSpec pipeline_spec;
+    pipeline_spec.component = "relay_pipeline";
+    pipeline_spec.event_type = "run_pipeline";
+    profiling::ScopedSpan pipeline_span(profiling::CurrentContext(), std::move(pipeline_spec));
+
     Function current = func;
     for (const auto& pass_name_obj : pass_names) {
         const std::string pass_name = pass_name_obj;
         if (pass_name == "optimize_default") {
             for (const auto& default_name : GetDefaultPassOrder()) {
-                current = RunSinglePass(current, static_cast<std::string>(default_name));
+                current = RunInstrumentedPass(current, static_cast<std::string>(default_name));
             }
             continue;
         }
-        current = RunSinglePass(current, pass_name);
+        current = RunInstrumentedPass(current, pass_name);
     }
     return current;
 }

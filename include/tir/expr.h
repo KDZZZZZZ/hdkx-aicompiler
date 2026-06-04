@@ -1,3 +1,7 @@
+/*! \file include/tir/expr.h
+ * \brief 定义 TIR PrimExpr、Stmt、PrimFunc 和 pass 工具。
+ */
+
 #pragma once
 
 #include <stdint.h>
@@ -12,6 +16,7 @@
 namespace kxc {
 namespace tir {
 
+/*! \brief TIR 标量/向量数据类型描述，包含类型 code、位宽和 lanes。 */
 struct DataType {
     uint8_t code;
     uint8_t bits;
@@ -28,6 +33,7 @@ struct DataType {
     static DataType Void() { return {4, 0, 0}; }
 };
 
+/*! \brief 所有 TIR primitive expression 节点的基类。 */
 class PrimExprNode : public ExprNode {
 public:
     DataType dtype;
@@ -35,6 +41,7 @@ public:
 };
 KXC_OBJECT_DEFINE(PrimExprNode)
 
+/*! \brief TIR primitive expression 的引用类型。 */
 class PrimExpr : public Expr {
 public:
     using Expr::Expr;
@@ -48,6 +55,7 @@ public:
     DataType dtype() const { return operator->()->dtype; }
 };
 
+/*! \brief 整数字面量表达式节点。 */
 class IntImmNode : public PrimExprNode {
 public:
     int64_t value;
@@ -56,6 +64,7 @@ public:
 };
 KXC_OBJECT_DEFINE(IntImmNode)
 
+/*! \brief 整数字面量表达式引用类型。 */
 class IntImm : public PrimExpr {
 public:
     using PrimExpr::PrimExpr;
@@ -63,6 +72,7 @@ public:
     const IntImmNode* operator->() const { return static_cast<const IntImmNode*>(object_); }
 };
 
+/*! \brief 浮点字面量表达式节点。 */
 class FloatImmNode : public PrimExprNode {
 public:
     double value;
@@ -70,12 +80,14 @@ public:
 };
 KXC_OBJECT_DEFINE(FloatImmNode)
 
+/*! \brief 浮点字面量表达式引用类型。 */
 class FloatImm : public PrimExpr {
 public:
     using PrimExpr::PrimExpr;
     explicit FloatImm(double value, DataType dtype = DataType::Float(32));
 };
 
+/*! \brief TIR 符号变量节点。 */
 class VarNode : public PrimExprNode {
 public:
     std::string name_hint;
@@ -83,6 +95,7 @@ public:
 };
 KXC_OBJECT_DEFINE(VarNode)
 
+/*! \brief TIR 符号变量引用类型。 */
 class Var : public PrimExpr {
 public:
     Var() = default;
@@ -93,6 +106,7 @@ public:
     bool operator!=(const Var& other) const { return !(*this == other); }
 };
 
+/*! \brief 二元表达式节点基类，保存左右操作数。 */
 class BinaryOpNode : public PrimExprNode {
 public:
     PrimExpr a;
@@ -137,6 +151,7 @@ DEFINE_LOGIC_OP(LT)
 DEFINE_LOGIC_OP(And)
 DEFINE_LOGIC_OP(Or)
 
+/*! \brief 逻辑非表达式节点。 */
 class NotNode : public PrimExprNode {
 public:
     PrimExpr value;
@@ -144,12 +159,14 @@ public:
 };
 KXC_OBJECT_DEFINE(NotNode)
 
+/*! \brief 逻辑非表达式引用类型。 */
 class Not : public PrimExpr {
 public:
     using PrimExpr::PrimExpr;
     explicit Not(PrimExpr value);
 };
 
+/*! \brief 从 buffer 指针按下标读取的表达式节点。 */
 class LoadNode : public PrimExprNode {
 public:
     Var buffer_var;
@@ -160,12 +177,14 @@ public:
 };
 KXC_OBJECT_DEFINE(LoadNode)
 
+/*! \brief Load 表达式引用类型。 */
 class Load : public PrimExpr {
 public:
     using PrimExpr::PrimExpr;
     Load(Var buffer_var, PrimExpr index, PrimExpr predicate = PrimExpr());
 };
 
+/*! \brief 对外部函数、intrinsic 或 runtime helper 的调用表达式节点。 */
 class CallNode : public PrimExprNode {
 public:
     std::string name;
@@ -175,12 +194,14 @@ public:
 };
 KXC_OBJECT_DEFINE(CallNode)
 
+/*! \brief Call 表达式引用类型。 */
 class Call : public PrimExpr {
 public:
     using PrimExpr::PrimExpr;
     Call(DataType dtype, std::string name, Array<PrimExpr> args);
 };
 
+/*! \brief 条件选择表达式节点，语义等价于 condition ? true_value : false_value。 */
 class SelectNode : public PrimExprNode {
 public:
     PrimExpr condition;
@@ -191,6 +212,7 @@ public:
 };
 KXC_OBJECT_DEFINE(SelectNode)
 
+/*! \brief Select 表达式引用类型。 */
 class Select : public PrimExpr {
 public:
     using PrimExpr::PrimExpr;

@@ -1,3 +1,7 @@
+/*! \file src/tir/stmt.cc
+ * \brief 实现 TIR 节点构造、工具函数和 pass 基础能力。
+ */
+
 #include "tir/stmt.h"
 
 namespace kxc {

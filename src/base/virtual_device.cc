@@ -1,3 +1,7 @@
+/*! \file src/base/virtual_device.cc
+ * \brief 实现基础对象、设备、NDArray、Target、执行计划、PassContext 和 profiling 支撑逻辑。
+ */
+
 #include "base/virtual_device.h"
 
 #include "base/registry.h"

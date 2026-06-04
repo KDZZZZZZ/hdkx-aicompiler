@@ -29,6 +29,8 @@ compile_commands.json
 *.pdb
 *.ilk
 *.log
+__pycache__/
+*.pyc
 
 # Test and temporary artifacts (keep test sources tracked)
 test/*.exe
@@ -38,3 +40,8 @@ test/*stdout.txt
 test/*stderr.txt
 test/resnet18_ir_dump.txt
 test/resnet18_all_output.txt
+
+# Profiling / agent outputs
+profile_bundles/
+profile_bundle_test_output/
+.kxc_agent_memory/

@@ -1,3 +1,7 @@
+/*! \file src/tir/transforms/fold_constant.cc
+ * \brief 实现 TIR 优化 pass 和 pipeline。
+ */
+
 #include "tir/transforms/fold_constant.h"
 
 #include <cmath>

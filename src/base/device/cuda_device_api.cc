@@ -1,8 +1,14 @@
+/*! \file src/base/device/cuda_device_api.cc
+ * \brief 实现具体 CPU/CUDA DeviceAPI 后端。
+ */
+
 #include "base/device_api.h"
 
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+
+#include "base/profiling.h"
 
 #if KXC_USE_CUDA
 #include <cuda_runtime.h>
@@ -15,6 +21,18 @@ namespace kxc {
 namespace {
 
 thread_local cudaStream_t tls_cuda_stream = nullptr;
+
+std::string DeviceTag(const class Device& device) {
+    return "cuda:" + std::to_string(device.device_id());
+}
+
+profiling::EventSpec MakeDeviceSpec(const std::string& event_type, const class Device& device) {
+    profiling::EventSpec spec;
+    spec.component = "device_api";
+    spec.event_type = event_type;
+    spec.device = DeviceTag(device);
+    return spec;
+}
 
 cudaMemcpyKind ResolveCopyKind(const class Device& from_dev, const class Device& to_dev) {
     if (from_dev.device_type() == kCPU && to_dev.device_type() == kGPU) {
@@ -48,19 +66,29 @@ int64_t ReadAvailableMemory(int device_id) {
 class CUDADeviceAPI : public DeviceAPI {
 public:
     void SetDevice(const class Device& device) override {
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("set_device", device));
         cudaError_t err = cudaSetDevice(device.device_id());
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA SetDevice failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
     }
 
     void* AllocDataSpace(const class Device& device, size_t nbytes, size_t alignment) override {
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("alloc", device));
+        span.AddMetric("bytes", static_cast<double>(nbytes));
+        span.AddMetric("alignment", static_cast<double>(alignment));
         (void)alignment;
         void* ptr = nullptr;
         cudaSetDevice(device.device_id());
         cudaError_t err = cudaMalloc(&ptr, nbytes);
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA AllocDataSpace failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
@@ -68,6 +96,9 @@ public:
     }
 
     void FreeDataSpace(const class Device& device, void* ptr) override {
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("free", device));
+        span.AddField("ptr", ptr ? "nonnull" : "null");
         cudaSetDevice(device.device_id());
         cudaFree(ptr);
     }
@@ -82,6 +113,12 @@ public:
                         void* to_ptr, size_t to_offset, size_t nbytes,
                         const class Device& from_dev, const class Device& to_dev,
                         StreamHandle stream) override {
+        profiling::EventSpec spec;
+        spec.component = "device_api";
+        spec.event_type = "copy";
+        spec.device = DeviceTag(from_dev) + "->" + DeviceTag(to_dev);
+        profiling::ScopedSpan span(profiling::CurrentContext(), std::move(spec));
+        span.AddMetric("bytes", static_cast<double>(nbytes));
         cudaMemcpyKind kind = ResolveCopyKind(from_dev, to_dev);
         if (to_dev.device_type() == kGPU) {
             cudaSetDevice(to_dev.device_id());
@@ -103,6 +140,8 @@ public:
             err = cudaMemcpyAsync(dst, src, nbytes, kind, cuda_stream);
         }
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA CopyDataFromTo failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
@@ -162,8 +201,12 @@ public:
     }
 
     StreamHandle CreateStream(const class Device& device) override {
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("create_stream", device));
         cudaError_t err = cudaSetDevice(device.device_id());
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA SetDevice failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
@@ -171,6 +214,8 @@ public:
         cudaStream_t stream = nullptr;
         err = cudaStreamCreate(&stream);
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA StreamCreate failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
@@ -178,8 +223,12 @@ public:
     }
 
     void FreeStream(const class Device& device, StreamHandle stream) override {
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("free_stream", device));
         cudaError_t err = cudaSetDevice(device.device_id());
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA SetDevice failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
@@ -191,6 +240,8 @@ public:
 
         err = cudaStreamDestroy(cuda_stream);
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA StreamDestroy failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
@@ -200,8 +251,13 @@ public:
     }
 
     void SetStream(const class Device& device, StreamHandle stream) override {
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("set_stream", device));
+        span.AddField("stream", stream ? "nonnull" : "null");
         cudaError_t err = cudaSetDevice(device.device_id());
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA SetDevice failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
@@ -209,8 +265,12 @@ public:
     }
 
     StreamHandle GetCurrentStream(const class Device& device) override {
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("get_current_stream", device));
         cudaError_t err = cudaSetDevice(device.device_id());
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA SetDevice failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
@@ -218,8 +278,13 @@ public:
     }
 
     void StreamSync(const class Device& device, StreamHandle stream) override {
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("stream_sync", device));
+        span.AddField("stream", stream ? "nonnull" : "null");
         cudaError_t err = cudaSetDevice(device.device_id());
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA SetDevice failed: " +
                                      std::string(cudaGetErrorString(err)));
         }
@@ -234,6 +299,8 @@ public:
             err = cudaStreamSynchronize(cuda_stream);
         }
         if (err != cudaSuccess) {
+            span.SetStatus("error");
+            span.SetMessage(cudaGetErrorString(err));
             throw std::runtime_error("CUDA StreamSync failed: " +
                                      std::string(cudaGetErrorString(err)));
         }

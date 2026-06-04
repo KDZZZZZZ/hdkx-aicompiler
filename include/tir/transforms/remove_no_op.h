@@ -1,3 +1,7 @@
+/*! \file include/tir/transforms/remove_no_op.h
+ * \brief 声明 TIR 优化 pass。
+ */
+
 #pragma once
 
 #include "tir/stmt.h"

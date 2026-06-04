@@ -1,3 +1,7 @@
+/*! \file src/tir/transforms/unroll_loop.cc
+ * \brief 实现 TIR 优化 pass 和 pipeline。
+ */
+
 #include "tir/transforms/unroll_loop.h"
 
 #include <cstdint>

@@ -1,4 +1,8 @@
-#ifdef KXC_USE_LLVM
+/*! \file src/codegen/codegen_llvm.cc
+ * \brief 实现 C/LLVM codegen、LLVM JIT 和 compiled kernel 调用封装。
+ */
+
+#if KXC_USE_LLVM
 
 #include "codegen/codegen_llvm.h"
 

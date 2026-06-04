@@ -1,3 +1,7 @@
+/*! \file include/relay/pass/print_ir.h
+ * \brief 声明 Relay IR 文本打印和调试工具。
+ */
+
 #pragma once
 
 #include "relay/relay.h"

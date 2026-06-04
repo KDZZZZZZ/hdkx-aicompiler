@@ -1,3 +1,7 @@
+/*! \file include/codegen/codegen_c.h
+ * \brief 定义 codegen 后端、C/LLVM codegen、JIT 和 compiled kernel 抽象。
+ */
+
 #pragma once
 
 #include <sstream>

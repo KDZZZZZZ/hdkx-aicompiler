@@ -1,3 +1,7 @@
+/*! \file src/relay/op/op_ffi.cc
+ * \brief 注册 Relay 算子及其 FRelayToTE compute。
+ */
+
 #include "relay/relay.h"
 #include "relay/op.h"
 #include "base/registry.h"

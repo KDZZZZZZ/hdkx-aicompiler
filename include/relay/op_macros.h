@@ -1,3 +1,7 @@
+/*! \file include/relay/op_macros.h
+ * \brief 定义 Relay IR 节点、算子注册、attrs 和 Relay 到 TE lowering 属性。
+ */
+
 #pragma once
 
 #include <any>

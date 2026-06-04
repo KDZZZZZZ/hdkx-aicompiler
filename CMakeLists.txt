@@ -84,6 +84,7 @@ set(KXC_RUNTIME_SOURCES
   src/base/expr.cc
   src/base/device.cc
   src/base/device_api.cc
+  src/base/profiling.cc
   src/base/target.cc
   src/base/virtual_device.cc
   src/base/disco_placement.cc
@@ -146,6 +147,7 @@ set(KXC_RUNTIME_SOURCES
 # ==================== Codegen Sources (conditional) ====================
 # C codegen and runtime are always available
 list(APPEND KXC_RUNTIME_SOURCES
+  src/codegen/compiled_kernel.cc
   src/codegen/codegen_c.cc
   src/api/compile_config.cc
   src/api/compiler.cc
@@ -157,7 +159,6 @@ list(APPEND KXC_RUNTIME_SOURCES
 )
 if(KXC_USE_LLVM)
   list(APPEND KXC_RUNTIME_SOURCES
-    src/codegen/compiled_kernel.cc
     src/codegen/codegen_llvm.cc
     src/codegen/llvm_jit.cc
   )
@@ -234,6 +235,16 @@ endif()
 
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
+  kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
+  if(KXC_USE_CUDA)
+    kxc_add_runtime_exe(cupti_smoke_test test/cupti_smoke_test.cpp)
+    if(TARGET CUDA::cuda_driver)
+      target_link_libraries(cupti_smoke_test PRIVATE CUDA::cuda_driver)
+    endif()
+    if(TARGET CUDA::nvrtc)
+      target_link_libraries(cupti_smoke_test PRIVATE CUDA::nvrtc)
+    endif()
+  endif()
 
   add_custom_target(run_pass_pipeline_test
     COMMAND "$<TARGET_FILE:pass_pipeline_test>"
@@ -242,6 +253,23 @@ if(KXC_BUILD_PASS_TESTS)
     USES_TERMINAL
     COMMENT "Run pass_pipeline_test"
   )
+
+  add_custom_target(run_profile_bundle_test
+    COMMAND "$<TARGET_FILE:profile_bundle_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS profile_bundle_test
+    USES_TERMINAL
+    COMMENT "Run profile_bundle_test"
+  )
+  if(KXC_USE_CUDA)
+    add_custom_target(run_cupti_smoke_test
+      COMMAND "$<TARGET_FILE:cupti_smoke_test>"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+      DEPENDS cupti_smoke_test
+      USES_TERMINAL
+      COMMENT "Run cupti_smoke_test"
+    )
+  endif()
 endif()
 
 if(KXC_BUILD_CODEGEN_TESTS AND KXC_USE_LLVM)

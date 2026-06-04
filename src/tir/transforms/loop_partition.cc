@@ -1,3 +1,7 @@
+/*! \file src/tir/transforms/loop_partition.cc
+ * \brief 实现 TIR 优化 pass 和 pipeline。
+ */
+
 #include "tir/transforms/loop_partition.h"
 
 #include <cstdint>

@@ -1,3 +1,7 @@
+/*! \file src/codegen/compiled_kernel.cc
+ * \brief 实现 C/LLVM codegen、LLVM JIT 和 compiled kernel 调用封装。
+ */
+
 #include "codegen/compiled_kernel.h"
 
 #include <memory>
@@ -7,7 +11,7 @@
 #include <dlfcn.h>
 #endif
 
-#ifdef KXC_USE_LLVM
+#if KXC_USE_LLVM
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #endif
 
@@ -22,7 +26,7 @@ CompiledKernelNode::~CompiledKernelNode() {
     }
 #endif
 
-#ifdef KXC_USE_LLVM
+#if KXC_USE_LLVM
     // Clean up JIT resource if it's a shared_ptr to LLJIT
     if (backend == CodeGenBackend::kLLVM && jit_resource) {
         auto* jit_ptr = static_cast<std::shared_ptr<std::unique_ptr<llvm::orc::LLJIT>>*>(jit_resource);

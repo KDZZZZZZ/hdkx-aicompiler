@@ -1,3 +1,7 @@
+/*! \file test/pass_pipeline_test.cpp
+ * \brief 定义编译器核心路径、pass、codegen 和 profiling 的 C++ 测试入口。
+ */
+
 #include "base/target.h"
 #include "relay/op.h"
 #include "relay/pass/print_ir.h"

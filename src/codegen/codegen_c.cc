@@ -1,3 +1,7 @@
+/*! \file src/codegen/codegen_c.cc
+ * \brief 实现 C/LLVM codegen、LLVM JIT 和 compiled kernel 调用封装。
+ */
+
 #include "codegen/codegen_c.h"
 
 #include <cmath>

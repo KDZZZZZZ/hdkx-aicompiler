@@ -1,3 +1,7 @@
+/*! \file src/base/disco_placement.cc
+ * \brief 实现基础对象、设备、NDArray、Target、执行计划、PassContext 和 profiling 支撑逻辑。
+ */
+
 #include "base/disco_placement.h"
 
 #include <sstream>

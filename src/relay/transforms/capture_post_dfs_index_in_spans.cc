@@ -1,3 +1,7 @@
+/*! \file src/relay/transforms/capture_post_dfs_index_in_spans.cc
+ * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
+ */
+
 #include "relay/transforms/capture_post_dfs_index_in_spans.h"
 
 #include <algorithm>

@@ -1,3 +1,7 @@
+/*! \file include/codegen/compiled_kernel.h
+ * \brief 定义 codegen 后端、C/LLVM codegen、JIT 和 compiled kernel 抽象。
+ */
+
 #pragma once
 
 #include <string>
@@ -11,22 +15,23 @@
 namespace kxc {
 namespace codegen {
 
+/*! \brief 已编译 kernel 节点，统一保存 LLVM JIT 或 C 动态库后端资源。 */
 class CompiledKernelNode : public Object {
 public:
     std::string kernel_name;
     CodeGenBackend backend;
 
-    // 函数指针（LLVM JIT和C编译最终都得到这个）
+    /*! \brief 统一调用入口函数指针，LLVM JIT 和 C 编译后端都会填充。 */
     void* func_ptr{nullptr};
 
-    // LLVM JIT路径资源（生命周期由JIT引擎管理）
+    /*! \brief LLVM JIT 路径关联资源，生命周期由 JIT 引擎管理。 */
     void* jit_resource{nullptr};
 
-    // C路径资源
+    /*! \brief C 后端动态库路径和句柄。 */
     std::string so_path;
     void* lib_handle{nullptr};
 
-    // 函数签名信息
+    /*! \brief kernel 参数 buffer 签名信息。 */
     Array<tir::Buffer> param_buffers;
 
     ~CompiledKernelNode() override;
@@ -35,13 +40,15 @@ public:
 
 KXC_OBJECT_DEFINE(CompiledKernelNode)
 
+/*! \brief 已编译 kernel 的引用类型，提供统一执行和就绪状态查询。 */
 class CompiledKernel : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
 
-    // 调用kernel（统一接口）
+    /*! \brief 以 void* 参数数组调用底层 kernel。 */
     void operator()(const std::vector<void*>& args) const;
 
+    /*! \brief 判断底层函数指针是否已可用。 */
     bool IsReady() const;
     const CompiledKernelNode* operator->() const {
         return static_cast<const CompiledKernelNode*>(object_);

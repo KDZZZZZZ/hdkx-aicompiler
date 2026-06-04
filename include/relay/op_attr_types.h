@@ -1,3 +1,7 @@
+/*! \file include/relay/op_attr_types.h
+ * \brief 定义 Relay IR 节点、算子注册、attrs 和 Relay 到 TE lowering 属性。
+ */
+
 #pragma once
 #include "te/te.h"
 #include "relay/op.h" // For Attrs

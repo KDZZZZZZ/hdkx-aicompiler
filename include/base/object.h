@@ -1,3 +1,7 @@
+/*! \file include/base/object.h
+ * \brief 定义基础对象系统、容器、设备、NDArray、Target、PassContext 和 profiling 公共类型。
+ */
+
 #pragma once
 #include <functional>
 #include <atomic>
@@ -15,6 +19,12 @@ using AttrVisitor = std::function<void(const char* key, void* value)>;
 // New code should use the automatic registration mechanism.
 constexpr TypeIndex kKXC_OBJECT_TYPE = 0;
 
+/*!
+ * \brief 全局对象类型注册表。
+ *
+ * 每个 Object 派生类通过 KXC_OBJECT_DEFINE 注册一个运行时 type id。
+ * 该 id 主要用于 IR 节点识别、序列化和执行计划解释。
+ */
 class TypeRegistry {
 public:
     static uint32_t Register(const std::string& name) {
@@ -35,14 +45,26 @@ public:
     }
 };
 
+/*!
+ * \brief 在 Object 派生类中声明静态 type id 和 GetTypeId 覆写。
+ */
 #define KXC_OBJECT_DECLARE \
     static const uint32_t _type_index; \
     const uint32_t GetTypeId() const override { return _type_index; }
 
+/*!
+ * \brief 在类定义可见处定义静态 type id。
+ */
 #define KXC_OBJECT_DEFINE(TypeName) \
     inline const uint32_t TypeName::_type_index = \
         kxc::TypeRegistry::Register(#TypeName);
 
+/*!
+ * \brief 所有 IR 节点和 runtime 对象的引用计数基类。
+ *
+ * Object 本身不直接暴露给上层长期持有；上层通常通过 ObjectRef 派生句柄
+ * 管理生命周期。new 会优先使用当前线程的 Arena，便于批量构造 IR 节点。
+ */
 class Object{
 public:
     virtual void VisitAttrs(AttrVisitor& visitor) {}
@@ -58,16 +80,19 @@ public:
     }
     static void operator delete(void* ptr, size_t size) {
         // 因为Arena是批量释放，所以单个对象的delete是一个空操作(no-op)
-        // 我们什么都不用做，这正是Arena高效的原因之一�?
+        // 我们什么都不用做，这正是Arena高效的原因之一�?
         if (current_arena) {
             // std::cout << "Arena handles deallocation." << std::endl;
         } else {
             ::operator delete(ptr);
         }
     }
+    /*! \brief 增加引用计数。 */
 	void IncRef() const {
         _refCount.fetch_add(1, std::memory_order_relaxed);
     }
+
+    /*! \brief 减少引用计数；归零时释放对象。 */
     void DecRef() const {
         if(_refCount.fetch_sub(1, std::memory_order_relaxed)==1){
             std::atomic_thread_fence(std::memory_order_acquire);
@@ -75,7 +100,7 @@ public:
         }
     }
     Object() : _refCount(0) {}
-    // 允许拷贝构造，但新对象的引用计数初始化�?0
+    // 允许拷贝构造，但新对象的引用计数初始化�?0
     Object(const Object&) : _refCount(0) {}
     // 允许赋值，但不改变引用计数
     Object& operator=(const Object&) { return *this; }
@@ -90,6 +115,12 @@ private:
 // Define Object's type index (should be 0)
 KXC_OBJECT_DEFINE(Object)
 
+/*!
+ * \brief Object 的引用类型基类。
+ *
+ * ObjectRef 负责引用计数、拷贝/移动语义和动态类型查询。Relay、TIR、
+ * TE、runtime 中的用户可见 handle 大多继承自该类。
+ */
 class ObjectRef {
 public:
     ObjectRef() : object_(nullptr) {}
@@ -114,10 +145,10 @@ public:
         return *this;
     }
     ObjectRef& operator=(const ObjectRef& other) {
-        if (this != &other) { // 防止自我赋�?
-            if (object_) object_->DecRef(); // 减少当前对象所持有的引�?
+        if (this != &other) { // 防止自我赋�?
+            if (object_) object_->DecRef(); // 减少当前对象所持有的引�?
             object_ = other.object_;        // 复制指针
-            if (object_) object_->IncRef(); // 增加新对象所持有的引�?
+            if (object_) object_->IncRef(); // 增加新对象所持有的引�?
         }
         return *this;
     }
@@ -125,9 +156,10 @@ public:
     const Object* operator->() const { return object_; }
     explicit operator bool() const { return object_ != nullptr; }
     bool defined() const { return object_ != nullptr; }
+    /*! \brief 将底层 Object 安全转换为指定节点类型，转换失败返回 nullptr。 */
     template<typename T>
     const T* As() const {
-        // dynamic_cast 用于安全地向下转�?
+        // dynamic_cast 用于安全地向下转�?
         return dynamic_cast<const T*>(object_);
     }
     
@@ -150,6 +182,11 @@ protected:
     }
 };
 
+/*!
+ * \brief 创建 Object 派生对象并返回 ObjectRef。
+ * \tparam T Object 派生节点类型。
+ * \param args 转发给 T 构造函数的参数。
+ */
 template<typename T, typename... Args>
 inline ObjectRef make_object(Args&&... args) {
     return ObjectRef(new T(std::forward<Args>(args)...));

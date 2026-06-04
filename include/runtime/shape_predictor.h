@@ -1,3 +1,7 @@
+/*! \file include/runtime/shape_predictor.h
+ * \brief 定义 adaptive runtime、shape predictor、kernel cache 和后台编译器。
+ */
+
 #pragma once
 
 #include <cstdint>
@@ -10,7 +14,7 @@
 namespace kxc {
 namespace runtime {
 
-// 输入shape签名：用于kernel缓存索引
+/*! \brief 输入 shape 签名，用作 adaptive kernel cache 的索引。 */
 struct ShapeSignature {
     std::vector<std::vector<int64_t>> input_shapes;
 
@@ -30,34 +34,32 @@ struct ShapeSignature {
     }
 };
 
+/*! \brief ShapeSignature 的哈希器，供 unordered_map/unordered_set 使用。 */
 struct ShapeSignatureHash {
     size_t operator()(const ShapeSignature& sig) const { return sig.Hash(); }
 };
 
-// 从raw指针和shape信息提取签名
+/*! \brief 从调用方传入的 shape 列表构造 ShapeSignature。 */
 ShapeSignature MakeShapeSignature(const std::vector<std::vector<int64_t>>& shapes);
 
-// Shape预测器：统计历史输入，预测未来可能的shape
+/*! \brief 基于历史调用频率预测常见输入 shape，驱动后台优化编译。 */
 class ShapePredictor {
 public:
-    // 记录一次实际输入
+    /*! \brief 记录一次实际输入 shape。 */
     void Record(const ShapeSignature& sig);
 
-    // 预测Top-K最可能的输入shape
+    /*! \brief 返回出现频率最高的 Top-K shape。 */
     std::vector<ShapeSignature> PredictTopK(int k = 3) const;
 
-    // 是否值得为此shape编译优化版本
-    // 首次出现：不编译（可能是偶发）
-    // 出现 >= threshold 次：编译
-    // 占比 >= ratio：编译
+    /*! \brief 判断是否值得为该 shape 编译优化版本。 */
     bool ShouldCompile(const ShapeSignature& sig,
                        int count_threshold = 2,
                        double ratio_threshold = 0.05) const;
 
-    // 获取某shape的出现次数
+    /*! \brief 获取某个 shape 的历史出现次数。 */
     int GetCount(const ShapeSignature& sig) const;
 
-    // 总调用次数
+    /*! \brief 返回已记录的总调用次数。 */
     int TotalCount() const { return total_count_; }
 
 private:

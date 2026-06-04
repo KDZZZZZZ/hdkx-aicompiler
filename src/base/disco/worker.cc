@@ -1,3 +1,7 @@
+/*! \file src/base/disco/worker.cc
+ * \brief 实现 Disco 线程会话、执行计划解释器和 CPU/NCCL 通信后端。
+ */
+
 #include "base/disco/worker.h"
 
 #include "base/packedfunc.h"

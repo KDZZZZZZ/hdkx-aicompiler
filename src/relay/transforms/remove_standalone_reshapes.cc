@@ -1,3 +1,7 @@
+/*! \file src/relay/transforms/remove_standalone_reshapes.cc
+ * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
+ */
+
 #include "relay/transforms/remove_standalone_reshapes.h"
 
 #include <string>

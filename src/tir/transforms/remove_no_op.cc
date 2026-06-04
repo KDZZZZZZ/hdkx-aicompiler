@@ -1,3 +1,7 @@
+/*! \file src/tir/transforms/remove_no_op.cc
+ * \brief 实现 TIR 优化 pass 和 pipeline。
+ */
+
 #include "tir/transforms/remove_no_op.h"
 
 #include "base/pass.h"

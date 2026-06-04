@@ -1,3 +1,8 @@
+"""
+职责简介：
+- 提供 ONNX 解析、模型报告和 C++ Relay 构图辅助脚本。
+"""
+
 import onnx
 import os
 import collections

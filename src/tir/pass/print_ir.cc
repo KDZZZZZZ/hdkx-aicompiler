@@ -1,3 +1,7 @@
+/*! \file src/tir/pass/print_ir.cc
+ * \brief 实现 TIR IR 文本打印工具。
+ */
+
 #include "tir/pass/print_ir.h"
 
 #include "base/pass.h"

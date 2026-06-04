@@ -1,6 +1,10 @@
+/*! \file include/codegen/codegen_llvm.h
+ * \brief 定义 codegen 后端、C/LLVM codegen、JIT 和 compiled kernel 抽象。
+ */
+
 #pragma once
 
-#ifdef KXC_USE_LLVM
+#if KXC_USE_LLVM
 
 #include <memory>
 #include <string>
@@ -17,21 +21,23 @@
 namespace kxc {
 namespace codegen {
 
+/*! \brief 将 TIR PrimFunc lowering 为 LLVM IR module 的代码生成器。 */
 class CodeGenLLVM {
 public:
+    /*! \brief 使用外部 LLVMContext 创建 codegen；调用方负责 context 生命周期。 */
     explicit CodeGenLLVM(llvm::LLVMContext& ctx);
 
-    // 将PrimFunc编译为LLVM Module中的一个Function
+    /*! \brief 将 PrimFunc 编译为 LLVM Module 中的一个 Function。 */
     void AddFunction(const tir::PrimFunc& func, const std::string& name = "main");
 
-    // 获取生成的LLVM Module（所有权转移）
+    /*! \brief 取出生成的 LLVM Module，所有权转移给调用方。 */
     std::unique_ptr<llvm::Module> TakeModule();
 
-    // 将Module打印为LLVM IR文本（用于调试）
+    /*! \brief 将当前 Module 打印为 LLVM IR 文本，用于调试和 profiling artifact。 */
     std::string DumpIR() const;
 
 private:
-    // ---- 表达式code generation ----
+    /*! \brief 生成 TIR 表达式对应的 LLVM Value。 */
     llvm::Value* GenExpr(const tir::PrimExpr& expr);
     llvm::Value* GenIntImm(const tir::IntImmNode* op);
     llvm::Value* GenFloatImm(const tir::FloatImmNode* op);
@@ -42,7 +48,7 @@ private:
     llvm::Value* GenSelect(const tir::SelectNode* op);
     llvm::Value* GenNot(const tir::NotNode* op);
 
-    // ---- 语句code generation ----
+    /*! \brief 生成 TIR 语句对应的 LLVM IR 指令序列。 */
     void GenStmt(const tir::Stmt& stmt);
     void GenFor(const tir::ForNode* op);
     void GenStore(const tir::StoreNode* op);
@@ -52,7 +58,7 @@ private:
     void GenSeqStmt(const tir::SeqStmtNode* op);
     void GenEvaluate(const tir::EvaluateNode* op);
 
-    // ---- 工具方法 ----
+    /*! \brief 将 TIR DataType 映射为 LLVM Type。 */
     llvm::Type* GetLLVMType(tir::DataType dtype);
     llvm::FunctionType* CreateFuncType(const tir::PrimFunc& func);
     llvm::Function* GetOrDeclareIntrinsic(const std::string& name, llvm::Type* type);

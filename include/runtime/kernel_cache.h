@@ -1,3 +1,7 @@
+/*! \file include/runtime/kernel_cache.h
+ * \brief 定义 adaptive runtime、shape predictor、kernel cache 和后台编译器。
+ */
+
 #pragma once
 
 #include <memory>
@@ -10,34 +14,32 @@
 namespace kxc {
 namespace runtime {
 
-// Kernel缓存：精确匹配 + 模糊匹配
+/*! \brief Adaptive kernel 缓存，支持精确 shape 匹配和向上兼容的模糊匹配。 */
 class KernelCache {
 public:
-    // 精确查找：shape完全匹配
+    /*! \brief 精确查找 shape 完全一致的 compiled module。 */
     api::CompiledModule* GetExact(const ShapeSignature& sig);
 
-    // 模糊查找：找最接近的已编译kernel（用于fallback）
-    // 策略：找shape最接近且 >= 输入shape的kernel
+    /*! \brief 查找可兼容输入 shape 的最近 compiled module，用于 fallback 执行。 */
     api::CompiledModule* GetFuzzy(const ShapeSignature& sig);
 
-    // 插入新编译的kernel
+    /*! \brief 插入新编译完成的 kernel。 */
     void Put(const ShapeSignature& sig, api::CompiledModule module);
 
-    // 是否已有此shape的kernel
+    /*! \brief 判断缓存中是否已有指定 shape 的 kernel。 */
     bool Has(const ShapeSignature& sig) const;
 
-    // 缓存大小
+    /*! \brief 返回缓存中 kernel 的数量。 */
     size_t Size() const;
 
-    // 清空缓存
+    /*! \brief 清空缓存中所有 kernel。 */
     void Clear();
 
 private:
     mutable std::mutex mu_;
     std::unordered_map<ShapeSignature, api::CompiledModule, ShapeSignatureHash> cache_;
 
-    // 计算两个shape的"距离"（用于模糊匹配）
-    // 返回：-1表示不兼容，>=0表示距离（越小越好）
+    /*! \brief 计算两个 shape 的兼容距离，-1 表示不兼容，值越小越优。 */
     static int64_t ShapeDistance(const ShapeSignature& a, const ShapeSignature& b);
 };
 

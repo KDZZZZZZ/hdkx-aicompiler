@@ -1,3 +1,7 @@
+/*! \file include/tir/transforms/simplify_expr.h
+ * \brief 声明 TIR 优化 pass。
+ */
+
 #pragma once
 
 #include "tir/stmt.h"

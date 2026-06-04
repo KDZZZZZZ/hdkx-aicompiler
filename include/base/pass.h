@@ -1,3 +1,7 @@
+/*! \file include/base/pass.h
+ * \brief 定义基础对象系统、容器、设备、NDArray、Target、PassContext 和 profiling 公共类型。
+ */
+
 #pragma once
 
 #include <stdexcept>
@@ -13,6 +17,7 @@
 
 namespace kxc {
 
+/*! \brief 编译 pass 的上下文，携带 target、虚拟设备和 Disco placement 信息。 */
 class PassContext {
 public:
     PassContext() = default;
@@ -28,13 +33,19 @@ public:
 
     std::string ToString() const;
 
+    /*! \brief 返回线程本地当前 PassContext；未设置时返回默认上下文。 */
     static PassContext Current();
+    /*! \brief 从 Relay 表达式推导 PassContext。 */
     static PassContext FromRelay(const Expr& expr);
+    /*! \brief 从 Relay 函数推导 PassContext。 */
     static PassContext FromRelay(const Function& func);
+    /*! \brief 从 TIR PrimFunc 推导 PassContext。 */
     static PassContext FromTIR(const tir::PrimFunc& func);
+    /*! \brief 在已有上下文上附加 Disco placement。 */
     static PassContext WithDiscoPlacement(const PassContext& base_ctx,
                                           const DiscoPlacement& disco_placement);
 
+    /*! \brief RAII 作用域，临时安装当前线程的 PassContext。 */
     class Scope {
     public:
         explicit Scope(const PassContext& pass_ctx);
@@ -62,13 +73,16 @@ private:
     static void ClearCurrent();
 };
 
+/*! \brief 将 PassContext 的关键字段附加到 attrs 中。 */
 Map<String, ObjectRef> AttachPassContextAttrs(const Map<String, ObjectRef>& attrs,
                                               const PassContext& pass_ctx);
 
+/*! \brief 从 Relay 表达式构建 Disco placement pass 结果。 */
 PassContext BuildDiscoPlacementPass(const Expr& expr);
+/*! \brief 从 Relay 函数构建 Disco placement pass 结果。 */
 PassContext BuildDiscoPlacementPass(const Function& func);
 
-// Visitor Pattern Functor for Relay IR (operating on Expr).
+/*! \brief Relay IR visitor functor，派生类通过重载 Visit* 处理不同节点。 */
 template <typename R>
 class RelayPassFunctor {
 public:
@@ -109,6 +123,7 @@ protected:
     }
 };
 
+/*! \brief Relay IR mutator，默认递归重建表达式树。 */
 class RelayPass : public RelayPassFunctor<Expr> {
 public:
     Expr Mutate(const Expr& expr);
@@ -130,7 +145,7 @@ private:
     Var MutateToVar(const Var& var);
 };
 
-// Visitor Pattern Functor for TIR PrimExpr.
+/*! \brief TIR PrimExpr visitor functor。 */
 template <typename R>
 class TIRExprFunctor {
 public:
@@ -187,7 +202,7 @@ protected:
     }
 };
 
-// Visitor Pattern Functor for TIR Stmt.
+/*! \brief TIR Stmt visitor functor。 */
 template <typename R>
 class TIRStmtFunctor {
 public:
@@ -226,6 +241,7 @@ protected:
     }
 };
 
+/*! \brief TIR mutator，默认递归重建 PrimExpr/Stmt/PrimFunc。 */
 class TIRPass : public TIRExprFunctor<tir::PrimExpr>, public TIRStmtFunctor<tir::Stmt> {
 public:
     tir::PrimExpr Mutate(const tir::PrimExpr& expr);

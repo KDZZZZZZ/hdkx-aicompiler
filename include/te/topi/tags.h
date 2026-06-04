@@ -1,3 +1,7 @@
+/*! \file include/te/topi/tags.h
+ * \brief 定义 TOPI 风格的 tensor compute helper。
+ */
+
 #pragma once
 #include <string>
 

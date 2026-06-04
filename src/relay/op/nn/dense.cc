@@ -1,3 +1,7 @@
+/*! \file src/relay/op/nn/dense.cc
+ * \brief 注册 Relay 算子及其 FRelayToTE compute。
+ */
+
 #include "relay/op_macros.h"
 #include "relay/op.h"
 #include "relay/op_attr_types.h"

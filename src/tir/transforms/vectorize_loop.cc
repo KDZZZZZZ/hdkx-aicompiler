@@ -1,3 +1,7 @@
+/*! \file src/tir/transforms/vectorize_loop.cc
+ * \brief 实现 TIR 优化 pass 和 pipeline。
+ */
+
 #include "tir/transforms/vectorize_loop.h"
 
 #include <cstdint>

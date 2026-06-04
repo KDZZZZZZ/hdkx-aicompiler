@@ -1,3 +1,7 @@
+/*! \file include/te/topi/utils.h
+ * \brief 定义 TOPI 风格的 tensor compute helper。
+ */
+
 #pragma once
 #include "te/te.h"
 #include "base/container.h"

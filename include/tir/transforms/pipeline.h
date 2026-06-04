@@ -1,3 +1,7 @@
+/*! \file include/tir/transforms/pipeline.h
+ * \brief 声明 TIR 优化 pass。
+ */
+
 #pragma once
 
 #include "base/container.h"

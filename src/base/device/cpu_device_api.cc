@@ -1,9 +1,15 @@
+/*! \file src/base/device/cpu_device_api.cc
+ * \brief 实现具体 CPU/CUDA DeviceAPI 后端。
+ */
+
 #include "base/device_api.h"
 
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
+
+#include "base/profiling.h"
 
 namespace kxc {
 
@@ -23,6 +29,18 @@ std::string DetectHostCPUArch() {
 #endif
 }
 
+std::string DeviceTag(const class Device& device) {
+    return "cpu:" + std::to_string(device.device_id());
+}
+
+profiling::EventSpec MakeDeviceSpec(const std::string& event_type, const class Device& device) {
+    profiling::EventSpec spec;
+    spec.component = "device_api";
+    spec.event_type = event_type;
+    spec.device = DeviceTag(device);
+    return spec;
+}
+
 }  // namespace
 
 class CPUDeviceAPI : public DeviceAPI {
@@ -30,7 +48,10 @@ public:
     void SetDevice(const class Device& device) override { (void)device; }
 
     void* AllocDataSpace(const class Device& device, size_t nbytes, size_t alignment) override {
-        (void)device;
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("alloc", device));
+        span.AddMetric("bytes", static_cast<double>(nbytes));
+        span.AddMetric("alignment", static_cast<double>(alignment));
         void* ptr = nullptr;
 #if defined(_MSC_VER)
         ptr = _aligned_malloc(nbytes, alignment);
@@ -39,11 +60,17 @@ public:
             ptr = nullptr;
         }
 #endif
+        if (ptr == nullptr) {
+            span.SetStatus("error");
+            span.SetMessage("CPU allocation returned null");
+        }
         return ptr;
     }
 
     void FreeDataSpace(const class Device& device, void* ptr) override {
-        (void)device;
+        profiling::ScopedSpan span(profiling::CurrentContext(),
+                                   MakeDeviceSpec("free", device));
+        span.AddField("ptr", ptr ? "nonnull" : "null");
 #if defined(_MSC_VER)
         _aligned_free(ptr);
 #else
@@ -54,10 +81,18 @@ public:
     void CopyDataFromTo(const class Device& from_dev, const void* from_ptr,
                         const class Device& to_dev, void* to_ptr,
                         size_t nbytes) override {
+        profiling::EventSpec spec;
+        spec.component = "device_api";
+        spec.event_type = "copy";
+        spec.device = DeviceTag(from_dev) + "->" + DeviceTag(to_dev);
+        profiling::ScopedSpan span(profiling::CurrentContext(), std::move(spec));
+        span.AddMetric("bytes", static_cast<double>(nbytes));
         if (from_dev.device_type() == kCPU && to_dev.device_type() == kCPU) {
             std::memcpy(to_ptr, from_ptr, nbytes);
             return;
         }
+        span.SetStatus("error");
+        span.SetMessage("Copy between CPU and non-CPU devices is not implemented");
         throw std::runtime_error("Copy between CPU and non-CPU devices is not implemented");
     }
 
