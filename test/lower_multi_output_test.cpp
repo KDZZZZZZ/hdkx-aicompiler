@@ -75,6 +75,23 @@ std::string TIRText(const kxc::tir::PrimFunc& func) {
     return os.str();
 }
 
+bool TestRepeatedTupleOutputRejected() {
+    kxc::Var x("x", kxc::TensorType({4}, "float32"));
+    kxc::Var y("y", kxc::TensorType({4}, "float32"));
+    kxc::Call add(kxc::relay::Op::Get("add"), {x, y});
+    kxc::Function func({x, y}, kxc::Tuple({add, add}));
+
+    try {
+        (void)kxc::relay::LowerToTIR(func);
+    } catch (const std::exception& e) {
+        return Check(std::string(e.what()).find("duplicate output tensor") != std::string::npos,
+                     "repeated tuple output should report duplicate output tensor");
+    }
+
+    std::cerr << "FAIL: repeated tuple output should be rejected\n";
+    return false;
+}
+
 bool TestExplicitTupleOutput() {
     kxc::Var x("x", kxc::TensorType({4}, "float32"));
     kxc::Var y("y", kxc::TensorType({4}, "float32"));
@@ -143,6 +160,7 @@ bool TestSplitTupleOutputLowering() {
 
 int main() {
     const std::vector<std::pair<std::string, bool (*)()>> tests = {
+        {"repeated_tuple_output_rejected", TestRepeatedTupleOutputRejected},
         {"explicit_tuple_output", TestExplicitTupleOutput},
         {"tuple_get_item_output", TestTupleGetItemOutput},
         {"split_tuple_get_item_lowering", TestSplitTupleGetItemLowering},

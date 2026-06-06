@@ -498,12 +498,21 @@ tir::PrimFunc LowerToTIR(Function func) {
         if (outputs.empty()) {
             throw std::runtime_error("LowerToTIR produced no output tensors");
         }
+        std::unordered_map<const Object*, size_t> output_index_by_tensor;
         for (size_t i = 0; i < outputs.size(); ++i) {
             const te::Tensor& out_tensor = outputs[i];
             if (!out_tensor.defined()) {
                 throw std::runtime_error("LowerToTIR output tensor " +
                                          std::to_string(i) + " is undefined");
             }
+            auto duplicate = output_index_by_tensor.find(out_tensor.get());
+            if (duplicate != output_index_by_tensor.end()) {
+                throw std::runtime_error(
+                    "LowerToTIR does not support duplicate output tensor '" +
+                    out_tensor->name + "' at output " + std::to_string(i) +
+                    "; first seen at output " + std::to_string(duplicate->second));
+            }
+            output_index_by_tensor[out_tensor.get()] = i;
             if (!out_tensor->op.As<te::ComputeOpNode>()) {
                 throw std::runtime_error(
                     "LowerToTIR requires output tensor " + std::to_string(i) +
