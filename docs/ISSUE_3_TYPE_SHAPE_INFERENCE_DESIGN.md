@@ -478,7 +478,7 @@ OW = ceil_mode ? floor((numerator_w + stride_w - 1) / stride_w) + 1
 
 - `softmax.cc` 注册 `softmax`
 - `common_ops.cc` 注册 `nn_softmax`
-- `op_ffi.cc::MakeSoftmax` 调用 `nn_softmax`
+- `op_ffi.cc::MakeSoftmax` 调用 canonical `softmax`
 
 建议 issue #3 以 `softmax` 为 canonical rule，`nn_softmax` 只作为 issue #2 解决前的临时 alias。
 
@@ -600,7 +600,8 @@ Lowering：
 - 直接调用未 typed Relay 时，报清楚：
 
 ```text
-LowerToTIR expects typed Relay. Run InferTypePass before lowering.
+Compiler::Compile runs InferTypePass before lowering.
+LowerToTIR also runs InferTypePass for direct callers, then validates typed Relay.
 ```
 
 ### 6.6 Debug / 文档
@@ -648,7 +649,7 @@ Call(op=add, args=2) : TensorType(shape=[1, 3, 224, 224], dtype=float32)
 - softmax axis 成功/失败
 - pipeline 能通过 `"infer_type"` 调用
 - compiler 会在 lowering 前运行 inference
-- 直接 `LowerToTIR` 未 typed graph 时有清晰错误
+- 直接 `LowerToTIR` 未 typed graph 时会先补跑 `InferTypePass`，若仍无法 typed 则有清晰错误
 
 ## 7. 建议实现顺序
 
@@ -740,7 +741,7 @@ Type rule lookup 依赖 op name。当前存在 `softmax` / `nn_softmax`、`sub` 
 
 1. `LowerToTIR` 是否自动运行 `InferTypePass`？
 
-   建议：不自动运行。`Compiler::Compile` 负责跑 inference；`LowerToTIR` 只验证 precondition。
+   决策：`Compiler::Compile` 仍负责在主路径显式运行 inference；`LowerToTIR` 为兼容直接调用入口，会先补跑一次 `InferTypePass`，再验证 params/body/call output 的 typed precondition。
 
 2. 是否支持 dtype promotion？
 

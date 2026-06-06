@@ -16,6 +16,11 @@ namespace {
 
 std::string Indent(int n) { return std::string(n, ' '); }
 
+std::string CheckedTypeSuffix(const Expr& expr) {
+    Type checked_type = expr.checked_type();
+    return checked_type.defined() ? " : " + TypeToString(checked_type) : "";
+}
+
 std::string DTypeToString(const DLDataType& dtype) {
     if (dtype.code == kDLFloat) {
         return "float" + std::to_string(dtype.bits);
@@ -42,7 +47,8 @@ public:
         }
 
         if (const auto* var = expr.As<VarNode>()) {
-            os_ << Indent(indent) << "Var(" << var->vid->name_hint << ")\n";
+            os_ << Indent(indent) << "Var(" << var->vid->name_hint << ")"
+                << CheckedTypeSuffix(expr) << "\n";
             return;
         }
         if (const auto* constant = expr.As<ConstantNode>()) {
@@ -51,7 +57,8 @@ public:
                 if (i) os_ << ", ";
                 os_ << constant->data->shape[i];
             }
-            os_ << "], dtype=" << DTypeToString(constant->data->dl_tensor.dtype) << ")\n";
+            os_ << "], dtype=" << DTypeToString(constant->data->dl_tensor.dtype) << ")"
+                << CheckedTypeSuffix(expr) << "\n";
             return;
         }
         if (const auto* call = expr.As<CallNode>()) {
@@ -60,7 +67,7 @@ public:
                 op_name = op_node->name;
             }
             os_ << Indent(indent) << "Call(op=" << op_name << ", args=" << call->args.size()
-                << ")\n";
+                << ")" << CheckedTypeSuffix(expr) << "\n";
             for (size_t i = 0; i < call->args.size(); ++i) {
                 os_ << Indent(indent + indent_spaces_) << "arg[" << i << "]:\n";
                 Print(call->args[i], indent + indent_spaces_ * 2);
@@ -68,7 +75,8 @@ public:
             return;
         }
         if (const auto* func = expr.As<FunctionNode>()) {
-            os_ << Indent(indent) << "Function(params=" << func->params.size() << ")\n";
+            os_ << Indent(indent) << "Function(params=" << func->params.size() << ")"
+                << CheckedTypeSuffix(expr) << "\n";
             for (size_t i = 0; i < func->params.size(); ++i) {
                 os_ << Indent(indent + indent_spaces_) << "param[" << i
                     << "]=" << func->params[i]->vid->name_hint << "\n";
@@ -78,7 +86,7 @@ public:
             return;
         }
         if (const auto* if_node = expr.As<IfNode>()) {
-            os_ << Indent(indent) << "If\n";
+            os_ << Indent(indent) << "If" << CheckedTypeSuffix(expr) << "\n";
             os_ << Indent(indent + indent_spaces_) << "cond:\n";
             Print(if_node->cond, indent + indent_spaces_ * 2);
             os_ << Indent(indent + indent_spaces_) << "true:\n";
@@ -88,7 +96,8 @@ public:
             return;
         }
         if (const auto* let_node = expr.As<LetNode>()) {
-            os_ << Indent(indent) << "Let(var=" << let_node->var->vid->name_hint << ")\n";
+            os_ << Indent(indent) << "Let(var=" << let_node->var->vid->name_hint << ")"
+                << CheckedTypeSuffix(expr) << "\n";
             os_ << Indent(indent + indent_spaces_) << "value:\n";
             Print(let_node->value, indent + indent_spaces_ * 2);
             os_ << Indent(indent + indent_spaces_) << "body:\n";
@@ -96,7 +105,8 @@ public:
             return;
         }
         if (const auto* tuple = expr.As<TupleNode>()) {
-            os_ << Indent(indent) << "Tuple(fields=" << tuple->fields.size() << ")\n";
+            os_ << Indent(indent) << "Tuple(fields=" << tuple->fields.size() << ")"
+                << CheckedTypeSuffix(expr) << "\n";
             for (size_t i = 0; i < tuple->fields.size(); ++i) {
                 os_ << Indent(indent + indent_spaces_) << "field[" << i << "]:\n";
                 Print(tuple->fields[i], indent + indent_spaces_ * 2);
@@ -104,7 +114,8 @@ public:
             return;
         }
         if (const auto* tuple_get = expr.As<TupleGetItemNode>()) {
-            os_ << Indent(indent) << "TupleGetItem(index=" << tuple_get->index << ")\n";
+            os_ << Indent(indent) << "TupleGetItem(index=" << tuple_get->index << ")"
+                << CheckedTypeSuffix(expr) << "\n";
             os_ << Indent(indent + indent_spaces_) << "tuple:\n";
             Print(tuple_get->tuple, indent + indent_spaces_ * 2);
             return;

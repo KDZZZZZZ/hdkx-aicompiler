@@ -129,6 +129,7 @@ Expr CopyRelayVirtualDevice(const Expr& source, const Expr& dest) {
         return dest;
     }
     dst_node->virtual_device_ = src_node->virtual_device_;
+    dst_node->checked_type_ = src_node->checked_type_;
     return dest;
 }
 

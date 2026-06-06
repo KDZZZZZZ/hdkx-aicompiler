@@ -1,9 +1,11 @@
 /*! \file include/base/expr.h
- * \brief 定义基础对象系统、容器、设备、NDArray、Target、PassContext 和 profiling 公共类型。
+ * \brief Defines the base expression and type handles shared by Relay/TIR IR.
  */
 
 #pragma once
+
 #include "object.h"
+
 #include <string>
 
 namespace kxc {
@@ -25,7 +27,7 @@ public:
     std::string source_name;
     int line;
     int column;
-    
+
     KXC_OBJECT_DECLARE
 };
 KXC_OBJECT_DEFINE(SpanNode)
@@ -39,7 +41,7 @@ public:
 class ExprNode : public Object {
 public:
     Span span;
-    Type checked_type_; 
+    Type checked_type_;
 
     KXC_OBJECT_DECLARE
     virtual bool StructualEqual(const ExprNode* other) const {
@@ -61,4 +63,6 @@ public:
     }
 };
 
-}
+void SetCheckedType(const Expr& expr, Type checked_type);
+
+}  // namespace kxc

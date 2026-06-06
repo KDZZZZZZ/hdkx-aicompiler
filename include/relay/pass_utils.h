@@ -30,7 +30,7 @@ bool HasSideEffect(const Expr& expr);
 // Counts uses of `var` in `expr`, excluding binder definitions.
 size_t CountVarUses(const Expr& expr, const Var& var);
 
-// Copies virtual_device_ from source to dest and returns dest.
+// Copies metadata from source to dest and returns dest.
 Expr CopyVirtualDevice(const Expr& source, const Expr& dest);
 std::string GetCallOpName(const CallNode* call);
 

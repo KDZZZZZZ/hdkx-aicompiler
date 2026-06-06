@@ -319,6 +319,7 @@ Expr CopyVirtualDevice(const Expr& source, const Expr& dest) {
         return dest;
     }
     dest_node->virtual_device_ = source_node->virtual_device_;
+    dest_node->checked_type_ = source_node->checked_type_;
     return dest;
 }
 

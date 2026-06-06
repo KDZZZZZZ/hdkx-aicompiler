@@ -12,6 +12,7 @@
 #include "relay/transforms/eliminate_dead_let.h"
 #include "relay/transforms/fold_constant.h"
 #include "relay/transforms/fold_tuple_get_item.h"
+#include "relay/transforms/infer_type.h"
 #include "relay/transforms/pipeline.h"
 #include "relay/transforms/remove_standalone_reshapes.h"
 #include "relay/transforms/simplify_expr.h"
@@ -216,16 +217,16 @@ bool TestRelayCanonicalizeCast() {
 
 bool TestRelayRemoveStandaloneReshapes() {
     kxc::Var x("x");
-    kxc::Expr shape_a = MakeRelayScalarInt64(4);
-    kxc::Expr shape_b = MakeRelayScalarInt64(8);
-    kxc::Expr inner = kxc::Call(kxc::relay::Op::Get("reshape"), {x, shape_a});
-    kxc::Expr outer = kxc::Call(kxc::relay::Op::Get("reshape"), {inner, shape_b});
+    kxc::Expr inner = kxc::Call(kxc::relay::Op::Get("reshape"), {x},
+                                kxc::relay::ReshapeAttrs::Create({4}));
+    kxc::Expr outer = kxc::Call(kxc::relay::Op::Get("reshape"), {inner},
+                                kxc::relay::ReshapeAttrs::Create({8}));
     kxc::Function func({x}, outer);
 
     kxc::Function out = kxc::relay::RemoveStandaloneReshapesPass(func);
     const auto* call = out->body.As<kxc::CallNode>();
     TEST_CHECK(call != nullptr, "Output should remain reshape call");
-    TEST_CHECK(call->args.size() == 2, "reshape should keep arity 2");
+    TEST_CHECK(call->args.size() == 1, "reshape should keep arity 1");
     TEST_CHECK(call->args[0].As<kxc::VarNode>() != nullptr, "Nested reshape should collapse");
     TEST_CHECK(call->args[0].get() == x.get(), "Collapsed reshape should use original tensor");
     return true;
@@ -333,19 +334,19 @@ bool TestRelayAnnotateMemoryScope() {
 }
 
 bool TestRelayPipeline() {
-    kxc::Var x("x");
+    kxc::Var x("x", kxc::TensorType({8}, "float32"));
     kxc::Var a("a");
     kxc::Var b("b");
-    kxc::Expr tuple_get =
-        kxc::TupleGetItem(kxc::Tuple({MakeRelayBinary("add", x, MakeRelayScalarFloat(0.0f))}), 0);
+    kxc::Expr add_zero = MakeRelayBinary("add", x, MakeRelayScalarFloat(0.0f));
     kxc::Expr cast_chain = kxc::Call(
         kxc::relay::Op::Get("cast"),
-        {kxc::Call(kxc::relay::Op::Get("cast"), {tuple_get}, kxc::relay::CastAttrs::Create(1))},
+        {kxc::Call(kxc::relay::Op::Get("cast"), {add_zero}, kxc::relay::CastAttrs::Create(1))},
         kxc::relay::CastAttrs::Create(1));
     kxc::Expr reshape_chain = kxc::Call(
         kxc::relay::Op::Get("reshape"),
-        {kxc::Call(kxc::relay::Op::Get("reshape"), {cast_chain, MakeRelayScalarInt64(4)}),
-         MakeRelayScalarInt64(8)});
+        {kxc::Call(kxc::relay::Op::Get("reshape"), {cast_chain},
+                   kxc::relay::ReshapeAttrs::Create({8}))},
+        kxc::relay::ReshapeAttrs::Create({8}));
     kxc::Expr shared = MakeRelayBinary("add", x, MakeRelayScalarFloat(1.0f));
     kxc::Expr cse_chain = kxc::Let(a, shared, kxc::Let(b, shared, MakeRelayBinary("add", a, b)));
     kxc::Function func(
@@ -357,14 +358,14 @@ bool TestRelayPipeline() {
         kxc::String("simplify_expr"),              kxc::String("canonicalize_cast"),
         kxc::String("remove_standalone_reshapes"), kxc::String("eliminate_common_subexpr"),
         kxc::String("eliminate_dead_let"),         kxc::String("annotate_memory_scope"),
-        kxc::String("capture_post_dfs_index_in_spans"),
+        kxc::String("capture_post_dfs_index_in_spans"), kxc::String("infer_type"),
     };
     kxc::Function by_pipeline = kxc::relay::RunRelayPassPipeline(func, order);
-    kxc::Function manual = kxc::relay::CapturePostDfsIndexInSpansPass(
+    kxc::Function manual = kxc::relay::InferTypePass(kxc::relay::CapturePostDfsIndexInSpansPass(
         kxc::relay::AnnotateMemoryScopePass(kxc::relay::EliminateDeadLetPass(
             kxc::relay::EliminateCommonSubexprPass(kxc::relay::RemoveStandaloneReshapesPass(
                 kxc::relay::CanonicalizeCastPass(kxc::relay::SimplifyExprPass(
-                    kxc::relay::FoldConstantPass(kxc::relay::FoldTupleGetItemPass(func)))))))));
+                    kxc::relay::FoldConstantPass(kxc::relay::FoldTupleGetItemPass(func))))))))));
     TEST_CHECK(RelayText(by_pipeline) == RelayText(manual), "Relay pipeline order mismatch");
 
     bool thrown = false;

@@ -9,6 +9,7 @@
 
 #include "base/profiling.h"
 #include "codegen/codegen_c.h"
+#include "relay/transforms/infer_type.h"
 #include "relay/transforms/lower.h"
 #include "relay/transforms/pipeline.h"
 #include "runtime/runtime_session.h"
@@ -83,7 +84,9 @@ CompiledModule Compiler::Compile(Function func, CompileConfig config) {
     } else {
         relay_passes = {String("fold_constant"), String("simplify_expr")};
     }
-    Function optimized_func = relay::RunRelayPassPipeline(func, relay_passes);
+    Function typed_func = relay::InferTypePass(func);
+    Function optimized_func = relay::RunRelayPassPipeline(typed_func, relay_passes);
+    optimized_func = relay::InferTypePass(optimized_func);
     tir::PrimFunc prim_func = relay::LowerToTIR(optimized_func);
 
     Array<String> passes;

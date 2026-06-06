@@ -21,6 +21,7 @@
 #include "relay/transforms/eliminate_common_subexpr.h"
 #include "relay/transforms/fold_constant.h"
 #include "relay/transforms/fold_tuple_get_item.h"
+#include "relay/transforms/infer_type.h"
 #include "relay/transforms/remove_standalone_reshapes.h"
 #include "relay/transforms/simplify_expr.h"
 
@@ -106,6 +107,7 @@ const std::unordered_map<std::string, RelayPassFunc>& GetRelayPassTable() {
         {"eliminate_dead_let", EliminateDeadLetPass},
         {"annotate_memory_scope", AnnotateMemoryScopePass},
         {"capture_post_dfs_index_in_spans", CapturePostDfsIndexInSpansPass},
+        {"infer_type", InferTypePass},
     };
     return table;
 }
@@ -115,7 +117,8 @@ Array<String> GetDefaultPassOrder() {
             String("canonicalize_cast"), String("remove_standalone_reshapes"),
             String("eliminate_common_subexpr"), String("eliminate_dead_let"),
             String("annotate_memory_scope"),
-            String("capture_post_dfs_index_in_spans")};
+            String("capture_post_dfs_index_in_spans"),
+            String("infer_type")};
 }
 
 Function RunSinglePass(const Function& func, const std::string& pass_name) {
@@ -201,6 +204,11 @@ KXC_REGISTER_GLOBAL("kxc.relay.transform.capture_post_dfs_index_in_spans")
 KXC_REGISTER_GLOBAL("kxc.relay.transform.annotate_memory_scope")
     .set_body(ToPackedFunc([](Function func) -> ObjectRef {
         return ObjectRef(AnnotateMemoryScopePass(func));
+    }));
+
+KXC_REGISTER_GLOBAL("kxc.relay.transform.infer_type")
+    .set_body(ToPackedFunc([](Function func) -> ObjectRef {
+        return ObjectRef(InferTypePass(func));
     }));
 
 }  // namespace relay

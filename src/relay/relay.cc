@@ -1,8 +1,11 @@
 /*! \file src/relay/relay.cc
- * \brief 实现 Relay 节点、算子元数据、pass 工具和公共注册。
+ * \brief Implements Relay IR handles and type helpers.
  */
 
 #include "relay/relay.h"
+
+#include <sstream>
+#include <utility>
 
 namespace kxc {
 
@@ -15,6 +18,85 @@ TensorType::TensorType(Array<int64_t> shape, std::string dtype) {
 
 const TensorTypeNode* TensorType::operator->() const {
     return static_cast<const TensorTypeNode*>(object_);
+}
+
+TupleType::TupleType(Array<Type> fields) {
+    auto* node = new TupleTypeNode();
+    node->fields = std::move(fields);
+    SetData(node);
+}
+
+const TupleTypeNode* TupleType::operator->() const {
+    return static_cast<const TupleTypeNode*>(object_);
+}
+
+std::string TensorTypeToString(const TensorTypeNode* type) {
+    if (!type) {
+        return "<non-tensor>";
+    }
+    std::ostringstream os;
+    os << "Tensor[";
+    for (size_t i = 0; i < type->shape.size(); ++i) {
+        if (i) os << ", ";
+        os << type->shape[i];
+    }
+    os << "; " << type->dtype << "]";
+    return os.str();
+}
+
+std::string TypeToString(const Type& type) {
+    if (!type.defined()) {
+        return "<unknown>";
+    }
+    if (const auto* tensor = type.As<TensorTypeNode>()) {
+        return TensorTypeToString(tensor);
+    }
+    if (const auto* tuple = type.As<TupleTypeNode>()) {
+        std::ostringstream os;
+        os << "Tuple(";
+        for (size_t i = 0; i < tuple->fields.size(); ++i) {
+            if (i) os << ", ";
+            os << TypeToString(tuple->fields[i]);
+        }
+        os << ")";
+        return os.str();
+    }
+    return "<type>";
+}
+
+bool TypeEqual(const Type& lhs, const Type& rhs) {
+    if (!lhs.defined() || !rhs.defined()) {
+        return !lhs.defined() && !rhs.defined();
+    }
+    if (lhs.get() == rhs.get()) {
+        return true;
+    }
+    if (const auto* left_tensor = lhs.As<TensorTypeNode>()) {
+        const auto* right_tensor = rhs.As<TensorTypeNode>();
+        if (!right_tensor || left_tensor->dtype != right_tensor->dtype ||
+            left_tensor->shape.size() != right_tensor->shape.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < left_tensor->shape.size(); ++i) {
+            if (left_tensor->shape[i] != right_tensor->shape[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (const auto* left_tuple = lhs.As<TupleTypeNode>()) {
+        const auto* right_tuple = rhs.As<TupleTypeNode>();
+        if (!right_tuple || left_tuple->fields.size() != right_tuple->fields.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < left_tuple->fields.size(); ++i) {
+            if (!TypeEqual(left_tuple->fields[i], right_tuple->fields[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
 }
 
 Id::Id(std::string name) {
@@ -111,4 +193,3 @@ Let::Let(Var var, Expr value, Expr body) {
 const LetNode* Let::operator->() const { return static_cast<const LetNode*>(object_); }
 
 }  // namespace kxc
-

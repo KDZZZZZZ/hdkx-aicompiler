@@ -5,6 +5,7 @@
 #include "relay/op_macros.h"
 #include "relay/op.h"
 #include "relay/op_attr_types.h"
+#include "relay/type_infer.h"
 #include "te/topi/nn.h"
 #include <vector>
 #include <string>
@@ -84,10 +85,11 @@ This operator computes a 2D convolution of input `data` with `weight`.
 The `data` input should have shape `(batch_size, in_channels, height, width)`
 if layout is `NCHW`.
 )doc")
-    .set_num_inputs(2)
+    .set_num_inputs(-1)
     .add_argument("data", "Tensor", "The input tensor.")
     .add_argument("weight", "Tensor", "The weight tensor.")
     .set_attr<std::string>("TAttrs", "Conv2DAttrs") // Bind to C++ Attribute Struct
+    .set_attr<FInferType>("FInferType", Conv2DInferType)
     .set_attr<FRelayToTE>("FRelayToTE", Conv2DCompute);
 
 } // namespace relay

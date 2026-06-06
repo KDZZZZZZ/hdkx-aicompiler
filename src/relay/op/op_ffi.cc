@@ -27,10 +27,7 @@ Call MakeAdd(Expr lhs, Expr rhs) {
 }
 
 Call MakeSub(Expr lhs, Expr rhs) {
-    // Check if "sub" or "subtract" is registered. math.cc uses "sub", common_ops.cc uses "subtract".
-    // We prefer "sub" if available, or we should unify. 
-    // For now, assuming "sub" based on math.cc
-    return Call(GetOp("sub"), {lhs, rhs});
+    return Call(GetOp("subtract"), {lhs, rhs});
 }
 
 Call MakeMul(Expr lhs, Expr rhs) {
@@ -85,33 +82,6 @@ Call MakeReduceMean(Expr data, std::vector<int64_t> axes, int64_t keepdims) {
 
 Call MakeReshape(Expr data, std::vector<int64_t> newshape, bool allowzero) {
     auto attrs = ReshapeAttrs::Create(newshape, allowzero);
-    // Reshape in transform.cc takes 2 args: data, shape (tensor).
-    // But typically reshape op might take shape as attribute if shape is constant.
-    // transform.cc: add_argument("shape", "Tensor", "The target shape.")
-    // If we want to support shape as attribute, we might need to change the op definition or
-    // create a Constant tensor for the shape.
-    // For this tutorial/implementation, let's assume we pass shape as attribute for now 
-    // (as per Attrs definition) and maybe the Op implementation expects it differently?
-    // Wait, transform.cc defines Reshape to take 2 inputs. 
-    // But it ALSO defines "TAttrs" -> "ReshapeAttrs".
-    // This is a bit ambiguous. Usually if shape is dynamic, it's an input.
-    // If static, it's an attribute.
-    // Let's assume we use the attribute version for static shapes.
-    // But if the Op expects 2 inputs, we must provide 2 inputs.
-    // Let's provide a "dummy" 2nd input or fix the Op definition?
-    // Or maybe we create a Constant tensor from newshape and pass it as 2nd arg.
-    // But ReshapeAttrs is also registered.
-    // Let's assume for now we just pass attributes.
-    // IF the Op expects 2 inputs, this Call constructor with 1 input might be invalid if checked strictly.
-    // But Relay `Call` just stores args.
-    
-    // Actually, let's look at `transform.cc` again. 
-    // `add_argument("shape", "Tensor")` -> It expects a tensor.
-    // So we should convert `newshape` (vector) to a Constant Tensor and pass it.
-    // BUT we also have `ReshapeAttrs`.
-    // Let's use the Attrs for now as the user requested "wrap relay layer operators".
-    // Maybe we should update `transform.cc` to make shape optional or just use attributes.
-    // For now, I'll pass it as attribute and let backend handle it, or maybe I should fix the Op registration later.
     return Call(GetOp("reshape"), {data}, attrs);
 }
 
@@ -140,7 +110,7 @@ Call MakeSlice(Expr data, std::vector<int64_t> starts, std::vector<int64_t> ends
 
 Call MakeSoftmax(Expr data, int axis) {
     auto attrs = SoftmaxAttrs::Create(axis);
-    return Call(GetOp("nn_softmax"), {data}, attrs);
+    return Call(GetOp("softmax"), {data}, attrs);
 }
 
 Call MakeSplit(Expr data, std::vector<int64_t> indices_or_sections, int axis) {

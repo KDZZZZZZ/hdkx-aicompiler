@@ -103,6 +103,7 @@ set(KXC_RUNTIME_SOURCES
   src/base/device/cuda_device_api.cc
   src/relay/relay.cc
   src/relay/pass_utils.cc
+  src/relay/type_infer.cc
   src/relay/op_attrs.cc
   src/relay/op_macros.cc
   src/relay/common_ops.cc
@@ -114,6 +115,7 @@ set(KXC_RUNTIME_SOURCES
   src/relay/transforms/canonicalize_cast.cc
   src/relay/transforms/remove_standalone_reshapes.cc
   src/relay/transforms/fold_tuple_get_item.cc
+  src/relay/transforms/infer_type.cc
   src/relay/transforms/eliminate_common_subexpr.cc
   src/relay/transforms/eliminate_dead_let.cc
   src/relay/transforms/capture_post_dfs_index_in_spans.cc
@@ -235,6 +237,7 @@ endif()
 
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
+  kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   if(KXC_USE_CUDA)
     kxc_add_runtime_exe(cupti_smoke_test test/cupti_smoke_test.cpp)
@@ -260,6 +263,13 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS profile_bundle_test
     USES_TERMINAL
     COMMENT "Run profile_bundle_test"
+  )
+  add_custom_target(run_infer_type_test
+    COMMAND "$<TARGET_FILE:infer_type_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS infer_type_test
+    USES_TERMINAL
+    COMMENT "Run infer_type_test"
   )
   if(KXC_USE_CUDA)
     add_custom_target(run_cupti_smoke_test

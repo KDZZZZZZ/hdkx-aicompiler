@@ -3,6 +3,7 @@
  */
 
 #include "relay/transforms/lower.h"
+#include "relay/transforms/infer_type.h"
 #include "relay/op_attr_types.h"
 #include "relay/op.h"
 #include "base/pass.h"
@@ -178,6 +179,14 @@ protected:
 
         Attrs attrs = op->attrs.defined() ? Attrs(op->attrs) : Attrs();
         kxc::Type out_type = ref.checked_type();
+        if (!out_type.defined()) {
+            throw std::runtime_error("LowerToTIR requires checked_type for op: " +
+                                     op_node->name);
+        }
+        if (!out_type.As<TensorTypeNode>()) {
+            throw std::runtime_error("LowerToTIR currently requires TensorType call output for op: " +
+                                     op_node->name + ", got " + TypeToString(out_type));
+        }
         te::Tensor out = (*lower_ptr)(attrs, inputs, out_type);
         return {out};
     }
@@ -375,6 +384,7 @@ tir::PrimFunc LowerToTIR(Function func) {
     if (!func.defined()) {
         throw std::runtime_error("LowerToTIR expects a defined function");
     }
+    func = InferTypePass(func);
     if (!func->body.defined()) {
         throw std::runtime_error("LowerToTIR expects function body to be defined");
     }
