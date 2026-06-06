@@ -40,6 +40,18 @@ Issue #3 覆盖的算子族：
 
 但 issue #3 的实现不能加重 issue #2 的负担。类型规则应优先使用 canonical op name；必要的历史 alias 只能作为临时兼容路径。
 
+### 1.1 与 issue #8 多输出 lowering 的边界
+
+多输出对应 [issue #8](https://github.com/KDZZZZZZ/hdkx-aicompiler/issues/8)：`Extend Relay-to-TIR lowering beyond single-output compute tensors`。它的问题是 `LowerToTIR` 目前只支持 single-output compute tensor，不能把 Relay `Tuple` output、multi-output op 或 `split -> tuple_get_item` 变成可执行 lowering/runtime 路径。
+
+Issue #3 和 issue #8 有依赖关系，但不应该完整合并实现：
+
+- issue #3 应该解决类型层面的 tuple 支持：`TupleType`、`Tuple` type inference、`TupleGetItem` type inference，以及错误诊断。
+- issue #3 不应该解决多输出 lowering ABI：multi-output `PrimFunc` 如何表示 outputs、`params/buffer_map` 如何排布、runtime packed args 如何传递多个输出、module metadata 如何描述多个输出。
+- issue #8 应该在 typed Relay 基础上实现 lowering/runtime 多输出路径，并保持现有 single-output path 稳定。
+
+因此，issue #3 可以为 #8 做前置准备，但不关闭 #8。实现 #3 时可以加入不进入 lowering 的 `TupleType` / `TupleGetItem` inference tests；真正的 `split -> tuple_get_item` lowering test、tuple-output `PrimFunc` 和 runtime multi-output metadata 应留给 #8。
+
 ## 2. 现状
 
 ### 2.1 已有类型元数据，但不是编译契约
