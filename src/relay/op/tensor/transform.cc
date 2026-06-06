@@ -8,6 +8,8 @@
 #include "relay/type_infer.h"
 #include "te/te.h"
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace kxc {
 namespace relay {
@@ -26,6 +28,67 @@ Array<kxc::tir::PrimExpr> UnflattenIndex(
         cur = cur / dims[i];
     }
     return out;
+}
+
+int64_t ConstInt(const kxc::tir::PrimExpr& expr, const std::string& context) {
+    const auto* imm = expr.As<kxc::tir::IntImmNode>();
+    if (!imm) {
+        throw std::runtime_error(context + " requires static integer shape");
+    }
+    return imm->value;
+}
+
+int NormalizeSplitAxis(int axis, int ndim) {
+    if (axis < 0) {
+        axis += ndim;
+    }
+    if (axis < 0 || axis >= ndim) {
+        throw std::runtime_error("split axis out of range");
+    }
+    return axis;
+}
+
+Array<kxc::tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type) {
+    if (!type) {
+        throw std::runtime_error("split output field must be TensorType");
+    }
+    Array<kxc::tir::PrimExpr> shape;
+    for (int64_t dim : type->shape) {
+        if (dim < 0) {
+            throw std::runtime_error("split lowering requires static output shape");
+        }
+        shape.push_back(kxc::tir::IntImm(dim, kxc::tir::DataType::Int(64)));
+    }
+    return shape;
+}
+
+std::vector<int64_t> SplitOffsets(const SplitAttrsNode* attrs, int64_t axis_dim) {
+    if (!attrs || attrs->split.empty()) {
+        throw std::runtime_error("split requires SplitAttrs");
+    }
+    std::vector<int64_t> offsets;
+    if (attrs->split.size() == 1) {
+        const int64_t sections = attrs->split[0];
+        if (sections <= 0 || axis_dim % sections != 0) {
+            throw std::runtime_error("split sections must divide axis dimension");
+        }
+        const int64_t segment = axis_dim / sections;
+        for (int64_t i = 0; i < sections; ++i) {
+            offsets.push_back(i * segment);
+        }
+        return offsets;
+    }
+
+    int64_t previous = 0;
+    for (int64_t point : attrs->split) {
+        if (point < previous || point > axis_dim) {
+            throw std::runtime_error("split points must be sorted within axis dimension");
+        }
+        offsets.push_back(previous);
+        previous = point;
+    }
+    offsets.push_back(previous);
+    return offsets;
 }
 }
 
@@ -70,6 +133,51 @@ te::Tensor FlattenCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, c
         }
         return inputs[0](in_indices);
     }, "T_flatten");
+}
+
+Array<te::Tensor> SplitCompute(const Attrs& attrs,
+                               const Array<te::Tensor>& inputs,
+                               const kxc::Type& out_type) {
+    if (inputs.size() != 1) {
+        throw std::runtime_error("split expects exactly 1 input");
+    }
+    const auto* split_attrs = attrs.As<SplitAttrsNode>();
+    if (!split_attrs) {
+        throw std::runtime_error("split lowering requires SplitAttrs");
+    }
+    const auto* tuple_type = out_type.As<TupleTypeNode>();
+    if (!tuple_type) {
+        throw std::runtime_error("split lowering expects TupleType output");
+    }
+    const int ndim = static_cast<int>(inputs[0]->shape.size());
+    const int axis = NormalizeSplitAxis(split_attrs->axis, ndim);
+    const int64_t axis_dim = ConstInt(inputs[0]->shape[static_cast<size_t>(axis)],
+                                      "split axis dimension");
+    std::vector<int64_t> offsets = SplitOffsets(split_attrs, axis_dim);
+    if (offsets.size() != tuple_type->fields.size()) {
+        throw std::runtime_error("split output count does not match inferred TupleType");
+    }
+
+    Array<te::Tensor> outputs;
+    for (size_t out_index = 0; out_index < tuple_type->fields.size(); ++out_index) {
+        const auto* field_type = tuple_type->fields[out_index].As<TensorTypeNode>();
+        Array<kxc::tir::PrimExpr> out_shape = ShapeFromTensorType(field_type);
+        const int64_t offset = offsets[out_index];
+        outputs.push_back(te::compute(
+            out_shape,
+            [input = inputs[0], axis, offset](const Array<kxc::tir::Var>& indices) {
+                Array<kxc::tir::PrimExpr> input_indices;
+                for (const auto& idx : indices) {
+                    input_indices.push_back(idx);
+                }
+                input_indices[static_cast<size_t>(axis)] =
+                    input_indices[static_cast<size_t>(axis)] +
+                    kxc::tir::IntImm(offset, kxc::tir::DataType::Int(64));
+                return input(input_indices);
+            },
+            "T_split_" + std::to_string(out_index)));
+    }
+    return outputs;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +254,7 @@ KXC_REGISTER_OP(split)
     .add_argument("data", "Tensor", "The input tensor.")
     .add_argument("split", "Array<Int>", "The split points or number of sections.")
     .set_attr<FInferType>("FInferType", SplitInferType)
+    .set_attr<FRelayToTEMulti>("FRelayToTEMulti", SplitCompute)
     .set_attr<std::string>("TAttrs", "SplitAttrs");
 
 // Squeeze

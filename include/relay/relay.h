@@ -54,6 +54,7 @@ public:
     const TensorTypeNode* operator->() const;
 };
 
+/*! \brief Tuple 类型节点，保存 Tuple 表达式每个字段的静态类型。 */
 class TupleTypeNode : public TypeNode {
 public:
     Array<Type> fields;
@@ -63,6 +64,7 @@ public:
 
 KXC_OBJECT_DEFINE(TupleTypeNode)
 
+/*! \brief Tuple 类型句柄，用于在类型推导中表达多值或结构化结果。 */
 class TupleType : public Type {
 public:
     using Type::Type;
@@ -71,8 +73,11 @@ public:
     const TupleTypeNode* operator->() const;
 };
 
+/*! \brief 将 TensorType 格式化为可读字符串，主要用于错误信息和 IR 调试输出。 */
 std::string TensorTypeToString(const TensorTypeNode* type);
+/*! \brief 统一格式化当前支持的 Type，未定义类型会输出为 unknown。 */
 std::string TypeToString(const Type& type);
+/*! \brief 递归比较两个类型的结构、shape 和 dtype 是否完全一致。 */
 bool TypeEqual(const Type& lhs, const Type& rhs);
 
 class IdNode : public Object {
