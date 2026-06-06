@@ -4,6 +4,8 @@
 
 #include "relay/op_macros.h"
 #include "relay/relay.h"
+#include "relay/op_attr_types.h"
+#include "relay/type_infer.h"
 
 namespace kxc {
 namespace relay {
@@ -18,6 +20,7 @@ KXC_REGISTER_OP(reduce_mean)
 )doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", ReduceMeanInferType)
     .set_attr<std::string>("TAttrs", "ReduceMeanAttrs");
 
 } // namespace relay

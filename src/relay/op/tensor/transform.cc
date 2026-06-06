@@ -5,6 +5,7 @@
 #include "relay/op_macros.h"
 #include "relay/op.h"
 #include "relay/op_attr_types.h"
+#include "relay/type_infer.h"
 #include "te/te.h"
 #include <stdexcept>
 
@@ -84,6 +85,7 @@ The input is a tuple of tensors.
 )doc")
     .set_num_inputs(1)
     .add_argument("data", "Tuple", "The tuple of tensors to concatenate.")
+    .set_attr<FInferType>("FInferType", ConcatenateInferType)
     .set_attr<std::string>("TAttrs", "ConcatAttrs");
 
 // Flatten
@@ -93,6 +95,7 @@ KXC_REGISTER_OP(nn_flatten)
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
     .set_attr<std::string>("TAttrs", "FlattenAttrs")
+    .set_attr<FInferType>("FInferType", FlattenInferType)
     .set_attr<FRelayToTE>("FRelayToTE", FlattenCompute);
 
 // Reshape
@@ -101,9 +104,10 @@ KXC_REGISTER_OP(reshape)
 
 Returns a tensor with the same data but different shape.
 )doc")
-    .set_num_inputs(2)
+    .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
-    .add_argument("shape", "Tensor", "The target shape.")
+    .add_argument("newshape", "Array<Int>", "The static target shape.")
+    .set_attr<FInferType>("FInferType", ReshapeInferType)
     .set_attr<std::string>("TAttrs", "ReshapeAttrs");
 
 // Shape
@@ -111,7 +115,8 @@ KXC_REGISTER_OP(shape)
     .describe(R"doc(Returns the shape of the input tensor.
 )doc")
     .set_num_inputs(1)
-    .add_argument("data", "Tensor", "The input tensor.");
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", ShapeInferType);
 
 // Slice
 KXC_REGISTER_OP(slice)
@@ -137,9 +142,10 @@ KXC_REGISTER_OP(slice)
 KXC_REGISTER_OP(split)
     .describe(R"doc(Splits the input tensor into multiple tensors.
 )doc")
-    .set_num_inputs(2)
+    .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
-    .add_argument("split", "Tensor", "The split points or sizes.")
+    .add_argument("split", "Array<Int>", "The split points or number of sections.")
+    .set_attr<FInferType>("FInferType", SplitInferType)
     .set_attr<std::string>("TAttrs", "SplitAttrs");
 
 // Squeeze
@@ -156,6 +162,7 @@ KXC_REGISTER_OP(transpose)
 )doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", TransposeInferType)
     .set_attr<std::string>("TAttrs", "TransposeAttrs");
 
 // Unsqueeze
@@ -173,7 +180,8 @@ KXC_REGISTER_OP(where)
     .set_num_inputs(3)
     .add_argument("condition", "Tensor", "The condition tensor.")
     .add_argument("x", "Tensor", "Values to use where condition is True.")
-    .add_argument("y", "Tensor", "Values to use where condition is False.");
+    .add_argument("y", "Tensor", "Values to use where condition is False.")
+    .set_attr<FInferType>("FInferType", WhereInferType);
 
 // Gather
 KXC_REGISTER_OP(gather)
@@ -182,6 +190,7 @@ KXC_REGISTER_OP(gather)
     .set_num_inputs(2)
     .add_argument("data", "Tensor", "The input tensor.")
     .add_argument("indices", "Tensor", "The indices to gather.")
+    .set_attr<FInferType>("FInferType", GatherInferType)
     .set_attr<std::string>("TAttrs", "GatherAttrs");
 
 // Cast
@@ -190,6 +199,7 @@ KXC_REGISTER_OP(cast)
 )doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", CastInferType)
     .set_attr<std::string>("TAttrs", "CastAttrs");
 
 // ConstantOfShape

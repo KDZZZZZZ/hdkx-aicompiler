@@ -1,5 +1,5 @@
 /*! \file include/relay/relay.h
- * \brief 定义 Relay IR 节点、算子注册、attrs 和 Relay 到 TE lowering 属性。
+ * \brief 定义 Relay IR 节点、类型节点和用户可见句柄。
  */
 
 #pragma once
@@ -17,21 +17,11 @@
 
 namespace kxc {
 
-/*!
- * \brief Relay 表达式节点基类，额外携带设备规划信息。
- */
 class RelayNode : public ExprNode {
 public:
-    // Device planning metadata, similar to TVM's virtual_device_ on relay::ExprNode.
     VirtualDevice virtual_device_;
 };
 
-/*!
- * \brief Relay 表达式句柄基类。
- *
- * 具体表达式如 Var、Call、Function 都继承该句柄，提供统一的 virtual device
- * 读写接口。
- */
 class Relay : public Expr {
 public:
     using Expr::Expr;
@@ -46,7 +36,6 @@ public:
     }
 };
 
-/*! \brief Tensor 类型节点，描述 shape 和 dtype。 */
 class TensorTypeNode : public TypeNode {
 public:
     Array<int64_t> shape;
@@ -57,7 +46,6 @@ public:
 
 KXC_OBJECT_DEFINE(TensorTypeNode)
 
-/*! \brief Tensor 类型句柄。 */
 class TensorType : public Type {
 public:
     using Type::Type;
@@ -66,7 +54,27 @@ public:
     const TensorTypeNode* operator->() const;
 };
 
-/*! \brief Relay 变量名节点。 */
+class TupleTypeNode : public TypeNode {
+public:
+    Array<Type> fields;
+
+    KXC_OBJECT_DECLARE
+};
+
+KXC_OBJECT_DEFINE(TupleTypeNode)
+
+class TupleType : public Type {
+public:
+    using Type::Type;
+
+    explicit TupleType(Array<Type> fields);
+    const TupleTypeNode* operator->() const;
+};
+
+std::string TensorTypeToString(const TensorTypeNode* type);
+std::string TypeToString(const Type& type);
+bool TypeEqual(const Type& lhs, const Type& rhs);
+
 class IdNode : public Object {
 public:
     std::string name_hint;
@@ -75,7 +83,6 @@ public:
 
 KXC_OBJECT_DEFINE(IdNode)
 
-/*! \brief Relay 变量名句柄。 */
 class Id : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
@@ -83,7 +90,6 @@ public:
     const IdNode* operator->() const;
 };
 
-/*! \brief Relay 变量节点，表示函数参数或 let-bound 局部变量。 */
 class VarNode : public RelayNode {
 public:
     Id vid;
@@ -98,7 +104,6 @@ public:
 
 KXC_OBJECT_DEFINE(VarNode)
 
-/*! \brief Relay 变量句柄。 */
 class Var : public Relay {
 public:
     using Relay::Relay;
@@ -107,7 +112,6 @@ public:
     const VarNode* operator->() const;
 };
 
-/*! \brief Relay 常量节点，持有 runtime::NDArray 数据。 */
 class ConstantNode : public RelayNode {
 public:
     runtime::NDArray data;
@@ -117,7 +121,6 @@ public:
 
 KXC_OBJECT_DEFINE(ConstantNode)
 
-/*! \brief Relay 常量句柄。 */
 class Constant : public Relay {
 public:
     using Relay::Relay;
@@ -125,7 +128,6 @@ public:
     const ConstantNode* operator->() const;
 };
 
-/*! \brief Relay 调用节点，op 可以是算子或其他可调用表达式。 */
 class CallNode : public RelayNode {
 public:
     Expr op;
@@ -137,7 +139,6 @@ public:
 
 KXC_OBJECT_DEFINE(CallNode)
 
-/*! \brief Relay 调用句柄。 */
 class Call : public Relay {
 public:
     using Relay::Relay;
@@ -145,7 +146,6 @@ public:
     const CallNode* operator->() const;
 };
 
-/*! \brief Relay 函数节点，包含参数列表和函数体表达式。 */
 class FunctionNode : public RelayNode {
 public:
     Array<Var> params;
@@ -156,7 +156,6 @@ public:
 
 KXC_OBJECT_DEFINE(FunctionNode)
 
-/*! \brief Relay 函数句柄，是 Compiler::Compile 的主要输入。 */
 class Function : public Relay {
 public:
     using Relay::Relay;
@@ -164,7 +163,6 @@ public:
     const FunctionNode* operator->() const;
 };
 
-/*! \brief Relay 元组节点。 */
 class TupleNode : public RelayNode {
 public:
     Array<Expr> fields;
@@ -174,7 +172,6 @@ public:
 
 KXC_OBJECT_DEFINE(TupleNode)
 
-/*! \brief Relay 元组句柄。 */
 class Tuple : public Relay {
 public:
     using Relay::Relay;
@@ -182,7 +179,6 @@ public:
     const TupleNode* operator->() const;
 };
 
-/*! \brief Relay 元组取项节点。 */
 class TupleGetItemNode : public RelayNode {
 public:
     Expr tuple;
@@ -193,7 +189,6 @@ public:
 
 KXC_OBJECT_DEFINE(TupleGetItemNode)
 
-/*! \brief Relay 元组取项句柄。 */
 class TupleGetItem : public Relay {
 public:
     using Relay::Relay;
@@ -201,7 +196,6 @@ public:
     const TupleGetItemNode* operator->() const;
 };
 
-/*! \brief Relay 条件表达式节点。 */
 class IfNode : public RelayNode {
 public:
     Expr cond;
@@ -213,7 +207,6 @@ public:
 
 KXC_OBJECT_DEFINE(IfNode)
 
-/*! \brief Relay 条件表达式句柄。 */
 class If : public Relay {
 public:
     using Relay::Relay;
@@ -221,7 +214,6 @@ public:
     const IfNode* operator->() const;
 };
 
-/*! \brief Relay let binding 节点。 */
 class LetNode : public RelayNode {
 public:
     Var var;
@@ -233,7 +225,6 @@ public:
 
 KXC_OBJECT_DEFINE(LetNode)
 
-/*! \brief Relay let binding 句柄。 */
 class Let : public Relay {
 public:
     using Relay::Relay;

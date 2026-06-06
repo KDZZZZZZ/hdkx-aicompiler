@@ -5,6 +5,7 @@
 #include "relay/op_macros.h"
 #include "relay/op.h"
 #include "relay/op_attr_types.h"
+#include "relay/type_infer.h"
 #include "te/topi/nn.h"
 #include <vector>
 #include <string>
@@ -108,6 +109,7 @@ This operator performs max pooling on the input tensor.
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
     .set_attr<std::string>("TAttrs", "MaxPool2DAttrs")
+    .set_attr<FInferType>("FInferType", Pool2DInferType)
     .set_attr<FRelayToTE>("FRelayToTE", MaxPool2DCompute);
 
 KXC_REGISTER_OP(nn_avg_pool2d)
@@ -120,6 +122,7 @@ This operator performs average pooling on the input tensor.
     // Reusing MaxPool2DAttrs for AvgPool2D as they share structure (pool_size, strides, padding)
     // In real TVM, they might share a generic Pool2DAttrs.
     .set_attr<std::string>("TAttrs", "MaxPool2DAttrs")
+    .set_attr<FInferType>("FInferType", Pool2DInferType)
     .set_attr<FRelayToTE>("FRelayToTE", AvgPool2DCompute); 
 
 KXC_REGISTER_OP(nn_global_avg_pool2d)
@@ -130,6 +133,7 @@ Reduces the spatial dimensions (H, W) to 1x1 by averaging.
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
     .set_attr<std::string>("TAttrs", "GlobalAvgPool2DAttrs")
+    .set_attr<FInferType>("FInferType", GlobalAvgPool2DInferType)
     .set_attr<FRelayToTE>("FRelayToTE", GlobalAvgPool2DCompute);
 
 } // namespace relay

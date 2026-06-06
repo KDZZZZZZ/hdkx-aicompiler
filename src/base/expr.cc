@@ -1,8 +1,11 @@
 /*! \file src/base/expr.cc
- * \brief 实现基础对象、设备、NDArray、Target、执行计划、PassContext 和 profiling 支撑逻辑。
+ * \brief 实现共享表达式辅助函数。
  */
 
 #include "base/expr.h"
+
+#include <stdexcept>
+#include <utility>
 
 namespace kxc {
 
@@ -14,5 +17,12 @@ Span::Span(std::string source_name, int line, int column) {
     SetData(node);
 }
 
-}  // namespace kxc
+void SetCheckedType(const Expr& expr, Type checked_type) {
+    if (!expr.defined()) {
+        throw std::runtime_error("SetCheckedType expects a defined expression");
+    }
+    auto* node = const_cast<ExprNode*>(static_cast<const ExprNode*>(expr.get()));
+    node->checked_type_ = std::move(checked_type);
+}
 
+}  // namespace kxc

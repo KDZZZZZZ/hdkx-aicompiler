@@ -4,6 +4,7 @@
 
 #include "relay/op_macros.h"
 #include "relay/op_attr_types.h"
+#include "relay/type_infer.h"
 #include "te/topi/nn.h"
 #include <stdexcept>
 
@@ -22,6 +23,7 @@ KXC_REGISTER_OP(nn_relu)
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
     .set_attr<std::string>("TAttrs", "ReluAttrs")
+    .set_attr<FInferType>("FInferType", UnarySameInferType)
     .set_attr<FRelayToTE>("FRelayToTE", ReluCompute);
 
 } // namespace relay

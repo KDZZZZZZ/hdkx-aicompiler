@@ -5,6 +5,7 @@
 #include "relay/op_macros.h"
 #include "relay/op.h"
 #include "relay/op_attr_types.h"
+#include "relay/type_infer.h"
 #include "te/topi/nn.h"
 #include "te/topi/broadcast.h"
 #include <stdexcept>
@@ -63,6 +64,7 @@ KXC_REGISTER_OP(nn_dense)
     .describe("Dense (fully connected) layer")
     .set_num_inputs(2) // data, weight
     .set_attr<std::string>("TAttrs", "DenseAttrs")
+    .set_attr<FInferType>("FInferType", DenseInferType)
     .set_attr<FRelayToTE>("FRelayToTE", DenseCompute);
 
 // Gemm
@@ -74,6 +76,7 @@ KXC_REGISTER_OP(nn_gemm)
     .add_argument("B", "Tensor", "The second input tensor.")
     .add_argument("C", "Tensor", "The third input tensor (bias).")
     .set_attr<std::string>("TAttrs", "GemmAttrs")
+    .set_attr<FInferType>("FInferType", GemmInferType)
     .set_attr<FRelayToTE>("FRelayToTE", GemmCompute);
 
 } // namespace relay
