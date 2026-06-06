@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -76,6 +77,8 @@ public:
 
     const NDArrayNode* operator->() const;
     const DLTensor* operator*() const;
+    size_t NBytes() const;
+    void CopyFromBytes(const void* data, size_t nbytes) const;
 };
 
 }  // namespace runtime

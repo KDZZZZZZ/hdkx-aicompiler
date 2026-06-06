@@ -14,6 +14,8 @@ option(KXC_BUILD_DEBUG_EXAMPLES "Build temporary debug examples in test/" OFF)
 option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+
 if(MSVC)
   add_compile_options(/utf-8 /EHsc)
 endif()
@@ -101,6 +103,7 @@ set(KXC_RUNTIME_SOURCES
   src/base/disco/executor.cc
   src/base/device/cpu_device_api.cc
   src/base/device/cuda_device_api.cc
+  src/frontend/onnx_importer.cc
   src/relay/relay.cc
   src/relay/pass_utils.cc
   src/relay/type_infer.cc
@@ -239,6 +242,36 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
+  if(Python3_Interpreter_FOUND)
+    set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
+    set(KXC_ONNX_IMPORT_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.params.bin")
+    add_custom_command(
+      OUTPUT "${KXC_ONNX_IMPORT_JSON}" "${KXC_ONNX_IMPORT_PARAMS}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/onnx"
+      COMMAND "${CMAKE_COMMAND}" -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
+              "${Python3_EXECUTABLE}" -m kxc_onnx
+              --model "${CMAKE_CURRENT_SOURCE_DIR}/resnet18.onnx"
+              --json "${KXC_ONNX_IMPORT_JSON}"
+              --params "${KXC_ONNX_IMPORT_PARAMS}"
+              --batch 1
+      DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/resnet18.onnx"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/__init__.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/__main__.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/importer.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/spec.py"
+      VERBATIM
+      COMMENT "Generate ResNet18 ONNX import fixture")
+    add_custom_target(onnx_importer_fixture DEPENDS
+      "${KXC_ONNX_IMPORT_JSON}" "${KXC_ONNX_IMPORT_PARAMS}")
+    kxc_add_runtime_exe(onnx_importer_test test/onnx_importer_test.cpp)
+    add_dependencies(onnx_importer_test onnx_importer_fixture)
+    target_compile_definitions(onnx_importer_test PRIVATE
+      KXC_ONNX_IMPORT_JSON_PATH="${KXC_ONNX_IMPORT_JSON}"
+      KXC_ONNX_IMPORT_PARAMS_PATH="${KXC_ONNX_IMPORT_PARAMS}")
+  else()
+    message(WARNING "Python3 interpreter was not found; skipping onnx_importer_test target.")
+  endif()
   if(KXC_USE_CUDA)
     kxc_add_runtime_exe(cupti_smoke_test test/cupti_smoke_test.cpp)
     if(TARGET CUDA::cuda_driver)
@@ -271,6 +304,15 @@ if(KXC_BUILD_PASS_TESTS)
     USES_TERMINAL
     COMMENT "Run infer_type_test"
   )
+  if(Python3_Interpreter_FOUND)
+    add_custom_target(run_onnx_importer_test
+      COMMAND "$<TARGET_FILE:onnx_importer_test>"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+      DEPENDS onnx_importer_test
+      USES_TERMINAL
+      COMMENT "Run onnx_importer_test"
+    )
+  endif()
   if(KXC_USE_CUDA)
     add_custom_target(run_cupti_smoke_test
       COMMAND "$<TARGET_FILE:cupti_smoke_test>"
