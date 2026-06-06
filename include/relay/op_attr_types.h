@@ -1,5 +1,5 @@
 /*! \file include/relay/op_attr_types.h
- * \brief Defines typed Relay operator attributes used by compiler passes.
+ * \brief 定义编译 pass 使用的 Relay 算子属性函数类型。
  */
 
 #pragma once

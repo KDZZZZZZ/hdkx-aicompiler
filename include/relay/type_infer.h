@@ -1,5 +1,5 @@
 /*! \file include/relay/type_infer.h
- * \brief Shared Relay operator type inference rules.
+ * \brief 声明 Relay 算子共享的类型推导规则。
  */
 
 #pragma once

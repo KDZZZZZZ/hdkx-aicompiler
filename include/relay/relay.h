@@ -1,5 +1,5 @@
 /*! \file include/relay/relay.h
- * \brief Defines Relay IR nodes, type nodes, and user-facing handles.
+ * \brief 定义 Relay IR 节点、类型节点和用户可见句柄。
  */
 
 #pragma once

@@ -1,5 +1,5 @@
 /*! \file src/relay/op/tensor/math.cc
- * \brief Registers Relay tensor math operators and compiler hooks.
+ * \brief 注册 Relay tensor math 算子及其编译 hook。
  */
 
 #include "relay/op_macros.h"

@@ -1,5 +1,5 @@
 /*! \file src/relay/relay.cc
- * \brief Implements Relay IR handles and type helpers.
+ * \brief 实现 Relay IR 句柄和类型辅助函数。
  */
 
 #include "relay/relay.h"

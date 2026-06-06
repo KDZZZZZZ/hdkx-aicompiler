@@ -1,5 +1,5 @@
 /*! \file src/base/expr.cc
- * \brief Implements shared expression helpers.
+ * \brief 实现共享表达式辅助函数。
  */
 
 #include "base/expr.h"

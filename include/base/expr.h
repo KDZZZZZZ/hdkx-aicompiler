@@ -1,5 +1,5 @@
 /*! \file include/base/expr.h
- * \brief Defines the base expression and type handles shared by Relay/TIR IR.
+ * \brief 定义 Relay/TIR 共享的基础表达式和类型句柄。
  */
 
 #pragma once

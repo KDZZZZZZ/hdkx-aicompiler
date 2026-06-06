@@ -14,7 +14,7 @@ namespace relay {
 // --- NN Ops ---
 KXC_REGISTER_OP(nn_conv2d)
     .describe("2D convolution layer")
-    .set_num_inputs(-1) // data, weight[, bias]
+    .set_num_inputs(-1) // 数据、权重[, 偏置]
     .set_attr<FInferType>("FInferType", Conv2DInferType)
     .set_attr<std::string>("TAttrs", "Conv2DAttrs"); // Register the Attribute Type Key
 

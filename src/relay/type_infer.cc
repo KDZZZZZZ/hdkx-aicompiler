@@ -1,5 +1,5 @@
 /*! \file src/relay/type_infer.cc
- * \brief Implements shared Relay operator type inference rules.
+ * \brief 实现 Relay 算子共享的类型推导规则。
  */
 
 #include "relay/type_infer.h"

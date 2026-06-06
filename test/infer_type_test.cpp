@@ -1,5 +1,5 @@
 /*! \file test/infer_type_test.cpp
- * \brief Tests Relay type and shape inference.
+ * \brief 测试 Relay 类型和 shape 推导。
  */
 
 #include "relay/op.h"

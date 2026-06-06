@@ -1,5 +1,5 @@
 /*! \file include/relay/transforms/infer_type.h
- * \brief Declares Relay static type and shape inference.
+ * \brief 声明 Relay 静态类型和 shape 推导 pass。
  */
 
 #pragma once
