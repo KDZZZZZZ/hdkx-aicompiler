@@ -91,14 +91,14 @@ For compiler-facing changes, the PR should state which layer is affected:
 
 ## Validation Baseline
 
-Use the narrowest checks that cover the issue. When the CPU-only toolchain is
-enough, prefer:
+Use the narrowest checks that cover the issue. When the existing CMake CPU-only
+toolchain is enough, prefer:
 
 ```powershell
-cmake --preset dev-mingw-cpu
-cmake --build --preset dev-mingw-cpu
-cmake --build out/build/dev-mingw-cpu --target run_pass_pipeline_test
-cmake --build out/build/dev-mingw-cpu --target run_profile_bundle_test
+cmake --preset dev-ninja-cpu
+cmake --build --preset dev-ninja-cpu
+cmake --build out/build/dev-ninja-cpu --target run_pass_pipeline_test
+cmake --build out/build/dev-ninja-cpu --target run_profile_bundle_test
 ```
 
 If a change touches CUDA, LLVM, code generation, device placement, or distributed
