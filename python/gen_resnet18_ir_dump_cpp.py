@@ -10,6 +10,8 @@ from pathlib import Path
 import onnx
 from onnx import AttributeProto, TensorProto
 
+from kxc_onnx import import_onnx
+
 
 SUPPORTED_OPS = {
     "Conv",
@@ -80,13 +82,7 @@ def value_info_shape_and_dtype(value_info, default_batch):
 
 
 def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
-    model = onnx.load(str(model_path))
-    graph = model.graph
-
-    # Build lookup for input/output type info.
-    vi_by_name = {}
-    for vi in list(graph.input) + list(graph.output) + list(graph.value_info):
-        vi_by_name[vi.name] = vi
+    imported = import_onnx(model_path, default_batch=default_batch)
 
     lines = []
     w = lines.append
@@ -407,113 +403,90 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     value_map = {}
     sym_id = 0
 
-    for init in graph.initializer:
-        c_name = f"const_{sym_id}_{sanitize(init.name)}"
+    for param_name in imported.param_order:
+        param = imported.params[param_name]
+        c_name = f"const_{sym_id}_{sanitize(param.name)}"
         nd_name = f"nd_{sym_id}"
         sym_id += 1
-        shape = [int(d) for d in init.dims]
-        dtype = onnx_dtype_to_kxc(int(init.data_type))
-        w(f"    runtime::NDArray {nd_name}({fmt_int_list(shape)}, \"{dtype}\");")
+        w(f"    runtime::NDArray {nd_name}({fmt_int_list(param.shape)}, \"{param.dtype}\");")
         w(f"    Constant {c_name}({nd_name});")
-        value_map[init.name] = c_name
+        value_map[param.name] = c_name
 
     w("")
     # Inputs as typed Var params.
-    for inp in graph.input:
+    for inp in imported.function.inputs:
         if inp.name in value_map:
             continue
-        if inp.name not in vi_by_name:
-            raise RuntimeError(f"Missing value info for input: {inp.name}")
-        shape, dtype = value_info_shape_and_dtype(vi_by_name[inp.name], default_batch)
         v_name = f"input_{sym_id}_{sanitize(inp.name)}"
         sym_id += 1
-        w(f"    Var {v_name}(\"{inp.name}\", TensorType({fmt_int_list(shape)}, \"{dtype}\"));")
+        w(f"    Var {v_name}(\"{inp.name}\", TensorType({fmt_int_list(inp.shape)}, \"{inp.dtype}\"));")
         w(f"    params.push_back({v_name});")
         value_map[inp.name] = v_name
 
     w("")
-    for i, node in enumerate(graph.node):
-        if node.op_type not in SUPPORTED_OPS:
+    for i, node in enumerate(imported.function.nodes):
+        if len(node.outputs) != 1:
             raise RuntimeError(
-                f"Unsupported op '{node.op_type}' in resnet18.onnx for current lower path."
+                f"Node '{node.name}' has {len(node.outputs)} outputs; only single output is supported."
             )
-        if len(node.output) != 1:
-            raise RuntimeError(
-                f"Node '{node.name or node.op_type}' has {len(node.output)} outputs; only single output is supported."
-            )
-        missing = [name for name in node.input if name and name not in value_map]
+        missing = [name for name in node.inputs if name and name not in value_map]
         if missing:
-            raise RuntimeError(
-                f"Node '{node.name or node.op_type}' has missing inputs in map: {missing}"
-            )
+            raise RuntimeError(f"Node '{node.name}' has missing inputs in map: {missing}")
 
-        out_var = f"node_{i}_{sanitize(node.op_type)}"
+        out_var = f"node_{i}_{sanitize(node.op_name)}"
         arg_vec = f"args_{i}"
-        in_vars = [value_map[name] for name in node.input if name]
+        in_vars = [value_map[name] for name in node.inputs if name]
         in_text = ", ".join(in_vars)
 
-        w(f"    // ONNX Node {i}: {node.op_type} ({node.name})")
+        w(f"    // ONNX Node {i}: {node.op_name} ({node.name})")
         w(f"    std::vector<Expr> {arg_vec} = {{{in_text}}};")
 
-        if node.op_type == "Conv":
-            strides = get_attr(node, "strides", [1, 1])
-            pads = get_attr(node, "pads", [0, 0, 0, 0])
-            dilations = get_attr(node, "dilations", [1, 1])
-            group = get_attr(node, "group", 1)
-            kernel_shape = get_attr(node, "kernel_shape", [3, 3])
-            weight_name = node.input[1]
-            weight_init = next((x for x in graph.initializer if x.name == weight_name), None)
-            if weight_init is None:
-                raise RuntimeError(f"Conv weight initializer not found: {weight_name}")
-            channels = int(weight_init.dims[0])
+        if node.op_name == "nn_conv2d":
+            attrs = node.attrs
             w(
-                f"    Conv2DAttrs attrs_{i} = Conv2DAttrs::Create({fmt_int_list(strides)}, "
-                f"{fmt_int_list(pads)}, {fmt_int_list(dilations)}, {group}, {channels}, "
-                f"{fmt_int_list(kernel_shape)}, \"NCHW\", \"OIHW\", \"\", \"\");"
+                f"    Conv2DAttrs attrs_{i} = Conv2DAttrs::Create({fmt_int_list(attrs['strides'])}, "
+                f"{fmt_int_list(attrs['pads'])}, {fmt_int_list(attrs['dilations'])}, "
+                f"{int(attrs['group'])}, {int(attrs['channels'])}, "
+                f"{fmt_int_list(attrs['kernel_size'])}, \"{attrs['data_layout']}\", "
+                f"\"{attrs['kernel_layout']}\", \"{attrs['out_layout']}\", \"{attrs['out_dtype']}\");"
             )
             w(f"    Call {out_var}(Op::Get(\"nn_conv2d\"), {arg_vec}, attrs_{i});")
-        elif node.op_type == "Relu":
+        elif node.op_name == "nn_relu":
             w(f"    Call {out_var}(Op::Get(\"nn_relu\"), {arg_vec}, ReluAttrs::Create());")
-        elif node.op_type == "MaxPool":
-            kernel = get_attr(node, "kernel_shape", [1, 1])
-            strides = get_attr(node, "strides", [1, 1])
-            pads = get_attr(node, "pads", [0, 0, 0, 0])
-            dilations = get_attr(node, "dilations", [1, 1])
-            ceil_mode = bool(get_attr(node, "ceil_mode", 0))
-            ceil_lit = "true" if ceil_mode else "false"
+        elif node.op_name == "nn_max_pool2d":
+            attrs = node.attrs
+            ceil_lit = "true" if attrs["ceil_mode"] else "false"
             w(
-                f"    MaxPool2DAttrs attrs_{i} = MaxPool2DAttrs::Create({fmt_int_list(strides)}, "
-                f"{fmt_int_list(pads)}, {fmt_int_list(dilations)}, {fmt_int_list(kernel)}, "
-                f"\"NCHW\", {ceil_lit});"
+                f"    MaxPool2DAttrs attrs_{i} = MaxPool2DAttrs::Create({fmt_int_list(attrs['strides'])}, "
+                f"{fmt_int_list(attrs['pads'])}, {fmt_int_list(attrs['dilations'])}, "
+                f"{fmt_int_list(attrs['pool_size'])}, \"{attrs['layout']}\", {ceil_lit});"
             )
             w(f"    Call {out_var}(Op::Get(\"nn_max_pool2d\"), {arg_vec}, attrs_{i});")
-        elif node.op_type == "Add":
+        elif node.op_name == "add":
             w(f"    Call {out_var}(Op::Get(\"add\"), {arg_vec}, AddAttrs::Create());")
-        elif node.op_type == "GlobalAveragePool":
+        elif node.op_name == "nn_global_avg_pool2d":
             w(
                 f"    Call {out_var}(Op::Get(\"nn_global_avg_pool2d\"), {arg_vec}, "
                 "GlobalAvgPool2DAttrs::Create());"
             )
-        elif node.op_type == "Flatten":
-            axis = get_attr(node, "axis", 1)
+        elif node.op_name == "nn_flatten":
+            axis = int(node.attrs["axis"])
             w(f"    Call {out_var}(Op::Get(\"nn_flatten\"), {arg_vec}, FlattenAttrs::Create({axis}));")
-        elif node.op_type == "Gemm":
-            alpha = get_attr(node, "alpha", 1.0)
-            beta = get_attr(node, "beta", 1.0)
-            trans_a = get_attr(node, "transA", 0)
-            trans_b = get_attr(node, "transB", 0)
+        elif node.op_name == "nn_gemm":
+            attrs = node.attrs
             w(
                 f"    Call {out_var}(Op::Get(\"nn_gemm\"), {arg_vec}, "
-                f"GemmAttrs::Create({alpha}f, {beta}f, {trans_a}, {trans_b}));"
+                f"GemmAttrs::Create({float(attrs['alpha'])}f, {float(attrs['beta'])}f, "
+                f"{int(attrs['transA'])}, {int(attrs['transB'])}));"
             )
         else:
-            raise RuntimeError(f"Unhandled op: {node.op_type}")
+            raise RuntimeError(f"Unhandled Relay op: {node.op_name}")
 
-        value_map[node.output[0]] = out_var
+        value_map[node.outputs[0]] = out_var
 
-    if not graph.output:
+    if not imported.function.outputs:
         raise RuntimeError("Model has no outputs.")
-    out_name = graph.output[0].name
+    out_name = imported.function.outputs[0].name
     if out_name not in value_map:
         raise RuntimeError(f"Graph output not found in value map: {out_name}")
     w("")
