@@ -300,7 +300,221 @@ Issue #2 至少应增加以下测试。
 - `mul`、`subtract`、`divide`、`softmax` 均使用 canonical name。
 - 如果输入历史 alias，预期行为必须明确：要么前置 canonicalization 后成功，要么报出“不支持历史 alias”的清晰错误。
 
-## 7. 实现顺序建议
+## 7. 编译与 CI 固化计划
+
+Issue #2 不能只靠人工 review。规范落地后必须有构建期和 CI 期的硬失败检查，用来自动发现“半拉实现”。
+
+### 7.1 半拉实现的定义
+
+以下任一情况都应让检查失败：
+
+- 新增 `KXC_REGISTER_OP(...)`，但该 op 没有进入 op support matrix。
+- 新增或保留历史内部名，例如 `KXC_REGISTER_OP(multiply)`、`KXC_REGISTER_OP(nn_softmax)`、`Op::Get("sub")`、`Op::Get("div")`、`Op::Get("concat")`。
+- support matrix 声明某 op 需要 `FInferType`，但注册表里没有挂 `FInferType`。
+- support matrix 声明某 op 需要 lowering，单输出 op 没有 `FRelayToTE`，多输出 op 没有 `FRelayToTEMulti`。
+- public `_make` helper 创建出的 `Call` 不是 canonical name。
+- ONNX importer 输出非 canonical name。
+- pass 中继续散落 alias 判断，例如 `mul || multiply`、`subtract || sub`、`divide || div`，但没有集中 canonicalization 或明确临时豁免。
+- TOPI helper 返回空 `Tensor()` 或错误替代实现，但 matrix 将依赖它的 Relay op 标记为 supported。
+
+### 7.2 机器可读 support matrix
+
+建议新增机器可读文件作为单一事实源，例如：
+
+- `docs/OP_SUPPORT_MATRIX.md`：面向人阅读。
+- `test/relay_op_contract.json`：面向检查脚本和 C++ 测试。
+
+`relay_op_contract.json` 至少包含：
+
+```json
+{
+  "canonical_ops": {
+    "add": {
+      "category": "tensor",
+      "required": true,
+      "infer_type": true,
+      "lowering": "single",
+      "public_helpers": ["kxc.relay.op._make.add"],
+      "onnx_ops": ["Add"]
+    },
+    "split": {
+      "category": "transform",
+      "required": true,
+      "infer_type": true,
+      "lowering": "multi",
+      "public_helpers": ["kxc.relay.op._make.split"],
+      "onnx_ops": ["Split"]
+    }
+  },
+  "forbidden_internal_names": ["sub", "multiply", "div", "nn_softmax", "concat"],
+  "temporary_alias_allowlist": []
+}
+```
+
+规则：
+
+- 新增 Relay op 必须先进入 matrix，再实现注册、type、lowering、测试。
+- matrix 里的状态不能比实际能力更乐观。
+- 如果某 op 只完成注册和类型推导，`lowering` 必须显式标为 `none`，不能伪装成 supported lowering。
+- `temporary_alias_allowlist` 默认应为空；需要临时兼容时必须写原因、过期 issue 和测试。
+
+### 7.3 C++ registry contract test
+
+新增 `test/relay_op_contract_test.cpp`，加入 `KXC_BUILD_PASS_TESTS`。
+
+它负责运行时检查：
+
+- matrix 中每个 canonical op 能在注册表中找到。
+- canonical op 的 `num_inputs`、`TAttrs`、`FInferType`、`FRelayToTE` / `FRelayToTEMulti` 与 matrix 声明一致。
+- matrix 中声明的 forbidden internal name 不应作为独立 op 注册。
+- public helper 生成的 `Call` op name 等于 canonical name。
+
+为避免 `Op::Get(name)` 当前会自动创建空 op，issue #2 实现时应同步补注册表 introspection API：
+
+- `Op::IsRegistered(name)`：只查询，不创建。
+- `Op::ListRegisteredNames()`：返回已注册 op 名列表。
+
+在这两个 API 落地前，C++ contract test 不能依赖 `Op::Get` 判断“是否注册”，只能检查已经明确构造出的 canonical op metadata。
+
+### 7.4 源码扫描 gate
+
+新增脚本，例如 `python/tools/check_relay_op_contract.py`，用于静态扫描源码。
+
+它负责检查：
+
+- `KXC_REGISTER_OP(...)` 只能注册 matrix 中的 canonical name，或显式允许的临时 alias。
+- `Op::Get("...")` 不能使用 forbidden internal name。
+- `ONNX_TO_RELAY` 只能输出 canonical name。
+- pass 源码中不能出现分散 alias 逻辑，除非命中临时 allowlist。
+- legacy 生成脚本不能继续输出 forbidden internal name。
+
+源码扫描 gate 可以在 C++ introspection API 完成前先落地；因此它是 issue #2 的第一道硬 gate。
+
+### 7.5 CMake target
+
+新增以下 target：
+
+- `relay_op_contract_test`
+- `run_relay_op_contract_test`
+- `check_relay_op_contract`
+- `run_cpu_required_tests`
+
+建议聚合关系：
+
+```cmake
+add_custom_target(check_relay_op_contract
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_relay_op_contract.py"
+          --root "${CMAKE_CURRENT_SOURCE_DIR}"
+          --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/relay_op_contract.json"
+)
+
+add_custom_target(run_cpu_required_tests
+  DEPENDS
+    check_relay_op_contract
+    run_relay_op_contract_test
+    run_infer_type_test
+    run_pass_pipeline_test
+    run_lower_multi_output_test
+    run_profile_bundle_test
+)
+```
+
+如果 ONNX Python 依赖可用，`run_cpu_required_tests` 还应包含：
+
+- `run_onnx_importer_test`
+
+### 7.6 GitHub Actions CI
+
+仓库目前只有 PR template，没有实际 `.github/workflows`。issue #2 或 issue #13 应新增 CPU-only CI：
+
+```yaml
+name: cpu-required
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Install deps
+        run: python -m pip install numpy onnx
+      - name: Configure
+        run: cmake --preset dev-ninja-cpu -DKXC_ENABLE_LLVM=OFF
+      - name: Build
+        run: cmake --build --preset dev-ninja-cpu --parallel 2
+      - name: Required tests
+        run: cmake --build out/build/dev-ninja-cpu --target run_cpu_required_tests
+```
+
+CI 必须默认跑硬 gate。LLVM/CUDA/NCCL 相关测试可以单独作为 optional workflow，不阻塞 CPU-only MVP。
+
+### 7.7 失败策略
+
+用户已经接受“立刻失败无所谓”，因此 gate 不需要为了历史债务做软失败。
+
+推荐策略：
+
+1. 第一版 gate 直接检查并失败。
+2. PR 描述里列出当前失败项。
+3. 后续实现提交逐项消除失败。
+4. 不引入长期 allowlist；临时 allowlist 必须带 issue 编号和删除条件。
+
+## 8. 相关 issue 合并范围
+
+这条链路的核心是“新增算子时，从名称、注册、类型、TOPI、lowering、测试、CI 都能自动对齐”。可以按以下范围合并推进。
+
+### 8.1 建议一起完成
+
+这些 issue 与 issue #2 的硬 gate 直接相关，适合放在同一组 PR 或连续 PR 中完成：
+
+- #2 `Canonicalize Relay op names across registration, helpers, importer, and passes`
+  - 当前文档和后续硬 gate 的主 issue。
+- #13 `Add op support matrix, per-op numeric tests, model tests, and CPU-only CI`
+  - support matrix 和 CPU-only CI 是 issue #2 gate 的承载物。
+- #4 `Complete FRelayToTE coverage for MVP Relay ops`
+  - matrix 如果声明 lowering supported，就必须由 #4 补齐 `FRelayToTE` / `FRelayToTEMulti`。
+- #6 `Remove placeholder and incorrect TOPI implementations before treating ops as supported`
+  - 防止 Relay op 通过了注册/type/lowering 检查，但底层 TOPI 返回空 tensor 或错误 compute。
+
+建议拆分方式：
+
+1. PR A：新增 matrix、源码扫描 gate、CMake target、CPU CI。允许先失败。
+2. PR B：完成 issue #2 命名清理，让 gate 中的 forbidden name 检查通过。
+3. PR C：补 issue #4/#6 的 MVP op lowering 和 TOPI 正确性，让 matrix 中 required op 全部通过。
+4. PR D：补 #13 的 per-op numeric tests 和 model-level smoke tests。
+
+### 8.2 可以同一阶段联动，但不建议塞进同一个 PR
+
+- #20 `Write TinyTVM quickstart, extension guides, and troubleshooting docs`
+  - 与算子扩展链路强相关，但文档量大，建议在 gate 和实现稳定后补“如何新增 op”的用户向教程。
+- #9 `Expand LLVM codegen coverage for MVP TIR and add numeric tests`
+  - 是 lowering 后的下游。可以复用 matrix，但不应阻塞 issue #2 的命名 gate。
+- #7 `Define constant and parameter binding through lowering, codegen, and runtime`
+  - ONNX 模型执行会需要，但不是 op name canonicalization 的前置。
+- #16 `Introduce structured pass manager with metadata, opt levels, dependencies, and instrumentation`
+  - pass 规范化会受益于 canonical op name，但不是本 issue 的必要范围。
+
+### 8.3 不建议一起做
+
+以下 issue 关联较远，容易扩大 PR blast radius：
+
+- #10 C backend AOT。
+- #11 用户态 Runtime Module API。
+- #12 Disco real kernel execution。
+- #14 热/冷自适应编译设计。
+- #15 TE schedule primitives。
+- #17 CUDA codegen。
+- #18 Device/Target semantics。
+- #19 profiling 覆盖。
+
+这些可以依赖 op support matrix 的结果，但不应和 issue #2 的命名/CI gate 混在同一个实现 PR。
+
+## 9. 实现顺序建议
 
 1. 新增 op name 常量与 alias 表。
 2. 修改 `_make` helper，确保所有 helper 输出 canonical name。
@@ -310,7 +524,7 @@ Issue #2 至少应增加以下测试。
 6. 补齐 registry/helper、importer、pass、type inference/lowering 测试。
 7. 运行完整验证并删除临时兼容 TODO。
 
-## 8. 验收标准
+## 10. 验收标准
 
 Issue #2 完成时必须满足：
 
@@ -322,7 +536,7 @@ Issue #2 完成时必须满足：
 - lowering 失败不再由“别名指向缺失 hook 的 op”造成。
 - 新增测试覆盖 canonical helper、ONNX importer 输出和关键 pass 行为。
 
-## 9. 非目标
+## 11. 非目标
 
 Issue #2 不负责：
 
