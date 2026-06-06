@@ -1,0 +1,523 @@
+#include "frontend/onnx_importer.h"
+
+#include <cctype>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+#include <utility>
+
+#include "relay/op.h"
+
+namespace kxc {
+namespace frontend {
+namespace {
+
+struct Json {
+    enum Kind { Null, Bool, Int, Double, String, Array, Object } kind{Null};
+    bool b{false};
+    int64_t i{0};
+    double d{0.0};
+    std::string s;
+    std::vector<Json> a;
+    std::unordered_map<std::string, Json> o;
+};
+
+class JsonParser {
+public:
+    explicit JsonParser(const std::string& text) : text_(text) {}
+
+    Json Parse() {
+        SkipWhitespace();
+        Json value = ParseValue();
+        SkipWhitespace();
+        if (pos_ != text_.size()) {
+            Fail("trailing characters");
+        }
+        return value;
+    }
+
+private:
+    const std::string& text_;
+    size_t pos_{0};
+
+    [[noreturn]] void Fail(const std::string& message) const {
+        std::ostringstream os;
+        os << "JSON parse error at " << pos_ << ": " << message;
+        throw std::runtime_error(os.str());
+    }
+
+    char Peek() const { return pos_ < text_.size() ? text_[pos_] : '\0'; }
+
+    char Get() {
+        if (pos_ >= text_.size()) {
+            Fail("unexpected EOF");
+        }
+        return text_[pos_++];
+    }
+
+    void SkipWhitespace() {
+        while (pos_ < text_.size() &&
+               std::isspace(static_cast<unsigned char>(text_[pos_])) != 0) {
+            ++pos_;
+        }
+    }
+
+    void Expect(char expected) {
+        if (Get() != expected) {
+            std::ostringstream os;
+            os << "expected '" << expected << "'";
+            Fail(os.str());
+        }
+    }
+
+    void Literal(const char* text) {
+        while (*text) {
+            if (Get() != *text) {
+                Fail("invalid literal");
+            }
+            ++text;
+        }
+    }
+
+    Json ParseValue() {
+        SkipWhitespace();
+        char c = Peek();
+        if (c == '{') return ParseObject();
+        if (c == '[') return ParseArray();
+        if (c == '"') return ParseString();
+        if (c == 't') return ParseTrue();
+        if (c == 'f') return ParseFalse();
+        if (c == 'n') return ParseNull();
+        if (c == '-' || std::isdigit(static_cast<unsigned char>(c)) != 0) return ParseNumber();
+        Fail("unexpected token");
+    }
+
+    Json ParseObject() {
+        Json out;
+        out.kind = Json::Object;
+        Expect('{');
+        SkipWhitespace();
+        if (Peek() == '}') {
+            Get();
+            return out;
+        }
+        while (true) {
+            Json key = ParseString();
+            SkipWhitespace();
+            Expect(':');
+            Json value = ParseValue();
+            if (!out.o.emplace(std::move(key.s), std::move(value)).second) {
+                Fail("duplicate key");
+            }
+            SkipWhitespace();
+            char c = Get();
+            if (c == '}') break;
+            if (c != ',') Fail("expected ',' or '}'");
+            SkipWhitespace();
+        }
+        return out;
+    }
+
+    Json ParseArray() {
+        Json out;
+        out.kind = Json::Array;
+        Expect('[');
+        SkipWhitespace();
+        if (Peek() == ']') {
+            Get();
+            return out;
+        }
+        while (true) {
+            out.a.push_back(ParseValue());
+            SkipWhitespace();
+            char c = Get();
+            if (c == ']') break;
+            if (c != ',') Fail("expected ',' or ']'");
+            SkipWhitespace();
+        }
+        return out;
+    }
+
+    Json ParseString() {
+        Json out;
+        out.kind = Json::String;
+        Expect('"');
+        while (true) {
+            char c = Get();
+            if (c == '"') break;
+            if (c == '\\') {
+                char e = Get();
+                switch (e) {
+                    case '"': out.s.push_back('"'); break;
+                    case '\\': out.s.push_back('\\'); break;
+                    case '/': out.s.push_back('/'); break;
+                    case 'b': out.s.push_back('\b'); break;
+                    case 'f': out.s.push_back('\f'); break;
+                    case 'n': out.s.push_back('\n'); break;
+                    case 'r': out.s.push_back('\r'); break;
+                    case 't': out.s.push_back('\t'); break;
+                    case 'u': {
+                        int codepoint = 0;
+                        for (int n = 0; n < 4; ++n) {
+                            char h = Get();
+                            codepoint <<= 4;
+                            if (h >= '0' && h <= '9') codepoint += h - '0';
+                            else if (h >= 'a' && h <= 'f') codepoint += h - 'a' + 10;
+                            else if (h >= 'A' && h <= 'F') codepoint += h - 'A' + 10;
+                            else Fail("invalid unicode escape");
+                        }
+                        out.s.push_back(codepoint <= 0x7F ? static_cast<char>(codepoint) : '?');
+                        break;
+                    }
+                    default:
+                        Fail("invalid escape");
+                }
+            } else {
+                out.s.push_back(c);
+            }
+        }
+        return out;
+    }
+
+    Json ParseNumber() {
+        Json out;
+        size_t start = pos_;
+        if (Peek() == '-') ++pos_;
+        if (Peek() == '0') {
+            ++pos_;
+        } else if (std::isdigit(static_cast<unsigned char>(Peek())) != 0) {
+            while (std::isdigit(static_cast<unsigned char>(Peek())) != 0) ++pos_;
+        } else {
+            Fail("invalid number");
+        }
+
+        bool is_double = false;
+        if (Peek() == '.') {
+            is_double = true;
+            ++pos_;
+            if (std::isdigit(static_cast<unsigned char>(Peek())) == 0) Fail("invalid fraction");
+            while (std::isdigit(static_cast<unsigned char>(Peek())) != 0) ++pos_;
+        }
+        if (Peek() == 'e' || Peek() == 'E') {
+            is_double = true;
+            ++pos_;
+            if (Peek() == '+' || Peek() == '-') ++pos_;
+            if (std::isdigit(static_cast<unsigned char>(Peek())) == 0) Fail("invalid exponent");
+            while (std::isdigit(static_cast<unsigned char>(Peek())) != 0) ++pos_;
+        }
+
+        std::string text = text_.substr(start, pos_ - start);
+        try {
+            if (is_double) {
+                out.kind = Json::Double;
+                out.d = std::stod(text);
+            } else {
+                out.kind = Json::Int;
+                out.i = std::stoll(text);
+            }
+        } catch (const std::exception&) {
+            Fail("invalid number");
+        }
+        return out;
+    }
+
+    Json ParseTrue() {
+        Literal("true");
+        Json out;
+        out.kind = Json::Bool;
+        out.b = true;
+        return out;
+    }
+
+    Json ParseFalse() {
+        Literal("false");
+        Json out;
+        out.kind = Json::Bool;
+        out.b = false;
+        return out;
+    }
+
+    Json ParseNull() {
+        Literal("null");
+        return Json();
+    }
+};
+
+const Json& RequireKind(const Json& value, Json::Kind kind, const std::string& ctx) {
+    if (value.kind != kind) {
+        std::ostringstream os;
+        os << "Expected JSON kind " << static_cast<int>(kind) << " in " << ctx << ", got "
+           << static_cast<int>(value.kind);
+        throw std::runtime_error(os.str());
+    }
+    return value;
+}
+
+const Json& Field(const Json& object, const std::string& key, const std::string& ctx) {
+    RequireKind(object, Json::Object, ctx);
+    auto it = object.o.find(key);
+    if (it == object.o.end()) {
+        throw std::runtime_error("Missing required field '" + key + "' in " + ctx);
+    }
+    return it->second;
+}
+
+const Json* OptionalField(const Json& object, const std::string& key) {
+    if (object.kind != Json::Object) return nullptr;
+    auto it = object.o.find(key);
+    return it == object.o.end() ? nullptr : &it->second;
+}
+
+std::string ReadString(const Json& value, const std::string& ctx) {
+    return RequireKind(value, Json::String, ctx).s;
+}
+
+int64_t ReadInt64(const Json& value, const std::string& ctx) {
+    RequireKind(value, Json::Int, ctx);
+    return value.i;
+}
+
+int ReadInt(const Json& value, const std::string& ctx) {
+    int64_t value64 = ReadInt64(value, ctx);
+    if (value64 < static_cast<int64_t>(std::numeric_limits<int>::min()) ||
+        value64 > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("int out of range in " + ctx);
+    }
+    return static_cast<int>(value64);
+}
+
+float ReadFloat(const Json& value, const std::string& ctx) {
+    if (value.kind == Json::Int) return static_cast<float>(value.i);
+    if (value.kind == Json::Double) return static_cast<float>(value.d);
+    throw std::runtime_error("Expected numeric value in " + ctx);
+}
+
+bool ReadBool(const Json& value, const std::string& ctx) {
+    return RequireKind(value, Json::Bool, ctx).b;
+}
+
+std::vector<int64_t> ReadInt64Vector(const Json& value, const std::string& ctx) {
+    RequireKind(value, Json::Array, ctx);
+    std::vector<int64_t> out;
+    out.reserve(value.a.size());
+    for (size_t i = 0; i < value.a.size(); ++i) {
+        out.push_back(ReadInt64(value.a[i], ctx + "[" + std::to_string(i) + "]"));
+    }
+    return out;
+}
+
+std::vector<std::string> ReadStringVector(const Json& value, const std::string& ctx) {
+    RequireKind(value, Json::Array, ctx);
+    std::vector<std::string> out;
+    out.reserve(value.a.size());
+    for (size_t i = 0; i < value.a.size(); ++i) {
+        out.push_back(ReadString(value.a[i], ctx + "[" + std::to_string(i) + "]"));
+    }
+    return out;
+}
+
+Array<int64_t> ToArray(const std::vector<int64_t>& values) {
+    Array<int64_t> out;
+    for (int64_t value : values) {
+        out.push_back(value);
+    }
+    return out;
+}
+
+std::vector<char> ReadBinaryFile(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("Failed to open ONNX params file for reading: " + path);
+    }
+    input.seekg(0, std::ios::end);
+    std::streamoff size = input.tellg();
+    if (size < 0) {
+        throw std::runtime_error("Failed to determine ONNX params file size: " + path);
+    }
+    input.seekg(0, std::ios::beg);
+    std::vector<char> data(static_cast<size_t>(size));
+    if (!data.empty()) {
+        input.read(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+    if (!input) {
+        throw std::runtime_error("Failed to read ONNX params file: " + path);
+    }
+    return data;
+}
+
+std::string ReadTextFile(const std::string& path) {
+    std::ifstream input(path, std::ios::in);
+    if (!input) {
+        throw std::runtime_error("Failed to open ONNX import JSON for reading: " + path);
+    }
+    std::ostringstream os;
+    os << input.rdbuf();
+    return os.str();
+}
+
+ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
+    RequireKind(attrs, Json::Object, "attrs for " + op_name);
+    if (op_name == "nn_conv2d") {
+        return ObjectRef(relay::Conv2DAttrs::Create(
+            ReadInt64Vector(Field(attrs, "strides", "conv attrs"), "conv attrs.strides"),
+            ReadInt64Vector(Field(attrs, "pads", "conv attrs"), "conv attrs.pads"),
+            ReadInt64Vector(Field(attrs, "dilations", "conv attrs"), "conv attrs.dilations"),
+            ReadInt(Field(attrs, "group", "conv attrs"), "conv attrs.group"),
+            ReadInt(Field(attrs, "channels", "conv attrs"), "conv attrs.channels"),
+            ReadInt64Vector(Field(attrs, "kernel_size", "conv attrs"), "conv attrs.kernel_size"),
+            ReadString(Field(attrs, "data_layout", "conv attrs"), "conv attrs.data_layout"),
+            ReadString(Field(attrs, "kernel_layout", "conv attrs"), "conv attrs.kernel_layout"),
+            ReadString(Field(attrs, "out_layout", "conv attrs"), "conv attrs.out_layout"),
+            ReadString(Field(attrs, "out_dtype", "conv attrs"), "conv attrs.out_dtype")));
+    }
+    if (op_name == "nn_relu") {
+        return ObjectRef(relay::ReluAttrs::Create());
+    }
+    if (op_name == "nn_max_pool2d") {
+        return ObjectRef(relay::MaxPool2DAttrs::Create(
+            ReadInt64Vector(Field(attrs, "strides", "pool attrs"), "pool attrs.strides"),
+            ReadInt64Vector(Field(attrs, "pads", "pool attrs"), "pool attrs.pads"),
+            ReadInt64Vector(Field(attrs, "dilations", "pool attrs"), "pool attrs.dilations"),
+            ReadInt64Vector(Field(attrs, "pool_size", "pool attrs"), "pool attrs.pool_size"),
+            ReadString(Field(attrs, "layout", "pool attrs"), "pool attrs.layout"),
+            ReadBool(Field(attrs, "ceil_mode", "pool attrs"), "pool attrs.ceil_mode")));
+    }
+    if (op_name == "add") {
+        return ObjectRef(relay::AddAttrs::Create());
+    }
+    if (op_name == "nn_global_avg_pool2d") {
+        return ObjectRef(relay::GlobalAvgPool2DAttrs::Create());
+    }
+    if (op_name == "nn_flatten") {
+        return ObjectRef(relay::FlattenAttrs::Create(
+            ReadInt(Field(attrs, "axis", "flatten attrs"), "flatten attrs.axis")));
+    }
+    if (op_name == "nn_gemm") {
+        return ObjectRef(relay::GemmAttrs::Create(
+            ReadFloat(Field(attrs, "alpha", "gemm attrs"), "gemm attrs.alpha"),
+            ReadFloat(Field(attrs, "beta", "gemm attrs"), "gemm attrs.beta"),
+            ReadInt(Field(attrs, "transA", "gemm attrs"), "gemm attrs.transA"),
+            ReadInt(Field(attrs, "transB", "gemm attrs"), "gemm attrs.transB")));
+    }
+    throw std::runtime_error("Unsupported Relay op in ONNX import spec: " + op_name);
+}
+
+}  // namespace
+
+ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
+                                     const std::string& params_path) {
+    Json root = JsonParser(ReadTextFile(json_path)).Parse();
+    RequireKind(root, Json::Object, "root");
+    std::string format = ReadString(Field(root, "format", "root"), "root.format");
+    if (format != "kxc.onnx_import.v1") {
+        throw std::runtime_error("Unsupported ONNX import spec format: " + format);
+    }
+
+    const Json& function_json = Field(root, "function", "root");
+    const Json& inputs_json = Field(function_json, "inputs", "function");
+    const Json& outputs_json = Field(function_json, "outputs", "function");
+    const Json& params_json = Field(root, "params", "root");
+    const Json& nodes_json = Field(function_json, "nodes", "function");
+    RequireKind(inputs_json, Json::Array, "function.inputs");
+    RequireKind(outputs_json, Json::Array, "function.outputs");
+    RequireKind(params_json, Json::Array, "root.params");
+    RequireKind(nodes_json, Json::Array, "function.nodes");
+
+    ImportedONNXModel result;
+    std::unordered_map<std::string, Expr> values;
+    Array<Var> function_params;
+
+    for (size_t i = 0; i < inputs_json.a.size(); ++i) {
+        const Json& input = inputs_json.a[i];
+        std::string ctx = "function.inputs[" + std::to_string(i) + "]";
+        std::string name = ReadString(Field(input, "name", ctx), ctx + ".name");
+        std::vector<int64_t> shape = ReadInt64Vector(Field(input, "shape", ctx), ctx + ".shape");
+        std::string dtype = ReadString(Field(input, "dtype", ctx), ctx + ".dtype");
+        Var var(name, TensorType(ToArray(shape), dtype));
+        function_params.push_back(var);
+        values[name] = var;
+        result.input_names.push_back(name);
+    }
+
+    std::vector<char> param_bytes = ReadBinaryFile(params_path);
+    for (size_t i = 0; i < params_json.a.size(); ++i) {
+        const Json& param = params_json.a[i];
+        std::string ctx = "root.params[" + std::to_string(i) + "]";
+        std::string name = ReadString(Field(param, "name", ctx), ctx + ".name");
+        std::vector<int64_t> shape = ReadInt64Vector(Field(param, "shape", ctx), ctx + ".shape");
+        std::string dtype = ReadString(Field(param, "dtype", ctx), ctx + ".dtype");
+        int64_t offset = ReadInt64(Field(param, "offset", ctx), ctx + ".offset");
+        int64_t nbytes = ReadInt64(Field(param, "nbytes", ctx), ctx + ".nbytes");
+        if (offset < 0 || nbytes < 0 ||
+            static_cast<uint64_t>(offset) + static_cast<uint64_t>(nbytes) > param_bytes.size()) {
+            throw std::runtime_error("Param bytes range out of bounds for: " + name);
+        }
+
+        runtime::NDArray array(ToArray(shape), dtype);
+        array.CopyFromBytes(param_bytes.data() + offset, static_cast<size_t>(nbytes));
+        result.params.emplace(name, array);
+        result.param_order.push_back(name);
+        values[name] = Constant(array);
+    }
+
+    const Json* param_order_json = OptionalField(root, "param_order");
+    if (param_order_json) {
+        std::vector<std::string> declared_order =
+            ReadStringVector(*param_order_json, "root.param_order");
+        if (declared_order != result.param_order) {
+            throw std::runtime_error("ONNX import spec param_order does not match params metadata");
+        }
+    }
+
+    for (size_t i = 0; i < nodes_json.a.size(); ++i) {
+        const Json& node = nodes_json.a[i];
+        std::string ctx = "function.nodes[" + std::to_string(i) + "]";
+        std::string node_name = ReadString(Field(node, "name", ctx), ctx + ".name");
+        std::string op_name = ReadString(Field(node, "op_name", ctx), ctx + ".op_name");
+        std::vector<std::string> input_names =
+            ReadStringVector(Field(node, "inputs", ctx), ctx + ".inputs");
+        std::vector<std::string> output_names =
+            ReadStringVector(Field(node, "outputs", ctx), ctx + ".outputs");
+        if (output_names.size() != 1) {
+            throw std::runtime_error("ONNX import node must have one output: " + node_name);
+        }
+
+        Array<Expr> args;
+        for (const std::string& input_name : input_names) {
+            auto it = values.find(input_name);
+            if (it == values.end()) {
+                throw std::runtime_error("Missing input value '" + input_name + "' for node '" +
+                                         node_name + "'");
+            }
+            args.push_back(it->second);
+        }
+        ObjectRef attrs = MakeAttrs(op_name, Field(node, "attrs", ctx));
+        Call call(relay::Op::Get(op_name), args, attrs);
+        values[output_names[0]] = call;
+    }
+
+    Array<Expr> output_exprs;
+    for (size_t i = 0; i < outputs_json.a.size(); ++i) {
+        const Json& output = outputs_json.a[i];
+        std::string ctx = "function.outputs[" + std::to_string(i) + "]";
+        std::string name = ReadString(Field(output, "name", ctx), ctx + ".name");
+        auto it = values.find(name);
+        if (it == values.end()) {
+            throw std::runtime_error("Missing graph output value in ONNX import spec: " + name);
+        }
+        output_exprs.push_back(it->second);
+        result.output_names.push_back(name);
+    }
+    if (output_exprs.empty()) {
+        throw std::runtime_error("ONNX import spec has no graph outputs");
+    }
+    Expr body = output_exprs.size() == 1 ? output_exprs[0] : Expr(Tuple(output_exprs));
+    result.function = Function(function_params, body);
+    return result;
+}
+
+}  // namespace frontend
+}  // namespace kxc

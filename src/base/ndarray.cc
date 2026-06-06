@@ -69,5 +69,31 @@ const DLTensor* NDArray::operator*() const {
     return &operator->()->dl_tensor;
 }
 
+size_t NDArray::NBytes() const {
+    const NDArrayNode* node = operator->();
+    int64_t elements = 1;
+    for (int64_t dim : node->shape) {
+        elements *= dim;
+    }
+    size_t bytes = static_cast<size_t>(elements) * ((node->dl_tensor.dtype.bits + 7) / 8);
+    return bytes == 0 ? 1 : bytes;
+}
+
+void NDArray::CopyFromBytes(const void* data, size_t nbytes) const {
+    if (!defined()) {
+        throw std::runtime_error("CopyFromBytes requires a defined NDArray");
+    }
+    if (!data && nbytes != 0) {
+        throw std::runtime_error("CopyFromBytes received null data");
+    }
+    size_t expected = NBytes();
+    if (nbytes != expected) {
+        throw std::runtime_error("CopyFromBytes byte size mismatch: expected " +
+                                 std::to_string(expected) + ", got " +
+                                 std::to_string(nbytes));
+    }
+    std::memcpy(const_cast<void*>(operator->()->dl_tensor.data), data, nbytes);
+}
+
 }  // namespace runtime
 }  // namespace kxc
