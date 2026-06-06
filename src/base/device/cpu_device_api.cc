@@ -8,6 +8,9 @@
 #include <cstring>
 #include <stdexcept>
 #include <thread>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 
 #include "base/profiling.h"
 
@@ -53,7 +56,7 @@ public:
         span.AddMetric("bytes", static_cast<double>(nbytes));
         span.AddMetric("alignment", static_cast<double>(alignment));
         void* ptr = nullptr;
-#if defined(_MSC_VER)
+#if defined(_WIN32)
         ptr = _aligned_malloc(nbytes, alignment);
 #else
         if (posix_memalign(&ptr, alignment, nbytes) != 0) {
@@ -71,7 +74,7 @@ public:
         profiling::ScopedSpan span(profiling::CurrentContext(),
                                    MakeDeviceSpec("free", device));
         span.AddField("ptr", ptr ? "nonnull" : "null");
-#if defined(_MSC_VER)
+#if defined(_WIN32)
         _aligned_free(ptr);
 #else
         free(ptr);

@@ -28,6 +28,15 @@
       }
     },
     {
+      "name": "dev-mingw-cpu",
+      "displayName": "Dev Ninja (Debug, MinGW CPU only)",
+      "inherits": "dev-ninja-cpu",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "g++",
+        "KXC_ENABLE_LLVM": "OFF"
+      }
+    },
+    {
       "name": "dev-ninja-debug-examples",
       "displayName": "Dev Ninja (Debug, extra examples)",
       "inherits": "dev-ninja",
@@ -44,6 +53,10 @@
     {
       "name": "dev-ninja-cpu",
       "configurePreset": "dev-ninja-cpu"
+    },
+    {
+      "name": "dev-mingw-cpu",
+      "configurePreset": "dev-mingw-cpu"
     },
     {
       "name": "dev-ninja-debug-examples",
