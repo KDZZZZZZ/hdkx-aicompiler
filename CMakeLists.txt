@@ -15,6 +15,18 @@ option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
+set(KXC_ONNX_IMPORTER_PY_DEPS_FOUND OFF)
+if(Python3_Interpreter_FOUND)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c "import onnx, numpy"
+    RESULT_VARIABLE KXC_ONNX_IMPORTER_PY_DEPS_RESULT
+    OUTPUT_QUIET
+    ERROR_QUIET
+  )
+  if(KXC_ONNX_IMPORTER_PY_DEPS_RESULT EQUAL 0)
+    set(KXC_ONNX_IMPORTER_PY_DEPS_FOUND ON)
+  endif()
+endif()
 
 if(MSVC)
   add_compile_options(/utf-8 /EHsc)
@@ -242,7 +254,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
-  if(Python3_Interpreter_FOUND)
+  if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
     set(KXC_ONNX_IMPORT_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.params.bin")
     add_custom_command(
@@ -270,7 +282,7 @@ if(KXC_BUILD_PASS_TESTS)
       KXC_ONNX_IMPORT_JSON_PATH="${KXC_ONNX_IMPORT_JSON}"
       KXC_ONNX_IMPORT_PARAMS_PATH="${KXC_ONNX_IMPORT_PARAMS}")
   else()
-    message(WARNING "Python3 interpreter was not found; skipping onnx_importer_test target.")
+    message(WARNING "Python3 with onnx and numpy was not found; skipping onnx_importer_test target.")
   endif()
   if(KXC_USE_CUDA)
     kxc_add_runtime_exe(cupti_smoke_test test/cupti_smoke_test.cpp)
@@ -304,7 +316,7 @@ if(KXC_BUILD_PASS_TESTS)
     USES_TERMINAL
     COMMENT "Run infer_type_test"
   )
-  if(Python3_Interpreter_FOUND)
+  if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     add_custom_target(run_onnx_importer_test
       COMMAND "$<TARGET_FILE:onnx_importer_test>"
       WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
