@@ -19,5 +19,8 @@ using FInferType = std::function<Type(const Attrs&, const Array<Type>&)>;
 using FRelayToTE =
     std::function<te::Tensor(const Attrs&, const Array<te::Tensor>&, const kxc::Type&)>;
 
+using FRelayToTEMulti =
+    std::function<Array<te::Tensor>(const Attrs&, const Array<te::Tensor>&, const kxc::Type&)>;
+
 }  // namespace relay
 }  // namespace kxc

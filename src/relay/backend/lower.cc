@@ -94,6 +94,65 @@ tir::PrimExpr MakeIdentityForReduce(te::ReduceType rtype, tir::DataType dtype) {
     throw std::runtime_error("Unsupported reduce type");
 }
 
+std::string RelayNodeKind(const Expr& expr) {
+    if (!expr.defined()) return "<undefined>";
+    if (expr.As<VarNode>()) return "Var";
+    if (expr.As<ConstantNode>()) return "Constant";
+    if (expr.As<CallNode>()) return "Call";
+    if (expr.As<FunctionNode>()) return "Function";
+    if (expr.As<TupleNode>()) return "Tuple";
+    if (expr.As<TupleGetItemNode>()) return "TupleGetItem";
+    if (expr.As<IfNode>()) return "If";
+    if (expr.As<LetNode>()) return "Let";
+    if (expr.As<OpNode>()) return "Op";
+    return "<unknown>";
+}
+
+Array<te::Tensor> InvokeRelayToTE(const OpNode* op_node,
+                                  const Attrs& attrs,
+                                  const Array<te::Tensor>& inputs,
+                                  const kxc::Type& out_type) {
+    if (!out_type.defined()) {
+        throw std::runtime_error("LowerToTIR requires checked_type for op: " +
+                                 op_node->name);
+    }
+    if (out_type.As<TensorTypeNode>()) {
+        auto it = op_node->attrs.find("FRelayToTE");
+        if (it == op_node->attrs.end()) {
+            throw std::runtime_error("No FRelayToTE registered for op: " + op_node->name);
+        }
+        auto* lower_ptr = std::any_cast<FRelayToTE>(&it->second);
+        if (!lower_ptr) {
+            throw std::runtime_error("Bad FRelayToTE type for op: " + op_node->name);
+        }
+        te::Tensor out = (*lower_ptr)(attrs, inputs, out_type);
+        return {out};
+    }
+
+    if (const auto* tuple = out_type.As<TupleTypeNode>()) {
+        auto it = op_node->attrs.find("FRelayToTEMulti");
+        if (it == op_node->attrs.end()) {
+            throw std::runtime_error("No FRelayToTEMulti registered for tuple-output op: " +
+                                     op_node->name + ", got " + TypeToString(out_type));
+        }
+        auto* lower_ptr = std::any_cast<FRelayToTEMulti>(&it->second);
+        if (!lower_ptr) {
+            throw std::runtime_error("Bad FRelayToTEMulti type for op: " + op_node->name);
+        }
+        Array<te::Tensor> outputs = (*lower_ptr)(attrs, inputs, out_type);
+        if (outputs.size() != tuple->fields.size()) {
+            throw std::runtime_error("FRelayToTEMulti output count mismatch for op: " +
+                                     op_node->name + ", expected " +
+                                     std::to_string(tuple->fields.size()) + ", got " +
+                                     std::to_string(outputs.size()));
+        }
+        return outputs;
+    }
+
+    throw std::runtime_error("LowerToTIR requires TensorType or TupleType call output for op: " +
+                             op_node->name + ", got " + TypeToString(out_type));
+}
+
 class RelayToTEConverter : public RelayPassFunctor<Array<te::Tensor>> {
 public:
     explicit RelayToTEConverter(const Function& func) {
@@ -168,31 +227,40 @@ protected:
                 "Run LowerRelayToExecPlanPass before LowerToTIR.");
         }
 
-        auto it = op_node->attrs.find("FRelayToTE");
-        if (it == op_node->attrs.end()) {
-            throw std::runtime_error("No FRelayToTE registered for op: " + op_node->name);
-        }
-        auto* lower_ptr = std::any_cast<FRelayToTE>(&it->second);
-        if (!lower_ptr) {
-            throw std::runtime_error("Bad FRelayToTE type for op: " + op_node->name);
-        }
-
         Attrs attrs = op->attrs.defined() ? Attrs(op->attrs) : Attrs();
         kxc::Type out_type = ref.checked_type();
-        if (!out_type.defined()) {
-            throw std::runtime_error("LowerToTIR requires checked_type for op: " +
-                                     op_node->name);
+        return InvokeRelayToTE(op_node, attrs, inputs, out_type);
+    }
+
+    Array<te::Tensor> VisitTuple(const TupleNode* op, const Expr& ref) override {
+        (void)ref;
+        Array<te::Tensor> outputs;
+        for (size_t i = 0; i < op->fields.size(); ++i) {
+            Array<te::Tensor> field_outputs = Visit(op->fields[i]);
+            if (field_outputs.size() != 1) {
+                throw std::runtime_error("LowerToTIR does not support nested tuple field " +
+                                         std::to_string(i) + "; field produced " +
+                                         std::to_string(field_outputs.size()) + " tensors");
+            }
+            outputs.push_back(field_outputs[0]);
         }
-        if (!out_type.As<TensorTypeNode>()) {
-            throw std::runtime_error("LowerToTIR currently requires TensorType call output for op: " +
-                                     op_node->name + ", got " + TypeToString(out_type));
+        return outputs;
+    }
+
+    Array<te::Tensor> VisitTupleGetItem(const TupleGetItemNode* op, const Expr& ref) override {
+        (void)ref;
+        Array<te::Tensor> tuple_outputs = Visit(op->tuple);
+        if (op->index < 0 || static_cast<size_t>(op->index) >= tuple_outputs.size()) {
+            throw std::runtime_error("TupleGetItem index out of range during LowerToTIR: " +
+                                     std::to_string(op->index) + ", tuple size " +
+                                     std::to_string(tuple_outputs.size()));
         }
-        te::Tensor out = (*lower_ptr)(attrs, inputs, out_type);
-        return {out};
+        return {tuple_outputs[static_cast<size_t>(op->index)]};
     }
 
     Array<te::Tensor> VisitDefault(const Expr& expr) override {
-        throw std::runtime_error("Unsupported Relay node in LowerToTIR");
+        throw std::runtime_error("Unsupported Relay node in LowerToTIR: " +
+                                 RelayNodeKind(expr));
     }
 };
 
@@ -329,7 +397,9 @@ tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
         throw std::runtime_error("ComputeOp body is empty");
     }
     if (op->body.size() != 1) {
-        throw std::runtime_error("Only single-output compute is supported");
+        throw std::runtime_error("LowerComputeStmt does not support multi-body TE compute for tensor '" +
+                                 out_tensor->name + "': body_count=" +
+                                 std::to_string(op->body.size()));
     }
 
     auto out_it = buffer_var_by_tensor.find(out_tensor.get());
@@ -378,6 +448,23 @@ tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
     return WrapDataLoops(op, store);
 }
 
+std::string MakeOutputVarName(const te::Tensor& tensor,
+                              size_t output_index,
+                              std::unordered_set<std::string>* used_names) {
+    std::string base = tensor->name.empty() ? "output" : tensor->name;
+    std::string name = base + "_out";
+    if (output_index != 0) {
+        name += "_" + std::to_string(output_index);
+    }
+    while (used_names && used_names->count(name)) {
+        name += "_";
+    }
+    if (used_names) {
+        used_names->insert(name);
+    }
+    return name;
+}
+
 }  // namespace
 
 tir::PrimFunc LowerToTIR(Function func) {
@@ -411,22 +498,25 @@ tir::PrimFunc LowerToTIR(Function func) {
         if (outputs.empty()) {
             throw std::runtime_error("LowerToTIR produced no output tensors");
         }
-        if (outputs.size() != 1) {
-            throw std::runtime_error("LowerToTIR currently supports single output only");
-        }
-        te::Tensor out_tensor = outputs[0];
-        if (!out_tensor.defined()) {
-            throw std::runtime_error("LowerToTIR output tensor is undefined");
-        }
-        if (!out_tensor->op.As<te::ComputeOpNode>()) {
-            throw std::runtime_error(
-                "LowerToTIR requires function body to lower to a compute tensor");
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            const te::Tensor& out_tensor = outputs[i];
+            if (!out_tensor.defined()) {
+                throw std::runtime_error("LowerToTIR output tensor " +
+                                         std::to_string(i) + " is undefined");
+            }
+            if (!out_tensor->op.As<te::ComputeOpNode>()) {
+                throw std::runtime_error(
+                    "LowerToTIR requires output tensor " + std::to_string(i) +
+                    " ('" + out_tensor->name + "') to lower to a compute tensor");
+            }
         }
 
         std::unordered_set<const Object*> visited_ops;
         std::unordered_map<const Object*, te::Tensor> op_output_tensor;
         std::vector<te::Operation> topo_ops;
-        CollectOpsDFS(out_tensor, &visited_ops, &op_output_tensor, &topo_ops);
+        for (const auto& out_tensor : outputs) {
+            CollectOpsDFS(out_tensor, &visited_ops, &op_output_tensor, &topo_ops);
+        }
 
         Array<tir::Var> params;
         Map<tir::Var, tir::Buffer> buffer_map;
@@ -439,6 +529,7 @@ tir::PrimFunc LowerToTIR(Function func) {
             buffer_map.Set(data_var, buf);
             buffer_var_by_tensor[t.get()] = data_var;
         }
+        const int64_t input_count = static_cast<int64_t>(converter.input_tensors().size());
 
         for (const auto& t : converter.constant_tensors()) {
             tir::Var data_var(t->name, t->dtype);
@@ -447,13 +538,22 @@ tir::PrimFunc LowerToTIR(Function func) {
             buffer_map.Set(data_var, buf);
             buffer_var_by_tensor[t.get()] = data_var;
         }
+        const int64_t constant_count = static_cast<int64_t>(converter.constant_tensors().size());
+        const int64_t output_param_start = input_count + constant_count;
 
-        tir::Var out_var(out_tensor->name + "_out", out_tensor->dtype);
-        tir::Buffer out_buf(out_var, out_tensor->dtype, out_tensor->shape, {}, tir::IntImm(0),
-                            out_tensor->name + "_out", 0, 0);
-        params.push_back(out_var);
-        buffer_map.Set(out_var, out_buf);
-        buffer_var_by_tensor[out_tensor.get()] = out_var;
+        std::unordered_set<const Object*> output_tensor_set;
+        std::unordered_set<std::string> used_output_names;
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            const te::Tensor& out_tensor = outputs[i];
+            output_tensor_set.insert(out_tensor.get());
+            std::string out_name = MakeOutputVarName(out_tensor, i, &used_output_names);
+            tir::Var out_var(out_name, out_tensor->dtype);
+            tir::Buffer out_buf(out_var, out_tensor->dtype, out_tensor->shape, {},
+                                tir::IntImm(0), out_name, 0, 0);
+            params.push_back(out_var);
+            buffer_map.Set(out_var, out_buf);
+            buffer_var_by_tensor[out_tensor.get()] = out_var;
+        }
 
         std::vector<te::Tensor> intermediates;
         for (const auto& op : topo_ops) {
@@ -461,7 +561,7 @@ tir::PrimFunc LowerToTIR(Function func) {
             auto t_it = op_output_tensor.find(op.get());
             if (t_it == op_output_tensor.end()) continue;
             te::Tensor t = t_it->second;
-            if (t.get() == out_tensor.get()) continue;
+            if (output_tensor_set.count(t.get()) != 0) continue;
             tir::Var local_var(t->name, t->dtype);
             buffer_var_by_tensor[t.get()] = local_var;
             intermediates.push_back(t);
@@ -510,6 +610,13 @@ tir::PrimFunc LowerToTIR(Function func) {
         Map<String, ObjectRef> attrs;
         attrs.Set(String("global_symbol"), String("main"));
         attrs.Set(String("tir.noalias"), tir::IntImm(1, tir::DataType::Bool()));
+        attrs.Set(String("kxc.input_count"), tir::IntImm(input_count, tir::DataType::Int(64)));
+        attrs.Set(String("kxc.constant_count"),
+                  tir::IntImm(constant_count, tir::DataType::Int(64)));
+        attrs.Set(String("kxc.output_count"),
+                  tir::IntImm(static_cast<int64_t>(outputs.size()), tir::DataType::Int(64)));
+        attrs.Set(String("kxc.output_param_start"),
+                  tir::IntImm(output_param_start, tir::DataType::Int(64)));
         attrs = AttachPassContextAttrs(attrs, PassContext::Current());
 
         tir::PrimFunc lowered = tir::PrimFunc(params, body, buffer_map, attrs);

@@ -290,6 +290,60 @@ void TestCompilerAPI() {
 #endif
 }
 
+void TestRelaySplitMultiOutputRuntime() {
+    std::cout << "\n=== Test: Relay Split Multi-Output ABI ===" << std::endl;
+
+#ifdef KXC_USE_LLVM
+    using namespace kxc;
+
+    kxc::Var x("x", TensorType({2, 6}, "float32"));
+    Call split_call(relay::Op::Get("split"), {x}, relay::SplitAttrs::Create({3}, 1));
+    Function func({x}, split_call);
+
+    auto config = api::CompileConfig::AOT(BuildTarget(kCPU), 2);
+    auto module = api::Compiler::Compile(func, config);
+
+    const auto& prim = module.GetPrimFunc();
+    bool metadata_ok = false;
+    if (prim->attrs.count(String("kxc.output_count"))) {
+        const auto* output_count =
+            prim->attrs.at(String("kxc.output_count")).As<tir::IntImmNode>();
+        metadata_ok = output_count && output_count->value == 3;
+    }
+    if (!metadata_ok) {
+        std::cerr << "FAIL: expected kxc.output_count = 3" << std::endl;
+    }
+
+    float data_x[12] = {
+        1, 2, 3, 4, 5, 6,
+        7, 8, 9, 10, 11, 12,
+    };
+    float out0[4] = {0};
+    float out1[4] = {0};
+    float out2[4] = {0};
+    std::vector<void*> args = {data_x, out0, out1, out2};
+    module.Run(args);
+
+    const float expected0[4] = {1, 2, 7, 8};
+    const float expected1[4] = {3, 4, 9, 10};
+    const float expected2[4] = {5, 6, 11, 12};
+    bool ok = metadata_ok;
+    for (int i = 0; i < 4; ++i) {
+        if (!FloatNear(out0[i], expected0[i]) ||
+            !FloatNear(out1[i], expected1[i]) ||
+            !FloatNear(out2[i], expected2[i])) {
+            std::cerr << "FAIL: split output mismatch at flat index " << i << std::endl;
+            ok = false;
+        }
+    }
+    if (ok) {
+        std::cout << "PASS: Relay split multi-output ABI correct!" << std::endl;
+    }
+#else
+    std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
+#endif
+}
+
 void TestAdaptiveRuntime() {
     std::cout << "\n=== Test: Adaptive Runtime (auto-compile + hot-swap) ===" << std::endl;
 
@@ -377,6 +431,7 @@ int main() {
     TestRelay_ElemwiseAdd();
     TestCCodegen();
     TestCompilerAPI();
+    TestRelaySplitMultiOutputRuntime();
     TestAdaptiveRuntime();
     std::cout << "\n==== All tests completed ====" << std::endl;
     return 0;

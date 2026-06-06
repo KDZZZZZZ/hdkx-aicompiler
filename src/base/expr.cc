@@ -21,6 +21,7 @@ void SetCheckedType(const Expr& expr, Type checked_type) {
     if (!expr.defined()) {
         throw std::runtime_error("SetCheckedType expects a defined expression");
     }
+    // checked_type_ 是类型推导阶段补写的元数据；这里只更新该字段，不改变表达式结构。
     auto* node = const_cast<ExprNode*>(static_cast<const ExprNode*>(expr.get()));
     node->checked_type_ = std::move(checked_type);
 }
