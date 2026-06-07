@@ -77,6 +77,10 @@ tir::PrimExpr max(tir::PrimExpr expr, Array<IterVar> axis) {
     return Reduce(std::move(axis), {std::move(expr)}, ReduceType::kMax);
 }
 
+tir::PrimExpr min(tir::PrimExpr expr, Array<IterVar> axis) {
+    return Reduce(std::move(axis), {std::move(expr)}, ReduceType::kMin);
+}
+
 PlaceholderOp::PlaceholderOp(std::string name, Array<tir::PrimExpr> shape, tir::DataType dtype) {
     auto* node = new PlaceholderOpNode();
     node->name = std::move(name);

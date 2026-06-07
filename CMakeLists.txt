@@ -386,6 +386,7 @@ endif()
 
 if(KXC_BUILD_CODEGEN_TESTS AND KXC_USE_LLVM)
   kxc_add_runtime_exe(codegen_llvm_test test/codegen_llvm_test.cpp)
+  kxc_add_runtime_exe(op_numeric_llvm_test test/op_numeric_llvm_test.cpp)
 
   add_custom_target(run_codegen_llvm_test
     COMMAND "$<TARGET_FILE:codegen_llvm_test>"
@@ -393,5 +394,13 @@ if(KXC_BUILD_CODEGEN_TESTS AND KXC_USE_LLVM)
     DEPENDS codegen_llvm_test
     USES_TERMINAL
     COMMENT "Run codegen_llvm_test"
+  )
+
+  add_custom_target(run_op_numeric_llvm_test
+    COMMAND "$<TARGET_FILE:op_numeric_llvm_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS op_numeric_llvm_test
+    USES_TERMINAL
+    COMMENT "Run per-op LLVM numeric tests"
   )
 endif()

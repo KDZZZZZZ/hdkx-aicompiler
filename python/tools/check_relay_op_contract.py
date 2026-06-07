@@ -153,6 +153,13 @@ def find_op_source_files(root: Path) -> list[Path]:
     importer = root / "python" / "kxc_onnx" / "importer.py"
     if importer.exists():
         files.append(importer)
+    topi_root = root / "include" / "te" / "topi"
+    if topi_root.exists():
+        files.extend(
+            p
+            for p in topi_root.rglob("*")
+            if p.suffix in {".h", ".hpp"}
+        )
     return sorted(set(files))
 
 
@@ -359,6 +366,7 @@ def count_test_refs(root: Path, op_names: set[str]) -> dict[str, dict[str, int]]
                 or "CompileConfig" in region
                 or "CodeGenLLVM" in region
                 or "LLVMJIT" in region
+                or "CompileAndRun" in region
             )
             has_exec_plan_signal = (
                 "LowerRelayToExecPlanPass" in region
@@ -472,6 +480,7 @@ def analyze(
     rules = contract.get("rules", {})
     forbidden_ops = set(rules.get("forbidden_op_names", []))
     forbidden_helpers = set(rules.get("forbidden_helper_names", []))
+    required_stages = set(rules.get("required_stages", []))
 
     op_names = set(expected_ops) | set(registrations) | set(relay_to_onnx)
     for helpers in helpers_by_op.values():
@@ -610,7 +619,8 @@ def analyze(
         requires_backend_test = bool(
             expected
             and (
-                expected.get("llvm_required")
+                "backend" in required_stages
+                or expected.get("llvm_required")
                 or expected.get("backend") == "llvm"
                 or expected.get("executable")
                 or expected.get("tir_executable")

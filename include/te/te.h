@@ -247,6 +247,8 @@ public:
 tir::PrimExpr sum(tir::PrimExpr expr, Array<IterVar> axis);
 /*! \brief 构造最大值归约表达式。 */
 tir::PrimExpr max(tir::PrimExpr expr, Array<IterVar> axis);
+/*! \brief 构造最小值归约表达式。 */
+tir::PrimExpr min(tir::PrimExpr expr, Array<IterVar> axis);
 
 /*! \brief placeholder operation，表示 TE 图的外部输入。 */
 class PlaceholderOpNode : public OperationNode {

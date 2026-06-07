@@ -10,6 +10,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
@@ -363,8 +364,19 @@ llvm::Value* CodeGenLLVM::GenLoad(const tir::LoadNode* op) {
 }
 
 llvm::Value* CodeGenLLVM::GenCall(const tir::CallNode* op) {
-    // 内置函数映射
     llvm::Type* ret_type = GetLLVMType(op->dtype);
+
+    if (op->name == "cast") {
+        if (op->args.size() != 1) {
+            throw std::runtime_error("CodeGenLLVM: cast expects exactly one argument");
+        }
+        llvm::Value* value = GenExprInContext(op->args[0], "cast argument");
+        bool is_signed = op->args[0]->dtype.code == 0;
+        if (op->args[0]->dtype.code == 2 && op->dtype.code != 2) {
+            is_signed = op->dtype.code == 0;
+        }
+        return CastValue(value, ret_type, is_signed, "cast");
+    }
 
     std::vector<llvm::Value*> args;
     for (const auto& arg : op->args) {
@@ -437,25 +449,32 @@ llvm::Value* CodeGenLLVM::GenNot(const tir::NotNode* op) {
 
 llvm::Function* CodeGenLLVM::GetOrDeclareIntrinsic(const std::string& name,
                                                     llvm::Type* type) {
-    // 尝试查找已有声明
-    llvm::Function* f = module_->getFunction(name);
-    if (f) return f;
+    if (!type->isFloatingPointTy()) {
+        throw std::runtime_error("CodeGenLLVM: math call '" + name +
+                                 "' requires floating-point dtype");
+    }
 
-    // 简单映射: tir内置函数 → C数学函数
-    std::string c_name = name;
-    if (name == "tir.exp") c_name = "expf";
-    else if (name == "tir.log") c_name = "logf";
-    else if (name == "tir.sqrt") c_name = "sqrtf";
-    else if (name == "tir.tanh") c_name = "tanhf";
-    else if (name == "tir.floor") c_name = "floorf";
-    else if (name == "tir.ceil") c_name = "ceilf";
-    else if (name == "tir.fabs") c_name = "fabsf";
+    llvm::Intrinsic::ID id = llvm::Intrinsic::not_intrinsic;
+    if (name == "exp" || name == "tir.exp") {
+        id = llvm::Intrinsic::exp;
+    } else if (name == "log" || name == "tir.log") {
+        id = llvm::Intrinsic::log;
+    } else if (name == "sqrt" || name == "tir.sqrt") {
+        id = llvm::Intrinsic::sqrt;
+    } else if (name == "floor" || name == "tir.floor") {
+        id = llvm::Intrinsic::floor;
+    } else if (name == "ceil" || name == "tir.ceil") {
+        id = llvm::Intrinsic::ceil;
+    } else if (name == "fabs" || name == "tir.fabs") {
+        id = llvm::Intrinsic::fabs;
+    }
 
-    // 创建函数声明（假设单参数数学函数）
-    llvm::FunctionType* ft = llvm::FunctionType::get(type, {type}, false);
-    f = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
-                               c_name, module_.get());
-    return f;
+    if (id == llvm::Intrinsic::not_intrinsic) {
+        throw std::runtime_error("CodeGenLLVM: unsupported call '" + name + "'");
+    }
+    llvm::FunctionCallee callee =
+        llvm::Intrinsic::getOrInsertDeclaration(module_.get(), id, {type});
+    return llvm::cast<llvm::Function>(callee.getCallee());
 }
 
 // ==================== 语句生成 ====================
