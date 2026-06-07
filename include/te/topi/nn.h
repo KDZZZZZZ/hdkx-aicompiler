@@ -206,7 +206,29 @@ inline Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stri
     IterVar rh = reduce_axis(0, KH, "rh");
     IterVar rw = reduce_axis(0, KW, "rw");
 
-    return compute(
+    if (pool_type == "max") {
+        return compute(
+            {N, C, OH, OW},
+            [&](const Array<tir::Var>& indices) {
+                tir::Var n = indices[0];
+                tir::Var c = indices[1];
+                tir::Var h = indices[2];
+                tir::Var w = indices[3];
+
+                PrimExpr h_in = h * SH + rh - pad_top;
+                PrimExpr w_in = w * SW + rw - pad_left;
+
+                PrimExpr in_val = Select(
+                    (h_in >= 0) && (h_in < H) && (w_in >= 0) && (w_in < W),
+                    data(n, c, h_in, w_in),
+                    make_const(data->dtype, -1e30));
+                return kxc::te::max(in_val, {rh, rw});
+            },
+            name,
+            tag);
+    }
+
+    Tensor sum_out = compute(
         {N, C, OH, OW},
         [&](const Array<tir::Var>& indices) {
             tir::Var n = indices[0];
@@ -220,12 +242,16 @@ inline Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stri
             PrimExpr in_val = Select(
                 (h_in >= 0) && (h_in < H) && (w_in >= 0) && (w_in < W),
                 data(n, c, h_in, w_in),
-                (pool_type == "max") ? make_const(data->dtype, -1e30) : make_const(data->dtype, 0));
+                make_const(data->dtype, 0));
+            return kxc::te::sum(in_val, {rh, rw});
+        },
+        name + "_sum",
+        tag);
 
-            if (pool_type == "max") {
-                return kxc::te::max(in_val, {rh, rw});
-            }
-            return kxc::te::sum(in_val, {rh, rw}) / (KH * KW);
+    return compute(
+        sum_out->shape,
+        [sum_out, KH, KW](const Array<tir::Var>& indices) {
+            return sum_out(indices) / make_const(sum_out->dtype, KH * KW);
         },
         name,
         tag);

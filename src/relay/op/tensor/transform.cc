@@ -1,12 +1,14 @@
 /*! \file src/relay/op/tensor/transform.cc
- * \brief 注册 Relay 算子及其 FRelayToTE compute。
+ * \brief 注册 Relay tensor transform 算子及其 FRelayToTE compute。
  */
 
 #include "relay/op_macros.h"
 #include "relay/op.h"
 #include "relay/op_attr_types.h"
 #include "relay/type_infer.h"
-#include "te/te.h"
+#include "te/topi/elemwise.h"
+#include "te/topi/transform.h"
+
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -15,89 +17,99 @@ namespace kxc {
 namespace relay {
 
 namespace {
-Array<kxc::tir::PrimExpr> UnflattenIndex(
-    kxc::tir::PrimExpr flat,
-    const Array<kxc::tir::PrimExpr>& dims) {
-    Array<kxc::tir::PrimExpr> out;
-    for (size_t i = 0; i < dims.size(); ++i) {
-        out.push_back(0);
+
+void RequireInputCount(const char* op_name, const Array<te::Tensor>& inputs, size_t expected) {
+    if (inputs.size() != expected) {
+        throw std::runtime_error(std::string(op_name) + " expects exactly " +
+                                 std::to_string(expected) + " input(s)");
     }
-    kxc::tir::PrimExpr cur = flat;
-    for (int i = static_cast<int>(dims.size()) - 1; i >= 0; --i) {
-        out[i] = cur % dims[i];
-        cur = cur / dims[i];
-    }
-    return out;
 }
 
-int64_t ConstInt(const kxc::tir::PrimExpr& expr, const std::string& context) {
-    const auto* imm = expr.As<kxc::tir::IntImmNode>();
-    if (!imm) {
-        throw std::runtime_error(context + " requires static integer shape");
+const TensorTypeNode* RequireTensorOutput(const char* op_name, const kxc::Type& out_type) {
+    const auto* tensor_type = out_type.As<TensorTypeNode>();
+    if (!tensor_type) {
+        throw std::runtime_error(std::string(op_name) + " expects TensorType output");
     }
-    return imm->value;
+    return tensor_type;
 }
 
-int NormalizeSplitAxis(int axis, int ndim) {
-    if (axis < 0) {
-        axis += ndim;
+te::Tensor RequireDefined(const char* op_name, const te::Tensor& tensor) {
+    if (!tensor.defined()) {
+        throw std::runtime_error(std::string(op_name) + " lowering returned undefined tensor");
     }
-    if (axis < 0 || axis >= ndim) {
-        throw std::runtime_error("split axis out of range");
-    }
-    return axis;
+    return tensor;
 }
 
-Array<kxc::tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type) {
-    if (!type) {
-        throw std::runtime_error("split output field must be TensorType");
-    }
+Array<kxc::tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type,
+                                              const std::string& op_name) {
     Array<kxc::tir::PrimExpr> shape;
     for (int64_t dim : type->shape) {
         if (dim < 0) {
-            throw std::runtime_error("split lowering requires static output shape");
+            throw std::runtime_error(op_name + " lowering requires static output shape");
         }
         shape.push_back(kxc::tir::IntImm(dim, kxc::tir::DataType::Int(64)));
     }
     return shape;
 }
 
-std::vector<int64_t> SplitOffsets(const SplitAttrsNode* attrs, int64_t axis_dim) {
-    if (!attrs || attrs->split.empty()) {
-        throw std::runtime_error("split requires SplitAttrs");
+kxc::tir::PrimExpr LinearIndex(const Array<kxc::tir::PrimExpr>& indices,
+                               const Array<kxc::tir::PrimExpr>& dims) {
+    if (dims.empty()) {
+        return kxc::tir::IntImm(0, kxc::tir::DataType::Int(64));
     }
-    std::vector<int64_t> offsets;
-    if (attrs->split.size() == 1) {
-        const int64_t sections = attrs->split[0];
-        if (sections <= 0 || axis_dim % sections != 0) {
-            throw std::runtime_error("split sections must divide axis dimension");
-        }
-        const int64_t segment = axis_dim / sections;
-        for (int64_t i = 0; i < sections; ++i) {
-            offsets.push_back(i * segment);
-        }
-        return offsets;
+    if (indices.size() != dims.size()) {
+        throw std::runtime_error("reshape index rank mismatch");
     }
-
-    int64_t previous = 0;
-    for (int64_t point : attrs->split) {
-        if (point < previous || point > axis_dim) {
-            throw std::runtime_error("split points must be sorted within axis dimension");
-        }
-        offsets.push_back(previous);
-        previous = point;
+    kxc::tir::PrimExpr linear = indices[0];
+    for (size_t i = 1; i < indices.size(); ++i) {
+        linear = linear * dims[i] + indices[i];
     }
-    offsets.push_back(previous);
-    return offsets;
-}
+    return linear;
 }
 
-te::Tensor FlattenCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
-    if (inputs.size() != 1) {
-        throw std::runtime_error("nn_flatten expects exactly 1 input");
+Array<kxc::tir::PrimExpr> UnflattenIndex(kxc::tir::PrimExpr flat,
+                                         const Array<kxc::tir::PrimExpr>& dims) {
+    Array<kxc::tir::PrimExpr> out;
+    for (size_t i = 0; i < dims.size(); ++i) {
+        out.push_back(kxc::tir::IntImm(0, kxc::tir::DataType::Int(64)));
     }
-    auto* p = attrs.As<FlattenAttrsNode>();
-    int axis = p ? p->axis : 1;
+    kxc::tir::PrimExpr cur = flat;
+    for (int i = static_cast<int>(dims.size()) - 1; i >= 0; --i) {
+        out[static_cast<size_t>(i)] = cur % dims[static_cast<size_t>(i)];
+        cur = cur / dims[static_cast<size_t>(i)];
+    }
+    return out;
+}
+
+kxc::tir::DataType DTypeFromCastCode(int code) {
+    switch (code) {
+    case 0:
+        return kxc::tir::DataType::Float(32);
+    case 1:
+        return kxc::tir::DataType::Int(32);
+    case 2:
+        return kxc::tir::DataType::Int(64);
+    case 3:
+        return kxc::tir::DataType::Float(64);
+    case 4:
+        return kxc::tir::DataType::Bool();
+    case 5:
+        return kxc::tir::DataType::Int(8);
+    case 6:
+        return kxc::tir::DataType::UInt(8);
+    default:
+        throw std::runtime_error("cast has unsupported dtype code: " + std::to_string(code));
+    }
+}
+
+}  // namespace
+
+te::Tensor FlattenCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                          const kxc::Type& out_type) {
+    RequireInputCount("nn_flatten", inputs, 1);
+    RequireTensorOutput("nn_flatten", out_type);
+    const auto* flatten_attrs = attrs.As<FlattenAttrsNode>();
+    int axis = flatten_attrs ? flatten_attrs->axis : 1;
     int ndim = static_cast<int>(inputs[0]->shape.size());
     if (ndim <= 0) {
         throw std::runtime_error("nn_flatten requires rank >= 1");
@@ -114,219 +126,106 @@ te::Tensor FlattenCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, c
     Array<kxc::tir::PrimExpr> outer_dims;
     Array<kxc::tir::PrimExpr> inner_dims;
     for (int i = 0; i < axis; ++i) {
-        outer = outer * inputs[0]->shape[i];
-        outer_dims.push_back(inputs[0]->shape[i]);
+        outer = outer * inputs[0]->shape[static_cast<size_t>(i)];
+        outer_dims.push_back(inputs[0]->shape[static_cast<size_t>(i)]);
     }
     for (int i = axis; i < ndim; ++i) {
-        inner = inner * inputs[0]->shape[i];
-        inner_dims.push_back(inputs[0]->shape[i]);
+        inner = inner * inputs[0]->shape[static_cast<size_t>(i)];
+        inner_dims.push_back(inputs[0]->shape[static_cast<size_t>(i)]);
     }
 
-    return te::compute({outer, inner}, [&](const Array<kxc::tir::Var>& indices) {
-        Array<kxc::tir::PrimExpr> in_indices;
-        auto outer_idx = UnflattenIndex(indices[0], outer_dims);
-        auto inner_idx = UnflattenIndex(indices[1], inner_dims);
-        for (const auto& v : outer_idx) in_indices.push_back(v);
-        for (const auto& v : inner_idx) in_indices.push_back(v);
-        if (in_indices.empty()) {
-            in_indices.push_back(0);
+    te::Tensor out = te::compute(
+        {outer, inner},
+        [input = inputs[0], outer_dims, inner_dims](const Array<kxc::tir::Var>& indices) {
+            Array<kxc::tir::PrimExpr> in_indices;
+            auto outer_idx = UnflattenIndex(indices[0], outer_dims);
+            auto inner_idx = UnflattenIndex(indices[1], inner_dims);
+            for (const auto& value : outer_idx) in_indices.push_back(value);
+            for (const auto& value : inner_idx) in_indices.push_back(value);
+            return input(in_indices);
+        },
+        "T_flatten");
+    return RequireDefined("nn_flatten", out);
+}
+
+te::Tensor ReshapeCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                          const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("reshape", inputs, 1);
+    const auto* tensor_type = RequireTensorOutput("reshape", out_type);
+    Array<kxc::tir::PrimExpr> out_shape = ShapeFromTensorType(tensor_type, "reshape");
+
+    te::Tensor out = te::compute(
+        out_shape,
+        [input = inputs[0], out_shape](const Array<kxc::tir::Var>& indices) {
+            Array<kxc::tir::PrimExpr> out_indices;
+            for (const auto& index : indices) {
+                out_indices.push_back(index);
+            }
+            kxc::tir::PrimExpr flat = LinearIndex(out_indices, out_shape);
+            Array<kxc::tir::PrimExpr> input_indices = UnflattenIndex(flat, input->shape);
+            return input(input_indices);
+        },
+        "T_reshape");
+    return RequireDefined("reshape", out);
+}
+
+te::Tensor TransposeCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                            const kxc::Type& out_type) {
+    RequireInputCount("transpose", inputs, 1);
+    RequireTensorOutput("transpose", out_type);
+    Array<int> axes;
+    if (const auto* transpose_attrs = attrs.As<TransposeAttrsNode>()) {
+        for (int64_t axis : transpose_attrs->perm) {
+            axes.push_back(static_cast<int>(axis));
         }
-        return inputs[0](in_indices);
-    }, "T_flatten");
+    }
+    return RequireDefined("transpose", te::topi::transpose(inputs[0], axes, "T_transpose"));
 }
 
-Array<te::Tensor> SplitCompute(const Attrs& attrs,
-                               const Array<te::Tensor>& inputs,
-                               const kxc::Type& out_type) {
-    if (inputs.size() != 1) {
-        throw std::runtime_error("split expects exactly 1 input");
+te::Tensor CastCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                       const kxc::Type& out_type) {
+    RequireInputCount("cast", inputs, 1);
+    RequireTensorOutput("cast", out_type);
+    const auto* cast_attrs = attrs.As<CastAttrsNode>();
+    if (!cast_attrs) {
+        throw std::runtime_error("cast expects CastAttrs");
     }
-    const auto* split_attrs = attrs.As<SplitAttrsNode>();
-    if (!split_attrs) {
-        throw std::runtime_error("split lowering requires SplitAttrs");
-    }
-    const auto* tuple_type = out_type.As<TupleTypeNode>();
-    if (!tuple_type) {
-        throw std::runtime_error("split lowering expects TupleType output");
-    }
-    const int ndim = static_cast<int>(inputs[0]->shape.size());
-    const int axis = NormalizeSplitAxis(split_attrs->axis, ndim);
-    const int64_t axis_dim = ConstInt(inputs[0]->shape[static_cast<size_t>(axis)],
-                                      "split axis dimension");
-    std::vector<int64_t> offsets = SplitOffsets(split_attrs, axis_dim);
-    if (offsets.size() != tuple_type->fields.size()) {
-        throw std::runtime_error("split output count does not match inferred TupleType");
-    }
-
-    Array<te::Tensor> outputs;
-    for (size_t out_index = 0; out_index < tuple_type->fields.size(); ++out_index) {
-        const auto* field_type = tuple_type->fields[out_index].As<TensorTypeNode>();
-        Array<kxc::tir::PrimExpr> out_shape = ShapeFromTensorType(field_type);
-        const int64_t offset = offsets[out_index];
-        outputs.push_back(te::compute(
-            out_shape,
-            [input = inputs[0], axis, offset](const Array<kxc::tir::Var>& indices) {
-                Array<kxc::tir::PrimExpr> input_indices;
-                for (const auto& idx : indices) {
-                    input_indices.push_back(idx);
-                }
-                input_indices[static_cast<size_t>(axis)] =
-                    input_indices[static_cast<size_t>(axis)] +
-                    kxc::tir::IntImm(offset, kxc::tir::DataType::Int(64));
-                return input(input_indices);
-            },
-            "T_split_" + std::to_string(out_index)));
-    }
-    return outputs;
+    return RequireDefined(
+        "cast", te::topi::cast(inputs[0], DTypeFromCastCode(cast_attrs->to), "T_cast"));
 }
 
-// ---------------------------------------------------------------------------
-// Tensor Transformation Operators
-// ---------------------------------------------------------------------------
-
-// Concatenate
-// Note: Concatenate takes a Tuple of tensors, so num_inputs is technically 1 (the tuple).
-KXC_REGISTER_OP(concatenate)
-    .describe(R"doc(Concatenate tensors along a given axis.
-
-The input is a tuple of tensors.
-)doc")
-    .set_num_inputs(1)
-    .add_argument("data", "Tuple", "The tuple of tensors to concatenate.")
-    .set_attr<FInferType>("FInferType", ConcatenateInferType)
-    .set_attr<std::string>("TAttrs", "ConcatAttrs");
-
-// Flatten
 KXC_REGISTER_OP(nn_flatten)
-    .describe(R"doc(Flattens the input tensor into a 2D tensor.
-)doc")
+    .describe(R"doc(Flatten input tensor into a 2D tensor.)doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
     .set_attr<std::string>("TAttrs", "FlattenAttrs")
     .set_attr<FInferType>("FInferType", FlattenInferType)
     .set_attr<FRelayToTE>("FRelayToTE", FlattenCompute);
 
-// Reshape
 KXC_REGISTER_OP(reshape)
-    .describe(R"doc(Reshapes the input tensor.
-
-Returns a tensor with the same data but different shape.
-)doc")
+    .describe(R"doc(Reshape input tensor using a static target shape.)doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
-    .add_argument("newshape", "Array<Int>", "The static target shape.")
+    .set_attr<std::string>("TAttrs", "ReshapeAttrs")
     .set_attr<FInferType>("FInferType", ReshapeInferType)
-    .set_attr<std::string>("TAttrs", "ReshapeAttrs");
+    .set_attr<FRelayToTE>("FRelayToTE", ReshapeCompute);
 
-// Shape
-KXC_REGISTER_OP(shape)
-    .describe(R"doc(Returns the shape of the input tensor.
-)doc")
-    .set_num_inputs(1)
-    .add_argument("data", "Tensor", "The input tensor.")
-    .set_attr<FInferType>("FInferType", ShapeInferType);
-
-// Slice
-KXC_REGISTER_OP(slice)
-    .describe(R"doc(Slices the input tensor.
-)doc")
-    .set_num_inputs(5) // Max inputs, can be variable? For now fixed max or variable? Relay usually handles this.
-    // Since user said inputs [3, 5], we might set num_inputs to -1 (variable) or max. 
-    // However, our system assumes fixed inputs usually. 
-    // Let's set it to 5 and make some optional if possible, or just 5.
-    // But "Inputs: [3, 5]" implies it varies. 
-    // Let's set num_inputs to -1 to indicate variable arguments if supported, 
-    // but OpNode::num_inputs = -1 usually means variable.
-    // Let's check OpNode::num_inputs usage.
-    // Assuming 5 for now as max.
-    .set_num_inputs(5) 
-    .add_argument("data", "Tensor", "The input tensor.")
-    .add_argument("starts", "Tensor", "Indices to start slicing.")
-    .add_argument("ends", "Tensor", "Indices to end slicing.")
-    .add_argument("axes", "Tensor", "Axes to slice along.", true) // Optional
-    .add_argument("steps", "Tensor", "Slicing steps.", true); // Optional
-
-// Split
-KXC_REGISTER_OP(split)
-    .describe(R"doc(Splits the input tensor into multiple tensors.
-)doc")
-    .set_num_inputs(1)
-    .add_argument("data", "Tensor", "The input tensor.")
-    .add_argument("split", "Array<Int>", "The split points or number of sections.")
-    .set_attr<FInferType>("FInferType", SplitInferType)
-    .set_attr<FRelayToTEMulti>("FRelayToTEMulti", SplitCompute)
-    .set_attr<std::string>("TAttrs", "SplitAttrs");
-
-// Squeeze
-KXC_REGISTER_OP(squeeze)
-    .describe(R"doc(Remove single-dimensional entries from the shape of a tensor.
-)doc")
-    .set_num_inputs(2)
-    .add_argument("data", "Tensor", "The input tensor.")
-    .add_argument("axes", "Tensor", "Axes to squeeze.");
-
-// Transpose
 KXC_REGISTER_OP(transpose)
-    .describe(R"doc(Permutes the dimensions of an array.
-)doc")
+    .describe(R"doc(Permute tensor dimensions.)doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "TransposeAttrs")
     .set_attr<FInferType>("FInferType", TransposeInferType)
-    .set_attr<std::string>("TAttrs", "TransposeAttrs");
+    .set_attr<FRelayToTE>("FRelayToTE", TransposeCompute);
 
-// Unsqueeze
-KXC_REGISTER_OP(unsqueeze)
-    .describe(R"doc(Insert single-dimensional entries to the shape of a tensor.
-)doc")
-    .set_num_inputs(2)
-    .add_argument("data", "Tensor", "The input tensor.")
-    .add_argument("axes", "Tensor", "Axes to insert.");
-
-// Where
-KXC_REGISTER_OP(where)
-    .describe(R"doc(Return elements chosen from x or y depending on condition.
-)doc")
-    .set_num_inputs(3)
-    .add_argument("condition", "Tensor", "The condition tensor.")
-    .add_argument("x", "Tensor", "Values to use where condition is True.")
-    .add_argument("y", "Tensor", "Values to use where condition is False.")
-    .set_attr<FInferType>("FInferType", WhereInferType);
-
-// Gather
-KXC_REGISTER_OP(gather)
-    .describe(R"doc(Gather values along an axis.
-)doc")
-    .set_num_inputs(2)
-    .add_argument("data", "Tensor", "The input tensor.")
-    .add_argument("indices", "Tensor", "The indices to gather.")
-    .set_attr<FInferType>("FInferType", GatherInferType)
-    .set_attr<std::string>("TAttrs", "GatherAttrs");
-
-// Cast
 KXC_REGISTER_OP(cast)
-    .describe(R"doc(Cast input to specified type.
-)doc")
+    .describe(R"doc(Cast input tensor to a target dtype.)doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "CastAttrs")
     .set_attr<FInferType>("FInferType", CastInferType)
-    .set_attr<std::string>("TAttrs", "CastAttrs");
+    .set_attr<FRelayToTE>("FRelayToTE", CastCompute);
 
-// ConstantOfShape
-KXC_REGISTER_OP(constant_of_shape)
-    .describe(R"doc(Generate a tensor with given value and shape.
-)doc")
-    .set_num_inputs(1)
-    .add_argument("input", "Tensor", "The shape tensor.")
-    .set_attr<std::string>("TAttrs", "ConstantOfShapeAttrs");
-
-// ExpandDims (Mapped from ONNX Expand, effectively broadcast_to)
-KXC_REGISTER_OP(expand_dims)
-    .describe(R"doc(Expand/Broadcast tensor to new shape.
-)doc")
-    .set_num_inputs(2)
-    .add_argument("data", "Tensor", "The input tensor.")
-    .add_argument("shape", "Tensor", "The target shape.")
-    .set_attr<std::string>("TAttrs", "ExpandAttrs");
-
-} // namespace relay
-} // namespace kxc
+}  // namespace relay
+}  // namespace kxc

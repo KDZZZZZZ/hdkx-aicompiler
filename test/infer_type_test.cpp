@@ -148,25 +148,81 @@ bool TestTransformAndReduceOps() {
     return true;
 }
 
-bool TestTupleSplitAndConcat() {
-    kxc::Var x("x", kxc::TensorType({2, 6}, "float32"));
-    kxc::Call split(kxc::relay::Op::Get("split"), {x},
-                    kxc::relay::SplitAttrs::Create({3}, 1));
-    kxc::TupleGetItem item(split, 1);
-    kxc::Function split_func({x}, item);
-    kxc::relay::InferTypePass(split_func);
-    TEST_CHECK(CheckTensor(item.checked_type(), {2, 2}, "float32"),
-               "split item output shape mismatch");
+bool TestMvpElementwiseLowerToTIR() {
+    kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var y("y", kxc::TensorType({3}, "float32"));
+    kxc::Call add(kxc::relay::Op::Get("add"), {x, y});
+    kxc::Call subtract(kxc::relay::Op::Get("subtract"), {add, y});
+    kxc::Call mul(kxc::relay::Op::Get("mul"), {subtract, y});
+    kxc::Call divide(kxc::relay::Op::Get("divide"), {mul, y});
+    kxc::Call sqrt(kxc::relay::Op::Get("sqrt"), {divide});
+    kxc::Function func({x, y}, sqrt);
 
-    kxc::Var lhs("lhs", kxc::TensorType({2, 3}, "float32"));
-    kxc::Var rhs("rhs", kxc::TensorType({2, 4}, "float32"));
-    kxc::Tuple tuple({lhs, rhs});
-    kxc::Call concat(kxc::relay::Op::Get("concatenate"), {tuple},
-                     kxc::relay::ConcatAttrs::Create(1));
-    kxc::Function concat_func({lhs, rhs}, concat);
-    kxc::relay::InferTypePass(concat_func);
-    TEST_CHECK(CheckTensor(concat.checked_type(), {2, 7}, "float32"),
-               "concatenate output shape mismatch");
+    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func);
+    TEST_CHECK(lowered.defined(), "elementwise MVP ops should lower to TIR");
+    return true;
+}
+
+bool TestMvpMatrixLowerToTIR() {
+    kxc::Var a("a", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var b("b", kxc::TensorType({3, 4}, "float32"));
+    kxc::Call matmul(kxc::relay::Op::Get("matmul"), {a, b});
+    kxc::Function matmul_func({a, b}, matmul);
+    TEST_CHECK(kxc::relay::LowerToTIR(matmul_func).defined(), "matmul should lower to TIR");
+
+    kxc::Var dense_weight("dense_weight", kxc::TensorType({5, 3}, "float32"));
+    kxc::Call dense(kxc::relay::Op::Get("nn_dense"), {a, dense_weight},
+                    kxc::relay::DenseAttrs::Create(5, ""));
+    kxc::Function dense_func({a, dense_weight}, dense);
+    TEST_CHECK(kxc::relay::LowerToTIR(dense_func).defined(), "nn_dense should lower to TIR");
+
+    kxc::Var gemm_b("gemm_b", kxc::TensorType({4, 3}, "float32"));
+    kxc::Var gemm_bias("gemm_bias", kxc::TensorType({4}, "float32"));
+    kxc::Call gemm(kxc::relay::Op::Get("nn_gemm"), {a, gemm_b, gemm_bias},
+                   kxc::relay::GemmAttrs::Create(1.0f, 1.0f, 0, 1));
+    kxc::Function gemm_func({a, gemm_b, gemm_bias}, gemm);
+    TEST_CHECK(kxc::relay::LowerToTIR(gemm_func).defined(), "nn_gemm should lower to TIR");
+    return true;
+}
+
+bool TestMvpNNLowerToTIR() {
+    kxc::Var data("data", kxc::TensorType({1, 3, 8, 8}, "float32"));
+    kxc::Var weight("weight", kxc::TensorType({4, 3, 3, 3}, "float32"));
+    auto conv_attrs = kxc::relay::Conv2DAttrs::Create(
+        {1, 1}, {1, 1, 1, 1}, {1, 1}, 1, 4, {3, 3}, "NCHW", "OIHW", "", "");
+    kxc::Call conv(kxc::relay::Op::Get("nn_conv2d"), {data, weight}, conv_attrs);
+    kxc::Call relu(kxc::relay::Op::Get("nn_relu"), {conv}, kxc::relay::ReluAttrs::Create());
+    auto pool_attrs =
+        kxc::relay::MaxPool2DAttrs::Create({2, 2}, {0, 0, 0, 0}, {1, 1}, {2, 2},
+                                           "NCHW", false);
+    kxc::Call max_pool(kxc::relay::Op::Get("nn_max_pool2d"), {relu}, pool_attrs);
+    kxc::Call avg_pool(kxc::relay::Op::Get("nn_avg_pool2d"), {relu}, pool_attrs);
+    kxc::Call global_pool(kxc::relay::Op::Get("nn_global_avg_pool2d"), {relu},
+                          kxc::relay::GlobalAvgPool2DAttrs::Create());
+    kxc::Call flatten(kxc::relay::Op::Get("nn_flatten"), {global_pool},
+                      kxc::relay::FlattenAttrs::Create(1));
+    kxc::Function func({data, weight}, kxc::Tuple({max_pool, avg_pool, flatten}));
+
+    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func);
+    TEST_CHECK(lowered.defined(), "NN MVP ops should lower to TIR");
+    return true;
+}
+
+bool TestMvpTransformReduceSoftmaxLowerToTIR() {
+    kxc::Var x("x", kxc::TensorType({2, 3, 4}, "float32"));
+    kxc::Call reshape(kxc::relay::Op::Get("reshape"), {x},
+                      kxc::relay::ReshapeAttrs::Create({2, 12}));
+    kxc::Call transpose(kxc::relay::Op::Get("transpose"), {reshape},
+                        kxc::relay::TransposeAttrs::Create({1, 0}));
+    kxc::Call reduce_mean(kxc::relay::Op::Get("reduce_mean"), {transpose},
+                          kxc::relay::ReduceMeanAttrs::Create({1}, 1));
+    kxc::Call softmax(kxc::relay::Op::Get("softmax"), {reduce_mean},
+                      kxc::relay::SoftmaxAttrs::Create(0));
+    kxc::Call cast(kxc::relay::Op::Get("cast"), {softmax}, kxc::relay::CastAttrs::Create(1));
+    kxc::Function func({x}, cast);
+
+    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func);
+    TEST_CHECK(lowered.defined(), "transform/reduce/softmax MVP ops should lower to TIR");
     return true;
 }
 
@@ -201,7 +257,10 @@ int main() {
         {"matrix_and_dense_ops", TestMatrixAndDenseOps},
         {"conv_and_pool_ops", TestConvAndPoolOps},
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
-        {"tuple_split_and_concat", TestTupleSplitAndConcat},
+        {"mvp_elementwise_lower_to_tir", TestMvpElementwiseLowerToTIR},
+        {"mvp_matrix_lower_to_tir", TestMvpMatrixLowerToTIR},
+        {"mvp_nn_lower_to_tir", TestMvpNNLowerToTIR},
+        {"mvp_transform_reduce_softmax_lower_to_tir", TestMvpTransformReduceSoftmaxLowerToTIR},
         {"pipeline_and_lowering_integration", TestPipelineAndLoweringIntegration},
     };
 

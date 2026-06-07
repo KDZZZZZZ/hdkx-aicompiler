@@ -267,7 +267,6 @@ endif()
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
-  kxc_add_runtime_exe(lower_multi_output_test test/lower_multi_output_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
@@ -330,13 +329,6 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS infer_type_test
     USES_TERMINAL
     COMMENT "Run infer_type_test"
-  )
-  add_custom_target(run_lower_multi_output_test
-    COMMAND "$<TARGET_FILE:lower_multi_output_test>"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
-    DEPENDS lower_multi_output_test
-    USES_TERMINAL
-    COMMENT "Run lower_multi_output_test"
   )
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     add_custom_target(run_onnx_importer_test

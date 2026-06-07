@@ -16,23 +16,23 @@ using namespace kxc::tir;
 
 // Helper to create intrinsic calls
 inline PrimExpr exp(PrimExpr x) {
-    return Call(x.dtype(), "exp", {x});
+    return kxc::tir::Call(x.dtype(), "exp", {x});
 }
 
 inline PrimExpr log(PrimExpr x) {
-    return Call(x.dtype(), "log", {x});
+    return kxc::tir::Call(x.dtype(), "log", {x});
 }
 
 inline PrimExpr sqrt(PrimExpr x) {
-    return Call(x.dtype(), "sqrt", {x});
+    return kxc::tir::Call(x.dtype(), "sqrt", {x});
 }
 
 inline PrimExpr floor(PrimExpr x) {
-    return Call(x.dtype(), "floor", {x});
+    return kxc::tir::Call(x.dtype(), "floor", {x});
 }
 
 inline PrimExpr ceil(PrimExpr x) {
-    return Call(x.dtype(), "ceil", {x});
+    return kxc::tir::Call(x.dtype(), "ceil", {x});
 }
 
 // Sigmoid: 1 / (1 + exp(-x))
@@ -114,7 +114,7 @@ inline Tensor cast(const Tensor& x, DataType dtype, std::string name = "cast", s
     return compute(
         x->shape,
         [&](const Array<tir::Var>& indices) {
-            return Call(dtype, "cast", {x(indices)});
+            return kxc::tir::Call(dtype, "cast", {x(indices)});
         },
         name,
         tag

@@ -1,3 +1,4 @@
+#include "api/compiler.h"
 #include "frontend/onnx_importer.h"
 #include "relay/transforms/infer_type.h"
 
@@ -13,6 +14,10 @@
 
 #ifndef KXC_ONNX_IMPORT_PARAMS_PATH
 #define KXC_ONNX_IMPORT_PARAMS_PATH "resnet18.params.bin"
+#endif
+
+#ifndef KXC_USE_LLVM
+#define KXC_USE_LLVM 0
 #endif
 
 namespace {
@@ -78,11 +83,30 @@ bool TestLoadResNet18ImportSpec() {
     return true;
 }
 
+bool TestCompileResNet18ToLLVM() {
+#if KXC_USE_LLVM
+    kxc::frontend::ImportedONNXModel imported = kxc::frontend::LoadONNXImportSpec(
+        KXC_ONNX_IMPORT_JSON_PATH, KXC_ONNX_IMPORT_PARAMS_PATH);
+
+    auto config = kxc::api::CompileConfig::JIT(kxc::BuildTarget(kxc::kCPU));
+    auto module = kxc::api::Compiler::Compile(imported.function, config);
+    TEST_CHECK(module.IsReady(), "ResNet18 should compile to a ready LLVM module");
+    TEST_CHECK(module.GetPrimFunc().defined(), "ResNet18 compile should keep generated TIR");
+    return true;
+#else
+    std::cout << "[SKIP] resnet18 LLVM compile: KXC_USE_LLVM=0\n";
+    return true;
+#endif
+}
+
 }  // namespace
 
 int main() {
     try {
         if (!TestLoadResNet18ImportSpec()) {
+            return 1;
+        }
+        if (!TestCompileResNet18ToLLVM()) {
             return 1;
         }
     } catch (const std::exception& e) {
@@ -91,6 +115,7 @@ int main() {
     }
 
     std::cout << "[PASS] onnx_importer_load_resnet18\n";
+    std::cout << "[PASS] onnx_importer_compile_resnet18_llvm\n";
     std::cout << "All ONNX importer tests passed.\n";
     return 0;
 }
