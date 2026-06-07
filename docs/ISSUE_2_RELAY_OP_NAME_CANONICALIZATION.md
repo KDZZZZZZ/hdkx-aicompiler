@@ -24,6 +24,8 @@ Issue #2 要解决的是 Relay op name 在注册、前端 helper、ONNX importer
 4. 禁止 metadata-only alias 注册，避免别名指向缺失 `FInferType` / `FRelayToTE` 的 op。
 5. 增加测试，确保公开 helper、ONNX importer 输出和 pass 逻辑不会再产生非 canonical name。
 
+新增算子的完整接入步骤见 [ADD_RELAY_OP_GUIDE.md](./ADD_RELAY_OP_GUIDE.md)。本文负责约束命名和 gate，新增算子指南负责说明从 Relay 注册到 TE/TOPI/TIR/后端测试的具体链路。
+
 ## 3. 命名原则
 
 ### 3.1 Canonical name 是内部唯一语义名
