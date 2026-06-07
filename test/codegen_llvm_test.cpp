@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -283,8 +284,10 @@ void TestCompilerAPI() {
     }
 
     // 导出C源码
-    module.SaveCSource("/tmp/kxc_elemwise_add.c");
-    std::cout << "C source saved to /tmp/kxc_elemwise_add.c" << std::endl;
+    std::filesystem::path c_source_path =
+        std::filesystem::temp_directory_path() / "kxc_elemwise_add.c";
+    module.SaveCSource(c_source_path.string());
+    std::cout << "C source saved to " << c_source_path.string() << std::endl;
 #else
     std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
 #endif

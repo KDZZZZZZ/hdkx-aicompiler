@@ -52,7 +52,7 @@ inline Tensor comm_reduce(const Tensor& data, const Array<int>& axis, bool keepd
             
             for (size_t i = 0; i < ndim; ++i) {
                 if (reduce_set.count(i)) {
-                    eval_indices.push_back(reduce_axes[red_counter++]);
+                    eval_indices.push_back(AsPrimExpr(reduce_axes[red_counter++]));
                 } else {
                     eval_indices.push_back(indices[idx_counter++]);
                 }

@@ -14,6 +14,7 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace kxc {
@@ -124,7 +125,11 @@ std::string CodeGenLLVM::DumpIR() const {
 
 llvm::Value* CodeGenLLVM::GenExpr(const tir::PrimExpr& expr) {
     if (!expr.defined()) {
-        throw std::runtime_error("CodeGenLLVM: undefined expression");
+        std::string message = "CodeGenLLVM: undefined expression";
+        if (!expr_context_.empty()) {
+            message += " in " + expr_context_;
+        }
+        throw std::runtime_error(message);
     }
 
     if (auto* n = expr.As<tir::IntImmNode>()) return GenIntImm(n);
@@ -137,6 +142,20 @@ llvm::Value* CodeGenLLVM::GenExpr(const tir::PrimExpr& expr) {
     if (auto* n = expr.As<tir::NotNode>()) return GenNot(n);
 
     throw std::runtime_error("CodeGenLLVM: unsupported expression type");
+}
+
+llvm::Value* CodeGenLLVM::GenExprInContext(const tir::PrimExpr& expr,
+                                            const std::string& context) {
+    std::string previous = expr_context_;
+    expr_context_ = context;
+    try {
+        llvm::Value* value = GenExpr(expr);
+        expr_context_ = previous;
+        return value;
+    } catch (...) {
+        expr_context_ = previous;
+        throw;
+    }
 }
 
 llvm::Value* CodeGenLLVM::GenIntImm(const tir::IntImmNode* op) {
@@ -158,11 +177,111 @@ llvm::Value* CodeGenLLVM::GenVar(const tir::VarNode* op) {
     return it->second;
 }
 
+llvm::Type* CodeGenLLVM::CommonNumericType(llvm::Value* lhs, llvm::Value* rhs) const {
+    llvm::Type* lhs_type = lhs->getType();
+    llvm::Type* rhs_type = rhs->getType();
+    if (lhs_type == rhs_type) {
+        return lhs_type;
+    }
+
+    if (lhs_type->isFloatingPointTy() || rhs_type->isFloatingPointTy()) {
+        if (lhs_type->isDoubleTy() || rhs_type->isDoubleTy()) {
+            return llvm::Type::getDoubleTy(ctx_);
+        }
+        if (lhs_type->isFloatTy() || rhs_type->isFloatTy()) {
+            return llvm::Type::getFloatTy(ctx_);
+        }
+        return llvm::Type::getHalfTy(ctx_);
+    }
+
+    return CommonIntegerType(lhs, rhs);
+}
+
+llvm::Type* CodeGenLLVM::CommonIntegerType(llvm::Value* lhs, llvm::Value* rhs) const {
+    llvm::Type* lhs_type = lhs->getType();
+    llvm::Type* rhs_type = rhs->getType();
+    if (!lhs_type->isIntegerTy() || !rhs_type->isIntegerTy()) {
+        throw std::runtime_error("CodeGenLLVM: expected integer operands");
+    }
+    unsigned bits = std::max(lhs_type->getIntegerBitWidth(), rhs_type->getIntegerBitWidth());
+    return llvm::Type::getIntNTy(ctx_, bits);
+}
+
+llvm::Value* CodeGenLLVM::CastValue(llvm::Value* value, llvm::Type* target_type,
+                                    bool is_signed, const std::string& name) {
+    llvm::Type* source_type = value->getType();
+    if (source_type == target_type) {
+        return value;
+    }
+
+    if (source_type->isIntegerTy() && target_type->isIntegerTy()) {
+        return is_signed ? builder_.CreateSExtOrTrunc(value, target_type, name)
+                         : builder_.CreateZExtOrTrunc(value, target_type, name);
+    }
+    if (source_type->isIntegerTy() && target_type->isFloatingPointTy()) {
+        return is_signed ? builder_.CreateSIToFP(value, target_type, name)
+                         : builder_.CreateUIToFP(value, target_type, name);
+    }
+    if (source_type->isFloatingPointTy() && target_type->isIntegerTy()) {
+        return is_signed ? builder_.CreateFPToSI(value, target_type, name)
+                         : builder_.CreateFPToUI(value, target_type, name);
+    }
+    if (source_type->isFloatingPointTy() && target_type->isFloatingPointTy()) {
+        unsigned source_bits = source_type->getPrimitiveSizeInBits();
+        unsigned target_bits = target_type->getPrimitiveSizeInBits();
+        if (source_bits < target_bits) {
+            return builder_.CreateFPExt(value, target_type, name);
+        }
+        return builder_.CreateFPTrunc(value, target_type, name);
+    }
+
+    throw std::runtime_error("CodeGenLLVM: unsupported scalar cast");
+}
+
+llvm::Value* CodeGenLLVM::CastToBool(llvm::Value* value, const std::string& name) {
+    llvm::Type* type = value->getType();
+    if (type->isIntegerTy(1)) {
+        return value;
+    }
+    if (type->isIntegerTy()) {
+        llvm::Value* zero = llvm::ConstantInt::get(type, 0);
+        return builder_.CreateICmpNE(value, zero, name);
+    }
+    if (type->isFloatingPointTy()) {
+        llvm::Value* zero = llvm::ConstantFP::get(type, 0.0);
+        return builder_.CreateFCmpONE(value, zero, name);
+    }
+    throw std::runtime_error("CodeGenLLVM: cannot cast value to bool");
+}
+
+void CodeGenLLVM::PromoteBinaryOperands(llvm::Value** lhs, llvm::Value** rhs,
+                                        const tir::DataType& lhs_dtype,
+                                        const tir::DataType& rhs_dtype,
+                                        const std::string& name) {
+    llvm::Type* common_type = CommonNumericType(*lhs, *rhs);
+    *lhs = CastValue(*lhs, common_type, lhs_dtype.code == 0, name + ".lhs.cast");
+    *rhs = CastValue(*rhs, common_type, rhs_dtype.code == 0, name + ".rhs.cast");
+}
+
 llvm::Value* CodeGenLLVM::GenBinaryOp(const tir::BinaryOpNode* op,
                                        const tir::PrimExpr& ref) {
-    llvm::Value* a = GenExpr(op->a);
-    llvm::Value* b = GenExpr(op->b);
-    bool is_float = (op->a->dtype.code == 2);
+    llvm::Value* a = GenExprInContext(op->a, "binary lhs");
+    llvm::Value* b = GenExprInContext(op->b, "binary rhs");
+
+    if (ref.As<tir::AndNode>()) {
+        a = CastToBool(a, "and.lhs.bool");
+        b = CastToBool(b, "and.rhs.bool");
+        return builder_.CreateAnd(a, b, "and");
+    }
+    if (ref.As<tir::OrNode>()) {
+        a = CastToBool(a, "or.lhs.bool");
+        b = CastToBool(b, "or.rhs.bool");
+        return builder_.CreateOr(a, b, "or");
+    }
+
+    PromoteBinaryOperands(&a, &b, op->a->dtype, op->b->dtype, "binary");
+    bool is_float = a->getType()->isFloatingPointTy();
+    bool is_signed = op->a->dtype.code == 0 || op->b->dtype.code == 0;
 
     if (ref.As<tir::AddNode>()) {
         return is_float ? builder_.CreateFAdd(a, b, "add")
@@ -178,20 +297,21 @@ llvm::Value* CodeGenLLVM::GenBinaryOp(const tir::BinaryOpNode* op,
     }
     if (ref.As<tir::DivNode>()) {
         if (is_float) return builder_.CreateFDiv(a, b, "div");
-        return (op->a->dtype.code == 0) ? builder_.CreateSDiv(a, b, "div")
-                                        : builder_.CreateUDiv(a, b, "div");
+        return is_signed ? builder_.CreateSDiv(a, b, "div")
+                         : builder_.CreateUDiv(a, b, "div");
     }
     if (ref.As<tir::ModNode>()) {
         if (is_float) return builder_.CreateFRem(a, b, "mod");
-        return (op->a->dtype.code == 0) ? builder_.CreateSRem(a, b, "mod")
-                                        : builder_.CreateURem(a, b, "mod");
+        return is_signed ? builder_.CreateSRem(a, b, "mod")
+                         : builder_.CreateURem(a, b, "mod");
     }
     if (ref.As<tir::MinNode>()) {
         if (is_float) {
             llvm::Value* cmp = builder_.CreateFCmpOLT(a, b, "cmp");
             return builder_.CreateSelect(cmp, a, b, "min");
         }
-        llvm::Value* cmp = builder_.CreateICmpSLT(a, b, "cmp");
+        llvm::Value* cmp = is_signed ? builder_.CreateICmpSLT(a, b, "cmp")
+                                     : builder_.CreateICmpULT(a, b, "cmp");
         return builder_.CreateSelect(cmp, a, b, "min");
     }
     if (ref.As<tir::MaxNode>()) {
@@ -199,7 +319,8 @@ llvm::Value* CodeGenLLVM::GenBinaryOp(const tir::BinaryOpNode* op,
             llvm::Value* cmp = builder_.CreateFCmpOGT(a, b, "cmp");
             return builder_.CreateSelect(cmp, a, b, "max");
         }
-        llvm::Value* cmp = builder_.CreateICmpSGT(a, b, "cmp");
+        llvm::Value* cmp = is_signed ? builder_.CreateICmpSGT(a, b, "cmp")
+                                     : builder_.CreateICmpUGT(a, b, "cmp");
         return builder_.CreateSelect(cmp, a, b, "max");
     }
     if (ref.As<tir::EQNode>()) {
@@ -208,29 +329,25 @@ llvm::Value* CodeGenLLVM::GenBinaryOp(const tir::BinaryOpNode* op,
     }
     if (ref.As<tir::LTNode>()) {
         if (is_float) return builder_.CreateFCmpOLT(a, b, "lt");
-        return (op->a->dtype.code == 0) ? builder_.CreateICmpSLT(a, b, "lt")
-                                        : builder_.CreateICmpULT(a, b, "lt");
-    }
-    if (ref.As<tir::AndNode>()) {
-        return builder_.CreateAnd(a, b, "and");
-    }
-    if (ref.As<tir::OrNode>()) {
-        return builder_.CreateOr(a, b, "or");
+        return is_signed ? builder_.CreateICmpSLT(a, b, "lt")
+                         : builder_.CreateICmpULT(a, b, "lt");
     }
 
     throw std::runtime_error("CodeGenLLVM: unsupported binary op");
 }
 
 llvm::Value* CodeGenLLVM::GenLoad(const tir::LoadNode* op) {
-    llvm::Value* buf_ptr = GenExpr(tir::PrimExpr(ObjectRef(op->buffer_var)));
-    llvm::Value* index = GenExpr(op->index);
+    llvm::Value* buf_ptr = GenExprInContext(tir::PrimExpr(ObjectRef(op->buffer_var)),
+                                            "load buffer");
+    llvm::Value* index = GenExprInContext(op->index, "load index");
     llvm::Type* elem_type = GetLLVMType(op->dtype);
 
     llvm::Value* ptr = builder_.CreateGEP(elem_type, buf_ptr, index, "load_ptr");
     llvm::Value* val = builder_.CreateLoad(elem_type, ptr, "load_val");
 
     if (op->predicate.defined()) {
-        llvm::Value* pred = GenExpr(op->predicate);
+        llvm::Value* pred = GenExprInContext(op->predicate, "load predicate");
+        pred = CastToBool(pred, "load.predicate.bool");
         llvm::Value* zero = llvm::Constant::getNullValue(elem_type);
         val = builder_.CreateSelect(pred, val, zero, "pred_load");
     }
@@ -243,7 +360,8 @@ llvm::Value* CodeGenLLVM::GenCall(const tir::CallNode* op) {
 
     std::vector<llvm::Value*> args;
     for (const auto& arg : op->args) {
-        args.push_back(GenExpr(arg));
+        llvm::Value* arg_value = GenExprInContext(arg, "call argument");
+        args.push_back(CastValue(arg_value, ret_type, arg->dtype.code == 0, "call.arg.cast"));
     }
 
     llvm::Function* callee = GetOrDeclareIntrinsic(op->name, ret_type);
@@ -251,14 +369,18 @@ llvm::Value* CodeGenLLVM::GenCall(const tir::CallNode* op) {
 }
 
 llvm::Value* CodeGenLLVM::GenSelect(const tir::SelectNode* op) {
-    llvm::Value* cond = GenExpr(op->condition);
-    llvm::Value* tv = GenExpr(op->true_value);
-    llvm::Value* fv = GenExpr(op->false_value);
+    llvm::Value* cond = GenExprInContext(op->condition, "select condition");
+    cond = CastToBool(cond, "select.condition.bool");
+    llvm::Value* tv = GenExprInContext(op->true_value, "select true value");
+    llvm::Value* fv = GenExprInContext(op->false_value, "select false value");
+    PromoteBinaryOperands(&tv, &fv, op->true_value->dtype, op->false_value->dtype,
+                          "select.value");
     return builder_.CreateSelect(cond, tv, fv, "sel");
 }
 
 llvm::Value* CodeGenLLVM::GenNot(const tir::NotNode* op) {
-    llvm::Value* val = GenExpr(op->value);
+    llvm::Value* val = GenExprInContext(op->value, "not value");
+    val = CastToBool(val, "not.value.bool");
     return builder_.CreateNot(val, "not");
 }
 
@@ -311,20 +433,31 @@ void CodeGenLLVM::GenFor(const tir::ForNode* op) {
     llvm::BasicBlock* exit = llvm::BasicBlock::Create(ctx_, "for.exit", func);
 
     // preheader → header
-    llvm::Value* init = GenExpr(op->min);
+    llvm::Value* init = GenExprInContext(op->min, "for min");
+    llvm::Value* extent = GenExprInContext(op->extent, "for extent");
+    llvm::Type* loop_type = CommonIntegerType(init, extent);
+    llvm::Type* declared_loop_type = GetLLVMType(op->loop_var->dtype);
+    if (!declared_loop_type->isIntegerTy()) {
+        throw std::runtime_error("CodeGenLLVM: for loop var must be integer");
+    }
+    unsigned loop_bits = std::max(loop_type->getIntegerBitWidth(),
+                                  declared_loop_type->getIntegerBitWidth());
+    loop_type = llvm::Type::getIntNTy(ctx_, loop_bits);
+    const bool loop_signed = op->loop_var->dtype.code == 0;
+    init = CastValue(init, loop_type, loop_signed, "for.min.cast");
+    extent = CastValue(extent, loop_type, loop_signed, "for.extent.cast");
     builder_.CreateBr(header);
 
     // header: phi, cmp, br
     builder_.SetInsertPoint(header);
-    llvm::Type* loop_type = GetLLVMType(op->loop_var->dtype);
     llvm::PHINode* phi = builder_.CreatePHI(loop_type, 2, op->loop_var->name_hint);
     phi->addIncoming(init, preheader);
 
     var_map_[op->loop_var.get()] = phi;
 
-    llvm::Value* extent = GenExpr(op->extent);
     llvm::Value* end = builder_.CreateAdd(init, extent, "end");
-    llvm::Value* cond = builder_.CreateICmpSLT(phi, end, "for.cond");
+    llvm::Value* cond = loop_signed ? builder_.CreateICmpSLT(phi, end, "for.cond")
+                                    : builder_.CreateICmpULT(phi, end, "for.cond");
     builder_.CreateCondBr(cond, body, exit);
 
     // body
@@ -344,16 +477,18 @@ void CodeGenLLVM::GenFor(const tir::ForNode* op) {
 }
 
 void CodeGenLLVM::GenStore(const tir::StoreNode* op) {
-    llvm::Value* buf_ptr = GenExpr(tir::PrimExpr(ObjectRef(op->buffer_var)));
-    llvm::Value* value = GenExpr(op->value);
-    llvm::Value* index = GenExpr(op->index);
+    llvm::Value* buf_ptr = GenExprInContext(tir::PrimExpr(ObjectRef(op->buffer_var)),
+                                            "store buffer");
+    llvm::Value* value = GenExprInContext(op->value, "store value");
+    llvm::Value* index = GenExprInContext(op->index, "store index");
 
     // 确定元素类型
     llvm::Type* elem_type = value->getType();
     llvm::Value* ptr = builder_.CreateGEP(elem_type, buf_ptr, index, "store_ptr");
 
     if (op->predicate.defined()) {
-        llvm::Value* pred = GenExpr(op->predicate);
+        llvm::Value* pred = GenExprInContext(op->predicate, "store predicate");
+        pred = CastToBool(pred, "store.predicate.bool");
         llvm::BasicBlock* store_bb =
             llvm::BasicBlock::Create(ctx_, "pred.store", current_func_);
         llvm::BasicBlock* merge_bb =
@@ -376,7 +511,7 @@ void CodeGenLLVM::GenAllocate(const tir::AllocateNode* op) {
     llvm::Value* total_size =
         llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), 1);
     for (const auto& ext : op->extents) {
-        llvm::Value* e = GenExpr(ext);
+        llvm::Value* e = GenExprInContext(ext, "allocate extent");
         if (e->getType() != llvm::Type::getInt64Ty(ctx_)) {
             e = builder_.CreateSExt(e, llvm::Type::getInt64Ty(ctx_), "ext64");
         }
@@ -392,7 +527,8 @@ void CodeGenLLVM::GenAllocate(const tir::AllocateNode* op) {
 }
 
 void CodeGenLLVM::GenIfThenElse(const tir::IfThenElseNode* op) {
-    llvm::Value* cond = GenExpr(op->condition);
+    llvm::Value* cond = GenExprInContext(op->condition, "if condition");
+    cond = CastToBool(cond, "if.condition.bool");
 
     llvm::BasicBlock* then_bb =
         llvm::BasicBlock::Create(ctx_, "if.then", current_func_);
@@ -423,7 +559,7 @@ void CodeGenLLVM::GenIfThenElse(const tir::IfThenElseNode* op) {
 }
 
 void CodeGenLLVM::GenLetStmt(const tir::LetStmtNode* op) {
-    llvm::Value* val = GenExpr(op->value);
+    llvm::Value* val = GenExprInContext(op->value, "let value");
     var_map_[op->var.get()] = val;
     GenStmt(op->body);
 }
@@ -435,7 +571,10 @@ void CodeGenLLVM::GenSeqStmt(const tir::SeqStmtNode* op) {
 }
 
 void CodeGenLLVM::GenEvaluate(const tir::EvaluateNode* op) {
-    GenExpr(op->value);
+    if (!op->value.defined()) {
+        return;
+    }
+    GenExprInContext(op->value, "evaluate value");
 }
 
 }  // namespace codegen
