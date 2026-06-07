@@ -203,11 +203,62 @@ matrix 的状态不能比实际实现更乐观。
 
 ## 4. 定义 attrs
 
-没有额外参数的算子可以复用简单 attrs，或不设置 `TAttrs`。
+本章只处理方案卡里的 `attrs_source` 和 `attrs`。先按下面表格选分支，不要在实现时临时决定。
 
-有额外参数时，在 [include/relay/op.h](../include/relay/op.h) 中定义 attrs node 和引用类型，在 [src/relay/op_attrs.cc](../src/relay/op_attrs.cc) 中实现 `Create`。
+| `attrs_source` | 允许的 `attrs` | 要改的文件 | 注册时 `TAttrs` | 适用场景 |
+| --- | --- | --- | --- | --- |
+| `none` | `null` | 不新增 attrs | 不写 | 纯输入 tensor 决定语义 |
+| `attrs` | `XxxAttrs` | [include/relay/op.h](../include/relay/op.h)、[src/relay/op_attrs.cc](../src/relay/op_attrs.cc) | 写 `"XxxAttrs"` | axis、layout、shape、dtype、padding、stride 等编译期参数 |
+| `tensor_input` | `null` 或已有 attrs | 通常不新增 attrs | 通常不写 | 参数本身是运行时 tensor，例如 indices、condition、shape tensor |
+| `device` | `DeviceCopyAttrs` / `CollectiveAttrs` | 复用已有 attrs | 写已有 attrs 名 | 只允许 `device.` 通信 op |
 
-示例：
+### 4.1 `attrs_source = none`
+
+这种情况下不要定义 attrs，不要注册 `TAttrs`，也不要为了“以后可能用”创建空 attrs。
+
+必须写法：
+
+```json
+{
+  "negative": {
+    "attrs": null,
+    "lowering": "single"
+  }
+}
+```
+
+注册时：
+
+```cpp
+KXC_REGISTER_OP(negative)
+    .describe(R"doc(Element-wise negation.)doc")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", UnarySameInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", NegativeCompute);
+```
+
+禁止：
+
+- 新增 `NegativeAttrs` 空壳。
+- 注册 `.set_attr<std::string>("TAttrs", "...")`。
+- 在 FFI helper 里构造无意义 attrs。
+
+### 4.2 `attrs_source = attrs`
+
+使用固定三步：定义 attrs node、定义 attrs ref、实现 `Create`。
+
+字段选择只能来自以下类型：
+
+| 参数语义 | 字段类型 |
+| --- | --- |
+| 单个 axis、dtype code、group、channel 数 | `int` 或 `int64_t` |
+| 多维 shape、axes、padding、stride、kernel size | `std::vector<int64_t>` |
+| layout、dtype 字符串 | `std::string` |
+| 开关参数 | `bool` |
+| scale、epsilon 等浮点参数 | `float` 或 `double` |
+
+`include/relay/op.h` 模板：
 
 ```cpp
 class ClipAttrsNode : public BaseAttrsNode {
@@ -226,7 +277,7 @@ public:
 };
 ```
 
-`Create` 实现：
+[src/relay/op_attrs.cc](../src/relay/op_attrs.cc) 模板：
 
 ```cpp
 ClipAttrs ClipAttrs::Create(double a_min, double a_max) {
@@ -237,25 +288,172 @@ ClipAttrs ClipAttrs::Create(double a_min, double a_max) {
 }
 ```
 
-attrs 要求：
+注册时必须绑定同名 `TAttrs`：
 
-- 字段名要和 ONNX/importer/FFI helper 语义一致。
-- 默认值必须明确。
-- type inference 和 lowering 都要使用同一个 attrs 类型。
-- 错误路径要检查 attrs 是否为空或类型不匹配。
+```cpp
+.set_attr<std::string>("TAttrs", "ClipAttrs")
+```
+
+FFI helper 参数顺序必须和 `Create` 参数顺序一致：
+
+```cpp
+Call MakeClip(Expr data, double a_min, double a_max) {
+    auto attrs = ClipAttrs::Create(a_min, a_max);
+    return Call(GetOp("clip"), {data}, attrs);
+}
+```
+
+ONNX importer 生成的字段名必须和 `Create` 参数语义一致。例如 `kernel_shape` 可以转成 `kernel_size`，但不能在 C++ attrs、FFI、ONNX 三处使用三套含义不同的字段名。
+
+### 4.3 `attrs_source = tensor_input`
+
+如果参数是运行时 tensor，必须作为 `Call` 输入，不允许塞进 attrs。
+
+示例：`where(condition, x, y)`：
+
+```json
+{
+  "where": {
+    "num_inputs": 3,
+    "attrs": null,
+    "lowering": "single"
+  }
+}
+```
+
+注册时每个 tensor 输入都要有 `add_argument`：
+
+```cpp
+KXC_REGISTER_OP(where)
+    .describe(R"doc(Select values from x or y by condition.)doc")
+    .set_num_inputs(3)
+    .add_argument("condition", "Tensor", "The condition tensor.")
+    .add_argument("x", "Tensor", "The true branch tensor.")
+    .add_argument("y", "Tensor", "The false branch tensor.")
+    .set_attr<FInferType>("FInferType", WhereInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", WhereCompute);
+```
+
+禁止：
+
+- 把 shape tensor、indices tensor、condition tensor 转成 attrs。
+- `num_inputs` 少写，然后在 helper 里偷偷创建常量 tensor。
+
+### 4.4 `attrs_source = device`
+
+只允许 `device.` 通信 op 使用。当前只能选：
+
+- `device.copy`：`DeviceCopyAttrs`
+- `device.allreduce`、`device.broadcast_from_worker0`、`device.scatter_from_worker0`、`device.gather_to_worker0`、`device.send_to_worker`、`device.recv_from_worker`：`CollectiveAttrs`
+
+device op 不写 `FRelayToTE` / `FRelayToTEMulti`，只进入 execution plan。
+
+### 4.5 attrs 检查清单
+
+- [ ] matrix 的 `attrs` 与注册的 `TAttrs` 完全一致。
+- [ ] `Create` 参数顺序与 FFI helper 参数顺序一致。
+- [ ] type inference 和 lowering 使用同一个 attrs 类型。
+- [ ] 默认值在 attrs node 或 `Create` 中明确。
+- [ ] 错误路径检查 attrs 是否为空或类型不匹配。
+- [ ] `tensor_input` 参数没有被塞进 attrs。
 
 ## 5. 增加类型推导规则
 
-类型推导函数声明放在 [include/relay/type_infer.h](../include/relay/type_infer.h)，实现放在 [src/relay/type_infer.cc](../src/relay/type_infer.cc)。
+本章只处理方案卡里的 `type_rule`。类型推导函数声明放在 [include/relay/type_infer.h](../include/relay/type_infer.h)，实现放在 [src/relay/type_infer.cc](../src/relay/type_infer.cc)。
 
-常见模式：
+新增规则时优先复用 `type_infer.cc` 现有内部 helper：`RequireArity`、`RequireTensor`、`RequireSameDType`、`ShapeVector`、`MakeTensorType`、`NormalizeAxis`、`BinaryBroadcastInferType`。
 
-- 输入输出 shape/dtype 相同：复用 `UnarySameInferType`。
-- 二元广播：复用或新增类似 `BinaryBroadcastInferType` 的规则。
-- 输出 shape 由 attrs 决定：新增专用 infer rule。
-- 多输出：返回 `TupleType`。
+### 5.1 按 `type_rule` 选模板
 
-示例：
+| `type_rule` | 直接可用 | 模板 |
+| --- | --- | --- |
+| `identity` | `IdentityInferType` | 不新增函数 |
+| `unary_same` | `UnarySameInferType` | 不新增函数，除非要检查 attrs |
+| `binary_broadcast` | 内部 `BinaryBroadcastInferType` | 新增薄封装函数 |
+| `matmul_like` | 已有专用规则 | 优先复用 `MatMulInferType` / `DenseInferType` / `GemmInferType` |
+| `attrs_shape` | 无 | 新增专用 `XxxInferType` |
+| `tuple_output` | 无 | 新增专用 `XxxInferType`，返回 `TupleType` |
+| `device_identity` | `IdentityInferType` | 只给 `device.` op |
+
+`identity` / `unary_same` 注册模板：
+
+```cpp
+KXC_REGISTER_OP(negative)
+    .set_attr<FInferType>("FInferType", UnarySameInferType);
+```
+
+`binary_broadcast` 模板：
+
+```cpp
+Type MaximumInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    return BinaryBroadcastInferType("maximum", input_types);
+}
+```
+
+`attrs_shape` 模板：
+
+```cpp
+Type ClipInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("clip", input_types, 1);
+    const auto* data = RequireTensor("clip", input_types[0], "data");
+    const auto* clip_attrs = attrs.As<ClipAttrsNode>();
+    if (!clip_attrs) {
+        throw std::runtime_error("clip expects ClipAttrs");
+    }
+    return MakeTensorType(ShapeVector(data), data->dtype);
+}
+```
+
+`tuple_output` 模板：
+
+```cpp
+Type SplitLikeInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("split_like", input_types, 1);
+    const auto* data = RequireTensor("split_like", input_types[0], "data");
+    const auto* split_attrs = attrs.As<SplitLikeAttrsNode>();
+    if (!split_attrs) {
+        throw std::runtime_error("split_like expects SplitLikeAttrs");
+    }
+
+    Array<Type> fields;
+    fields.push_back(MakeTensorType({data->shape[0]}, data->dtype));
+    fields.push_back(MakeTensorType({data->shape[0]}, data->dtype));
+    return TupleType(fields);
+}
+```
+
+### 5.2 必须检查的内容
+
+每个新增专用 infer rule 按这个顺序写：
+
+1. `RequireArity(op_name, input_types, expected)`。
+2. 对每个 tensor 输入调用 `RequireTensor(op_name, input_types[i], input_name)`。
+3. 检查 dtype：同 dtype 用 `RequireSameDType`；不同 dtype 必须明确输出 dtype。
+4. 检查 rank：例如 `if (data->shape.size() != 4) throw ...`。
+5. 检查 axis/layout/padding/shape 参数合法。
+6. 返回 `MakeTensorType(shape, dtype)` 或 `TupleType(fields)`。
+7. 错误信息必须包含 canonical op name。
+
+### 5.3 不能复用已有规则的情况
+
+出现以下任一情况，必须新增专用 `XxxInferType`：
+
+- 输出 shape 依赖 attrs，例如 axis、newshape、kernel、stride、padding。
+- 输出 dtype 不是输入 dtype。
+- 输入可以是 tuple 或输出是 tuple。
+- 需要检查 layout、rank、group、broadcast 以外的特殊语义。
+- 报错需要区分多个输入角色，例如 data、weight、bias。
+
+### 5.4 类型推导检查清单
+
+- [ ] `include/relay/type_infer.h` 声明了新增规则，或注册处复用了已有规则。
+- [ ] `src/relay/type_infer.cc` 实现与声明一致。
+- [ ] arity、TensorType、dtype、rank、attrs 都有检查。
+- [ ] 输出类型和 `FRelayToTE` / `FRelayToTEMulti` 生成的 tensor 数量、shape、dtype 一致。
+- [ ] 错误信息包含 canonical op name。
+
+示例最小 unary 规则：
 
 ```cpp
 Type NegativeInferType(const Attrs& attrs, const Array<Type>& input_types) {
@@ -264,19 +462,18 @@ Type NegativeInferType(const Attrs& attrs, const Array<Type>& input_types) {
 }
 ```
 
-如果复用已有函数，注册时可以直接挂 `UnarySameInferType`。
-
-类型推导要求：
-
-- 检查 arity。
-- 检查输入必须是 `TensorType`。
-- 检查 dtype、rank、axis、layout、broadcast 是否合法。
-- 输出类型必须和 lowering 产物一致。
-- 报错包含 op name，例如 `negative expects 1 input`。
-
 ## 6. 实现 TE/TOPI compute
 
-如果算子 compute 可复用，优先放在 TOPI helper 中，例如：
+本章只处理方案卡里的 `topi`。先选 TOPI 位置，再写 compute。
+
+| `topi` | 何时选择 | 写在哪里 | 是否允许 `lowering` |
+| --- | --- | --- | --- |
+| `none` | `lowering = none` 或 `exec_plan` | 不写 TOPI | 只允许 `none` / `exec_plan` |
+| 已有 TOPI helper | 语义完全匹配已有 helper | 不新增 helper | `single` / `multi` |
+| 新增 TOPI helper | 逻辑可复用或索引复杂 | 对应 TOPI 头文件 | `single` / `multi` |
+| op 文件内 `te::compute` | 一次性简单 compute | 对应 `src/relay/op/**.cc` | `single` / `multi` |
+
+TOPI 文件只能从这里选：
 
 - elementwise: [include/te/topi/elemwise.h](../include/te/topi/elemwise.h)
 - broadcast: [include/te/topi/broadcast.h](../include/te/topi/broadcast.h)
@@ -284,7 +481,33 @@ Type NegativeInferType(const Attrs& attrs, const Array<Type>& input_types) {
 - transform: [include/te/topi/transform.h](../include/te/topi/transform.h)
 - reduction: [include/te/topi/reduction.h](../include/te/topi/reduction.h)
 
-简单 unary op 示例：
+### 6.1 `topi = none`
+
+只允许：
+
+- `lowering = none`：当前 PR 不支持 lowering。
+- `lowering = exec_plan`：`device.` op 走 execution plan。
+
+禁止为了通过编译返回 `te::Tensor()`。
+
+### 6.2 使用已有 TOPI helper
+
+只有语义完全一致时才能复用。检查项：
+
+- shape 规则一致。
+- dtype 规则一致。
+- axis/layout/padding/stride 语义一致。
+- 不支持场景的错误行为一致。
+
+`FRelayToTE` 中直接调用：
+
+```cpp
+return te::topi::add(inputs[0], inputs[1], "T_add");
+```
+
+### 6.3 新增 TOPI helper
+
+新增 helper 使用固定签名风格：
 
 ```cpp
 inline Tensor negative(const Tensor& x,
@@ -300,23 +523,30 @@ inline Tensor negative(const Tensor& x,
 }
 ```
 
-TOPI 要求：
+带参数 helper 模板：
 
-- 返回 defined `te::Tensor`。
-- shape/dtype 和 type inference 一致。
-- 不支持的参数组合必须抛错。
-- 不能返回空 tensor。
-- 不能用错误实现占位。
+```cpp
+inline Tensor clip(const Tensor& x,
+                   tir::PrimExpr a_min,
+                   tir::PrimExpr a_max,
+                   std::string name = "clip",
+                   std::string tag = kElementWise) {
+    return compute(
+        x->shape,
+        [&](const Array<tir::Var>& indices) {
+            auto value = x(indices);
+            return tir::Min(tir::Max(value, a_min), a_max);
+        },
+        name,
+        tag);
+}
+```
 
-## 7. 写 `FRelayToTE`
+TOPI helper 不接收 Relay `Attrs`，只接收 TE tensor 和已经解析好的普通参数。attrs 解析只放在 `FRelayToTE`。
 
-`FRelayToTE` 是 Relay op 到 TE compute 的桥。通常写在对应注册文件里：
+### 6.4 op 文件内 `te::compute`
 
-- tensor math: [src/relay/op/tensor/math.cc](../src/relay/op/tensor/math.cc)
-- tensor transform: [src/relay/op/tensor/transform.cc](../src/relay/op/tensor/transform.cc)
-- nn: [src/relay/op/nn](../src/relay/op/nn)
-
-单输出示例：
+只允许用于不可复用、非常短的 compute。模板：
 
 ```cpp
 te::Tensor NegativeCompute(const Attrs& attrs,
@@ -327,11 +557,72 @@ te::Tensor NegativeCompute(const Attrs& attrs,
     if (inputs.size() != 1) {
         throw std::runtime_error("negative expects exactly 1 input");
     }
-    return te::topi::negative(inputs[0], "T_negative");
+    return te::compute(inputs[0]->shape,
+                       [x = inputs[0]](const Array<kxc::tir::Var>& indices) {
+                           return 0 - x(indices);
+                       },
+                       "T_negative");
 }
 ```
 
-带 attrs 示例：
+如果 compute 超过一个表达式、需要 axis normalize、需要 layout/padding 处理，改用新增 TOPI helper。
+
+### 6.5 TOPI/TE 检查清单
+
+- 返回 defined `te::Tensor`。
+- shape/dtype 和 type inference 一致。
+- 不支持的参数组合必须抛错。
+- 不能返回空 tensor。
+- 不能用错误实现占位。
+- 不能在 TOPI helper 中读取 Relay attrs。
+- 生成的 TIR 表达式不能超出当前 `LowerToTIR` 和 C/LLVM codegen 支持范围；超出时必须同步补后端。
+
+## 7. 写 `FRelayToTE`
+
+本章只处理方案卡里的 `lowering`。`FRelayToTE` / `FRelayToTEMulti` 是 Relay op 到 TE compute 的桥。通常写在对应注册文件里：
+
+- tensor math: [src/relay/op/tensor/math.cc](../src/relay/op/tensor/math.cc)
+- tensor transform: [src/relay/op/tensor/transform.cc](../src/relay/op/tensor/transform.cc)
+- nn: [src/relay/op/nn](../src/relay/op/nn)
+
+### 7.1 `lowering = none`
+
+不写 `FRelayToTE`，不写 `FRelayToTEMulti`，不写空 compute。matrix 必须保留：
+
+```json
+{
+  "lowering": "none"
+}
+```
+
+### 7.2 `lowering = single`，无 attrs
+
+固定检查顺序：输入数量、输出类型、调用 TOPI/TE、检查返回 tensor。
+
+```cpp
+te::Tensor NegativeCompute(const Attrs& attrs,
+                           const Array<te::Tensor>& inputs,
+                           const kxc::Type& out_type) {
+    (void)attrs;
+    (void)out_type;
+    if (inputs.size() != 1) {
+        throw std::runtime_error("negative expects exactly 1 input");
+    }
+    const auto* tensor_type = out_type.As<TensorTypeNode>();
+    if (!tensor_type) {
+        throw std::runtime_error("negative expects TensorType output");
+    }
+    te::Tensor out = te::topi::negative(inputs[0], "T_negative");
+    if (!out.defined()) {
+        throw std::runtime_error("negative lowering returned undefined tensor");
+    }
+    return out;
+}
+```
+
+### 7.3 `lowering = single`，有 attrs
+
+固定检查顺序：输入数量、attrs 类型、输出类型、解析 attrs、调用 TOPI/TE、检查返回 tensor。
 
 ```cpp
 te::Tensor ClipCompute(const Attrs& attrs,
@@ -345,18 +636,130 @@ te::Tensor ClipCompute(const Attrs& attrs,
     if (!clip_attrs) {
         throw std::runtime_error("clip expects ClipAttrs");
     }
-    return te::topi::clip(inputs[0],
-                          tir::FloatImm(clip_attrs->a_min, inputs[0]->dtype),
-                          tir::FloatImm(clip_attrs->a_max, inputs[0]->dtype),
-                          "T_clip");
+    const auto* tensor_type = out_type.As<TensorTypeNode>();
+    if (!tensor_type) {
+        throw std::runtime_error("clip expects TensorType output");
+    }
+    te::Tensor out = te::topi::clip(
+        inputs[0],
+        tir::FloatImm(clip_attrs->a_min, inputs[0]->dtype),
+        tir::FloatImm(clip_attrs->a_max, inputs[0]->dtype),
+        "T_clip");
+    if (!out.defined()) {
+        throw std::runtime_error("clip lowering returned undefined tensor");
+    }
+    return out;
 }
 ```
 
-多输出 op 使用 `FRelayToTEMulti`，参考 `split` 的设计：
+### 7.4 `lowering = multi`
+
+固定检查顺序：输入数量、attrs 类型、`TupleType` 输出、生成每个输出、检查数量、检查 undefined、检查重复 tensor。
+
+多输出 compute 必须把每个输出 tensor 的 shape 和索引映射写清楚。下面是 split-like 算子的模板：输出 shape 来自 `TupleType::fields`，输入索引在 split axis 上增加当前输出的 offset。
+
+```cpp
+Array<kxc::tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type,
+                                              const std::string& op_name) {
+    if (!type) {
+        throw std::runtime_error(op_name + " output field must be TensorType");
+    }
+    Array<kxc::tir::PrimExpr> shape;
+    for (int64_t dim : type->shape) {
+        if (dim < 0) {
+            throw std::runtime_error(op_name + " lowering requires static output shape");
+        }
+        shape.push_back(kxc::tir::IntImm(dim, kxc::tir::DataType::Int(64)));
+    }
+    return shape;
+}
+
+Array<te::Tensor> SplitLikeCompute(const Attrs& attrs,
+                                   const Array<te::Tensor>& inputs,
+                                   const kxc::Type& out_type) {
+    if (inputs.size() != 1) {
+        throw std::runtime_error("split_like expects exactly 1 input");
+    }
+    const auto* split_attrs = attrs.As<SplitLikeAttrsNode>();
+    if (!split_attrs) {
+        throw std::runtime_error("split_like expects SplitLikeAttrs");
+    }
+    const auto* tuple_type = out_type.As<TupleTypeNode>();
+    if (!tuple_type) {
+        throw std::runtime_error("split_like expects TupleType output");
+    }
+    const int axis = NormalizeSplitAxis(split_attrs->axis,
+                                        static_cast<int>(inputs[0]->shape.size()));
+    const std::vector<int64_t> offsets = SplitOffsets(split_attrs, tuple_type);
+    if (offsets.size() != tuple_type->fields.size()) {
+        throw std::runtime_error("split_like output count mismatch");
+    }
+
+    Array<te::Tensor> outputs;
+    for (size_t i = 0; i < tuple_type->fields.size(); ++i) {
+        const auto* field_type = tuple_type->fields[i].As<TensorTypeNode>();
+        Array<kxc::tir::PrimExpr> out_shape = ShapeFromTensorType(field_type, "split_like");
+        const int64_t offset = offsets[i];
+        outputs.push_back(te::compute(
+            out_shape,
+            [input = inputs[0], axis, offset](const Array<kxc::tir::Var>& indices) {
+                Array<kxc::tir::PrimExpr> input_indices;
+                for (const auto& index : indices) {
+                    input_indices.push_back(index);
+                }
+                input_indices[static_cast<size_t>(axis)] =
+                    input_indices[static_cast<size_t>(axis)] +
+                    kxc::tir::IntImm(offset, kxc::tir::DataType::Int(64));
+                return input(input_indices);
+            },
+            "T_split_like_" + std::to_string(i)));
+    }
+
+    if (outputs.size() != tuple_type->fields.size()) {
+        throw std::runtime_error("split_like output count mismatch");
+    }
+    for (const auto& out : outputs) {
+        if (!out.defined()) {
+            throw std::runtime_error("split_like returned undefined tensor");
+        }
+    }
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        for (size_t j = i + 1; j < outputs.size(); ++j) {
+            if (outputs[i] == outputs[j]) {
+                throw std::runtime_error("split_like returned duplicate tensor outputs");
+            }
+        }
+    }
+    return outputs;
+}
+```
+
+`NormalizeSplitAxis`、`SplitOffsets` 这类 helper 必须是当前算子的真实语义实现，并有类型推导和 lowering 测试覆盖；不能返回固定 offset 或固定 shape。
 
 - 输出类型必须是 `TupleType`。
 - 返回 tensor 数量必须等于 `TupleType::fields.size()`。
 - 不允许用同一个 tensor 重复冒充多个输出。
+
+### 7.5 `lowering = exec_plan`
+
+不写 `FRelayToTE`，不写 `FRelayToTEMulti`。实现重点转到：
+
+- 注册 `device.` op。
+- attrs 使用 `DeviceCopyAttrs` 或 `CollectiveAttrs`。
+- `LowerRelayToExecPlanPass` 能生成 execution plan。
+- 测试里检查 `CommExec` 或序列化后的 execution plan 节点。
+
+### 7.6 lowering 检查清单
+
+- [ ] `none` 没有空 hook。
+- [ ] `single` 返回 defined `te::Tensor`。
+- [ ] `multi` 返回数量等于 `TupleType::fields.size()`。
+- [ ] `multi` 不重复返回同一个 tensor。
+- [ ] attrs 类型检查在 compute 函数开头完成。
+- [ ] `out_type` 类型检查在 compute 函数开头完成。
+- [ ] 报错信息包含 canonical op name。
+- [ ] `single` / `multi` 有同函数块 `LowerToTIR` 测试。
+- [ ] `exec_plan` 有同函数块 `LowerRelayToExecPlanPass` 测试。
 
 ## 8. 注册 Relay op
 
