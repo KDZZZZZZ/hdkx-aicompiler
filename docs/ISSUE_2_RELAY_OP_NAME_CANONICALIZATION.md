@@ -255,6 +255,90 @@ ONNX 映射建议：
 - `multiply` 不应作为新 IR 进入 lowering。
 - `softmax` 能找到 type/lowering hook；`nn_softmax` 不应作为新 IR 进入 lowering。
 
+### 5.7 TE / TOPI / TIR 适配
+
+Issue #2 的命名规范只是算子扩展链路的入口。一个 Relay op 只有同时满足 TE/TOPI/TIR 适配要求，才能在 support matrix 中标记为 executable。
+
+#### 5.7.1 Relay 到 TE 的边界
+
+每个可执行 Relay op 必须明确一个 lowering hook：
+
+- 单输出 Tensor op：注册 `FRelayToTE`。
+- 多输出 Tuple op：注册 `FRelayToTEMulti`。
+- 暂不支持 lowering 的 op：不得伪装为 supported；matrix 中 `lowering` 必须标为 `none`。
+
+`FRelayToTE` / `FRelayToTEMulti` 的职责：
+
+- 校验输入 tensor 数量。
+- 校验 attrs 类型和必要字段。
+- 使用 `out_type` 中的 `TensorType` / `TupleType` 作为输出 shape、dtype 的权威来源。
+- 调用 TOPI/TE helper 生成 `te::Tensor`。
+- 抛出可诊断错误，错误信息必须包含 canonical op name。
+
+禁止行为：
+
+- 返回未定义的 `te::Tensor()`。
+- 忽略 attrs 中影响 shape/index 的字段。
+- 在 hook 中重新发明一套与 type inference 不一致的 shape 计算。
+- 对多输出 op 只返回第一个输出，或用重复 tensor 冒充多个输出。
+
+#### 5.7.2 TOPI helper 要求
+
+TOPI 是可复用 TE compute 的位置。新增或接入 TOPI helper 时必须满足：
+
+- 返回定义完整的 `te::Tensor`，包括 shape、dtype、compute body 和稳定 name。
+- 不支持的模式必须 `throw std::runtime_error`，不能返回空 tensor。
+- 不能用错误实现占位，例如用 `sum` 代替 `min` / `prod`。
+- index 计算必须显式处理 broadcast、axis normalize、negative axis、layout 和 padding 等规则。
+- helper 的行为必须和 Relay type inference 的 shape/dtype 规则一致。
+
+如果算子逻辑很简单，可以直接在 `FRelayToTE` 中写 `te::compute`；但一旦该 compute 可复用或涉及复杂索引，应沉到 TOPI helper。
+
+#### 5.7.3 TIR lowering 合约
+
+Relay op 支持 lowering 不等于支持执行。`LowerToTIR` 生成的 TIR 必须落在后端支持范围内。
+
+新增 op 时需要检查 TIR 产物：
+
+- 语句节点是否只使用当前后端支持的节点，例如 `For`、`Store`、`Allocate`、`IfThenElse`、`LetStmt`、`SeqStmt`、`Evaluate`。
+- 表达式节点是否只使用当前后端支持的节点，例如 `IntImm`、`FloatImm`、`Var`、二元表达式、`Load`、`Call`、`Select`、`Not`。
+- 是否引入新的 intrinsic，例如 `exp`、`sqrt`、`cast`、`floor`、`ceil`。
+- 是否引入新的 dtype 转换语义。
+- 是否需要真实 reduction init/update 语义，而不是只靠普通 loop 偶然表达。
+
+如果 TIR 产物使用后端尚未支持的节点或 intrinsic，必须同步补 codegen，或在 matrix 中把 executable 状态标为 false。
+
+#### 5.7.4 LLVM codegen 适配要求
+
+LLVM 后端消费的是 TIR，不直接认识 Relay op。新增 Relay op 时只有在 TIR 产物超出现有 LLVM codegen 支持范围时，才需要改 LLVM。
+
+需要改 LLVM 的典型情况：
+
+- 新增 TIR 表达式节点或语句节点。
+- 新增 intrinsic name，例如 `tir.exp` / `exp` 命名不统一。
+- 新增 dtype cast，需要生成 LLVM cast 指令，而不是当成外部函数。
+- 新增向量化、并行、block、attr 等 TIR 结构。
+- 新增 runtime ABI 需求，例如动态 shape、额外 metadata、workspace 分配。
+
+不需要改 LLVM 的典型情况：
+
+- 新算子最终只是嵌套 loop、load/store、加减乘除、比较和 select。
+- 新算子的复杂度只体现在 TE/TOPI index 计算，生成的 TIR 仍在支持子集内。
+
+#### 5.7.5 算子扩展完成定义
+
+一个 MVP Relay op 只有满足以下条件，才能标记为完整支持：
+
+- canonical op name 已进入 matrix。
+- op 注册含完整 schema、attrs、`FInferType`。
+- `FRelayToTE` / `FRelayToTEMulti` 已注册，或 matrix 明确标为不支持 lowering。
+- TOPI/TE compute 不返回空 tensor，不使用错误占位实现。
+- `LowerToTIR` 成功并生成后端可接受的 TIR。
+- LLVM/C 后端能处理该 TIR，或 matrix 明确标记该后端不支持。
+- 有 type inference test。
+- 有 lowering test。
+- 对 executable op，有 numeric runtime test。
+
 ## 6. 测试要求
 
 Issue #2 至少应增加以下测试。
@@ -300,6 +384,38 @@ Issue #2 至少应增加以下测试。
 - `mul`、`subtract`、`divide`、`softmax` 均使用 canonical name。
 - 如果输入历史 alias，预期行为必须明确：要么前置 canonicalization 后成功，要么报出“不支持历史 alias”的清晰错误。
 
+### 6.5 TE / TOPI 测试
+
+新增或扩展 TOPI/TE 测试，覆盖每个 matrix 中 `topi = required` 的 op：
+
+- helper 返回 defined `te::Tensor`。
+- 输出 shape、dtype 和 Relay type inference 一致。
+- 关键 index 计算可通过 TIR 文本或小 shape numeric test 验证。
+- 不支持的 attrs/layout/axis 组合会抛出清晰错误。
+- 禁止空 tensor、错误占位实现和 silent fallback。
+
+优先覆盖：
+
+- elementwise/broadcast：`add`、`subtract`、`mul`、`divide`、`sqrt`、`cast`。
+- transform：`reshape`、`transpose`、`nn_flatten`、`split`。
+- reduction：`reduce_mean`。
+- NN：`nn_dense`、`nn_gemm`、`nn_conv2d`、`nn_max_pool2d`、`nn_avg_pool2d`、`nn_global_avg_pool2d`、`softmax`。
+
+### 6.6 TIR / LLVM 后端适配测试
+
+对 matrix 中 `tir_executable = true` 的 op，需要至少有 lowering test：
+
+- Relay -> InferType -> LowerToTIR 成功。
+- TIR 不包含后端不支持的节点或 intrinsic。
+- 错误路径包含 canonical op name。
+
+对 matrix 中 `llvm_required = true` 的 op，需要 numeric LLVM runtime test：
+
+- Relay -> Compile(LLVM) -> Run。
+- 输出和手写参考、numpy 或 ONNX Runtime 结果比较。
+- 覆盖至少一个代表性小 shape。
+- 如果本地配置关闭 LLVM，CI 中必须有单独 LLVM job 或明确记录为 optional backend gap。
+
 ## 7. 编译与 CI 固化计划
 
 Issue #2 不能只靠人工 review。规范落地后必须有构建期和 CI 期的硬失败检查，用来自动发现“半拉实现”。
@@ -312,6 +428,9 @@ Issue #2 不能只靠人工 review。规范落地后必须有构建期和 CI 期
 - 新增或保留历史内部名，例如 `KXC_REGISTER_OP(multiply)`、`KXC_REGISTER_OP(nn_softmax)`、`Op::Get("sub")`、`Op::Get("div")`、`Op::Get("concat")`。
 - support matrix 声明某 op 需要 `FInferType`，但注册表里没有挂 `FInferType`。
 - support matrix 声明某 op 需要 lowering，单输出 op 没有 `FRelayToTE`，多输出 op 没有 `FRelayToTEMulti`。
+- support matrix 声明某 op 需要 TOPI，但没有 TOPI/TE helper 测试覆盖。
+- support matrix 声明某 op 可执行，但 LowerToTIR 生成了后端不支持的 TIR 节点或 intrinsic。
+- support matrix 声明某 op 需要 LLVM runtime，但没有 numeric LLVM test。
 - public `_make` helper 创建出的 `Call` 不是 canonical name。
 - ONNX importer 输出非 canonical name。
 - pass 中继续散落 alias 判断，例如 `mul || multiply`、`subtract || sub`、`divide || div`，但没有集中 canonicalization 或明确临时豁免。
@@ -334,6 +453,9 @@ Issue #2 不能只靠人工 review。规范落地后必须有构建期和 CI 期
       "required": true,
       "infer_type": true,
       "lowering": "single",
+      "topi": "required",
+      "tir_executable": true,
+      "llvm_required": true,
       "public_helpers": ["kxc.relay.op._make.add"],
       "onnx_ops": ["Add"]
     },
@@ -342,6 +464,9 @@ Issue #2 不能只靠人工 review。规范落地后必须有构建期和 CI 期
       "required": true,
       "infer_type": true,
       "lowering": "multi",
+      "topi": "required",
+      "tir_executable": true,
+      "llvm_required": true,
       "public_helpers": ["kxc.relay.op._make.split"],
       "onnx_ops": ["Split"]
     }
@@ -356,6 +481,9 @@ Issue #2 不能只靠人工 review。规范落地后必须有构建期和 CI 期
 - 新增 Relay op 必须先进入 matrix，再实现注册、type、lowering、测试。
 - matrix 里的状态不能比实际能力更乐观。
 - 如果某 op 只完成注册和类型推导，`lowering` 必须显式标为 `none`，不能伪装成 supported lowering。
+- 如果某 op 依赖 TOPI helper，`topi` 必须标明 `required`，并由 TOPI 测试覆盖。
+- 如果某 op 生成的 TIR 暂时不能被后端执行，`tir_executable` 必须为 `false`。
+- 如果某 op 需要进入 LLVM runtime 测试，`llvm_required` 必须为 `true`；否则必须说明后端限制。
 - `temporary_alias_allowlist` 默认应为空；需要临时兼容时必须写原因、过期 issue 和测试。
 
 ### 7.3 C++ registry contract test
