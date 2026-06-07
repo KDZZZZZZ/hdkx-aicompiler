@@ -419,6 +419,7 @@ python python/tools/check_relay_op_contract.py --root .
 - 是否有 canonical `_make` helper，不允许 `_make.sub`、`_make.conv2d` 这类 alias。
 - ONNX importer 是否输出 canonical op name。
 - 是否有测试引用。
+- 可 lowering / executable op 是否有 TIR 和后端契约测试覆盖。
 - 源码里是否残留 `TODO`、`FIXME`、`placeholder`、`for now`、`skip` 这类占位实现标记。
 
 检查器逻辑如下：
@@ -433,6 +434,8 @@ python python/tools/check_relay_op_contract.py --root .
 8. 阶段按最远完成点推导：无注册为 `missing`，schema 不完整为 `registered`，缺 type 为 `schema`，缺 lowering 为 `typed`，缺 FFI 为 `lowered`，缺测试为 `ffi`，全部满足为 `tested`。阶段只是进度展示，任何规范问题都会让检查失败。
 9. 全局源码扫描会额外检查 op 链路相关文件中的占位关键字和 `return te::Tensor()` 空 tensor 返回。命中后记入 `Global issues`。
 10. 默认模式下只要存在任意 operator issue 或 global issue 就返回非零退出码；`--report-only` 只改变退出码，不改变报告内容；`--format json` 输出机器可消费报告，便于 CI 或后续工具读取。
+11. TIR/LLVM 是否真的支持某个 op 生成的 stmt、expr 或 intrinsic，不能只靠静态扫描判断。正确做法是把它拆成两层：checker 强制 matrix 中可 lowering 的 op 必须有 `LowerToTIR` 契约测试，可执行 op 必须有 C/LLVM compile 或 runtime numeric 测试；CI 实际运行这些测试。如果 TE/TOPI 生成了 TIR 不支持的节点，`LowerToTIR` 测试失败；如果生成了 LLVM codegen 不支持的 intrinsic、stmt 或 dtype 组合，LLVM compile/run 测试失败。
+12. 新 op 只有在对应的 TIR/LLVM 契约测试进入 CMake/CI 后，才能把 matrix 中的 `tir_executable`、`llvm_required` 或 executable 状态标为已支持。否则即使静态字段齐全，也只能算“lowering 已注册但后端未证明”。
 
 只想查看完整状态报告时可以运行：
 

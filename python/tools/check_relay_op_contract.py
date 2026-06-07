@@ -295,8 +295,15 @@ def parse_onnx_mapping(root: Path) -> dict[str, list[str]]:
     return relay_to_onnx
 
 
-def count_test_refs(root: Path, op_names: set[str]) -> dict[str, int]:
-    counts = {op: 0 for op in op_names}
+def count_test_refs(root: Path, op_names: set[str]) -> dict[str, dict[str, int]]:
+    counts = {
+        op: {
+            "refs": 0,
+            "tir_refs": 0,
+            "backend_refs": 0,
+        }
+        for op in op_names
+    }
     test_root = root / "test"
     if not test_root.exists():
         return counts
@@ -309,8 +316,20 @@ def count_test_refs(root: Path, op_names: set[str]) -> dict[str, int]:
     ]
     for path in test_files:
         text = read_text(path)
+        has_tir_signal = "LowerToTIR" in text
+        has_backend_signal = (
+            "Compiler::Compile" in text
+            or "CompileConfig" in text
+            or "KXC_USE_LLVM" in text
+            or "codegen_llvm" in path.name
+        )
         for op in op_names:
-            counts[op] += text.count(f'"{op}"')
+            refs = text.count(f'"{op}"')
+            counts[op]["refs"] += refs
+            if refs and has_tir_signal:
+                counts[op]["tir_refs"] += refs
+            if refs and has_backend_signal:
+                counts[op]["backend_refs"] += refs
     return counts
 
 
@@ -490,13 +509,18 @@ def analyze(
                     + ", ".join(sorted(set(helper.placeholder_terms)))
                 )
 
+        coverage = test_counts.get(op, {"refs": 0, "tir_refs": 0, "backend_refs": 0})
+        test_ref_count = coverage["refs"]
+        tir_test_ref_count = coverage["tir_refs"]
+        backend_test_ref_count = coverage["backend_refs"]
+
         if expected:
             expected_onnx = set(expected.get("onnx_ops", []))
             missing_onnx = sorted(expected_onnx - set(onnx_ops))
             if missing_onnx:
                 issues.append("missing ONNX mapping(s): " + ", ".join(missing_onnx))
 
-            if expected.get("tests", True) and test_counts.get(op, 0) == 0:
+            if expected.get("tests", True) and test_ref_count == 0:
                 issues.append("missing test reference")
 
         schema_ok = bool(regs) and any(has_complete_schema(reg, expected) for reg in regs)
@@ -509,7 +533,25 @@ def analyze(
         else:
             has_lowering = any(reg.single_lowering or reg.multi_lowering for reg in regs)
         has_ffi = bool(strict_helpers)
-        has_tests = test_counts.get(op, 0) > 0
+        requires_tir_test = expected_lowering in {"single", "multi"}
+        if expected and requires_tir_test and tir_test_ref_count == 0:
+            issues.append("missing LowerToTIR contract test reference")
+
+        requires_backend_test = bool(
+            expected
+            and (
+                expected.get("llvm_required")
+                or expected.get("backend") == "llvm"
+                or expected.get("executable")
+                or expected.get("tir_executable")
+            )
+        )
+        if requires_backend_test and backend_test_ref_count == 0:
+            issues.append("missing backend compile/runtime test reference")
+
+        has_tests = test_ref_count > 0 and (not requires_tir_test or tir_test_ref_count > 0)
+        if requires_backend_test:
+            has_tests = has_tests and backend_test_ref_count > 0
 
         if not regs:
             stage = "missing"
@@ -549,7 +591,9 @@ def analyze(
                     for helper in helpers
                 ],
                 "onnx_ops": onnx_ops,
-                "test_refs": test_counts.get(op, 0),
+                "test_refs": test_ref_count,
+                "tir_test_refs": tir_test_ref_count,
+                "backend_test_refs": backend_test_ref_count,
                 "issues": issues,
             }
         )
@@ -598,15 +642,18 @@ def print_text_report(root: Path, matrix_path: Path, report: dict[str, Any]) -> 
     print()
     print(
         f"{'op':<34} {'stage':<11} {'reg':>3} {'schema':>6} {'type':>5} "
-        f"{'lower':>6} {'ffi':>4} {'onnx':>4} {'tests':>5} {'issues':>6}"
+        f"{'lower':>6} {'ffi':>4} {'onnx':>4} {'tests':>5} {'tir':>4} "
+        f"{'be':>3} {'issues':>6}"
     )
-    print("-" * 91)
+    print("-" * 101)
     for row in rows:
         print(
             f"{row['op']:<34} {row['stage']:<11} {row['registered_count']:>3} "
             f"{yn(row['schema']):>6} {yn(row['type_inference']):>5} "
             f"{yn(row['lowering']):>6} {yn(row['ffi']):>4} "
-            f"{len(row['onnx_ops']):>4} {row['test_refs']:>5} {len(row['issues']):>6}"
+            f"{len(row['onnx_ops']):>4} {row['test_refs']:>5} "
+            f"{row['tir_test_refs']:>4} {row['backend_test_refs']:>3} "
+            f"{len(row['issues']):>6}"
         )
 
     if failed:
