@@ -21,11 +21,12 @@
 
 完成可执行 lowering 时：
 
-- 单输出 op 必须注册 `FRelayToTE`。
-- 多输出 op 必须注册 `FRelayToTEMulti`。
+- 普通单输出 Tensor/NN op 必须注册 `FRelayToTE`。
+- 普通多输出 Tensor/NN op 必须注册 `FRelayToTEMulti`。
+- 设备通信类 op 走 execution plan 路径，matrix 中写 `lowering = exec_plan`，不注册 `FRelayToTE` / `FRelayToTEMulti`。
 - TOPI/TE helper 不能返回空 `te::Tensor()`。
 - `LowerToTIR` 能生成后端可接受的 TIR。
-- 至少有 lowering test。
+- 至少有 `LowerToTIR` 或 `LowerRelayToExecPlanPass` 契约测试。
 
 完成 runtime 支持时：
 
@@ -40,7 +41,7 @@
 命名要求：
 
 - Relay IR 内部只使用 canonical name。
-- public helper 可以是短名，但 helper 创建的 `Call` 必须指向 canonical op。
+- public helper 也必须使用 canonical name。
 - 不新增 metadata-only alias。
 - ONNX importer 输出 canonical name。
 
@@ -48,13 +49,13 @@
 
 | 语义 | canonical name | public helper |
 | --- | --- | --- |
-| subtraction | `subtract` | `_make.sub` |
+| subtraction | `subtract` | `_make.subtract` |
 | multiplication | `mul` | `_make.mul` |
 | softmax | `softmax` | `_make.softmax` |
 
 ## 3. 更新 support matrix
 
-在实现代码前，先把算子加入 op support matrix。当前 issue #2 计划会引入机器可读 matrix，例如 `test/relay_op_contract.json`。
+在实现代码前，先把算子加入机器可读 op support matrix：[test/relay_op_contract.json](../test/relay_op_contract.json)。
 
 建议字段：
 
@@ -93,6 +94,13 @@
 ```
 
 matrix 的状态不能比实际实现更乐观。
+
+`lowering` 目前允许四类值：
+
+- `none`：暂不支持 lowering，不能伪装成可执行。
+- `single`：单输出 Tensor/NN op，必须注册 `FRelayToTE`，并有 `LowerToTIR` 契约测试。
+- `multi`：多输出 Tuple op，必须注册 `FRelayToTEMulti`，并有 `LowerToTIR` 契约测试。
+- `exec_plan`：设备通信类 op，不走 TE/TIR hook，必须能被 `LowerRelayToExecPlanPass` 转成 `CommExec` 或 execution plan 中的对应节点。
 
 ## 4. 定义 attrs
 
@@ -415,7 +423,7 @@ python python/tools/check_relay_op_contract.py --root .
 - 是否存在重复注册或未声明 op。
 - 是否有完整 schema、`set_num_inputs`、`add_argument`。
 - 是否注册 `FInferType`。
-- 单输出 op 是否注册 `FRelayToTE`，多输出 op 是否注册 `FRelayToTEMulti`。
+- `single` op 是否注册 `FRelayToTE`，`multi` op 是否注册 `FRelayToTEMulti`，`exec_plan` op 是否避免注册 TE lowering hook。
 - 是否有 canonical `_make` helper，不允许 `_make.sub`、`_make.conv2d` 这类 alias。
 - ONNX importer 是否输出 canonical op name。
 - 是否有测试引用。
@@ -428,13 +436,13 @@ python python/tools/check_relay_op_contract.py --root .
 2. 静态扫描 `src` 下的 C++ 源码，识别 `KXC_REGISTER_OP(name)` 和 `OpRegEntry(Op::Get("name"))`。每个注册块会提取 `describe`、`set_num_inputs`、`add_argument` 数量、`TAttrs`、`FInferType`、`FRelayToTE`、`FRelayToTEMulti`。
 3. 静态扫描 [src/relay/op/op_ffi.cc](../src/relay/op/op_ffi.cc)，识别 `KXC_REGISTER_GLOBAL("kxc.relay.op._make.xxx")` 绑定到的 `MakeXxx` 函数，再从函数体里提取 `GetOp("name")` 和 `Call(..., {inputs})` 的输入个数。
 4. 解析 [python/kxc_onnx/importer.py](../python/kxc_onnx/importer.py) 中的 `ONNX_TO_RELAY`，反向生成 `relay op -> ONNX op` 映射，用来确认 importer 只输出 canonical name。
-5. 扫描 `test` 目录中对 op name 字符串的引用，作为最低限度的测试覆盖信号。这个检查只证明测试提到了该 op，不替代实际 type/lowering/runtime 断言。
+5. 扫描 `test` 目录中对 op name 字符串的引用，作为最低限度的测试覆盖信号。普通引用按文件统计；`LowerToTIR`、backend compile/runtime、`LowerRelayToExecPlanPass` 覆盖按测试函数块统计，避免同一个测试文件里无关 op 被误算成已覆盖。
 6. 对所有来源取并集生成检查对象：matrix 中声明的 op、源码注册的 op、FFI helper 指向的 op、ONNX importer 输出的 op 都会进入报告。因此未声明 op、历史 alias、孤立 helper 都会被发现。
-7. 对每个 op 做规范判定：必须在 matrix 中声明，不能是 forbidden alias，必须且只能注册一次，schema 必须完整，`TAttrs` 必须和 matrix 一致，必须有 `FInferType`，单输出必须有 `FRelayToTE`，多输出必须有 `FRelayToTEMulti`，必须有同名 canonical `_make` helper，声明的 ONNX 映射必须存在，声明需要测试时必须有测试引用。
-8. 阶段按最远完成点推导：无注册为 `missing`，schema 不完整为 `registered`，缺 type 为 `schema`，缺 lowering 为 `typed`，缺 FFI 为 `lowered`，缺测试为 `ffi`，全部满足为 `tested`。阶段只是进度展示，任何规范问题都会让检查失败。
+7. 对每个 op 做规范判定：必须在 matrix 中声明，不能是 forbidden alias，必须且只能注册一次，schema 必须完整，`TAttrs` 必须和 matrix 一致，必须有 `FInferType`。`single` 必须有 `FRelayToTE`，`multi` 必须有 `FRelayToTEMulti`，`exec_plan` 不允许注册 TE lowering hook。需要 FFI 时必须有同名 canonical `_make` helper；声明的 ONNX 映射必须存在；声明需要测试时必须有测试引用。
+8. 阶段按最远完成点推导：无注册为 `missing`，schema 不完整为 `registered`，缺 type 为 `schema`，缺 lowering 为 `typed`，缺 FFI 为 `lowered`，缺测试为 `ffi`，全部满足为 `tested`。对 `exec_plan` op，注册和 type 之后的 lowering 完成度由 execution-plan 路径表达，不由 `FRelayToTE` 表达。阶段只是进度展示，任何规范问题都会让检查失败。
 9. 全局源码扫描会额外检查 op 链路相关文件中的占位关键字和 `return te::Tensor()` 空 tensor 返回。命中后记入 `Global issues`。
 10. 默认模式下只要存在任意 operator issue 或 global issue 就返回非零退出码；`--report-only` 只改变退出码，不改变报告内容；`--format json` 输出机器可消费报告，便于 CI 或后续工具读取。
-11. TIR/LLVM 是否真的支持某个 op 生成的 stmt、expr 或 intrinsic，不能只靠静态扫描判断。正确做法是把它拆成两层：checker 强制 matrix 中可 lowering 的 op 必须有 `LowerToTIR` 契约测试，可执行 op 必须有 C/LLVM compile 或 runtime numeric 测试；CI 实际运行这些测试。如果 TE/TOPI 生成了 TIR 不支持的节点，`LowerToTIR` 测试失败；如果生成了 LLVM codegen 不支持的 intrinsic、stmt 或 dtype 组合，LLVM compile/run 测试失败。
+11. TIR/LLVM 是否真的支持某个 op 生成的 stmt、expr 或 intrinsic，不能只靠静态扫描判断。正确做法是把它拆成两层：checker 强制 matrix 中 `single` / `multi` op 必须有 `LowerToTIR` 契约测试，`exec_plan` op 必须有 `LowerRelayToExecPlanPass` 契约测试，可执行 op 必须有 C/LLVM compile 或 runtime numeric 测试；CI 实际运行这些测试。如果 TE/TOPI 生成了 TIR 不支持的节点，`LowerToTIR` 测试失败；如果生成了 LLVM codegen 不支持的 intrinsic、stmt 或 dtype 组合，LLVM compile/run 测试失败。
 12. 新 op 只有在对应的 TIR/LLVM 契约测试进入 CMake/CI 后，才能把 matrix 中的 `tir_executable`、`llvm_required` 或 executable 状态标为已支持。否则即使静态字段齐全，也只能算“lowering 已注册但后端未证明”。
 
 只想查看完整状态报告时可以运行：

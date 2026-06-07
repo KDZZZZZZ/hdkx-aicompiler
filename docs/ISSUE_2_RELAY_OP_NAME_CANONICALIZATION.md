@@ -263,10 +263,11 @@ Issue #2 的命名规范只是算子扩展链路的入口。一个 Relay op 只�
 
 #### 5.7.1 Relay 到 TE 的边界
 
-每个可执行 Relay op 必须明确一个 lowering hook：
+每个可执行 Relay op 必须明确一个 lowering 路径：
 
-- 单输出 Tensor op：注册 `FRelayToTE`。
-- 多输出 Tuple op：注册 `FRelayToTEMulti`。
+- 单输出 Tensor/NN op：matrix 中 `lowering = single`，注册 `FRelayToTE`。
+- 多输出 Tuple op：matrix 中 `lowering = multi`，注册 `FRelayToTEMulti`。
+- 设备通信 op：matrix 中 `lowering = exec_plan`，由 `LowerRelayToExecPlanPass` 转成 `CommExec` / execution plan 节点，不注册 `FRelayToTE` / `FRelayToTEMulti`。
 - 暂不支持 lowering 的 op：不得伪装为 supported；matrix 中 `lowering` 必须标为 `none`。
 
 `FRelayToTE` / `FRelayToTEMulti` 的职责：

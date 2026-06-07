@@ -30,6 +30,10 @@ CALL_FUNCTION_RE = re.compile(
     re.DOTALL,
 )
 EMPTY_TENSOR_RETURN_RE = re.compile(r"return\s+(?:kxc::)?te::Tensor\s*\(\s*\)\s*;")
+CPP_FUNCTION_START_RE = re.compile(
+    r"(?m)^[ \t]*(?:[A-Za-z_][\w:<>,: \t*&]+)\s+"
+    r"[A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\)\s*(?:const\s*)?\{"
+)
 
 
 @dataclass
@@ -295,12 +299,36 @@ def parse_onnx_mapping(root: Path) -> dict[str, list[str]]:
     return relay_to_onnx
 
 
+def extract_cpp_function_blocks(text: str) -> list[str]:
+    masked = mask_comments(text)
+    blocks: list[str] = []
+    for match in CPP_FUNCTION_START_RE.finditer(masked):
+        brace = masked.find("{", match.start(), match.end())
+        if brace < 0:
+            continue
+        depth = 0
+        end = -1
+        for index in range(brace, len(masked)):
+            ch = masked[index]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+        if end > brace:
+            blocks.append(text[match.start():end])
+    return blocks
+
+
 def count_test_refs(root: Path, op_names: set[str]) -> dict[str, dict[str, int]]:
     counts = {
         op: {
             "refs": 0,
             "tir_refs": 0,
             "backend_refs": 0,
+            "exec_plan_refs": 0,
         }
         for op in op_names
     }
@@ -316,20 +344,39 @@ def count_test_refs(root: Path, op_names: set[str]) -> dict[str, dict[str, int]]
     ]
     for path in test_files:
         text = read_text(path)
-        has_tir_signal = "LowerToTIR" in text
-        has_backend_signal = (
-            "Compiler::Compile" in text
-            or "CompileConfig" in text
-            or "KXC_USE_LLVM" in text
-            or "codegen_llvm" in path.name
-        )
         for op in op_names:
-            refs = text.count(f'"{op}"')
-            counts[op]["refs"] += refs
-            if refs and has_tir_signal:
-                counts[op]["tir_refs"] += refs
-            if refs and has_backend_signal:
-                counts[op]["backend_refs"] += refs
+            counts[op]["refs"] += text.count(f'"{op}"')
+
+        regions = (
+            extract_cpp_function_blocks(text)
+            if path.suffix in {".cc", ".cpp", ".h", ".hpp"}
+            else [text]
+        )
+        for region in regions:
+            has_tir_signal = "LowerToTIR" in region
+            has_backend_signal = (
+                "Compiler::Compile" in region
+                or "CompileConfig" in region
+                or "CodeGenLLVM" in region
+                or "LLVMJIT" in region
+            )
+            has_exec_plan_signal = (
+                "LowerRelayToExecPlanPass" in region
+                or "lower_to_exec_plan" in region
+                or "SerializeExecutionPlan" in region
+                or "CommExec" in region
+                or "ExecutionPlanExecutor" in region
+            )
+            if not (has_tir_signal or has_backend_signal or has_exec_plan_signal):
+                continue
+            for op in op_names:
+                refs = region.count(f'"{op}"')
+                if refs and has_tir_signal:
+                    counts[op]["tir_refs"] += refs
+                if refs and has_backend_signal:
+                    counts[op]["backend_refs"] += refs
+                if refs and has_exec_plan_signal:
+                    counts[op]["exec_plan_refs"] += refs
     return counts
 
 
@@ -469,11 +516,19 @@ def analyze(
                     issues.append(f"{reg.file}:{reg.line} missing FRelayToTEMulti")
                 if reg.single_lowering:
                     issues.append(f"{reg.file}:{reg.line} should not register FRelayToTE")
+            elif expected_lowering == "exec_plan":
+                if reg.single_lowering or reg.multi_lowering:
+                    issues.append(
+                        f"{reg.file}:{reg.line} exec_plan op should not register TE lowering hooks"
+                    )
 
         strict_helpers = [
             helper for helper in helpers if len(helper.op_names) == 1 and helper.helper_name == op
         ]
-        if expected and expected.get("ffi", True) and not strict_helpers:
+        ffi_required = bool(expected.get("ffi", True)) if expected else True
+        ffi_present = bool(strict_helpers)
+        ffi_satisfied = (not ffi_required) or ffi_present
+        if expected and ffi_required and not strict_helpers:
             issues.append(f"missing canonical FFI helper kxc.relay.op._make.{op}")
 
         for helper in helpers:
@@ -509,10 +564,19 @@ def analyze(
                     + ", ".join(sorted(set(helper.placeholder_terms)))
                 )
 
-        coverage = test_counts.get(op, {"refs": 0, "tir_refs": 0, "backend_refs": 0})
+        coverage = test_counts.get(
+            op,
+            {
+                "refs": 0,
+                "tir_refs": 0,
+                "backend_refs": 0,
+                "exec_plan_refs": 0,
+            },
+        )
         test_ref_count = coverage["refs"]
         tir_test_ref_count = coverage["tir_refs"]
         backend_test_ref_count = coverage["backend_refs"]
+        exec_plan_test_ref_count = coverage["exec_plan_refs"]
 
         if expected:
             expected_onnx = set(expected.get("onnx_ops", []))
@@ -530,12 +594,18 @@ def analyze(
             has_lowering = any(reg.multi_lowering for reg in regs)
         elif expected_lowering == "single":
             has_lowering = any(reg.single_lowering for reg in regs)
+        elif expected_lowering == "exec_plan":
+            has_lowering = bool(regs)
         else:
             has_lowering = any(reg.single_lowering or reg.multi_lowering for reg in regs)
-        has_ffi = bool(strict_helpers)
+        has_ffi = ffi_present
         requires_tir_test = expected_lowering in {"single", "multi"}
         if expected and requires_tir_test and tir_test_ref_count == 0:
             issues.append("missing LowerToTIR contract test reference")
+
+        requires_exec_plan_test = expected_lowering == "exec_plan"
+        if expected and requires_exec_plan_test and exec_plan_test_ref_count == 0:
+            issues.append("missing LowerRelayToExecPlan contract test reference")
 
         requires_backend_test = bool(
             expected
@@ -549,7 +619,11 @@ def analyze(
         if requires_backend_test and backend_test_ref_count == 0:
             issues.append("missing backend compile/runtime test reference")
 
-        has_tests = test_ref_count > 0 and (not requires_tir_test or tir_test_ref_count > 0)
+        has_tests = (
+            test_ref_count > 0
+            and (not requires_tir_test or tir_test_ref_count > 0)
+            and (not requires_exec_plan_test or exec_plan_test_ref_count > 0)
+        )
         if requires_backend_test:
             has_tests = has_tests and backend_test_ref_count > 0
 
@@ -561,7 +635,7 @@ def analyze(
             stage = "schema"
         elif not has_lowering:
             stage = "typed"
-        elif not has_ffi:
+        elif not ffi_satisfied:
             stage = "lowered"
         elif not has_tests:
             stage = "ffi"
@@ -579,6 +653,8 @@ def analyze(
                 "type_inference": has_type,
                 "lowering": has_lowering,
                 "ffi": has_ffi,
+                "ffi_required": ffi_required,
+                "ffi_satisfied": ffi_satisfied,
                 "ffi_helpers": [
                     {
                         "helper_name": helper.helper_name,
@@ -594,6 +670,7 @@ def analyze(
                 "test_refs": test_ref_count,
                 "tir_test_refs": tir_test_ref_count,
                 "backend_test_refs": backend_test_ref_count,
+                "exec_plan_test_refs": exec_plan_test_ref_count,
                 "issues": issues,
             }
         )
@@ -643,16 +720,17 @@ def print_text_report(root: Path, matrix_path: Path, report: dict[str, Any]) -> 
     print(
         f"{'op':<34} {'stage':<11} {'reg':>3} {'schema':>6} {'type':>5} "
         f"{'lower':>6} {'ffi':>4} {'onnx':>4} {'tests':>5} {'tir':>4} "
-        f"{'be':>3} {'issues':>6}"
+        f"{'be':>3} {'exec':>4} {'issues':>6}"
     )
-    print("-" * 101)
+    print("-" * 106)
     for row in rows:
         print(
             f"{row['op']:<34} {row['stage']:<11} {row['registered_count']:>3} "
             f"{yn(row['schema']):>6} {yn(row['type_inference']):>5} "
-            f"{yn(row['lowering']):>6} {yn(row['ffi']):>4} "
+            f"{yn(row['lowering']):>6} {ffi_text(row):>4} "
             f"{len(row['onnx_ops']):>4} {row['test_refs']:>5} "
             f"{row['tir_test_refs']:>4} {row['backend_test_refs']:>3} "
+            f"{row['exec_plan_test_refs']:>4} "
             f"{len(row['issues']):>6}"
         )
 
@@ -673,6 +751,12 @@ def print_text_report(root: Path, matrix_path: Path, report: dict[str, Any]) -> 
 
 def yn(flag: bool) -> str:
     return "Y" if flag else "-"
+
+
+def ffi_text(row: dict[str, Any]) -> str:
+    if not row.get("ffi_required", True):
+        return "n/a"
+    return yn(row["ffi"])
 
 
 def main() -> int:
