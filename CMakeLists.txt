@@ -250,6 +250,20 @@ if(KXC_BUILD_DEBUG_EXAMPLES)
   kxc_add_runtime_exe(tmp_maxpool_compute test/tmp_maxpool_compute.cpp)
 endif()
 
+if(Python3_Interpreter_FOUND)
+  add_custom_target(check_relay_op_contract
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_relay_op_contract.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/relay_op_contract.json"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    USES_TERMINAL
+    COMMENT "Check Relay operator implementation contract"
+  )
+else()
+  message(WARNING "Python3 was not found; skipping check_relay_op_contract target.")
+endif()
+
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)

@@ -1,0 +1,403 @@
+{
+  "version": 1,
+  "rules": {
+    "canonical_names_only": true,
+    "single_registration": true,
+    "required_stages": [
+      "schema",
+      "type_inference",
+      "lowering",
+      "ffi",
+      "tests"
+    ],
+    "forbidden_op_names": [
+      "concat",
+      "div",
+      "flatten",
+      "multiply",
+      "nn_softmax",
+      "sub"
+    ],
+    "forbidden_helper_names": [
+      "concat",
+      "conv2d",
+      "dense",
+      "div",
+      "flatten",
+      "max_pool2d",
+      "relu",
+      "sub"
+    ],
+    "placeholder_terms": [
+      "FIXME",
+      "TODO",
+      "for now",
+      "placeholder",
+      "skip"
+    ]
+  },
+  "operators": {
+    "add": {
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": ["Add"]
+    },
+    "cast": {
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "CastAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "concatenate": {
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "ConcatAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "constant_of_shape": {
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "ConstantOfShapeAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "device.allreduce": {
+      "category": "device",
+      "num_inputs": 1,
+      "attrs": "CollectiveAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "device.broadcast_from_worker0": {
+      "category": "device",
+      "num_inputs": 1,
+      "attrs": "CollectiveAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "device.copy": {
+      "category": "device",
+      "num_inputs": 1,
+      "attrs": "DeviceCopyAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "device.gather_to_worker0": {
+      "category": "device",
+      "num_inputs": 1,
+      "attrs": "CollectiveAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "device.recv_from_worker": {
+      "category": "device",
+      "num_inputs": 1,
+      "attrs": "CollectiveAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "device.scatter_from_worker0": {
+      "category": "device",
+      "num_inputs": 1,
+      "attrs": "CollectiveAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "device.send_to_worker": {
+      "category": "device",
+      "num_inputs": 1,
+      "attrs": "CollectiveAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "divide": {
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": "DivAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "equal": {
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": "EqualAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "erf": {
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": "ErfAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "expand_dims": {
+      "category": "tensor.transform",
+      "num_inputs": 2,
+      "attrs": "ExpandAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "gather": {
+      "category": "tensor.transform",
+      "num_inputs": 2,
+      "attrs": "GatherAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "greater": {
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "matmul": {
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "mul": {
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "nn_avg_pool2d": {
+      "category": "nn",
+      "num_inputs": 1,
+      "attrs": "MaxPool2DAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "nn_conv2d": {
+      "category": "nn",
+      "num_inputs": -1,
+      "min_inputs": 2,
+      "max_inputs": 3,
+      "attrs": "Conv2DAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": ["Conv"]
+    },
+    "nn_dense": {
+      "category": "nn",
+      "num_inputs": 2,
+      "attrs": "DenseAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "nn_flatten": {
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "FlattenAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": ["Flatten"]
+    },
+    "nn_gemm": {
+      "category": "nn",
+      "num_inputs": 3,
+      "attrs": "GemmAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": ["Gemm"]
+    },
+    "nn_global_avg_pool2d": {
+      "category": "nn",
+      "num_inputs": 1,
+      "attrs": "GlobalAvgPool2DAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": ["GlobalAveragePool"]
+    },
+    "nn_max_pool2d": {
+      "category": "nn",
+      "num_inputs": 1,
+      "attrs": "MaxPool2DAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": ["MaxPool"]
+    },
+    "nn_relu": {
+      "category": "nn",
+      "num_inputs": 1,
+      "attrs": "ReluAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": ["Relu"]
+    },
+    "pow": {
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "reduce_mean": {
+      "category": "tensor.reduce",
+      "num_inputs": 1,
+      "attrs": "ReduceMeanAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "reshape": {
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "ReshapeAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "shape": {
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "slice": {
+      "category": "tensor.transform",
+      "num_inputs": 5,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "softmax": {
+      "category": "nn",
+      "num_inputs": 1,
+      "attrs": "SoftmaxAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "split": {
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "SplitAttrs",
+      "lowering": "multi",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "sqrt": {
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "squeeze": {
+      "category": "tensor.transform",
+      "num_inputs": 2,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "subtract": {
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "transpose": {
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "TransposeAttrs",
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "unsqueeze": {
+      "category": "tensor.transform",
+      "num_inputs": 2,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "where": {
+      "category": "tensor.transform",
+      "num_inputs": 3,
+      "attrs": null,
+      "lowering": "single",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    }
+  }
+}

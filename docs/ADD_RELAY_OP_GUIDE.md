@@ -403,6 +403,38 @@ add_custom_target(run_relay_negative_test
 
 如果该算子属于 MVP required op，必须进入 `run_cpu_required_tests` 或等价 CI 聚合 target。
 
+提交 PR 前还必须运行算子契约检查：
+
+```bash
+python python/tools/check_relay_op_contract.py --root .
+```
+
+该命令默认硬失败。它会对照 [test/relay_op_contract.json](../test/relay_op_contract.json) 检查所有 Relay 算子的统一接入模板，包括：
+
+- 是否只使用 canonical op name。
+- 是否存在重复注册或未声明 op。
+- 是否有完整 schema、`set_num_inputs`、`add_argument`。
+- 是否注册 `FInferType`。
+- 单输出 op 是否注册 `FRelayToTE`，多输出 op 是否注册 `FRelayToTEMulti`。
+- 是否有 canonical `_make` helper，不允许 `_make.sub`、`_make.conv2d` 这类 alias。
+- ONNX importer 是否输出 canonical op name。
+- 是否有测试引用。
+- 源码里是否残留 `TODO`、`FIXME`、`placeholder`、`for now`、`skip` 这类占位实现标记。
+
+只想查看完整状态报告时可以运行：
+
+```bash
+python python/tools/check_relay_op_contract.py --root . --report-only
+```
+
+CMake 侧提供同名 target：
+
+```bash
+cmake --build --preset dev-mingw-cpu --target check_relay_op_contract
+```
+
+CI 应直接运行不带 `--report-only` 的版本；发现 alias、占位实现或半拉链路时立刻失败。
+
 ## 14. PR 检查清单
 
 提交 PR 前检查：
@@ -420,6 +452,7 @@ add_custom_target(run_relay_negative_test
 - [ ] 没有新增 metadata-only alias。
 - [ ] 错误信息包含 canonical op name。
 - [ ] CMake/CI target 已更新。
+- [ ] `check_relay_op_contract` 已通过，或本 PR 明确只是在暴露既有缺口并附带报告。
 
 ## 15. 常见错误
 
