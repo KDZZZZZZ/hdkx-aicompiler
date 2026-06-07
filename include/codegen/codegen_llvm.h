@@ -39,6 +39,7 @@ public:
 private:
     /*! \brief 生成 TIR 表达式对应的 LLVM Value。 */
     llvm::Value* GenExpr(const tir::PrimExpr& expr);
+    llvm::Value* GenExprInContext(const tir::PrimExpr& expr, const std::string& context);
     llvm::Value* GenIntImm(const tir::IntImmNode* op);
     llvm::Value* GenFloatImm(const tir::FloatImmNode* op);
     llvm::Value* GenVar(const tir::VarNode* op);
@@ -47,6 +48,15 @@ private:
     llvm::Value* GenCall(const tir::CallNode* op);
     llvm::Value* GenSelect(const tir::SelectNode* op);
     llvm::Value* GenNot(const tir::NotNode* op);
+    llvm::Type* CommonNumericType(llvm::Value* lhs, llvm::Value* rhs) const;
+    llvm::Type* CommonIntegerType(llvm::Value* lhs, llvm::Value* rhs) const;
+    llvm::Value* CastValue(llvm::Value* value, llvm::Type* target_type,
+                           bool is_signed, const std::string& name);
+    llvm::Value* CastToBool(llvm::Value* value, const std::string& name);
+    void PromoteBinaryOperands(llvm::Value** lhs, llvm::Value** rhs,
+                               const tir::DataType& lhs_dtype,
+                               const tir::DataType& rhs_dtype,
+                               const std::string& name);
 
     /*! \brief 生成 TIR 语句对应的 LLVM IR 指令序列。 */
     void GenStmt(const tir::Stmt& stmt);
@@ -70,6 +80,7 @@ private:
 
     // TIR Var → LLVM Value* 映射
     std::unordered_map<const Object*, llvm::Value*> var_map_;
+    std::string expr_context_;
 };
 
 }  // namespace codegen

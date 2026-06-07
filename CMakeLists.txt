@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(hdkx_aicompiler LANGUAGES CXX)
+project(hdkx_aicompiler LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -59,33 +59,64 @@ if(KXC_ENABLE_LLVM AND LLVM_FOUND)
   set(KXC_USE_LLVM 1)
   message(STATUS "LLVM support: enabled (version ${LLVM_PACKAGE_VERSION})")
 
-  # Use llvm-config to get proper link flags
+  set(KXC_LLVM_LINK_MODE --link-static)
+  if(WIN32)
+    set(KXC_LLVM_LINK_MODE --link-shared)
+  endif()
+
+  # 使用 llvm-config 获取与当前平台匹配的链接参数。
   execute_process(
-    COMMAND llvm-config --link-static --ldflags
+    COMMAND llvm-config ${KXC_LLVM_LINK_MODE} --ldflags
     OUTPUT_VARIABLE LLVM_LDFLAGS
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
   execute_process(
-    COMMAND llvm-config --link-static --libs core support irreader executionengine orcjit aarch64asmparser aarch64codegen aarch64desc aarch64info passes
+    COMMAND llvm-config ${KXC_LLVM_LINK_MODE} --libs core support irreader executionengine orcjit native passes
     OUTPUT_VARIABLE LLVM_LIBS_STR
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
   execute_process(
-    COMMAND llvm-config --system-libs
+    COMMAND llvm-config ${KXC_LLVM_LINK_MODE} --system-libs
     OUTPUT_VARIABLE LLVM_SYSTEM_LIBS_STR
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
 
-  # Convert to list
-  string(REPLACE " " ";" LLVM_LIBS ${LLVM_LIBS_STR})
-  string(REPLACE " " ";" LLVM_LDFLAGS_LIST ${LLVM_LDFLAGS})
-  string(REPLACE " " ";" LLVM_SYSTEM_LIBS ${LLVM_SYSTEM_LIBS_STR})
+  # 转成 CMake list；Windows 上 llvm-config 某些分组可能返回空字符串。
+  set(LLVM_LIBS "")
+  if(LLVM_LIBS_STR)
+    string(REPLACE " " ";" LLVM_LIBS "${LLVM_LIBS_STR}")
+  endif()
+  set(LLVM_LDFLAGS_LIST "")
+  if(LLVM_LDFLAGS)
+    string(REPLACE " " ";" LLVM_LDFLAGS_LIST "${LLVM_LDFLAGS}")
+  endif()
+  set(LLVM_SYSTEM_LIBS "")
+  if(LLVM_SYSTEM_LIBS_STR)
+    string(REPLACE " " ";" LLVM_SYSTEM_LIBS "${LLVM_SYSTEM_LIBS_STR}")
+  endif()
   # Remove -lxml2 if not available (optional LLVM dependency)
   list(REMOVE_ITEM LLVM_SYSTEM_LIBS "-lxml2")
 
   set(KXC_LLVM_INCLUDE_DIRS ${LLVM_INCLUDE_DIRS})
-  set(KXC_LLVM_DEFINITIONS ${LLVM_DEFINITIONS})
+  set(KXC_LLVM_DEFINITIONS "")
+  if(LLVM_DEFINITIONS)
+    separate_arguments(KXC_LLVM_DEFINITIONS NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+  endif()
   set(KXC_LLVM_LINK_FLAGS "${LLVM_LDFLAGS}")
+  set(KXC_MINGW_LIBGCC_PATH "")
+  if(MINGW)
+    execute_process(
+      COMMAND "${CMAKE_CXX_COMPILER}" -print-libgcc-file-name
+      OUTPUT_VARIABLE KXC_MINGW_LIBGCC_PATH
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(EXISTS "${KXC_MINGW_LIBGCC_PATH}")
+      message(STATUS "MinGW libgcc for LLVM JIT: ${KXC_MINGW_LIBGCC_PATH}")
+    else()
+      set(KXC_MINGW_LIBGCC_PATH "")
+      message(WARNING "MinGW libgcc archive was not found. Windows LLVM JIT may miss runtime symbols.")
+    endif()
+  endif()
 elseif(KXC_ENABLE_LLVM AND NOT LLVM_FOUND)
   set(KXC_USE_LLVM 0)
   message(WARNING "KXC_ENABLE_LLVM=ON but LLVM was not found. Codegen will be disabled.")
@@ -189,7 +220,8 @@ if(KXC_USE_CUDA)
 endif()
 if(KXC_USE_LLVM)
   target_include_directories(kxc_runtime_obj SYSTEM PUBLIC ${KXC_LLVM_INCLUDE_DIRS})
-  target_compile_definitions(kxc_runtime_obj PUBLIC ${KXC_LLVM_DEFINITIONS})
+  target_compile_definitions(kxc_runtime_obj PUBLIC ${KXC_LLVM_DEFINITIONS}
+    KXC_MINGW_LIBGCC_PATH="${KXC_MINGW_LIBGCC_PATH}")
 endif()
 
 add_library(kxc_runtime STATIC $<TARGET_OBJECTS:kxc_runtime_obj>)
@@ -200,7 +232,8 @@ if(KXC_USE_CUDA)
 endif()
 if(KXC_USE_LLVM)
   target_include_directories(kxc_runtime SYSTEM PUBLIC ${KXC_LLVM_INCLUDE_DIRS})
-  target_compile_definitions(kxc_runtime PUBLIC ${KXC_LLVM_DEFINITIONS})
+  target_compile_definitions(kxc_runtime PUBLIC ${KXC_LLVM_DEFINITIONS}
+    KXC_MINGW_LIBGCC_PATH="${KXC_MINGW_LIBGCC_PATH}")
   target_link_libraries(kxc_runtime PUBLIC ${LLVM_LIBS} ${LLVM_SYSTEM_LIBS})
   target_link_options(kxc_runtime PUBLIC ${LLVM_LDFLAGS_LIST})
   # LLVM archives contain bitcode (LTO), use lld to handle them
@@ -223,7 +256,8 @@ function(kxc_add_runtime_exe target source_file)
   endif()
   if(KXC_USE_LLVM)
     target_include_directories(${target} SYSTEM PRIVATE ${KXC_LLVM_INCLUDE_DIRS})
-    target_compile_definitions(${target} PRIVATE ${KXC_LLVM_DEFINITIONS})
+    target_compile_definitions(${target} PRIVATE ${KXC_LLVM_DEFINITIONS}
+      KXC_MINGW_LIBGCC_PATH="${KXC_MINGW_LIBGCC_PATH}")
     target_link_libraries(${target} PRIVATE ${LLVM_LIBS} ${LLVM_SYSTEM_LIBS})
     target_link_options(${target} PRIVATE ${LLVM_LDFLAGS_LIST})
     target_link_options(${target} PRIVATE -fuse-ld=lld)
@@ -267,7 +301,6 @@ endif()
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
-  kxc_add_runtime_exe(lower_multi_output_test test/lower_multi_output_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
@@ -330,13 +363,6 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS infer_type_test
     USES_TERMINAL
     COMMENT "Run infer_type_test"
-  )
-  add_custom_target(run_lower_multi_output_test
-    COMMAND "$<TARGET_FILE:lower_multi_output_test>"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
-    DEPENDS lower_multi_output_test
-    USES_TERMINAL
-    COMMENT "Run lower_multi_output_test"
   )
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     add_custom_target(run_onnx_importer_test

@@ -21,6 +21,12 @@ class Schedule;
 class Stage;
 class Operation;
 class Tensor;
+class IterVar;
+
+/*! \brief 将 TE/TIR 索引参数统一转换为 TIR PrimExpr。 */
+tir::PrimExpr AsPrimExpr(const tir::PrimExpr& expr);
+tir::PrimExpr AsPrimExpr(const tir::Var& var);
+tir::PrimExpr AsPrimExpr(const IterVar& iter_var);
 
 /*! \brief TE operation 的基类，描述 tensor 由哪个计算节点产生。 */
 class OperationNode : public Object {
@@ -94,7 +100,7 @@ public:
 
     template <typename... Args>
     tir::PrimExpr operator()(Args... args) const {
-        return (*this)(Array<tir::PrimExpr>{tir::PrimExpr(args)...});
+        return (*this)(Array<tir::PrimExpr>{AsPrimExpr(args)...});
     }
 };
 
@@ -154,6 +160,18 @@ public:
     bool operator==(const IterVar& other) const { return object_ == other.object_; }
     bool operator!=(const IterVar& other) const { return !(*this == other); }
 };
+
+inline tir::PrimExpr AsPrimExpr(const tir::PrimExpr& expr) {
+    return expr;
+}
+
+inline tir::PrimExpr AsPrimExpr(const tir::Var& var) {
+    return var;
+}
+
+inline tir::PrimExpr AsPrimExpr(const IterVar& iter_var) {
+    return iter_var->var;
+}
 
 /*! \brief 创建归约轴，供 sum/max 等归约表达式使用。 */
 IterVar reduce_axis(tir::PrimExpr min, tir::PrimExpr extent, std::string name = "rv");

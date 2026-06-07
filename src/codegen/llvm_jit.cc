@@ -6,6 +6,7 @@
 
 #include "codegen/llvm_jit.h"
 
+#include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -19,6 +20,39 @@
 
 namespace kxc {
 namespace codegen {
+
+#ifndef KXC_MINGW_LIBGCC_PATH
+#define KXC_MINGW_LIBGCC_PATH ""
+#endif
+
+namespace {
+
+void AddHostRuntimeSymbols(llvm::orc::LLJIT* jit) {
+    auto generator = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+        jit->getDataLayout().getGlobalPrefix());
+    if (!generator) {
+        throw std::runtime_error("Failed to add current-process symbols to LLVM JIT: " +
+                                 llvm::toString(generator.takeError()));
+    }
+    jit->getMainJITDylib().addGenerator(std::move(*generator));
+}
+
+void AddMinGWRuntimeArchive(llvm::orc::LLJIT* jit) {
+#ifdef __MINGW32__
+    const char* libgcc_path = KXC_MINGW_LIBGCC_PATH;
+    if (libgcc_path[0] == '\0') {
+        return;
+    }
+    if (auto err = jit->linkStaticLibraryInto(jit->getMainJITDylib(), libgcc_path)) {
+        throw std::runtime_error("Failed to link MinGW libgcc into LLVM JIT: " +
+                                 llvm::toString(std::move(err)));
+    }
+#else
+    (void)jit;
+#endif
+}
+
+}  // namespace
 
 class LLVMJITEngine::Impl {
 public:
@@ -38,6 +72,8 @@ public:
                                      llvm::toString(jit_or_err.takeError()));
         }
         jit = std::move(*jit_or_err);
+        AddHostRuntimeSymbols(jit.get());
+        AddMinGWRuntimeArchive(jit.get());
     }
 };
 

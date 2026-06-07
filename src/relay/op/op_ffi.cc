@@ -1,32 +1,29 @@
 /*! \file src/relay/op/op_ffi.cc
- * \brief 注册 Relay 算子及其 FRelayToTE compute。
+ * \brief 注册 Relay MVP 算子的 canonical Python `_make` 构造入口。
  */
 
-#include "relay/relay.h"
-#include "relay/op.h"
-#include "base/registry.h"
 #include "base/packedfunc.h"
-// #include "relay/attrs.h"
-#include <vector>
+#include "base/registry.h"
+#include "relay/op.h"
+#include "relay/relay.h"
+
 #include <string>
+#include <vector>
 
 namespace kxc {
 namespace relay {
 
-using namespace kxc;
+namespace {
 
-// Helper to get Op
-inline const Op& GetOp(const std::string& name) {
-    return Op::Get(name);
-}
+inline const Op& GetOp(const std::string& name) { return Op::Get(name); }
 
-// --- Basic Ops (No Attrs) ---
+}  // namespace
 
 Call MakeAdd(Expr lhs, Expr rhs) {
-    return Call(GetOp("add"), {lhs, rhs}); // Assuming "add" is registered
+    return Call(GetOp("add"), {lhs, rhs});
 }
 
-Call MakeSub(Expr lhs, Expr rhs) {
+Call MakeSubtract(Expr lhs, Expr rhs) {
     return Call(GetOp("subtract"), {lhs, rhs});
 }
 
@@ -34,204 +31,109 @@ Call MakeMul(Expr lhs, Expr rhs) {
     return Call(GetOp("mul"), {lhs, rhs});
 }
 
-Call MakeDiv(Expr lhs, Expr rhs) {
-    return Call(GetOp("divide"), {lhs, rhs}); // math.cc uses "divide"
-}
-
-Call MakePow(Expr x, Expr y) {
-    return Call(GetOp("pow"), {x, y});
+Call MakeDivide(Expr lhs, Expr rhs) {
+    return Call(GetOp("divide"), {lhs, rhs});
 }
 
 Call MakeSqrt(Expr data) {
     return Call(GetOp("sqrt"), {data});
 }
 
-Call MakeErf(Expr data) {
-    return Call(GetOp("erf"), {data});
+Call MakeMatmul(Expr lhs, Expr rhs) {
+    return Call(GetOp("matmul"), {lhs, rhs});
 }
-
-Call MakeEqual(Expr lhs, Expr rhs) {
-    return Call(GetOp("equal"), {lhs, rhs});
-}
-
-Call MakeGreater(Expr lhs, Expr rhs) {
-    return Call(GetOp("greater"), {lhs, rhs});
-}
-
-Call MakeMatMul(Expr a, Expr b) {
-    return Call(GetOp("matmul"), {a, b});
-}
-
-// --- Ops with Attrs ---
 
 Call MakeCast(Expr data, int dtype) {
-    auto attrs = CastAttrs::Create(dtype);
-    return Call(GetOp("cast"), {data}, attrs);
-}
-
-Call MakeConcat(Expr data, int axis) {
-    auto attrs = ConcatAttrs::Create(axis);
-    // data is expected to be a Tuple of tensors
-    return Call(GetOp("concatenate"), {data}, attrs);
+    return Call(GetOp("cast"), {data}, CastAttrs::Create(dtype));
 }
 
 Call MakeReduceMean(Expr data, std::vector<int64_t> axes, int64_t keepdims) {
-    auto attrs = ReduceMeanAttrs::Create(axes, keepdims);
-    return Call(GetOp("reduce_mean"), {data}, attrs);
+    return Call(GetOp("reduce_mean"), {data}, ReduceMeanAttrs::Create(std::move(axes), keepdims));
 }
 
-Call MakeReshape(Expr data, std::vector<int64_t> newshape, bool allowzero) {
-    auto attrs = ReshapeAttrs::Create(newshape, allowzero);
-    return Call(GetOp("reshape"), {data}, attrs);
-}
-
-Call MakeShape(Expr data) {
-    return Call(GetOp("shape"), {data});
-}
-
-Call MakeSlice(Expr data, std::vector<int64_t> starts, std::vector<int64_t> ends, std::vector<int64_t> axes, std::vector<int64_t> steps) {
-    // Slice in transform.cc takes up to 5 inputs.
-    // It does NOT use SliceAttrs in transform.cc (I commented it uses TAttrs?).
-    // Wait, I saw `.set_attr<std::string>("TAttrs", "SplitAttrs")` for Split, but Slice?
-    // `transform.cc`: `KXC_REGISTER_OP(slice) ... .set_num_inputs(5) ...` NO attributes registered.
-    // So Slice expects inputs.
-    // I should convert vectors to Constant Tensors.
-    // This is getting complicated for a simple wrapper.
-    // Ideally we have a helper to create Constant from vector.
-    // For now, let's skip Slice or implement it assuming inputs are provided as Exprs?
-    // User wants `_make.slice(data, starts, ends, ...)`
-    // I will assume for now that I can't easily make Constants here without more helpers.
-    // So I will implement `MakeSlice` taking Exprs.
-    // But `_make` usually takes primitive types for ease of use.
-    
-    // Let's skip Slice for a moment and focus on others.
-    return Call(GetOp("slice"), {data}); // Placeholder
+Call MakeReshape(Expr data, std::vector<int64_t> newshape, int allowzero) {
+    return Call(GetOp("reshape"), {data}, ReshapeAttrs::Create(std::move(newshape), allowzero));
 }
 
 Call MakeSoftmax(Expr data, int axis) {
-    auto attrs = SoftmaxAttrs::Create(axis);
-    return Call(GetOp("softmax"), {data}, attrs);
-}
-
-Call MakeSplit(Expr data, std::vector<int64_t> indices_or_sections, int axis) {
-    auto attrs = SplitAttrs::Create(indices_or_sections, axis);
-    return Call(GetOp("split"), {data}, attrs);
+    return Call(GetOp("softmax"), {data}, SoftmaxAttrs::Create(axis));
 }
 
 Call MakeTranspose(Expr data, std::vector<int64_t> axes) {
-    auto attrs = TransposeAttrs::Create(axes);
-    return Call(GetOp("transpose"), {data}, attrs);
+    return Call(GetOp("transpose"), {data}, TransposeAttrs::Create(std::move(axes)));
 }
 
-Call MakeSqueeze(Expr data, std::vector<int64_t> axes) {
-    // Squeeze in transform.cc: 2 inputs (data, axes). No attrs.
-    // We need to pass axes as a Tensor.
-    // Since I don't have easy Constant creation here, I'll assume usage of attributes 
-    // and maybe I should update the Op registration to support attributes OR inputs.
-    // Or I just register a `MakeSqueeze` that takes `Expr` axes.
-    // But usually `_make` is for python convenience.
-    // Let's assume we update `transform.cc` to use attributes for Squeeze/Unsqueeze as it's cleaner for static cases.
-    // I'll define Attrs for Squeeze/Unsqueeze (Wait, I didn't define them in attrs.h).
-    // Let's stick to what's defined.
-    return Call(GetOp("squeeze"), {data}); // Placeholder
+Call MakeNNConv2D(Expr data, Expr weight, std::vector<int64_t> strides,
+                  std::vector<int64_t> padding, std::vector<int64_t> dilation, int groups,
+                  int channels, std::vector<int64_t> kernel_size, std::string data_layout,
+                  std::string kernel_layout, std::string out_layout, std::string out_dtype) {
+    return Call(GetOp("nn_conv2d"), {data, weight},
+                Conv2DAttrs::Create(std::move(strides), std::move(padding), std::move(dilation),
+                                    groups, channels, std::move(kernel_size),
+                                    std::move(data_layout), std::move(kernel_layout),
+                                    std::move(out_layout), std::move(out_dtype)));
 }
 
-Call MakeUnsqueeze(Expr data, std::vector<int64_t> axes) {
-    return Call(GetOp("unsqueeze"), {data}); // Placeholder
+Call MakeNNDense(Expr data, Expr weight, int units, std::string out_dtype) {
+    return Call(GetOp("nn_dense"), {data, weight}, DenseAttrs::Create(units, std::move(out_dtype)));
 }
 
-Call MakeGather(Expr data, Expr indices, int axis) {
-    auto attrs = GatherAttrs::Create(axis);
-    return Call(GetOp("gather"), {data, indices}, attrs);
-}
-
-// --- NN Ops ---
-
-Call MakeConv2D(Expr data, Expr weight, 
-                std::vector<int64_t> strides, 
-                std::vector<int64_t> padding, 
-                std::vector<int64_t> dilation, 
-                int groups, 
-                int channels, 
-                std::vector<int64_t> kernel_size, 
-                std::string data_layout, 
-                std::string kernel_layout, 
-                std::string out_layout, 
-                std::string out_dtype) {
-    auto attrs = Conv2DAttrs::Create(strides, padding, dilation, groups, channels, kernel_size, data_layout, kernel_layout, out_layout, out_dtype);
-    return Call(GetOp("nn_conv2d"), {data, weight}, attrs);
-}
-
-Call MakeDense(Expr data, Expr weight, int units, std::string out_dtype) {
-    auto attrs = DenseAttrs::Create(units, out_dtype);
-    return Call(GetOp("nn_dense"), {data, weight}, attrs);
-}
-
-Call MakeRelu(Expr data) {
+Call MakeNNRelu(Expr data) {
     return Call(GetOp("nn_relu"), {data}, ReluAttrs::Create());
 }
 
-Call MakeMaxPool2D(Expr data, 
-                   std::vector<int64_t> strides, 
-                   std::vector<int64_t> padding, 
-                   std::vector<int64_t> dilation, 
-                   std::vector<int64_t> pool_size, 
-                   std::string layout, 
-                   bool ceil_mode) {
-    auto attrs = MaxPool2DAttrs::Create(strides, padding, dilation, pool_size, layout, ceil_mode);
-    return Call(GetOp("nn_max_pool2d"), {data}, attrs);
+Call MakeNNMaxPool2D(Expr data, std::vector<int64_t> strides, std::vector<int64_t> padding,
+                     std::vector<int64_t> dilation, std::vector<int64_t> pool_size,
+                     std::string layout, bool ceil_mode) {
+    return Call(GetOp("nn_max_pool2d"), {data},
+                MaxPool2DAttrs::Create(std::move(strides), std::move(padding),
+                                       std::move(dilation), std::move(pool_size),
+                                       std::move(layout), ceil_mode));
 }
 
-Call MakeFlatten(Expr data) {
-    return Call(GetOp("nn_flatten"), {data}, FlattenAttrs::Create());
+Call MakeNNAvgPool2D(Expr data, std::vector<int64_t> strides, std::vector<int64_t> padding,
+                     std::vector<int64_t> dilation, std::vector<int64_t> pool_size,
+                     std::string layout, bool ceil_mode) {
+    return Call(GetOp("nn_avg_pool2d"), {data},
+                MaxPool2DAttrs::Create(std::move(strides), std::move(padding),
+                                       std::move(dilation), std::move(pool_size),
+                                       std::move(layout), ceil_mode));
 }
 
-Call MakeWhere(Expr condition, Expr x, Expr y) {
-    return Call(GetOp("where"), {condition, x, y});
+Call MakeNNGlobalAvgPool2D(Expr data) {
+    return Call(GetOp("nn_global_avg_pool2d"), {data}, GlobalAvgPool2DAttrs::Create());
 }
 
-Call MakeConstantOfShape(Expr input) {
-    auto attrs = ConstantOfShapeAttrs::Create();
-    return Call(GetOp("constant_of_shape"), {input}, attrs);
+Call MakeNNFlatten(Expr data, int axis) {
+    return Call(GetOp("nn_flatten"), {data}, FlattenAttrs::Create(axis));
 }
 
-Call MakeExpandDims(Expr data, Expr shape) {
-    auto attrs = ExpandAttrs::Create();
-    return Call(GetOp("expand_dims"), {data, shape}, attrs);
+Call MakeNNGemm(Expr a, Expr b, Expr c, double alpha, double beta, int trans_a, int trans_b) {
+    return Call(GetOp("nn_gemm"), {a, b, c},
+                GemmAttrs::Create(static_cast<float>(alpha), static_cast<float>(beta), trans_a,
+                                  trans_b));
 }
 
-
-// Registration
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.add").set_body(ToPackedFunc(MakeAdd));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.sub").set_body(ToPackedFunc(MakeSub));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.subtract").set_body(ToPackedFunc(MakeSubtract));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.mul").set_body(ToPackedFunc(MakeMul));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.div").set_body(ToPackedFunc(MakeDiv)); // Using "div" alias for python
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.pow").set_body(ToPackedFunc(MakePow));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.divide").set_body(ToPackedFunc(MakeDivide));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sqrt").set_body(ToPackedFunc(MakeSqrt));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.erf").set_body(ToPackedFunc(MakeErf));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.equal").set_body(ToPackedFunc(MakeEqual));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.greater").set_body(ToPackedFunc(MakeGreater));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.matmul").set_body(ToPackedFunc(MakeMatMul));
-
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.matmul").set_body(ToPackedFunc(MakeMatmul));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.cast").set_body(ToPackedFunc(MakeCast));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.concatenate").set_body(ToPackedFunc(MakeConcat));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_mean").set_body(ToPackedFunc(MakeReduceMean));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape").set_body(ToPackedFunc(MakeReshape));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.shape").set_body(ToPackedFunc(MakeShape));
-// Slice, Squeeze, Unsqueeze skipped for now or need more work
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.softmax").set_body(ToPackedFunc(MakeSoftmax));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.split").set_body(ToPackedFunc(MakeSplit));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.transpose").set_body(ToPackedFunc(MakeTranspose));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.gather").set_body(ToPackedFunc(MakeGather));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_conv2d").set_body(ToPackedFunc(MakeNNConv2D));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_dense").set_body(ToPackedFunc(MakeNNDense));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_relu").set_body(ToPackedFunc(MakeNNRelu));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_max_pool2d").set_body(ToPackedFunc(MakeNNMaxPool2D));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_avg_pool2d").set_body(ToPackedFunc(MakeNNAvgPool2D));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_global_avg_pool2d")
+    .set_body(ToPackedFunc(MakeNNGlobalAvgPool2D));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_flatten").set_body(ToPackedFunc(MakeNNFlatten));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_gemm").set_body(ToPackedFunc(MakeNNGemm));
 
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.conv2d").set_body(ToPackedFunc(MakeConv2D));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.dense").set_body(ToPackedFunc(MakeDense));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.relu").set_body(ToPackedFunc(MakeRelu));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.max_pool2d").set_body(ToPackedFunc(MakeMaxPool2D));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.flatten").set_body(ToPackedFunc(MakeFlatten));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.where").set_body(ToPackedFunc(MakeWhere));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.constant_of_shape").set_body(ToPackedFunc(MakeConstantOfShape));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.expand_dims").set_body(ToPackedFunc(MakeExpandDims));
-
-} // namespace relay
-} // namespace kxc
+}  // namespace relay
+}  // namespace kxc

@@ -63,6 +63,8 @@ te::Tensor GemmCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, cons
 KXC_REGISTER_OP(nn_dense)
     .describe("Dense (fully connected) layer")
     .set_num_inputs(2) // data, weight
+    .add_argument("data", "Tensor", "The input tensor.")
+    .add_argument("weight", "Tensor", "The weight tensor.")
     .set_attr<std::string>("TAttrs", "DenseAttrs")
     .set_attr<FInferType>("FInferType", DenseInferType)
     .set_attr<FRelayToTE>("FRelayToTE", DenseCompute);
