@@ -10,6 +10,7 @@
 #include <vector>
 #include <algorithm>
 #include <set>
+#include <stdexcept>
 
 namespace kxc {
 namespace te {
@@ -69,12 +70,6 @@ inline Tensor sum(const Tensor& data, const Array<int>& axis, bool keepdims = fa
     return comm_reduce(data, axis, keepdims, kxc::te::sum, name);
 }
 
-// Max/Min require custom combiners or checking if te provides them.
-// Assuming te::max / te::min exist or implementing them via Reduce.
-// If not, we can assume Sum is the only one provided in te.h sample.
-// Let's implement generic Max/Min reduction if needed, but for now Sum is safest.
-// We can define custom reducer locally.
-
 inline PrimExpr max_reducer(PrimExpr expr, Array<IterVar> axis) {
     return kxc::te::max(expr, axis);
 }
@@ -84,13 +79,15 @@ inline Tensor max(const Tensor& data, const Array<int>& axis, bool keepdims = fa
 }
 
 inline Tensor min(const Tensor& data, const Array<int>& axis, bool keepdims = false, std::string name = "min") {
-    // WARNING: Using sum as placeholder for min due to simplified TE
-    return comm_reduce(data, axis, keepdims, kxc::te::sum, name);
+    return comm_reduce(data, axis, keepdims, kxc::te::min, name);
 }
 
-// Prod?
 inline Tensor prod(const Tensor& data, const Array<int>& axis, bool keepdims = false, std::string name = "prod") {
-    return comm_reduce(data, axis, keepdims, kxc::te::sum, name);
+    (void)data;
+    (void)axis;
+    (void)keepdims;
+    (void)name;
+    throw std::runtime_error("topi::prod is not supported by the current TE reducer set");
 }
 
 

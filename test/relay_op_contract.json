@@ -8,6 +8,7 @@
       "type_inference",
       "lowering",
       "ffi",
+      "backend",
       "tests"
     ],
     "forbidden_op_names": [

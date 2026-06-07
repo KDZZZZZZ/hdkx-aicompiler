@@ -101,7 +101,10 @@ jobs:
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_DEBUG_EXAMPLES=OFF
           -DKXC_BUILD_PASS_TESTS=ON
-          -DKXC_BUILD_CODEGEN_TESTS=OFF
+          -DKXC_BUILD_CODEGEN_TESTS=ON
+
+      - name: Build and run MVP op LLVM numeric tests
+        run: cmake --build out/build/ci-llvm --target run_op_numeric_llvm_test --parallel 2
 
       - name: Build and compile ResNet18 to LLVM
         run: cmake --build out/build/ci-llvm --target run_onnx_importer_test --parallel 2

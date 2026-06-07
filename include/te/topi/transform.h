@@ -10,6 +10,7 @@
 #include <vector>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 
 namespace kxc {
 namespace te {
@@ -66,7 +67,7 @@ inline Tensor expand_dims(const Tensor& x, int axis, int num_newaxis = 1, std::s
             Array<PrimExpr> input_indices;
             size_t idx_counter = 0;
             for (size_t i = 0; i < output_shape.size(); ++i) {
-                // If this is a new axis (between axis and axis+num), skip it
+                // New axes do not map to input indices.
                 if (i >= (size_t)axis && i < (size_t)(axis + num_newaxis)) {
                     continue;
                 }
@@ -123,7 +124,9 @@ inline Tensor squeeze(const Tensor& x, Array<int> axes = {}, std::string name = 
 
 // Concatenate
 inline Tensor concatenate(const Array<Tensor>& inputs, int axis = 0, std::string name = "concatenate", std::string tag = kInjective) {
-    if (inputs.empty()) return Tensor(); // Error?
+    if (inputs.empty()) {
+        throw std::runtime_error("topi::concatenate expects at least one input tensor");
+    }
     
     size_t ndim = inputs[0]->shape.size();
     if (axis < 0) axis += (int)ndim;
