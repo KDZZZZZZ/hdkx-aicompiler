@@ -2,6 +2,97 @@
 
 本文说明如何把一个新 Relay 算子接入 KXC/TinyTVM。这里的“接入”不是只写 `KXC_REGISTER_OP`，而是让算子从前端构图、类型推导、TE/TOPI lowering、TIR、后端执行和测试链路上都处于明确状态。
 
+## 0. 先填接入方案卡
+
+新增算子 PR 先填这张方案卡。每个字段只能从本节给出的选项中选择，不要临时发明新分类、新命名或新链路。
+
+| 字段 | 必选值 | 允许选项 |
+| --- | --- | --- |
+| `op_name` | canonical op name | `lower_snake_case`，或已有命名空间前缀 `nn_` / `device.` |
+| `category` | 代码归属 | `tensor.math`、`tensor.reduce`、`tensor.transform`、`nn`、`device` |
+| `source_file` | 注册文件 | 只能从“代码位置选择表”选择 |
+| `num_inputs` | 输入数量 | 固定整数，或 `-1` 并同时填写 `min_inputs` / `max_inputs` |
+| `attrs` | attrs 类型 | `null`、已有 attrs、或新增 attrs |
+| `attrs_source` | 参数承载方式 | `none`、`attrs`、`tensor_input` |
+| `type_rule` | 类型推导规则 | 只能从“类型推导选择表”选择 |
+| `lowering` | lowering 路径 | `none`、`single`、`multi`、`exec_plan` |
+| `topi` | TOPI/TE 位置 | `none`、已有 TOPI helper、新增 TOPI helper、op 文件内 `te::compute` |
+| `ffi` | 是否需要 `_make` | `true` 或 `false` |
+| `onnx_ops` | ONNX 来源 | 空数组，或明确 ONNX op 名列表 |
+| `tests` | 测试集合 | 只能从“测试选择表”勾选 |
+
+示例方案卡：
+
+```yaml
+op_name: negative
+category: tensor.math
+source_file: src/relay/op/tensor/math.cc
+num_inputs: 1
+attrs: null
+attrs_source: none
+type_rule: unary_same
+lowering: single
+topi: 新增 TOPI helper include/te/topi/elemwise.h::negative
+ffi: true
+onnx_ops: ["Neg"]
+tests:
+  - infer_type
+  - lower_to_tir
+  - onnx_importer
+```
+
+代码位置选择表：
+
+| `category` | 注册文件 | TOPI 位置 | 说明 |
+| --- | --- | --- | --- |
+| `tensor.math` | [src/relay/op/tensor/math.cc](../src/relay/op/tensor/math.cc) | [include/te/topi/broadcast.h](../include/te/topi/broadcast.h) 或 [include/te/topi/elemwise.h](../include/te/topi/elemwise.h) | elementwise、broadcast、matmul 类 |
+| `tensor.reduce` | [src/relay/op/tensor/reduce.cc](../src/relay/op/tensor/reduce.cc) | [include/te/topi/reduction.h](../include/te/topi/reduction.h) | reduce sum/mean/max/min 类 |
+| `tensor.transform` | [src/relay/op/tensor/transform.cc](../src/relay/op/tensor/transform.cc) | [include/te/topi/transform.h](../include/te/topi/transform.h) | reshape、transpose、split、gather 类 |
+| `nn` | [src/relay/op/nn](../src/relay/op/nn) 下已有子文件 | [include/te/topi/nn.h](../include/te/topi/nn.h) | conv、dense、pool、activation 类 |
+| `device` | [src/relay/common_ops.cc](../src/relay/common_ops.cc) | 不使用 TOPI | 只用于 `device.` 通信 op，走 execution plan |
+
+类型推导选择表：
+
+| `type_rule` | 何时选择 | 允许实现 |
+| --- | --- | --- |
+| `identity` | 输出类型完全等于第一个输入 | 复用 `IdentityInferType` |
+| `unary_same` | 单输入，shape/dtype 不变 | 复用 `UnarySameInferType` |
+| `binary_broadcast` | 二元 elementwise broadcast | 复用现有二元广播规则，或新增一个共享规则后复用 |
+| `matmul_like` | 矩阵乘、dense、gemm | 复用 `MatMulInferType` / `DenseInferType` / `GemmInferType`，或新增专用规则 |
+| `attrs_shape` | 输出 shape 由 attrs 决定 | 新增专用 `XxxInferType` |
+| `tuple_output` | 多输出 op | 新增专用 `XxxInferType`，返回 `TupleType` |
+| `device_identity` | `device.` 通信 op | 复用 `IdentityInferType` |
+
+attrs 选择表：
+
+| 情况 | `attrs_source` | `attrs` | 规则 |
+| --- | --- | --- | --- |
+| 没有额外参数 | `none` | `null` | 注册时不写 `TAttrs` |
+| axis、shape、layout、dtype、padding 等编译期参数 | `attrs` | 具体 attrs 类型 | 在 `include/relay/op.h` 定义，在 `src/relay/op_attrs.cc` 实现 `Create` |
+| 参数本身是运行时 tensor | `tensor_input` | `null` 或仅保留必要 attrs | 参数必须计入 `num_inputs`，不要塞进 attrs |
+| 设备通信属性 | `attrs` | `DeviceCopyAttrs` 或 `CollectiveAttrs` | 只用于 `device.` op，不进入 TE/TIR hook |
+
+lowering 选择表：
+
+| `lowering` | 何时选择 | 必须实现 | 禁止 |
+| --- | --- | --- | --- |
+| `none` | 只做注册/type，暂不能 lowering | matrix 写 `lowering = none` | 不得注册空 `FRelayToTE` 占位 |
+| `single` | 输出是 `TensorType` | `FRelayToTE`，`LowerToTIR` 测试 | 不得返回空 `te::Tensor()` |
+| `multi` | 输出是 `TupleType` | `FRelayToTEMulti`，`LowerToTIR` 多输出测试 | 不得重复返回同一个 tensor 冒充多输出 |
+| `exec_plan` | `device.` 通信 op | `LowerRelayToExecPlanPass` 测试 | 不得注册 `FRelayToTE` / `FRelayToTEMulti` |
+
+测试选择表：
+
+| 测试 | 何时必须 | 推荐位置 |
+| --- | --- | --- |
+| `infer_type` | 所有 op | [test/infer_type_test.cpp](../test/infer_type_test.cpp) 或新增专用测试 |
+| `lower_to_tir` | `lowering = single` / `multi` | lowering 专用测试文件 |
+| `exec_plan` | `lowering = exec_plan` | pass / multi-device 专用测试 |
+| `backend_compile` | `tir_executable` / `llvm_required` / `executable` 为 true | codegen 或 runtime 专用测试 |
+| `runtime_numeric` | 声明 executable | runtime numeric 测试 |
+| `onnx_importer` | `onnx_ops` 非空 | ONNX importer 测试 |
+| `contract` | 所有 op | `check_relay_op_contract` |
+
 ## 1. 完成标准
 
 新增算子必须先定义支持级别。
@@ -25,7 +116,8 @@
 - 普通多输出 Tensor/NN op 必须注册 `FRelayToTEMulti`。
 - 设备通信类 op 走 execution plan 路径，matrix 中写 `lowering = exec_plan`，不注册 `FRelayToTE` / `FRelayToTEMulti`。
 - TOPI/TE helper 不能返回空 `te::Tensor()`。
-- `LowerToTIR` 能生成后端可接受的 TIR。
+- `single` / `multi` op 必须能通过 `LowerToTIR` 生成后端可接受的 TIR。
+- `exec_plan` op 必须能通过 `LowerRelayToExecPlanPass` 生成 execution plan 节点。
 - 至少有 `LowerToTIR` 或 `LowerRelayToExecPlanPass` 契约测试。
 
 完成 runtime 支持时：
@@ -62,15 +154,13 @@
 ```json
 {
   "negative": {
-    "category": "tensor",
-    "required": true,
-    "infer_type": true,
+    "category": "tensor.math",
+    "num_inputs": 1,
+    "attrs": null,
     "lowering": "single",
-    "topi": "required",
-    "tir_executable": true,
-    "llvm_required": true,
-    "public_helpers": ["kxc.relay.op._make.negative"],
-    "onnx_ops": []
+    "ffi": true,
+    "tests": true,
+    "onnx_ops": ["Neg"]
   }
 }
 ```
@@ -80,20 +170,29 @@
 ```json
 {
   "negative": {
-    "category": "tensor",
-    "required": false,
-    "infer_type": false,
+    "category": "tensor.math",
+    "num_inputs": 1,
+    "attrs": null,
     "lowering": "none",
-    "topi": "none",
-    "tir_executable": false,
-    "llvm_required": false,
-    "public_helpers": [],
+    "ffi": true,
+    "tests": true,
     "onnx_ops": []
   }
 }
 ```
 
 matrix 的状态不能比实际实现更乐观。
+
+字段填写规则：
+
+- `category` 必须来自接入方案卡中的 `category` 选项。
+- `num_inputs` 固定时写非负整数；可变输入只允许写 `-1`，并补 `min_inputs` / `max_inputs`。
+- `attrs` 没有 attrs 时写 `null`；有 attrs 时写 C++ attrs 类型名，例如 `"ClipAttrs"`。
+- `lowering` 只能写 `none`、`single`、`multi`、`exec_plan`。
+- `ffi` 只表示是否需要 public `_make` helper；内部生成或 pass 专用 op 可以写 `false`。
+- `tests` 对新增 op 默认写 `true`。如果写 `false`，PR 必须说明该 op 为什么不进入当前检查范围。
+- `onnx_ops` 没有 ONNX 来源时写空数组；有来源时必须写 ONNX 原始 op 名。
+- 只有已经有 backend compile/runtime 测试时，才能新增 `tir_executable`、`llvm_required`、`executable` 等乐观字段。
 
 `lowering` 目前允许四类值：
 
@@ -261,7 +360,7 @@ te::Tensor ClipCompute(const Attrs& attrs,
 
 ## 8. 注册 Relay op
 
-使用 `KXC_REGISTER_OP` 注册 op。注册点应放在按类别划分的源文件中，不要随意塞进 `common_ops.cc`。
+使用 `KXC_REGISTER_OP` 注册普通 op。注册点应放在按类别划分的源文件中，不要随意塞进 `common_ops.cc`；只有 `device.` 通信 op 使用 `common_ops.cc` 中的 `OpRegEntry(Op::Get(...))` 形式。
 
 单输出 unary 示例：
 
@@ -292,8 +391,71 @@ KXC_REGISTER_OP(clip)
 - 每个输入都用 `add_argument` 描述。
 - 有 attrs 的 op 必须设置 `TAttrs`。
 - 可 type inference 的 op 必须设置 `FInferType`。
-- 可 lowering 的 op 必须设置 `FRelayToTE` 或 `FRelayToTEMulti`。
+- `single` op 必须设置 `FRelayToTE`。
+- `multi` op 必须设置 `FRelayToTEMulti`。
+- `exec_plan` op 不设置 TE lowering hook。
 - 不要注册历史 alias。
+
+注册模板只能从下面四种选。
+
+`lowering = none`：
+
+```cpp
+KXC_REGISTER_OP(op_name)
+    .describe(R"doc(One sentence description.)doc")
+    .set_num_inputs(N)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", OpNameInferType);
+```
+
+`lowering = single`，无 attrs：
+
+```cpp
+KXC_REGISTER_OP(op_name)
+    .describe(R"doc(One sentence description.)doc")
+    .set_num_inputs(N)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", OpNameInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", OpNameCompute);
+```
+
+`lowering = single`，有 attrs：
+
+```cpp
+KXC_REGISTER_OP(op_name)
+    .describe(R"doc(One sentence description.)doc")
+    .set_num_inputs(N)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "OpNameAttrs")
+    .set_attr<FInferType>("FInferType", OpNameInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", OpNameCompute);
+```
+
+`lowering = multi`：
+
+```cpp
+KXC_REGISTER_OP(op_name)
+    .describe(R"doc(One sentence description.)doc")
+    .set_num_inputs(N)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "OpNameAttrs")
+    .set_attr<FInferType>("FInferType", OpNameInferType)
+    .set_attr<FRelayToTEMulti>("FRelayToTEMulti", OpNameCompute);
+```
+
+`lowering = exec_plan`，只给 `device.` 通信 op 使用：
+
+```cpp
+static OpRegEntry __make_OpEntry_device_xxx__ =
+    OpRegEntry(Op::Get("device.xxx"))
+        .describe("Device communication op description")
+        .set_num_inputs(1)
+        .add_argument("data", "Tensor", "The input tensor.")
+        .set_attr<FInferType>("FInferType", IdentityInferType)
+        .set_attr<std::string>("TAttrs", "CollectiveAttrs");
+```
+
+注意：`device.xxx` 不能使用 `KXC_REGISTER_OP(device.xxx)`，因为宏参数不能包含 `.`；只能使用 `OpRegEntry(Op::Get("device.xxx"))`。
 
 ## 9. 增加 C++ `_make` helper
 
@@ -310,9 +472,33 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.negative")
     .set_body(ToPackedFunc(MakeNegative));
 ```
 
+带 attrs helper 模板：
+
+```cpp
+Call MakeClip(Expr data, double a_min, double a_max) {
+    auto attrs = ClipAttrs::Create(a_min, a_max);
+    return Call(GetOp("clip"), {data}, attrs);
+}
+
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.clip")
+    .set_body(ToPackedFunc(MakeClip));
+```
+
+多输入 helper 模板：
+
+```cpp
+Call MakeWhere(Expr condition, Expr x, Expr y) {
+    return Call(GetOp("where"), {condition, x, y});
+}
+
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.where")
+    .set_body(ToPackedFunc(MakeWhere));
+```
+
 helper 要求：
 
-- public helper 名可以短，但内部必须 `GetOp(canonical_name)`。
+- public helper 名必须是 canonical name，例如 `kxc.relay.op._make.subtract`，不能写 `_make.sub`。
+- helper 内部必须 `GetOp(canonical_name)`。
 - helper 必须构造正确 attrs。
 - helper 不能返回历史 alias op。
 - helper 的行为要被 registry/contract test 覆盖。
@@ -365,6 +551,17 @@ LLVM 后端只消费 TIR，不认识 Relay op。只有新算子生成了新的 T
 - ONNX importer test：如果接入 ONNX。
 - Contract test：support matrix、canonical name、hook 覆盖。
 
+按 `lowering` 选择测试：
+
+| `lowering` | 必须测试 | 测试里必须同时出现 |
+| --- | --- | --- |
+| `none` | type inference 或明确 unsupported 行为 | `Op::Get("op_name")` |
+| `single` | type inference、`LowerToTIR` | `Op::Get("op_name")` 和 `LowerToTIR` 在同一个测试函数块 |
+| `multi` | type inference、`LowerToTIR`、输出数量和 shape | `Op::Get("op_name")` 和 `LowerToTIR` 在同一个测试函数块 |
+| `exec_plan` | type inference、`LowerRelayToExecPlanPass`、`CommExec` / execution plan 节点 | `Op::Get("device.xxx")` 和 `LowerRelayToExecPlanPass` 在同一个测试函数块 |
+
+如果 matrix 写了 `llvm_required`、`tir_executable` 或 `executable`，还必须新增 backend compile/runtime 测试，并让测试函数中同时出现 op name 和 `Compiler::Compile`、`CompileConfig`、`CodeGenLLVM` 或 `LLVMJIT`。
+
 示例 type inference test：
 
 ```cpp
@@ -380,7 +577,27 @@ bool TestNegativeInferType() {
 示例 lowering test：
 
 ```cpp
-kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func);
+bool TestNegativeLowerToTIR() {
+    kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
+    kxc::Call neg(kxc::relay::Op::Get("negative"), {x});
+    kxc::Function func({x}, neg);
+    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func);
+    return lowered.defined();
+}
+```
+
+示例 execution-plan test：
+
+```cpp
+bool TestDeviceCopyExecPlan() {
+    kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
+    kxc::Call copy(kxc::relay::Op::Get("device.copy"), {x},
+                   kxc::relay::DeviceCopyAttrs::Create(
+                       kxc::VirtualDevice(), kxc::VirtualDevice()));
+    kxc::Function func({x}, copy);
+    kxc::ExecutionPlan plan = kxc::relay::LowerRelayToExecPlanPass(func);
+    return plan.defined();
+}
 ```
 
 示例 runtime test：
@@ -467,11 +684,12 @@ CI 应直接运行不带 `--report-only` 的版本；发现 alias、占位实现
 - [ ] support matrix 已更新。
 - [ ] attrs 已定义并实现 `Create`。
 - [ ] `FInferType` 已注册或 matrix 明确标为未支持。
-- [ ] `FRelayToTE` / `FRelayToTEMulti` 已注册或 matrix 明确标为未支持。
+- [ ] `single` 已注册 `FRelayToTE`，`multi` 已注册 `FRelayToTEMulti`，`exec_plan` 已覆盖 `LowerRelayToExecPlanPass`。
 - [ ] TOPI/TE helper 不返回空 tensor。
 - [ ] ONNX importer 输出 canonical name。
-- [ ] `_make` helper 使用 canonical `Op::Get`。
-- [ ] `LowerToTIR` 测试通过。
+- [ ] `_make` helper 名称和内部 `Op::Get` 都使用 canonical name。
+- [ ] `single` / `multi` op 的 `LowerToTIR` 测试通过。
+- [ ] `exec_plan` op 的 execution-plan 测试通过。
 - [ ] 后端 numeric test 覆盖 executable op。
 - [ ] 没有新增 metadata-only alias。
 - [ ] 错误信息包含 canonical op name。
