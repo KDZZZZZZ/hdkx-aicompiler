@@ -421,6 +421,19 @@ python python/tools/check_relay_op_contract.py --root .
 - 是否有测试引用。
 - 源码里是否残留 `TODO`、`FIXME`、`placeholder`、`for now`、`skip` 这类占位实现标记。
 
+检查器逻辑如下：
+
+1. 读取 [test/relay_op_contract.json](../test/relay_op_contract.json) 作为唯一规范来源。`operators` 定义允许存在的 canonical op、输入数、attrs、lowering 类型、是否需要 FFI、ONNX 映射和测试；`rules` 定义 forbidden op/helper name 和占位实现关键字。
+2. 静态扫描 `src` 下的 C++ 源码，识别 `KXC_REGISTER_OP(name)` 和 `OpRegEntry(Op::Get("name"))`。每个注册块会提取 `describe`、`set_num_inputs`、`add_argument` 数量、`TAttrs`、`FInferType`、`FRelayToTE`、`FRelayToTEMulti`。
+3. 静态扫描 [src/relay/op/op_ffi.cc](../src/relay/op/op_ffi.cc)，识别 `KXC_REGISTER_GLOBAL("kxc.relay.op._make.xxx")` 绑定到的 `MakeXxx` 函数，再从函数体里提取 `GetOp("name")` 和 `Call(..., {inputs})` 的输入个数。
+4. 解析 [python/kxc_onnx/importer.py](../python/kxc_onnx/importer.py) 中的 `ONNX_TO_RELAY`，反向生成 `relay op -> ONNX op` 映射，用来确认 importer 只输出 canonical name。
+5. 扫描 `test` 目录中对 op name 字符串的引用，作为最低限度的测试覆盖信号。这个检查只证明测试提到了该 op，不替代实际 type/lowering/runtime 断言。
+6. 对所有来源取并集生成检查对象：matrix 中声明的 op、源码注册的 op、FFI helper 指向的 op、ONNX importer 输出的 op 都会进入报告。因此未声明 op、历史 alias、孤立 helper 都会被发现。
+7. 对每个 op 做规范判定：必须在 matrix 中声明，不能是 forbidden alias，必须且只能注册一次，schema 必须完整，`TAttrs` 必须和 matrix 一致，必须有 `FInferType`，单输出必须有 `FRelayToTE`，多输出必须有 `FRelayToTEMulti`，必须有同名 canonical `_make` helper，声明的 ONNX 映射必须存在，声明需要测试时必须有测试引用。
+8. 阶段按最远完成点推导：无注册为 `missing`，schema 不完整为 `registered`，缺 type 为 `schema`，缺 lowering 为 `typed`，缺 FFI 为 `lowered`，缺测试为 `ffi`，全部满足为 `tested`。阶段只是进度展示，任何规范问题都会让检查失败。
+9. 全局源码扫描会额外检查 op 链路相关文件中的占位关键字和 `return te::Tensor()` 空 tensor 返回。命中后记入 `Global issues`。
+10. 默认模式下只要存在任意 operator issue 或 global issue 就返回非零退出码；`--report-only` 只改变退出码，不改变报告内容；`--format json` 输出机器可消费报告，便于 CI 或后续工具读取。
+
 只想查看完整状态报告时可以运行：
 
 ```bash
