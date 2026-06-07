@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  relay-op-contract:
+    name: Relay op contract
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check checker syntax
+        run: python -m py_compile python/tools/check_relay_op_contract.py
+
+      - name: Check Relay op implementation contract
+        run: python python/tools/check_relay_op_contract.py --root .
+
+  cpu-smoke:
+    name: CPU CMake smoke tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure CPU-only build
+        run: >
+          cmake -S . -B out/build/ci-cpu -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DKXC_ENABLE_CUDA=OFF
+          -DKXC_ENABLE_LLVM=OFF
+          -DKXC_BUILD_RESNET18_IR_DUMP=OFF
+          -DKXC_BUILD_DEBUG_EXAMPLES=OFF
+          -DKXC_BUILD_PASS_TESTS=ON
+          -DKXC_BUILD_CODEGEN_TESTS=OFF
+
+      - name: Build CPU targets
+        run: cmake --build out/build/ci-cpu --parallel 2
+
+      - name: Run type inference test
+        run: cmake --build out/build/ci-cpu --target run_infer_type_test
+
+      - name: Run multi-output lowering test
+        run: cmake --build out/build/ci-cpu --target run_lower_multi_output_test
+
+      - name: Run pass pipeline test
+        run: cmake --build out/build/ci-cpu --target run_pass_pipeline_test
+
+      - name: Run profiling bundle test
+        run: cmake --build out/build/ci-cpu --target run_profile_bundle_test
+
+  python-onnx-importer:
+    name: Python ONNX importer tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python test dependencies
+        run: python -m pip install --upgrade pip pytest onnx
+
+      - name: Run Python ONNX importer tests
+        env:
+          PYTHONPATH: python
+        run: python -m pytest test/onnx_importer_py_test.py -q
