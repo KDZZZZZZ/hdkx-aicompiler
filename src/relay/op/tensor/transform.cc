@@ -102,6 +102,39 @@ kxc::tir::DataType DTypeFromCastCode(int code) {
     }
 }
 
+Array<int> NormalizeTransposeAxes(const te::Tensor& input, const Attrs& attrs) {
+    const int rank = static_cast<int>(input->shape.size());
+    Array<int> axes;
+    if (const auto* transpose_attrs = attrs.As<TransposeAttrsNode>()) {
+        for (int64_t raw_axis : transpose_attrs->perm) {
+            int axis = static_cast<int>(raw_axis);
+            if (axis < 0) {
+                axis += rank;
+            }
+            if (axis < 0 || axis >= rank) {
+                throw std::runtime_error("transpose axis out of range");
+            }
+            axes.push_back(axis);
+        }
+    }
+    if (axes.empty()) {
+        for (int axis = rank - 1; axis >= 0; --axis) {
+            axes.push_back(axis);
+        }
+    }
+    if (static_cast<int>(axes.size()) != rank) {
+        throw std::runtime_error("transpose perm rank mismatch");
+    }
+    std::vector<bool> seen(static_cast<size_t>(rank), false);
+    for (int axis : axes) {
+        if (seen[static_cast<size_t>(axis)]) {
+            throw std::runtime_error("transpose duplicate axis");
+        }
+        seen[static_cast<size_t>(axis)] = true;
+    }
+    return axes;
+}
+
 }  // namespace
 
 te::Tensor FlattenCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
@@ -174,12 +207,7 @@ te::Tensor TransposeCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                             const kxc::Type& out_type) {
     RequireInputCount("transpose", inputs, 1);
     RequireTensorOutput("transpose", out_type);
-    Array<int> axes;
-    if (const auto* transpose_attrs = attrs.As<TransposeAttrsNode>()) {
-        for (int64_t axis : transpose_attrs->perm) {
-            axes.push_back(static_cast<int>(axis));
-        }
-    }
+    Array<int> axes = NormalizeTransposeAxes(inputs[0], attrs);
     return RequireDefined("transpose", te::topi::transpose(inputs[0], axes, "T_transpose"));
 }
 

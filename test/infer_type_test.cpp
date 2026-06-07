@@ -77,6 +77,13 @@ bool TestMatrixAndDenseOps() {
     TEST_CHECK(CheckTensor(matmul.checked_type(), {2, 4}, "float32"),
                "matmul output shape mismatch");
 
+    kxc::Var batched_a("batched_a", kxc::TensorType({2, 3, 4}, "float32"));
+    kxc::Var batched_b("batched_b", kxc::TensorType({2, 4, 5}, "float32"));
+    kxc::Call batched_matmul(kxc::relay::Op::Get("matmul"), {batched_a, batched_b});
+    kxc::Function batched_matmul_func({batched_a, batched_b}, batched_matmul);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::InferTypePass(batched_matmul_func); }),
+               "batched matmul should fail until batched lowering exists");
+
     kxc::Var weight("weight", kxc::TensorType({5, 3}, "float32"));
     kxc::Call dense(kxc::relay::Op::Get("nn_dense"), {a, weight},
                     kxc::relay::DenseAttrs::Create(5, ""));
@@ -213,7 +220,7 @@ bool TestMvpTransformReduceSoftmaxLowerToTIR() {
     kxc::Call reshape(kxc::relay::Op::Get("reshape"), {x},
                       kxc::relay::ReshapeAttrs::Create({2, 12}));
     kxc::Call transpose(kxc::relay::Op::Get("transpose"), {reshape},
-                        kxc::relay::TransposeAttrs::Create({1, 0}));
+                        kxc::relay::TransposeAttrs::Create({-1, 0}));
     kxc::Call reduce_mean(kxc::relay::Op::Get("reduce_mean"), {transpose},
                           kxc::relay::ReduceMeanAttrs::Create({1}, 1));
     kxc::Call softmax(kxc::relay::Op::Get("softmax"), {reduce_mean},
