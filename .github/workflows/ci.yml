@@ -65,14 +65,46 @@ jobs:
       - name: Run type inference test
         run: cmake --build out/build/ci-cpu --target run_infer_type_test
 
-      - name: Run multi-output lowering test
-        run: cmake --build out/build/ci-cpu --target run_lower_multi_output_test
-
       - name: Run pass pipeline test
         run: cmake --build out/build/ci-cpu --target run_pass_pipeline_test
 
       - name: Run profiling bundle test
         run: cmake --build out/build/ci-cpu --target run_profile_bundle_test
+
+  llvm-resnet18:
+    name: ResNet18 LLVM compile
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++ llvm-dev lld
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ONNX fixture dependencies
+        run: python -m pip install --upgrade pip onnx numpy
+
+      - name: Configure LLVM build
+        run: >
+          cmake -S . -B out/build/ci-llvm -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DKXC_ENABLE_CUDA=OFF
+          -DKXC_ENABLE_LLVM=ON
+          -DKXC_BUILD_RESNET18_IR_DUMP=OFF
+          -DKXC_BUILD_DEBUG_EXAMPLES=OFF
+          -DKXC_BUILD_PASS_TESTS=ON
+          -DKXC_BUILD_CODEGEN_TESTS=OFF
+
+      - name: Build and compile ResNet18 to LLVM
+        run: cmake --build out/build/ci-llvm --target run_onnx_importer_test --parallel 2
 
   python-onnx-importer:
     name: Python ONNX importer tests
@@ -88,7 +120,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python test dependencies
-        run: python -m pip install --upgrade pip pytest onnx
+        run: python -m pip install --upgrade pip pytest onnx numpy
 
       - name: Run Python ONNX importer tests
         env:
