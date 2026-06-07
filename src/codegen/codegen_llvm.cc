@@ -20,6 +20,14 @@
 namespace kxc {
 namespace codegen {
 
+namespace {
+
+uint64_t StorageBytes(tir::DataType dtype) {
+    return std::max<uint64_t>(1, (static_cast<uint64_t>(dtype.bits) + 7) / 8);
+}
+
+}  // namespace
+
 CodeGenLLVM::CodeGenLLVM(llvm::LLVMContext& ctx)
     : ctx_(ctx),
       module_(std::make_unique<llvm::Module>("kxc_module", ctx)),
@@ -371,11 +379,54 @@ llvm::Value* CodeGenLLVM::GenCall(const tir::CallNode* op) {
 llvm::Value* CodeGenLLVM::GenSelect(const tir::SelectNode* op) {
     llvm::Value* cond = GenExprInContext(op->condition, "select condition");
     cond = CastToBool(cond, "select.condition.bool");
+
+    llvm::BasicBlock* then_bb =
+        llvm::BasicBlock::Create(ctx_, "select.then", current_func_);
+    llvm::BasicBlock* else_bb =
+        llvm::BasicBlock::Create(ctx_, "select.else", current_func_);
+    llvm::BasicBlock* merge_bb =
+        llvm::BasicBlock::Create(ctx_, "select.merge", current_func_);
+    builder_.CreateCondBr(cond, then_bb, else_bb);
+
+    builder_.SetInsertPoint(then_bb);
     llvm::Value* tv = GenExprInContext(op->true_value, "select true value");
+    llvm::BasicBlock* then_end = builder_.GetInsertBlock();
+    if (!then_end->getTerminator()) {
+        builder_.CreateBr(merge_bb);
+    }
+
+    builder_.SetInsertPoint(else_bb);
     llvm::Value* fv = GenExprInContext(op->false_value, "select false value");
-    PromoteBinaryOperands(&tv, &fv, op->true_value->dtype, op->false_value->dtype,
-                          "select.value");
-    return builder_.CreateSelect(cond, tv, fv, "sel");
+    llvm::BasicBlock* else_end = builder_.GetInsertBlock();
+    if (!else_end->getTerminator()) {
+        builder_.CreateBr(merge_bb);
+    }
+
+    llvm::Type* result_type = CommonNumericType(tv, fv);
+    auto cast_in_block = [&](llvm::Value* value, llvm::BasicBlock* block,
+                             const tir::DataType& dtype,
+                             const std::string& name) -> llvm::Value* {
+        if (value->getType() == result_type) {
+            return value;
+        }
+        llvm::IRBuilder<>::InsertPoint saved = builder_.saveIP();
+        if (llvm::Instruction* terminator = block->getTerminator()) {
+            builder_.SetInsertPoint(terminator);
+        } else {
+            builder_.SetInsertPoint(block);
+        }
+        llvm::Value* casted = CastValue(value, result_type, dtype.code == 0, name);
+        builder_.restoreIP(saved);
+        return casted;
+    };
+    tv = cast_in_block(tv, then_end, op->true_value->dtype, "select.true.cast");
+    fv = cast_in_block(fv, else_end, op->false_value->dtype, "select.false.cast");
+
+    builder_.SetInsertPoint(merge_bb);
+    llvm::PHINode* phi = builder_.CreatePHI(result_type, 2, "sel");
+    phi->addIncoming(tv, then_end);
+    phi->addIncoming(fv, else_end);
+    return phi;
 }
 
 llvm::Value* CodeGenLLVM::GenNot(const tir::NotNode* op) {
@@ -506,7 +557,7 @@ void CodeGenLLVM::GenStore(const tir::StoreNode* op) {
 }
 
 void CodeGenLLVM::GenAllocate(const tir::AllocateNode* op) {
-    // 计算总大小
+    // 计算总元素数。
     llvm::Type* elem_type = GetLLVMType(op->dtype);
     llvm::Value* total_size =
         llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), 1);
@@ -518,12 +569,38 @@ void CodeGenLLVM::GenAllocate(const tir::AllocateNode* op) {
         total_size = builder_.CreateMul(total_size, e, "alloc_size");
     }
 
-    // 栈分配（alloca）
-    llvm::Value* alloc = builder_.CreateAlloca(elem_type, total_size,
-                                               op->buffer_var->name_hint);
+    // ResNet 这类模型的中间张量远大于默认线程栈，临时 buffer 统一走堆分配。
+    llvm::Type* i64 = llvm::Type::getInt64Ty(ctx_);
+    llvm::Type* void_ptr = llvm::PointerType::get(ctx_, 0);
+    llvm::Value* bytes_per_elem =
+        llvm::ConstantInt::get(i64, StorageBytes(op->dtype));
+    llvm::Value* total_bytes = builder_.CreateMul(total_size, bytes_per_elem,
+                                                  "alloc_bytes");
+
+    llvm::FunctionType* malloc_type =
+        llvm::FunctionType::get(void_ptr, {i64}, false);
+    llvm::FunctionCallee malloc_fn = module_->getOrInsertFunction("malloc", malloc_type);
+    llvm::Value* alloc = builder_.CreateCall(malloc_fn, {total_bytes},
+                                             op->buffer_var->name_hint + ".heap");
+
+    auto previous = var_map_.find(op->buffer_var.get());
+    llvm::Value* previous_value = previous == var_map_.end() ? nullptr : previous->second;
     var_map_[op->buffer_var.get()] = alloc;
 
     GenStmt(op->body);
+
+    if (!builder_.GetInsertBlock()->getTerminator()) {
+        llvm::FunctionType* free_type =
+            llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_), {void_ptr}, false);
+        llvm::FunctionCallee free_fn = module_->getOrInsertFunction("free", free_type);
+        builder_.CreateCall(free_fn, {alloc});
+    }
+
+    if (previous_value) {
+        var_map_[op->buffer_var.get()] = previous_value;
+    } else {
+        var_map_.erase(op->buffer_var.get());
+    }
 }
 
 void CodeGenLLVM::GenIfThenElse(const tir::IfThenElseNode* op) {

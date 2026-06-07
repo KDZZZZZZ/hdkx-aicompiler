@@ -293,6 +293,44 @@ void TestCompilerAPI() {
 #endif
 }
 
+void TestCompilerAPIIntermediateAllocate() {
+    std::cout << "\n=== Test: Compiler API intermediate Allocate ===" << std::endl;
+
+#ifdef KXC_USE_LLVM
+    using namespace kxc;
+
+    kxc::Var x("x", TensorType({4}, "float32"));
+    kxc::Var y("y", TensorType({4}, "float32"));
+    Call first_add(relay::Op::Get("add"), {x, y});
+    Call second_add(relay::Op::Get("add"), {first_add, y});
+    Function func({x, y}, second_add);
+
+    auto config = api::CompileConfig::AOT(BuildTarget(kCPU), 2);
+    auto module = api::Compiler::Compile(func, config);
+
+    float data_x[4] = {1, 2, 3, 4};
+    float data_y[4] = {10, 20, 30, 40};
+    float data_out[4] = {0};
+    std::vector<void*> args = {data_x, data_y, data_out};
+    module.Run(args);
+
+    bool ok = true;
+    for (int i = 0; i < 4; ++i) {
+        float expected = data_x[i] + data_y[i] + data_y[i];
+        if (!FloatNear(data_out[i], expected)) {
+            std::cerr << "FAIL: allocated out[" << i << "] = " << data_out[i]
+                      << ", expected " << expected << std::endl;
+            ok = false;
+        }
+    }
+    if (ok) {
+        std::cout << "PASS: Compiler API intermediate Allocate correct!" << std::endl;
+    }
+#else
+    std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
+#endif
+}
+
 void TestAdaptiveRuntime() {
     std::cout << "\n=== Test: Adaptive Runtime (auto-compile + hot-swap) ===" << std::endl;
 
@@ -380,6 +418,7 @@ int main() {
     TestRelay_ElemwiseAdd();
     TestCCodegen();
     TestCompilerAPI();
+    TestCompilerAPIIntermediateAllocate();
     TestAdaptiveRuntime();
     std::cout << "\n==== All tests completed ====" << std::endl;
     return 0;

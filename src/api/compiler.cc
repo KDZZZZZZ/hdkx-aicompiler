@@ -27,6 +27,8 @@ namespace api {
 
 namespace {
 
+constexpr const char* kKernelEntrySymbol = "kxc_kernel_main";
+
 std::shared_ptr<profiling::ProfileContext> MaybeCreateProfileContext(const CompileConfig& config) {
     if (profiling::CurrentContext()) {
         return profiling::CurrentContext();
@@ -105,13 +107,13 @@ CompiledModule Compiler::Compile(Function func, CompileConfig config) {
                                            run_id);
         auto llvm_ctx = std::make_unique<llvm::LLVMContext>();
         codegen::CodeGenLLVM codegen(*llvm_ctx);
-        codegen.AddFunction(prim_func, "main");
+        codegen.AddFunction(prim_func, kKernelEntrySymbol);
         auto module = codegen.TakeModule();
 
         codegen::LLVMJITEngine jit;
-        kernel = jit.Compile(std::move(module), std::move(llvm_ctx), "main",
+        kernel = jit.Compile(std::move(module), std::move(llvm_ctx), kKernelEntrySymbol,
                              config->opt_level);
-        codegen_span.AddField("kernel_symbol", "main");
+        codegen_span.AddField("kernel_symbol", kKernelEntrySymbol);
         codegen_span.SetMessage("LLVM JIT compilation completed");
         codegen_span.AddMetric("opt_level", static_cast<double>(config->opt_level));
     } else
