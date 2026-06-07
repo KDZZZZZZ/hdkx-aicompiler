@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <unordered_set>
@@ -142,6 +143,41 @@ void FillResNet18Input(const kxc::runtime::NDArray& input) {
     }
 }
 
+bool ValidateReferenceOutput(const kxc::runtime::NDArray& output) {
+    const char* reference_path = std::getenv("KXC_RESNET18_REFERENCE_OUTPUT_PATH");
+    if (!reference_path) {
+        return true;
+    }
+
+    std::ifstream input(reference_path, std::ios::binary);
+    TEST_CHECK(input.good(), "failed to open ResNet18 reference output");
+
+    std::vector<float> reference(1000, 0.0f);
+    input.read(reinterpret_cast<char*>(reference.data()),
+               static_cast<std::streamsize>(reference.size() * sizeof(float)));
+    TEST_CHECK(input.gcount() == static_cast<std::streamsize>(reference.size() * sizeof(float)),
+               "ResNet18 reference output should contain 1000 float32 values");
+
+    const float* actual = static_cast<const float*>(output->dl_tensor.data);
+    float max_abs_error = 0.0f;
+    float max_rel_error = 0.0f;
+    for (size_t i = 0; i < reference.size(); ++i) {
+        const float abs_error = std::fabs(actual[i] - reference[i]);
+        const float denom = std::max(1.0f, std::fabs(reference[i]));
+        const float rel_error = abs_error / denom;
+        max_abs_error = std::max(max_abs_error, abs_error);
+        max_rel_error = std::max(max_rel_error, rel_error);
+    }
+
+    constexpr float kAbsTol = 1e-3f;
+    constexpr float kRelTol = 1e-3f;
+    std::cout << "[INFO] resnet18 reference max_abs_error=" << max_abs_error
+              << ", max_rel_error=" << max_rel_error << "\n";
+    TEST_CHECK(max_abs_error <= kAbsTol || max_rel_error <= kRelTol,
+               "ResNet18 output should match reference within tolerance");
+    return true;
+}
+
 bool TestLoadResNet18ImportSpec() {
     kxc::frontend::ImportedONNXModel imported = kxc::frontend::LoadONNXImportSpec(
         KXC_ONNX_IMPORT_JSON_PATH, KXC_ONNX_IMPORT_PARAMS_PATH);
@@ -235,6 +271,7 @@ bool TestRunCompiledResNet18LLVM() {
         sum += out[i];
     }
     TEST_CHECK(max_abs > 0.0f, "ResNet18 output should not be all zeros");
+    TEST_CHECK(ValidateReferenceOutput(output), "ResNet18 reference validation failed");
 
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
