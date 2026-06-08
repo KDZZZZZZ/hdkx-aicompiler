@@ -80,23 +80,47 @@ checker 静态扫描 `test` 目录：
 
 位置：[.github/workflows/ci.yml](../../.github/workflows/ci.yml)
 
-CI 当前执行：
+CI 当前执行的验证命令：
 
 | Job | 命令 |
 | --- | --- |
-| contract | `python -m py_compile python/tools/check_relay_op_contract.py` |
-| contract | `python python/tools/check_relay_op_contract.py --root .` |
-| CPU build | `cmake --build out/build/ci-cpu --target run_infer_type_test` |
-| CPU build | `cmake --build out/build/ci-cpu --target run_pass_pipeline_test` |
-| LLVM build | `cmake --build out/build/ci-llvm --target run_op_numeric_llvm_test` |
-| LLVM build | `cmake --build out/build/ci-llvm --target run_onnx_importer_test` |
+| `relay-op-contract` | `python -m py_compile python/tools/check_relay_op_contract.py` |
+| `relay-op-contract` | `python python/tools/check_relay_op_contract.py --root .` |
+| `cpu-smoke` | `cmake -S . -B out/build/ci-cpu -G Ninja ... -DKXC_ENABLE_LLVM=OFF ...` |
+| `cpu-smoke` | `cmake --build out/build/ci-cpu --parallel 2` |
+| `cpu-smoke` | `cmake --build out/build/ci-cpu --target run_infer_type_test` |
+| `cpu-smoke` | `cmake --build out/build/ci-cpu --target run_pass_pipeline_test` |
+| `cpu-smoke` | `cmake --build out/build/ci-cpu --target run_profile_bundle_test` |
+| `llvm-resnet18` | `python -m pip install --upgrade pip onnx numpy` |
+| `llvm-resnet18` | `cmake -S . -B out/build/ci-llvm -G Ninja ... -DKXC_ENABLE_LLVM=ON ...` |
+| `llvm-resnet18` | `cmake --build out/build/ci-llvm --target run_op_numeric_llvm_test --parallel 2` |
+| `llvm-resnet18` | `cmake --build out/build/ci-llvm --target run_onnx_importer_test --parallel 2` |
+| `python-onnx-importer` | `python -m pip install --upgrade pip pytest onnx numpy` |
+| `python-onnx-importer` | `PYTHONPATH=python python -m pytest test/onnx_importer_py_test.py -q` |
 
 本地最小验证：
 
 ```bash
 python python/tools/check_relay_op_contract.py --root .
 cmake --build out/build/<cpu-build> --target run_infer_type_test
+cmake --build out/build/<cpu-build> --target run_pass_pipeline_test
+cmake --build out/build/<cpu-build> --target run_profile_bundle_test
 cmake --build out/build/<llvm-build> --target run_op_numeric_llvm_test
+```
+
+如果改了 ONNX importer、ONNX 映射或 ONNX attrs 转换，还要同时运行 C++ importer/LLVM 编译测试和 Python importer 测试：
+
+```bash
+cmake --build out/build/<llvm-build> --target run_onnx_importer_test
+$env:PYTHONPATH = "python"  # PowerShell
+python -m pytest test/onnx_importer_py_test.py -q
+```
+
+Linux/macOS 使用：
+
+```bash
+cmake --build out/build/<llvm-build> --target run_onnx_importer_test
+PYTHONPATH=python python -m pytest test/onnx_importer_py_test.py -q
 ```
 
 ## 新 op PR checklist
