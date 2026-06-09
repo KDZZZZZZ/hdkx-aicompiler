@@ -11,8 +11,10 @@
 
 #include <cstdint>
 #include <cstring>
+#include <sstream>
 #include <string>
 #include <stdexcept>
+#include <vector>
 
 #if KXC_USE_CUDA
 #include <cuda_runtime.h>
@@ -21,6 +23,138 @@
 namespace kxc {
 
 thread_local Arena* current_arena = nullptr;
+
+namespace {
+
+const char* DeviceTypeName(DeviceTypeCode type) {
+    switch (type) {
+        case kCPU:
+            return "cpu";
+        case kGPU:
+            return "cuda";
+        case kOpenCL:
+            return "opencl";
+        case kMetal:
+            return "metal";
+        case kUnknown:
+            return "unknown";
+    }
+    return "unknown";
+}
+
+std::string EscapeJson(const std::string& value) {
+    std::ostringstream os;
+    for (char ch : value) {
+        switch (ch) {
+            case '\\':
+                os << "\\\\";
+                break;
+            case '"':
+                os << "\\\"";
+                break;
+            case '\n':
+                os << "\\n";
+                break;
+            case '\r':
+                os << "\\r";
+                break;
+            case '\t':
+                os << "\\t";
+                break;
+            default:
+                os << ch;
+                break;
+        }
+    }
+    return os.str();
+}
+
+void WriteAttrJson(std::ostream& os, const DeviceAttributes& attrs) {
+    os << "{";
+    os << "\"exists\":" << attrs.exists << ",";
+    os << "\"max_threads_per_block\":" << attrs.max_threads_per_block << ",";
+    os << "\"warp_size\":" << attrs.warp_size << ",";
+    os << "\"max_shared_memory_per_block\":" << attrs.max_shared_memory_per_block << ",";
+    os << "\"compute_version\":\"" << EscapeJson(attrs.compute_version) << "\",";
+    os << "\"device_name\":\"" << EscapeJson(attrs.device_name) << "\",";
+    os << "\"max_clock_rate_khz\":" << attrs.max_clock_rate_khz << ",";
+    os << "\"multi_processor_count\":" << attrs.multi_processor_count << ",";
+    os << "\"max_registers_per_block\":" << attrs.max_registers_per_block << ",";
+    os << "\"api_version\":" << attrs.api_version << ",";
+    os << "\"driver_version\":" << attrs.driver_version << ",";
+    os << "\"l2_cache_size_bytes\":" << attrs.l2_cache_size_bytes << ",";
+    os << "\"total_global_memory\":" << attrs.total_global_memory << ",";
+    os << "\"available_global_memory\":" << attrs.available_global_memory << ",";
+    os << "\"max_shared_memory_per_multiprocessor\":"
+       << attrs.max_shared_memory_per_multiprocessor << ",";
+    os << "\"max_registers_per_multiprocessor\":"
+       << attrs.max_registers_per_multiprocessor << ",";
+    os << "\"max_threads_per_multiprocessor\":"
+       << attrs.max_threads_per_multiprocessor << ",";
+    os << "\"compute_version_major\":" << attrs.compute_version_major << ",";
+    os << "\"compute_version_minor\":" << attrs.compute_version_minor << ",";
+    os << "\"arch\":\"" << EscapeJson(attrs.arch) << "\"";
+    os << "}";
+}
+
+void WriteDeviceInfoJson(std::ostream& os, const DeviceInfo& info) {
+    os << "{";
+    os << "\"device_type\":" << static_cast<int>(info.device_type) << ",";
+    os << "\"device_type_name\":\"" << EscapeJson(info.device_type_name) << "\",";
+    os << "\"device_id\":" << info.device_id << ",";
+    os << "\"target_kind\":\"" << EscapeJson(info.target_kind) << "\",";
+    os << "\"available\":" << (info.available ? "true" : "false") << ",";
+    os << "\"status\":\"" << EscapeJson(info.status) << "\",";
+    os << "\"attrs\":";
+    WriteAttrJson(os, info.attrs);
+    os << "}";
+}
+
+DeviceInfo QueryDeviceInfo(DeviceTypeCode type, int device_id,
+                           const std::string& unavailable_status = "") {
+    DeviceInfo info;
+    info.device_type = type;
+    info.device_id = device_id;
+    info.device_type_name = DeviceTypeName(type);
+    info.status = unavailable_status;
+
+    try {
+        class Device device(type, device_id);
+        DeviceAPI* api = GetDeviceAPI(type);
+        info.target_kind = api->GetTargetKind(device);
+        info.attrs = api->GetDeviceAttributes(device);
+        info.available = info.attrs.exists != 0;
+        if (info.status.empty()) {
+            info.status = info.available ? "ok" : "unavailable";
+        }
+    } catch (const std::exception& e) {
+        info.available = false;
+        if (info.status.empty()) {
+            info.status = e.what();
+        }
+        if (info.target_kind.empty()) {
+            info.target_kind = DeviceTypeName(type);
+        }
+        info.attrs.exists = 0;
+        info.attrs.device_name = info.status;
+        info.attrs.arch = "";
+        info.attrs.compute_version = "0.0";
+    }
+    return info;
+}
+
+std::string DeviceInfosToJSON(const std::vector<DeviceInfo>& infos) {
+    std::ostringstream os;
+    os << "{\"devices\":[";
+    for (size_t i = 0; i < infos.size(); ++i) {
+        if (i) os << ",";
+        WriteDeviceInfoJson(os, infos[i]);
+    }
+    os << "]}";
+    return os.str();
+}
+
+}  // namespace
 
 DeviceAPIManager* DeviceAPIManager::Global() {
     static DeviceAPIManager instance;
@@ -189,6 +323,55 @@ int64_t GetDeviceAttr(const class Device& device, DeviceAttrKind kind) {
     }
     throw std::runtime_error("GetDeviceAttr(int64) got non-integer attr kind: " +
                              std::to_string(static_cast<int>(kind)));
+}
+
+std::vector<class Device> ListDevices() {
+    std::vector<class Device> devices;
+    for (const auto& info : GetAllDeviceInfo()) {
+        if (info.available) {
+            devices.emplace_back(info.device_type, info.device_id);
+        }
+    }
+    return devices;
+}
+
+std::vector<DeviceInfo> GetAllDeviceInfo() {
+    std::vector<DeviceInfo> infos;
+    infos.push_back(QueryDeviceInfo(kCPU, 0));
+
+#if KXC_USE_CUDA
+    int device_count = 0;
+    cudaError_t error_id = cudaGetDeviceCount(&device_count);
+    if (error_id == cudaSuccess && device_count > 0) {
+        for (int dev = 0; dev < device_count; ++dev) {
+            infos.push_back(QueryDeviceInfo(kGPU, dev));
+        }
+    } else {
+        std::string status = "no CUDA device detected";
+        if (error_id != cudaSuccess) {
+            status = "CUDA device query failed: " + std::string(cudaGetErrorString(error_id));
+        }
+        infos.push_back(QueryDeviceInfo(kGPU, 0, status));
+    }
+#else
+    infos.push_back(QueryDeviceInfo(kGPU, 0, "CUDA support is disabled (KXC_USE_CUDA=0)"));
+#endif
+
+    return infos;
+}
+
+std::string ListDevicesJSON() {
+    std::vector<DeviceInfo> available;
+    for (const auto& info : GetAllDeviceInfo()) {
+        if (info.available) {
+            available.push_back(info);
+        }
+    }
+    return DeviceInfosToJSON(available);
+}
+
+std::string GetAllDeviceInfoJSON() {
+    return DeviceInfosToJSON(GetAllDeviceInfo());
 }
 
 template <>
@@ -421,6 +604,30 @@ KXC_REGISTER_GLOBAL("device_api.NeedSetDevice")
     .set_body(PackedFunc(std::function<void(Args, RetValue*)>([](Args args, RetValue* rv) {
         int type_code = ArgConverter<int>::From(args[0], args.type_code(0));
         *rv = static_cast<int64_t>(DeviceAPI::NeedSetDevice(static_cast<DeviceTypeCode>(type_code)));
+    })));
+
+KXC_REGISTER_GLOBAL("device_api.ListDevices")
+    .set_body(PackedFunc(std::function<void(Args, RetValue*)>([](Args args, RetValue* rv) {
+        (void)args;
+        *rv = ListDevicesJSON();
+    })));
+
+KXC_REGISTER_GLOBAL("device_api.ListDevicesJSON")
+    .set_body(PackedFunc(std::function<void(Args, RetValue*)>([](Args args, RetValue* rv) {
+        (void)args;
+        *rv = ListDevicesJSON();
+    })));
+
+KXC_REGISTER_GLOBAL("device_api.GetAllDeviceInfo")
+    .set_body(PackedFunc(std::function<void(Args, RetValue*)>([](Args args, RetValue* rv) {
+        (void)args;
+        *rv = GetAllDeviceInfoJSON();
+    })));
+
+KXC_REGISTER_GLOBAL("device_api.GetAllDeviceInfoJSON")
+    .set_body(PackedFunc(std::function<void(Args, RetValue*)>([](Args args, RetValue* rv) {
+        (void)args;
+        *rv = GetAllDeviceInfoJSON();
     })));
 
 KXC_REGISTER_GLOBAL("device_api.GetTargetKind")

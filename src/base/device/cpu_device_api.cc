@@ -9,7 +9,13 @@
 #include <stdexcept>
 #include <thread>
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <malloc.h>
+#include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #include "base/profiling.h"
@@ -29,6 +35,31 @@ std::string DetectHostCPUArch() {
     return "x86";
 #else
     return "unknown";
+#endif
+}
+
+void FillHostMemoryInfo(DeviceAttributes* attrs) {
+#if defined(_WIN32)
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+        attrs->total_global_memory = static_cast<int64_t>(status.ullTotalPhys);
+        attrs->available_global_memory = static_cast<int64_t>(status.ullAvailPhys);
+    }
+#else
+#if defined(_SC_PHYS_PAGES) && defined(_SC_AVPHYS_PAGES) && defined(_SC_PAGESIZE)
+    const long page_size = sysconf(_SC_PAGESIZE);
+    const long total_pages = sysconf(_SC_PHYS_PAGES);
+    const long available_pages = sysconf(_SC_AVPHYS_PAGES);
+    if (page_size > 0 && total_pages > 0) {
+        attrs->total_global_memory =
+            static_cast<int64_t>(page_size) * static_cast<int64_t>(total_pages);
+    }
+    if (page_size > 0 && available_pages > 0) {
+        attrs->available_global_memory =
+            static_cast<int64_t>(page_size) * static_cast<int64_t>(available_pages);
+    }
+#endif
 #endif
 }
 
@@ -121,8 +152,10 @@ public:
         attrs.compute_version_major = 0;
         attrs.compute_version_minor = 0;
         attrs.multi_processor_count = attrs.max_threads_per_block;
-        attrs.device_name = "cpu";
         attrs.arch = DetectHostCPUArch();
+        attrs.device_name = "cpu/" + attrs.arch + "/" + std::to_string(attrs.max_threads_per_block) +
+                            "-threads";
+        FillHostMemoryInfo(&attrs);
         return attrs;
     }
 

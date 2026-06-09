@@ -65,6 +65,9 @@ jobs:
       - name: Run type inference test
         run: cmake --build out/build/ci-cpu --target run_infer_type_test
 
+      - name: Run device info test
+        run: cmake --build out/build/ci-cpu --target run_device_info_test
+
       - name: Run pass pipeline test
         run: cmake --build out/build/ci-cpu --target run_pass_pipeline_test
 
