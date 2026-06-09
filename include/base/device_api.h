@@ -62,6 +62,17 @@ struct DeviceAttributes {
     std::string arch;
 };
 
+/*! \brief 单个设备的可发现信息，供统一设备枚举和诊断输出使用。 */
+struct DeviceInfo {
+    DeviceTypeCode device_type{kUnknown};
+    int device_id{-1};
+    std::string device_type_name;
+    std::string target_kind;
+    bool available{false};
+    std::string status;
+    DeviceAttributes attrs;
+};
+
 /*! \brief 设备后端抽象，统一 CPU/CUDA/Metal/OpenCL 的内存、拷贝和 stream 操作。 */
 class DeviceAPI {
 public:
@@ -132,5 +143,9 @@ DeviceAPI* GetDeviceAPI(DeviceTypeCode type);
 DeviceAttributes CollectDeviceAttributes(const class Device& device);
 void GetDeviceAttr(const class Device& device, DeviceAttrKind kind, RetValue* rv);
 int64_t GetDeviceAttr(const class Device& device, DeviceAttrKind kind);
+std::vector<class Device> ListDevices();
+std::vector<DeviceInfo> GetAllDeviceInfo();
+std::string ListDevicesJSON();
+std::string GetAllDeviceInfoJSON();
 
 }  // namespace kxc

@@ -61,6 +61,15 @@ int64_t ReadAvailableMemory(int device_id) {
     return static_cast<int64_t>(free_bytes);
 }
 
+DeviceAttributes UnavailableCUDAAttributes(const std::string& reason) {
+    DeviceAttributes attrs;
+    attrs.exists = 0;
+    attrs.device_name = reason;
+    attrs.arch = "";
+    attrs.compute_version = "0.0";
+    return attrs;
+}
+
 }  // namespace
 
 class CUDADeviceAPI : public DeviceAPI {
@@ -148,17 +157,28 @@ public:
     }
 
     DeviceAttributes GetDeviceAttributes(const class Device& device) override {
-        cudaError_t err = cudaSetDevice(device.device_id());
+        int device_count = 0;
+        cudaError_t err = cudaGetDeviceCount(&device_count);
         if (err != cudaSuccess) {
-            throw std::runtime_error("CUDA SetDevice failed: " +
-                                     std::string(cudaGetErrorString(err)));
+            return UnavailableCUDAAttributes("CUDA device query failed: " +
+                                             std::string(cudaGetErrorString(err)));
+        }
+        if (device.device_id() < 0 || device.device_id() >= device_count) {
+            return UnavailableCUDAAttributes("CUDA device id is not available: " +
+                                             std::to_string(device.device_id()));
+        }
+
+        err = cudaSetDevice(device.device_id());
+        if (err != cudaSuccess) {
+            return UnavailableCUDAAttributes("CUDA SetDevice failed: " +
+                                             std::string(cudaGetErrorString(err)));
         }
 
         cudaDeviceProp prop;
         err = cudaGetDeviceProperties(&prop, device.device_id());
         if (err != cudaSuccess) {
-            throw std::runtime_error("CUDA GetDeviceProperties failed: " +
-                                     std::string(cudaGetErrorString(err)));
+            return UnavailableCUDAAttributes("CUDA GetDeviceProperties failed: " +
+                                             std::string(cudaGetErrorString(err)));
         }
 
         DeviceAttributes attrs;
@@ -314,8 +334,87 @@ DeviceAPI* GetCUDADeviceAPI() {
 
 #else
 
+namespace {
+
+class DisabledCUDADeviceAPI : public DeviceAPI {
+public:
+    void SetDevice(const class Device& device) override {
+        (void)device;
+        throw std::runtime_error("CUDA support is disabled (KXC_USE_CUDA=0)");
+    }
+
+    void* AllocDataSpace(const class Device& device, size_t nbytes, size_t alignment) override {
+        (void)device;
+        (void)nbytes;
+        (void)alignment;
+        throw std::runtime_error("CUDA support is disabled (KXC_USE_CUDA=0)");
+    }
+
+    void FreeDataSpace(const class Device& device, void* ptr) override {
+        (void)device;
+        (void)ptr;
+        throw std::runtime_error("CUDA support is disabled (KXC_USE_CUDA=0)");
+    }
+
+    void CopyDataFromTo(const class Device& from_dev, const void* from_ptr,
+                        const class Device& to_dev, void* to_ptr, size_t nbytes) override {
+        (void)from_dev;
+        (void)from_ptr;
+        (void)to_dev;
+        (void)to_ptr;
+        (void)nbytes;
+        throw std::runtime_error("CUDA support is disabled (KXC_USE_CUDA=0)");
+    }
+
+    DeviceAttributes GetDeviceAttributes(const class Device& device) override {
+        (void)device;
+        DeviceAttributes attrs;
+        attrs.exists = 0;
+        attrs.device_name = "CUDA support is disabled (KXC_USE_CUDA=0)";
+        attrs.arch = "";
+        attrs.compute_version = "0.0";
+        return attrs;
+    }
+
+    std::string GetTargetKind(const class Device& device) const override {
+        (void)device;
+        return "cuda";
+    }
+
+    StreamHandle CreateStream(const class Device& device) override {
+        (void)device;
+        throw std::runtime_error("CUDA support is disabled (KXC_USE_CUDA=0)");
+    }
+
+    void FreeStream(const class Device& device, StreamHandle stream) override {
+        (void)device;
+        (void)stream;
+        throw std::runtime_error("CUDA support is disabled (KXC_USE_CUDA=0)");
+    }
+
+    void SetStream(const class Device& device, StreamHandle stream) override {
+        (void)device;
+        (void)stream;
+        throw std::runtime_error("CUDA support is disabled (KXC_USE_CUDA=0)");
+    }
+
+    StreamHandle GetCurrentStream(const class Device& device) override {
+        (void)device;
+        return nullptr;
+    }
+
+    void StreamSync(const class Device& device, StreamHandle stream) override {
+        (void)device;
+        (void)stream;
+        throw std::runtime_error("CUDA support is disabled (KXC_USE_CUDA=0)");
+    }
+};
+
+}  // namespace
+
 DeviceAPI* GetCUDADeviceAPI() {
-    throw std::runtime_error("CUDA support is disabled (KXC_USE_CUDA=0)");
+    static DisabledCUDADeviceAPI inst;
+    return &inst;
 }
 
 #endif
