@@ -299,6 +299,7 @@ else()
 endif()
 
 if(KXC_BUILD_PASS_TESTS)
+  kxc_add_runtime_exe(object_test test/object_test.cpp)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
   kxc_add_runtime_exe(device_info_test test/device_info_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
@@ -349,6 +350,14 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS pass_pipeline_test
     USES_TERMINAL
     COMMENT "Run pass_pipeline_test"
+  )
+
+  add_custom_target(run_object_test
+    COMMAND "$<TARGET_FILE:object_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS object_test
+    USES_TERMINAL
+    COMMENT "Run object_test"
   )
 
   add_custom_target(run_device_info_test

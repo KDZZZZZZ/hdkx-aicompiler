@@ -25,25 +25,15 @@ public:
     ArrayNode() = default;
     ArrayNode(std::vector<T> d) : data(std::move(d)) {}
 
-    static const uint32_t _type_index;
-    const uint32_t GetTypeId() const override { return _type_index; }
+    KXC_OBJECT_DECLARE_TEMPLATE_NODE
 };
 
-// Initialize static member for each template instantiation
-// This will create a unique type index for each T (e.g., Array<int>, Array<float>)
-// Note: This relies on TypeRegistry returning unique IDs for "Array" calls. 
-// If TypeRegistry implementation simply increments a counter for new calls regardless of name collision (or if we append typeid name),
-// it works. The current implementation of TypeRegistry in object.h uses a map based on name.
-// So Register("Array") will return the SAME index for all Arrays if we pass "Array".
-// To fix this, we should ideally include type info in the name, e.g. "Array<" + typeid(T).name() + ">".
-// BUT for this simplified implementation, sharing TypeId "Array" for all arrays might be acceptable 
-// if we don't strictly differentiate Array<int> vs Array<float> at runtime type checking level via GetTypeId.
-// However, the user hint says: "Compiler will generate a variable...".
-// If we want them to have DIFFERENT IDs, we must pass DIFFERENT names to Register.
-// If we pass "Array" to all, they get the SAME ID.
-// Let's modify it to be generic "Array" for now as per "apply scenario: Array<IntImm>" usually treated as generic Array in dynamic type systems like TVM (which has ArrayNode generic).
 template<typename T>
-const uint32_t ArrayNode<T>::_type_index = kxc::TypeRegistry::Register("Array");
+inline const TypeInfo& ArrayNode<T>::_type_info = TypeRegistry::Register("Array");
+
+template<typename T>
+inline const uint32_t ArrayNode<T>::_type_index =
+    ArrayNode<T>::_type_info.runtime_index();
 
 
 template <typename T>
@@ -126,12 +116,15 @@ public:
     MapNode() = default;
     MapNode(std::unordered_map<K, V> d) : data(std::move(d)) {}
 
-    static const uint32_t _type_index;
-    const uint32_t GetTypeId() const override { return _type_index; }
+    KXC_OBJECT_DECLARE_TEMPLATE_NODE
 };
 
 template<typename K, typename V>
-const uint32_t MapNode<K, V>::_type_index = kxc::TypeRegistry::Register("Map");
+inline const TypeInfo& MapNode<K, V>::_type_info = TypeRegistry::Register("Map");
+
+template<typename K, typename V>
+inline const uint32_t MapNode<K, V>::_type_index =
+    MapNode<K, V>::_type_info.runtime_index();
 
 template <typename K, typename V>
 class Map : public ObjectRef {
@@ -192,14 +185,7 @@ public:
     
     KXC_OBJECT_DECLARE
 };
-// Definition macro needs to be in .cc or we assume header-only via inline
-// KXC_OBJECT_DEFINE(StringObj) -> This puts inline definition in header.
-// But we need to make sure we don't redefine if included multiple times.
-// KXC_OBJECT_DEFINE uses 'inline' so it is safe in header.
-
-// To avoid circular dependency or redefinition issues if we put this in header,
-// we'll put the define here.
-inline const uint32_t StringObj::_type_index = kxc::TypeRegistry::Register("String");
+KXC_OBJECT_DEFINE_WITH_KEY(StringObj, "String")
 
 class String : public ObjectRef {
 public:

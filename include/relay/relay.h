@@ -107,7 +107,7 @@ public:
     }
 };
 
-KXC_OBJECT_DEFINE(VarNode)
+KXC_OBJECT_DEFINE_WITH_KEY(VarNode, "kxc.relay.VarNode")
 
 class Var : public Relay {
 public:
@@ -142,7 +142,7 @@ public:
     KXC_OBJECT_DECLARE
 };
 
-KXC_OBJECT_DEFINE(CallNode)
+KXC_OBJECT_DEFINE_WITH_KEY(CallNode, "kxc.relay.CallNode")
 
 class Call : public Relay {
 public:

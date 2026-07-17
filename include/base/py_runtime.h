@@ -15,48 +15,6 @@
 
 namespace py = pybind11;
 
-// --- 1. pybind11 类型转换特化 (必须在 ::pybind11::detail 命名空间下) ---
-namespace pybind11 {
-namespace detail {
-
-template<>
-struct type_caster<kxc::ObjectRef> {
-public:
-    // 定义 Python 中的类型名称
-    PYBIND11_TYPE_CASTER(kxc::ObjectRef, _("kxc_runtime.ObjectRef"));
-
-    // Python -> C++ (load)
-    bool load(py::handle src, bool convert) {
-        if (!src) return false;
-        if (src.is_none()) {
-            value = kxc::ObjectRef();
-            return true;
-        }
-        try {
-            // 尝试将 Python 对象转换为 C++ Object 指针
-            // 注意：这要求 Python 对象必须是由 pybind11 包装的 kxc::Object 或其子类
-            const kxc::Object* cpp_obj_ptr = py::cast<const kxc::Object*>(src);
-            value = kxc::ObjectRef(cpp_obj_ptr);
-            return true;
-        } catch (const py::cast_error&) {
-            return false;
-        }
-    }
-
-    // C++ -> Python (cast)
-    static py::handle cast(const kxc::ObjectRef& src, py::return_value_policy policy, py::handle parent) {
-        if (!src.get()) {
-            return py::none().release();
-        }
-        // 将内部的 Object* 转换为 Python 对象
-        // pybind11 会查找该 Object 实际类型对应的 Python 类
-        return py::cast(src.get(), policy, parent);
-    }
-};
-
-} // namespace detail
-} // namespace pybind11
-
 namespace kxc {
 
 // 辅助函数：构造 Value
@@ -66,36 +24,76 @@ inline Value MakeValue(const char* v) { Value val; val.v_str = v; return val; }
 inline Value MakeValue(const Object* v) { Value val; val.v_object = v; return val; }
 inline Value MakeNullValue() { Value val; val.v_object = nullptr; return val; }
 
-// --- 2. 模块初始化函数 ---
+inline py::object WrapObjectRef(const ObjectRef& object) {
+    if (!object.defined()) return py::none();
+    if (object.As<runtime::NDArrayNode>()) {
+        return py::cast(runtime::NDArray(object.get()));
+    }
+    return py::cast(object);
+}
+
+// 模块初始化函数
 inline void InitKXCRuntime(py::module_& m) {
+    py::class_<TypeInfo>(m, "TypeInfo")
+        .def_property_readonly("runtime_index", &TypeInfo::runtime_index)
+        .def_property_readonly("type_key", [](const TypeInfo& info) {
+            return std::string(info.type_key());
+        });
+
     // 绑定 ObjectRef
     py::class_<ObjectRef>(m, "ObjectRef")
         .def(py::init<>())
-        .def_property_readonly("defined", [](const ObjectRef& self) { return (bool)self; });
+        .def_property_readonly("defined", [](const ObjectRef& self) { return (bool)self; })
+        .def_property_readonly(
+            "type_info",
+            [](const ObjectRef& self) -> const TypeInfo* {
+                return self.get() ? &self.get()->GetTypeInfo() : nullptr;
+            },
+            py::return_value_policy::reference)
+        .def_property_readonly("type_id", [](const ObjectRef& self) -> py::object {
+            return self.get() ? py::cast(self.get()->GetTypeId()) : py::none();
+        })
+        .def_property_readonly("type_key", [](const ObjectRef& self) -> py::object {
+            return self.get() ? py::cast(std::string(self.get()->GetTypeKey())) : py::none();
+        });
 
     // 绑定 Object
     // 使用 nodelete，因为 Object 是引用计数的，我们不希望 pybind11 直接 delete 它
     // 而是通过 ObjectRef 或手动 DecRef 管理
     py::class_<Object, std::unique_ptr<Object, py::nodelete>> object_base(m, "Object");
-    object_base.def("get_type_id", &Object::GetTypeId, "Get the type ID of the object.");
+    object_base
+        .def_property_readonly(
+            "type_info", &Object::GetTypeInfo,
+            py::return_value_policy::reference_internal)
+        .def_property_readonly("type_id", &Object::GetTypeId)
+        .def_property_readonly("type_key", [](const Object& object) {
+            return std::string(object.GetTypeKey());
+        })
+        .def("get_type_id", &Object::GetTypeId, "Get the runtime type ID of the object.");
     
     // 绑定 PackedFunc
     py::class_<PackedFunc, ObjectRef>(m, "PackedFunc")
         .def("__call__", [](const PackedFunc& func, py::args args) -> py::object {
             std::vector<Value> values;
             std::vector<TypeCode> type_codes;
+            std::vector<ObjectRef> object_holders;
             values.reserve(args.size());
             type_codes.reserve(args.size());
+            object_holders.reserve(args.size());
 
             // 保持 string 的生命周期
             std::vector<std::string> str_holders;
             str_holders.reserve(args.size());
 
             for (const auto& arg : args) {
-                if (py::isinstance<Object>(arg)) {
-                    ObjectRef obj_ref = arg.cast<ObjectRef>(); 
-                    // 增加引用计数，因为 Value 只持有裸指针
-                    values.push_back(MakeValue(obj_ref.get()));
+                if (py::isinstance<ObjectRef>(arg)) {
+                    object_holders.push_back(arg.cast<ObjectRef>());
+                    values.push_back(MakeValue(object_holders.back().get()));
+                    type_codes.push_back(kObjectRef);
+                } else if (py::isinstance<Object>(arg)) {
+                    const Object* object = arg.cast<const Object*>();
+                    object_holders.emplace_back(object);
+                    values.push_back(MakeValue(object_holders.back().get()));
                     type_codes.push_back(kObjectRef);
                 } else if (py::isinstance<py::int_>(arg)) {
                     values.push_back(MakeValue(arg.cast<int64_t>()));
@@ -125,7 +123,7 @@ inline void InitKXCRuntime(py::module_& m) {
                 case kInt: return py::cast(rv.As<int64_t>());
                 case kFloat: return py::cast(rv.As<double>());
                 case kString: return py::cast(rv.As<const char*>());
-                case kObjectRef: return py::cast(rv.As<ObjectRef>());
+                case kObjectRef: return WrapObjectRef(rv.As<ObjectRef>());
                 case kNull: return py::none();
                 default: throw py::type_error("Unsupported return type");
             }
@@ -189,27 +187,18 @@ inline void InitKXCRuntime(py::module_& m) {
     // 绑定 Device 类
     // 使用别名消除歧义
     using DeviceCls = class ::kxc::Device;
-    // Removed explicit holder to match MyObj pattern which works
-    py::class_<DeviceCls, Object>(m, "Device") 
-        .def(py::init<DeviceTypeCode, int>(),
-             py::arg("type_code"), py::arg("device_id"))
+    py::class_<DeviceCls, Object>(m, "Device")
         .def_property_readonly("device_type", &DeviceCls::device_type)
         .def_property_readonly("device_id", &DeviceCls::device_id)
         .def("__repr__", [](const DeviceCls& self) { return self.ToString(); })
         .def("__str__", [](const DeviceCls& self) { return self.ToString(); });
 
     // 绑定 device 工厂函数
-    // 使用 DeviceManager 显式创建，确保返回 ObjectRef 且使用缓存
+    // DeviceManager 的缓存持有 ObjectRef，Python 只借用对应节点。
     m.def("device", [](DeviceTypeCode type, int id) -> DeviceCls* {
-         // Return raw pointer to bypass potential ObjectRef type_caster issues with m.def return values.
-         // Use DeviceManager to get ObjectRef (which manages the device lifecycle).
-         // We IncRef because Python will hold a reference to the Device object.
-         // Since Device is bound with nodelete, Python won't delete it, but it won't DecRef it either via unique_ptr deleter.
-         // This effectively relies on DeviceManager keeping it alive or intentional leak of the python reference increment.
          ObjectRef ref = kxc::DeviceManager::Global()->GetOrCreate(type, id);
-         ref.get()->IncRef(); // Add a ref for Python
-         return (DeviceCls*)ref.get();
-    }, py::arg("type_code"), py::arg("device_id"));
+         return const_cast<DeviceCls*>(ref.As<DeviceCls>());
+    }, py::arg("type_code"), py::arg("device_id"), py::return_value_policy::reference);
 
     // 绑定 create_object 工厂函数
     // 使用 TypeManager 通过字符串键创建对象
@@ -219,9 +208,8 @@ inline void InitKXCRuntime(py::module_& m) {
             // 如果创建失败（未注册的类型），返回 None
             return py::none();
         }
-        // 返回 ObjectRef，pybind11 会自动转换为对应的 Python 对象
-        // 注意：这里利用了 type_caster<ObjectRef> 的特化
-        return py::cast(obj);
+        // 返回持有侵入式引用的 ObjectRef Python 句柄。
+        return WrapObjectRef(obj);
     }, py::arg("type_key"));
 }
 

@@ -144,7 +144,7 @@ public:
 
     KXC_OBJECT_DECLARE
 };
-KXC_OBJECT_DEFINE(IterVarNode)
+KXC_OBJECT_DEFINE_WITH_KEY(IterVarNode, "kxc.te.IterVarNode")
 
 /*! \brief TE 迭代轴引用类型，可隐式转换为底层 TIR Var/PrimExpr。 */
 class IterVar : public ObjectRef {

@@ -195,7 +195,7 @@ public:
     std::string thread_tag;
     KXC_OBJECT_DECLARE
 };
-KXC_OBJECT_DEFINE(IterVarNode)
+KXC_OBJECT_DEFINE_WITH_KEY(IterVarNode, "kxc.tir.IterVarNode")
 
 /*! \brief TIR block 迭代变量引用类型。 */
 class IterVar : public ObjectRef {

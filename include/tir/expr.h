@@ -93,7 +93,7 @@ public:
     std::string name_hint;
     KXC_OBJECT_DECLARE
 };
-KXC_OBJECT_DEFINE(VarNode)
+KXC_OBJECT_DEFINE_WITH_KEY(VarNode, "kxc.tir.VarNode")
 
 /*! \brief TIR 符号变量引用类型。 */
 class Var : public PrimExpr {
@@ -192,7 +192,7 @@ public:
 
     KXC_OBJECT_DECLARE
 };
-KXC_OBJECT_DEFINE(CallNode)
+KXC_OBJECT_DEFINE_WITH_KEY(CallNode, "kxc.tir.CallNode")
 
 /*! \brief Call 表达式引用类型。 */
 class Call : public PrimExpr {
