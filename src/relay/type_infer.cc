@@ -15,6 +15,7 @@ namespace relay {
 
 namespace {
 
+// 校验算子输入数量。
 void RequireArity(const std::string& op_name, const Array<Type>& input_types, size_t expected) {
     if (input_types.size() != expected) {
         throw std::runtime_error(op_name + " expects " + std::to_string(expected) +
@@ -22,6 +23,7 @@ void RequireArity(const std::string& op_name, const Array<Type>& input_types, si
     }
 }
 
+// 将临时 shape vector 转为对象系统 Array。
 Array<int64_t> ToArray(const std::vector<int64_t>& shape) {
     Array<int64_t> out;
     for (int64_t dim : shape) {
@@ -30,6 +32,7 @@ Array<int64_t> ToArray(const std::vector<int64_t>& shape) {
     return out;
 }
 
+// 从 TensorType 复制出便于算法处理的 shape vector。
 std::vector<int64_t> ShapeVector(const TensorTypeNode* type) {
     std::vector<int64_t> out;
     out.reserve(type->shape.size());
@@ -39,10 +42,12 @@ std::vector<int64_t> ShapeVector(const TensorTypeNode* type) {
     return out;
 }
 
+// 从临时 shape 与 dtype 构造 TensorType。
 Type MakeTensorType(const std::vector<int64_t>& shape, const std::string& dtype) {
     return TensorType(ToArray(shape), dtype);
 }
 
+// 要求输入为 TensorType 并返回节点指针。
 const TensorTypeNode* RequireTensor(const std::string& op_name, const Type& type,
                                     const std::string& input_name) {
     const auto* tensor = type.As<TensorTypeNode>();
@@ -53,6 +58,7 @@ const TensorTypeNode* RequireTensor(const std::string& op_name, const Type& type
     return tensor;
 }
 
+// 要求两个张量 dtype 完全一致。
 void RequireSameDType(const std::string& op_name, const TensorTypeNode* lhs,
                       const TensorTypeNode* rhs) {
     if (lhs->dtype != rhs->dtype) {
@@ -61,12 +67,15 @@ void RequireSameDType(const std::string& op_name, const TensorTypeNode* lhs,
     }
 }
 
+// 判断维度是否为已知非负值。
 bool IsKnown(int64_t dim) { return dim >= 0; }
 
+// 比较两个维度，未知维度视为可兼容。
 bool SameOrUnknown(int64_t lhs, int64_t rhs) {
     return !IsKnown(lhs) || !IsKnown(rhs) || lhs == rhs;
 }
 
+// 计算已知 shape 区间乘积，含未知维度时返回 -1。
 int64_t KnownProduct(const std::vector<int64_t>& shape, size_t begin, size_t end) {
     int64_t product = 1;
     for (size_t i = begin; i < end; ++i) {
@@ -78,6 +87,7 @@ int64_t KnownProduct(const std::vector<int64_t>& shape, size_t begin, size_t end
     return product;
 }
 
+// 按 NumPy 规则推导两个 shape 的广播结果。
 std::vector<int64_t> BroadcastShape(const std::string& op_name,
                                     const std::vector<int64_t>& lhs,
                                     const std::vector<int64_t>& rhs) {
@@ -105,6 +115,7 @@ std::vector<int64_t> BroadcastShape(const std::string& op_name,
     return out;
 }
 
+// 将可能为负的轴规范化到合法非负范围。
 int NormalizeAxis(const std::string& op_name, int64_t axis, int rank, bool allow_end = false) {
     const int upper = allow_end ? rank : rank - 1;
     if (axis < 0) {
@@ -117,7 +128,8 @@ int NormalizeAxis(const std::string& op_name, int64_t axis, int rank, bool allow
     return static_cast<int>(axis);
 }
 
-std::vector<int> NormalizeAxes(const std::string& op_name, const std::vector<int64_t>& axes,
+// 规范化轴集合，并拒绝重复轴。
+std::vector<int> NormalizeAxes(const std::string& op_name, const Array<int64_t>& axes,
                                int rank) {
     std::vector<int> out;
     if (axes.empty()) {
@@ -136,11 +148,13 @@ std::vector<int> NormalizeAxes(const std::string& op_name, const std::vector<int
     return out;
 }
 
-int64_t ReadVectorValue(const std::vector<int64_t>& values, size_t index, int64_t default_value) {
+// 读取可选向量分量。
+int64_t ReadVectorValue(const Array<int64_t>& values, size_t index, int64_t default_value) {
     return index < values.size() ? values[index] : default_value;
 }
 
-std::vector<int64_t> ReadPair(const std::vector<int64_t>& values, int64_t default_value) {
+// 将零、一或二维属性展开为高宽二元组。
+std::vector<int64_t> ReadPair(const Array<int64_t>& values, int64_t default_value) {
     if (values.empty()) {
         return {default_value, default_value};
     }
@@ -150,7 +164,8 @@ std::vector<int64_t> ReadPair(const std::vector<int64_t>& values, int64_t defaul
     return {values[0], values[1]};
 }
 
-std::vector<int64_t> ReadPadding(const std::vector<int64_t>& values) {
+// 将紧凑 padding 展开为四边顺序。
+std::vector<int64_t> ReadPadding(const Array<int64_t>& values) {
     if (values.empty()) {
         return {0, 0, 0, 0};
     }
@@ -163,6 +178,7 @@ std::vector<int64_t> ReadPadding(const std::vector<int64_t>& values) {
     return {values[0], values[1], values[2], values[3]};
 }
 
+// 推导卷积或池化窗口对应的单个输出维度。
 int64_t WindowOutputDim(const std::string& op_name, int64_t input, int64_t kernel,
                         int64_t pad_before, int64_t pad_after, int64_t stride,
                         int64_t dilation, bool ceil_mode) {
@@ -183,6 +199,7 @@ int64_t WindowOutputDim(const std::string& op_name, int64_t input, int64_t kerne
     return numerator / stride + 1;
 }
 
+// 推导二元逐元素算子的广播 shape 和结果 dtype。
 Type BinaryBroadcastInferType(const std::string& op_name, const Array<Type>& input_types,
                               const std::string& out_dtype = "") {
     RequireArity(op_name, input_types, 2);
@@ -193,6 +210,7 @@ Type BinaryBroadcastInferType(const std::string& op_name, const Array<Type>& inp
                           out_dtype.empty() ? lhs->dtype : out_dtype);
 }
 
+// 将前端 cast 整数编码映射到 Relay dtype 名称。
 std::string CastDTypeFromCode(int code) {
     switch (code) {
     case 0:
@@ -214,6 +232,7 @@ std::string CastDTypeFromCode(int code) {
     }
 }
 
+// 在属性未指定 out_dtype 时继承输入 dtype。
 std::string AttrOutDTypeOrDefault(const std::string& out_dtype,
                                   const std::string& default_dtype) {
     return out_dtype.empty() ? default_dtype : out_dtype;
@@ -221,47 +240,56 @@ std::string AttrOutDTypeOrDefault(const std::string& out_dtype,
 
 }  // namespace
 
+// 恒等算子直接返回输入类型。
 Type IdentityInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     RequireArity("identity", input_types, 1);
     return input_types[0];
 }
 
+// 推导 add 的广播结果类型。
 Type AddInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     return BinaryBroadcastInferType("add", input_types);
 }
 
+// 推导 subtract 的广播结果类型。
 Type SubtractInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     return BinaryBroadcastInferType("subtract", input_types);
 }
 
+// 推导 multiply 的广播结果类型。
 Type MultiplyInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     return BinaryBroadcastInferType("mul", input_types);
 }
 
+// 推导 divide 的广播结果类型。
 Type DivideInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     return BinaryBroadcastInferType("divide", input_types);
 }
 
+// 推导 pow 的广播结果类型。
 Type PowInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     return BinaryBroadcastInferType("pow", input_types);
 }
 
+// 推导 equal 的布尔广播结果类型。
 Type EqualInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     return BinaryBroadcastInferType("equal", input_types, "bool");
 }
 
+// 推导 greater 的布尔广播结果类型。
 Type GreaterInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     return BinaryBroadcastInferType("greater", input_types, "bool");
 }
 
+// 推导保持 shape 与 dtype 的一元算子类型。
 Type UnarySameInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     RequireArity("unary", input_types, 1);
@@ -269,6 +297,7 @@ Type UnarySameInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return input_types[0];
 }
 
+// 推导 cast 的 shape 保持和目标 dtype。
 Type CastInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("cast", input_types, 1);
     const auto* data = RequireTensor("cast", input_types[0], "data");
@@ -277,6 +306,7 @@ Type CastInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(ShapeVector(data), dtype);
 }
 
+// 推导批量矩阵乘的广播前缀与末两维。
 Type MatMulInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     RequireArity("matmul", input_types, 2);
@@ -298,6 +328,7 @@ Type MatMulInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType({a[0], b[1]}, lhs->dtype);
 }
 
+// 推导 dense 的批维和 units 输出维度。
 Type DenseInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("nn_dense", input_types, 2);
     const auto* data = RequireTensor("nn_dense", input_types[0], "data");
@@ -316,6 +347,7 @@ Type DenseInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType({data->shape[0], units}, dtype);
 }
 
+// 推导 GEMM 转置、广播 bias 和输出 dtype。
 Type GemmInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("nn_gemm", input_types, 3);
     const auto* a_type = RequireTensor("nn_gemm", input_types[0], "A");
@@ -343,6 +375,7 @@ Type GemmInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(out_shape, a_type->dtype);
 }
 
+// 推导 NCHW/OIHW 卷积输出 shape 与 dtype。
 Type Conv2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
     if (input_types.size() != 2 && input_types.size() != 3) {
         throw std::runtime_error("nn_conv2d expects data, weight[, bias]");
@@ -399,6 +432,7 @@ Type Conv2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType({data->shape[0], channels, oh, ow}, dtype);
 }
 
+// 推导二维池化输出空间维度。
 Type Pool2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("pool2d", input_types, 1);
     const auto* data = RequireTensor("pool2d", input_types[0], "data");
@@ -426,6 +460,7 @@ Type Pool2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType({data->shape[0], data->shape[1], oh, ow}, data->dtype);
 }
 
+// 推导全局平均池化的 NCHW 1x1 输出。
 Type GlobalAvgPool2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     RequireArity("nn_global_avg_pool2d", input_types, 1);
@@ -436,6 +471,7 @@ Type GlobalAvgPool2DInferType(const Attrs& attrs, const Array<Type>& input_types
     return MakeTensorType({data->shape[0], data->shape[1], 1, 1}, data->dtype);
 }
 
+// 按 axis 合并 flatten 两侧维度。
 Type FlattenInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("nn_flatten", input_types, 1);
     const auto* data = RequireTensor("nn_flatten", input_types[0], "data");
@@ -451,6 +487,7 @@ Type FlattenInferType(const Attrs& attrs, const Array<Type>& input_types) {
                           data->dtype);
 }
 
+// 解释 0、-1 与 allowzero 后推导 reshape 结果。
 Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     if (input_types.size() != 1 && input_types.size() != 2) {
         throw std::runtime_error("reshape expects data and optional legacy shape input");
@@ -510,6 +547,7 @@ Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(out, data->dtype);
 }
 
+// 返回输入张量 rank 长度的 int64 shape 向量类型。
 Type ShapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     RequireArity("shape", input_types, 1);
@@ -517,13 +555,14 @@ Type ShapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType({static_cast<int64_t>(data->shape.size())}, "int64");
 }
 
+// 按 perm 或逆序默认规则推导 transpose shape。
 Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("transpose", input_types, 1);
     const auto* data = RequireTensor("transpose", input_types[0], "data");
     const int rank = static_cast<int>(data->shape.size());
     std::vector<int64_t> perm;
     if (const auto* transpose_attrs = attrs.As<TransposeAttrsNode>()) {
-        perm = transpose_attrs->perm;
+        perm.assign(transpose_attrs->perm.begin(), transpose_attrs->perm.end());
     }
     if (perm.empty()) {
         for (int i = rank - 1; i >= 0; --i) {
@@ -547,12 +586,13 @@ Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(out, data->dtype);
 }
 
+// 按 axes 与 keepdims 推导 reduce_mean 结果 shape。
 Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("reduce_mean", input_types, 1);
     const auto* data = RequireTensor("reduce_mean", input_types[0], "data");
     const auto* reduce_attrs = attrs.As<ReduceMeanAttrsNode>();
     const std::vector<int> axes =
-        NormalizeAxes("reduce_mean", reduce_attrs ? reduce_attrs->axes : std::vector<int64_t>{},
+        NormalizeAxes("reduce_mean", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{},
                       static_cast<int>(data->shape.size()));
     const bool keepdims = !reduce_attrs || reduce_attrs->keepdims != 0;
 
@@ -574,6 +614,7 @@ Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(out, data->dtype);
 }
 
+// 校验 softmax 轴并保持输入类型。
 Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("softmax", input_types, 1);
     const auto* data = RequireTensor("softmax", input_types[0], "data");
@@ -585,6 +626,7 @@ Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return input_types[0];
 }
 
+// 校验输入 rank/dtype 并沿指定轴拼接维度。
 Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("concatenate", input_types, 1);
     const auto* tuple = input_types[0].As<TupleTypeNode>();
@@ -618,6 +660,7 @@ Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(out, first->dtype);
 }
 
+// 按等分数量或显式分段推导 split 的 TupleType。
 Type SplitInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("split", input_types, 1);
     const auto* data = RequireTensor("split", input_types[0], "data");
@@ -665,6 +708,7 @@ Type SplitInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return TupleType(fields);
 }
 
+// 广播条件与两个值分支，推导 where 结果类型。
 Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     RequireArity("where", input_types, 3);
@@ -680,6 +724,7 @@ Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(BroadcastShape("where", ShapeVector(cond), value_shape), lhs->dtype);
 }
 
+// 将 indices shape 插入 data 的 gather 轴位置。
 Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("gather", input_types, 2);
     const auto* data = RequireTensor("gather", input_types[0], "data");

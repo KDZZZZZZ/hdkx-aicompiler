@@ -25,10 +25,12 @@
 #endif
 
 // ======== 辅助函数 ========
+// 使用绝对误差比较 LLVM 执行结果中的单精度数值。
 bool FloatNear(float a, float b, float eps = 1e-5f) {
     return std::fabs(a - b) < eps;
 }
 
+// 直接构造 TIR 加法内核，验证 LLVM 降低、加载和 NDArray 参数调用。
 void TestDirect_ElemwiseAdd() {
     std::cout << "=== Test: Direct TIR ElemwiseAdd → LLVM → JIT ===" << std::endl;
 
@@ -126,6 +128,7 @@ void TestDirect_ElemwiseAdd() {
 #endif
 }
 
+// 从 Relay 加法函数走完整 lowering 路径，并验证生成内核数值。
 void TestRelay_ElemwiseAdd() {
     std::cout << "\n=== Test: Relay ElemwiseAdd → LowerToTIR → LLVM → JIT ===" << std::endl;
 
@@ -189,6 +192,7 @@ void TestRelay_ElemwiseAdd() {
 #endif
 }
 
+// 验证 C 源码后端生成循环、加法和返回语句。
 void TestCCodegen() {
     std::cout << "\n=== Test: C Codegen (TIR → C source) ===" << std::endl;
 
@@ -242,6 +246,7 @@ void TestCCodegen() {
     }
 }
 
+// 验证 Compiler 公共 API 可编译并执行单内核 Relay 函数。
 void TestCompilerAPI() {
     std::cout << "\n=== Test: Compiler API (Relay → Compile → Run) ===" << std::endl;
 
@@ -254,8 +259,8 @@ void TestCompilerAPI() {
     Call add_call(relay::Op::Get("add"), {x, y});
     Function func({x, y}, add_call);
 
-    // 一行编译
-    auto config = api::CompileConfig::AOT(BuildTarget(kCPU), 2);
+    // AOT 配置显式从 cpu:0 构造 Target，避免旧的设备类型/id 拼装路径。
+    auto config = api::CompileConfig::AOT(BuildTarget(Device::CPU()), 2);
     auto module = api::Compiler::Compile(func, config);
 
     std::cout << "Status: " << module.GetStatus() << std::endl;
@@ -293,6 +298,7 @@ void TestCompilerAPI() {
 #endif
 }
 
+// 验证 Compiler 为多阶段表达式生成并正确使用中间存储。
 void TestCompilerAPIIntermediateAllocate() {
     std::cout << "\n=== Test: Compiler API intermediate Allocate ===" << std::endl;
 
@@ -305,7 +311,7 @@ void TestCompilerAPIIntermediateAllocate() {
     Call second_add(relay::Op::Get("add"), {first_add, y});
     Function func({x, y}, second_add);
 
-    auto config = api::CompileConfig::AOT(BuildTarget(kCPU), 2);
+    auto config = api::CompileConfig::AOT(BuildTarget(Device::CPU()), 2);
     auto module = api::Compiler::Compile(func, config);
 
     float data_x[4] = {1, 2, 3, 4};
@@ -331,6 +337,7 @@ void TestCompilerAPIIntermediateAllocate() {
 #endif
 }
 
+// 验证自适应运行时按输入 shape 选择、缓存并执行编译内核。
 void TestAdaptiveRuntime() {
     std::cout << "\n=== Test: Adaptive Runtime (auto-compile + hot-swap) ===" << std::endl;
 
@@ -343,8 +350,8 @@ void TestAdaptiveRuntime() {
     Call add_call(relay::Op::Get("add"), {x, y});
     Function func({x, y}, add_call);
 
-    // Adaptive编译
-    auto config = api::CompileConfig::Adaptive(BuildTarget(kCPU));
+    // 自适应编译同样使用强类型 Device 构造 Target。
+    auto config = api::CompileConfig::Adaptive(BuildTarget(Device::CPU()));
     auto module = api::Compiler::Compile(func, config);
 
     std::cout << "Initial status: " << module.GetStatus() << std::endl;
@@ -412,6 +419,7 @@ void TestAdaptiveRuntime() {
 #endif
 }
 
+// 顺序执行 LLVM/C codegen 契约测试并汇总退出状态。
 int main() {
     std::cout << "==== HDKX AI Compiler - Codegen Test ====" << std::endl;
     TestDirect_ElemwiseAdd();

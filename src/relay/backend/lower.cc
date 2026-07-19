@@ -26,10 +26,12 @@ namespace relay {
 
 namespace {
 
+// 判断调用是否属于执行计划处理而非 TE 计算处理的设备通信算子。
 bool IsDeviceCommunicationOpName(const std::string& op_name) {
     return op_name.rfind("device.", 0) == 0;
 }
 
+// 将 Relay 文本 dtype 转换为 TIR DataType。
 tir::DataType DTypeFromString(const std::string& dtype) {
     if (dtype == "float32") return tir::DataType::Float(32);
     if (dtype == "float64") return tir::DataType::Float(64);
@@ -41,13 +43,17 @@ tir::DataType DTypeFromString(const std::string& dtype) {
     throw std::runtime_error("Unsupported dtype string: " + dtype);
 }
 
+// 将 DLPack dtype 显式映射为 TIR DataType，包括独立的 bool 类型码。
 tir::DataType DTypeFromDL(const DLDataType& dl_dtype) {
     if (dl_dtype.code == kDLFloat) return tir::DataType::Float(dl_dtype.bits, dl_dtype.lanes);
     if (dl_dtype.code == kDLInt) return tir::DataType::Int(dl_dtype.bits, dl_dtype.lanes);
-    if (dl_dtype.code == kDLUint) return tir::DataType::UInt(dl_dtype.bits, dl_dtype.lanes);
+    if (dl_dtype.code == kDLUInt || dl_dtype.code == kDLBool) {
+        return tir::DataType::UInt(dl_dtype.bits, dl_dtype.lanes);
+    }
     throw std::runtime_error("Unsupported DLDataType code in constant");
 }
 
+// 将 TensorType 的静态维度转换为 TIR shape 表达式。
 Array<tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type) {
     Array<tir::PrimExpr> shape;
     for (const auto dim : type->shape) {
@@ -56,6 +62,7 @@ Array<tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type) {
     return shape;
 }
 
+// 按行主序把多维索引展平为一维 buffer 索引。
 tir::PrimExpr FlattenIndex(const Array<tir::PrimExpr>& indices, const Array<tir::PrimExpr>& shape) {
     if (shape.empty()) {
         return tir::IntImm(0);
@@ -70,6 +77,7 @@ tir::PrimExpr FlattenIndex(const Array<tir::PrimExpr>& indices, const Array<tir:
     return linear;
 }
 
+// 为 sum、max、min 归约生成与 dtype 匹配的单位元。
 tir::PrimExpr MakeIdentityForReduce(te::ReduceType rtype, tir::DataType dtype) {
     if (rtype == te::ReduceType::kSum) {
         if (dtype.code == 2) {
@@ -94,6 +102,7 @@ tir::PrimExpr MakeIdentityForReduce(te::ReduceType rtype, tir::DataType dtype) {
     throw std::runtime_error("Unsupported reduce type");
 }
 
+// 返回 Relay 节点类别名称，用于 lowering 错误诊断。
 std::string RelayNodeKind(const Expr& expr) {
     if (!expr.defined()) return "<undefined>";
     if (expr.As<VarNode>()) return "Var";
@@ -108,6 +117,7 @@ std::string RelayNodeKind(const Expr& expr) {
     return "<unknown>";
 }
 
+// 调用算子注册的单输出或多输出 Relay-to-TE lowering 函数。
 Array<te::Tensor> InvokeRelayToTE(const OpNode* op_node,
                                   const Attrs& attrs,
                                   const Array<te::Tensor>& inputs,
@@ -153,8 +163,10 @@ Array<te::Tensor> InvokeRelayToTE(const OpNode* op_node,
                              op_node->name + ", got " + TypeToString(out_type));
 }
 
+// 把已完成类型推导的 Relay 数据流转换为 TE Tensor 图。
 class RelayToTEConverter : public RelayPassFunctor<Array<te::Tensor>> {
 public:
+    // 为函数参数建立 TE placeholder 与变量映射。
     explicit RelayToTEConverter(const Function& func) {
         for (const auto& param : func->params) {
             const TensorTypeNode* ttype = param->type_annotation.As<TensorTypeNode>();
@@ -170,9 +182,12 @@ public:
         }
     }
 
+    // 转换指定 Relay 表达式。
     Array<te::Tensor> Convert(const Expr& expr) { return Visit(expr); }
 
+    // 返回按函数参数顺序创建的输入 placeholder。
     const Array<te::Tensor>& input_tensors() const { return input_tensors_; }
+    // 返回为 Relay Constant 创建的常量 placeholder。
     const Array<te::Tensor>& constant_tensors() const { return constant_tensors_; }
 
 protected:
@@ -182,6 +197,7 @@ protected:
     Array<te::Tensor> constant_tensors_;
     int constant_counter_ = 0;
 
+    // 按表达式对象身份记忆化 TE 输出集合。
     Array<te::Tensor> Visit(const Expr& expr) override {
         auto it = memo_.find(expr.get());
         if (it != memo_.end()) return it->second;
@@ -190,6 +206,7 @@ protected:
         return res;
     }
 
+    // 解析函数参数变量对应的 TE placeholder。
     Array<te::Tensor> VisitVar(const VarNode* op, const Expr& ref) override {
         auto it = var_map_.find(ref.get());
         if (it == var_map_.end()) {
@@ -198,9 +215,10 @@ protected:
         return {it->second};
     }
 
+    // 从 Storage-backed NDArray 元数据创建只读常量 placeholder。
     Array<te::Tensor> VisitConstant(const ConstantNode* op, const Expr& ref) override {
         Array<tir::PrimExpr> shape;
-        for (const auto dim : op->data->shape) {
+        for (const auto dim : op->data->shape_storage) {
             shape.push_back(tir::IntImm(dim, tir::DataType::Int(64)));
         }
         tir::DataType dtype = DTypeFromDL(op->data->dl_tensor.dtype);
@@ -210,6 +228,7 @@ protected:
         return {t};
     }
 
+    // 转换实参并调用算子的 Relay-to-TE 注册规则。
     Array<te::Tensor> VisitCall(const CallNode* op, const Expr& ref) override {
         Array<te::Tensor> inputs;
         for (const auto& arg : op->args) {
@@ -232,6 +251,7 @@ protected:
         return InvokeRelayToTE(op_node, attrs, inputs, out_type);
     }
 
+    // 按字段顺序展平 tuple 的 TE 输出。
     Array<te::Tensor> VisitTuple(const TupleNode* op, const Expr& ref) override {
         (void)ref;
         Array<te::Tensor> outputs;
@@ -247,6 +267,7 @@ protected:
         return outputs;
     }
 
+    // 从 tuple 展平输出中选取指定字段。
     Array<te::Tensor> VisitTupleGetItem(const TupleGetItemNode* op, const Expr& ref) override {
         (void)ref;
         Array<te::Tensor> tuple_outputs = Visit(op->tuple);
@@ -258,12 +279,14 @@ protected:
         return {tuple_outputs[static_cast<size_t>(op->index)]};
     }
 
+    // 拒绝当前 TE lowering 尚未支持的 Relay 节点。
     Array<te::Tensor> VisitDefault(const Expr& expr) override {
         throw std::runtime_error("Unsupported Relay node in LowerToTIR: " +
                                  RelayNodeKind(expr));
     }
 };
 
+// 递归收集 TE 表达式中的 ProducerLoad 依赖。
 void FindProducerLoads(const tir::PrimExpr& expr, std::vector<te::Tensor>* deps) {
     if (!expr.defined()) return;
     if (auto* pl = expr.As<te::ProducerLoadNode>()) {
@@ -300,6 +323,7 @@ void FindProducerLoads(const tir::PrimExpr& expr, std::vector<te::Tensor>* deps)
     }
 }
 
+// 对 TE 张量依赖图执行 DFS，生成生产者在前的拓扑顺序。
 void CollectOpsDFS(const te::Tensor& t,
                    std::unordered_set<const Object*>* visited,
                    std::unordered_map<const Object*, te::Tensor>* op_output,
@@ -323,11 +347,14 @@ void CollectOpsDFS(const te::Tensor& t,
     topo->push_back(t->op);
 }
 
+// 把 TE 表达式中的张量访问改写为 TIR buffer Load。
 class ExprLowerer {
 public:
+    // 绑定张量到 TIR buffer 变量的映射。
     explicit ExprLowerer(const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor)
         : buffer_var_by_tensor_(buffer_var_by_tensor) {}
 
+    // 递归降低纯表达式节点；Reduce 留给语句级 lowering。
     tir::PrimExpr Lower(const tir::PrimExpr& expr) const {
         if (!expr.defined()) return expr;
 
@@ -379,6 +406,7 @@ private:
     const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor_;
 };
 
+// 用 ComputeOp 数据轴从内到外包裹串行循环。
 tir::Stmt WrapDataLoops(const te::ComputeOpNode* op, tir::Stmt body) {
     for (int i = static_cast<int>(op->axis.size()) - 1; i >= 0; --i) {
         body = tir::For(op->axis[i], tir::IntImm(0), op->shape[i], tir::ForType::Serial, body);
@@ -386,6 +414,7 @@ tir::Stmt WrapDataLoops(const te::ComputeOpNode* op, tir::Stmt body) {
     return body;
 }
 
+// 将单输出 TE ComputeOp 降为 TIR Store、数据循环和可选归约循环。
 tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
                            const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor,
                            const ExprLowerer& expr_lowerer) {
@@ -448,6 +477,7 @@ tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
     return WrapDataLoops(op, store);
 }
 
+// 为公开输出生成唯一且可读的 TIR 参数名。
 std::string MakeOutputVarName(const te::Tensor& tensor,
                               size_t output_index,
                               std::unordered_set<std::string>* used_names) {
@@ -467,6 +497,7 @@ std::string MakeOutputVarName(const te::Tensor& tensor,
 
 }  // namespace
 
+// 完成类型推导、Relay-to-TE 转换、拓扑排序并组装最终 TIR PrimFunc。
 tir::PrimFunc LowerToTIR(Function func) {
     if (!func.defined()) {
         throw std::runtime_error("LowerToTIR expects a defined function");

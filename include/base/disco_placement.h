@@ -17,7 +17,7 @@ public:
     int worker_id{-1};
     int group_id{0};
     int local_rank{-1};
-    ObjectRef device_obj;
+    Device device;
     Target target;
     VirtualDevice virtual_device;
 
@@ -33,7 +33,7 @@ class WorkerPlacement : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
     WorkerPlacement(const ObjectRef& ref) : ObjectRef(ref) {}
-    WorkerPlacement(int worker_id, int group_id, int local_rank, ObjectRef device_obj,
+    WorkerPlacement(int worker_id, int group_id, int local_rank, Device device,
                     Target target, VirtualDevice virtual_device);
 
     const WorkerPlacementNode* operator->() const;

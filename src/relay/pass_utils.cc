@@ -20,12 +20,13 @@ namespace pass_utils {
 
 namespace {
 
+// 判断 NDArray 的逻辑元素数是否恰为一。
 bool IsScalarShape(const runtime::NDArray& array) {
     if (!array.defined()) {
         return false;
     }
     int64_t elements = 1;
-    for (const int64_t dim : array->shape) {
+    for (const int64_t dim : array->shape_storage) {
         if (dim < 0) {
             return false;
         }
@@ -34,6 +35,7 @@ bool IsScalarShape(const runtime::NDArray& array) {
     return elements == 1;
 }
 
+// 将支持的 DLPack 标量类型转换为 NDArray dtype 名称。
 std::string DTypeToString(const DLDataType& dtype) {
     if (dtype.lanes != 1) {
         return "float64";
@@ -47,68 +49,76 @@ std::string DTypeToString(const DLDataType& dtype) {
         if (dtype.bits == 32) return "int32";
         if (dtype.bits == 64) return "int64";
     }
-    if (dtype.code == kDLUint) {
-        if (dtype.bits == 1) return "bool";
+    if (dtype.code == kDLUInt) {
         if (dtype.bits == 8) return "uint8";
     }
+    if (dtype.code == kDLBool && dtype.bits == 8) return "bool";
     return "float64";
 }
 
 template <typename T>
+// 把 double 中间值按目标标量类型写入主机缓冲区。
 void WriteScalarValue(void* raw, double value) {
     *static_cast<T*>(raw) = static_cast<T>(value);
 }
 
+// 通过 NDArray 复制接口写入一个标量值。
 bool WriteScalarToArray(const runtime::NDArray& array, double value) {
-    if (!array.defined() || !array->dl_tensor.data) {
+    if (!array.defined() || array.NBytes() == 0) {
         return false;
     }
-    void* raw = array->dl_tensor.data;
+    // 通过主机暂存区写入，避免 Pass 直接解引用可能位于 CUDA 上的张量地址。
+    std::vector<uint8_t> storage(array.NBytes());
+    void* raw = storage.data();
+    const auto finish = [&] {
+        array.CopyFromBytes(storage.data(), storage.size());
+        return true;
+    };
     const DLDataType& dtype = array->dl_tensor.dtype;
     if (dtype.code == kDLFloat) {
         if (dtype.bits == 32) {
             WriteScalarValue<float>(raw, value);
-            return true;
+            return finish();
         }
         if (dtype.bits == 64) {
             WriteScalarValue<double>(raw, value);
-            return true;
+            return finish();
         }
     }
     if (dtype.code == kDLInt) {
         if (dtype.bits == 8) {
             WriteScalarValue<int8_t>(raw, value);
-            return true;
+            return finish();
         }
         if (dtype.bits == 16) {
             WriteScalarValue<int16_t>(raw, value);
-            return true;
+            return finish();
         }
         if (dtype.bits == 32) {
             WriteScalarValue<int32_t>(raw, value);
-            return true;
+            return finish();
         }
         if (dtype.bits == 64) {
             WriteScalarValue<int64_t>(raw, value);
-            return true;
+            return finish();
         }
     }
-    if (dtype.code == kDLUint) {
-        if (dtype.bits == 1 || dtype.bits == 8) {
+    if (dtype.code == kDLUInt || dtype.code == kDLBool) {
+        if (dtype.bits == 8) {
             WriteScalarValue<uint8_t>(raw, value);
-            return true;
+            return finish();
         }
         if (dtype.bits == 16) {
             WriteScalarValue<uint16_t>(raw, value);
-            return true;
+            return finish();
         }
         if (dtype.bits == 32) {
             WriteScalarValue<uint32_t>(raw, value);
-            return true;
+            return finish();
         }
         if (dtype.bits == 64) {
             WriteScalarValue<uint64_t>(raw, value);
-            return true;
+            return finish();
         }
     }
     return false;
@@ -116,17 +126,19 @@ bool WriteScalarToArray(const runtime::NDArray& array, double value) {
 
 }  // namespace
 
+// 尝试读取标量常量的数值，不要求调用方接收 dtype。
 bool TryGetScalarConstantValue(const Expr& expr, double* out_value) {
     return TryGetScalarConstantValueWithDType(expr, out_value, nullptr);
 }
 
+// 通过主机副本读取标量常量，并可同时返回原始 DLPack dtype。
 bool TryGetScalarConstantValueWithDType(const Expr& expr, double* out_value,
                                         DLDataType* out_dtype) {
     if (!out_value) {
         return false;
     }
     const auto* constant = expr.As<ConstantNode>();
-    if (!constant || !constant->data.defined() || !constant->data->dl_tensor.data) {
+    if (!constant || !constant->data.defined() || constant->data.NBytes() == 0) {
         return false;
     }
     if (!IsScalarShape(constant->data)) {
@@ -141,7 +153,10 @@ bool TryGetScalarConstantValueWithDType(const Expr& expr, double* out_value,
         *out_dtype = dtype;
     }
 
-    const void* raw = constant->data->dl_tensor.data;
+    // 常量读取统一走 NDArray 复制接口，CPU-only Pass 不接触设备裸指针。
+    std::vector<uint8_t> storage(constant->data.NBytes());
+    constant->data.CopyToBytes(storage.data(), storage.size());
+    const void* raw = storage.data();
     if (dtype.code == kDLFloat) {
         if (dtype.bits == 32) {
             *out_value = static_cast<double>(*static_cast<const float*>(raw));
@@ -154,8 +169,8 @@ bool TryGetScalarConstantValueWithDType(const Expr& expr, double* out_value,
         return false;
     }
 
-    if (dtype.code == kDLInt || dtype.code == kDLUint) {
-        if (dtype.bits == 1 || dtype.bits == 8) {
+    if (dtype.code == kDLInt || dtype.code == kDLUInt || dtype.code == kDLBool) {
+        if (dtype.bits == 8) {
             *out_value = static_cast<double>(*static_cast<const uint8_t*>(raw));
             return true;
         }
@@ -177,26 +192,32 @@ bool TryGetScalarConstantValueWithDType(const Expr& expr, double* out_value,
     return false;
 }
 
+// 在 CPU Storage 上构造指定 dtype 的标量 Relay Constant。
 Constant MakeScalarConstant(double value, const DLDataType& dtype) {
-    runtime::NDArray array(Array<int64_t>{}, DTypeToString(dtype));
+    runtime::NDArray array = runtime::NDArray::Empty(
+        {}, runtime::DataTypeFromString(DTypeToString(dtype)), Device::CPU());
     if (!WriteScalarToArray(array, value)) {
-        runtime::NDArray fallback(Array<int64_t>{}, "float64");
+        runtime::NDArray fallback = runtime::NDArray::Empty(
+            {}, runtime::DataTypeFromString("float64"), Device::CPU());
         WriteScalarToArray(fallback, value);
         return Constant(fallback);
     }
     return Constant(array);
 }
 
+// 判断表达式是否为数值零标量常量。
 bool IsConstZero(const Expr& expr) {
     double value = 0.0;
     return TryGetScalarConstantValue(expr, &value) && value == 0.0;
 }
 
+// 判断表达式是否为数值一标量常量。
 bool IsConstOne(const Expr& expr) {
     double value = 0.0;
     return TryGetScalarConstantValue(expr, &value) && value == 1.0;
 }
 
+// 递归判断表达式是否包含设备操作或未知调用等潜在副作用。
 bool HasSideEffect(const Expr& expr) {
     std::unordered_map<const Object*, bool> memo;
 
@@ -254,6 +275,7 @@ bool HasSideEffect(const Expr& expr) {
     return visit(expr);
 }
 
+// 按对象身份统计目标变量在表达式中的引用次数。
 size_t CountVarUses(const Expr& expr, const Var& var) {
     if (!expr.defined() || !var.defined()) {
         return 0;
@@ -261,6 +283,7 @@ size_t CountVarUses(const Expr& expr, const Var& var) {
     const Object* target = var.get();
     size_t count = 0;
 
+    // 递归遍历所有 Relay 子表达式，并按目标 Var 的对象身份累计引用。
     std::function<void(const Expr&)> visit = [&](const Expr& current) {
         if (!current.defined()) {
             return;
@@ -309,6 +332,7 @@ size_t CountVarUses(const Expr& expr, const Var& var) {
     return count;
 }
 
+// 把源表达式的 VirtualDevice 与 checked_type 元数据复制到新表达式。
 Expr CopyVirtualDevice(const Expr& source, const Expr& dest) {
     if (!source.defined() || !dest.defined()) {
         return dest;
@@ -323,6 +347,7 @@ Expr CopyVirtualDevice(const Expr& source, const Expr& dest) {
     return dest;
 }
 
+// 取得 Call 直接引用的注册算子名称，非 Op 调用返回空串。
 std::string GetCallOpName(const CallNode* call) {
     if (!call) {
         return "";
@@ -334,21 +359,26 @@ std::string GetCallOpName(const CallNode* call) {
     return op_node->name;
 }
 
+// 生成用于 pass 去重和比较的稳定结构文本键。
 std::string ExprStructuralKey(const Expr& expr) {
     return relay::pass::ToText(expr);
 }
 
+// 在遵守函数参数与 let 绑定遮蔽规则的前提下替换自由变量。
 Expr SubstituteVar(const Expr& expr, const Var& target, const Expr& replacement) {
     if (!expr.defined() || !target.defined() || !replacement.defined()) {
         return expr;
     }
 
+    // 执行具备词法作用域感知的变量替换。
     class VarSubstituter : public RelayPass {
     public:
+        // 保存待替换变量和替代表达式。
         VarSubstituter(Var target, Expr replacement)
             : target_(std::move(target)), replacement_(std::move(replacement)) {}
 
     protected:
+        // 仅替换对象身份匹配的变量。
         Expr VisitVar(const VarNode* op, const Expr& ref) override {
             (void)op;
             if (ref.get() == target_.get()) {
@@ -357,6 +387,7 @@ Expr SubstituteVar(const Expr& expr, const Var& target, const Expr& replacement)
             return ref;
         }
 
+        // 参数遮蔽目标变量时停止进入函数体。
         Expr VisitFunction(const FunctionNode* op, const Expr& ref) override {
             for (const auto& param : op->params) {
                 if (param.get() == target_.get()) {
@@ -366,6 +397,7 @@ Expr SubstituteVar(const Expr& expr, const Var& target, const Expr& replacement)
             return RelayPass::VisitFunction(op, ref);
         }
 
+        // let 绑定只遮蔽 body，不遮蔽 value。
         Expr VisitLet(const LetNode* op, const Expr& ref) override {
             Expr new_value = Mutate(op->value);
             if (op->var.get() == target_.get()) {
@@ -390,13 +422,14 @@ Expr SubstituteVar(const Expr& expr, const Var& target, const Expr& replacement)
     return substituter.Mutate(expr);
 }
 
+// 克隆 VirtualDevice 并只替换 memory_scope，保留物理与逻辑身份。
 VirtualDevice WithMemoryScope(const VirtualDevice& virtual_device,
                               const std::string& memory_scope) {
     if (!virtual_device.defined()) {
         return virtual_device;
     }
     auto* node = new VirtualDeviceNode();
-    node->device_obj = virtual_device->device_obj;
+    node->device = virtual_device->device;
     node->target = virtual_device->target;
     node->memory_scope = memory_scope;
     node->virtual_device_id = virtual_device->virtual_device_id;

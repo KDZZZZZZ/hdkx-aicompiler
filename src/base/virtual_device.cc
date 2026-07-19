@@ -13,21 +13,7 @@ namespace kxc {
 
 namespace {
 
-const class Device* AsDevice(const ObjectRef& obj) {
-    if (!obj.defined()) {
-        return nullptr;
-    }
-    const Object* raw = obj.get();
-    if (!raw || raw->GetTypeId() != kKXC_DEVICE_TYPE) {
-        throw std::runtime_error("VirtualDevice.device_obj is not a Device");
-    }
-    return static_cast<const class Device*>(raw);
-}
-
-ObjectRef CloneDevice(const class Device& device) {
-    return ObjectRef(new class Device(device));
-}
-
+// 从可选 ObjectRef 恢复 Target，并拒绝其他对象类型。
 Target AsTarget(const ObjectRef& obj) {
     if (!obj.defined()) {
         return Target();
@@ -39,92 +25,92 @@ Target AsTarget(const ObjectRef& obj) {
     return Target(obj);
 }
 
-void ValidateTargetDevicePair(const ObjectRef& device_obj, const Target& target) {
-    if (!device_obj.defined() || !target.defined()) {
+// 当两侧约束同时存在时，验证逻辑放置中的物理身份一致。
+void ValidateTargetDevicePair(const Device& device, const Target& target) {
+    if (!device.defined() || !target.defined()) {
         return;
     }
-    const class Device* dev = AsDevice(device_obj);
-    if (!dev) {
-        return;
-    }
-    if (target->device_type != kUnknown && target->device_type != dev->device_type()) {
+    if (target->device_type != kUnknown && target->device_type != device.device_type()) {
         throw std::runtime_error("VirtualDevice device/target mismatch in device_type");
     }
-    if (target->device_id >= 0 && target->device_id != dev->device_id()) {
+    if (target->device_id >= 0 && target->device_id != device.device_id()) {
         throw std::runtime_error("VirtualDevice device/target mismatch in device_id");
     }
 }
 
 }  // namespace
 
+// 判断逻辑放置是否绑定物理 Device。
 bool VirtualDeviceNode::has_device() const {
-    return device_obj.defined();
+    return device.defined();
 }
 
+// 判断逻辑放置是否携带编译 Target。
 bool VirtualDeviceNode::has_target() const {
     return target.defined();
 }
 
+// 判断所有放置维度是否均未施加约束。
 bool VirtualDeviceNode::IsFullyUnconstrained() const {
-    return !device_obj.defined() && !target.defined() && memory_scope.empty() &&
+    return !device.defined() && !target.defined() && memory_scope.empty() &&
            virtual_device_id == kInvalidVirtualDeviceId;
 }
 
+// 判断执行设备与编译目标是否都已确定。
 bool VirtualDeviceNode::IsFullyConstrained() const {
-    return device_obj.defined() && target.defined() &&
-           virtual_device_id != kInvalidVirtualDeviceId;
+    // 逻辑放置是否完整由 Device 与 Target 决定，不要求复用物理 device_id 作为逻辑 ID。
+    return device.defined() && target.defined();
 }
 
-class Device VirtualDeviceNode::device() const {
-    const class Device* dev = AsDevice(device_obj);
-    if (!dev) {
-        throw std::runtime_error("VirtualDevice does not contain a Device");
-    }
-    return *dev;
-}
-
-VirtualDevice::VirtualDevice(const class Device& device, Target target,
+// 构造可同时包含物理 Device、Target、内存域与逻辑编号的放置约束。
+VirtualDevice::VirtualDevice(const Device& device, Target target,
                              std::string memory_scope, int virtual_device_id) {
     VirtualDeviceNode* node = new VirtualDeviceNode();
-    node->device_obj = CloneDevice(device);
+    node->device = device;
     node->target = std::move(target);
     node->memory_scope = std::move(memory_scope);
-    node->virtual_device_id =
-        (virtual_device_id == kInvalidVirtualDeviceId) ? device.device_id() : virtual_device_id;
-    ValidateTargetDevicePair(node->device_obj, node->target);
+    // virtual_device_id 是编译期逻辑身份，与物理 Device::device_id 保持解耦。
+    node->virtual_device_id = virtual_device_id;
+    ValidateTargetDevicePair(node->device, node->target);
     SetData(node);
 }
 
+// 构造尚未绑定物理 Device 的 Target 侧放置约束。
 VirtualDevice::VirtualDevice(Target target, std::string memory_scope, int virtual_device_id) {
     VirtualDeviceNode* node = new VirtualDeviceNode();
     node->target = std::move(target);
     node->memory_scope = std::move(memory_scope);
     node->virtual_device_id = virtual_device_id;
-    if (node->virtual_device_id == kInvalidVirtualDeviceId && node->target.defined()) {
-        node->virtual_device_id = node->target->device_id;
-    }
     SetData(node);
 }
 
+// 返回经过 VirtualDevice 类型约束的底层节点。
 const VirtualDeviceNode* VirtualDevice::operator->() const {
     return static_cast<const VirtualDeviceNode*>(object_);
 }
 
+// 将未定义句柄也视为无约束放置。
 bool VirtualDevice::IsFullyUnconstrained() const {
     return !defined() || operator->()->IsFullyUnconstrained();
 }
 
+// 判断已定义对象是否同时包含 Device 与 Target。
 bool VirtualDevice::IsFullyConstrained() const {
     return defined() && operator->()->IsFullyConstrained();
 }
 
-class Device VirtualDevice::device() const {
+// 返回已绑定的物理 Device，缺失约束时明确失败。
+Device VirtualDevice::device() const {
     if (!defined()) {
         throw std::runtime_error("Undefined VirtualDevice has no Device");
     }
-    return operator->()->device();
+    if (!operator->()->device.defined()) {
+        throw std::runtime_error("VirtualDevice does not contain a Device");
+    }
+    return operator->()->device;
 }
 
+// 输出逻辑放置的各维约束，便于 Pass 和计划诊断。
 std::string VirtualDevice::ToString() const {
     if (!defined()) {
         return "VirtualDevice(undefined)";
@@ -133,7 +119,7 @@ std::string VirtualDevice::ToString() const {
     std::stringstream ss;
     ss << "VirtualDevice(";
     if (n->has_device()) {
-        ss << n->device().ToString();
+        ss << n->device.ToString();
     } else {
         ss << "device=none";
     }
@@ -148,33 +134,38 @@ std::string VirtualDevice::ToString() const {
     return ss.str();
 }
 
+// 创建显式的全无约束逻辑设备对象。
 VirtualDevice VirtualDevice::FullyUnconstrained() {
     VirtualDeviceNode* node = new VirtualDeviceNode();
     return VirtualDevice(ObjectRef(node));
 }
 
-VirtualDevice VirtualDevice::ForDevice(const class Device& device) {
-    return VirtualDevice(device, Target(), "", device.device_id());
+// 创建仅绑定物理设备的逻辑放置。
+VirtualDevice VirtualDevice::ForDevice(const Device& device) {
+    return VirtualDevice(device);
 }
 
+// 创建仅绑定编译目标的逻辑放置。
 VirtualDevice VirtualDevice::ForTarget(const Target& target) {
-    return VirtualDevice(target, "", target.defined() ? target->device_id : kInvalidVirtualDeviceId);
+    return VirtualDevice(target);
 }
 
-VirtualDevice VirtualDevice::ForDeviceAndTarget(const class Device& device, const Target& target) {
-    return VirtualDevice(device, target, "", device.device_id());
+// 创建物理设备与编译目标均已确定的逻辑放置。
+VirtualDevice VirtualDevice::ForDeviceAndTarget(const Device& device, const Target& target) {
+    return VirtualDevice(device, target);
 }
 
+// 注册 VirtualDevice 工厂函数的 PackedFunc 入口。
 KXC_REGISTER_GLOBAL("virtual_device.FullyUnconstrained")
     .set_body(ToPackedFunc([]() -> ObjectRef { return VirtualDevice::FullyUnconstrained(); }));
 
 KXC_REGISTER_GLOBAL("virtual_device.ForDevice")
     .set_body(ToPackedFunc([](ObjectRef device_ref) -> ObjectRef {
-        const class Device* device = AsDevice(device_ref);
-        if (!device) {
+        Device device(device_ref);
+        if (!device.defined()) {
             throw std::runtime_error("virtual_device.ForDevice expects a defined Device");
         }
-        return VirtualDevice::ForDevice(*device);
+        return VirtualDevice::ForDevice(device);
     }));
 
 KXC_REGISTER_GLOBAL("virtual_device.ForTarget")
@@ -185,12 +176,12 @@ KXC_REGISTER_GLOBAL("virtual_device.ForTarget")
 
 KXC_REGISTER_GLOBAL("virtual_device.ForDeviceAndTarget")
     .set_body(ToPackedFunc([](ObjectRef device_ref, ObjectRef target_ref) -> ObjectRef {
-        const class Device* device = AsDevice(device_ref);
-        if (!device) {
+        Device device(device_ref);
+        if (!device.defined()) {
             throw std::runtime_error("virtual_device.ForDeviceAndTarget expects a defined Device");
         }
         Target target = AsTarget(target_ref);
-        return VirtualDevice::ForDeviceAndTarget(*device, target);
+        return VirtualDevice::ForDeviceAndTarget(device, target);
     }));
 
 }  // namespace kxc

@@ -3,6 +3,7 @@
  */
 
 #include "base/container.h"
+#include "relay/op.h"
 #include "relay/relay.h"
 #include "te/te.h"
 #include "tir/stmt.h"
@@ -12,6 +13,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 #ifdef KXC_OBJECT_TEST_STANDALONE
@@ -30,11 +32,13 @@ namespace {
         }                                                                           \
     } while (false)
 
+// 记录测试对象的构造和析构次数，用于验证引用生命周期。
 struct LifetimeCounters {
     int parent_destroyed{0};
     int child_destroyed{0};
 };
 
+// 析构时更新计数器的子对象节点。
 class ChildNode final : public kxc::Object {
 public:
     explicit ChildNode(LifetimeCounters* counters) : counters_(counters) {}
@@ -45,6 +49,7 @@ private:
     LifetimeCounters* counters_;
 };
 
+// 持有 ChildNode 的父对象，用于覆盖成员引用赋值场景。
 class ParentNode final : public kxc::Object {
 public:
     ParentNode(kxc::ObjectRef child, LifetimeCounters* counters)
@@ -58,6 +63,7 @@ private:
     LifetimeCounters* counters_;
 };
 
+// 暴露 SetData 的测试句柄，用于验证侵入式引用计数边界。
 class TestObjectRef : public kxc::ObjectRef {
 public:
     using ObjectRef::ObjectRef;
@@ -65,13 +71,16 @@ public:
     void ResetTo(const kxc::Object* object) { SetData(object); }
 };
 
+// 要求 128 字节对齐的节点，用于验证 Arena 对齐分配。
 class alignas(128) OveralignedNode final : public kxc::Object {};
 
+// 构造时抛出异常的节点，用于验证 Arena 回滚分配。
 class ThrowingNode final : public kxc::Object {
 public:
     ThrowingNode() { throw std::runtime_error("expected constructor failure"); }
 };
 
+// 验证从自身持有成员复制赋值时引用计数不会提前归零。
 bool TestCopyAssignmentFromOwnedMember() {
     LifetimeCounters counters;
     {
@@ -94,6 +103,7 @@ bool TestCopyAssignmentFromOwnedMember() {
     return true;
 }
 
+// 验证从自身持有成员移动赋值时对象仍保持有效。
 bool TestMoveAssignmentFromOwnedMember() {
     LifetimeCounters counters;
     {
@@ -116,6 +126,7 @@ bool TestMoveAssignmentFromOwnedMember() {
     return true;
 }
 
+// 验证用相同裸节点重设 ObjectRef 不改变净引用计数。
 bool TestSetDataWithSamePointer() {
     LifetimeCounters counters;
     {
@@ -131,6 +142,7 @@ bool TestSetDataWithSamePointer() {
     return true;
 }
 
+// 验证 SetData 接收当前对象拥有的成员节点时保留其生命周期。
 bool TestSetDataFromOwnedMember() {
     LifetimeCounters counters;
     {
@@ -153,6 +165,7 @@ bool TestSetDataFromOwnedMember() {
     return true;
 }
 
+// 验证对象类型信息可按运行时编号和类型键稳定查询。
 bool TestTypeInfoLookup() {
     kxc::ObjectRef relay_var(new kxc::VarNode());
     const kxc::TypeInfo& info = relay_var.get()->GetTypeInfo();
@@ -170,6 +183,7 @@ bool TestTypeInfoLookup() {
     return true;
 }
 
+// 验证同名 C++ 节点在不同命名空间中获得独立类型信息。
 bool TestCollidingCppNamesHaveDistinctTypeInfo() {
     const kxc::TypeInfo& relay_var = kxc::VarNode::_type_info;
     const kxc::TypeInfo& tir_var = kxc::tir::VarNode::_type_info;
@@ -200,6 +214,7 @@ bool TestCollidingCppNamesHaveDistinctTypeInfo() {
     return true;
 }
 
+// 验证 Array、Map 等容器族均通过对象系统注册类型信息。
 bool TestContainerFamilyTypeInfo() {
     kxc::Array<int> ints;
     kxc::Array<kxc::String> strings;
@@ -223,6 +238,33 @@ bool TestContainerFamilyTypeInfo() {
     return true;
 }
 
+// 验证 Relay attrs 字段使用项目对象容器而非标准库容器。
+bool TestRelayAttrsUseObjectContainers() {
+    static_assert(std::is_same_v<decltype(kxc::relay::Conv2DAttrsNode::strides),
+                                 kxc::Array<int64_t>>);
+    static_assert(std::is_same_v<decltype(kxc::relay::MaxPool2DAttrsNode::pool_size),
+                                 kxc::Array<int64_t>>);
+    static_assert(std::is_same_v<decltype(kxc::relay::ReduceMeanAttrsNode::axes),
+                                 kxc::Array<int64_t>>);
+    static_assert(std::is_same_v<decltype(kxc::relay::ReshapeAttrsNode::newshape),
+                                 kxc::Array<int64_t>>);
+    static_assert(std::is_same_v<decltype(kxc::relay::SplitAttrsNode::split),
+                                 kxc::Array<int64_t>>);
+    static_assert(std::is_same_v<decltype(kxc::relay::TransposeAttrsNode::perm),
+                                 kxc::Array<int64_t>>);
+
+    const auto conv = kxc::relay::Conv2DAttrs::Create(
+        {2, 2}, {1, 1, 1, 1}, {1, 1}, 1, 64, {3, 3}, "NCHW", "OIHW", "", "");
+    TEST_CHECK(conv->strides.size() == 2 && conv->strides[0] == 2,
+               "Array-backed Relay attrs should preserve constructor values");
+
+    const auto reshape = kxc::relay::ReshapeAttrs::Create({0, -1});
+    TEST_CHECK(reshape->newshape.size() == 2 && reshape->newshape[1] == -1,
+               "Array-backed shape attrs should preserve signed dimensions");
+    return true;
+}
+
+// 验证 ObjectRef::As 依赖 C++ RTTI 拒绝错误的节点转换。
 bool TestAsUsesCppRtti() {
     LifetimeCounters counters;
     kxc::ObjectRef child(new ChildNode(&counters));
@@ -233,6 +275,7 @@ bool TestAsUsesCppRtti() {
     return true;
 }
 
+// 验证嵌套 ArenaScope 退出后恢复此前线程局部 Arena。
 bool TestArenaScopeRestoration() {
     kxc::Arena* initial = kxc::current_arena;
     kxc::Arena outer(1024);
@@ -254,6 +297,7 @@ bool TestArenaScopeRestoration() {
     return true;
 }
 
+// 验证 Arena 创建的对象可安全逃逸并由引用计数延长生命周期。
 bool TestArenaObjectEscapesOwner() {
     LifetimeCounters counters;
     kxc::ObjectRef escaped;
@@ -273,6 +317,7 @@ bool TestArenaObjectEscapesOwner() {
     return true;
 }
 
+// 验证 Arena 空间耗尽后回退堆分配且不破坏对象生命周期。
 bool TestArenaExhaustionFallsBackToHeap() {
     LifetimeCounters counters;
     kxc::ObjectRef escaped;
@@ -290,6 +335,7 @@ bool TestArenaExhaustionFallsBackToHeap() {
     return true;
 }
 
+// 验证 Arena 对象可在其他线程释放并正确析构。
 bool TestArenaObjectDestroyedOnAnotherThread() {
     LifetimeCounters counters;
     kxc::ObjectRef escaped;
@@ -309,6 +355,7 @@ bool TestArenaObjectDestroyedOnAnotherThread() {
     return true;
 }
 
+// 验证 Arena 满足超过默认值的对象对齐要求。
 bool TestOveralignedArenaObject() {
     kxc::ObjectRef object;
     {
@@ -323,6 +370,7 @@ bool TestOveralignedArenaObject() {
     return true;
 }
 
+// 验证对象构造抛出异常时 Arena 回收预留槽位。
 bool TestThrowingArenaConstructorReleasesAllocation() {
     kxc::Arena arena(4096);
     kxc::ArenaScope scope(arena);
@@ -337,6 +385,7 @@ bool TestThrowingArenaConstructorReleasesAllocation() {
 
 }  // namespace
 
+// 执行对象系统、容器和 Arena 回归矩阵。
 int main() {
     if (!TestCopyAssignmentFromOwnedMember()) return EXIT_FAILURE;
     if (!TestMoveAssignmentFromOwnedMember()) return EXIT_FAILURE;
@@ -345,6 +394,7 @@ int main() {
     if (!TestTypeInfoLookup()) return EXIT_FAILURE;
     if (!TestCollidingCppNamesHaveDistinctTypeInfo()) return EXIT_FAILURE;
     if (!TestContainerFamilyTypeInfo()) return EXIT_FAILURE;
+    if (!TestRelayAttrsUseObjectContainers()) return EXIT_FAILURE;
     if (!TestAsUsesCppRtti()) return EXIT_FAILURE;
     if (!TestArenaScopeRestoration()) return EXIT_FAILURE;
     if (!TestArenaObjectEscapesOwner()) return EXIT_FAILURE;

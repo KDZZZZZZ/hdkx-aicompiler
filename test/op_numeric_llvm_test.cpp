@@ -1,3 +1,7 @@
+/*! \file test/op_numeric_llvm_test.cpp
+ * \brief 验证 Relay 算子在 LLVM 后端上的数值正确性。
+ */
+
 #include "api/compiler.h"
 #include "relay/op.h"
 
@@ -17,12 +21,14 @@
 
 namespace {
 
+// 将失败条件转换为带上下文的测试异常。
 void Check(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
 }
 
+// 按容差比较浮点结果向量。
 void ExpectNear(const std::vector<float>& actual, const std::vector<float>& expected,
                 float tolerance = 1e-4f) {
     Check(actual.size() == expected.size(), "result size mismatch");
@@ -36,14 +42,16 @@ void ExpectNear(const std::vector<float>& actual, const std::vector<float>& expe
     }
 }
 
+// 精确比较整数结果向量。
 void ExpectEqual(const std::vector<int32_t>& actual, const std::vector<int32_t>& expected) {
     Check(actual == expected, "integer result mismatch");
 }
 
+// 编译 Relay 函数，并用显式 CPU NDArray 输入输出执行 LLVM 内核。
 void CompileAndRun(const std::string& op_name, kxc::Function func,
                    const std::vector<void*>& packed_args) {
 #if KXC_USE_LLVM
-    auto config = kxc::api::CompileConfig::JIT(kxc::BuildTarget(kxc::kCPU));
+    auto config = kxc::api::CompileConfig::JIT(kxc::BuildTarget(kxc::Device::CPU()));
     config->opt_level = 0;
     auto module = kxc::api::Compiler::Compile(func, config);
     Check(module.IsReady(), op_name + " LLVM module should be ready");
@@ -56,6 +64,7 @@ void CompileAndRun(const std::string& op_name, kxc::Function func,
 #endif
 }
 
+// 验证逐元素 Add 的 LLVM 数值结果。
 void TestAdd() {
     kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
     kxc::Var y("y", kxc::TensorType({3}, "float32"));
@@ -69,6 +78,7 @@ void TestAdd() {
     ExpectNear(out, {11, 22, 33, 14, 25, 36});
 }
 
+// 验证逐元素 Subtract 的 LLVM 数值结果。
 void TestSubtract() {
     kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
     kxc::Var y("y", kxc::TensorType({3}, "float32"));
@@ -82,6 +92,7 @@ void TestSubtract() {
     ExpectNear(out, {-9, -18, -27, -6, -15, -24});
 }
 
+// 验证逐元素 Mul 的 LLVM 数值结果。
 void TestMul() {
     kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
     kxc::Var y("y", kxc::TensorType({3}, "float32"));
@@ -95,6 +106,7 @@ void TestMul() {
     ExpectNear(out, {10, 40, 90, 40, 100, 180});
 }
 
+// 验证逐元素 Divide 的 LLVM 数值结果。
 void TestDivide() {
     kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
     kxc::Var y("y", kxc::TensorType({3}, "float32"));
@@ -108,6 +120,7 @@ void TestDivide() {
     ExpectNear(out, {0.1f, 0.1f, 0.1f, 0.4f, 0.25f, 0.2f});
 }
 
+// 验证逐元素 Sqrt 的 LLVM 数值结果。
 void TestSqrt() {
     kxc::Var x("x", kxc::TensorType({4}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("sqrt"), {x});
@@ -119,6 +132,7 @@ void TestSqrt() {
     ExpectNear(out, {1, 2, 3, 4});
 }
 
+// 验证二维 Matmul 的 LLVM 数值结果。
 void TestMatmul() {
     kxc::Var a("a", kxc::TensorType({2, 3}, "float32"));
     kxc::Var b("b", kxc::TensorType({3, 2}, "float32"));
@@ -132,6 +146,7 @@ void TestMatmul() {
     ExpectNear(out, {22, 28, 49, 64});
 }
 
+// 验证 Dense 的权重布局和 LLVM 数值结果。
 void TestDense() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Var weight("weight", kxc::TensorType({2, 3}, "float32"));
@@ -146,6 +161,7 @@ void TestDense() {
     ExpectNear(out, {4, 5, 10, 11});
 }
 
+// 验证 Gemm 的转置、缩放和偏置语义。
 void TestGemm() {
     kxc::Var a("a", kxc::TensorType({2, 3}, "float32"));
     kxc::Var b("b", kxc::TensorType({4, 3}, "float32"));
@@ -162,6 +178,7 @@ void TestGemm() {
     ExpectNear(out, {11, 22, 33, 46, 14, 25, 36, 55});
 }
 
+// 验证 Relu 对正负输入的数值结果。
 void TestRelu() {
     kxc::Var x("x", kxc::TensorType({6}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("nn_relu"), {x}, kxc::relay::ReluAttrs::Create());
@@ -173,6 +190,7 @@ void TestRelu() {
     ExpectNear(out, {0, 0, 0, 1, 2, 0});
 }
 
+// 验证 Conv2D 的布局、步幅和卷积数值结果。
 void TestConv2D() {
     kxc::Var data("data", kxc::TensorType({1, 1, 3, 3}, "float32"));
     kxc::Var weight("weight", kxc::TensorType({1, 1, 2, 2}, "float32"));
@@ -188,6 +206,7 @@ void TestConv2D() {
     ExpectNear(out, {6, 8, 12, 14});
 }
 
+// 验证 MaxPool2D 的窗口归约结果。
 void TestMaxPool2D() {
     kxc::Var data("data", kxc::TensorType({1, 1, 4, 4}, "float32"));
     auto attrs = kxc::relay::MaxPool2DAttrs::Create(
@@ -202,6 +221,7 @@ void TestMaxPool2D() {
     ExpectNear(out, {6, 8, 14, 16});
 }
 
+// 验证 AvgPool2D 的窗口平均结果。
 void TestAvgPool2D() {
     kxc::Var data("data", kxc::TensorType({1, 1, 4, 4}, "float32"));
     auto attrs = kxc::relay::MaxPool2DAttrs::Create(
@@ -216,6 +236,7 @@ void TestAvgPool2D() {
     ExpectNear(out, {3.5f, 5.5f, 11.5f, 13.5f});
 }
 
+// 验证 GlobalAvgPool2D 对空间维的归约结果。
 void TestGlobalAvgPool2D() {
     kxc::Var data("data", kxc::TensorType({1, 2, 2, 2}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("nn_global_avg_pool2d"), {data},
@@ -228,6 +249,7 @@ void TestGlobalAvgPool2D() {
     ExpectNear(out, {2.5f, 25.0f});
 }
 
+// 验证 Flatten 只改变逻辑 shape 而保持元素顺序。
 void TestFlatten() {
     kxc::Var data("data", kxc::TensorType({1, 2, 2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("nn_flatten"), {data},
@@ -240,6 +262,7 @@ void TestFlatten() {
     ExpectNear(out, data_buf);
 }
 
+// 验证 Reshape 保持元素数量和线性顺序。
 void TestReshape() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("reshape"), {data},
@@ -252,6 +275,7 @@ void TestReshape() {
     ExpectNear(out, data_buf);
 }
 
+// 验证 Transpose 按指定轴重排数据。
 void TestTranspose() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("transpose"), {data},
@@ -264,6 +288,7 @@ void TestTranspose() {
     ExpectNear(out, {1, 4, 2, 5, 3, 6});
 }
 
+// 验证 ReduceMean 的轴和 keepdims 语义。
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("reduce_mean"), {data},
@@ -276,6 +301,7 @@ void TestReduceMean() {
     ExpectNear(out, {2.0f, 5.0f});
 }
 
+// 验证 Softmax 的归一化轴和数值稳定性。
 void TestSoftmax() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("softmax"), {data},
@@ -299,6 +325,7 @@ void TestSoftmax() {
     ExpectNear(out, expected);
 }
 
+// 验证 Cast 的目标 dtype 与数值转换。
 void TestCast() {
     kxc::Var data("data", kxc::TensorType({4}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("cast"), {data}, kxc::relay::CastAttrs::Create(1));
@@ -310,6 +337,7 @@ void TestCast() {
     ExpectEqual(out, {1, -2, 3, 4});
 }
 
+// 验证多个 Add 串联时中间 NDArray 的执行结果。
 void TestModelAddChain() {
     kxc::Var x("x", kxc::TensorType({4}, "float32"));
     kxc::Var y("y", kxc::TensorType({4}, "float32"));
@@ -324,6 +352,7 @@ void TestModelAddChain() {
     ExpectNear(out, {21, 42, 63, 84});
 }
 
+// 验证 Dense/激活组成的 MLP 子图端到端数值结果。
 void TestModelMLP() {
     kxc::Var x("x", kxc::TensorType({1, 2}, "float32"));
     kxc::Var w1("w1", kxc::TensorType({3, 2}, "float32"));
@@ -344,6 +373,7 @@ void TestModelMLP() {
     ExpectNear(out, {6, -2});
 }
 
+// 验证卷积、池化和分类层组成的 CNN 子图端到端结果。
 void TestModelCNN() {
     kxc::Var data("data", kxc::TensorType({1, 1, 3, 3}, "float32"));
     kxc::Var conv_weight("conv_weight", kxc::TensorType({1, 1, 2, 2}, "float32"));
@@ -372,6 +402,7 @@ void TestModelCNN() {
 
 }  // namespace
 
+// 运行全部算子及模型级 LLVM 数值测试。
 int main() {
     const std::vector<std::pair<std::string, void (*)()>> tests = {
         {"add", TestAdd},

@@ -23,8 +23,9 @@ namespace {
         }                                                                         \
     } while (0)
 
+// 验证 cpu:0 的能力、内存和单项属性查询保持一致。
 bool TestCPUDeviceInfo() {
-    class kxc::Device cpu(kxc::kCPU, 0);
+    kxc::Device cpu = kxc::Device::CPU();
     kxc::DeviceAttributes attrs = kxc::CollectDeviceAttributes(cpu);
 
     TEST_CHECK(attrs.exists == 1, "CPU device should exist");
@@ -46,8 +47,9 @@ bool TestCPUDeviceInfo() {
     return true;
 }
 
+// 验证 BuildTarget 从强类型 DeviceAPI 属性构造 CPU 编译目标。
 bool TestTargetBuildMatchesDeviceInfo() {
-    kxc::Target target = kxc::BuildTarget(kxc::kCPU, 0);
+    kxc::Target target = kxc::BuildTarget(kxc::Device::CPU());
     TEST_CHECK(target.defined(), "CPU target should be defined");
     TEST_CHECK(target->kind == "llvm", "CPU target kind should be llvm");
     TEST_CHECK(target->device_type == kxc::kCPU, "CPU target device type should match");
@@ -58,6 +60,7 @@ bool TestTargetBuildMatchesDeviceInfo() {
     return true;
 }
 
+// 验证完整枚举保留不可用 CUDA 诊断，而可用列表只返回真实设备。
 bool TestUnifiedDeviceInfo() {
     std::vector<kxc::DeviceInfo> infos = kxc::GetAllDeviceInfo();
     TEST_CHECK(!infos.empty(), "GetAllDeviceInfo should return at least CPU info");
@@ -74,7 +77,7 @@ bool TestUnifiedDeviceInfo() {
             TEST_CHECK(info.status == "ok", "CPU status should be ok");
             TEST_CHECK(info.attrs.exists == 1, "CPU attrs should mark existence");
         }
-        if (info.device_type == kxc::kGPU) {
+        if (info.device_type == kxc::kCUDA) {
             saw_cuda = true;
             TEST_CHECK(info.device_type_name == "cuda", "GPU type name should be cuda");
             TEST_CHECK(info.target_kind == "cuda", "GPU target kind should be cuda");
@@ -107,9 +110,10 @@ bool TestUnifiedDeviceInfo() {
     return true;
 }
 
+// 验证 CUDA 属性接口在无卡或 CPU-only 构建中仍返回可解释状态。
 bool TestCUDAAttributesDoNotRequireCUDARuntimeAvailability() {
-    class kxc::Device cuda(kxc::kGPU, 0);
-    kxc::DeviceAPI* api = kxc::GetDeviceAPI(kxc::kGPU);
+    kxc::Device cuda = kxc::Device::CUDA();
+    kxc::DeviceAPI* api = kxc::GetDeviceAPI(kxc::kCUDA);
     kxc::DeviceAttributes attrs = api->GetDeviceAttributes(cuda);
 
     if (attrs.exists) {
@@ -124,6 +128,7 @@ bool TestCUDAAttributesDoNotRequireCUDARuntimeAvailability() {
     return true;
 }
 
+// 验证 PackedFunc JSON 入口与结构化设备枚举采用相同过滤规则。
 bool TestRegistryJSONEntrypoints() {
     kxc::PackedFunc get_all = kxc::Registry::Global().Get("device_api.GetAllDeviceInfo");
     TEST_CHECK(get_all, "device_api.GetAllDeviceInfo should be registered");
@@ -147,6 +152,7 @@ bool TestRegistryJSONEntrypoints() {
 
 }  // namespace
 
+// 顺序运行设备发现契约测试，并将首个失败转换为进程退出码。
 int main() {
     const std::vector<std::pair<std::string, bool (*)()>> tests = {
         {"cpu_device_info", TestCPUDeviceInfo},
@@ -172,4 +178,3 @@ int main() {
     std::cout << "All device info tests passed.\n";
     return 0;
 }
-

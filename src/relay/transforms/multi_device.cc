@@ -20,6 +20,7 @@ namespace relay {
 
 namespace {
 
+// 从 Relay 节点读取可选的编译期 VirtualDevice 放置信息。
 VirtualDevice GetVirtualDeviceFromExpr(const Expr& expr) {
     if (!expr.defined()) {
         return VirtualDevice();
@@ -31,6 +32,7 @@ VirtualDevice GetVirtualDeviceFromExpr(const Expr& expr) {
     return relay_node->virtual_device_;
 }
 
+// 按物理设备、Target、内存域和逻辑编号比较两个放置约束。
 bool SameVirtualDevice(const VirtualDevice& a, const VirtualDevice& b) {
     if (!a.defined() || !b.defined()) {
         return !a.defined() && !b.defined();
@@ -39,9 +41,8 @@ bool SameVirtualDevice(const VirtualDevice& a, const VirtualDevice& b) {
         return true;
     }
     auto extract_dev = [](const VirtualDevice& vd) -> std::pair<int, int> {
-        if (vd->device_obj.defined()) {
-            const auto* dev = static_cast<const class Device*>(vd->device_obj.get());
-            return {static_cast<int>(dev->device_type()), dev->device_id()};
+        if (vd->device.defined()) {
+            return {static_cast<int>(vd->device.device_type()), vd->device.device_id()};
         }
         if (vd->target.defined()) {
             return {static_cast<int>(vd->target->device_type), vd->target->device_id};
@@ -55,6 +56,7 @@ bool SameVirtualDevice(const VirtualDevice& a, const VirtualDevice& b) {
            a->virtual_device_id == b->virtual_device_id;
 }
 
+// 向 worker 列表追加非负且尚未出现的编号。
 void PushUniqueWorker(std::vector<int>* workers, int worker_id) {
     if (worker_id < 0) {
         return;
@@ -67,6 +69,7 @@ void PushUniqueWorker(std::vector<int>* workers, int worker_id) {
     workers->push_back(worker_id);
 }
 
+// 将临时 worker vector 转为执行计划可持有的对象系统 Array。
 Array<int> ToArray(const std::vector<int>& values) {
     Array<int> out;
     for (int v : values) {
@@ -75,6 +78,7 @@ Array<int> ToArray(const std::vector<int>& values) {
     return out;
 }
 
+// 通过 DiscoPlacement 把 VirtualDevice 映射到 worker。
 int ResolveWorkerForVirtualDevice(const PassContext& pass_ctx, const VirtualDevice& vd) {
     if (!vd.defined()) {
         return -1;
@@ -82,15 +86,11 @@ int ResolveWorkerForVirtualDevice(const PassContext& pass_ctx, const VirtualDevi
     if (pass_ctx.has_disco_placement()) {
         return FindWorkerForVirtualDevice(pass_ctx.disco_placement(), vd);
     }
-    if (pass_ctx.default_device_obj().defined()) {
-        const auto* dev = static_cast<const class Device*>(pass_ctx.default_device_obj().get());
-        if (dev) {
-            return dev->device_id();
-        }
-    }
+    // 没有 placement 时不能用物理 device_id 推导 worker；0 仅表示单 worker 默认值。
     return 0;
 }
 
+// 把单个 VirtualDevice 解析为执行节点 worker 集合。
 Array<int> WorkerSetFromVirtualDevice(const PassContext& pass_ctx, const VirtualDevice& vd) {
     int worker = ResolveWorkerForVirtualDevice(pass_ctx, vd);
     if (worker < 0) {
@@ -99,13 +99,14 @@ Array<int> WorkerSetFromVirtualDevice(const PassContext& pass_ctx, const Virtual
     return {worker};
 }
 
+// 将常量 DLPack dtype 转为执行计划中的文本 dtype。
 std::string DTypeToString(const DLDataType& dtype) {
     std::string prefix = "unknown";
     if (dtype.code == kDLFloat) {
         prefix = "float";
     } else if (dtype.code == kDLInt) {
         prefix = "int";
-    } else if (dtype.code == kDLUint) {
+    } else if (dtype.code == kDLUInt) {
         prefix = dtype.bits == 1 ? "bool" : "uint";
     }
     if (prefix == "bool") {
@@ -117,6 +118,7 @@ std::string DTypeToString(const DLDataType& dtype) {
     return prefix + std::to_string(dtype.bits);
 }
 
+// 取得直接 Op 调用的算子名称。
 std::string GetCallOpName(const CallNode* call) {
     if (!call) {
         return "";
@@ -128,8 +130,10 @@ std::string GetCallOpName(const CallNode* call) {
     return op_node->name;
 }
 
+// 在生产者与消费者放置不同处插入 device.copy，并规范化已有通信属性。
 class DeviceCommunicationInserter : public RelayPass {
 public:
+    // 重写调用实参，必要时插入跨设备复制节点。
     Expr VisitCall(const CallNode* op, const Expr& ref) override {
         Expr rewritten = RelayPass::VisitCall(op, ref);
         const CallNode* call = rewritten.As<CallNode>();
@@ -177,6 +181,7 @@ public:
     }
 
 private:
+    // 补齐 device.copy 或 collective 的默认属性和结果放置。
     Expr NormalizeCommunicationCall(const CallNode* call, const Expr& ref,
                                     const std::string& op_name) {
         if (op_name == "device.copy") {
@@ -237,10 +242,13 @@ private:
     }
 };
 
+// 把 Relay 数据流线性化为带值编号、worker 集合和张量元数据的 ExecutionPlan。
 class RelayToExecPlanBuilder : public RelayPassFunctor<int> {
 public:
+    // 保存用于设备到 worker 映射的 PassContext。
     explicit RelayToExecPlanBuilder(PassContext pass_ctx) : pass_ctx_(std::move(pass_ctx)) {}
 
+    // 为参数、常量和函数体分配值编号并组装最终执行计划。
     ExecutionPlan Build(const Function& func) {
         for (const auto& param : func->params) {
             int value_id = AllocateValue(param);
@@ -258,6 +266,7 @@ public:
     }
 
 protected:
+    // 按表达式对象身份记忆化其执行计划值编号。
     int Visit(const Expr& expr) override {
         if (!expr.defined()) {
             return -1;
@@ -271,6 +280,7 @@ protected:
         return value;
     }
 
+    // 解析已绑定变量，未绑定自由变量分配新值编号。
     int VisitVar(const VarNode* op, const Expr& ref) override {
         (void)op;
         auto it = var_bindings_.find(ref.get());
@@ -281,20 +291,20 @@ protected:
         return value_id;
     }
 
+    // 登记常量值及其 Storage-backed NDArray shape、dtype 元数据。
     int VisitConstant(const ConstantNode* op, const Expr& ref) override {
         int value_id = AllocateValue(ref);
         constant_value_ids_.push_back(value_id);
         Array<int64_t> shape;
         if (op && op->data.defined()) {
-            for (const auto& dim : op->data->shape) {
-                shape.push_back(dim);
-            }
+            shape = op->data.shape();
             value_shapes_.Set(value_id, shape);
-            value_dtypes_.Set(value_id, DTypeToString(op->data->dl_tensor.dtype));
+            value_dtypes_.Set(value_id, DTypeToString(op->data.dtype()));
         }
         return value_id;
     }
 
+    // 将普通调用生成 KernelExec，将通信调用生成 CommExec。
     int VisitCall(const CallNode* op, const Expr& ref) override {
         std::string op_name = GetCallOpName(op);
         if (op_name.empty()) {
@@ -324,11 +334,13 @@ protected:
         return output;
     }
 
+    // 函数节点以其 body 的计划值作为结果。
     int VisitFunction(const FunctionNode* op, const Expr& ref) override {
         (void)ref;
         return Visit(op->body);
     }
 
+    // 建立 let 变量到计划值的词法绑定。
     int VisitLet(const LetNode* op, const Expr& ref) override {
         int value_id = Visit(op->value);
         var_bindings_[op->var.get()] = value_id;
@@ -338,6 +350,7 @@ protected:
         return body_id;
     }
 
+    // 把 tuple 构造表示为内部合成 KernelExec。
     int VisitTuple(const TupleNode* op, const Expr& ref) override {
         Array<int> inputs;
         std::vector<int> input_vec;
@@ -354,6 +367,7 @@ protected:
         return output;
     }
 
+    // 把 tuple 字段读取表示为内部合成 KernelExec。
     int VisitTupleGetItem(const TupleGetItemNode* op, const Expr& ref) override {
         int tuple_id = Visit(op->tuple);
         int output = AllocateValue(ref);
@@ -365,6 +379,7 @@ protected:
         return output;
     }
 
+    // 第一阶段执行计划暂不支持控制流，明确拒绝 If。
     int VisitIf(const IfNode* op, const Expr& ref) override {
         (void)op;
         (void)ref;
@@ -372,6 +387,7 @@ protected:
             "LowerRelayToExecPlanPass does not support IfNode in phase-1");
     }
 
+    // 对未建模的 Relay 节点给出明确 lowering 错误。
     int VisitDefault(const Expr& expr) override {
         (void)expr;
         throw std::runtime_error(
@@ -379,6 +395,7 @@ protected:
     }
 
 private:
+    // 从 TensorType 捕获值的静态 shape 与 dtype。
     void CaptureValueInfoFromType(int value_id, const Type& type) {
         const auto* tensor_type = type.As<TensorTypeNode>();
         if (!tensor_type) {
@@ -392,6 +409,7 @@ private:
         value_dtypes_.Set(value_id, tensor_type->dtype);
     }
 
+    // 分配计划值编号并记录表达式的 VirtualDevice。
     int AllocateValue(const Expr& expr) {
         int value_id = next_value_id_++;
         const VirtualDevice vd = GetVirtualDeviceFromExpr(expr);
@@ -401,6 +419,7 @@ private:
         return value_id;
     }
 
+    // 优先使用结果放置，否则继承首个有放置输入的 worker 集合。
     Array<int> ResolveComputeWorkerSet(const Expr& ref, const std::vector<int>& input_values) {
         VirtualDevice vd = GetVirtualDeviceFromExpr(ref);
         if (!vd.defined()) {
@@ -414,6 +433,7 @@ private:
         return WorkerSetFromVirtualDevice(pass_ctx_, vd);
     }
 
+    // 根据复制端点或 collective 分组属性解析通信参与 worker。
     Array<int> ResolveCommunicationWorkerSet(const std::string& op_name, const CallNode* call,
                                              const Expr& ref,
                                              const std::vector<int>& input_values) {
@@ -479,19 +499,23 @@ private:
 
 }  // namespace
 
+// 从函数中的 VirtualDevice 集合构造 Disco 放置上下文。
 PassContext BuildDiscoPlacementPass(const Function& func) {
     return ::kxc::BuildDiscoPlacementPass(func);
 }
 
+// 插入并规范化跨设备复制及 collective 调用。
 Function InsertDeviceCommunicationPass(const Function& func) {
     DeviceCommunicationInserter pass;
     return pass.Mutate(func);
 }
 
+// 将 Relay 计算部分降低为单个 TIR PrimFunc。
 tir::PrimFunc LowerRelayComputeToTIRPass(const Function& func) {
     return LowerToTIR(func);
 }
 
+// 生成包含放置、通信和值元数据的 ExecutionPlan。
 ExecutionPlan LowerRelayToExecPlanPass(const Function& func) {
     if (!func.defined()) {
         throw std::runtime_error("LowerRelayToExecPlanPass expects a defined function");

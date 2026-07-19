@@ -24,10 +24,14 @@ inline Value MakeValue(const char* v) { Value val; val.v_str = v; return val; }
 inline Value MakeValue(const Object* v) { Value val; val.v_object = v; return val; }
 inline Value MakeNullValue() { Value val; val.v_object = nullptr; return val; }
 
+// 将运行时对象恢复为最具体的 Python 句柄，确保 Device/NDArray 保留强类型接口。
 inline py::object WrapObjectRef(const ObjectRef& object) {
     if (!object.defined()) return py::none();
     if (object.As<runtime::NDArrayNode>()) {
         return py::cast(runtime::NDArray(object.get()));
+    }
+    if (object.As<DeviceNode>()) {
+        return py::cast(Device(object));
     }
     return py::cast(object);
 }
@@ -129,34 +133,63 @@ inline void InitKXCRuntime(py::module_& m) {
             }
         });
         
-    // Bind NDArrayNode
+    // 绑定 NDArray 元数据节点；仅公开 shape，底层 Storage 不作为裸指针对 Python 暴露。
     py::class_<runtime::NDArrayNode, Object, std::unique_ptr<runtime::NDArrayNode, py::nodelete>>(m, "NDArrayNode")
-        .def_readonly("shape", &runtime::NDArrayNode::shape);
+        .def_readonly("shape", &runtime::NDArrayNode::shape_storage);
 
-    // Bind NDArray
+    // empty/zeros 显式要求 Device，copy_to 显式产生目标设备副本，不保留隐式设备回退。
     py::class_<runtime::NDArray, ObjectRef>(m, "NDArray", py::buffer_protocol())
-        .def(py::init<std::vector<int64_t>, std::string>())
+        .def_static("empty", [](const std::vector<int64_t>& shape,
+                                const std::string& dtype, const Device& device) {
+            Array<int64_t> dimensions;
+            for (int64_t dim : shape) dimensions.push_back(dim);
+            return runtime::NDArray::Empty(
+                dimensions, runtime::DataTypeFromString(dtype), device);
+        })
+        .def_static("zeros", [](const std::vector<int64_t>& shape,
+                                const std::string& dtype, const Device& device) {
+            Array<int64_t> dimensions;
+            for (int64_t dim : shape) dimensions.push_back(dim);
+            return runtime::NDArray::Zeros(
+                dimensions, runtime::DataTypeFromString(dtype), device);
+        })
+        .def("copy_to", &runtime::NDArray::CopyTo)
         .def_buffer([](runtime::NDArray& m) -> py::buffer_info {
             const runtime::NDArrayNode* node = m.operator->();
+            if (m.device() != Device::CPU() || !m.IsContiguous()) {
+                throw py::buffer_error(
+                    "Python buffer export requires a contiguous cpu:0 NDArray");
+            }
+            const DLDataType dtype = node->dl_tensor.dtype;
+            if (dtype.lanes != 1) {
+                throw py::buffer_error("Python buffer export requires dtype lanes=1");
+            }
             std::string format;
-            if (node->dl_tensor.dtype.code == kDLFloat) format = "f";
-            else if (node->dl_tensor.dtype.code == kDLInt) format = "i"; 
-            else format = "B"; // fallback
+            if (dtype.code == kDLFloat && dtype.bits == 32) format = "f";
+            else if (dtype.code == kDLFloat && dtype.bits == 64) format = "d";
+            else if (dtype.code == kDLInt && dtype.bits == 8) format = "b";
+            else if (dtype.code == kDLInt && dtype.bits == 16) format = "h";
+            else if (dtype.code == kDLInt && dtype.bits == 32) format = "i";
+            else if (dtype.code == kDLInt && dtype.bits == 64) format = "q";
+            else if (dtype.code == kDLUInt && dtype.bits == 8) format = "B";
+            else if (dtype.code == kDLBool && dtype.bits == 8) format = "?";
+            else throw py::buffer_error("dtype is not supported by Python buffer export");
 
             std::vector<py::ssize_t> strides;
             std::vector<py::ssize_t> shape;
-            for(auto s : node->shape) shape.push_back(s);
+            for(auto s : node->shape_storage) shape.push_back(s);
             
-            // Calc strides (row-major)
-            py::ssize_t stride = node->dl_tensor.dtype.bits / 8;
+            // Python buffer 仅借用连续 cpu:0 Storage，并按行主序计算字节步长。
+            const py::ssize_t itemsize = dtype.bits / 8;
+            py::ssize_t stride = itemsize;
             for (int i = node->dl_tensor.ndim - 1; i >= 0; --i) {
                 strides.insert(strides.begin(), stride);
                 stride *= node->dl_tensor.shape[i];
             }
             
             return py::buffer_info(
-                node->dl_tensor.data,
-                node->dl_tensor.dtype.bits / 8,
+                static_cast<uint8_t*>(node->storage.data()) + node->byte_offset,
+                itemsize,
                 format,
                 node->dl_tensor.ndim,
                 shape,
@@ -175,30 +208,26 @@ inline void InitKXCRuntime(py::module_& m) {
         return py::cast(func);
     }, py::arg("name"));
 
-    // 绑定 DeviceTypeCode 枚举
+    // 暴露与 C++ 运行时一致的设备类型编号，不直接使用 DLPack 枚举值。
     py::enum_<DeviceTypeCode>(m, "DeviceTypeCode")
         .value("CPU", kCPU)
-        .value("GPU", kGPU)
+        .value("CUDA", kCUDA)
         .value("OpenCL", kOpenCL)
         .value("Metal", kMetal)
         .value("Unknown", kUnknown)
         .export_values();
 
-    // 绑定 Device 类
-    // 使用别名消除歧义
+    // Device 作为 ObjectRef 值对象绑定；cpu/cuda 工厂返回规范驻留设备。
+    // 使用别名消除 Windows SDK 中同名 Device 宏可能造成的歧义。
     using DeviceCls = class ::kxc::Device;
-    py::class_<DeviceCls, Object>(m, "Device")
+    py::class_<DeviceCls, ObjectRef>(m, "Device")
+        .def(py::init<DeviceTypeCode, int>())
+        .def_static("cpu", &DeviceCls::CPU, py::arg("device_id") = 0)
+        .def_static("cuda", &DeviceCls::CUDA, py::arg("device_id") = 0)
         .def_property_readonly("device_type", &DeviceCls::device_type)
         .def_property_readonly("device_id", &DeviceCls::device_id)
         .def("__repr__", [](const DeviceCls& self) { return self.ToString(); })
         .def("__str__", [](const DeviceCls& self) { return self.ToString(); });
-
-    // 绑定 device 工厂函数
-    // DeviceManager 的缓存持有 ObjectRef，Python 只借用对应节点。
-    m.def("device", [](DeviceTypeCode type, int id) -> DeviceCls* {
-         ObjectRef ref = kxc::DeviceManager::Global()->GetOrCreate(type, id);
-         return const_cast<DeviceCls*>(ref.As<DeviceCls>());
-    }, py::arg("type_code"), py::arg("device_id"), py::return_value_policy::reference);
 
     // 绑定 create_object 工厂函数
     // 使用 TypeManager 通过字符串键创建对象

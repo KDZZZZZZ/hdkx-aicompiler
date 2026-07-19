@@ -8,17 +8,20 @@ import os
 import collections
 
 def to_cpp_vector(py_list):
-    """Converts a python list to C++ std::vector initialization string."""
+    """将 Python 序列格式化为 C++ std::vector 初始化列表。"""
     if py_list is None:
         return "{}"
     return "{" + ", ".join(str(x) for x in py_list) + "}"
 
 def to_cpp_string(py_str):
-    """Converts python string to C++ string literal."""
+    """将 Python 字符串格式化为 C++ 字符串字面量。"""
     return f'"{py_str}"'
 
 class RelayCppCodegen:
+    """把 ONNX 图转换为使用强类型 Device/NDArray 接口的 Relay C++ 构图程序。"""
+
     def __init__(self, model_path, output_path):
+        """加载 ONNX 模型并初始化名称映射和输出语句缓冲区。"""
         self.model_path = model_path
         self.output_path = output_path
         self.model = onnx.load(model_path)
@@ -28,11 +31,13 @@ class RelayCppCodegen:
         self.statements = []
 
     def get_new_var(self, prefix="v"):
+        """生成在单次 C++ 输出中唯一的变量名。"""
         name = f"{prefix}_{self.next_var_id}"
         self.next_var_id += 1
         return name
 
     def generate(self):
+        """生成完整 C++ 构图程序，并将 initializer 放入显式 cpu:0 NDArray。"""
         # Header
         self.statements.append('#include "../include/relay/relay.h"')
         self.statements.append('#include "../include/relay/op.h"')
@@ -57,11 +62,9 @@ class RelayCppCodegen:
             if initializer.data_type == onnx.TensorProto.INT64:
                 dtype = "int64"
             
-            # Generate code
+            # 示例生成器不嵌入权重字节，以 CPU 零张量保留 initializer 的 shape 与 dtype。
             shape_str = to_cpp_vector(shape)
-            self.statements.append(f'    Tensor {cpp_var}_tensor({shape_str}, "{dtype}");')
-            # Note: We skip loading actual data for brevity/performance in this codegen demo.
-            # In a real compiler, we'd load from file or embed binary.
+            self.statements.append(f'    Tensor {cpp_var}_tensor(runtime::NDArray::Zeros({shape_str}, runtime::DataTypeFromString("{dtype}"), Device::CPU()));')
             self.statements.append(f'    Constant {cpp_var}({cpp_var}_tensor);')
 
         # 2. Handle Inputs -> Vars
@@ -113,6 +116,7 @@ class RelayCppCodegen:
         print(f"Generated C++ code to: {self.output_path}")
 
     def emit_node(self, node):
+        """把单个 ONNX 节点映射为 Relay Call 或 Constant 构造语句。"""
         op_type = node.op_type
         inputs = []
         for inp in node.input:
@@ -228,9 +232,8 @@ class RelayCppCodegen:
                 self.emit_tensor_creation(val_attr, val_var)
                 attrs_code = f"ConstantOfShapeAttrs::Create({val_var})"
             else:
-                # Default 0.0f
-                self.statements.append(f'    Tensor {val_var}({{1}}, "float32");') 
-                # We would need to fill it with 0, but for codegen we leave it empty/uninitialized data
+                # 缺省 value 是零初始化的 float32 标量占位张量。
+                self.statements.append(f'    Tensor {val_var}(runtime::NDArray::Zeros({{1}}, runtime::DataTypeFromString("float32"), Device::CPU()));')
                 attrs_code = f"ConstantOfShapeAttrs::Create({val_var})"
         else:
              print(f"Warning: Unknown op {op_type}")
@@ -241,6 +244,7 @@ class RelayCppCodegen:
         self.statements.append(f'    Call {cpp_var}(Op::Get("{op_name}"), args_{cpp_var}, {attrs_code});')
 
     def emit_constant_node(self, node, cpp_var):
+        """生成 ONNX Constant 节点对应的 CPU NDArray 和 Relay Constant。"""
         # ONNX Constant op has 'value' attribute with TensorProto
         attr = self.get_attr_raw(node, "value")
         if attr:
@@ -248,31 +252,34 @@ class RelayCppCodegen:
             shape = list(t.shape)
             dtype = str(t.dtype)
             shape_str = to_cpp_vector(shape)
-            # For codegen, we skip data.
+            # 该示例生成器只验证图结构，因此用显式 CPU 零张量保留 shape/dtype 而不嵌入权重字节。
             self.statements.append(f'    // Node: {node.name} (Constant)')
-            self.statements.append(f'    Tensor {cpp_var}_tensor({shape_str}, "{dtype}");')
+            self.statements.append(f'    Tensor {cpp_var}_tensor(runtime::NDArray::Zeros({shape_str}, runtime::DataTypeFromString("{dtype}"), Device::CPU()));')
             self.statements.append(f'    Constant {cpp_var}({cpp_var}_tensor);')
         else:
             self.statements.append(f'    // Node: {node.name} (Constant - No Value?)')
-            self.statements.append(f'    Constant {cpp_var}(Tensor({{}}, "float32"));')
+            self.statements.append(f'    Constant {cpp_var}(Tensor(runtime::NDArray::Zeros({{}}, runtime::DataTypeFromString("float32"), Device::CPU())));')
 
     def emit_tensor_creation(self, tensor_proto, var_name):
+        """生成保留 TensorProto shape/dtype 的 CPU 零张量占位代码。"""
         t = onnx.numpy_helper.to_array(tensor_proto)
         shape = list(t.shape)
         dtype = str(t.dtype)
         shape_str = to_cpp_vector(shape)
-        self.statements.append(f'    Tensor {var_name}({shape_str}, "{dtype}");')
-        # In real codegen, we would load data here.
+        self.statements.append(f'    Tensor {var_name}(runtime::NDArray::Zeros({shape_str}, runtime::DataTypeFromString("{dtype}"), Device::CPU()));')
+        # 真实模型执行必须加载权重；此脚本只生成结构检查程序。
 
     # --- Attribute Converters ---
 
     def get_attr_raw(self, node, attr_name):
+        """返回指定名称的原始 TensorProto 属性，未找到时返回 None。"""
         for attr in node.attribute:
             if attr.name == attr_name:
                 return attr.t # return TensorProto
         return None
 
     def get_attr(self, node, attr_name, default=None):
+        """读取常用 ONNX 标量或列表属性，并在缺失时返回默认值。"""
         for attr in node.attribute:
             if attr.name == attr_name:
                 if attr.type == onnx.AttributeProto.INT:
@@ -286,6 +293,7 @@ class RelayCppCodegen:
         return default
 
     def convert_conv_attrs(self, node):
+        """将 ONNX Conv 属性转换为 Conv2DAttrs 构造表达式。"""
         strides = self.get_attr(node, "strides", [1, 1])
         pads = self.get_attr(node, "pads", [0, 0, 0, 0]) 
         # ONNX pads: [x1_begin, x2_begin... x1_end, x2_end...]
@@ -295,41 +303,50 @@ class RelayCppCodegen:
         return f'Conv2DAttrs::Create({to_cpp_vector(strides)}, {to_cpp_vector(pads)})'
 
     def convert_maxpool_attrs(self, node):
+        """将 ONNX MaxPool 属性转换为 MaxPool2DAttrs 构造表达式。"""
         pool_size = self.get_attr(node, "kernel_shape", [2, 2])
         strides = self.get_attr(node, "strides", [1, 1])
         pads = self.get_attr(node, "pads", [0, 0, 0, 0])
         return f'MaxPool2DAttrs::Create({to_cpp_vector(pool_size)}, {to_cpp_vector(strides)}, {to_cpp_vector(pads)})'
 
     def convert_reshape_attrs(self, node):
+        """将 ONNX Reshape 的 allowzero 属性转换为构造表达式。"""
         allowzero = self.get_attr(node, "allowzero", 0)
         return f'ReshapeAttrs::Create({allowzero})'
 
     def convert_transpose_attrs(self, node):
+        """将 ONNX Transpose 的轴排列转换为构造表达式。"""
         perm = self.get_attr(node, "perm", [])
         return f'TransposeAttrs::Create({to_cpp_vector(perm)})'
 
     def convert_softmax_attrs(self, node):
+        """将 ONNX Softmax 的归一化轴转换为构造表达式。"""
         axis = self.get_attr(node, "axis", -1)
         return f'SoftmaxAttrs::Create({axis})'
 
     def convert_reducemean_attrs(self, node):
+        """将 ONNX ReduceMean 的轴和维度保留规则转换为构造表达式。"""
         axes = self.get_attr(node, "axes", [])
         keepdims = self.get_attr(node, "keepdims", 1)
         return f'ReduceMeanAttrs::Create({to_cpp_vector(axes)}, {keepdims})'
 
     def convert_split_attrs(self, node):
+        """将 ONNX Split 的拆分轴转换为构造表达式。"""
         axis = self.get_attr(node, "axis", 0)
         return f'SplitAttrs::Create({axis})'
 
     def convert_gather_attrs(self, node):
+        """将 ONNX Gather 的索引轴转换为构造表达式。"""
         axis = self.get_attr(node, "axis", 0)
         return f'GatherAttrs::Create({axis})'
 
     def convert_concat_attrs(self, node):
+        """将 ONNX Concat 的拼接轴转换为构造表达式。"""
         axis = self.get_attr(node, "axis", 0)
         return f'ConcatAttrs::Create({axis})'
 
     def convert_cast_attrs(self, node):
+        """将 ONNX Cast 的目标类型编号转换为构造表达式。"""
         to_type = self.get_attr(node, "to", 1) # Default float (1)
         return f'CastAttrs::Create({to_type})'
 

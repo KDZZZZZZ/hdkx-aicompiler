@@ -18,6 +18,7 @@ namespace relay {
 
 namespace {
 
+// 校验归约算子的 TE 输入数量。
 void RequireInputCount(const char* op_name, const Array<te::Tensor>& inputs, size_t expected) {
     if (inputs.size() != expected) {
         throw std::runtime_error(std::string(op_name) + " expects exactly " +
@@ -25,13 +26,15 @@ void RequireInputCount(const char* op_name, const Array<te::Tensor>& inputs, siz
     }
 }
 
+// 确认归约结果已完成 TensorType 推导。
 void RequireTensorOutput(const char* op_name, const kxc::Type& out_type) {
     if (!out_type.As<TensorTypeNode>()) {
         throw std::runtime_error(std::string(op_name) + " expects TensorType output");
     }
 }
 
-std::vector<int> NormalizeAxes(const std::string& op_name, const std::vector<int64_t>& axes,
+// 将负轴规范化为非负轴，并拒绝越界或重复轴。
+std::vector<int> NormalizeAxes(const std::string& op_name, const Array<int64_t>& axes,
                                int rank) {
     std::vector<int> out;
     if (axes.empty()) {
@@ -56,6 +59,7 @@ std::vector<int> NormalizeAxes(const std::string& op_name, const std::vector<int
     return out;
 }
 
+// 将标准库轴列表转换为对象系统 Array，供 TOPI 接口持有。
 Array<int> ToAxisArray(const std::vector<int>& axes) {
     Array<int> out;
     for (int axis : axes) {
@@ -64,6 +68,7 @@ Array<int> ToAxisArray(const std::vector<int>& axes) {
     return out;
 }
 
+// 计算静态归约域元素数，作为 reduce_mean 的除数。
 int64_t ReductionElementCount(const te::Tensor& input, const std::vector<int>& axes) {
     int64_t count = 1;
     for (int axis : axes) {
@@ -78,6 +83,7 @@ int64_t ReductionElementCount(const te::Tensor& input, const std::vector<int>& a
 
 }  // namespace
 
+// 将 Relay reduce_mean 降为 TOPI 求和与逐元素除法组合。
 te::Tensor ReduceMeanCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                              const kxc::Type& out_type) {
     RequireInputCount("reduce_mean", inputs, 1);
@@ -85,7 +91,7 @@ te::Tensor ReduceMeanCompute(const Attrs& attrs, const Array<te::Tensor>& inputs
     const auto* reduce_attrs = attrs.As<ReduceMeanAttrsNode>();
     const int rank = static_cast<int>(inputs[0]->shape.size());
     const std::vector<int> axes = NormalizeAxes(
-        "reduce_mean", reduce_attrs ? reduce_attrs->axes : std::vector<int64_t>{}, rank);
+        "reduce_mean", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{}, rank);
     const bool keepdims = !reduce_attrs || reduce_attrs->keepdims != 0;
 
     te::Tensor sum_out = te::topi::sum(inputs[0], ToAxisArray(axes), keepdims, "T_reduce_mean_sum");
@@ -98,6 +104,7 @@ te::Tensor ReduceMeanCompute(const Attrs& attrs, const Array<te::Tensor>& inputs
         "T_reduce_mean");
 }
 
+// 注册 reduce_mean 的属性、类型推导和 Relay-to-TE 入口。
 KXC_REGISTER_OP(reduce_mean)
     .describe(R"doc(Computes the mean of elements across given dimensions.)doc")
     .set_num_inputs(1)

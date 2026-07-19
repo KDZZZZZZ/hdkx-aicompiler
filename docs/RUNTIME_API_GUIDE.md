@@ -107,92 +107,47 @@ print(result) # 输出 30
 - **核心方法**:
   - `AllocDataSpace`: 分配显存/内存。
   - `FreeDataSpace`: 释放内存。
-  - `CopyDataFromTo`: 设备间数据拷贝 (Host->Device, Device->Host, Device->Device)。
+  - `CopyDataSync` / `CopyDataAsync`: 设备间同步或流绑定异步拷贝。
+  - `CreateStream` / event API: 管理后端 stream 与完成事件。
 
 ### 3.3 使用方法
 
 **Python 端创建设备:**
 ```python
-# 获取 CPU 设备 (id=0)
-cpu_dev = kxc_runtime.device(kxc_runtime.DeviceTypeCode.CPU, 0)
-
-# 获取 GPU 设备 (id=0)
-gpu_dev = kxc_runtime.device(kxc_runtime.DeviceTypeCode.GPU, 0)
+cpu_dev = kxc_runtime.Device.cpu()
+cuda_dev = kxc_runtime.Device.cuda(0)
 ```
 
 **C++ 端获取 API:**
 ```cpp
-// 获取对应设备的 API 实现
-DeviceAPI* api = DeviceAPIManager::Global()->GetAPI(kGPU);
-void* ptr = api->AllocDataSpace(gpu_dev, 1024, 256);
+Device cpu = Device::CPU();
+Device cuda = Device::CUDA(0);
+runtime::NDArray host = runtime::NDArray::Zeros(
+    {256}, runtime::DataTypeFromString("float32"), cpu);
+runtime::NDArray device_array = host.CopyTo(cuda);
 ```
 
 ---
 
 ## 4. 内存管理与数据传输
 
-内存操作通过全局注册的 PackedFunc 暴露给 Python，底层转发给具体的 `DeviceAPI` 实现。
+公共 API 只暴露 `Storage`、`NDArray`、`DeviceStream` 和 `AsyncOperation`。
+裸指针仅存在于 `DeviceAPI` 后端、DLPack 边界和内核 ABI，不编码成 Python 整数。
 
-### 4.1 核心 API (Python)
+### 4.1 核心 API
 
-以下函数注册在 `device_api` 命名空间下：
-
-1.  **`device_api.AllocDataSpace(device, nbytes, alignment)`**
-    - 返回: 内存指针的整数地址 (`int64`)。
-
-2.  **`device_api.FreeDataSpace(device, ptr_val)`**
-    - 参数: `ptr_val` 是之前分配的指针地址。
-
-3.  **`device_api.CopyDataFromTo(src_dev, src_ptr, dst_dev, dst_ptr, nbytes)`**
-    - 功能: 执行同步数据拷贝。自动处理不同设备间的流向。
+1. `Storage::Alloc` / `Storage::FromExternal` 管理物理内存及其唯一释放责任。
+2. `NDArray::Empty` / `NDArray::Zeros` 创建带 dtype、shape 和 Device 的张量视图。
+3. `NDArray::CopyTo` / `CopyFrom` 执行所有权安全的同步复制。
+4. `NDArray::CopyFromAsync` 返回持有 stream、event 和参与 Storage 的 `AsyncOperation`。
 
 ### 4.2 完整示例 (Python)
 
 ```python
 import kxc_runtime
-import ctypes
-
-# 1. 准备设备
-cpu = kxc_runtime.device(kxc_runtime.DeviceTypeCode.CPU, 0)
-gpu = kxc_runtime.device(kxc_runtime.DeviceTypeCode.GPU, 0)
-
-# 2. 获取全局函数
-alloc = kxc_runtime.get_global_func("device_api.AllocDataSpace")
-free = kxc_runtime.get_global_func("device_api.FreeDataSpace")
-copy = kxc_runtime.get_global_func("device_api.CopyDataFromTo")
-
-# 3. 分配内存
-size = 1024
-cpu_ptr = alloc(cpu, size, 64)
-gpu_ptr = alloc(gpu, size, 64)
-
-# 4. 初始化数据 (使用 ctypes 访问 CPU 内存)
-# 假设我们写入一些 float 数据
-FLOAT_SIZE = 4
-num_floats = size // FLOAT_SIZE
-# 将 int 地址转换为 ctypes 指针
-c_float_p = ctypes.POINTER(ctypes.c_float)
-cpu_buffer = ctypes.cast(cpu_ptr, c_float_p)
-
-for i in range(num_floats):
-    cpu_buffer[i] = float(i)
-
-# 5. 拷贝 Host -> Device
-copy(cpu, cpu_ptr, gpu, gpu_ptr, size)
-
-# 6. 拷贝 Device -> Host (验证)
-# 先清空 CPU buffer 验证是否真的拷贝回来了
-for i in range(num_floats):
-    cpu_buffer[i] = 0.0
-
-copy(gpu, gpu_ptr, cpu, cpu_ptr, size)
-
-# 验证
-print(f"Value at index 5: {cpu_buffer[5]}") # 应该输出 5.0
-
-# 7. 释放内存
-free(gpu, gpu_ptr)
-free(cpu, cpu_ptr)
+cpu = kxc_runtime.Device.cpu()
+array = kxc_runtime.NDArray.zeros([256], "float32", cpu)
+view = memoryview(array)  # 仅连续 cpu:0 NDArray 可导出 buffer
 ```
 
 ## 5. 扩展指南
@@ -206,7 +161,7 @@ free(cpu, cpu_ptr)
 
 ### 如何添加新的设备后端?
 
-1.  **继承 `DeviceAPI`**: 实现 `AllocDataSpace`, `FreeDataSpace`, `CopyDataFromTo` 等纯虚函数。
+1.  **继承 `DeviceAPI`**: 实现分配、释放、清零、同步/异步复制、stream、event 和属性查询契约。
 2.  **注册 API**: 在 `DeviceAPIManager::GetAPI` 中添加新的 `DeviceTypeCode` 分支，返回新的 API 单例。
 3.  **编译**: 将新的 `.cc` 文件加入构建系统（如 `build_pybind.bat`）。
 

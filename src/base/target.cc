@@ -9,10 +9,12 @@
 
 namespace kxc {
 
+// 返回经过 Target 类型约束的底层节点。
 const TargetNode* Target::operator->() const {
     return static_cast<const TargetNode*>(object_);
 }
 
+// 输出 target kind、设备身份及编译所需硬件能力快照。
 std::string Target::ToString() const {
     if (!defined()) {
         return "Target(undefined)";
@@ -31,7 +33,9 @@ std::string Target::ToString() const {
     return ss.str();
 }
 
-Target BuildTarget(const class Device& device) {
+// 从物理设备后端构造用于编译决策的 Target 能力快照。
+Target BuildTarget(const Device& device) {
+    // Target 的 kind 与硬件属性由对应 DeviceAPI 查询，避免编译端维护重复的设备表。
     DeviceAPI* api = GetDeviceAPI(device.device_type());
     TargetNode* node = new TargetNode();
     node->kind = api->GetTargetKind(device);
@@ -39,15 +43,6 @@ Target BuildTarget(const class Device& device) {
     node->device_id = device.device_id();
     node->attrs = api->GetDeviceAttributes(device);
     return Target(ObjectRef(node));
-}
-
-Target BuildTarget(DeviceTypeCode type, int device_id) {
-    ObjectRef dev_ref = DeviceManager::Global()->GetOrCreate(type, device_id);
-    const Object* obj = dev_ref.get();
-    if (!obj || obj->GetTypeId() != kKXC_DEVICE_TYPE) {
-        throw std::runtime_error("BuildTarget expects a Device object");
-    }
-    return BuildTarget(*static_cast<const class Device*>(obj));
 }
 
 }  // namespace kxc

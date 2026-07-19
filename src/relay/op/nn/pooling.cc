@@ -7,7 +7,6 @@
 #include "relay/op_attr_types.h"
 #include "relay/type_infer.h"
 #include "te/topi/nn.h"
-#include <vector>
 #include <string>
 #include <stdexcept>
 
@@ -15,7 +14,8 @@ namespace kxc {
 namespace relay {
 
 namespace {
-Array<int> Read2DPair(const std::vector<int64_t>& values, int default_value) {
+// 将零、一或二维池化属性规范化为高宽二元组。
+Array<int> Read2DPair(const Array<int64_t>& values, int default_value) {
     Array<int> out;
     if (values.size() >= 2) {
         out.push_back(static_cast<int>(values[0]));
@@ -27,7 +27,8 @@ Array<int> Read2DPair(const std::vector<int64_t>& values, int default_value) {
     return out;
 }
 
-Array<int> ReadPadding(const std::vector<int64_t>& values) {
+// 将紧凑 padding 属性展开为 TOPI 接受的二维或四维形式。
+Array<int> ReadPadding(const Array<int64_t>& values) {
     Array<int> out;
     if (values.size() >= 4) {
         out.push_back(static_cast<int>(values[0]));
@@ -47,6 +48,7 @@ Array<int> ReadPadding(const std::vector<int64_t>& values) {
 }
 }
 
+// 校验并生成最大池化的 TE 计算。
 te::Tensor MaxPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
     (void)out_type;
     if (inputs.size() != 1) {
@@ -66,6 +68,7 @@ te::Tensor MaxPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     return te::topi::pool2d(inputs[0], pool_size, strides, padding, "max", p->ceil_mode, "T_max_pool2d");
 }
 
+// 校验并生成平均池化的 TE 计算；属性布局与最大池化共享。
 te::Tensor AvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
     (void)out_type;
     if (inputs.size() != 1) {
@@ -85,6 +88,7 @@ te::Tensor AvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     return te::topi::pool2d(inputs[0], pool_size, strides, padding, "avg", p->ceil_mode, "T_avg_pool2d");
 }
 
+// 将 NCHW 输入的全部空间维归约为 1x1 TE 张量。
 te::Tensor GlobalAvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
     (void)attrs;
     (void)out_type;
@@ -98,7 +102,7 @@ te::Tensor GlobalAvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& i
 }
 
 // ---------------------------------------------------------------------------
-// 1. Operator Registration for Pooling
+// 注册三类池化算子的属性、类型推导和 Relay-to-TE 入口。
 // ---------------------------------------------------------------------------
 
 KXC_REGISTER_OP(nn_max_pool2d)
@@ -119,8 +123,7 @@ This operator performs average pooling on the input tensor.
 )doc")
     .set_num_inputs(1)
     .add_argument("data", "Tensor", "The input tensor.")
-    // Reusing MaxPool2DAttrs for AvgPool2D as they share structure (pool_size, strides, padding)
-    // In real TVM, they might share a generic Pool2DAttrs.
+    // 平均池化与最大池化共享 pool_size、strides、padding 等属性结构。
     .set_attr<std::string>("TAttrs", "MaxPool2DAttrs")
     .set_attr<FInferType>("FInferType", Pool2DInferType)
     .set_attr<FRelayToTE>("FRelayToTE", AvgPool2DCompute); 

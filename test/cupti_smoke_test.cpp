@@ -18,6 +18,7 @@
 #include <nvrtc.h>
 #endif
 
+// 在真实 CUDA 设备上执行内存和 NVRTC 内核操作，并验证 CUPTI 事件输出。
 int main() {
 #if !KXC_USE_CUDA
     std::cout << "SKIPPED: KXC_USE_CUDA not enabled\n";
@@ -71,16 +72,11 @@ int main() {
         return 0;
     };
 
-    ObjectRef gpu_ref = Device(kGPU, 0);
-    ObjectRef cpu_ref = Device(kCPU, 0);
-    const class Device* gpu = dynamic_cast<const class Device*>(gpu_ref.get());
-    const class Device* cpu = dynamic_cast<const class Device*>(cpu_ref.get());
-    if (gpu == nullptr || cpu == nullptr) {
-        std::cerr << "Failed to materialize Device objects\n";
-        return 1;
-    }
-    DeviceAPI* api = GetDeviceAPI(kGPU);
-    DeviceAttributes attrs = api->GetDeviceAttributes(*gpu);
+    // 使用强类型 Device 身份统一 CUPTI、CUDA Runtime 和 DeviceAPI 的设备归属。
+    Device gpu = Device::CUDA();
+    Device cpu = Device::CPU();
+    DeviceAPI* api = GetDeviceAPI(kCUDA);
+    DeviceAttributes attrs = api->GetDeviceAttributes(gpu);
     if (!attrs.exists) {
         std::cout << "SKIPPED: no CUDA device detected\n";
         return 0;
@@ -105,13 +101,12 @@ int main() {
         std::vector<float> host_out(64, -1.0f);
         const size_t nbytes = host_in.size() * sizeof(float);
 
-        api->SetDevice(*gpu);
-        void* gpu_buf = api->AllocDataSpace(*gpu, nbytes, 64);
-        void* gpu_out = api->AllocDataSpace(*gpu, nbytes, 64);
-        StreamHandle stream = api->CreateStream(*gpu);
-        api->SetStream(*gpu, stream);
+        api->SetDevice(gpu);
+        void* gpu_buf = api->AllocDataSpace(gpu, nbytes, 64);
+        void* gpu_out = api->AllocDataSpace(gpu, nbytes, 64);
+        StreamHandle stream = api->CreateStream(gpu);
 
-        api->CopyDataFromTo(*cpu, host_in.data(), *gpu, gpu_buf, nbytes);
+        api->CopyDataSync(cpu, host_in.data(), 0, gpu, gpu_buf, 0, nbytes);
         cudaError_t err =
             cudaMemsetAsync(gpu_buf, 0, nbytes, reinterpret_cast<cudaStream_t>(stream));
         if (check_cuda(err, "cudaMemsetAsync") != 0) {
@@ -211,7 +206,7 @@ extern "C" __global__ void scale_add(const float* x, float* y, float alpha, int 
             return 1;
         }
 
-        api->StreamSync(*gpu, stream);
+        api->StreamSync(gpu, stream);
         cuModuleUnload(module);
 
         for (float value : host_out) {
@@ -220,10 +215,9 @@ extern "C" __global__ void scale_add(const float* x, float* y, float alpha, int 
             }
         }
 
-        api->SetStream(*gpu, nullptr);
-        api->FreeStream(*gpu, stream);
-        api->FreeDataSpace(*gpu, gpu_out);
-        api->FreeDataSpace(*gpu, gpu_buf);
+        api->FreeStream(gpu, stream);
+        api->FreeDataSpace(gpu, gpu_out);
+        api->FreeDataSpace(gpu, gpu_buf);
     }
 
     ctx->Flush();

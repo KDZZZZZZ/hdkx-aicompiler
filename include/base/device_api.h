@@ -1,21 +1,34 @@
 /*! \file include/base/device_api.h
- * \brief 定义基础对象系统、容器、设备、NDArray、Target、PassContext 和 profiling 公共类型。
+ * \brief 定义设备后端接口、公共路由函数和结构化设备信息。
  */
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
-#include "device.h"
+#include "base/device.h"
 
 namespace kxc {
 
+/*! \brief PackedFunc 单项属性查询使用的返回值类型。 */
 class RetValue;
-using StreamHandle = void*;
+/*! \brief 设备物理存储对象，完整定义位于 storage.h。 */
+class Storage;
+/*! \brief 设备执行流对象，完整定义位于 device_stream.h。 */
+class DeviceStream;
+/*! \brief 异步完成对象，完整定义位于 device_stream.h。 */
+class AsyncOperation;
 
-/*! \brief DeviceAPI::GetAttr 支持查询的设备属性类型。 */
+/*! \brief 仅在 DeviceAPI 后端边界内使用的非拥有型原生句柄。 */
+using StreamHandle = void*;
+using EventHandle = void*;
+
+/*! \brief PackedFunc 兼容查询所使用的设备属性编号。 */
 enum class DeviceAttrKind : int {
     kExist = 0,
     kMaxThreadsPerBlock = 1,
@@ -38,7 +51,7 @@ enum class DeviceAttrKind : int {
     kComputeVersionMinor = 18,
 };
 
-/*! \brief 后端设备能力快照，用于 target 推导、调度和诊断输出。 */
+/*! \brief 单个物理设备的能力和内存属性快照。 */
 struct DeviceAttributes {
     int exists{0};
     int64_t max_threads_per_block{1};
@@ -62,7 +75,7 @@ struct DeviceAttributes {
     std::string arch;
 };
 
-/*! \brief 单个设备的可发现信息，供统一设备枚举和诊断输出使用。 */
+/*! \brief 设备发现结果；不可用后端也通过 status 返回原因。 */
 struct DeviceInfo {
     DeviceTypeCode device_type{kUnknown};
     int device_id{-1};
@@ -73,79 +86,102 @@ struct DeviceInfo {
     DeviceAttributes attrs;
 };
 
-/*! \brief 设备后端抽象，统一 CPU/CUDA/Metal/OpenCL 的内存、拷贝和 stream 操作。 */
+/*! \brief CPU/CUDA 后端必须实现的内存、复制和同步原语。 */
 class DeviceAPI {
 public:
+    /*! \brief 允许通过后端接口安全销毁具体实现。 */
     virtual ~DeviceAPI() = default;
 
-    /*! \brief 切换当前线程或后端上下文到指定设备。 */
-    virtual void SetDevice(const class Device& device) = 0;
-    /*! \brief 在指定设备上分配数据空间。 */
-    virtual void* AllocDataSpace(const class Device& device, size_t nbytes, size_t alignment) = 0;
-    /*! \brief 释放指定设备上的数据空间。 */
-    virtual void FreeDataSpace(const class Device& device, void* ptr) = 0;
-    /*! \brief 在两个设备指针之间执行同步数据拷贝。 */
-    virtual void CopyDataFromTo(const class Device& from_dev, const void* from_ptr,
-                                const class Device& to_dev, void* to_ptr,
-                                size_t nbytes) = 0;
-    /*! \brief 在两个设备指针之间按 offset 和 stream 执行数据拷贝。 */
-    virtual void CopyDataFromTo(const void* from_ptr, size_t from_offset,
-                                void* to_ptr, size_t to_offset, size_t nbytes,
-                                const class Device& from_dev, const class Device& to_dev,
-                                StreamHandle stream);
-    /*! \brief 查询设备能力属性快照。 */
-    virtual DeviceAttributes GetDeviceAttributes(const class Device& device) = 0;
-    /*! \brief 返回设备对应的 target kind 名称。 */
-    virtual std::string GetTargetKind(const class Device& device) const = 0;
-    /*! \brief 按 DeviceAttrKind 查询单个设备属性。 */
-    virtual void GetAttr(const class Device& device, DeviceAttrKind kind, RetValue* rv);
-    /*! \brief 创建后端 stream；不支持 stream 的后端可返回 nullptr。 */
-    virtual StreamHandle CreateStream(const class Device& device);
-    /*! \brief 释放后端 stream。 */
-    virtual void FreeStream(const class Device& device, StreamHandle stream);
-    /*! \brief 设置当前后端 stream。 */
-    virtual void SetStream(const class Device& device, StreamHandle stream);
-    /*! \brief 获取当前后端 stream。 */
-    virtual StreamHandle GetCurrentStream(const class Device& device);
-    /*! \brief 同步指定 stream。 */
-    virtual void StreamSync(const class Device& device, StreamHandle stream);
-    /*! \brief 建立两个 stream 之间的同步依赖。 */
-    virtual void SyncStreamFromTo(const class Device& device, StreamHandle src, StreamHandle dst);
-    /*! \brief 分配临时 workspace。 */
-    virtual void* AllocWorkspace(const class Device& device, size_t nbytes, size_t alignment);
-    /*! \brief 释放临时 workspace。 */
-    virtual void FreeWorkspace(const class Device& device, void* ptr);
-    /*! \brief 返回该后端是否允许 host 端对设备指针做地址算术。 */
-    virtual bool SupportsDevicePointerArithmeticsOnHost(const class Device& device) const;
+    /*! \brief 选择当前设备；CPU 后端用它校验只能访问 cpu:0。 */
+    virtual void SetDevice(const Device& device) = 0;
+    /*! \brief 分配和释放后端内存；零字节分配由公共路由直接处理。 */
+    virtual void* AllocDataSpace(const Device& device, size_t nbytes,
+                                 size_t alignment) = 0;
+    /*! \brief 释放由 AllocDataSpace 在同一设备上返回的地址。 */
+    virtual void FreeDataSpace(const Device& device, void* ptr) = 0;
+    /*! \brief 从 ptr 的字节 offset 开始清零 nbytes。 */
+    virtual void ZeroData(const Device& device, void* ptr, size_t offset,
+                          size_t nbytes) = 0;
+    /*! \brief 同步复制；两个 offset 和 nbytes 的单位均为字节。 */
+    virtual void CopyDataSync(const Device& from_device, const void* from,
+                              size_t from_offset, const Device& to_device,
+                              void* to, size_t to_offset, size_t nbytes) = 0;
+    /*! \brief 将复制排入 stream；完成状态由调用层用 event 跟踪。 */
+    virtual void CopyDataAsync(const Device& from_device, const void* from,
+                               size_t from_offset, const Device& to_device,
+                               void* to, size_t to_offset, size_t nbytes,
+                               StreamHandle stream) = 0;
 
-    /*! \brief 判断访问该设备类型前是否需要调用 SetDevice。 */
-    static bool NeedSetDevice(DeviceTypeCode type);
+    /*! \brief 创建、销毁和同步后端 stream；空句柄表示默认 stream。 */
+    virtual StreamHandle CreateStream(const Device& device) = 0;
+    /*! \brief 释放 CreateStream 创建的非默认 stream。 */
+    virtual void FreeStream(const Device& device, StreamHandle stream) = 0;
+    /*! \brief 等待 stream 中此前提交的任务完成。 */
+    virtual void StreamSync(const Device& device, StreamHandle stream) = 0;
+    /*! \brief event 由创建它的后端负责记录、查询、等待和销毁。 */
+    virtual EventHandle CreateEvent(const Device& device) = 0;
+    /*! \brief 在 stream 中记录 event；空 stream 表示默认 stream。 */
+    virtual void RecordEvent(const Device& device, EventHandle event,
+                             StreamHandle stream) = 0;
+    /*! \brief 非阻塞查询 event 是否已经完成。 */
+    virtual bool QueryEvent(const Device& device, EventHandle event) = 0;
+    /*! \brief 阻塞等待 event 完成。 */
+    virtual void WaitEvent(const Device& device, EventHandle event) = 0;
+    /*! \brief 释放由 CreateEvent 创建的 event。 */
+    virtual void FreeEvent(const Device& device, EventHandle event) = 0;
+
+    /*! \brief 查询设备能力及其编译目标类型。 */
+    virtual DeviceAttributes GetDeviceAttributes(const Device& device) = 0;
+    /*! \brief 返回用于编译 Target 的后端 kind 名称。 */
+    virtual std::string GetTargetKind(const Device& device) const = 0;
+    /*! \brief 将指定属性写入 PackedFunc 返回值。 */
+    virtual void GetAttr(const Device& device, DeviceAttrKind kind, RetValue* rv);
 };
 
+/*! \brief 返回进程级 CPU 后端实现。 */
 DeviceAPI* GetCPUDeviceAPI();
+/*! \brief 返回 CUDA 后端实现；未启用 CUDA 时操作会显式失败。 */
 DeviceAPI* GetCUDADeviceAPI();
-DeviceAPI* GetMetalDeviceAPI();
-DeviceAPI* GetOpenCLDeviceAPI();
 
-/*! \brief DeviceAPI 全局注册表，按 DeviceTypeCode 返回对应后端实现。 */
+/*! \brief 按设备类型缓存进程级后端实例。 */
 class DeviceAPIManager {
 public:
+    /*! \brief 返回进程级后端注册表。 */
     static DeviceAPIManager* Global();
+    /*! \brief 按设备类型取得后端实现；不支持的类型会抛出异常。 */
     DeviceAPI* GetAPI(DeviceTypeCode type);
 
 private:
-    DeviceAPIManager() = default;
-    std::vector<DeviceAPI*> apis_;
+    std::mutex mutex_;
+    std::unordered_map<int, DeviceAPI*> apis_;
 };
 
+/*! \brief 公共强类型路由；调用方不直接持有后端实现。 */
 DeviceAPI* GetDeviceAPI(DeviceTypeCode type);
+/*! \brief 分配设备内存；alignment 为 0 或二的幂，零字节返回 nullptr。 */
+void* DeviceAlloc(const Device& device, size_t nbytes, size_t alignment = 0);
+/*! \brief 释放 DeviceAlloc 返回的内存；空指针是无操作。 */
+void DeviceFree(const Device& device, void* ptr);
+/*! \brief 对设备内存中的字节区间执行清零。 */
+void DeviceZero(const Device& device, void* ptr, size_t offset, size_t nbytes);
+/*! \brief 根据源和目标 Device 自动选择 H2H、H2D、D2H 或 D2D 路由。 */
+void DeviceCopySync(const Device& from_device, const void* from, size_t from_offset,
+                    const Device& to_device, void* to, size_t to_offset,
+                    size_t nbytes);
 
-DeviceAttributes CollectDeviceAttributes(const class Device& device);
-void GetDeviceAttr(const class Device& device, DeviceAttrKind kind, RetValue* rv);
-int64_t GetDeviceAttr(const class Device& device, DeviceAttrKind kind);
-std::vector<class Device> ListDevices();
+/*! \brief 设备能力查询以及面向工具的枚举/JSON 接口。 */
+DeviceAttributes CollectDeviceAttributes(const Device& device);
+/*! \brief 以 PackedFunc 返回值形式查询单项设备属性。 */
+void GetDeviceAttr(const Device& device, DeviceAttrKind kind, RetValue* rv);
+/*! \brief 查询可表示为整数的单项设备属性。 */
+int64_t GetDeviceAttr(const Device& device, DeviceAttrKind kind);
+/*! \brief 枚举当前实际可用的物理设备。 */
+std::vector<Device> ListDevices();
+/*! \brief 返回已知后端的结构化设备信息和不可用原因。 */
 std::vector<DeviceInfo> GetAllDeviceInfo();
+/*! \brief 将可用设备列表序列化为 JSON。 */
 std::string ListDevicesJSON();
+/*! \brief 将完整设备信息序列化为 JSON。 */
 std::string GetAllDeviceInfoJSON();
 
 }  // namespace kxc

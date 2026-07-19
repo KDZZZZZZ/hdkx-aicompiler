@@ -8,7 +8,6 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 #include "base/container.h"
 #include "relay.h"
@@ -103,12 +102,12 @@ public:
 /*! \brief nn.conv2d 的卷积窗口、布局和输出通道属性。 */
 class Conv2DAttrsNode : public BaseAttrsNode {
 public:
-    std::vector<int64_t> strides;
-    std::vector<int64_t> padding;
-    std::vector<int64_t> dilation;
+    Array<int64_t> strides;
+    Array<int64_t> padding;
+    Array<int64_t> dilation;
     int groups;
     int channels;
-    std::vector<int64_t> kernel_size;
+    Array<int64_t> kernel_size;
     std::string data_layout;
     std::string kernel_layout;
     std::string out_layout;
@@ -126,9 +125,9 @@ class Conv2DAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(Conv2DAttrs, Conv2DAttrsNode)
 
 public:
-    static Conv2DAttrs Create(std::vector<int64_t> strides, std::vector<int64_t> padding,
-                              std::vector<int64_t> dilation, int groups, int channels,
-                              std::vector<int64_t> kernel_size, std::string data_layout,
+    static Conv2DAttrs Create(Array<int64_t> strides, Array<int64_t> padding,
+                              Array<int64_t> dilation, int groups, int channels,
+                              Array<int64_t> kernel_size, std::string data_layout,
                               std::string kernel_layout, std::string out_layout,
                               std::string out_dtype);
 };
@@ -153,10 +152,10 @@ public:
 /*! \brief nn.max_pool2d 的窗口、步幅、padding 和布局属性。 */
 class MaxPool2DAttrsNode : public BaseAttrsNode {
 public:
-    std::vector<int64_t> pool_size;
-    std::vector<int64_t> strides;
-    std::vector<int64_t> padding;
-    std::vector<int64_t> dilation;
+    Array<int64_t> pool_size;
+    Array<int64_t> strides;
+    Array<int64_t> padding;
+    Array<int64_t> dilation;
     std::string layout;
     bool ceil_mode;
 
@@ -169,8 +168,8 @@ class MaxPool2DAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(MaxPool2DAttrs, MaxPool2DAttrsNode)
 
 public:
-    static MaxPool2DAttrs Create(std::vector<int64_t> strides, std::vector<int64_t> padding,
-                                 std::vector<int64_t> dilation, std::vector<int64_t> pool_size,
+    static MaxPool2DAttrs Create(Array<int64_t> strides, Array<int64_t> padding,
+                                 Array<int64_t> dilation, Array<int64_t> pool_size,
                                  std::string layout, bool ceil_mode);
 };
 
@@ -290,7 +289,7 @@ public:
 /*! \brief reduce.mean 的归约轴和 keepdims 属性。 */
 class ReduceMeanAttrsNode : public BaseAttrsNode {
 public:
-    std::vector<int64_t> axes;
+    Array<int64_t> axes;
     int64_t keepdims = 1;
     KXC_DECLARE_ATTRS_NODE
 };
@@ -299,13 +298,13 @@ class ReduceMeanAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ReduceMeanAttrs, ReduceMeanAttrsNode)
 
 public:
-    static ReduceMeanAttrs Create(std::vector<int64_t> axes, int64_t keepdims = 1);
+    static ReduceMeanAttrs Create(Array<int64_t> axes, int64_t keepdims = 1);
 };
 
 /*! \brief reshape 的目标形状和 allowzero 语义属性。 */
 class ReshapeAttrsNode : public BaseAttrsNode {
 public:
-    std::vector<int64_t> newshape;
+    Array<int64_t> newshape;
     int allowzero = 0;
     KXC_DECLARE_ATTRS_NODE
 };
@@ -314,13 +313,13 @@ class ReshapeAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(ReshapeAttrs, ReshapeAttrsNode)
 
 public:
-    static ReshapeAttrs Create(std::vector<int64_t> newshape, int allowzero = 0);
+    static ReshapeAttrs Create(Array<int64_t> newshape, int allowzero = 0);
 };
 
 /*! \brief split 的切分位置/段数和切分轴属性。 */
 class SplitAttrsNode : public BaseAttrsNode {
 public:
-    std::vector<int64_t> split;
+    Array<int64_t> split;
     int axis = 0;
     KXC_DECLARE_ATTRS_NODE
 };
@@ -329,13 +328,13 @@ class SplitAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(SplitAttrs, SplitAttrsNode)
 
 public:
-    static SplitAttrs Create(std::vector<int64_t> split, int axis = 0);
+    static SplitAttrs Create(Array<int64_t> split, int axis = 0);
 };
 
 /*! \brief transpose 的维度置换属性。 */
 class TransposeAttrsNode : public BaseAttrsNode {
 public:
-    std::vector<int64_t> perm;
+    Array<int64_t> perm;
     KXC_DECLARE_ATTRS_NODE
 };
 KXC_OBJECT_DEFINE(TransposeAttrsNode)
@@ -343,7 +342,7 @@ class TransposeAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(TransposeAttrs, TransposeAttrsNode)
 
 public:
-    static TransposeAttrs Create(std::vector<int64_t> perm);
+    static TransposeAttrs Create(Array<int64_t> perm);
 };
 
 KXC_DEFINE_SIMPLE_ATTRS(ReluAttrs)

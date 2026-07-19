@@ -129,6 +129,8 @@ set(KXC_RUNTIME_SOURCES
   src/base/expr.cc
   src/base/device.cc
   src/base/device_api.cc
+  src/base/device_stream.cc
+  src/base/storage.cc
   src/base/profiling.cc
   src/base/target.cc
   src/base/virtual_device.cc
@@ -302,6 +304,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(object_test test/object_test.cpp)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
   kxc_add_runtime_exe(device_info_test test/device_info_test.cpp)
+  kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
@@ -366,6 +369,13 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS device_info_test
     USES_TERMINAL
     COMMENT "Run device_info_test"
+  )
+  add_custom_target(run_device_runtime_test
+    COMMAND "$<TARGET_FILE:device_runtime_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS device_runtime_test
+    USES_TERMINAL
+    COMMENT "Run device_runtime_test"
   )
 
   add_custom_target(run_profile_bundle_test

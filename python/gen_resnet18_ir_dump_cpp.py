@@ -25,6 +25,7 @@ SUPPORTED_OPS = {
 
 
 def sanitize(name: str) -> str:
+    """将 ONNX 名称规范化为合法且稳定的 C++ 标识符。"""
     name = re.sub(r"[^0-9a-zA-Z_]", "_", name)
     if not name:
         name = "v"
@@ -34,10 +35,12 @@ def sanitize(name: str) -> str:
 
 
 def fmt_int_list(v):
+    """将整数序列格式化为 C++ 初始化列表。"""
     return "{" + ", ".join(str(int(x)) for x in v) + "}"
 
 
 def onnx_dtype_to_kxc(dtype: int) -> str:
+    """将 ONNX TensorProto 类型映射为 KXC dtype 名称。"""
     if dtype == TensorProto.FLOAT:
         return "float32"
     if dtype == TensorProto.DOUBLE:
@@ -52,11 +55,12 @@ def onnx_dtype_to_kxc(dtype: int) -> str:
         return "uint8"
     if dtype == TensorProto.BOOL:
         return "bool"
-    # Fallback for this compiler's minimal dtype set.
+    # 编译器当前只支持最小 dtype 集合，未知类型按 float32 生成诊断代码。
     return "float32"
 
 
 def get_attr(node, name, default):
+    """读取生成器支持的 ONNX 属性类型，缺失时返回默认值。"""
     for a in node.attribute:
         if a.name != name:
             continue
@@ -70,6 +74,7 @@ def get_attr(node, name, default):
 
 
 def value_info_shape_and_dtype(value_info, default_batch):
+    """解析输入元数据，并用 default_batch 补全动态批维。"""
     t = value_info.type.tensor_type
     dtype = onnx_dtype_to_kxc(t.elem_type)
     shape = []
@@ -82,6 +87,7 @@ def value_info_shape_and_dtype(value_info, default_batch):
 
 
 def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
+    """导入 ResNet18 并生成可输出 Relay/TIR 的 C++ 诊断程序。"""
     imported = import_onnx(model_path, default_batch=default_batch)
 
     lines = []
@@ -107,8 +113,10 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("")
     w("namespace {")
     w("")
+    w("// 生成 IR 树形文本所需的缩进。")
     w("std::string Indent(int n) { return std::string(n, ' '); }")
     w("")
+    w("// 将 TIR dtype 格式化为可读名称。")
     w("std::string DTypeToString(const tir::DataType& dt) {")
     w("    if (dt.code == 2) return \"float\" + std::to_string(dt.bits);")
     w("    if (dt.code == 0) return \"int\" + std::to_string(dt.bits);")
@@ -117,14 +125,17 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("    return \"dtype(code=\" + std::to_string(dt.code) + \",bits=\" + std::to_string(dt.bits) + \")\";")
     w("}")
     w("")
+    w("// 将 NDArray 的 DLPack dtype 格式化为可读名称。")
     w("std::string NDArrayDTypeToString(const runtime::NDArray& arr) {")
     w("    const DLDataType& dt = arr->dl_tensor.dtype;")
     w("    if (dt.code == kDLFloat) return \"float\" + std::to_string(dt.bits);")
     w("    if (dt.code == kDLInt) return \"int\" + std::to_string(dt.bits);")
-    w("    if (dt.code == kDLUint) return dt.bits == 1 ? \"bool\" : (\"uint\" + std::to_string(dt.bits));")
+    w("    if (dt.code == kDLUInt) return \"uint\" + std::to_string(dt.bits);")
+    w("    if (dt.code == kDLBool) return \"bool\";")
     w("    return \"unknown\";")
     w("}")
     w("")
+    w("// 递归格式化 Relay 类型及其 shape、dtype。")
     w("std::string PrintRelayType(const Type& ty) {")
     w("    if (!ty.defined()) return \"<none>\";")
     w("    if (const auto* t = ty.As<TensorTypeNode>()) {")
@@ -142,6 +153,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("")
     w("std::string PrintPrimExpr(const tir::PrimExpr& e);")
     w("")
+    w("// 将 TIR 标量表达式格式化为诊断文本。")
     w("std::string PrintPrimExpr(const tir::PrimExpr& e) {")
     w("    if (!e.defined()) return \"<undef>\";")
     w("    if (const auto* n = e.As<tir::IntImmNode>()) return std::to_string(n->value);")
@@ -178,6 +190,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("    return \"<expr>\";")
     w("}")
     w("")
+    w("// 递归输出 TIR 语句树。")
     w("void DumpStmt(const tir::Stmt& s, std::ostream& os, int indent) {")
     w("    if (!s.defined()) { os << Indent(indent) << \"<empty-stmt>\\n\"; return; }")
     w("    if (const auto* n = s.As<tir::ForNode>()) {")
@@ -229,6 +242,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("    os << Indent(indent) << \"<stmt>\\n\";")
     w("}")
     w("")
+    w("// 输出 TIR 函数参数、buffer、attrs 和函数体。")
     w("void DumpPrimFunc(const tir::PrimFunc& f, std::ostream& os) {")
     w("    os << \"\\n================ TIR PrimFunc ================\\n\";")
     w("    os << \"params(\" << f->params.size() << \"):\\n\";")
@@ -255,6 +269,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("    DumpStmt(f->body, os, 2);")
     w("}")
     w("")
+    w("// 提取受支持算子 attrs 的关键字段用于诊断输出。")
     w("std::string DescribeCallAttrs(const ObjectRef& attrs) {")
     w("    if (!attrs.defined()) return \"<none>\";")
     w("    if (const auto* a = attrs.As<Conv2DAttrsNode>()) {")
@@ -285,6 +300,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("    return \"<attrs>\";")
     w("}")
     w("")
+    w("// 保存 Relay 图节点的稳定编号、标签和输入边。")
     w("struct RelayGraphNode {")
     w("    int id;")
     w("    const Object* obj;")
@@ -293,6 +309,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("    std::vector<int> inputs;")
     w("};")
     w("")
+    w("// 深度优先遍历 Relay 表达式并构建去重后的图节点表。")
     w("int CollectRelayGraph(const Expr& e, std::unordered_map<const Object*, int>& ids, std::vector<RelayGraphNode>& nodes) {")
     w("    if (!e.defined()) return -1;")
     w("    auto it = ids.find(e.get());")
@@ -335,6 +352,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("    return id;")
     w("}")
     w("")
+    w("// 递归输出 Relay 表达式树，并避免重复展开共享节点。")
     w("void DumpRelayExpr(const Expr& e, std::ostream& os, int indent, std::unordered_set<const Object*>& seen) {")
     w("    if (!e.defined()) { os << Indent(indent) << \"<undef-expr>\\n\"; return; }")
     w("    if (seen.count(e.get())) {")
@@ -369,6 +387,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("    os << Indent(indent) << \"Expr(<unknown>)\\n\";")
     w("}")
     w("")
+    w("// 输出 Relay 函数签名、表达式树和图边。")
     w("void DumpRelay(const Function& f, std::ostream& os) {")
     w("    os << \"================ Relay Function ================\\n\";")
     w("    os << \"params(\" << f->params.size() << \"):\\n\";")
@@ -396,10 +415,11 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("    DumpRelayExpr(f->body, os, 2, seen);")
     w("}")
     w("")
+    w("// 用显式 CPU NDArray 常量构造导入后的 ResNet18 Relay 函数。")
     w("Function BuildResNet18Function() {")
     w("    Array<Var> params;")
 
-    # Initializers as Constant.
+    # 生成的 IR dump 只需要参数元数据，使用 CPU 零张量稳定承载 shape 与 dtype。
     value_map = {}
     sym_id = 0
 
@@ -408,12 +428,13 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
         c_name = f"const_{sym_id}_{sanitize(param.name)}"
         nd_name = f"nd_{sym_id}"
         sym_id += 1
-        w(f"    runtime::NDArray {nd_name}({fmt_int_list(param.shape)}, \"{param.dtype}\");")
+        w("    // IR dump 不执行权重计算，显式 CPU 零张量仅承载常量 shape/dtype。")
+        w(f"    runtime::NDArray {nd_name} = runtime::NDArray::Zeros({fmt_int_list(param.shape)}, runtime::DataTypeFromString(\"{param.dtype}\"), Device::CPU());")
         w(f"    Constant {c_name}({nd_name});")
         value_map[param.name] = c_name
 
     w("")
-    # Inputs as typed Var params.
+    # 将非 initializer 输入保留为具有完整类型的 Relay Var 参数。
     for inp in imported.function.inputs:
         if inp.name in value_map:
             continue
@@ -496,6 +517,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
     w("")
     w("}  // namespace")
     w("")
+    w("// 构造 ResNet18，执行类型推导与 lowering，并写出 Relay/TIR 诊断文件。")
     w("int main() {")
     w("    try {")
     w("        std::ofstream devnull(\"NUL\");")
@@ -523,6 +545,7 @@ def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
 
 
 def main():
+    """解析命令行参数并生成 ResNet18 IR dump 源文件。"""
     parser = argparse.ArgumentParser(
         description="Generate C++ tool that lowers ONNX ResNet18 to Relay and TIR and dumps IR."
     )

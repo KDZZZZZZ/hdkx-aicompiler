@@ -27,7 +27,7 @@ public:
     const VirtualDevice& primary_virtual_device() const { return primary_virtual_device_; }
     const Array<VirtualDevice>& virtual_devices() const { return virtual_devices_; }
     const Target& default_target() const { return default_target_; }
-    const ObjectRef& default_device_obj() const { return default_device_obj_; }
+    const Device& default_device() const { return default_device_; }
     const DiscoPlacement& disco_placement() const { return disco_placement_; }
     bool has_disco_placement() const { return disco_placement_.defined(); }
 
@@ -65,7 +65,7 @@ private:
     VirtualDevice primary_virtual_device_;
     Array<VirtualDevice> virtual_devices_;
     Target default_target_;
-    ObjectRef default_device_obj_;
+    Device default_device_;
     DiscoPlacement disco_placement_;
 
     static PassContext BuildFromVirtualDevices(const Array<VirtualDevice>& virtual_devices);
