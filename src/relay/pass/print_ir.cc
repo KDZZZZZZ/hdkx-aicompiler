@@ -14,13 +14,16 @@ namespace pass {
 
 namespace {
 
+// 生成指定宽度的缩进字符串。
 std::string Indent(int n) { return std::string(n, ' '); }
 
+// 在表达式已有 checked_type 时追加类型文本。
 std::string CheckedTypeSuffix(const Expr& expr) {
     Type checked_type = expr.checked_type();
     return checked_type.defined() ? " : " + TypeToString(checked_type) : "";
 }
 
+// 将 DLPack dtype 转换为调试输出使用的稳定名称。
 std::string DTypeToString(const DLDataType& dtype) {
     if (dtype.code == kDLFloat) {
         return "float" + std::to_string(dtype.bits);
@@ -28,18 +31,20 @@ std::string DTypeToString(const DLDataType& dtype) {
     if (dtype.code == kDLInt) {
         return "int" + std::to_string(dtype.bits);
     }
-    if (dtype.code == kDLUint) {
-        return dtype.bits == 1 ? "bool" : ("uint" + std::to_string(dtype.bits));
-    }
+    if (dtype.code == kDLUInt) return "uint" + std::to_string(dtype.bits);
+    if (dtype.code == kDLBool) return "bool";
     return "dtype(code=" + std::to_string(dtype.code) + ",bits=" +
            std::to_string(dtype.bits) + ")";
 }
 
+// 递归打印 Relay 表达式树及其类型、参数和张量元数据。
 class RelayIRPrinter {
 public:
+    // 绑定输出流和每层缩进宽度。
     RelayIRPrinter(std::ostream& os, int indent_spaces)
         : os_(os), indent_spaces_(indent_spaces) {}
 
+    // 按节点类别打印当前表达式并递归处理子节点。
     void Print(const Expr& expr, int indent) {
         if (!expr.defined()) {
             os_ << Indent(indent) << "<undef-expr>\n";
@@ -53,9 +58,9 @@ public:
         }
         if (const auto* constant = expr.As<ConstantNode>()) {
             os_ << Indent(indent) << "Constant(shape=[";
-            for (size_t i = 0; i < constant->data->shape.size(); ++i) {
+            for (size_t i = 0; i < constant->data->shape_storage.size(); ++i) {
                 if (i) os_ << ", ";
-                os_ << constant->data->shape[i];
+                os_ << constant->data->shape_storage[i];
             }
             os_ << "], dtype=" << DTypeToString(constant->data->dl_tensor.dtype) << ")"
                 << CheckedTypeSuffix(expr) << "\n";
@@ -131,32 +136,39 @@ private:
 
 }  // namespace
 
+// 配置公开 IR 打印 pass 的缩进宽度。
 IRPrinterPass::IRPrinterPass(int indent_spaces) : indent_spaces_(indent_spaces) {}
 
+// 打印任意 Relay 表达式。
 void IRPrinterPass::Run(const Expr& expr, std::ostream& os) const {
     RelayIRPrinter printer(os, indent_spaces_);
     printer.Print(expr, 0);
 }
 
+// 将 Function 适配为 Expr 后打印。
 void IRPrinterPass::Run(const Function& func, std::ostream& os) const {
     Run(Expr(ObjectRef(func)), os);
 }
 
+// 直接把表达式转储到调用方流。
 void DumpExpr(const Expr& expr, std::ostream& os, int indent_spaces) {
     IRPrinterPass pass(indent_spaces);
     pass.Run(expr, os);
 }
 
+// 直接把函数转储到调用方流。
 void DumpFunction(const Function& func, std::ostream& os, int indent_spaces) {
     DumpExpr(Expr(ObjectRef(func)), os, indent_spaces);
 }
 
+// 返回表达式的完整文本表示。
 std::string ToText(const Expr& expr, int indent_spaces) {
     std::ostringstream os;
     DumpExpr(expr, os, indent_spaces);
     return os.str();
 }
 
+// 返回函数的完整文本表示。
 std::string ToText(const Function& func, int indent_spaces) {
     std::ostringstream os;
     DumpFunction(func, os, indent_spaces);

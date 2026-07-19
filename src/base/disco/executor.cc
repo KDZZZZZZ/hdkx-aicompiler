@@ -18,6 +18,7 @@ namespace disco {
 
 namespace {
 
+// 规范节点 worker 集合；未显式指定时退回放置结果或 worker0。
 Array<int> EffectiveWorkerSet(const Array<int>& worker_set, int fallback_worker) {
     if (!worker_set.empty()) {
         return worker_set;
@@ -25,6 +26,7 @@ Array<int> EffectiveWorkerSet(const Array<int>& worker_set, int fallback_worker)
     return {fallback_worker >= 0 ? fallback_worker : 0};
 }
 
+// 构造执行计划统一 profiling 事件描述。
 profiling::EventSpec MakeExecutorSpec(const std::string& event_type) {
     profiling::EventSpec spec;
     spec.component = "execution_plan";
@@ -34,6 +36,7 @@ profiling::EventSpec MakeExecutorSpec(const std::string& event_type) {
 
 }  // namespace
 
+// 绑定一个 Disco 会话和通信后端，拒绝不可执行的空依赖。
 ExecutionPlanExecutor::ExecutionPlanExecutor(DiscoSession session,
                                              std::shared_ptr<CCLBackend> ccl_backend)
     : session_(std::move(session)), ccl_backend_(std::move(ccl_backend)) {
@@ -45,6 +48,7 @@ ExecutionPlanExecutor::ExecutionPlanExecutor(DiscoSession session,
     }
 }
 
+// 按计划顺序解释 kernel、通信和 barrier 节点，并维护 value 到 DRef 的表。
 Map<int, DRef> ExecutionPlanExecutor::Execute(const ExecutionPlan& plan,
                                               const Map<int, DRef>& initial_values) {
     if (!plan.defined()) {
@@ -61,6 +65,7 @@ Map<int, DRef> ExecutionPlanExecutor::Execute(const ExecutionPlan& plan,
         if (!node_ref.defined()) {
             continue;
         }
+        // 节点类型通过对象系统 TypeId 分派，未知类型必须失败而不能跳过。
         if (node_ref.get()->GetTypeId() == KernelExecNode::_type_index) {
             profiling::ScopedSpan node_span(profiling::CurrentContext(),
                                             MakeExecutorSpec("execute_kernel_node"));
@@ -91,6 +96,7 @@ Map<int, DRef> ExecutionPlanExecutor::Execute(const ExecutionPlan& plan,
     return values_;
 }
 
+// 执行完整计划并返回声明的唯一输出 DRef。
 DRef ExecutionPlanExecutor::ExecuteForOutput(const ExecutionPlan& plan,
                                              const Map<int, DRef>& initial_values) {
     Execute(plan, initial_values);
@@ -101,6 +107,7 @@ DRef ExecutionPlanExecutor::ExecuteForOutput(const ExecutionPlan& plan,
     return values_.at(output);
 }
 
+// 确保 value 已有 DRef；给定原型时复制各 worker 本地值作为初始内容。
 DRef ExecutionPlanExecutor::EnsureValue(const ExecutionPlan& plan, int value_id,
                                         const DRef& prototype) {
     if (values_.count(value_id)) {
@@ -119,6 +126,7 @@ DRef ExecutionPlanExecutor::EnsureValue(const ExecutionPlan& plan, int value_id,
     return ref;
 }
 
+// 解释当前 kernel 节点；现阶段用零值或输入副本承接输出占位语义。
 void ExecutionPlanExecutor::ExecuteKernel(const ExecutionPlan& plan, const KernelExecNode* kernel) {
     if (!kernel || kernel->output_values.empty()) {
         return;
@@ -130,12 +138,16 @@ void ExecutionPlanExecutor::ExecuteKernel(const ExecutionPlan& plan, const Kerne
     kernel_span.AddMetric("input_count", static_cast<double>(kernel->input_values.size()));
     kernel_span.AddMetric("output_count", static_cast<double>(kernel->output_values.size()));
 
+    // 无输入节点没有原型可复制，当前执行器为目标 worker 创建 float32 零值占位。
     if (kernel->input_values.empty()) {
         for (int out_id : kernel->output_values) {
             DRef out = EnsureValue(plan, out_id, DRef());
             Array<int64_t> scalar_shape = {1};
             for (int worker : EffectiveWorkerSet(kernel->worker_set, 0)) {
-                session_.Set(worker, out, runtime::NDArray(scalar_shape, "float32"));
+                session_.Set(worker, out, runtime::NDArray::Zeros(
+                                              scalar_shape,
+                                              runtime::DataTypeFromString("float32"),
+                                              Device::CPU()));
             }
         }
         return;
@@ -156,6 +168,7 @@ void ExecutionPlanExecutor::ExecuteKernel(const ExecutionPlan& plan, const Kerne
     }
 }
 
+// 根据通信算子名和结构化 attrs 分派到 CCLBackend，并登记输出 DRef。
 void ExecutionPlanExecutor::ExecuteComm(const ExecutionPlan& plan, const CommExecNode* comm) {
     if (!comm || comm->output_values.empty()) {
         return;
@@ -178,6 +191,7 @@ void ExecutionPlanExecutor::ExecuteComm(const ExecutionPlan& plan, const CommExe
     int output_id = comm->output_values[0];
     DRef dst = EnsureValue(plan, output_id, src);
 
+    // device.copy 可由 attrs 中的显式 VirtualDevice 覆盖 value 默认放置。
     if (comm->op_name == "device.copy") {
         int src_worker = ResolveWorkerForValue(plan, input_id);
         int dst_worker = ResolveWorkerForValue(plan, output_id);
@@ -248,12 +262,14 @@ void ExecutionPlanExecutor::ExecuteComm(const ExecutionPlan& plan, const CommExe
         throw std::runtime_error("Unsupported communication op in executor: " + comm->op_name);
     }
 
+    // 多输出通信节点当前共享同一 DRef，保持执行计划中的别名关系。
     values_.Set(output_id, dst);
     for (size_t i = 1; i < comm->output_values.size(); ++i) {
         values_.Set(comm->output_values[i], dst);
     }
 }
 
+// 通过 value 的 VirtualDevice 约束解析 worker，缺失映射时使用 worker0。
 int ExecutionPlanExecutor::ResolveWorkerForValue(const ExecutionPlan& plan, int value_id) const {
     if (!plan.defined()) return 0;
     if (!plan->value_virtual_devices.count(value_id)) {
@@ -262,6 +278,7 @@ int ExecutionPlanExecutor::ResolveWorkerForValue(const ExecutionPlan& plan, int 
     return ResolveWorkerForVirtualDevice(plan, plan->value_virtual_devices.at(value_id));
 }
 
+// 仅通过 DiscoPlacement 把逻辑设备映射为 worker，禁止复用物理 device_id。
 int ExecutionPlanExecutor::ResolveWorkerForVirtualDevice(const ExecutionPlan& plan,
                                                          const VirtualDevice& vd) const {
     if (!plan.defined() || !vd.defined()) {
@@ -271,16 +288,11 @@ int ExecutionPlanExecutor::ResolveWorkerForVirtualDevice(const ExecutionPlan& pl
         int worker = FindWorkerForVirtualDevice(plan->pass_ctx.disco_placement(), vd);
         if (worker >= 0) return worker;
     }
-    if (vd->device_obj.defined()) {
-        const auto* dev = static_cast<const class Device*>(vd->device_obj.get());
-        if (dev) return dev->device_id();
-    }
-    if (vd->target.defined()) {
-        return vd->target->device_id;
-    }
+    // 物理 device id 与 worker id 属于不同命名空间；参与 Disco 时只能由 placement 映射。
     return 0;
 }
 
+// 注册对象、JSON 文本及 JSON 文件三类计划执行 PackedFunc 入口。
 KXC_REGISTER_GLOBAL("kxc.disco.execute_plan")
     .set_body(ToPackedFunc([](DiscoSession session, ExecutionPlan plan) -> ObjectRef {
         ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());

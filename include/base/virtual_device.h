@@ -15,7 +15,7 @@ constexpr int kInvalidVirtualDeviceId = -1;
 
 class VirtualDeviceNode : public Object {
 public:
-    ObjectRef device_obj;
+    Device device;
     Target target;
     std::string memory_scope;
     int virtual_device_id{kInvalidVirtualDeviceId};
@@ -26,7 +26,6 @@ public:
     bool has_target() const;
     bool IsFullyUnconstrained() const;
     bool IsFullyConstrained() const;
-    class Device device() const;
 };
 
 KXC_OBJECT_DEFINE(VirtualDeviceNode)
@@ -36,7 +35,7 @@ public:
     using ObjectRef::ObjectRef;
     VirtualDevice(const ObjectRef& ref) : ObjectRef(ref) {}
 
-    VirtualDevice(const class Device& device, Target target = Target(),
+    VirtualDevice(const Device& device, Target target = Target(),
                   std::string memory_scope = "",
                   int virtual_device_id = kInvalidVirtualDeviceId);
     VirtualDevice(Target target, std::string memory_scope = "",
@@ -46,13 +45,13 @@ public:
 
     bool IsFullyUnconstrained() const;
     bool IsFullyConstrained() const;
-    class Device device() const;
+    Device device() const;
     std::string ToString() const;
 
     static VirtualDevice FullyUnconstrained();
-    static VirtualDevice ForDevice(const class Device& device);
+    static VirtualDevice ForDevice(const Device& device);
     static VirtualDevice ForTarget(const Target& target);
-    static VirtualDevice ForDeviceAndTarget(const class Device& device, const Target& target);
+    static VirtualDevice ForDeviceAndTarget(const Device& device, const Target& target);
 };
 
 }  // namespace kxc

@@ -10,11 +10,15 @@
 using namespace kxc;
 using namespace kxc::relay;
 
+// 构造最小 Conv2D Relay 图并验证其可降低为 TIR。
 int main() {
     try {
         Var input("input", TensorType({1, 3, 224, 224}, "float32"));
-        runtime::NDArray w_data({64, 3, 7, 7}, "float32");
-        runtime::NDArray b_data({64}, "float32");
+        // lowering 测试只需要常量元数据，显式 cpu:0 零张量避免旧构造器的隐式设备选择。
+        runtime::NDArray w_data = runtime::NDArray::Zeros(
+            {64, 3, 7, 7}, runtime::DataTypeFromString("float32"), Device::CPU());
+        runtime::NDArray b_data = runtime::NDArray::Zeros(
+            {64}, runtime::DataTypeFromString("float32"), Device::CPU());
         Constant weight(w_data);
         Constant bias(b_data);
 

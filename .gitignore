@@ -15,6 +15,9 @@ compile_commands.json
 .idea/
 .vscode/
 
+# Machine-local agent instructions
+/AGENTS.md
+
 # Binary/artifact outputs
 *.obj
 *.o
@@ -44,4 +47,5 @@ test/resnet18_all_output.txt
 # Profiling / agent outputs
 profile_bundles/
 profile_bundle_test_output/
+test/cupti_smoke_test_output/
 .kxc_agent_memory/

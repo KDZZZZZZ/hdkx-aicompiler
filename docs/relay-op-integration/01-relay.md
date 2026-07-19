@@ -54,7 +54,7 @@ KXC_REGISTER_OP(op_name)
 class XxxAttrsNode : public BaseAttrsNode {
 public:
     int axis = 0;
-    std::vector<int64_t> shape;
+    Array<int64_t> shape;
     KXC_DECLARE_ATTRS_NODE
 };
 KXC_OBJECT_DEFINE(XxxAttrsNode)
@@ -63,12 +63,12 @@ class XxxAttrs : public Attrs {
     KXC_DECLARE_ATTRS_REF(XxxAttrs, XxxAttrsNode)
 
 public:
-    static XxxAttrs Create(int axis, std::vector<int64_t> shape);
+    static XxxAttrs Create(int axis, Array<int64_t> shape);
 };
 ```
 
 ```cpp
-XxxAttrs XxxAttrs::Create(int axis, std::vector<int64_t> shape) {
+XxxAttrs XxxAttrs::Create(int axis, Array<int64_t> shape) {
     auto* node = new XxxAttrsNode();
     node->axis = axis;
     node->shape = std::move(shape);

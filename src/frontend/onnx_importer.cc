@@ -1,3 +1,7 @@
+/*! \file src/frontend/onnx_importer.cc
+ * \brief 实现 ONNX 图、属性和 Storage-backed 常量张量的导入。
+ */
+
 #include "frontend/onnx_importer.h"
 
 #include <cctype>
@@ -15,7 +19,9 @@ namespace kxc {
 namespace frontend {
 namespace {
 
+// 保存导入规范所需的最小 JSON 值树，避免解析阶段依赖外部 JSON 对象生命周期。
 struct Json {
+    // 标识 JSON 节点当前承载的值类别。
     enum Kind { Null, Bool, Int, Double, String, Array, Object } kind{Null};
     bool b{false};
     int64_t i{0};
@@ -25,10 +31,13 @@ struct Json {
     std::unordered_map<std::string, Json> o;
 };
 
+// 对受控 ONNX 导入规范执行严格递归下降解析，并报告精确字节位置。
 class JsonParser {
 public:
+    // 绑定待解析文本；文本生命周期由调用方覆盖解析过程。
     explicit JsonParser(const std::string& text) : text_(text) {}
 
+    // 解析单个根值并拒绝尾随字符。
     Json Parse() {
         SkipWhitespace();
         Json value = ParseValue();
@@ -43,14 +52,17 @@ private:
     const std::string& text_;
     size_t pos_{0};
 
+    // 以当前位置构造统一解析异常。
     [[noreturn]] void Fail(const std::string& message) const {
         std::ostringstream os;
         os << "JSON parse error at " << pos_ << ": " << message;
         throw std::runtime_error(os.str());
     }
 
+    // 查看当前字符而不推进游标。
     char Peek() const { return pos_ < text_.size() ? text_[pos_] : '\0'; }
 
+    // 读取当前字符并推进游标，EOF 时失败。
     char Get() {
         if (pos_ >= text_.size()) {
             Fail("unexpected EOF");
@@ -58,6 +70,7 @@ private:
         return text_[pos_++];
     }
 
+    // 跳过 JSON 允许的空白字符。
     void SkipWhitespace() {
         while (pos_ < text_.size() &&
                std::isspace(static_cast<unsigned char>(text_[pos_])) != 0) {
@@ -65,6 +78,7 @@ private:
         }
     }
 
+    // 消费一个必需的分隔字符。
     void Expect(char expected) {
         if (Get() != expected) {
             std::ostringstream os;
@@ -73,6 +87,7 @@ private:
         }
     }
 
+    // 消费 true、false 或 null 等固定字面量。
     void Literal(const char* text) {
         while (*text) {
             if (Get() != *text) {
@@ -82,6 +97,7 @@ private:
         }
     }
 
+    // 根据首字符分派到具体 JSON 值解析器。
     Json ParseValue() {
         SkipWhitespace();
         char c = Peek();
@@ -95,6 +111,7 @@ private:
         Fail("unexpected token");
     }
 
+    // 解析对象并拒绝重复字段。
     Json ParseObject() {
         Json out;
         out.kind = Json::Object;
@@ -121,6 +138,7 @@ private:
         return out;
     }
 
+    // 解析保持原始顺序的 JSON 数组。
     Json ParseArray() {
         Json out;
         out.kind = Json::Array;
@@ -141,6 +159,7 @@ private:
         return out;
     }
 
+    // 解析字符串转义；最小导入格式仅原样保留 ASCII Unicode 转义。
     Json ParseString() {
         Json out;
         out.kind = Json::String;
@@ -182,6 +201,7 @@ private:
         return out;
     }
 
+    // 区分整数与浮点语法并执行范围检查。
     Json ParseNumber() {
         Json out;
         size_t start = pos_;
@@ -224,6 +244,7 @@ private:
         return out;
     }
 
+    // 解析布尔真值。
     Json ParseTrue() {
         Literal("true");
         Json out;
@@ -232,6 +253,7 @@ private:
         return out;
     }
 
+    // 解析布尔假值。
     Json ParseFalse() {
         Literal("false");
         Json out;
@@ -240,12 +262,14 @@ private:
         return out;
     }
 
+    // 解析空值。
     Json ParseNull() {
         Literal("null");
         return Json();
     }
 };
 
+// 校验 JSON 节点类别，并在错误中携带字段上下文。
 const Json& RequireKind(const Json& value, Json::Kind kind, const std::string& ctx) {
     if (value.kind != kind) {
         std::ostringstream os;
@@ -256,6 +280,7 @@ const Json& RequireKind(const Json& value, Json::Kind kind, const std::string& c
     return value;
 }
 
+// 读取必需对象字段。
 const Json& Field(const Json& object, const std::string& key, const std::string& ctx) {
     RequireKind(object, Json::Object, ctx);
     auto it = object.o.find(key);
@@ -265,21 +290,25 @@ const Json& Field(const Json& object, const std::string& key, const std::string&
     return it->second;
 }
 
+// 查询可选对象字段，缺失时返回空指针。
 const Json* OptionalField(const Json& object, const std::string& key) {
     if (object.kind != Json::Object) return nullptr;
     auto it = object.o.find(key);
     return it == object.o.end() ? nullptr : &it->second;
 }
 
+// 将 JSON 字符串读取为标准字符串。
 std::string ReadString(const Json& value, const std::string& ctx) {
     return RequireKind(value, Json::String, ctx).s;
 }
 
+// 读取有符号 64 位整数。
 int64_t ReadInt64(const Json& value, const std::string& ctx) {
     RequireKind(value, Json::Int, ctx);
     return value.i;
 }
 
+// 读取并校验平台 int 范围。
 int ReadInt(const Json& value, const std::string& ctx) {
     int64_t value64 = ReadInt64(value, ctx);
     if (value64 < static_cast<int64_t>(std::numeric_limits<int>::min()) ||
@@ -289,16 +318,19 @@ int ReadInt(const Json& value, const std::string& ctx) {
     return static_cast<int>(value64);
 }
 
+// 接受整数或浮点 JSON 数字并转换为 float。
 float ReadFloat(const Json& value, const std::string& ctx) {
     if (value.kind == Json::Int) return static_cast<float>(value.i);
     if (value.kind == Json::Double) return static_cast<float>(value.d);
     throw std::runtime_error("Expected numeric value in " + ctx);
 }
 
+// 读取布尔字段。
 bool ReadBool(const Json& value, const std::string& ctx) {
     return RequireKind(value, Json::Bool, ctx).b;
 }
 
+// 读取有序整数数组，用于 shape 和算子维度属性。
 std::vector<int64_t> ReadInt64Vector(const Json& value, const std::string& ctx) {
     RequireKind(value, Json::Array, ctx);
     std::vector<int64_t> out;
@@ -309,6 +341,7 @@ std::vector<int64_t> ReadInt64Vector(const Json& value, const std::string& ctx) 
     return out;
 }
 
+// 读取有序字符串数组，用于值名称列表。
 std::vector<std::string> ReadStringVector(const Json& value, const std::string& ctx) {
     RequireKind(value, Json::Array, ctx);
     std::vector<std::string> out;
@@ -319,6 +352,7 @@ std::vector<std::string> ReadStringVector(const Json& value, const std::string& 
     return out;
 }
 
+// 将解析期 vector 转入对象系统 Array，供 Relay/NDArray 节点长期持有。
 Array<int64_t> ToArray(const std::vector<int64_t>& values) {
     Array<int64_t> out;
     for (int64_t value : values) {
@@ -327,6 +361,7 @@ Array<int64_t> ToArray(const std::vector<int64_t>& values) {
     return out;
 }
 
+// 完整读取参数二进制文件并校验读取结果。
 std::vector<char> ReadBinaryFile(const std::string& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -348,6 +383,7 @@ std::vector<char> ReadBinaryFile(const std::string& path) {
     return data;
 }
 
+// 完整读取导入规范文本。
 std::string ReadTextFile(const std::string& path) {
     std::ifstream input(path, std::ios::in);
     if (!input) {
@@ -358,6 +394,7 @@ std::string ReadTextFile(const std::string& path) {
     return os.str();
 }
 
+// 按算子名称把 JSON 属性转换为对应的强类型 Relay Attrs 对象。
 ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
     RequireKind(attrs, Json::Object, "attrs for " + op_name);
     if (op_name == "nn_conv2d") {
@@ -407,6 +444,7 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
 
 }  // namespace
 
+// 装载 ONNX 中间规范、参数 Storage 和 Relay 数据流，返回可编译函数及参数表。
 ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
                                      const std::string& params_path) {
     Json root = JsonParser(ReadTextFile(json_path)).Parse();
@@ -456,7 +494,9 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             throw std::runtime_error("Param bytes range out of bounds for: " + name);
         }
 
-        runtime::NDArray array(ToArray(shape), dtype);
+        // ONNX 参数先落到 CPU Storage；后续放置阶段再显式复制到目标设备。
+        runtime::NDArray array = runtime::NDArray::Empty(
+            ToArray(shape), runtime::DataTypeFromString(dtype), Device::CPU());
         array.CopyFromBytes(param_bytes.data() + offset, static_cast<size_t>(nbytes));
         result.params.emplace(name, array);
         result.param_order.push_back(name);

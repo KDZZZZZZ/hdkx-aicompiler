@@ -15,17 +15,16 @@ namespace kxc {
 
 namespace {
 
+// 生成值语义身份键，使等价但不同 ObjectRef 的逻辑设备可映射到同一 worker。
 std::string VirtualDeviceIdentity(const VirtualDevice& vd) {
     if (!vd.defined()) {
         return "virtual_device:undefined";
     }
     std::stringstream ss;
     ss << "virtual_device:";
-    if (vd->device_obj.defined()) {
-        const auto* dev = static_cast<const class Device*>(vd->device_obj.get());
-        if (dev) {
-            ss << "dev(" << static_cast<int>(dev->device_type()) << "," << dev->device_id() << ")";
-        }
+    if (vd->device.defined()) {
+        ss << "dev(" << static_cast<int>(vd->device.device_type()) << ","
+           << vd->device.device_id() << ")";
     } else {
         ss << "dev(none)";
     }
@@ -42,30 +41,36 @@ std::string VirtualDeviceIdentity(const VirtualDevice& vd) {
 
 }  // namespace
 
+// 判断 worker 是否已绑定物理设备。
 bool WorkerPlacementNode::has_device() const {
-    return device_obj.defined();
+    return device.defined();
 }
 
+// 判断 worker 是否已有代码生成目标。
 bool WorkerPlacementNode::has_target() const {
     return target.defined();
 }
 
-WorkerPlacement::WorkerPlacement(int worker_id, int group_id, int local_rank, ObjectRef device_obj,
+// 构造单个 worker 的组身份、物理设备和逻辑放置记录。
+WorkerPlacement::WorkerPlacement(int worker_id, int group_id, int local_rank, Device device,
                                  Target target, VirtualDevice virtual_device) {
+    // 直接保存强类型 Device，防止任意 ObjectRef 绕过设备类型与身份校验。
     WorkerPlacementNode* node = new WorkerPlacementNode();
     node->worker_id = worker_id;
     node->group_id = group_id;
     node->local_rank = local_rank;
-    node->device_obj = std::move(device_obj);
+    node->device = std::move(device);
     node->target = std::move(target);
     node->virtual_device = std::move(virtual_device);
     SetData(node);
 }
 
+// 返回经过 WorkerPlacement 类型约束的底层节点。
 const WorkerPlacementNode* WorkerPlacement::operator->() const {
     return static_cast<const WorkerPlacementNode*>(object_);
 }
 
+// 输出 worker 身份及其可用放置约束。
 std::string WorkerPlacement::ToString() const {
     if (!defined()) {
         return "WorkerPlacement(undefined)";
@@ -84,10 +89,12 @@ std::string WorkerPlacement::ToString() const {
     return ss.str();
 }
 
+// 判断放置表是否包含任何 worker。
 bool DiscoPlacementNode::empty() const {
     return workers.empty();
 }
 
+// 优先按 ObjectRef 映射查找，再按值语义身份匹配等价逻辑设备。
 int DiscoPlacementNode::FindWorker(const VirtualDevice& virtual_device) const {
     if (!virtual_device.defined()) {
         return -1;
@@ -107,6 +114,7 @@ int DiscoPlacementNode::FindWorker(const VirtualDevice& virtual_device) const {
     return -1;
 }
 
+// 构造逻辑设备到 worker 的完整放置表，并规范化组数下限。
 DiscoPlacement::DiscoPlacement(Array<WorkerPlacement> workers, Map<VirtualDevice, int> vd_to_worker,
                                int num_groups) {
     DiscoPlacementNode* node = new DiscoPlacementNode();
@@ -116,14 +124,17 @@ DiscoPlacement::DiscoPlacement(Array<WorkerPlacement> workers, Map<VirtualDevice
     SetData(node);
 }
 
+// 返回经过 DiscoPlacement 类型约束的底层节点。
 const DiscoPlacementNode* DiscoPlacement::operator->() const {
     return static_cast<const DiscoPlacementNode*>(object_);
 }
 
+// 未定义放置与无 worker 放置都按空表处理。
 bool DiscoPlacement::empty() const {
     return !defined() || operator->()->empty();
 }
 
+// 在已定义放置表中查询逻辑设备对应 worker。
 int DiscoPlacement::FindWorker(const VirtualDevice& virtual_device) const {
     if (!defined()) {
         return -1;
@@ -131,6 +142,7 @@ int DiscoPlacement::FindWorker(const VirtualDevice& virtual_device) const {
     return operator->()->FindWorker(virtual_device);
 }
 
+// 输出放置表规模和组数摘要。
 std::string DiscoPlacement::ToString() const {
     if (!defined()) {
         return "DiscoPlacement(undefined)";
@@ -141,6 +153,7 @@ std::string DiscoPlacement::ToString() const {
     return ss.str();
 }
 
+// 对等价逻辑设备去重，并为每个唯一放置分配稳定 worker 编号。
 DiscoPlacement BuildDiscoPlacement(const Array<VirtualDevice>& virtual_devices, int num_groups) {
     Array<WorkerPlacement> workers;
     Map<VirtualDevice, int> vd_to_worker;
@@ -159,17 +172,15 @@ DiscoPlacement BuildDiscoPlacement(const Array<VirtualDevice>& virtual_devices, 
         }
 
         Target target = vd->target;
-        if (!target.defined() && vd->device_obj.defined()) {
-            const auto* dev = static_cast<const class Device*>(vd->device_obj.get());
-            if (dev) {
-                target = BuildTarget(*dev);
-            }
+        if (!target.defined() && vd->device.defined()) {
+            // Target 缺失时由物理 Device 的后端能力构造，而不是仅凭类型编号猜测。
+            target = BuildTarget(vd->device);
         }
 
         int worker_id = next_worker_id++;
         int group_id = 0;
         int local_rank = worker_id;
-        workers.push_back(WorkerPlacement(worker_id, group_id, local_rank, vd->device_obj, target,
+        workers.push_back(WorkerPlacement(worker_id, group_id, local_rank, vd->device, target,
                                           vd));
         vd_to_worker.Set(vd, worker_id);
         key_to_worker[key] = worker_id;
@@ -178,6 +189,7 @@ DiscoPlacement BuildDiscoPlacement(const Array<VirtualDevice>& virtual_devices, 
     return DiscoPlacement(workers, vd_to_worker, num_groups);
 }
 
+// 提供可接受未定义 placement 的安全查询入口。
 int FindWorkerForVirtualDevice(const DiscoPlacement& placement,
                                const VirtualDevice& virtual_device) {
     if (!placement.defined()) {

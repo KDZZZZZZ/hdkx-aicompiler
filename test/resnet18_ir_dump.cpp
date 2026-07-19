@@ -22,16 +22,20 @@ using namespace kxc::relay;
 
 namespace {
 
+// 生成 IR 树形文本所需的缩进。
 std::string Indent(int n) { return std::string(n, ' '); }
 
+// 将 NDArray 的 DLPack dtype 格式化为可读名称。
 std::string NDArrayDTypeToString(const runtime::NDArray& arr) {
     const DLDataType& dt = arr->dl_tensor.dtype;
     if (dt.code == kDLFloat) return "float" + std::to_string(dt.bits);
     if (dt.code == kDLInt) return "int" + std::to_string(dt.bits);
-    if (dt.code == kDLUint) return dt.bits == 1 ? "bool" : ("uint" + std::to_string(dt.bits));
+    if (dt.code == kDLUInt) return "uint" + std::to_string(dt.bits);
+    if (dt.code == kDLBool) return "bool";
     return "unknown";
 }
 
+// 递归格式化 Relay 类型及其 shape、dtype。
 std::string PrintRelayType(const Type& ty) {
     if (!ty.defined()) return "<none>";
     if (const auto* t = ty.As<TensorTypeNode>()) {
@@ -47,6 +51,7 @@ std::string PrintRelayType(const Type& ty) {
     return "<Type>";
 }
 
+// 提取受支持算子 attrs 的关键字段用于诊断输出。
 std::string DescribeCallAttrs(const ObjectRef& attrs) {
     if (!attrs.defined()) return "<none>";
     if (const auto* a = attrs.As<Conv2DAttrsNode>()) {
@@ -77,6 +82,7 @@ std::string DescribeCallAttrs(const ObjectRef& attrs) {
     return "<attrs>";
 }
 
+// 保存 Relay 图节点的稳定编号、标签和输入边。
 struct RelayGraphNode {
     int id;
     const Object* obj;
@@ -85,6 +91,7 @@ struct RelayGraphNode {
     std::vector<int> inputs;
 };
 
+// 深度优先遍历 Relay 表达式并构建去重后的图节点表。
 int CollectRelayGraph(const Expr& e, std::unordered_map<const Object*, int>& ids, std::vector<RelayGraphNode>& nodes) {
     if (!e.defined()) return -1;
     auto it = ids.find(e.get());
@@ -102,9 +109,9 @@ int CollectRelayGraph(const Expr& e, std::unordered_map<const Object*, int>& ids
         kind = "Constant";
         std::ostringstream os;
         os << "shape=[";
-        for (size_t i = 0; i < c->data->shape.size(); ++i) {
+        for (size_t i = 0; i < c->data->shape_storage.size(); ++i) {
             if (i) os << ", ";
-            os << c->data->shape[i];
+            os << c->data->shape_storage[i];
         }
         os << "], dtype=" << NDArrayDTypeToString(c->data);
         label = os.str();
@@ -127,6 +134,7 @@ int CollectRelayGraph(const Expr& e, std::unordered_map<const Object*, int>& ids
     return id;
 }
 
+// 递归输出 Relay 表达式树，并用 seen 集合阻止共享节点重复展开。
 void DumpRelayExpr(const Expr& e, std::ostream& os, int indent, std::unordered_set<const Object*>& seen) {
     if (!e.defined()) { os << Indent(indent) << "<undef-expr>\n"; return; }
     if (seen.count(e.get())) {
@@ -140,9 +148,9 @@ void DumpRelayExpr(const Expr& e, std::ostream& os, int indent, std::unordered_s
     }
     if (const auto* c = e.As<ConstantNode>()) {
         os << Indent(indent) << "Constant(shape=[";
-        for (size_t i = 0; i < c->data->shape.size(); ++i) {
+        for (size_t i = 0; i < c->data->shape_storage.size(); ++i) {
             if (i) os << ", ";
-            os << c->data->shape[i];
+            os << c->data->shape_storage[i];
         }
         os << "], dtype=" << NDArrayDTypeToString(c->data) << ")\n";
         return;
@@ -161,6 +169,7 @@ void DumpRelayExpr(const Expr& e, std::ostream& os, int indent, std::unordered_s
     os << Indent(indent) << "Expr(<unknown>)\n";
 }
 
+// 输出 Relay 函数签名、表达式树和图边。
 void DumpRelay(const Function& f, std::ostream& os) {
     os << "================ Relay Function ================\n";
     os << "params(" << f->params.size() << "):\n";
@@ -188,91 +197,97 @@ void DumpRelay(const Function& f, std::ostream& os) {
     DumpRelayExpr(f->body, os, 2, seen);
 }
 
+// 用显式 CPU NDArray 常量构造可供 pass/lowering 检查的 ResNet18 Relay 函数。
 Function BuildResNet18Function() {
     Array<Var> params;
-    runtime::NDArray nd_0({1000, 512}, "float32");
+    // IR dump 不执行权重计算，显式 cpu:0 零张量仅稳定承载常量 shape/dtype。
+    const auto zeros = [](Array<int64_t> shape) {
+        return runtime::NDArray::Zeros(shape, runtime::DataTypeFromString("float32"),
+                                       Device::CPU());
+    };
+    runtime::NDArray nd_0 = zeros({1000, 512});
     Constant const_0_fc_weight(nd_0);
-    runtime::NDArray nd_1({1000}, "float32");
+    runtime::NDArray nd_1 = zeros({1000});
     Constant const_1_fc_bias(nd_1);
-    runtime::NDArray nd_2({64, 3, 7, 7}, "float32");
+    runtime::NDArray nd_2 = zeros({64, 3, 7, 7});
     Constant const_2_onnx__Conv_193(nd_2);
-    runtime::NDArray nd_3({64}, "float32");
+    runtime::NDArray nd_3 = zeros({64});
     Constant const_3_onnx__Conv_194(nd_3);
-    runtime::NDArray nd_4({64, 64, 3, 3}, "float32");
+    runtime::NDArray nd_4 = zeros({64, 64, 3, 3});
     Constant const_4_onnx__Conv_196(nd_4);
-    runtime::NDArray nd_5({64}, "float32");
+    runtime::NDArray nd_5 = zeros({64});
     Constant const_5_onnx__Conv_197(nd_5);
-    runtime::NDArray nd_6({64, 64, 3, 3}, "float32");
+    runtime::NDArray nd_6 = zeros({64, 64, 3, 3});
     Constant const_6_onnx__Conv_199(nd_6);
-    runtime::NDArray nd_7({64}, "float32");
+    runtime::NDArray nd_7 = zeros({64});
     Constant const_7_onnx__Conv_200(nd_7);
-    runtime::NDArray nd_8({64, 64, 3, 3}, "float32");
+    runtime::NDArray nd_8 = zeros({64, 64, 3, 3});
     Constant const_8_onnx__Conv_202(nd_8);
-    runtime::NDArray nd_9({64}, "float32");
+    runtime::NDArray nd_9 = zeros({64});
     Constant const_9_onnx__Conv_203(nd_9);
-    runtime::NDArray nd_10({64, 64, 3, 3}, "float32");
+    runtime::NDArray nd_10 = zeros({64, 64, 3, 3});
     Constant const_10_onnx__Conv_205(nd_10);
-    runtime::NDArray nd_11({64}, "float32");
+    runtime::NDArray nd_11 = zeros({64});
     Constant const_11_onnx__Conv_206(nd_11);
-    runtime::NDArray nd_12({128, 64, 3, 3}, "float32");
+    runtime::NDArray nd_12 = zeros({128, 64, 3, 3});
     Constant const_12_onnx__Conv_208(nd_12);
-    runtime::NDArray nd_13({128}, "float32");
+    runtime::NDArray nd_13 = zeros({128});
     Constant const_13_onnx__Conv_209(nd_13);
-    runtime::NDArray nd_14({128, 128, 3, 3}, "float32");
+    runtime::NDArray nd_14 = zeros({128, 128, 3, 3});
     Constant const_14_onnx__Conv_211(nd_14);
-    runtime::NDArray nd_15({128}, "float32");
+    runtime::NDArray nd_15 = zeros({128});
     Constant const_15_onnx__Conv_212(nd_15);
-    runtime::NDArray nd_16({128, 64, 1, 1}, "float32");
+    runtime::NDArray nd_16 = zeros({128, 64, 1, 1});
     Constant const_16_onnx__Conv_214(nd_16);
-    runtime::NDArray nd_17({128}, "float32");
+    runtime::NDArray nd_17 = zeros({128});
     Constant const_17_onnx__Conv_215(nd_17);
-    runtime::NDArray nd_18({128, 128, 3, 3}, "float32");
+    runtime::NDArray nd_18 = zeros({128, 128, 3, 3});
     Constant const_18_onnx__Conv_217(nd_18);
-    runtime::NDArray nd_19({128}, "float32");
+    runtime::NDArray nd_19 = zeros({128});
     Constant const_19_onnx__Conv_218(nd_19);
-    runtime::NDArray nd_20({128, 128, 3, 3}, "float32");
+    runtime::NDArray nd_20 = zeros({128, 128, 3, 3});
     Constant const_20_onnx__Conv_220(nd_20);
-    runtime::NDArray nd_21({128}, "float32");
+    runtime::NDArray nd_21 = zeros({128});
     Constant const_21_onnx__Conv_221(nd_21);
-    runtime::NDArray nd_22({256, 128, 3, 3}, "float32");
+    runtime::NDArray nd_22 = zeros({256, 128, 3, 3});
     Constant const_22_onnx__Conv_223(nd_22);
-    runtime::NDArray nd_23({256}, "float32");
+    runtime::NDArray nd_23 = zeros({256});
     Constant const_23_onnx__Conv_224(nd_23);
-    runtime::NDArray nd_24({256, 256, 3, 3}, "float32");
+    runtime::NDArray nd_24 = zeros({256, 256, 3, 3});
     Constant const_24_onnx__Conv_226(nd_24);
-    runtime::NDArray nd_25({256}, "float32");
+    runtime::NDArray nd_25 = zeros({256});
     Constant const_25_onnx__Conv_227(nd_25);
-    runtime::NDArray nd_26({256, 128, 1, 1}, "float32");
+    runtime::NDArray nd_26 = zeros({256, 128, 1, 1});
     Constant const_26_onnx__Conv_229(nd_26);
-    runtime::NDArray nd_27({256}, "float32");
+    runtime::NDArray nd_27 = zeros({256});
     Constant const_27_onnx__Conv_230(nd_27);
-    runtime::NDArray nd_28({256, 256, 3, 3}, "float32");
+    runtime::NDArray nd_28 = zeros({256, 256, 3, 3});
     Constant const_28_onnx__Conv_232(nd_28);
-    runtime::NDArray nd_29({256}, "float32");
+    runtime::NDArray nd_29 = zeros({256});
     Constant const_29_onnx__Conv_233(nd_29);
-    runtime::NDArray nd_30({256, 256, 3, 3}, "float32");
+    runtime::NDArray nd_30 = zeros({256, 256, 3, 3});
     Constant const_30_onnx__Conv_235(nd_30);
-    runtime::NDArray nd_31({256}, "float32");
+    runtime::NDArray nd_31 = zeros({256});
     Constant const_31_onnx__Conv_236(nd_31);
-    runtime::NDArray nd_32({512, 256, 3, 3}, "float32");
+    runtime::NDArray nd_32 = zeros({512, 256, 3, 3});
     Constant const_32_onnx__Conv_238(nd_32);
-    runtime::NDArray nd_33({512}, "float32");
+    runtime::NDArray nd_33 = zeros({512});
     Constant const_33_onnx__Conv_239(nd_33);
-    runtime::NDArray nd_34({512, 512, 3, 3}, "float32");
+    runtime::NDArray nd_34 = zeros({512, 512, 3, 3});
     Constant const_34_onnx__Conv_241(nd_34);
-    runtime::NDArray nd_35({512}, "float32");
+    runtime::NDArray nd_35 = zeros({512});
     Constant const_35_onnx__Conv_242(nd_35);
-    runtime::NDArray nd_36({512, 256, 1, 1}, "float32");
+    runtime::NDArray nd_36 = zeros({512, 256, 1, 1});
     Constant const_36_onnx__Conv_244(nd_36);
-    runtime::NDArray nd_37({512}, "float32");
+    runtime::NDArray nd_37 = zeros({512});
     Constant const_37_onnx__Conv_245(nd_37);
-    runtime::NDArray nd_38({512, 512, 3, 3}, "float32");
+    runtime::NDArray nd_38 = zeros({512, 512, 3, 3});
     Constant const_38_onnx__Conv_247(nd_38);
-    runtime::NDArray nd_39({512}, "float32");
+    runtime::NDArray nd_39 = zeros({512});
     Constant const_39_onnx__Conv_248(nd_39);
-    runtime::NDArray nd_40({512, 512, 3, 3}, "float32");
+    runtime::NDArray nd_40 = zeros({512, 512, 3, 3});
     Constant const_40_onnx__Conv_250(nd_40);
-    runtime::NDArray nd_41({512}, "float32");
+    runtime::NDArray nd_41 = zeros({512});
     Constant const_41_onnx__Conv_251(nd_41);
 
     Var input_42_input("input", TensorType({1, 3, 224, 224}, "float32"));
@@ -453,6 +468,7 @@ Function BuildResNet18Function() {
 
 }  // namespace
 
+// 构造 ResNet18，执行类型推导与 lowering，并写出 Relay/TIR 诊断文件。
 int main() {
     try {
         std::ofstream devnull("NUL");

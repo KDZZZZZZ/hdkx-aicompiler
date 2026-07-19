@@ -15,8 +15,10 @@ namespace relay {
 
 namespace {
 
+// 重写可在编译期求值的二元标量调用，并保留原表达式的设备放置信息。
 class FoldConstantRewriter : public RelayPass {
 protected:
+    // 递归改写调用，在两个参数均为标量常量时执行受支持的算术或比较。
     Expr VisitCall(const CallNode* op, const Expr& ref) override {
         Expr rewritten = RelayPass::VisitCall(op, ref);
         const auto* call = rewritten.As<CallNode>();
@@ -55,10 +57,10 @@ protected:
             out_value = lhs / rhs;
         } else if (op_name == "equal") {
             out_value = lhs == rhs ? 1.0 : 0.0;
-            out_dtype = DLDataType{kDLUint, 1, 1};
+            out_dtype = DLDataType{kDLBool, 8, 1};
         } else if (op_name == "greater") {
             out_value = lhs > rhs ? 1.0 : 0.0;
-            out_dtype = DLDataType{kDLUint, 1, 1};
+            out_dtype = DLDataType{kDLBool, 8, 1};
         } else {
             matched = false;
         }
@@ -74,6 +76,7 @@ protected:
 
 }  // namespace
 
+// 对函数执行一次标量常量折叠并返回新 Relay 函数。
 Function FoldConstantPass(const Function& func) {
     FoldConstantRewriter pass;
     return pass.Mutate(func);

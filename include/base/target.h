@@ -31,8 +31,7 @@ public:
     std::string ToString() const;
 };
 
-Target BuildTarget(const class Device& device);
-Target BuildTarget(DeviceTypeCode type, int device_id = 0);
+Target BuildTarget(const Device& device);
 
 }  // namespace kxc
 

@@ -21,7 +21,9 @@ namespace kxc {
 
 namespace {
 
+// 表示执行计划 JSON 所需的最小值树，避免引入额外解析依赖。
 struct J {
+    // 区分 null、布尔、整数、字符串、数组和对象六类 JSON 值。
     enum K { N, B, I, S, A, O } k{N};
     bool b{false};
     int64_t i{0};
@@ -30,10 +32,13 @@ struct J {
     std::unordered_map<std::string, J> o;
 };
 
+// 对可信契约仍执行严格语法和重复键检查的最小 JSON 解析器。
 class P {
 public:
+    // 绑定待解析文本，解析器不取得字符串所有权。
     explicit P(const std::string& text) : t_(text) {}
 
+    // 解析唯一根值并拒绝尾随字符。
     J Parse() {
         WS();
         J v = V();
@@ -46,20 +51,25 @@ private:
     const std::string& t_;
     size_t p_{0};
 
+    // 抛出包含当前字节位置的统一解析错误。
     [[noreturn]] void Err(const std::string& m) const {
         std::stringstream ss;
         ss << "JSON parse error at " << p_ << ": " << m;
         throw std::runtime_error(ss.str());
     }
 
+    // 查看当前字符但不推进游标，末尾返回哨兵零字符。
     char Peek() const { return p_ < t_.size() ? t_[p_] : '\0'; }
+    // 读取当前字符并推进游标，禁止越过输入末尾。
     char Get() {
         if (p_ >= t_.size()) Err("unexpected EOF");
         return t_[p_++];
     }
+    // 跳过 JSON 允许的空白字符。
     void WS() {
         while (p_ < t_.size() && std::isspace(static_cast<unsigned char>(t_[p_])) != 0) ++p_;
     }
+    // 消费指定结构字符，否则报告当前位置。
     void Expect(char c) {
         if (Get() != c) {
             std::stringstream ss;
@@ -67,6 +77,7 @@ private:
             Err(ss.str());
         }
     }
+    // 消费 true、false 或 null 等固定字面量。
     void Lit(const char* s) {
         while (*s) {
             if (Get() != *s) Err("invalid literal");
@@ -74,6 +85,7 @@ private:
         }
     }
 
+    // 根据首字符分派具体 JSON 值解析器。
     J V() {
         WS();
         char c = Peek();
@@ -88,6 +100,7 @@ private:
         return J();
     }
 
+    // 解析对象并拒绝重复键，避免后值静默覆盖计划字段。
     J Obj() {
         J v;
         v.k = J::O;
@@ -113,6 +126,7 @@ private:
         return v;
     }
 
+    // 解析有序 JSON 数组。
     J Arr() {
         J v;
         v.k = J::A;
@@ -133,6 +147,7 @@ private:
         return v;
     }
 
+    // 解析字符串转义；非 ASCII unicode 暂以问号保持单字节契约。
     J Str() {
         J v;
         v.k = J::S;
@@ -174,6 +189,7 @@ private:
         return v;
     }
 
+    // 解析计划契约所需的有符号整数，并拒绝浮点或指数形式。
     J Num() {
         J v;
         v.k = J::I;
@@ -195,6 +211,7 @@ private:
         return v;
     }
 
+    // 解析 true 字面量。
     J True() {
         Lit("true");
         J v;
@@ -202,6 +219,7 @@ private:
         v.b = true;
         return v;
     }
+    // 解析 false 字面量。
     J False() {
         Lit("false");
         J v;
@@ -209,6 +227,7 @@ private:
         v.b = false;
         return v;
     }
+    // 解析 null 字面量。
     J Null() {
         Lit("null");
         J v;
@@ -217,6 +236,7 @@ private:
     }
 };
 
+// 转义写入计划 JSON 的字符串字段。
 std::string Esc(const std::string& in) {
     std::string out;
     out.reserve(in.size() + 8);
@@ -244,6 +264,7 @@ std::string Esc(const std::string& in) {
     return out;
 }
 
+// 校验 JSON 值类型并返回原值引用。
 const J& RK(const J& v, J::K k, const std::string& ctx) {
     if (v.k != k) {
         std::stringstream ss;
@@ -254,6 +275,7 @@ const J& RK(const J& v, J::K k, const std::string& ctx) {
     return v;
 }
 
+// 读取必需对象字段，缺失时附带上下文失败。
 const J& RF(const J& obj, const std::string& key, const std::string& ctx) {
     RK(obj, J::O, ctx);
     auto it = obj.o.find(key);
@@ -263,12 +285,14 @@ const J& RF(const J& obj, const std::string& key, const std::string& ctx) {
     return it->second;
 }
 
+// 查找可选对象字段，缺失时返回空指针。
 const J* FF(const J& obj, const std::string& key) {
     if (obj.k != J::O) return nullptr;
     auto it = obj.o.find(key);
     return it == obj.o.end() ? nullptr : &it->second;
 }
 
+// 读取 int 字段并检查从 int64_t 缩窄的范围。
 int RI(const J& v, const std::string& ctx) {
     RK(v, J::I, ctx);
     if (v.i < static_cast<int64_t>(std::numeric_limits<int>::min()) ||
@@ -277,35 +301,42 @@ int RI(const J& v, const std::string& ctx) {
     }
     return static_cast<int>(v.i);
 }
+// 读取 int64_t 字段。
 int64_t RI64(const J& v, const std::string& ctx) {
     RK(v, J::I, ctx);
     return v.i;
 }
+// 读取布尔字段。
 bool RB(const J& v, const std::string& ctx) {
     RK(v, J::B, ctx);
     return v.b;
 }
+// 读取字符串字段。
 std::string RS(const J& v, const std::string& ctx) {
     RK(v, J::S, ctx);
     return v.s;
 }
 
+// 读取带默认值的可选 int 字段。
 int OI(const J& obj, const std::string& key, int d, const std::string& ctx) {
     const J* v = FF(obj, key);
     if (!v || v->k == J::N) return d;
     return RI(*v, ctx + "." + key);
 }
+// 读取带默认值的可选布尔字段。
 bool OB(const J& obj, const std::string& key, bool d, const std::string& ctx) {
     const J* v = FF(obj, key);
     if (!v || v->k == J::N) return d;
     return RB(*v, ctx + "." + key);
 }
+// 读取带默认值的可选字符串字段。
 std::string OS(const J& obj, const std::string& key, const std::string& d, const std::string& ctx) {
     const J* v = FF(obj, key);
     if (!v || v->k == J::N) return d;
     return RS(*v, ctx + "." + key);
 }
 
+// 将 JSON 整数数组转换为对象系统 Array<int>。
 Array<int> AI(const J& arr, const std::string& ctx) {
     RK(arr, J::A, ctx);
     Array<int> out;
@@ -314,6 +345,7 @@ Array<int> AI(const J& arr, const std::string& ctx) {
     }
     return out;
 }
+// 将 JSON 整数数组转换为对象系统 Array<int64_t>。
 Array<int64_t> AI64(const J& arr, const std::string& ctx) {
     RK(arr, J::A, ctx);
     Array<int64_t> out;
@@ -323,6 +355,7 @@ Array<int64_t> AI64(const J& arr, const std::string& ctx) {
     return out;
 }
 
+// 按稳定顺序写出 Array<int>。
 void WI(std::ostream& os, const Array<int>& arr) {
     os << "[";
     for (size_t i = 0; i < arr.size(); ++i) {
@@ -331,6 +364,7 @@ void WI(std::ostream& os, const Array<int>& arr) {
     }
     os << "]";
 }
+// 按稳定顺序写出 Array<int64_t>。
 void WI64(std::ostream& os, const Array<int64_t>& arr) {
     os << "[";
     for (size_t i = 0; i < arr.size(); ++i) {
@@ -340,14 +374,17 @@ void WI64(std::ostream& os, const Array<int64_t>& arr) {
     os << "]";
 }
 
-ObjectRef ParseDeviceObj(const J& j, const std::string& ctx) {
-    if (j.k == J::N) return ObjectRef();
+// 从 JSON 设备对象恢复规范驻留的 Device。
+Device ParseDeviceObj(const J& j, const std::string& ctx) {
+    if (j.k == J::N) return Device();
     RK(j, J::O, ctx);
     int t = RI(RF(j, "device_type", ctx), ctx + ".device_type");
     int id = RI(RF(j, "device_id", ctx), ctx + ".device_id");
-    return DeviceManager::Global()->GetOrCreate(static_cast<DeviceTypeCode>(t), id);
+    // 反序列化统一回到 DeviceManager 的驻留对象，保持同一物理设备的对象身份稳定。
+    return DeviceManager::Global()->Get(static_cast<DeviceTypeCode>(t), id);
 }
 
+// 从 JSON 恢复 Target 能力快照。
 Target ParseTargetObj(const J& j, const std::string& ctx) {
     if (j.k == J::N) return Target();
     RK(j, J::O, ctx);
@@ -369,40 +406,32 @@ Target ParseTargetObj(const J& j, const std::string& ctx) {
     return Target(ObjectRef(n));
 }
 
+// 从 JSON 恢复逻辑设备的物理、目标、内存域和逻辑编号约束。
 VirtualDevice ParseVD(const J& j, const std::string& ctx) {
     if (j.k == J::N) return VirtualDevice();
     RK(j, J::O, ctx);
     std::string scope = OS(j, "memory_scope", "", ctx);
     int vid = OI(j, "virtual_device_id", kInvalidVirtualDeviceId, ctx);
-    ObjectRef dev;
+    Device dev;
     if (const J* d = FF(j, "device")) dev = ParseDeviceObj(*d, ctx + ".device");
     Target target;
     if (const J* t = FF(j, "target")) target = ParseTargetObj(*t, ctx + ".target");
-    if (dev.defined()) {
-        const Object* raw = dev.get();
-        if (!raw || raw->GetTypeId() != kKXC_DEVICE_TYPE) {
-            throw std::runtime_error("Expected Device in " + ctx);
-        }
-        const auto* d = static_cast<const class Device*>(raw);
-        return VirtualDevice(*d, target, scope, vid);
-    }
+    if (dev.defined()) return VirtualDevice(dev, target, scope, vid);
     return VirtualDevice(target, scope, vid);
 }
 
-void WriteDeviceObj(std::ostream& os, const ObjectRef& dev) {
+// 将物理设备身份写为 JSON 对象。
+void WriteDeviceObj(std::ostream& os, const Device& dev) {
     if (!dev.defined()) {
         os << "null";
         return;
     }
-    const Object* raw = dev.get();
-    if (!raw || raw->GetTypeId() != kKXC_DEVICE_TYPE) {
-        throw std::runtime_error("Expected Device object during ExecutionPlan serialization");
-    }
-    const auto* d = static_cast<const class Device*>(raw);
-    os << "{\"device_type\":" << static_cast<int>(d->device_type()) << ",\"device_id\":"
-       << d->device_id() << "}";
+    // 执行计划只持久化设备值；对象身份在读取时由 DeviceManager 重建。
+    os << "{\"device_type\":" << static_cast<int>(dev.device_type()) << ",\"device_id\":"
+       << dev.device_id() << "}";
 }
 
+// 将 Target 能力快照写为 JSON 对象。
 void WriteTargetObj(std::ostream& os, const Target& t) {
     if (!t.defined()) {
         os << "null";
@@ -421,6 +450,7 @@ void WriteTargetObj(std::ostream& os, const Target& t) {
     os << "}}";
 }
 
+// 将可选 VirtualDevice 约束写为 JSON。
 void WriteVD(std::ostream& os, const VirtualDevice& vd) {
     if (!vd.defined()) {
         os << "null";
@@ -430,13 +460,14 @@ void WriteVD(std::ostream& os, const VirtualDevice& vd) {
     os << "\"virtual_device_id\":" << vd->virtual_device_id << ",";
     os << "\"memory_scope\":\"" << Esc(vd->memory_scope) << "\",";
     os << "\"device\":";
-    WriteDeviceObj(os, vd->device_obj);
+    WriteDeviceObj(os, vd->device);
     os << ",";
     os << "\"target\":";
     WriteTargetObj(os, vd->target);
     os << "}";
 }
 
+// 从 JSON 恢复 worker 放置表，并重建 VirtualDevice 映射。
 DiscoPlacement ParsePlacement(const J& j, const std::string& ctx) {
     if (j.k == J::N) return DiscoPlacement();
     RK(j, J::O, ctx);
@@ -452,7 +483,7 @@ DiscoPlacement ParsePlacement(const J& j, const std::string& ctx) {
         int worker_id = RI(RF(item, "worker_id", wctx), wctx + ".worker_id");
         int group_id = OI(item, "group_id", 0, wctx);
         int local_rank = OI(item, "local_rank", worker_id, wctx);
-        ObjectRef dev;
+        Device dev;
         if (const J* d = FF(item, "device")) dev = ParseDeviceObj(*d, wctx + ".device");
         Target target;
         if (const J* t = FF(item, "target")) target = ParseTargetObj(*t, wctx + ".target");
@@ -460,11 +491,7 @@ DiscoPlacement ParsePlacement(const J& j, const std::string& ctx) {
         if (const J* v = FF(item, "virtual_device")) {
             vd = ParseVD(*v, wctx + ".virtual_device");
         } else if (dev.defined()) {
-            const Object* raw = dev.get();
-            if (!raw || raw->GetTypeId() != kKXC_DEVICE_TYPE) {
-                throw std::runtime_error("Expected Device in " + wctx);
-            }
-            vd = VirtualDevice(*static_cast<const class Device*>(raw), target);
+            vd = VirtualDevice(dev, target);
         } else if (target.defined()) {
             vd = VirtualDevice(target);
         }
@@ -474,6 +501,7 @@ DiscoPlacement ParsePlacement(const J& j, const std::string& ctx) {
     return DiscoPlacement(ws, map, num_groups);
 }
 
+// 将 PassContext 中可选的 DiscoPlacement 写入计划 JSON。
 void WritePlacement(std::ostream& os, const PassContext& pass_ctx) {
     if (!pass_ctx.has_disco_placement()) {
         os << "null";
@@ -508,7 +536,7 @@ void WritePlacement(std::ostream& os, const PassContext& pass_ctx) {
         os << "\"group_id\":" << w->group_id << ",";
         os << "\"local_rank\":" << w->local_rank << ",";
         os << "\"device\":";
-        WriteDeviceObj(os, w->device_obj);
+        WriteDeviceObj(os, w->device);
         os << ",";
         os << "\"target\":";
         WriteTargetObj(os, w->target);
@@ -520,6 +548,7 @@ void WritePlacement(std::ostream& os, const PassContext& pass_ctx) {
     os << "]}";
 }
 
+// 按已知通信 attrs 类型序列化结构化参数。
 void WriteCommAttrs(std::ostream& os, const ObjectRef& attrs) {
     if (!attrs.defined()) {
         os << "null";
@@ -551,6 +580,7 @@ void WriteCommAttrs(std::ostream& os, const ObjectRef& attrs) {
     os << "null";
 }
 
+// 根据通信算子名恢复对应 attrs 对象，未知字段不转为裸指针或弱类型数据。
 ObjectRef ParseCommAttrs(const std::string& op_name, const J* attrs, const std::string& ctx) {
     if (op_name == "device.copy") {
         if (!attrs || attrs->k == J::N) {
@@ -582,6 +612,7 @@ ObjectRef ParseCommAttrs(const std::string& op_name, const J* attrs, const std::
     return ObjectRef(relay::CollectiveAttrs::Create(kind, reduce_kind, in_group, group_id, root_worker));
 }
 
+// 对 Map 键排序，保证 JSON 输出可复现。
 std::vector<int> SortedIds(const Map<int, VirtualDevice>& m) {
     std::vector<int> ids;
     ids.reserve(m.size());
@@ -590,6 +621,7 @@ std::vector<int> SortedIds(const Map<int, VirtualDevice>& m) {
     return ids;
 }
 
+// 合并 shape/dtype 的 value id 并排序，保证元数据输出稳定。
 std::vector<int> SortedInfoIds(const Map<int, Array<int64_t>>& shapes,
                                const Map<int, std::string>& dtypes) {
     std::unordered_set<int> set;
@@ -602,6 +634,7 @@ std::vector<int> SortedInfoIds(const Map<int, Array<int64_t>>& shapes,
 
 }  // namespace
 
+// 构造计算节点，记录 PrimFunc、值依赖、worker 集合与可选内核符号。
 KernelExec::KernelExec(std::string op_name, tir::PrimFunc primfunc, Array<int> input_values,
                        Array<int> output_values, Array<int> worker_set,
                        std::string kernel_symbol) {
@@ -616,6 +649,7 @@ KernelExec::KernelExec(std::string op_name, tir::PrimFunc primfunc, Array<int> i
     SetData(node);
 }
 
+// 构造通信节点，保留结构化 attrs 及输入输出值依赖。
 CommExec::CommExec(std::string op_name, ObjectRef attrs, Array<int> input_values,
                    Array<int> output_values, Array<int> worker_set) {
     CommExecNode* node = new CommExecNode();
@@ -628,6 +662,7 @@ CommExec::CommExec(std::string op_name, ObjectRef attrs, Array<int> input_values
     SetData(node);
 }
 
+// 构造指定 worker 集合上的同步屏障节点。
 BarrierExec::BarrierExec(std::string tag, Array<int> worker_set) {
     BarrierExecNode* node = new BarrierExecNode();
     node->kind = ExecNodeKind::kBarrier;
@@ -636,6 +671,7 @@ BarrierExec::BarrierExec(std::string tag, Array<int> worker_set) {
     SetData(node);
 }
 
+// 汇总有序执行节点、值元数据、放置上下文和计划输出。
 ExecutionPlan::ExecutionPlan(Array<ObjectRef> nodes, Map<int, VirtualDevice> value_virtual_devices,
                              Array<int> input_value_ids, Array<int> constant_value_ids,
                              Map<int, Array<int64_t>> value_shapes,
@@ -654,6 +690,7 @@ ExecutionPlan::ExecutionPlan(Array<ObjectRef> nodes, Map<int, VirtualDevice> val
     SetData(node);
 }
 
+// 输出执行计划规模和输入输出摘要。
 std::string ExecutionPlan::ToString() const {
     if (!defined()) {
         return "ExecutionPlan(undefined)";
@@ -667,10 +704,12 @@ std::string ExecutionPlan::ToString() const {
     return ss.str();
 }
 
+// 按 device. 命名空间识别执行计划通信算子。
 bool IsCommunicationOpName(const std::string& op_name) {
     return op_name.rfind("device.", 0) == 0;
 }
 
+// 将完整执行计划序列化为可复现、可跨进程传输的 JSON。
 std::string SerializeExecutionPlanToJson(const ExecutionPlan& plan) {
     if (!plan.defined()) {
         throw std::runtime_error("SerializeExecutionPlanToJson requires a defined ExecutionPlan");
@@ -776,6 +815,7 @@ std::string SerializeExecutionPlanToJson(const ExecutionPlan& plan) {
     return os.str();
 }
 
+// 严格校验 JSON 契约并重建强类型执行计划对象。
 ExecutionPlan DeserializeExecutionPlanFromJson(const std::string& json_text) {
     J root = P(json_text).Parse();
     RK(root, J::O, "root");
@@ -857,6 +897,7 @@ ExecutionPlan DeserializeExecutionPlanFromJson(const std::string& json_text) {
                          value_shapes, value_dtypes, num_values, pass_ctx, output_value);
 }
 
+// 从文件读取并反序列化执行计划。
 ExecutionPlan LoadExecutionPlanFromJsonFile(const std::string& path) {
     std::ifstream ifs(path, std::ios::in);
     if (!ifs) {
@@ -867,6 +908,7 @@ ExecutionPlan LoadExecutionPlanFromJsonFile(const std::string& path) {
     return DeserializeExecutionPlanFromJson(ss.str());
 }
 
+// 将执行计划 JSON 完整写入文件并检查 I/O 失败。
 void SaveExecutionPlanToJsonFile(const ExecutionPlan& plan, const std::string& path) {
     std::ofstream ofs(path, std::ios::out | std::ios::trunc);
     if (!ofs) {

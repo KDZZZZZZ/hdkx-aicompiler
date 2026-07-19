@@ -24,27 +24,26 @@ constexpr const char* kPassCtxDiscoPlacementAttr = "kxc.pass_ctx.disco_placement
 thread_local PassContext current_pass_ctx;
 thread_local bool has_current_pass_ctx = false;
 
-bool IsDeviceObjectRef(const ObjectRef& obj) {
-    return obj.defined() && obj.get()->GetTypeId() == kKXC_DEVICE_TYPE;
-}
-
+// 判断属性对象是否为 Target，避免跨类型 ObjectRef 强转。
 bool IsTargetObjectRef(const ObjectRef& obj) {
     return obj.defined() && obj.get()->GetTypeId() == TargetNode::_type_index;
 }
 
+// 判断属性对象是否为 VirtualDevice。
 bool IsVirtualDeviceObjectRef(const ObjectRef& obj) {
     return obj.defined() && obj.get()->GetTypeId() == VirtualDeviceNode::_type_index;
 }
 
+// 判断属性对象是否为 DiscoPlacement。
 bool IsDiscoPlacementObjectRef(const ObjectRef& obj) {
     return obj.defined() && obj.get()->GetTypeId() == DiscoPlacementNode::_type_index;
 }
 
-std::string DeviceIdentityKey(const ObjectRef& device_obj, const Target& target) {
-    if (IsDeviceObjectRef(device_obj)) {
-        const auto* dev = static_cast<const class Device*>(device_obj.get());
-        return std::to_string(static_cast<int>(dev->device_type())) + ":" +
-               std::to_string(dev->device_id());
+// 生成用于判断多设备上下文的物理身份键，优先采用显式 Device。
+std::string DeviceIdentityKey(const Device& device, const Target& target) {
+    if (device.defined()) {
+        return std::to_string(static_cast<int>(device.device_type())) + ":" +
+               std::to_string(device.device_id());
     }
     if (target.defined()) {
         return std::to_string(static_cast<int>(target->device_type)) + ":" +
@@ -53,6 +52,7 @@ std::string DeviceIdentityKey(const ObjectRef& device_obj, const Target& target)
     return "unconstrained";
 }
 
+// 遍历 Relay 图并按对象身份去重收集 VirtualDevice，visited 集合同时处理 DAG 共享。
 void CollectRelayVirtualDevices(const Expr& expr, std::unordered_set<const Object*>* visited_exprs,
                                 std::unordered_set<const Object*>* visited_virtual_devices,
                                 Array<VirtualDevice>* out_virtual_devices) {
@@ -119,6 +119,7 @@ void CollectRelayVirtualDevices(const Expr& expr, std::unordered_set<const Objec
     }
 }
 
+// 将源表达式的放置与已推导类型复制到重建节点。
 Expr CopyRelayVirtualDevice(const Expr& source, const Expr& dest) {
     if (!source.defined() || !dest.defined()) {
         return dest;
@@ -135,6 +136,7 @@ Expr CopyRelayVirtualDevice(const Expr& source, const Expr& dest) {
 
 }  // namespace
 
+// 输出 PassContext 的设备、目标和 Disco 放置摘要。
 std::string PassContext::ToString() const {
     if (!defined_) {
         return "PassContext(undefined)";
@@ -162,6 +164,7 @@ std::string PassContext::ToString() const {
     return ss.str();
 }
 
+// 返回当前线程的 PassContext；未设置时返回未定义上下文。
 PassContext PassContext::Current() {
     if (!has_current_pass_ctx) {
         return PassContext();
@@ -169,6 +172,7 @@ PassContext PassContext::Current() {
     return current_pass_ctx;
 }
 
+// 从逻辑设备集合推导默认 Device、Target、多设备标志及 DiscoPlacement。
 PassContext PassContext::BuildFromVirtualDevices(const Array<VirtualDevice>& virtual_devices) {
     PassContext ctx;
     if (virtual_devices.empty()) {
@@ -178,25 +182,26 @@ PassContext PassContext::BuildFromVirtualDevices(const Array<VirtualDevice>& vir
     ctx.defined_ = true;
     ctx.virtual_devices_ = virtual_devices;
     ctx.primary_virtual_device_ = virtual_devices[0];
-    ctx.default_device_obj_ = ctx.primary_virtual_device_->device_obj;
+    // PassContext 保留强类型 Device，使后续 Target 推导不再依赖 ObjectRef 强制转换。
+    ctx.default_device_ = ctx.primary_virtual_device_->device;
 
     if (ctx.primary_virtual_device_->target.defined()) {
         ctx.default_target_ = ctx.primary_virtual_device_->target;
-    } else if (IsDeviceObjectRef(ctx.default_device_obj_)) {
-        const auto* dev = static_cast<const class Device*>(ctx.default_device_obj_.get());
-        ctx.default_target_ = BuildTarget(*dev);
+    } else if (ctx.default_device_.defined()) {
+        ctx.default_target_ = BuildTarget(ctx.default_device_);
     }
 
     std::unordered_set<std::string> identities;
     for (const auto& vd : virtual_devices) {
         if (!vd.defined()) continue;
-        identities.insert(DeviceIdentityKey(vd->device_obj, vd->target));
+        identities.insert(DeviceIdentityKey(vd->device, vd->target));
     }
     ctx.is_multi_device_ = identities.size() > 1;
     ctx.disco_placement_ = BuildDiscoPlacement(virtual_devices, /*num_groups=*/1);
     return ctx;
 }
 
+// 扫描 Relay 表达式中的逻辑放置并构造 PassContext。
 PassContext PassContext::FromRelay(const Expr& expr) {
     Array<VirtualDevice> virtual_devices;
     std::unordered_set<const Object*> visited_exprs;
@@ -205,10 +210,12 @@ PassContext PassContext::FromRelay(const Expr& expr) {
     return BuildFromVirtualDevices(virtual_devices);
 }
 
+// 将 Relay Function 作为表达式扫描放置上下文。
 PassContext PassContext::FromRelay(const Function& func) {
     return FromRelay(Expr(ObjectRef(func)));
 }
 
+// 从 PrimFunc 的保留属性恢复强类型 PassContext。
 PassContext PassContext::FromTIR(const tir::PrimFunc& func) {
     PassContext ctx;
     if (!func.defined()) {
@@ -232,10 +239,10 @@ PassContext PassContext::FromTIR(const tir::PrimFunc& func) {
 
     if (func->attrs.count(String(kPassCtxDefaultDeviceAttr))) {
         ObjectRef device_ref = func->attrs.at(String(kPassCtxDefaultDeviceAttr));
-        if (IsDeviceObjectRef(device_ref)) {
-            if (!ctx.defined_) ctx.defined_ = true;
-            ctx.default_device_obj_ = device_ref;
-        }
+        // Device(ObjectRef) 在属性边界完成类型检查，非法对象不会静默进入 PassContext。
+        Device device(device_ref);
+        if (!ctx.defined_) ctx.defined_ = true;
+        ctx.default_device_ = std::move(device);
     }
 
     if (func->attrs.count(String(kPassCtxMultiDeviceAttr))) {
@@ -257,6 +264,7 @@ PassContext PassContext::FromTIR(const tir::PrimFunc& func) {
     return ctx;
 }
 
+// 基于现有上下文替换 DiscoPlacement，同时保留其他推导结果。
 PassContext PassContext::WithDiscoPlacement(const PassContext& base_ctx,
                                             const DiscoPlacement& disco_placement) {
     PassContext ctx = base_ctx;
@@ -267,16 +275,19 @@ PassContext PassContext::WithDiscoPlacement(const PassContext& base_ctx,
     return ctx;
 }
 
+// 设置当前线程 PassContext，避免跨线程共享可变编译状态。
 void PassContext::SetCurrent(const PassContext& pass_ctx) {
     current_pass_ctx = pass_ctx;
     has_current_pass_ctx = pass_ctx.defined_;
 }
 
+// 清除当前线程 PassContext。
 void PassContext::ClearCurrent() {
     current_pass_ctx = PassContext();
     has_current_pass_ctx = false;
 }
 
+// 进入作用域时保存旧上下文并安装新的已定义上下文。
 PassContext::Scope::Scope(const PassContext& pass_ctx) {
     previous_ = std::make_unique<PassContext>(PassContext::Current());
     if (!pass_ctx.defined()) {
@@ -287,6 +298,7 @@ PassContext::Scope::Scope(const PassContext& pass_ctx) {
     active_ = true;
 }
 
+// 离开作用域时恢复旧上下文，保证嵌套 Pass 不泄漏状态。
 PassContext::Scope::~Scope() {
     if (!active_) {
         return;
@@ -298,6 +310,7 @@ PassContext::Scope::~Scope() {
     }
 }
 
+// 复制 PrimFunc 属性并附加可跨 Pass 传递的上下文字段。
 Map<String, ObjectRef> AttachPassContextAttrs(const Map<String, ObjectRef>& attrs,
                                               const PassContext& pass_ctx) {
     Map<String, ObjectRef> new_attrs;
@@ -315,8 +328,8 @@ Map<String, ObjectRef> AttachPassContextAttrs(const Map<String, ObjectRef>& attr
     if (pass_ctx.default_target().defined()) {
         new_attrs.Set(String(kPassCtxDefaultTargetAttr), ObjectRef(pass_ctx.default_target()));
     }
-    if (pass_ctx.default_device_obj().defined()) {
-        new_attrs.Set(String(kPassCtxDefaultDeviceAttr), pass_ctx.default_device_obj());
+    if (pass_ctx.default_device().defined()) {
+        new_attrs.Set(String(kPassCtxDefaultDeviceAttr), ObjectRef(pass_ctx.default_device()));
     }
     new_attrs.Set(String(kPassCtxMultiDeviceAttr),
                   tir::IntImm(pass_ctx.is_multi_device() ? 1 : 0, tir::DataType::Bool()));
@@ -326,6 +339,7 @@ Map<String, ObjectRef> AttachPassContextAttrs(const Map<String, ObjectRef>& attr
     return new_attrs;
 }
 
+// 从 Relay 放置约束建立 DiscoPlacement，缺失时生成默认单组映射。
 PassContext BuildDiscoPlacementPass(const Expr& expr) {
     PassContext pass_ctx = PassContext::FromRelay(expr);
     if (!pass_ctx.has_disco_placement()) {
@@ -335,10 +349,12 @@ PassContext BuildDiscoPlacementPass(const Expr& expr) {
     return pass_ctx;
 }
 
+// 为 Relay Function 提供 BuildDiscoPlacementPass 重载。
 PassContext BuildDiscoPlacementPass(const Function& func) {
     return BuildDiscoPlacementPass(Expr(ObjectRef(func)));
 }
 
+// 在当前或推导出的 PassContext 作用域内递归重写 Relay 表达式。
 Expr RelayPass::Mutate(const Expr& expr) {
     PassContext pass_ctx = PassContext::Current();
     if (!pass_ctx.defined()) {
@@ -348,6 +364,7 @@ Expr RelayPass::Mutate(const Expr& expr) {
     return VisitExpr(expr);
 }
 
+// 重写 Relay Function 并验证结果仍为 Function。
 Function RelayPass::Mutate(const Function& func) {
     if (!func.defined()) return func;
     Expr out = Mutate(Expr(ObjectRef(func)));
@@ -358,23 +375,28 @@ Function RelayPass::Mutate(const Function& func) {
     return Function(out);
 }
 
+// 重写 Relay Var 并保持强类型返回。
 Var RelayPass::Mutate(const Var& var) { return MutateToVar(var); }
 
+// 常量没有递归子节点，默认保持原对象。
 Expr RelayPass::VisitConstant(const ConstantNode* op, const Expr& ref) {
     (void)op;
     return ref;
 }
 
+// 将 Var 分派给可覆写的强类型变量重写入口。
 Expr RelayPass::VisitVar(const VarNode* op, const Expr& ref) {
     (void)op;
     return ref;
 }
 
+// 算子描述节点不可变，默认保持原对象。
 Expr RelayPass::VisitOp(const relay::OpNode* op, const Expr& ref) {
     (void)op;
     return ref;
 }
 
+// 递归重写调用目标与参数，并把原放置和类型元数据复制到新节点。
 Expr RelayPass::VisitCall(const CallNode* op, const Expr& ref) {
     auto new_op = Mutate(op->op);
     Array<Expr> new_args;
@@ -390,6 +412,7 @@ Expr RelayPass::VisitCall(const CallNode* op, const Expr& ref) {
     return CopyRelayVirtualDevice(ref, Call(new_op, new_args, op->attrs));
 }
 
+// 递归重写函数参数和函数体，同时保留函数属性与放置元数据。
 Expr RelayPass::VisitFunction(const FunctionNode* op, const Expr& ref) {
     Array<Var> new_params;
     bool changed = false;
@@ -406,6 +429,7 @@ Expr RelayPass::VisitFunction(const FunctionNode* op, const Expr& ref) {
     return CopyRelayVirtualDevice(ref, Function(changed ? new_params : op->params, new_body));
 }
 
+// 递归重写条件与两个分支，并保留结果放置元数据。
 Expr RelayPass::VisitIf(const IfNode* op, const Expr& ref) {
     auto new_cond = Mutate(op->cond);
     auto new_true = Mutate(op->true_branch);
@@ -418,6 +442,7 @@ Expr RelayPass::VisitIf(const IfNode* op, const Expr& ref) {
     return CopyRelayVirtualDevice(ref, If(new_cond, new_true, new_false));
 }
 
+// 递归重写 Let 绑定变量、值与作用域体。
 Expr RelayPass::VisitLet(const LetNode* op, const Expr& ref) {
     auto new_var = MutateToVar(op->var);
     auto new_value = Mutate(op->value);
@@ -430,6 +455,7 @@ Expr RelayPass::VisitLet(const LetNode* op, const Expr& ref) {
     return CopyRelayVirtualDevice(ref, Let(new_var, new_value, new_body));
 }
 
+// 递归重写 Tuple 各字段并保留元数据。
 Expr RelayPass::VisitTuple(const TupleNode* op, const Expr& ref) {
     Array<Expr> new_fields;
     bool changed = false;
@@ -443,12 +469,14 @@ Expr RelayPass::VisitTuple(const TupleNode* op, const Expr& ref) {
     return CopyRelayVirtualDevice(ref, Tuple(new_fields));
 }
 
+// 递归重写 TupleGetItem 的源 Tuple 并保留索引与元数据。
 Expr RelayPass::VisitTupleGetItem(const TupleGetItemNode* op, const Expr& ref) {
     auto new_tuple = Mutate(op->tuple);
     if (new_tuple.get() == op->tuple.get()) return ref;
     return CopyRelayVirtualDevice(ref, TupleGetItem(new_tuple, op->index));
 }
 
+// 默认保持 Var；派生 Pass 可覆写以替换绑定身份。
 Var RelayPass::MutateToVar(const Var& var) {
     if (!var.defined()) return var;
     Expr new_var = Mutate(Expr(ObjectRef(var)));
@@ -461,10 +489,13 @@ Var RelayPass::MutateToVar(const Var& var) {
     return Var(new_var);
 }
 
+// 递归重写 TIR 表达式入口。
 tir::PrimExpr TIRPass::Mutate(const tir::PrimExpr& expr) { return VisitExpr(expr); }
 
+// 递归重写 TIR 语句入口。
 tir::Stmt TIRPass::Mutate(const tir::Stmt& stmt) { return VisitStmt(stmt); }
 
+// 在当前或从属性恢复的 PassContext 中重写 PrimFunc。
 tir::PrimFunc TIRPass::Mutate(const tir::PrimFunc& func) {
     PassContext pass_ctx = PassContext::Current();
     if (!pass_ctx.defined()) {
@@ -474,6 +505,7 @@ tir::PrimFunc TIRPass::Mutate(const tir::PrimFunc& func) {
     return VisitPrimFunc(func);
 }
 
+// 重写参数、buffer map、函数体并重新附加 PassContext 属性。
 tir::PrimFunc TIRPass::VisitPrimFunc(const tir::PrimFunc& func) {
     if (!func.defined()) return func;
 
@@ -507,21 +539,25 @@ tir::PrimFunc TIRPass::VisitPrimFunc(const tir::PrimFunc& func) {
                          buffer_map_changed ? new_buffer_map : func->buffer_map, func->attrs);
 }
 
+// 整数立即数没有子节点，默认保持原对象。
 tir::PrimExpr TIRPass::VisitIntImm(const tir::IntImmNode* op, const tir::PrimExpr& ref) {
     (void)op;
     return ref;
 }
 
+// 浮点立即数没有子节点，默认保持原对象。
 tir::PrimExpr TIRPass::VisitFloatImm(const tir::FloatImmNode* op, const tir::PrimExpr& ref) {
     (void)op;
     return ref;
 }
 
+// 将 TIR Var 分派给可覆写的强类型变量重写入口。
 tir::PrimExpr TIRPass::VisitVar(const tir::VarNode* op, const tir::PrimExpr& ref) {
     (void)op;
     return ref;
 }
 
+// 递归重写加法两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitAdd(const tir::AddNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -529,6 +565,7 @@ tir::PrimExpr TIRPass::VisitAdd(const tir::AddNode* op, const tir::PrimExpr& ref
     return tir::Add(new_a, new_b);
 }
 
+// 递归重写减法两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitSub(const tir::SubNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -536,6 +573,7 @@ tir::PrimExpr TIRPass::VisitSub(const tir::SubNode* op, const tir::PrimExpr& ref
     return tir::Sub(new_a, new_b);
 }
 
+// 递归重写乘法两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitMul(const tir::MulNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -543,6 +581,7 @@ tir::PrimExpr TIRPass::VisitMul(const tir::MulNode* op, const tir::PrimExpr& ref
     return tir::Mul(new_a, new_b);
 }
 
+// 递归重写除法两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitDiv(const tir::DivNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -550,6 +589,7 @@ tir::PrimExpr TIRPass::VisitDiv(const tir::DivNode* op, const tir::PrimExpr& ref
     return tir::Div(new_a, new_b);
 }
 
+// 递归重写取模两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitMod(const tir::ModNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -557,6 +597,7 @@ tir::PrimExpr TIRPass::VisitMod(const tir::ModNode* op, const tir::PrimExpr& ref
     return tir::Mod(new_a, new_b);
 }
 
+// 递归重写 Min 两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitMin(const tir::MinNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -564,6 +605,7 @@ tir::PrimExpr TIRPass::VisitMin(const tir::MinNode* op, const tir::PrimExpr& ref
     return tir::Min(new_a, new_b);
 }
 
+// 递归重写 Max 两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitMax(const tir::MaxNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -571,6 +613,7 @@ tir::PrimExpr TIRPass::VisitMax(const tir::MaxNode* op, const tir::PrimExpr& ref
     return tir::Max(new_a, new_b);
 }
 
+// 递归重写相等比较两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitEQ(const tir::EQNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -578,6 +621,7 @@ tir::PrimExpr TIRPass::VisitEQ(const tir::EQNode* op, const tir::PrimExpr& ref) 
     return tir::EQ(new_a, new_b);
 }
 
+// 递归重写小于比较两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitLT(const tir::LTNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -585,6 +629,7 @@ tir::PrimExpr TIRPass::VisitLT(const tir::LTNode* op, const tir::PrimExpr& ref) 
     return tir::LT(new_a, new_b);
 }
 
+// 递归重写逻辑与两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitAnd(const tir::AndNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -592,6 +637,7 @@ tir::PrimExpr TIRPass::VisitAnd(const tir::AndNode* op, const tir::PrimExpr& ref
     return tir::And(new_a, new_b);
 }
 
+// 递归重写逻辑或两侧并重建表达式。
 tir::PrimExpr TIRPass::VisitOr(const tir::OrNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_a = Mutate(op->a);
     tir::PrimExpr new_b = Mutate(op->b);
@@ -599,12 +645,14 @@ tir::PrimExpr TIRPass::VisitOr(const tir::OrNode* op, const tir::PrimExpr& ref) 
     return tir::Or(new_a, new_b);
 }
 
+// 递归重写逻辑非操作数并重建表达式。
 tir::PrimExpr TIRPass::VisitNot(const tir::NotNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_value = Mutate(op->value);
     if (new_value.get() == op->value.get()) return ref;
     return tir::Not(new_value);
 }
 
+// 重写 Load 的 buffer 变量、索引和谓词并保留 dtype。
 tir::PrimExpr TIRPass::VisitLoad(const tir::LoadNode* op, const tir::PrimExpr& ref) {
     tir::Var new_buffer_var = MutateToVar(op->buffer_var);
     tir::PrimExpr new_index = Mutate(op->index);
@@ -616,6 +664,7 @@ tir::PrimExpr TIRPass::VisitLoad(const tir::LoadNode* op, const tir::PrimExpr& r
     return tir::Load(new_buffer_var, new_index, new_pred);
 }
 
+// 递归重写 TIR Call 参数并保留调用目标与 dtype。
 tir::PrimExpr TIRPass::VisitCall(const tir::CallNode* op, const tir::PrimExpr& ref) {
     Array<tir::PrimExpr> new_args;
     bool changed = false;
@@ -628,6 +677,7 @@ tir::PrimExpr TIRPass::VisitCall(const tir::CallNode* op, const tir::PrimExpr& r
     return tir::Call(ref.dtype(), op->name, new_args);
 }
 
+// 递归重写 Select 条件和两个值分支。
 tir::PrimExpr TIRPass::VisitSelect(const tir::SelectNode* op, const tir::PrimExpr& ref) {
     tir::PrimExpr new_cond = Mutate(op->condition);
     tir::PrimExpr new_true = Mutate(op->true_value);
@@ -639,6 +689,7 @@ tir::PrimExpr TIRPass::VisitSelect(const tir::SelectNode* op, const tir::PrimExp
     return tir::Select(new_cond, new_true, new_false);
 }
 
+// 重写 LetStmt 的绑定变量、值和作用域体。
 tir::Stmt TIRPass::VisitLetStmt(const tir::LetStmtNode* op, const tir::Stmt& ref) {
     tir::Var new_var = MutateToVar(op->var);
     tir::PrimExpr new_value = Mutate(op->value);
@@ -650,6 +701,7 @@ tir::Stmt TIRPass::VisitLetStmt(const tir::LetStmtNode* op, const tir::Stmt& ref
     return tir::LetStmt(new_var, new_value, new_body);
 }
 
+// 重写 Store 的 buffer 变量、值、索引和谓词。
 tir::Stmt TIRPass::VisitStore(const tir::StoreNode* op, const tir::Stmt& ref) {
     tir::Var new_buffer_var = MutateToVar(op->buffer_var);
     tir::PrimExpr new_value = Mutate(op->value);
@@ -662,6 +714,7 @@ tir::Stmt TIRPass::VisitStore(const tir::StoreNode* op, const tir::Stmt& ref) {
     return tir::Store(new_buffer_var, new_value, new_index, new_pred);
 }
 
+// 重写循环变量、范围和循环体，同时保留循环种类与注解。
 tir::Stmt TIRPass::VisitFor(const tir::ForNode* op, const tir::Stmt& ref) {
     tir::Var new_loop_var = MutateToVar(op->loop_var);
     tir::PrimExpr new_min = Mutate(op->min);
@@ -674,6 +727,7 @@ tir::Stmt TIRPass::VisitFor(const tir::ForNode* op, const tir::Stmt& ref) {
     return tir::For(new_loop_var, new_min, new_extent, op->for_type, new_body);
 }
 
+// 重写条件语句的条件、真分支和可选假分支。
 tir::Stmt TIRPass::VisitIfThenElse(const tir::IfThenElseNode* op, const tir::Stmt& ref) {
     tir::PrimExpr new_cond = Mutate(op->condition);
     tir::Stmt new_then = Mutate(op->then_case);
@@ -685,6 +739,7 @@ tir::Stmt TIRPass::VisitIfThenElse(const tir::IfThenElseNode* op, const tir::Stm
     return tir::IfThenElse(new_cond, new_then, new_else);
 }
 
+// 重写 Allocate 的变量、维度、条件和作用域体，并保留存储注解。
 tir::Stmt TIRPass::VisitAllocate(const tir::AllocateNode* op, const tir::Stmt& ref) {
     tir::Var new_buffer_var = MutateToVar(op->buffer_var);
     Array<tir::PrimExpr> new_extents;
@@ -704,6 +759,7 @@ tir::Stmt TIRPass::VisitAllocate(const tir::AllocateNode* op, const tir::Stmt& r
                          new_cond, new_body);
 }
 
+// 重写 AttrStmt 的节点、值与作用域体并保留属性键。
 tir::Stmt TIRPass::VisitAttrStmt(const tir::AttrStmtNode* op, const tir::Stmt& ref) {
     tir::PrimExpr new_value = Mutate(op->value);
     tir::Stmt new_body = Mutate(op->body);
@@ -713,6 +769,7 @@ tir::Stmt TIRPass::VisitAttrStmt(const tir::AttrStmtNode* op, const tir::Stmt& r
     return tir::AttrStmt(op->node, op->attr_key, new_value, new_body);
 }
 
+// 递归重建 Block 的迭代变量、读写区域、初始化和主体。
 tir::Stmt TIRPass::VisitBlock(const tir::BlockNode* op, const tir::Stmt& ref) {
     Array<tir::IterVar> new_iter_vars;
     bool iter_vars_changed = false;
@@ -752,6 +809,7 @@ tir::Stmt TIRPass::VisitBlock(const tir::BlockNode* op, const tir::Stmt& ref) {
                       new_init);
 }
 
+// 按原顺序重写语句序列。
 tir::Stmt TIRPass::VisitSeqStmt(const tir::SeqStmtNode* op, const tir::Stmt& ref) {
     Array<tir::Stmt> new_seq;
     bool changed = false;
@@ -764,12 +822,14 @@ tir::Stmt TIRPass::VisitSeqStmt(const tir::SeqStmtNode* op, const tir::Stmt& ref
     return tir::SeqStmt(new_seq);
 }
 
+// 重写 Evaluate 持有的表达式。
 tir::Stmt TIRPass::VisitEvaluate(const tir::EvaluateNode* op, const tir::Stmt& ref) {
     tir::PrimExpr new_value = Mutate(op->value);
     if (new_value.get() == op->value.get()) return ref;
     return tir::Evaluate(new_value);
 }
 
+// 默认保持 TIR Var；派生 Pass 可覆写以替换绑定身份。
 tir::Var TIRPass::MutateToVar(const tir::Var& var) {
     if (!var.defined()) return var;
     const tir::PrimExpr& var_expr = static_cast<const tir::PrimExpr&>(var);
@@ -784,6 +844,7 @@ tir::Var TIRPass::MutateToVar(const tir::Var& var) {
     return tir::Var(new_var_expr);
 }
 
+// 重写 Range 的起点和跨度。
 tir::Range TIRPass::MutateRange(const tir::Range& range) {
     if (!range.defined()) return range;
     tir::PrimExpr new_min = Mutate(range->min);
@@ -794,6 +855,7 @@ tir::Range TIRPass::MutateRange(const tir::Range& range) {
     return tir::Range(new_min, new_extent);
 }
 
+// 重写 IterVar 的范围和绑定变量并保留迭代类型。
 tir::IterVar TIRPass::MutateIterVar(const tir::IterVar& iv) {
     if (!iv.defined()) return iv;
     tir::Range new_dom = MutateRange(iv->dom);
@@ -804,6 +866,7 @@ tir::IterVar TIRPass::MutateIterVar(const tir::IterVar& iv) {
     return tir::IterVar(new_dom, new_var, iv->iter_type, iv->thread_tag);
 }
 
+// 重写 Buffer 的数据变量、shape、strides 和偏移元数据。
 tir::Buffer TIRPass::MutateBuffer(const tir::Buffer& buffer) {
     if (!buffer.defined()) return buffer;
 
@@ -837,6 +900,7 @@ tir::Buffer TIRPass::MutateBuffer(const tir::Buffer& buffer) {
                        buffer->name, buffer->data_alignment, buffer->offset_factor);
 }
 
+// 重写 BufferRegion 的 Buffer 与各维 Range。
 tir::BufferRegion TIRPass::MutateBufferRegion(const tir::BufferRegion& region) {
     if (!region.defined()) return region;
     tir::Buffer new_buffer = MutateBuffer(region->buffer);

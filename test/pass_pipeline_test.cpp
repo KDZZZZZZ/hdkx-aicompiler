@@ -43,29 +43,38 @@ namespace {
         }                                                                         \
     } while (0)
 
+// 在显式 cpu:0 NDArray 中构造 float32 标量常量。
 kxc::runtime::NDArray MakeScalarFloat(float value) {
-    kxc::runtime::NDArray array(kxc::Array<int64_t>{}, "float32");
+    kxc::runtime::NDArray array = kxc::runtime::NDArray::Empty(
+        {}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
     float* data = static_cast<float*>(array->dl_tensor.data);
     *data = value;
     return array;
 }
 
+// 在显式 cpu:0 NDArray 中构造 int64 标量常量。
 kxc::runtime::NDArray MakeScalarInt64(int64_t value) {
-    kxc::runtime::NDArray array(kxc::Array<int64_t>{}, "int64");
+    kxc::runtime::NDArray array = kxc::runtime::NDArray::Empty(
+        {}, kxc::runtime::DataTypeFromString("int64"), kxc::Device::CPU());
     int64_t* data = static_cast<int64_t*>(array->dl_tensor.data);
     *data = value;
     return array;
 }
 
+// 在显式 cpu:0 NDArray 中构造 int32 标量常量。
 kxc::runtime::NDArray MakeScalarInt32(int32_t value) {
-    kxc::runtime::NDArray array(kxc::Array<int64_t>{}, "int32");
+    kxc::runtime::NDArray array = kxc::runtime::NDArray::Empty(
+        {}, kxc::runtime::DataTypeFromString("int32"), kxc::Device::CPU());
     int32_t* data = static_cast<int32_t*>(array->dl_tensor.data);
     *data = value;
     return array;
 }
 
+// 将 CPU 标量 NDArray 包装为 Relay float32 Constant。
 kxc::Constant MakeRelayScalarFloat(float value) { return kxc::Constant(MakeScalarFloat(value)); }
+// 将 CPU 标量 NDArray 包装为 Relay int64 Constant。
 kxc::Constant MakeRelayScalarInt64(int64_t value) { return kxc::Constant(MakeScalarInt64(value)); }
+// 将 CPU 标量 NDArray 包装为 Relay int32 Constant。
 kxc::Constant MakeRelayScalarInt32(int32_t value) { return kxc::Constant(MakeScalarInt32(value)); }
 
 kxc::Call MakeRelayBinary(const std::string& op_name, const kxc::Expr& lhs,
@@ -73,14 +82,17 @@ kxc::Call MakeRelayBinary(const std::string& op_name, const kxc::Expr& lhs,
     return kxc::Call(kxc::relay::Op::Get(op_name), {lhs, rhs});
 }
 
+// 将 Relay 函数序列化为便于断言的稳定文本。
 std::string RelayText(const kxc::Function& func) { return kxc::relay::pass::ToText(func); }
 
+// 将 TIR PrimFunc 序列化为便于断言的稳定文本。
 std::string TIRText(const kxc::tir::PrimFunc& func) {
     std::ostringstream os;
     kxc::tir::pass::DumpPrimFunc(func, os);
     return os.str();
 }
 
+// 递归统计 Relay 表达式中的 Let 节点数量。
 int CountLetNodes(const kxc::Expr& expr) {
     if (!expr.defined()) return 0;
     if (const auto* let_node = expr.As<kxc::LetNode>()) {
@@ -113,6 +125,7 @@ int CountLetNodes(const kxc::Expr& expr) {
     return 0;
 }
 
+// 递归收集 TIR 循环类型，用于验证循环变换结果。
 void CollectForTypes(const kxc::tir::Stmt& stmt, std::vector<kxc::tir::ForType>* out) {
     if (!stmt.defined()) return;
     if (const auto* for_node = stmt.As<kxc::tir::ForNode>()) {
@@ -149,6 +162,7 @@ void CollectForTypes(const kxc::tir::Stmt& stmt, std::vector<kxc::tir::ForType>*
     }
 }
 
+// 验证常量索引的 TupleGetItem 被折叠为对应字段。
 bool TestRelayFoldTupleGetItem() {
     kxc::Var x("x");
     kxc::Var y("y");
@@ -162,6 +176,7 @@ bool TestRelayFoldTupleGetItem() {
     return true;
 }
 
+// 验证 Relay 标量常量表达式在 CPU NDArray 上正确折叠。
 bool TestRelayFoldConstant() {
     kxc::Expr folded_add = MakeRelayBinary("add", MakeRelayScalarInt64(2), MakeRelayScalarInt64(3));
     kxc::Expr folded_mul =
@@ -182,6 +197,7 @@ bool TestRelayFoldConstant() {
     return true;
 }
 
+// 验证 Relay 代数恒等式和冗余表达式被简化。
 bool TestRelaySimplifyExpr() {
     kxc::Var x("x");
     kxc::Expr add_zero = MakeRelayBinary("add", x, MakeRelayScalarFloat(0.0f));
@@ -199,6 +215,7 @@ bool TestRelaySimplifyExpr() {
     return true;
 }
 
+// 验证冗余 Cast 被规范化且类型保持正确。
 bool TestRelayCanonicalizeCast() {
     kxc::Var x("x");
     kxc::Expr inner = kxc::Call(kxc::relay::Op::Get("cast"), {x}, kxc::relay::CastAttrs::Create(1));
@@ -215,6 +232,7 @@ bool TestRelayCanonicalizeCast() {
     return true;
 }
 
+// 验证无语义作用的独立 Reshape 被删除。
 bool TestRelayRemoveStandaloneReshapes() {
     kxc::Var x("x");
     kxc::Expr inner = kxc::Call(kxc::relay::Op::Get("reshape"), {x},
@@ -232,6 +250,7 @@ bool TestRelayRemoveStandaloneReshapes() {
     return true;
 }
 
+// 验证结构相同的 Relay 子表达式被公共子表达式消除。
 bool TestRelayEliminateCommonSubexpr() {
     kxc::Var x("x");
     kxc::Var a("a");
@@ -254,12 +273,13 @@ bool TestRelayEliminateCommonSubexpr() {
     return true;
 }
 
+// 验证死 Let 被删除，同时保留 VirtualDevice 放置信息。
 bool TestRelayEliminateDeadLetAndVirtualDevice() {
     kxc::Var x("x");
     kxc::Var tmp("tmp");
 
     kxc::Let dead_let(tmp, MakeRelayScalarFloat(1.0f), x);
-    kxc::VirtualDevice vd(kxc::BuildTarget(kxc::kCPU, 0), "global", 0);
+    kxc::VirtualDevice vd(kxc::BuildTarget(kxc::Device::CPU()), "global", 0);
     dead_let.set_virtual_device(vd);
     kxc::Function func_dead({x}, dead_let);
 
@@ -274,6 +294,7 @@ bool TestRelayEliminateDeadLetAndVirtualDevice() {
     return true;
 }
 
+// 验证后序 DFS 编号稳定写入表达式 Span。
 bool TestRelayCapturePostDfsIndexInSpans() {
     kxc::Var x("x");
     kxc::Expr body = MakeRelayBinary("add", x, MakeRelayScalarFloat(1.0f));
@@ -292,8 +313,9 @@ bool TestRelayCapturePostDfsIndexInSpans() {
     return true;
 }
 
+// 验证 Relay 值获得预期的设备内存 scope 注解。
 bool TestRelayAnnotateMemoryScope() {
-    kxc::VirtualDevice empty_scope_vd(kxc::BuildTarget(kxc::kCPU, 0), "", 0);
+    kxc::VirtualDevice empty_scope_vd(kxc::BuildTarget(kxc::Device::CPU()), "", 0);
     kxc::Var x("x");
     x.set_virtual_device(empty_scope_vd);
     kxc::Constant c = MakeRelayScalarFloat(1.0f);
@@ -312,7 +334,7 @@ bool TestRelayAnnotateMemoryScope() {
     TEST_CHECK(x_node->virtual_device_->memory_scope == "global", "x scope should be global");
     TEST_CHECK(c_node->virtual_device_->memory_scope == "const", "constant scope should be const");
 
-    kxc::VirtualDevice preset_scope_vd(kxc::BuildTarget(kxc::kCPU, 0), "shared", 0);
+    kxc::VirtualDevice preset_scope_vd(kxc::BuildTarget(kxc::Device::CPU()), "shared", 0);
     kxc::Var y("y");
     y.set_virtual_device(preset_scope_vd);
     kxc::Function func2({y}, y);
@@ -324,6 +346,7 @@ bool TestRelayAnnotateMemoryScope() {
     return true;
 }
 
+// 验证默认 Relay PassPipeline 的组合顺序和最终不变量。
 bool TestRelayPipeline() {
     kxc::Var x("x", kxc::TensorType({8}, "float32"));
     kxc::Var a("a");
@@ -374,6 +397,7 @@ bool TestRelayPipeline() {
     return true;
 }
 
+// 验证 TIR 算术表达式简化。
 bool TestTIRSimplifyExpr() {
     kxc::tir::Var x("x", kxc::tir::DataType::Int(32));
     kxc::tir::Stmt body =
@@ -387,6 +411,7 @@ bool TestTIRSimplifyExpr() {
     return true;
 }
 
+// 验证 TIR 常量表达式折叠。
 bool TestTIRFoldConstant() {
     kxc::tir::Stmt body = kxc::tir::SeqStmt({
         kxc::tir::Evaluate(
@@ -415,6 +440,7 @@ bool TestTIRFoldConstant() {
     return true;
 }
 
+// 验证可安全表示的索引被收窄为 int32。
 bool TestTIRForceNarrowIndexToI32() {
     kxc::tir::Var i("i", kxc::tir::DataType::Int(64));
     kxc::tir::Var buf("buf", kxc::tir::DataType::Int(32));
@@ -461,6 +487,7 @@ bool TestTIRForceNarrowIndexToI32() {
     return true;
 }
 
+// 验证循环类型可统一转换为串行循环。
 bool TestTIRConvertForLoopsSerial() {
     kxc::tir::Var i("i");
     kxc::tir::Var j("j");
@@ -479,6 +506,7 @@ bool TestTIRConvertForLoopsSerial() {
     return true;
 }
 
+// 验证循环分区生成正确的边界分支。
 bool TestTIRLoopPartition() {
     kxc::tir::Var i("i", kxc::tir::DataType::Int(32));
     kxc::tir::Stmt loop =
@@ -501,6 +529,7 @@ bool TestTIRLoopPartition() {
     return true;
 }
 
+// 验证固定次数循环按策略展开。
 bool TestTIRUnrollLoop() {
     kxc::tir::Var i("i", kxc::tir::DataType::Int(32));
     kxc::tir::Stmt loop =
@@ -518,6 +547,7 @@ bool TestTIRUnrollLoop() {
     return true;
 }
 
+// 验证可向量化循环标记为向量循环。
 bool TestTIRVectorizeLoop() {
     kxc::tir::Var i("i", kxc::tir::DataType::Int(32));
     kxc::tir::Stmt vec_loop =
@@ -542,6 +572,7 @@ bool TestTIRVectorizeLoop() {
     return true;
 }
 
+// 验证无副作用空语句从 TIR 中删除。
 bool TestTIRRemoveNoOp() {
     kxc::tir::Stmt seq = kxc::tir::SeqStmt({
         kxc::tir::Evaluate(kxc::tir::IntImm(0)),
@@ -561,6 +592,7 @@ bool TestTIRRemoveNoOp() {
     return true;
 }
 
+// 验证默认 TIR PassPipeline 的组合顺序和最终不变量。
 bool TestTIRPipeline() {
     kxc::tir::Var i("i", kxc::tir::DataType::Int(64));
     kxc::tir::Var x("x", kxc::tir::DataType::Int(32));
@@ -605,6 +637,7 @@ bool TestTIRPipeline() {
 
 }  // namespace
 
+// 顺序运行 Relay/TIR pass 契约矩阵并汇总失败。
 int main() {
     const std::vector<std::pair<std::string, bool (*)()>> tests = {
         {"relay_fold_tuple_get_item", TestRelayFoldTupleGetItem},

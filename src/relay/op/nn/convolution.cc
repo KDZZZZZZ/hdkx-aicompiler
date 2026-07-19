@@ -7,7 +7,6 @@
 #include "relay/op_attr_types.h"
 #include "relay/type_infer.h"
 #include "te/topi/nn.h"
-#include <vector>
 #include <string>
 #include <stdexcept>
 
@@ -27,7 +26,8 @@ namespace relay {
 // In a real large project, you would include "include/relay/attrs/nn.h".
 
 namespace {
-int Read2DValue(const std::vector<int64_t>& v, int idx, int default_value) {
+// 读取二维卷积属性的指定分量，并为省略项提供规范默认值。
+int Read2DValue(const Array<int64_t>& v, int idx, int default_value) {
     if (idx < 0 || static_cast<size_t>(idx) >= v.size()) {
         return default_value;
     }
@@ -35,6 +35,7 @@ int Read2DValue(const std::vector<int64_t>& v, int idx, int default_value) {
 }
 }
 
+// 将 Relay nn_conv2d 调用转换为 NCHW TE 卷积，并在存在 bias 时附加广播加法。
 te::Tensor Conv2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
     (void)out_type;
     if (inputs.size() < 2 || inputs.size() > 3) {
@@ -75,7 +76,7 @@ te::Tensor Conv2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, co
 }
 
 // ---------------------------------------------------------------------------
-// 2. Operator Registration
+// 注册卷积的属性类型、类型推导和 Relay-to-TE 计算入口。
 // ---------------------------------------------------------------------------
 
 KXC_REGISTER_OP(nn_conv2d)
