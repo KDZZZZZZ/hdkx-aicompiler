@@ -17,6 +17,7 @@
 #include "codegen/cuda_module.h"
 #include "codegen/kernel_signature.h"
 #include "relay/op.h"
+#include "runtime/runtime_session.h"
 
 namespace {
 
@@ -266,51 +267,61 @@ void TestByteOffsetLaunch(
     }
 }
 
-/*! \brief 按 Compiler 冻结的签名分配 CUDA 参数并执行一次完整异步调用。 */
+/*!
+ * \brief 编译 Relay 后只构造 inputs，由 RuntimeSession 分配输出并异步执行。
+ *
+ * H2D 与 kernel 使用同一 stream，依靠 CUDA stream 顺序而不在二者之间同步。
+ * 离开内部作用域后只保留 outputs 和 completion，验证它们能独立覆盖执行期。
+ */
 std::vector<float> CompileAndRunRelay(
     const kxc::Function& function, const kxc::Device& device,
     const std::vector<std::vector<float>>& inputs, size_t output_elements) {
     using namespace kxc;
-    api::CompiledModule module = api::Compiler::Compile(
-        function, api::CompileConfig::Create(BuildTarget(device), 2));
-    const Array<codegen::KernelArgSpec> specs = module.signature().arguments();
-    Array<runtime::NDArray> arguments;
-    const Map<String, runtime::NDArray> constants = module.constants();
-    size_t input_index = 0;
-    size_t output_index = 0;
-    for (const auto& spec : specs) {
-        runtime::NDArray array = runtime::NDArray::Empty(
-            spec.shape(), spec->dtype, spec->device);
-        if (spec->role == codegen::KernelArgRole::kInput) {
+    runtime::RunAsyncResult run_result;
+    {
+        api::CompiledModule module = api::Compiler::Compile(
+            function, api::CompileConfig::Create(BuildTarget(device), 2));
+        runtime::RuntimeSession session(module);
+        const Array<codegen::KernelArgSpec> specs =
+            module.signature().arguments();
+        const DeviceStream stream = DeviceStream::Create(device);
+        Array<runtime::NDArray> device_inputs;
+        Array<runtime::NDArray> host_inputs;
+        Array<AsyncOperation> uploads;
+        size_t input_index = 0;
+        for (const auto& spec : specs) {
+            if (spec->role != codegen::KernelArgRole::kInput) continue;
             Require(input_index < inputs.size(),
                     "Compiler CUDA signature has too many inputs");
             const auto& values = inputs[input_index++];
-            Require(values.size() * sizeof(float) == array.NBytes(),
+            runtime::NDArray host = runtime::NDArray::Empty(
+                spec.shape(), spec->dtype, Device::CPU(), spec->alignment);
+            Require(values.size() * sizeof(float) == host.NBytes(),
                     "Compiler CUDA input byte count mismatch");
-            array.CopyFromBytes(values.data(), array.NBytes());
-        } else if (spec->role == codegen::KernelArgRole::kConstant) {
-            Require(constants.count(spec->constant_key) == 1,
-                    "Compiler CUDA module omitted a bound constant");
-            array = constants.at(spec->constant_key);
-        } else if (spec->role == codegen::KernelArgRole::kOutput) {
-            output_index = arguments.size();
+            host.CopyFromBytes(values.data(), host.NBytes());
+            runtime::NDArray input = runtime::NDArray::Empty(
+                spec.shape(), spec->dtype, spec->device, spec->alignment);
+            uploads.push_back(input.CopyFromAsync(host, stream));
+            host_inputs.push_back(std::move(host));
+            device_inputs.push_back(std::move(input));
         }
-        arguments.push_back(std::move(array));
+        Require(input_index == inputs.size(),
+                "Compiler CUDA signature omitted an input");
+        // RunAsync 在同一 stream 上排在全部 H2D 之后；此处没有显式 Wait。
+        run_result = session.RunAsync(device_inputs, stream);
     }
-    Require(input_index == inputs.size(),
-            "Compiler CUDA signature omitted an input");
-
-    const DeviceStream stream = DeviceStream::Create(device);
-    module.Launch(arguments, stream).Wait();
+    run_result.completion.Wait();
+    Require(run_result.outputs.size() == 1,
+            "RuntimeSession CUDA should allocate one output");
     std::vector<float> result(output_elements);
-    Require(result.size() * sizeof(float) == arguments[output_index].NBytes(),
+    Require(result.size() * sizeof(float) == run_result.outputs[0].NBytes(),
             "Compiler CUDA output byte count mismatch");
-    arguments[output_index].CopyToBytes(result.data(),
-                                        arguments[output_index].NBytes());
+    run_result.outputs[0].CopyToBytes(result.data(),
+                                      run_result.outputs[0].NBytes());
     return result;
 }
 
-/*! \brief 验证 CPU Relay Constant 被 Compiler 放置到 CUDA 并按稳定 key 注入。 */
+/*! \brief 验证 CPU Relay Constant 放置到 CUDA 后由 RuntimeSession 自动注入。 */
 void TestCompilerConstant(const kxc::Device& device) {
     using namespace kxc;
     runtime::NDArray data = runtime::NDArray::Empty(
@@ -329,7 +340,7 @@ void TestCompilerConstant(const kxc::Device& device) {
     }
 }
 
-/*! \brief 验证 Relay add 经七阶段 Compiler、NVRTC 和 Driver launch 得到正确结果。 */
+/*! \brief 验证 Relay add 经 Compiler 和 RuntimeSession 自动输出路径得到正确结果。 */
 void TestCompilerAdd(const kxc::Device& device) {
     using namespace kxc;
     Var x("x", TensorType({8}, "float32"));
@@ -345,7 +356,7 @@ void TestCompilerAdd(const kxc::Device& device) {
     }
 }
 
-/*! \brief 验证 Relay relu 的 Max 表达式也能经过 Compiler CUDA 主路径。 */
+/*! \brief 验证 Relay relu 也能经过 Compiler 与 RuntimeSession CUDA 主路径。 */
 void TestCompilerRelu(const kxc::Device& device) {
     using namespace kxc;
     Var x("x", TensorType({8}, "float32"));
@@ -409,11 +420,11 @@ int main(int argc, char** argv) {
         TestByteOffsetLaunch(device, options);
         std::cout << "[PASS] byte_offset_launch\n";
         TestCompilerAdd(device);
-        std::cout << "[PASS] compiler_add\n";
+        std::cout << "[PASS] runtime_session_add\n";
         TestCompilerConstant(device);
-        std::cout << "[PASS] compiler_constant\n";
+        std::cout << "[PASS] runtime_session_constant\n";
         TestCompilerRelu(device);
-        std::cout << "[PASS] compiler_relu\n";
+        std::cout << "[PASS] runtime_session_relu\n";
     } catch (const std::exception& error) {
         std::cerr << "[FAIL] cuda_runtime: " << error.what() << '\n';
         return 1;

@@ -14,7 +14,8 @@ namespace kxc::runtime {
  * \brief 同时返回自动分配的输出和后端完成句柄。
  *
  * outputs 持有张量元数据与 Storage；completion 额外保活本次 launch 的全部
- * 参数 Storage 和 executable，使调用方可以分别管理结果与完成状态。
+ * 参数 Storage。尚未完成的异步后端还会由 completion 保活 executable，使
+ * 调用方可以分别管理结果与完成状态。
  */
 struct RunAsyncResult final {
     /*! \brief 按 KernelSignature 输出参数顺序排列的自动分配张量。 */

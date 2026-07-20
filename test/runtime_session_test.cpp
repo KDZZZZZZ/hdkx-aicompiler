@@ -2,12 +2,14 @@
  * \brief 验证 RuntimeSession 的输入校验、常量绑定、输出分配和异步完成契约。
  */
 
+#include <atomic>
+#include <cstdint>
 #include <exception>
 #include <functional>
-#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -83,10 +85,33 @@ public:
     bool ready{true};
     /*! \brief 后端实际收到的 launch 次数。 */
     mutable int calls{0};
-    /*! \brief 证明 CompiledKernel owner 已进入异步保活链。 */
+    /*! \brief 记录 launcher 是否收到当前 CompiledKernel owner。 */
     mutable bool saw_compiled_kernel_owner{false};
     /*! \brief 最近一次调用按 KernelSignature 顺序保存的参数。 */
     mutable kxc::Array<kxc::runtime::NDArray> last_arguments;
+};
+
+/*! \brief 不保存参数快照的线程安全 launcher，用于验证并发参数装配。 */
+class ConcurrentLauncher final : public kxc::codegen::KernelLauncher {
+public:
+    /*! \brief 并发测试 executable 始终 ready。 */
+    bool IsReady() const noexcept override { return true; }
+
+    /*! \brief 原子记录调用，将同次 launch 的 input 复制到 output。 */
+    kxc::AsyncOperation Launch(
+        const kxc::Array<kxc::runtime::NDArray>& arguments,
+        const kxc::DeviceStream& stream,
+        const kxc::ObjectRef&) const override {
+        if (arguments.size() != 2) {
+            throw std::invalid_argument(
+                "concurrent launcher expects one input and one output");
+        }
+        calls.fetch_add(1, std::memory_order_relaxed);
+        return arguments[1].CopyFromAsync(arguments[0], stream);
+    }
+
+    /*! \brief 所有线程累计到达 backend 的次数。 */
+    mutable std::atomic<int> calls{0};
 };
 
 /*! \brief 保存 session 测试所需的模块、常量和 fake launcher。 */
@@ -176,7 +201,7 @@ bool TestSynchronousAssembly() {
                    fixture.launcher->last_arguments[2].get() == outputs[0].get(),
                "session changed input/constant/output ABI order or identity");
     TEST_CHECK(fixture.launcher->saw_compiled_kernel_owner,
-               "launch should retain the compiled kernel owner");
+               "launch should pass the compiled kernel owner to the launcher");
     return true;
 }
 
@@ -363,6 +388,77 @@ bool TestZeroInputAndMultipleOutputs() {
     return true;
 }
 
+/*! \brief 在线程安全 launcher 上验证并发参数装配没有共享调用状态。 */
+bool TestConcurrentArgumentAssembly() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    KernelSignature signature(
+        "concurrent_session",
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {4},
+                       Device::CPU()),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {4},
+                       Device::CPU(), 16, true)});
+    auto launcher = std::make_shared<ConcurrentLauncher>();
+    KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
+    CompiledKernel executable(signature, metadata, launcher);
+    api::CompiledModule module(BuildTarget(Device::CPU()), tir::PrimFunc(),
+                               signature, metadata, {}, executable);
+    runtime::RuntimeSession session(module);
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+    constexpr int kThreads = 8;
+    std::vector<runtime::NDArray> concurrent_outputs(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&, i] {
+            try {
+                const float expected = static_cast<float>(i + 1);
+                std::vector<float> input_values(4, expected);
+                runtime::NDArray input = runtime::NDArray::Empty(
+                    {4}, Float32(), Device::CPU());
+                input.CopyFromBytes(input_values.data(),
+                                    input_values.size() * sizeof(float));
+                Array<runtime::NDArray> outputs = session.Run({input});
+                if (outputs.size() != 1 ||
+                    outputs[0].NBytes() != 4 * sizeof(float)) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    std::vector<float> output_values(4);
+                    outputs[0].CopyToBytes(
+                        output_values.data(),
+                        output_values.size() * sizeof(float));
+                    for (float value : output_values) {
+                        if (value != expected) {
+                            failures.fetch_add(1, std::memory_order_relaxed);
+                            break;
+                        }
+                    }
+                    concurrent_outputs[i] = outputs[0];
+                }
+            } catch (...) {
+                failures.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    bool outputs_are_distinct = true;
+    for (int i = 0; i < kThreads; ++i) {
+        if (!concurrent_outputs[i].defined()) outputs_are_distinct = false;
+        for (int j = 0; j < i; ++j) {
+            if (concurrent_outputs[i].defined() &&
+                concurrent_outputs[j].defined() &&
+                concurrent_outputs[i].storage().get() ==
+                    concurrent_outputs[j].storage().get()) {
+                outputs_are_distinct = false;
+            }
+        }
+    }
+    TEST_CHECK(failures.load(std::memory_order_relaxed) == 0 &&
+                   launcher->calls.load(std::memory_order_relaxed) == kThreads &&
+                   outputs_are_distinct,
+               "concurrent RuntimeSession assembly should keep outputs independent");
+    return true;
+}
+
 }  // namespace
 
 /*! \brief 顺序执行 RuntimeSession 契约用例，并将任一失败转换为非零退出码。 */
@@ -377,6 +473,7 @@ int main() {
          TestInputDeviceValidationBeforeAllocation},
         {"dynamic_input", TestDynamicInput},
         {"zero_input_and_multiple_outputs", TestZeroInputAndMultipleOutputs},
+        {"concurrent_argument_assembly", TestConcurrentArgumentAssembly},
     };
     int failures = 0;
     for (const auto& test : tests) {
