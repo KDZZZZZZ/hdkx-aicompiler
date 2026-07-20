@@ -207,7 +207,7 @@ bool TestCompilerTargetDispatch() {
     api::CompileConfig cuda = api::CompileConfig::Create(
         MakeContractTarget("cuda", kCUDA, 0, true), 0);
     TEST_CHECK(ThrowsWithMessage([&] { api::Compiler::Compile(add, cuda); },
-                                 "CUDA codegen is not implemented"),
+                                 "KXC_ENABLE_CUDA=ON"),
                "CUDA target should report the unavailable codegen stage");
     return true;
 }

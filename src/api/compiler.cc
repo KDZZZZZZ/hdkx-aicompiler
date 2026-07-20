@@ -18,6 +18,7 @@
 #include "relay/transforms/lower.h"
 #include "relay/transforms/pipeline.h"
 #include "tir/pass/print_ir.h"
+#include "tir/transforms/bind_cuda_threads.h"
 #include "tir/transforms/pipeline.h"
 
 #if KXC_USE_LLVM
@@ -25,6 +26,11 @@
 
 #include "codegen/codegen_llvm.h"
 #include "codegen/llvm_jit.h"
+#endif
+
+#if KXC_USE_CUDA
+#include "codegen/codegen_cuda.h"
+#include "codegen/cuda_module.h"
 #endif
 
 namespace kxc::api {
@@ -167,6 +173,12 @@ CompileResult OptimizeTIR(const CompileResult& input,
         passes = {String("fold_constant"), String("simplify_expr")};
     }
     tir::PrimFunc optimized = RunTIRPassPipeline(input.lowered_tir(), passes);
+#if KXC_USE_CUDA
+    if (input.target()->kind == "cuda" && input.target()->device_type == kCUDA) {
+        // CUDA thread binding 是后端 ABI 的一部分，必须在 Signature 冻结前完成。
+        optimized = tir::BindCudaThreads(optimized, input.target()).prim_func();
+    }
+#endif
     return input.AfterTIROptimization(std::move(optimized));
 }
 
@@ -201,8 +213,29 @@ CompileResult BuildBackend(const CompileResult& input,
 #endif
     }
     if (target->kind == "cuda" && target->device_type == kCUDA) {
+#if KXC_USE_CUDA
+        codegen::KernelLaunchMetadata metadata =
+            tir::GetCudaLaunchMetadata(input.optimized_tir());
+        codegen::CodeGenCUDA emitter;
+        const std::string source = emitter.Generate(
+            input.optimized_tir(), std::string(input.signature()->symbol));
+        if (target->attrs.compute_version_major <= 0 ||
+            target->attrs.compute_version_minor < 0) {
+            throw std::runtime_error(
+                "CUDA Target has no usable compute capability");
+        }
+        codegen::CUDACompileOptions options;
+        options.architecture =
+            "compute_" + std::to_string(target->attrs.compute_version_major) +
+            std::to_string(target->attrs.compute_version_minor);
+        options.source_name = std::string(input.signature()->symbol) + ".cu";
+        codegen::CompiledKernel kernel = codegen::CUDAModule::Compile(
+            source, input.signature(), metadata, options);
+        return input.AfterBackend(metadata, kernel);
+#else
         throw std::runtime_error(
-            "Compiler target 'cuda' is recognized but CUDA codegen is not implemented");
+            "Compiler target 'cuda' requires a build with KXC_ENABLE_CUDA=ON");
+#endif
     }
     throw std::runtime_error("Compiler Target has no matching backend");
 }

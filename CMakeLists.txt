@@ -40,7 +40,7 @@ endif()
 
 if(KXC_ENABLE_CUDA AND CUDAToolkit_FOUND)
   set(KXC_USE_CUDA 1)
-  set(KXC_CUDA_LIBS CUDA::cudart)
+  set(KXC_CUDA_LIBS CUDA::cudart CUDA::nvrtc CUDA::cuda_driver)
   message(STATUS "CUDA support: enabled")
 elseif(KXC_ENABLE_CUDA AND NOT CUDAToolkit_FOUND)
   set(KXC_USE_CUDA 0)
@@ -212,6 +212,12 @@ if(KXC_USE_LLVM)
     src/codegen/llvm_jit.cc
   )
 endif()
+if(KXC_USE_CUDA)
+  list(APPEND KXC_RUNTIME_SOURCES
+    src/codegen/codegen_cuda.cc
+    src/codegen/cuda_module.cc
+  )
+endif()
 
 add_library(kxc_runtime_obj OBJECT ${KXC_RUNTIME_SOURCES})
 target_include_directories(kxc_runtime_obj PUBLIC "${KXC_INCLUDE_DIR}")
@@ -342,6 +348,7 @@ if(KXC_BUILD_PASS_TESTS)
   endif()
   if(KXC_USE_CUDA)
     kxc_add_runtime_exe(cupti_smoke_test test/cupti_smoke_test.cpp)
+    kxc_add_runtime_exe(codegen_cuda_test test/codegen_cuda_test.cpp)
     if(TARGET CUDA::cuda_driver)
       target_link_libraries(cupti_smoke_test PRIVATE CUDA::cuda_driver)
     endif()
@@ -433,6 +440,13 @@ if(KXC_BUILD_PASS_TESTS)
     )
   endif()
   if(KXC_USE_CUDA)
+    add_custom_target(run_codegen_cuda_test
+      COMMAND "$<TARGET_FILE:codegen_cuda_test>"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+      DEPENDS codegen_cuda_test
+      USES_TERMINAL
+      COMMENT "Run codegen_cuda_test"
+    )
     add_custom_target(run_cupti_smoke_test
       COMMAND "$<TARGET_FILE:cupti_smoke_test>"
       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
