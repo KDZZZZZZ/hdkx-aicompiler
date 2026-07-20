@@ -73,7 +73,6 @@ std::string CodeGenCUDA::Generate(const tir::PrimFunc& function,
     output_ << "#include <stdint.h>\n";
     output_ << "#include <math.h>\n";
     output_ << "#include <cuda_fp16.h>\n\n";
-    output_ << "#include <cuda_fp16.h>\n\n";
     output_ << "extern \"C\" __global__ void " << symbol << "(";
     for (size_t i = 0; i < function->params.size(); ++i) {
         if (i != 0) output_ << ", ";

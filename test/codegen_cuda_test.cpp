@@ -226,6 +226,44 @@ void TestAsyncLaunchLifetime(
     }
 }
 
+/*! \brief 非零 byte_offset 必须传递逻辑首元素地址，且不能覆盖相邻哨兵。 */
+void TestByteOffsetLaunch(
+    const kxc::Device& device,
+    const kxc::codegen::CUDACompileOptions& options) {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    using runtime::NDArray;
+    constexpr int64_t kExtent = 8;
+    const std::string symbol = "offset_add";
+    CompiledKernel kernel = CUDAModule::Compile(
+        CodeGenCUDA().Generate(MakeBoundAdd(symbol, kExtent), symbol),
+        AddSignature(symbol, device, kExtent),
+        KernelLaunchMetadata(device, CodeGenBackend::kCUDA, {1, 1, 1},
+                             {static_cast<uint32_t>(kExtent), 1, 1}),
+        options);
+    const DLDataType dtype = runtime::DataTypeFromString("float32");
+    NDArray a_backing = NDArray::Empty({kExtent + 2}, dtype, device);
+    NDArray b_backing = NDArray::Empty({kExtent + 2}, dtype, device);
+    NDArray out_backing = NDArray::Zeros({kExtent + 2}, dtype, device);
+    NDArray a = a_backing.CreateView({kExtent}, {1}, sizeof(float));
+    NDArray b = b_backing.CreateView({kExtent}, {1}, sizeof(float));
+    NDArray output = out_backing.CreateView({kExtent}, {1}, sizeof(float));
+    const std::vector<float> a_values{1, 2, 3, 4, 5, 6, 7, 8};
+    const std::vector<float> b_values{8, 7, 6, 5, 4, 3, 2, 1};
+    a.CopyFromBytes(a_values.data(), a.NBytes());
+    b.CopyFromBytes(b_values.data(), b.NBytes());
+    kernel.Launch({a, b, output}, DeviceStream::Create(device)).Wait();
+
+    std::vector<float> actual(kExtent + 2);
+    out_backing.CopyToBytes(actual.data(), out_backing.NBytes());
+    Require(actual.front() == 0.0f && actual.back() == 0.0f,
+            "CUDA offset launch overwrote an adjacent sentinel");
+    for (int64_t i = 1; i <= kExtent; ++i) {
+        Require(std::fabs(actual[static_cast<size_t>(i)] - 9.0f) < 1e-5f,
+                "CUDA offset launch used the Storage base address");
+    }
+}
+
 /*! \brief 按 Compiler 冻结的签名分配 CUDA 参数并执行一次完整异步调用。 */
 std::vector<float> CompileAndRunRelay(
     const kxc::Function& function, const kxc::Device& device,
@@ -234,10 +272,8 @@ std::vector<float> CompileAndRunRelay(
     api::CompiledModule module = api::Compiler::Compile(
         function, api::CompileConfig::Create(BuildTarget(device), 2));
     const Array<codegen::KernelArgSpec> specs = module.signature().arguments();
-    Require(specs.size() == inputs.size() + 1,
-            "Compiler CUDA signature has unexpected argument count");
-
     Array<runtime::NDArray> arguments;
+    const Map<String, runtime::NDArray> constants = module.constants();
     size_t input_index = 0;
     size_t output_index = 0;
     for (const auto& spec : specs) {
@@ -250,11 +286,12 @@ std::vector<float> CompileAndRunRelay(
             Require(values.size() * sizeof(float) == array.NBytes(),
                     "Compiler CUDA input byte count mismatch");
             array.CopyFromBytes(values.data(), array.NBytes());
+        } else if (spec->role == codegen::KernelArgRole::kConstant) {
+            Require(constants.count(spec->constant_key) == 1,
+                    "Compiler CUDA module omitted a bound constant");
+            array = constants.at(spec->constant_key);
         } else if (spec->role == codegen::KernelArgRole::kOutput) {
             output_index = arguments.size();
-        } else {
-            throw std::runtime_error(
-                "Compiler CUDA test did not expect a constant argument");
         }
         arguments.push_back(std::move(array));
     }
@@ -269,6 +306,25 @@ std::vector<float> CompileAndRunRelay(
     arguments[output_index].CopyToBytes(result.data(),
                                         arguments[output_index].NBytes());
     return result;
+}
+
+/*! \brief 验证 CPU Relay Constant 被 Compiler 放置到 CUDA 并按稳定 key 注入。 */
+void TestCompilerConstant(const kxc::Device& device) {
+    using namespace kxc;
+    runtime::NDArray data = runtime::NDArray::Empty(
+        {8}, runtime::DataTypeFromString("float32"), Device::CPU());
+    const std::vector<float> constant_values{10, 20, 30, 40, 50, 60, 70, 80};
+    data.CopyFromBytes(constant_values.data(), data.NBytes());
+    Var x("x", TensorType({8}, "float32"));
+    Function function(
+        {x}, Call(relay::Op::Get("add"), {x, Constant(data)}));
+    const std::vector<float> actual = CompileAndRunRelay(
+        function, device, {{1, 2, 3, 4, 5, 6, 7, 8}}, 8);
+    const std::vector<float> expected{11, 22, 33, 44, 55, 66, 77, 88};
+    for (size_t i = 0; i < actual.size(); ++i) {
+        Require(std::fabs(actual[i] - expected[i]) < 1e-5f,
+                "Compiler CUDA constant mismatch at " + std::to_string(i));
+    }
 }
 
 /*! \brief 验证 Relay add 经七阶段 Compiler、NVRTC 和 Driver launch 得到正确结果。 */
@@ -333,8 +389,12 @@ int main() {
         std::cout << "[PASS] missing_symbol\n";
         TestAsyncLaunchLifetime(device, options);
         std::cout << "[PASS] async_launch_lifetime\n";
+        TestByteOffsetLaunch(device, options);
+        std::cout << "[PASS] byte_offset_launch\n";
         TestCompilerAdd(device);
         std::cout << "[PASS] compiler_add\n";
+        TestCompilerConstant(device);
+        std::cout << "[PASS] compiler_constant\n";
         TestCompilerRelu(device);
         std::cout << "[PASS] compiler_relu\n";
     } catch (const std::exception& error) {

@@ -158,8 +158,22 @@ CompileResult OptimizeRelay(const CompileResult& input,
 CompileResult Lower(const CompileResult& input) {
     relay::LoweredFunction lowered = relay::LowerToTIR(input.optimized_relay());
     Map<String, runtime::NDArray> constants;
+    const Device target_device(input.target()->device_type,
+                               input.target()->device_id);
     for (const auto& binding : lowered.constants()) {
-        constants.Set(binding->key, binding->value);
+        runtime::NDArray value = binding->value;
+#if KXC_USE_CUDA
+        // 常量是最终内核参数，必须在签名冻结前与 Target 位于同一设备。
+        // 模块持有迁移后的唯一 payload，Launch 再按 constant_key 注入该对象。
+        if (value.device() != target_device) value = value.CopyTo(target_device);
+#else
+        // CUDA-off 构建保留 lowering payload，后端阶段负责返回精确 feature 错误。
+        if (target_device.device_type() != kCUDA &&
+            value.device() != target_device) {
+            value = value.CopyTo(target_device);
+        }
+#endif
+        constants.Set(binding->key, std::move(value));
     }
     return input.AfterLowering(lowered->prim_func, constants);
 }

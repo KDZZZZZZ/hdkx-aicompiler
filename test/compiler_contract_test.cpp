@@ -204,11 +204,13 @@ bool TestCompilerTargetDispatch() {
                "LLVM-disabled CPU target should report the required build feature");
 #endif
 
+#if !KXC_USE_CUDA
     api::CompileConfig cuda = api::CompileConfig::Create(
         MakeContractTarget("cuda", kCUDA, 0, true), 0);
     TEST_CHECK(ThrowsWithMessage([&] { api::Compiler::Compile(add, cuda); },
                                  "KXC_ENABLE_CUDA=ON"),
-               "CUDA target should report the unavailable codegen stage");
+               "CUDA-disabled target should report the required build feature");
+#endif
     return true;
 }
 
