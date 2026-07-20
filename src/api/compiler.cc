@@ -139,8 +139,8 @@ CompiledModule::CompiledModule(CompileConfig config, tir::PrimFunc prim_func,
     : config_(config), prim_func_(prim_func), kernel_(kernel),
       constants_(std::move(constants)),
       profile_context_(std::move(profile_context)) {
-    codegen::CodeGenC codegen_c;
-    c_source_ = codegen_c.Generate(prim_func, "main");
+    codegen::CSourceEmitter emitter;
+    c_source_ = emitter.Generate(prim_func, "main");
 }
 
 // 返回独立 Array，防止调用方通过共享容器别名改写模块内常量顺序。
@@ -256,8 +256,8 @@ std::string CompiledModule::GetStatus() const {
 
 void CompiledModule::SaveCSource(const std::string& path) const {
     if (c_source_.empty() && prim_func_.defined()) {
-        codegen::CodeGenC codegen_c;
-        const_cast<std::string&>(c_source_) = codegen_c.Generate(prim_func_, "main");
+        codegen::CSourceEmitter emitter;
+        const_cast<std::string&>(c_source_) = emitter.Generate(prim_func_, "main");
     }
     std::ofstream ofs(path);
     if (!ofs) {

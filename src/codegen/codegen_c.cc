@@ -1,5 +1,5 @@
 /*! \file src/codegen/codegen_c.cc
- * \brief 实现 C/LLVM codegen、LLVM JIT 和 compiled kernel 调用封装。
+ * \brief 实现仅用于诊断和导出的 TIR 到 C 源码发射器。
  */
 
 #include "codegen/codegen_c.h"
@@ -11,9 +11,8 @@
 namespace kxc {
 namespace codegen {
 
-// ==================== 工具方法 ====================
-
-std::string CodeGenC::DTypeToCType(tir::DataType dtype) {
+// 将 TIR 标量类型转换为 C 类型；不支持的类型返回 void 以便诊断源码暴露缺口。
+std::string CSourceEmitter::DTypeToCType(tir::DataType dtype) {
     if (dtype.code == 2) {  // Float
         if (dtype.bits == 32) return "float";
         if (dtype.bits == 64) return "double";
@@ -35,7 +34,8 @@ std::string CodeGenC::DTypeToCType(tir::DataType dtype) {
     return "void";
 }
 
-std::string CodeGenC::GetVarName(const tir::Var& var) {
+// 优先保留 IR 名称；匿名变量使用单次 Generate 内稳定递增的名称。
+std::string CSourceEmitter::GetVarName(const tir::Var& var) {
     auto it = var_name_map_.find(var.get());
     if (it != var_name_map_.end()) return it->second;
     std::string name = var->name_hint.empty()
@@ -45,28 +45,28 @@ std::string CodeGenC::GetVarName(const tir::Var& var) {
     return name;
 }
 
-void CodeGenC::PrintIndent() {
+// 每一缩进层使用两个空格，使生成源码保持稳定且便于测试比较。
+void CSourceEmitter::PrintIndent() {
     for (int i = 0; i < indent_; ++i) stream_ << ' ';
 }
 
-// ==================== 主入口 ====================
-
-std::string CodeGenC::Generate(const tir::PrimFunc& func, const std::string& name) {
+// 重置全部可变状态后发射函数，保证同一 emitter 可安全地顺序复用。
+std::string CSourceEmitter::Generate(const tir::PrimFunc& func, const std::string& name) {
     stream_.str("");
     var_name_map_.clear();
     var_counter_ = 0;
     indent_ = 0;
 
-    // Header
+    // 诊断源码显式包含当前发射内容依赖的标准类型、分配和数学声明。
     stream_ << "#include <stdint.h>\n";
     stream_ << "#include <stdlib.h>\n";
     stream_ << "#include <math.h>\n\n";
 
-    // Function signature: int32_t name(void** packed_args)
+    // C 源码仍展示现有内部 packed ABI，但它不是公共可执行 backend 契约。
     stream_ << "int32_t " << name << "(void** packed_args) {\n";
     indent_ += 2;
 
-    // Unpack parameters
+    // 参数顺序严格沿用 PrimFunc.params，并从 buffer_map 恢复元素 dtype。
     for (size_t i = 0; i < func->params.size(); ++i) {
         const auto& param = func->params[i];
         std::string vname = GetVarName(param);
@@ -83,10 +83,10 @@ std::string CodeGenC::Generate(const tir::PrimFunc& func, const std::string& nam
     }
     stream_ << "\n";
 
-    // Body
+    // 函数体由语句发射器递归展开。
     GenStmt(func->body);
 
-    // Return
+    // 诊断函数使用零返回值表示源码中展示的正常完成路径。
     PrintIndent();
     stream_ << "return 0;\n";
     indent_ -= 2;
@@ -95,9 +95,8 @@ std::string CodeGenC::Generate(const tir::PrimFunc& func, const std::string& nam
     return stream_.str();
 }
 
-// ==================== 表达式生成 ====================
-
-std::string CodeGenC::GenExpr(const tir::PrimExpr& expr) {
+// 按节点类型递归生成表达式；未知节点保留显式占位，避免伪装为可执行支持。
+std::string CSourceEmitter::GenExpr(const tir::PrimExpr& expr) {
     if (!expr.defined()) return "0";
 
     if (auto* n = expr.As<tir::IntImmNode>()) {
@@ -179,7 +178,8 @@ std::string CodeGenC::GenExpr(const tir::PrimExpr& expr) {
 
 // ==================== 语句生成 ====================
 
-void CodeGenC::GenStmt(const tir::Stmt& stmt) {
+// 按语句类型递归发射控制流、存储和局部分配。
+void CSourceEmitter::GenStmt(const tir::Stmt& stmt) {
     if (!stmt.defined()) return;
 
     if (auto* n = stmt.As<tir::ForNode>()) {

@@ -331,10 +331,6 @@ bool TestLaunchMetadata() {
                                         Dim3{2, 1, 1}, Dim3{1, 1, 1});
                }),
                "LLVM metadata should reject CUDA dimensions");
-    TEST_CHECK(Throws([] {
-                   KernelLaunchMetadata(Device::CPU(), CodeGenBackend::kC);
-               }),
-               "non-executable C backend metadata should fail");
     return true;
 }
 

@@ -237,8 +237,8 @@ void TestCCodegen() {
     PrimFunc func(params, loop, buffer_map, attrs);
 
     // Generate C code
-    kxc::codegen::CodeGenC codegen_c;
-    std::string c_code = codegen_c.Generate(func, "elemwise_add_c");
+    kxc::codegen::CSourceEmitter emitter;
+    std::string c_code = emitter.Generate(func, "elemwise_add_c");
 
     std::cout << "Generated C code:\n" << c_code << std::endl;
 

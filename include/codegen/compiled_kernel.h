@@ -9,7 +9,7 @@
 
 #include "base/container.h"
 #include "base/object.h"
-#include "codegen/codegen.h"
+#include "codegen/backend.h"
 #include "tir/stmt.h"
 
 namespace kxc {

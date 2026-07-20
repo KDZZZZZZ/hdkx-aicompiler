@@ -10,10 +10,8 @@ namespace kxc::codegen {
 enum class CodeGenBackend : int {
     /*! \brief 通过 LLVM IR 和 ORC JIT 生成本机 CPU 机器码。 */
     kLLVM = 0,
-    /*! \brief 仅生成诊断 C 源码，不表示存在可执行 C runtime backend。 */
-    kC = 1,
     /*! \brief 通过 CUDA C、NVRTC 和 Driver API 生成并加载 GPU 内核。 */
-    kCUDA = 2,
+    kCUDA = 1,
 };
 
 }  // namespace kxc::codegen

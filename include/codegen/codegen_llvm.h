@@ -15,7 +15,7 @@
 #include <llvm/IR/Module.h>
 
 #include "base/pass.h"
-#include "codegen/codegen.h"
+#include "codegen/backend.h"
 #include "tir/stmt.h"
 
 namespace kxc {

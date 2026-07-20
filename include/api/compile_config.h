@@ -11,7 +11,7 @@
 #include "base/container.h"
 #include "base/object.h"
 #include "base/target.h"
-#include "codegen/codegen.h"
+#include "codegen/backend.h"
 
 namespace kxc {
 namespace api {
