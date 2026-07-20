@@ -41,6 +41,11 @@ public:
     static PassContext FromRelay(const Function& func);
     /*! \brief 从 TIR PrimFunc 推导 PassContext。 */
     static PassContext FromTIR(const tir::PrimFunc& func);
+    /*! \brief 从 Compiler 的唯一 Target 构造单设备 PassContext。 */
+    static PassContext FromTarget(const Target& target);
+    /*! \brief 将 Relay 推导上下文与显式 Target 合并，身份冲突时拒绝。 */
+    static PassContext MergeTarget(const PassContext& base_ctx,
+                                   const Target& target);
     /*! \brief 在已有上下文上附加 Disco placement。 */
     static PassContext WithDiscoPlacement(const PassContext& base_ctx,
                                           const DiscoPlacement& disco_placement);

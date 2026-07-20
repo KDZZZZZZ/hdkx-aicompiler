@@ -6,6 +6,7 @@
 
 #include "api/compile_config.h"
 #include "api/compiled_module.h"
+#include "base/container.h"
 #include "relay/relay.h"
 
 namespace kxc {
@@ -26,6 +27,11 @@ public:
      * \return 可运行的编译模块。
      */
     static CompiledModule Compile(Function func, CompileConfig config);
+
+    /*! \brief 返回 opt_level 对应的确定性 Relay pass 顺序。 */
+    static Array<String> RelayPassPolicy(int opt_level);
+    /*! \brief 返回 opt_level 对应的确定性 TIR pass 顺序。 */
+    static Array<String> TIRPassPolicy(int opt_level);
 };
 
 }  // namespace api

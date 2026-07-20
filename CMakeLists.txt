@@ -201,6 +201,7 @@ list(APPEND KXC_RUNTIME_SOURCES
   src/codegen/codegen_c.cc
   src/codegen/kernel_signature.cc
   src/api/compile_config.cc
+  src/api/compile_result.cc
   src/api/compiled_module.cc
   src/api/compiler.cc
 )

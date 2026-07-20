@@ -11,6 +11,7 @@
 
 #include "api/compiler.h"
 #include "base/ndarray.h"
+#include "base/pass.h"
 #include "base/registry.h"
 #include "codegen/kernel_signature.h"
 #include "relay/op.h"
@@ -208,6 +209,57 @@ bool TestCompilerTargetDispatch() {
     TEST_CHECK(ThrowsWithMessage([&] { api::Compiler::Compile(add, cuda); },
                                  "CUDA codegen is not implemented"),
                "CUDA target should report the unavailable codegen stage");
+    return true;
+}
+
+// opt_level 必须映射到稳定且逐级增强的 Relay/TIR pass 顺序。
+bool TestCompilerPassPolicies() {
+    using namespace kxc;
+    const Array<String> relay0 = api::Compiler::RelayPassPolicy(0);
+    const Array<String> relay1 = api::Compiler::RelayPassPolicy(1);
+    const Array<String> relay2 = api::Compiler::RelayPassPolicy(2);
+    const Array<String> relay3 = api::Compiler::RelayPassPolicy(3);
+    TEST_CHECK(relay0.empty() && relay1.size() == 3 && relay2.size() == 6 &&
+                   relay3.size() == 1 && std::string(relay3[0]) == "optimize_default",
+               "Relay opt_level policy changed unexpectedly");
+
+    const Array<String> tir0 = api::Compiler::TIRPassPolicy(0);
+    const Array<String> tir1 = api::Compiler::TIRPassPolicy(1);
+    const Array<String> tir2 = api::Compiler::TIRPassPolicy(2);
+    const Array<String> tir3 = api::Compiler::TIRPassPolicy(3);
+    TEST_CHECK(tir0.empty() && tir1.size() == 2 && tir2.size() == 4 &&
+                   tir3.size() == 1 && std::string(tir3[0]) == "optimize_default",
+               "TIR opt_level policy changed unexpectedly");
+    TEST_CHECK(Throws([] { api::Compiler::RelayPassPolicy(-1); }) &&
+                   Throws([] { api::Compiler::TIRPassPolicy(4); }),
+               "pass policy should reject an invalid opt_level");
+    return true;
+}
+
+// CompileConfig Target 填充缺失 placement，但不得覆盖已有的不同设备身份。
+bool TestPassContextTargetMerge() {
+    using namespace kxc;
+    const Target cpu = BuildTarget(Device::CPU());
+    const PassContext from_target = PassContext::FromTarget(cpu);
+    TEST_CHECK(from_target.defined() && from_target.default_target()->kind == "llvm" &&
+                   from_target.default_device() == Device::CPU(),
+               "PassContext::FromTarget did not preserve CPU identity");
+
+    Var input("input", TensorType({1}, "float32"));
+    Function function({input}, input);
+    const PassContext merged =
+        PassContext::MergeTarget(PassContext::FromRelay(function), cpu);
+    TEST_CHECK(merged.default_target()->kind == "llvm" &&
+                   merged.default_device() == Device::CPU(),
+               "target was not installed into an unplaced Relay function");
+
+    const Target cuda = MakeContractTarget("cuda", kCUDA, 0, true);
+    input.set_virtual_device(VirtualDevice(cuda));
+    Function conflicting({input}, input);
+    TEST_CHECK(Throws([&] {
+                   PassContext::MergeTarget(PassContext::FromRelay(conflicting), cpu);
+               }),
+               "conflicting Relay placement should not be overwritten");
     return true;
 }
 
@@ -489,6 +541,8 @@ int main() {
         {"invalid_function_rejected", TestInvalidFunctionRejected},
         {"compile_config_validation", TestCompileConfigValidation},
         {"compiler_target_dispatch", TestCompilerTargetDispatch},
+        {"compiler_pass_policies", TestCompilerPassPolicies},
+        {"pass_context_target_merge", TestPassContextTargetMerge},
         {"input_constant_output_order", TestInputConstantOutputOrder},
         {"constant_binding_identity", TestConstantBindingIdentity},
         {"lowered_object_validation", TestLoweredObjectValidation},

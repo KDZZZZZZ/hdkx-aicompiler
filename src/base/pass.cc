@@ -264,6 +264,51 @@ PassContext PassContext::FromTIR(const tir::PrimFunc& func) {
     return ctx;
 }
 
+// 从 Compiler 的唯一 Target 建立完整单设备上下文，供 Relay/TIR pass 共享。
+PassContext PassContext::FromTarget(const Target& target) {
+    if (!IsTargetObjectRef(target) || target->device_type == kUnknown ||
+        target->device_id < 0 || target->kind.empty()) {
+        throw std::invalid_argument("PassContext requires a complete Target");
+    }
+    const Device device(target->device_type, target->device_id);
+    return BuildFromVirtualDevices(
+        {VirtualDevice::ForDeviceAndTarget(device, target)});
+}
+
+// 合并时保留 Relay 已建立的多设备/Disco 信息，但不允许覆盖其物理身份。
+PassContext PassContext::MergeTarget(const PassContext& base_ctx,
+                                     const Target& target) {
+    PassContext target_ctx = FromTarget(target);
+    if (!base_ctx.defined()) return target_ctx;
+
+    const Device expected(target->device_type, target->device_id);
+    if (base_ctx.default_device_.defined() &&
+        base_ctx.default_device_ != expected) {
+        throw std::invalid_argument(
+            "Relay placement device conflicts with CompileConfig target");
+    }
+    if (base_ctx.default_target_.defined()) {
+        const Target& placed = base_ctx.default_target_;
+        if (!IsTargetObjectRef(placed) || placed->kind != target->kind ||
+            placed->device_type != target->device_type ||
+            placed->device_id != target->device_id) {
+            throw std::invalid_argument(
+                "Relay placement target conflicts with CompileConfig target");
+        }
+    }
+
+    PassContext merged = base_ctx;
+    merged.defined_ = true;
+    merged.default_target_ = target;
+    merged.default_device_ = expected;
+    if (!merged.primary_virtual_device_.defined()) {
+        merged.primary_virtual_device_ =
+            VirtualDevice::ForDeviceAndTarget(expected, target);
+        merged.virtual_devices_ = {merged.primary_virtual_device_};
+    }
+    return merged;
+}
+
 // 基于现有上下文替换 DiscoPlacement，同时保留其他推导结果。
 PassContext PassContext::WithDiscoPlacement(const PassContext& base_ctx,
                                             const DiscoPlacement& disco_placement) {
