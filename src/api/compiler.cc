@@ -4,11 +4,10 @@
 
 #include "api/compiler.h"
 
-#include <fstream>
 #include <stdexcept>
 
 #include "base/profiling.h"
-#include "codegen/codegen_c.h"
+#include "codegen/kernel_signature.h"
 #include "relay/transforms/infer_type.h"
 #include "relay/transforms/lower.h"
 #include "relay/transforms/pipeline.h"
@@ -81,7 +80,20 @@ CompiledModule Compiler::Compile(Function func, CompileConfig config) {
     }
     prim_func = RunTIRPassPipeline(prim_func, passes);
 
-    codegen::CompiledKernel kernel{ObjectRef()};
+    // 常量表以 key 索引并强持有 payload；签名与 Launch 使用同一批对象。
+    Map<String, runtime::NDArray> constants;
+    for (const auto& binding : lowered.constants()) {
+        constants.Set(binding->key, binding->value);
+    }
+    const String symbol(kKernelEntrySymbol);
+    codegen::KernelSignature signature = codegen::BuildKernelSignature(
+        prim_func, constants, config->target, symbol);
+    const codegen::CodeGenBackend backend =
+        config->target->kind == "llvm" ? codegen::CodeGenBackend::kLLVM
+                                       : codegen::CodeGenBackend::kCUDA;
+    codegen::KernelLaunchMetadata metadata(
+        Device(config->target->device_type, config->target->device_id),
+        backend);
 
 #if KXC_USE_LLVM
     // LLVM 是 llvm/cpu Target 的唯一执行后端，不能由独立配置字段覆盖。
@@ -94,11 +106,15 @@ CompiledModule Compiler::Compile(Function func, CompileConfig config) {
         auto module = codegen.TakeModule();
 
         codegen::LLVMJITEngine jit;
-        kernel = jit.Compile(std::move(module), std::move(llvm_ctx), kKernelEntrySymbol,
-                             config->opt_level);
+        codegen::CompiledKernel kernel = jit.Compile(
+            std::move(module), std::move(llvm_ctx), signature, metadata,
+            config->opt_level);
         codegen_span.AddField("kernel_symbol", kKernelEntrySymbol);
         codegen_span.SetMessage("LLVM JIT compilation completed");
         codegen_span.AddMetric("opt_level", static_cast<double>(config->opt_level));
+        if (profile_context) profile_context->Flush();
+        return CompiledModule(config->target, prim_func, signature, metadata,
+                              constants, kernel, profile_context);
     } else
 #else
     if (config->target->kind == "llvm" && config->target->device_type == kCPU) {
@@ -116,65 +132,6 @@ CompiledModule Compiler::Compile(Function func, CompileConfig config) {
             "Compiler target 'cuda' is recognized but CUDA codegen is not implemented");
     }
 
-    if (profile_context) {
-        profile_context->Flush();
-    }
-    return CompiledModule(config, prim_func, kernel, lowered.constants(), profile_context);
-}
-
-CompiledModule::CompiledModule(CompileConfig config, tir::PrimFunc prim_func,
-                               codegen::CompiledKernel kernel,
-                               Array<relay::ConstantBinding> constants,
-                               std::shared_ptr<profiling::ProfileContext> profile_context)
-    : config_(config), prim_func_(prim_func), kernel_(kernel),
-      constants_(std::move(constants)),
-      profile_context_(std::move(profile_context)) {
-    codegen::CSourceEmitter emitter;
-    c_source_ = emitter.Generate(prim_func, "main");
-}
-
-// 返回独立 Array，防止调用方通过共享容器别名改写模块内常量顺序。
-Array<relay::ConstantBinding> CompiledModule::GetConstants() const {
-    Array<relay::ConstantBinding> result;
-    for (const auto& binding : constants_) result.push_back(binding);
-    return result;
-}
-
-void CompiledModule::Run(const std::vector<void*>& packed_args) {
-    (void)packed_args;
-    if (!kernel_.IsReady()) {
-        throw std::runtime_error("CompiledModule: kernel not ready");
-    }
-    // 新 CompiledKernel 只接受已校验的 NDArray；Task 6 会删除本裸指针入口并接通 Launch。
-    throw std::runtime_error(
-        "CompiledModule::Run uses the removed packed-pointer ABI; use the typed launch API");
-}
-
-bool CompiledModule::IsReady() const {
-    return kernel_.IsReady();
-}
-
-std::string CompiledModule::GetStatus() const {
-    if (!kernel_.IsReady()) {
-        return "not_ready";
-    }
-    return "compiled";
-}
-
-void CompiledModule::SaveCSource(const std::string& path) const {
-    if (c_source_.empty() && prim_func_.defined()) {
-        codegen::CSourceEmitter emitter;
-        const_cast<std::string&>(c_source_) = emitter.Generate(prim_func_, "main");
-    }
-    std::ofstream ofs(path);
-    if (!ofs) {
-        throw std::runtime_error("Failed to open file: " + path);
-    }
-    ofs << c_source_;
-}
-
-std::string CompiledModule::GetProfileBundlePath() const {
-    return profile_context_ ? profile_context_->bundle_dir() : "";
 }
 
 }  // namespace api
