@@ -4,6 +4,8 @@
 
 #include "tir/stmt.h"
 
+#include <stdexcept>
+
 namespace kxc {
 namespace tir {
 
@@ -32,6 +34,35 @@ For::For(Var loop_var, PrimExpr min, PrimExpr extent, ForType for_type, Stmt bod
     node->for_type = for_type;
     node->body = std::move(body);
     SetData(node);
+}
+
+// 构造结构化线程绑定时拒绝空字段和未知索引，避免 CUDA 后端猜测语义。
+ThreadBinding::ThreadBinding(Var thread_var, ThreadIndexKind thread_index,
+                             PrimExpr extent, Stmt body) {
+    if (!thread_var.defined() || !thread_var.As<VarNode>()) {
+        throw std::invalid_argument("ThreadBinding requires a defined thread Var");
+    }
+    if (!extent.defined() || !body.defined()) {
+        throw std::invalid_argument("ThreadBinding requires extent and body");
+    }
+    const int kind = static_cast<int>(thread_index);
+    if (kind < static_cast<int>(ThreadIndexKind::kBlockIdxX) ||
+        kind > static_cast<int>(ThreadIndexKind::kThreadIdxZ)) {
+        throw std::invalid_argument("ThreadBinding uses an unknown thread index");
+    }
+    auto* node = new ThreadBindingNode();
+    node->thread_var = std::move(thread_var);
+    node->thread_index = thread_index;
+    node->extent = std::move(extent);
+    node->body = std::move(body);
+    SetData(node);
+}
+
+// undefined 或其他 Stmt 类型不能被静态解释为线程绑定。
+const ThreadBindingNode* ThreadBinding::operator->() const {
+    const auto* node = As<ThreadBindingNode>();
+    if (!node) throw std::runtime_error("undefined or invalid ThreadBinding");
+    return node;
 }
 
 IfThenElse::IfThenElse(PrimExpr condition, Stmt then_case, Stmt else_case) {

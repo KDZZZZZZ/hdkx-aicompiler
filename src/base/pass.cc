@@ -772,6 +772,20 @@ tir::Stmt TIRPass::VisitFor(const tir::ForNode* op, const tir::Stmt& ref) {
     return tir::For(new_loop_var, new_min, new_extent, op->for_type, new_body);
 }
 
+// 重写线程索引变量、启动范围与作用域体，同时保留结构化 CUDA 索引类别。
+tir::Stmt TIRPass::VisitThreadBinding(const tir::ThreadBindingNode* op,
+                                      const tir::Stmt& ref) {
+    tir::Var new_thread_var = MutateToVar(op->thread_var);
+    tir::PrimExpr new_extent = Mutate(op->extent);
+    tir::Stmt new_body = Mutate(op->body);
+    if (new_thread_var.get() == op->thread_var.get() &&
+        new_extent.get() == op->extent.get() &&
+        new_body.get() == op->body.get()) {
+        return ref;
+    }
+    return tir::ThreadBinding(new_thread_var, op->thread_index, new_extent, new_body);
+}
+
 // 重写条件语句的条件、真分支和可选假分支。
 tir::Stmt TIRPass::VisitIfThenElse(const tir::IfThenElseNode* op, const tir::Stmt& ref) {
     tir::PrimExpr new_cond = Mutate(op->condition);

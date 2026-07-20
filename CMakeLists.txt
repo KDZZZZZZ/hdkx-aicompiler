@@ -191,6 +191,7 @@ set(KXC_RUNTIME_SOURCES
   src/tir/transforms/vectorize_loop.cc
   src/tir/transforms/remove_no_op.cc
   src/tir/transforms/convert_for_loops_serial.cc
+  src/tir/transforms/bind_cuda_threads.cc
   src/te/te.cc
 )
 
@@ -308,6 +309,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
   kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
+  kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
     set(KXC_ONNX_IMPORT_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.params.bin")
@@ -413,6 +415,13 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS compiled_module_test
     USES_TERMINAL
     COMMENT "Run compiled_module_test"
+  )
+  add_custom_target(run_cuda_schedule_test
+    COMMAND "$<TARGET_FILE:cuda_schedule_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS cuda_schedule_test
+    USES_TERMINAL
+    COMMENT "Run cuda_schedule_test"
   )
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     add_custom_target(run_onnx_importer_test

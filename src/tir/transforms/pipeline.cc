@@ -11,9 +11,11 @@
 #include <unordered_map>
 
 #include "base/profiling.h"
+#include "base/pass.h"
 #include "base/packedfunc.h"
 #include "base/registry.h"
 #include "tir/pass/print_ir.h"
+#include "tir/transforms/bind_cuda_threads.h"
 #include "tir/transforms/convert_for_loops_serial.h"
 #include "tir/transforms/fold_constant.h"
 #include "tir/transforms/force_narrow_index_to_i32.h"
@@ -51,6 +53,16 @@ std::string PrimFuncToText(const PrimFunc& func) {
 }
 
 PrimFunc RunSinglePass(const PrimFunc& func, const std::string& pass_name);
+
+// Pipeline adapter 优先使用当前上下文，否则从 TIR attrs 恢复唯一 Target。
+PrimFunc BindCudaThreadsPipelinePass(const PrimFunc& func) {
+    PassContext pass_ctx = PassContext::Current();
+    if (!pass_ctx.defined()) pass_ctx = PassContext::FromTIR(func);
+    if (!pass_ctx.defined() || !pass_ctx.default_target().defined()) {
+        throw std::runtime_error("bind_cuda_threads requires a Target in PassContext");
+    }
+    return BindCudaThreads(func, pass_ctx.default_target()).prim_func();
+}
 
 PrimFunc RunInstrumentedPass(const PrimFunc& func, const std::string& pass_name) {
     auto profile_context = profiling::CurrentContext();
@@ -110,6 +122,7 @@ const std::unordered_map<std::string, TIRPassFunc>& GetTIRPassTable() {
         {"vectorize_loop", VectorizeLoopPass},
         {"remove_no_op", RemoveNoOpPass},
         {"convert_for_loops_serial", ConvertForLoopsSerialPass},
+        {"bind_cuda_threads", BindCudaThreadsPipelinePass},
     };
     return table;
 }
@@ -208,6 +221,12 @@ KXC_REGISTER_GLOBAL("kxc.tir.transform.vectorize_loop")
     .set_body(ToPackedFunc([](ObjectRef func_ref) -> ObjectRef {
         PrimFunc func(func_ref.get());
         return ObjectRef(VectorizeLoopPass(func));
+    }));
+
+KXC_REGISTER_GLOBAL("kxc.tir.transform.bind_cuda_threads")
+    .set_body(ToPackedFunc([](ObjectRef func_ref) -> ObjectRef {
+        PrimFunc func(func_ref.get());
+        return ObjectRef(BindCudaThreadsPipelinePass(func));
     }));
 
 }  // namespace tir

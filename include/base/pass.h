@@ -219,6 +219,7 @@ public:
         if (auto* n = stmt.As<tir::LetStmtNode>()) return VisitLetStmt(n, stmt);
         if (auto* n = stmt.As<tir::StoreNode>()) return VisitStore(n, stmt);
         if (auto* n = stmt.As<tir::ForNode>()) return VisitFor(n, stmt);
+        if (auto* n = stmt.As<tir::ThreadBindingNode>()) return VisitThreadBinding(n, stmt);
         if (auto* n = stmt.As<tir::IfThenElseNode>()) return VisitIfThenElse(n, stmt);
         if (auto* n = stmt.As<tir::AllocateNode>()) return VisitAllocate(n, stmt);
         if (auto* n = stmt.As<tir::AttrStmtNode>()) return VisitAttrStmt(n, stmt);
@@ -233,6 +234,9 @@ protected:
     virtual R VisitLetStmt(const tir::LetStmtNode* op, const tir::Stmt& ref) { return VisitStmtDefault(ref); }
     virtual R VisitStore(const tir::StoreNode* op, const tir::Stmt& ref) { return VisitStmtDefault(ref); }
     virtual R VisitFor(const tir::ForNode* op, const tir::Stmt& ref) { return VisitStmtDefault(ref); }
+    virtual R VisitThreadBinding(const tir::ThreadBindingNode* op, const tir::Stmt& ref) {
+        return VisitStmtDefault(ref);
+    }
     virtual R VisitIfThenElse(const tir::IfThenElseNode* op, const tir::Stmt& ref) { return VisitStmtDefault(ref); }
     virtual R VisitAllocate(const tir::AllocateNode* op, const tir::Stmt& ref) { return VisitStmtDefault(ref); }
     virtual R VisitAttrStmt(const tir::AttrStmtNode* op, const tir::Stmt& ref) { return VisitStmtDefault(ref); }
@@ -278,6 +282,8 @@ protected:
     tir::Stmt VisitLetStmt(const tir::LetStmtNode* op, const tir::Stmt& ref) override;
     tir::Stmt VisitStore(const tir::StoreNode* op, const tir::Stmt& ref) override;
     tir::Stmt VisitFor(const tir::ForNode* op, const tir::Stmt& ref) override;
+    tir::Stmt VisitThreadBinding(const tir::ThreadBindingNode* op,
+                                 const tir::Stmt& ref) override;
     tir::Stmt VisitIfThenElse(const tir::IfThenElseNode* op, const tir::Stmt& ref) override;
     tir::Stmt VisitAllocate(const tir::AllocateNode* op, const tir::Stmt& ref) override;
     tir::Stmt VisitAttrStmt(const tir::AttrStmtNode* op, const tir::Stmt& ref) override;
