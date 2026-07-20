@@ -3,6 +3,7 @@
  */
 
 #include "base/profiling.h"
+#include "api/compiler.h"
 #include "relay/op.h"
 #include "relay/transforms/lower.h"
 #include "relay/transforms/pipeline.h"
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 int main() {
     namespace fs = std::filesystem;
@@ -46,6 +48,17 @@ int main() {
     tir_out = tir::RunTIRPassPipeline(tir_out, {String("optimize_default")});
     (void)tir_out;
 
+#if KXC_USE_LLVM
+    // LLVM 构建额外经过真实 Compiler，锁定七个显式阶段都进入同一 bundle。
+    api::CompileConfig config =
+        api::CompileConfig::Create(BuildTarget(Device::CPU()), 1);
+    api::CompiledModule module = api::Compiler::Compile(func, config);
+    if (!module.IsReady()) {
+        std::cerr << "Compiler profiling fixture did not produce a ready module\n";
+        return 1;
+    }
+#endif
+
     ctx->Flush();
 
     const fs::path manifest = bundle_dir / "manifest.json";
@@ -77,18 +90,39 @@ int main() {
     bool saw_relay_pass = false;
     bool saw_lower = false;
     bool saw_tir_pass = false;
+#if KXC_USE_LLVM
+    const std::vector<std::string> compiler_stages = {
+        "validate", "optimize_relay", "lower", "optimize_tir",
+        "build_signature", "build_backend", "assemble"};
+    size_t next_compiler_stage = 0;
+#endif
     std::ifstream ifs(events);
     std::string line;
     while (std::getline(ifs, line)) {
         saw_relay_pass = saw_relay_pass || line.find("\"component\":\"relay_pass\"") != std::string::npos;
         saw_lower = saw_lower || line.find("\"event_type\":\"lower_to_tir\"") != std::string::npos;
         saw_tir_pass = saw_tir_pass || line.find("\"component\":\"tir_pass\"") != std::string::npos;
+#if KXC_USE_LLVM
+        // 事件按阶段 span 关闭顺序写入，顺序检查同时证明管线没有跳步。
+        if (next_compiler_stage < compiler_stages.size() &&
+            line.find("\"pass_name\":\"" +
+                          compiler_stages[next_compiler_stage] + "\"") !=
+                std::string::npos) {
+            ++next_compiler_stage;
+        }
+#endif
     }
 
     if (!saw_relay_pass || !saw_lower || !saw_tir_pass) {
         std::cerr << "Bundle did not contain expected relay/lower/tir events\n";
         return 1;
     }
+#if KXC_USE_LLVM
+    if (next_compiler_stage != compiler_stages.size()) {
+        std::cerr << "Bundle did not contain the ordered Compiler stage events\n";
+        return 1;
+    }
+#endif
 
     std::cout << "Bundle generated at: " << bundle_dir.string() << "\n";
     return 0;
