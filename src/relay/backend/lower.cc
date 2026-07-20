@@ -8,6 +8,7 @@
 #include "relay/op.h"
 #include "base/pass.h"
 #include "base/profiling.h"
+#include "codegen/kernel_signature.h"
 #include "te/te.h"
 #include "relay/pass/print_ir.h"
 #include "tir/pass/print_ir.h"
@@ -548,48 +549,6 @@ const ConstantBindingNode* ConstantBinding::operator->() const {
     return node;
 }
 
-// 深拷贝 attrs key 列表，隔离 Array 共享可变实现。
-ConstantKeyList::ConstantKeyList(Array<String> keys) {
-    auto* node = new ConstantKeyListNode();
-    for (const auto& key : keys) node->keys_.push_back(key);
-    SetData(node);
-    Validate();
-}
-
-// 从 attrs 恢复时使用专用节点 type key，避免 Array<T> 元素类型擦除导致 UB。
-ConstantKeyList::ConstantKeyList(const ObjectRef& ref) : ObjectRef(ref) {
-    if (defined() && !As<ConstantKeyListNode>()) {
-        SetData(nullptr);
-        throw std::invalid_argument("ObjectRef does not contain ConstantKeyListNode");
-    }
-    if (defined()) Validate();
-}
-
-// 返回独立 key 数组，调用方不能通过副本改写 PrimFunc attrs 内的契约。
-Array<String> ConstantKeyList::keys() const {
-    Array<String> result;
-    for (const auto& key : operator->()->keys_) result.push_back(key);
-    return result;
-}
-
-// key 在单个 lowered function 内承担常量身份，因此必须非空且唯一。
-void ConstantKeyList::Validate() const {
-    std::unordered_set<std::string> seen;
-    for (const auto& key : operator->()->keys_) {
-        const std::string text = key;
-        if (text.empty() || !seen.insert(text).second) {
-            throw std::invalid_argument("ConstantKeyList keys must be non-empty and unique");
-        }
-    }
-}
-
-// 返回类型安全节点；普通 Array 或 String attrs 不能伪装为 key 列表。
-const ConstantKeyListNode* ConstantKeyList::operator->() const {
-    const auto* node = As<ConstantKeyListNode>();
-    if (!node) throw std::runtime_error("undefined or invalid ConstantKeyList");
-    return node;
-}
-
 // 组合 lowering 产物，并核对 attrs、参数槽和常量绑定的一一对应关系。
 LoweredFunction::LoweredFunction(tir::PrimFunc prim_func,
                                  Array<ConstantBinding> constants) {
@@ -656,7 +615,8 @@ void LoweredFunction::Validate() const {
     if (!prim_func->attrs.count(constant_keys_attr)) {
         throw std::invalid_argument("LoweredFunction requires constant key metadata");
     }
-    const ConstantKeyList constant_key_list(prim_func->attrs.at(constant_keys_attr));
+    const codegen::KernelConstantKeys constant_key_list(
+        prim_func->attrs.at(constant_keys_attr));
     const Array<String> constant_keys = constant_key_list.keys();
     if (constant_keys.size() != constants.size()) {
         throw std::invalid_argument("LoweredFunction constant key count mismatch");
@@ -872,7 +832,8 @@ LoweredFunction LowerToTIR(Function func) {
         attrs.Set(String("kxc.output_param_start"),
                   tir::IntImm(output_param_start, tir::DataType::Int(64)));
         // key 列表与常量参数段同序，Codegen 无需回扫 Relay 或解析变量名。
-        attrs.Set(String("kxc.constant_keys"), ConstantKeyList(constant_keys));
+        attrs.Set(String("kxc.constant_keys"),
+                  codegen::KernelConstantKeys(constant_keys));
         attrs = AttachPassContextAttrs(attrs, PassContext::Current());
 
         tir::PrimFunc lowered = tir::PrimFunc(params, body, buffer_map, attrs);

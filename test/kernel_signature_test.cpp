@@ -338,6 +338,127 @@ bool TestLaunchMetadata() {
     return true;
 }
 
+// 直接构造 PrimFunc，验证 bool ABI、零尺寸和动态输出拒绝等 builder 边界。
+bool TestBuildKernelSignature() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    tir::Var input("input", tir::DataType::Bool());
+    tir::Var output("output", tir::DataType::Bool());
+    Array<tir::Var> params = {input, output};
+    Map<tir::Var, tir::Buffer> buffers;
+    buffers.Set(input, tir::Buffer(input, tir::DataType::Bool(),
+                                   {tir::IntImm(0, tir::DataType::Int(64))}, {},
+                                   tir::IntImm(0), "input", 0, 0));
+    buffers.Set(output, tir::Buffer(output, tir::DataType::Bool(),
+                                    {tir::IntImm(0, tir::DataType::Int(64))}, {},
+                                    tir::IntImm(0), "output", 0, 0));
+    Map<String, ObjectRef> attrs;
+    attrs.Set("global_symbol", String("bool_kernel"));
+    attrs.Set("kxc.input_count", tir::IntImm(1, tir::DataType::Int(64)));
+    attrs.Set("kxc.constant_count", tir::IntImm(0, tir::DataType::Int(64)));
+    attrs.Set("kxc.output_count", tir::IntImm(1, tir::DataType::Int(64)));
+    attrs.Set("kxc.output_param_start", tir::IntImm(1, tir::DataType::Int(64)));
+    attrs.Set("kxc.constant_keys", KernelConstantKeys(Array<String>()));
+    tir::PrimFunc function(params, tir::Evaluate(tir::IntImm(0)), buffers, attrs);
+
+    KernelSignature signature =
+        BuildKernelSignature(function, {}, BuildTarget(Device::CPU()), "bool_kernel");
+    const Array<KernelArgSpec> arguments = signature.arguments();
+    TEST_CHECK(arguments.size() == 2 && arguments[0]->dtype.code == kDLBool &&
+                   arguments[0]->dtype.bits == 8 && arguments[0].shape()[0] == 0,
+               "TIR bool or zero-size shape was not mapped to DLPack ABI");
+    TEST_CHECK(arguments[0]->alignment == 1 && arguments[1]->mutable_data,
+               "natural bool alignment or output mutability mismatch");
+
+    // 同一个 UInt(8) TIR Buffer 可承载 bool 或 uint8；常量 payload 决定最终 ABI。
+    tir::Var constant("constant", tir::DataType::UInt(8));
+    tir::Var constant_output("constant_output", tir::DataType::UInt(8));
+    Map<tir::Var, tir::Buffer> constant_buffers;
+    constant_buffers.Set(
+        constant, tir::Buffer(constant, tir::DataType::UInt(8), {tir::IntImm(1)}, {},
+                              tir::IntImm(0), "constant", 0, 0));
+    constant_buffers.Set(
+        constant_output,
+        tir::Buffer(constant_output, tir::DataType::UInt(8), {tir::IntImm(1)}, {},
+                    tir::IntImm(0), "constant_output", 0, 0));
+    Map<String, ObjectRef> constant_attrs;
+    constant_attrs.Set("kxc.input_count", tir::IntImm(0, tir::DataType::Int(64)));
+    constant_attrs.Set("kxc.constant_count", tir::IntImm(1, tir::DataType::Int(64)));
+    constant_attrs.Set("kxc.output_count", tir::IntImm(1, tir::DataType::Int(64)));
+    constant_attrs.Set("kxc.output_param_start",
+                       tir::IntImm(1, tir::DataType::Int(64)));
+    constant_attrs.Set("kxc.constant_keys",
+                       KernelConstantKeys(Array<String>{String("constant.0")}));
+    tir::PrimFunc constant_function(
+        Array<tir::Var>{constant, constant_output}, tir::Evaluate(tir::IntImm(0)),
+        constant_buffers, constant_attrs);
+    Map<String, runtime::NDArray> bool_constants;
+    bool_constants.Set("constant.0", runtime::NDArray::Zeros(
+                                         {1}, runtime::DataTypeFromString("bool"),
+                                         Device::CPU()));
+    Map<String, runtime::NDArray> uint8_constants;
+    uint8_constants.Set("constant.0", runtime::NDArray::Zeros(
+                                          {1}, runtime::DataTypeFromString("uint8"),
+                                          Device::CPU()));
+    const KernelSignature bool_constant_signature = BuildKernelSignature(
+        constant_function, bool_constants, BuildTarget(Device::CPU()), "bool_constant");
+    const KernelSignature uint8_constant_signature = BuildKernelSignature(
+        constant_function, uint8_constants, BuildTarget(Device::CPU()), "uint8_constant");
+    TEST_CHECK(bool_constant_signature.arguments()[0]->dtype.code == kDLBool &&
+                   uint8_constant_signature.arguments()[0]->dtype.code == kDLUInt,
+               "constant payload did not disambiguate bool from uint8");
+    TEST_CHECK(Throws([&] {
+                   BuildKernelSignature(constant_function, {},
+                                        BuildTarget(Device::CPU()), "missing_constant");
+               }),
+               "missing constant payload should fail");
+
+    TEST_CHECK(Throws([&] {
+                   BuildKernelSignature(tir::PrimFunc(), {}, BuildTarget(Device::CPU()),
+                                        "bad");
+               }),
+               "undefined PrimFunc should fail");
+    TEST_CHECK(Throws([&] {
+                   BuildKernelSignature(function, {}, Target(), "bad");
+               }),
+               "undefined Target should fail");
+    TEST_CHECK(Throws([&] {
+                   BuildKernelSignature(function, {}, BuildTarget(Device::CPU()), "");
+               }),
+               "empty symbol should fail");
+
+    tir::Var dynamic_extent("n", tir::DataType::Int(64));
+    Map<tir::Var, tir::Buffer> dynamic_buffers;
+    dynamic_buffers.Set(output,
+                        tir::Buffer(output, tir::DataType::Float(32), {dynamic_extent},
+                                    {}, tir::IntImm(0), "output", 0, 0));
+    Map<String, ObjectRef> dynamic_attrs;
+    dynamic_attrs.Set("kxc.input_count", tir::IntImm(0, tir::DataType::Int(64)));
+    dynamic_attrs.Set("kxc.constant_count", tir::IntImm(0, tir::DataType::Int(64)));
+    dynamic_attrs.Set("kxc.output_count", tir::IntImm(1, tir::DataType::Int(64)));
+    dynamic_attrs.Set("kxc.output_param_start", tir::IntImm(0, tir::DataType::Int(64)));
+    dynamic_attrs.Set("kxc.constant_keys", KernelConstantKeys(Array<String>()));
+    tir::PrimFunc dynamic_output(Array<tir::Var>{output},
+                                 tir::Evaluate(tir::IntImm(0)), dynamic_buffers,
+                                 dynamic_attrs);
+    TEST_CHECK(Throws([&] {
+                   BuildKernelSignature(dynamic_output, {}, BuildTarget(Device::CPU()),
+                                        "dynamic_output");
+               }),
+               "dynamic output without shape function should fail");
+
+    Map<String, ObjectRef> wrong_key_attrs = attrs;
+    wrong_key_attrs.Set("kxc.constant_keys", String("wrong-type"));
+    tir::PrimFunc wrong_keys(params, tir::Evaluate(tir::IntImm(0)), buffers,
+                             wrong_key_attrs);
+    TEST_CHECK(Throws([&] {
+                   BuildKernelSignature(wrong_keys, {}, BuildTarget(Device::CPU()),
+                                        "bad_keys");
+               }),
+               "wrong constant key metadata type should fail safely");
+    return true;
+}
+
 }  // namespace
 
 // 顺序运行全部签名测试并汇总失败，使单次 CI 输出保留所有契约问题。
@@ -351,6 +472,7 @@ int main() {
         {"invalid_signatures", TestInvalidSignatures},
         {"object_ref_type_checks", TestObjectRefTypeChecks},
         {"launch_metadata", TestLaunchMetadata},
+        {"build_kernel_signature", TestBuildKernelSignature},
     };
 
     int failures = 0;

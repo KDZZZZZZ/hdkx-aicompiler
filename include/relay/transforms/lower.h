@@ -41,35 +41,6 @@ public:
     const ConstantBindingNode* operator->() const;
 };
 
-/*! \brief TIR attrs 中专用的常量 key 列表节点，避免模板 Array 类型擦除。 */
-class ConstantKeyListNode final : public Object {
-public:
-    KXC_OBJECT_DECLARE
-
-private:
-    friend class ConstantKeyList;
-    /*! \brief 私有 key 数组，禁止共享可变别名改写 lowering 契约。 */
-    Array<String> keys_;
-};
-
-KXC_OBJECT_DEFINE_WITH_KEY(ConstantKeyListNode, "kxc.relay.ConstantKeyListNode")
-
-/*! \brief 常量 key 列表的类型安全不可变句柄。 */
-class ConstantKeyList : public ObjectRef {
-public:
-    /*! \brief 深拷贝并校验 key 列表。 */
-    explicit ConstantKeyList(Array<String> keys);
-    /*! \brief 从 attrs ObjectRef 恢复列表并验证节点类型和内容。 */
-    explicit ConstantKeyList(const ObjectRef& ref);
-
-    /*! \brief 返回 key 的独立 Array，调用方修改不会影响 attrs。 */
-    Array<String> keys() const;
-    /*! \brief 校验 key 非空且在列表内唯一。 */
-    void Validate() const;
-    /*! \brief 返回经过类型检查的只读节点。 */
-    const ConstantKeyListNode* operator->() const;
-};
-
 /*! \brief 保存 TIR 计算和全部常量 payload 的完整 lowering 产物。 */
 class LoweredFunctionNode final : public Object {
 public:

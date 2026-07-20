@@ -11,6 +11,7 @@
 
 #include "base/ndarray.h"
 #include "base/registry.h"
+#include "codegen/kernel_signature.h"
 #include "relay/op.h"
 #include "relay/relay.h"
 #include "relay/transforms/lower.h"
@@ -68,6 +69,16 @@ bool BufferHasShape(const kxc::tir::Buffer& buffer,
 // 返回指定参数对应的 Buffer；本辅助函数只在先验证 buffer_map 后调用。
 kxc::tir::Buffer ParamBuffer(const kxc::tir::PrimFunc& function, size_t index) {
     return function->buffer_map.at(function->params[index]);
+}
+
+// 将 lowering 的有序绑定转成签名构建器需要的 key -> payload 映射。
+kxc::Map<kxc::String, kxc::runtime::NDArray> ConstantMap(
+    const kxc::relay::LoweredFunction& lowered) {
+    kxc::Map<kxc::String, kxc::runtime::NDArray> result;
+    for (const auto& binding : lowered.constants()) {
+        result.Set(binding->key, binding->value);
+    }
+    return result;
 }
 
 // 深拷贝 attrs，确保负例修改不会通过共享 Map 别名污染基准 PrimFunc。
@@ -136,7 +147,7 @@ bool TestInputConstantOutputOrder() {
                    bindings[0]->param_index == 1 &&
                    bindings[0]->value.get() == constant_data.get(),
                "constant binding key, parameter slot, or payload mismatch");
-    const relay::ConstantKeyList constant_key_list(
+    const codegen::KernelConstantKeys constant_key_list(
         lowered->attrs.at(String("kxc.constant_keys")));
     const Array<String> constant_keys = constant_key_list.keys();
     TEST_CHECK(constant_keys.size() == 1 &&
@@ -157,6 +168,18 @@ bool TestInputConstantOutputOrder() {
                    ParamBuffer(lowered, 1)->dtype == tir::DataType::Float(32) &&
                    ParamBuffer(lowered, 2)->dtype == tir::DataType::Float(32),
                "lowered Buffer dtype mismatch");
+
+    const codegen::KernelSignature signature = codegen::BuildKernelSignature(
+        lowered, ConstantMap(result), BuildTarget(Device::CPU()), "contract_add");
+    const Array<codegen::KernelArgSpec> arguments = signature.arguments();
+    TEST_CHECK(arguments.size() == 3 &&
+                   arguments[0]->role == codegen::KernelArgRole::kInput &&
+                   arguments[1]->role == codegen::KernelArgRole::kConstant &&
+                   arguments[2]->role == codegen::KernelArgRole::kOutput,
+               "signature roles do not match lowered parameter order");
+    TEST_CHECK(std::string(arguments[1]->constant_key) == "relay.constant.0" &&
+                   arguments[2]->mutable_data,
+               "signature constant key or output mutability mismatch");
     return true;
 }
 
@@ -223,10 +246,10 @@ bool TestLoweredObjectValidation() {
                }),
                "same-type invalid ConstantBindingNode should be revalidated");
     TEST_CHECK(Throws([] {
-                   ObjectRef raw(new relay::ConstantKeyListNode());
-                   relay::ConstantKeyList invalid(raw);
+                   ObjectRef raw(new codegen::KernelConstantKeysNode());
+                   codegen::KernelConstantKeys invalid(raw);
                }) == false,
-               "empty ConstantKeyList is valid for functions without constants");
+               "empty KernelConstantKeys is valid for functions without constants");
     TEST_CHECK(Throws([] {
                    ObjectRef raw(new relay::LoweredFunctionNode());
                    relay::LoweredFunction invalid(raw);
@@ -320,8 +343,10 @@ bool TestMultiOutputMetadata() {
     Call multiply(relay::Op::Get("mul"), {lhs, rhs});
     Function function({lhs, rhs}, Tuple({add, multiply}));
 
-    tir::PrimFunc first = relay::LowerToTIR(function)->prim_func;
-    tir::PrimFunc second = relay::LowerToTIR(function)->prim_func;
+    relay::LoweredFunction first_result = relay::LowerToTIR(function);
+    relay::LoweredFunction second_result = relay::LowerToTIR(function);
+    tir::PrimFunc first = first_result->prim_func;
+    tir::PrimFunc second = second_result->prim_func;
     int64_t output_count = -1;
     int64_t output_start = -1;
     TEST_CHECK(ReadIntAttr(first, "kxc.output_count", &output_count) && output_count == 2,
@@ -334,6 +359,13 @@ bool TestMultiOutputMetadata() {
     TEST_CHECK(BufferHasShape(ParamBuffer(first, 2), {4}) &&
                    BufferHasShape(ParamBuffer(first, 3), {4}),
                "tuple output Buffer shapes mismatch");
+    const codegen::KernelSignature signature = codegen::BuildKernelSignature(
+        first, ConstantMap(first_result), BuildTarget(Device::CPU()), "tuple_kernel");
+    const Array<codegen::KernelArgSpec> arguments = signature.arguments();
+    TEST_CHECK(arguments.size() == 4 &&
+                   arguments[2]->role == codegen::KernelArgRole::kOutput &&
+                   arguments[3]->role == codegen::KernelArgRole::kOutput,
+               "multi-output signature roles mismatch");
 
     // 重复 lowering 必须至少保持参数数量、顺序元数据和 Buffer shape 确定。
     int64_t second_output_start = -1;

@@ -11,9 +11,42 @@
 
 #include "base/container.h"
 #include "base/device.h"
+#include "base/ndarray.h"
+#include "base/target.h"
 #include "codegen/backend.h"
+#include "tir/stmt.h"
 
 namespace kxc::codegen {
+
+/*! \brief 保存 lowered TIR 常量参数段对应的稳定 key 顺序。 */
+class KernelConstantKeysNode final : public Object {
+public:
+    KXC_OBJECT_DECLARE
+
+private:
+    friend class KernelConstantKeys;
+    /*! \brief 私有 key 数组，防止外部通过容器别名改写 ABI 参数顺序。 */
+    Array<String> keys_;
+};
+
+KXC_OBJECT_DEFINE_WITH_KEY(KernelConstantKeysNode,
+                           "kxc.codegen.KernelConstantKeysNode")
+
+/*! \brief 常量 key 列表的类型安全、不可变对象句柄。 */
+class KernelConstantKeys : public ObjectRef {
+public:
+    /*! \brief 深拷贝并校验 key 列表。 */
+    explicit KernelConstantKeys(Array<String> keys);
+    /*! \brief 从 PrimFunc attr 恢复列表，并验证节点类型和内容。 */
+    explicit KernelConstantKeys(const ObjectRef& ref);
+
+    /*! \brief 返回独立 Array，调用方修改不会影响 PrimFunc metadata。 */
+    Array<String> keys() const;
+    /*! \brief 校验每个 key 非空且在列表内唯一。 */
+    void Validate() const;
+    /*! \brief 返回经过运行时类型检查的只读节点。 */
+    const KernelConstantKeysNode* operator->() const;
+};
 
 /*! \brief 动态输入维度的唯一哨兵；当前编译器仍只生成静态 shape。 */
 constexpr int64_t kDynamicDimension = -1;
@@ -157,5 +190,17 @@ public:
     /*! \brief 返回经过类型检查的只读节点。 */
     const KernelLaunchMetadataNode* operator->() const;
 };
+
+/*!
+ * \brief 从 lowered PrimFunc 的参数、Buffer 和结构化 attrs 构建内核签名。
+ * \param function 已完成 TIR pass 的函数。
+ * \param constants 由 lowering 保活的 key 到 NDArray payload 映射。
+ * \param target 决定每个参数物理设备的编译目标。
+ * \param symbol 后端模块中的入口符号；显式值是最终签名的事实来源。
+ */
+KernelSignature BuildKernelSignature(const tir::PrimFunc& function,
+                                     const Map<String, runtime::NDArray>& constants,
+                                     const Target& target,
+                                     String symbol);
 
 }  // namespace kxc::codegen
