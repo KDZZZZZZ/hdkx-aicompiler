@@ -202,11 +202,6 @@ list(APPEND KXC_RUNTIME_SOURCES
   src/codegen/kernel_signature.cc
   src/api/compile_config.cc
   src/api/compiler.cc
-  src/runtime/shape_predictor.cc
-  src/runtime/kernel_cache.cc
-  src/runtime/kernel_runner.cc
-  src/runtime/background_compiler.cc
-  src/runtime/runtime_session.cc
 )
 if(KXC_USE_LLVM)
   list(APPEND KXC_RUNTIME_SOURCES

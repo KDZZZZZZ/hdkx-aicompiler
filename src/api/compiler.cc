@@ -12,7 +12,6 @@
 #include "relay/transforms/infer_type.h"
 #include "relay/transforms/lower.h"
 #include "relay/transforms/pipeline.h"
-#include "runtime/runtime_session.h"
 #include "tir/transforms/pipeline.h"
 
 #if KXC_USE_LLVM
@@ -49,39 +48,21 @@ profiling::EventSpec MakeEvent(const std::string& component, const std::string& 
 }  // namespace
 
 CompiledModule Compiler::Compile(Function func, CompileConfig config) {
+    // 配置验证必须先于任何字段读取，避免错误 ObjectRef 被解释为 CompileConfigNode。
+    config.Validate();
     auto profile_context = MaybeCreateProfileContext(config);
     const std::string run_id = profile_context ? profile_context->NextRunId("compile") : "";
     profiling::ActivationScope activation(profile_context, run_id);
     profiling::ScopedSpan compile_span(profile_context, MakeEvent("compiler", "compile_module"),
                                        run_id);
-    if (config.defined()) {
-        compile_span.AddField("compile_mode", std::to_string(static_cast<int>(config->mode)));
-        compile_span.AddField("target_kind", config->target.defined() ? config->target->kind : "");
-        compile_span.AddField("backend", std::to_string(static_cast<int>(config->backend)));
-        compile_span.AddMetric("opt_level", static_cast<double>(config->opt_level));
-    }
+    compile_span.AddField("target_kind", config->target->kind);
+    compile_span.AddField("target_device_type",
+                          std::to_string(static_cast<int>(config->target->device_type)));
+    compile_span.AddMetric("opt_level", static_cast<double>(config->opt_level));
 
-    if (config->mode == CompileMode::kAdaptive) {
-        auto session = std::make_shared<runtime::RuntimeSession>(func, config, profile_context);
-        for (const auto& shape : config->suggested_input_shapes) {
-            std::vector<std::vector<int64_t>> shapes_vec;
-            std::vector<int64_t> single_shape;
-            for (const auto& dim : shape) {
-                single_shape.push_back(dim);
-            }
-            shapes_vec.push_back(single_shape);
-            session->WarmUp(shapes_vec);
-        }
-        if (profile_context) {
-            profile_context->RecordLog(profiling::LogSeverity::kInfo, "compiler",
-                                       "Adaptive session initialized", {}, {}, run_id);
-            profile_context->Flush();
-        }
-        return CompiledModule(config, func, session, profile_context);
-    }
-
+    // Task 8 将把 pass 策略拆成显式阶段；当前按优化等级保持原两档行为。
     Array<String> relay_passes;
-    if (config->mode == CompileMode::kAOT) {
+    if (config->opt_level >= 2) {
         relay_passes = {String("optimize_default")};
     } else {
         relay_passes = {String("fold_constant"), String("simplify_expr")};
@@ -93,17 +74,18 @@ CompiledModule Compiler::Compile(Function func, CompileConfig config) {
     tir::PrimFunc prim_func = lowered->prim_func;
 
     Array<String> passes;
-    if (config->mode == CompileMode::kAOT) {
+    if (config->opt_level >= 2) {
         passes = {String("optimize_default")};
     } else {
         passes = {String("fold_constant"), String("simplify_expr")};
     }
     prim_func = RunTIRPassPipeline(prim_func, passes);
 
-    codegen::CompiledKernel kernel;
+    codegen::CompiledKernel kernel{ObjectRef()};
 
 #if KXC_USE_LLVM
-    if (config->backend == codegen::CodeGenBackend::kLLVM) {
+    // LLVM 是 llvm/cpu Target 的唯一执行后端，不能由独立配置字段覆盖。
+    if (config->target->kind == "llvm" && config->target->device_type == kCPU) {
         profiling::ScopedSpan codegen_span(profile_context, MakeEvent("codegen", "llvm_jit_compile"),
                                            run_id);
         auto llvm_ctx = std::make_unique<llvm::LLVMContext>();
@@ -118,12 +100,20 @@ CompiledModule Compiler::Compile(Function func, CompileConfig config) {
         codegen_span.SetMessage("LLVM JIT compilation completed");
         codegen_span.AddMetric("opt_level", static_cast<double>(config->opt_level));
     } else
+#else
+    if (config->target->kind == "llvm" && config->target->device_type == kCPU) {
+        compile_span.SetStatus("error");
+        compile_span.SetMessage("LLVM backend is disabled in this build");
+        throw std::runtime_error(
+            "Compiler target 'llvm' requires a build with KXC_ENABLE_LLVM=ON");
+    } else
 #endif
     {
+        // CUDA Target 已被配置层识别，但真实 CUDA codegen 在后续任务实现前明确拒绝。
         compile_span.SetStatus("error");
-        compile_span.SetMessage("Unsupported backend");
+        compile_span.SetMessage("CUDA backend is not implemented");
         throw std::runtime_error(
-            "C backend compilation not fully implemented. Use LLVM backend.");
+            "Compiler target 'cuda' is recognized but CUDA codegen is not implemented");
     }
 
     if (profile_context) {
@@ -150,106 +140,23 @@ Array<relay::ConstantBinding> CompiledModule::GetConstants() const {
     return result;
 }
 
-CompiledModule::CompiledModule(CompileConfig config, Function relay_func,
-                               std::shared_ptr<runtime::RuntimeSession> session,
-                               std::shared_ptr<profiling::ProfileContext> profile_context)
-    : config_(config), relay_func_(relay_func), session_(std::move(session)),
-      profile_context_(std::move(profile_context)) {}
-
 void CompiledModule::Run(const std::vector<void*>& packed_args) {
-    if (session_) {
-        throw std::runtime_error(
-            "Adaptive mode requires Run(args, input_shapes). Use the overload with input_shapes.");
-    }
+    (void)packed_args;
     if (!kernel_.IsReady()) {
         throw std::runtime_error("CompiledModule: kernel not ready");
     }
-    const std::string run_id = profile_context_ ? profile_context_->NextRunId("execute") : "";
-    profiling::ActivationScope activation(profile_context_, run_id);
-    profiling::ScopedSpan span(profile_context_, MakeEvent("runtime", "compiled_module_run"),
-                               run_id);
-    if (kernel_.IsReady() && kernel_->kernel_name.size()) {
-        span.AddField("kernel_symbol", kernel_->kernel_name);
-    }
-    kernel_(packed_args);
-    if (profile_context_) {
-        profile_context_->Flush();
-    }
-}
-
-void CompiledModule::Run(const std::vector<void*>& packed_args,
-                         const std::vector<std::vector<int64_t>>& input_shapes) {
-    const std::string run_id =
-        profile_context_ ? profile_context_->NextRunId(session_ ? "adaptive_run" : "execute") : "";
-    profiling::ActivationScope activation(profile_context_, run_id);
-    profiling::EventSpec spec = MakeEvent("runtime",
-                                          session_ ? "adaptive_module_run" : "compiled_module_run");
-    spec.shape_signature = profiling::ShapeSignatureToString(input_shapes);
-    if (!session_ && kernel_.IsReady()) {
-        spec.kernel_symbol = kernel_->kernel_name;
-    }
-    profiling::ScopedSpan span(profile_context_, std::move(spec), run_id);
-    if (session_) {
-        session_->Run(packed_args, input_shapes);
-        if (profile_context_) {
-            profile_context_->Flush();
-        }
-        return;
-    }
-    if (!kernel_.IsReady()) {
-        throw std::runtime_error("CompiledModule: kernel not ready");
-    }
-    kernel_(packed_args);
-    if (profile_context_) {
-        profile_context_->Flush();
-    }
-}
-
-void CompiledModule::WarmUp(const std::vector<std::vector<int64_t>>& input_shapes) {
-    const std::string run_id = profile_context_ ? profile_context_->NextRunId("warmup") : "";
-    profiling::ActivationScope activation(profile_context_, run_id);
-    profiling::EventSpec spec = MakeEvent("runtime", "module_warmup");
-    spec.shape_signature = profiling::ShapeSignatureToString(input_shapes);
-    profiling::ScopedSpan span(profile_context_, std::move(spec), run_id);
-    if (session_) {
-        session_->WarmUp(input_shapes);
-    }
-    if (profile_context_) {
-        profile_context_->Flush();
-    }
-}
-
-void CompiledModule::WaitAll() {
-    const std::string run_id = profile_context_ ? profile_context_->NextRunId("waitall") : "";
-    profiling::ActivationScope activation(profile_context_, run_id);
-    profiling::ScopedSpan span(profile_context_, MakeEvent("runtime", "module_wait_all"), run_id);
-    if (session_) {
-        session_->WaitAll();
-    }
-    if (profile_context_) {
-        profile_context_->Flush();
-    }
+    // 新 CompiledKernel 只接受已校验的 NDArray；Task 6 会删除本裸指针入口并接通 Launch。
+    throw std::runtime_error(
+        "CompiledModule::Run uses the removed packed-pointer ABI; use the typed launch API");
 }
 
 bool CompiledModule::IsReady() const {
-    if (session_) {
-        return true;
-    }
     return kernel_.IsReady();
 }
 
 std::string CompiledModule::GetStatus() const {
-    if (session_) {
-        return session_->GetStatus();
-    }
     if (!kernel_.IsReady()) {
         return "not_ready";
-    }
-    if (config_->mode == CompileMode::kAOT) {
-        return "aot_compiled";
-    }
-    if (config_->mode == CompileMode::kJIT) {
-        return "jit_compiled";
     }
     return "compiled";
 }

@@ -57,7 +57,7 @@ enum class KernelArgRole : int {
     kInput = 0,
     /*! \brief 由编译结果的稳定 key 解析且内核只读的常量张量。 */
     kConstant = 1,
-    /*! \brief 由调用方或 RuntimeSession 分配且允许内核写入的输出张量。 */
+    /*! \brief 由调用方或后续强类型运行时分配且允许内核写入的输出张量。 */
     kOutput = 2,
 };
 

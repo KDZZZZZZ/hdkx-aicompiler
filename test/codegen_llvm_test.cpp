@@ -271,7 +271,7 @@ void TestCompilerAPI() {
     Function func({x, y}, add_call);
 
     // AOT 配置显式从 cpu:0 构造 Target，避免旧的设备类型/id 拼装路径。
-    auto config = api::CompileConfig::AOT(BuildTarget(Device::CPU()), 2);
+    auto config = api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
     auto module = api::Compiler::Compile(func, config);
 
     std::cout << "Status: " << module.GetStatus() << std::endl;
@@ -321,7 +321,7 @@ void TestCompilerAPIIntermediateAllocate() {
     Call second_add(relay::Op::Get("add"), {first_add, y});
     Function func({x, y}, second_add);
 
-    auto config = api::CompileConfig::AOT(BuildTarget(Device::CPU()), 2);
+    auto config = api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
     auto module = api::Compiler::Compile(func, config);
 
     float data_x[4] = {1, 2, 3, 4};

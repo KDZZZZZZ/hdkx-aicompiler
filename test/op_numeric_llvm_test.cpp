@@ -51,8 +51,8 @@ void ExpectEqual(const std::vector<int32_t>& actual, const std::vector<int32_t>&
 void CompileAndRun(const std::string& op_name, kxc::Function func,
                    const std::vector<void*>& packed_args) {
 #if KXC_USE_LLVM
-    auto config = kxc::api::CompileConfig::JIT(kxc::BuildTarget(kxc::Device::CPU()));
-    config->opt_level = 0;
+    auto config = kxc::api::CompileConfig::Create(
+        kxc::BuildTarget(kxc::Device::CPU()), 0);
     auto module = kxc::api::Compiler::Compile(func, config);
     Check(module.IsReady(), op_name + " LLVM module should be ready");
     module.Run(packed_args);

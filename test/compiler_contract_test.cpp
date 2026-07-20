@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "api/compiler.h"
 #include "base/ndarray.h"
 #include "base/registry.h"
 #include "codegen/kernel_signature.h"
@@ -33,6 +34,16 @@ bool Throws(const std::function<void()>& fn) {
         fn();
     } catch (const std::exception&) {
         return true;
+    }
+    return false;
+}
+
+// 验证失败消息包含稳定片段，保证缺失 backend 时不会退化为模糊异常。
+bool ThrowsWithMessage(const std::function<void()>& fn, const std::string& expected) {
+    try {
+        fn();
+    } catch (const std::exception& error) {
+        return std::string(error.what()).find(expected) != std::string::npos;
     }
     return false;
 }
@@ -109,6 +120,94 @@ bool TestInvalidFunctionRejected() {
     kxc::Function missing_body({input}, kxc::Expr());
     TEST_CHECK(Throws([&] { kxc::relay::LowerToTIR(missing_body); }),
                "Function with undefined body should be rejected");
+    return true;
+}
+
+// 构造具有指定 kind/type/可用性的 Target，用于覆盖配置边界而不依赖本机 CUDA。
+kxc::Target MakeContractTarget(const std::string& kind, kxc::DeviceTypeCode device_type,
+                               int device_id, bool available) {
+    auto* node = new kxc::TargetNode();
+    node->kind = kind;
+    node->device_type = device_type;
+    node->device_id = device_id;
+    node->attrs.exists = available ? 1 : 0;
+    node->attrs.device_name = "contract-device";
+    node->attrs.arch = device_type == kxc::kCPU ? "contract-cpu" : "sm_75";
+    node->attrs.max_threads_per_block = 1;
+    node->attrs.warp_size = 1;
+    node->attrs.multi_processor_count = 1;
+    return kxc::Target(kxc::ObjectRef(node));
+}
+
+// CompileConfig 必须只接受类型正确、优化等级合法且 Target 自洽的对象。
+bool TestCompileConfigValidation() {
+    using namespace kxc;
+
+    api::CompileConfig valid = api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+    TEST_CHECK(valid->opt_level == 2 && valid->target->kind == "llvm",
+               "valid CPU CompileConfig fields mismatch");
+    valid.Validate();
+
+    TEST_CHECK(Throws([] {
+                   api::CompileConfig::Create(BuildTarget(Device::CPU()), -1);
+               }),
+               "negative opt_level should fail");
+    TEST_CHECK(Throws([] {
+                   api::CompileConfig::Create(BuildTarget(Device::CPU()), 4);
+               }),
+               "opt_level above three should fail");
+    TEST_CHECK(Throws([] { api::CompileConfig::Create(Target(), 1); }),
+               "undefined target should fail");
+    TEST_CHECK(Throws([] {
+                   api::CompileConfig::Create(Target(ObjectRef(String("not-a-target"))), 1);
+               }),
+               "wrong Target ObjectRef type should fail");
+    TEST_CHECK(Throws([] {
+                   api::CompileConfig wrong(ObjectRef(String("not-a-config")));
+               }),
+               "wrong ObjectRef type should fail");
+    TEST_CHECK(Throws([] {
+                   api::CompileConfig::Create(
+                       MakeContractTarget("cuda", kCPU, 0, true), 1);
+               }),
+               "CUDA kind on CPU device should fail");
+    TEST_CHECK(Throws([] {
+                   api::CompileConfig::Create(
+                       MakeContractTarget("llvm", kCPU, 1, true), 1);
+               }),
+               "non-zero CPU device id should fail");
+    TEST_CHECK(Throws([] {
+                   api::CompileConfig::Create(
+                       MakeContractTarget("cuda", kCUDA, 0, false), 1);
+               }),
+               "unavailable target should fail");
+
+    valid->opt_level = 9;
+    TEST_CHECK(Throws([&] { valid.Validate(); }),
+               "mutated invalid opt_level should fail revalidation");
+    return true;
+}
+
+// Compiler 必须只按 Target 选择 backend，并对尚不可用的执行路径给出精确诊断。
+bool TestCompilerTargetDispatch() {
+    using namespace kxc;
+
+    Var lhs("lhs", TensorType({1}, "float32"));
+    Var rhs("rhs", TensorType({1}, "float32"));
+    Function add({lhs, rhs}, Call(relay::Op::Get("add"), {lhs, rhs}));
+
+#if !KXC_USE_LLVM
+    api::CompileConfig cpu = api::CompileConfig::Create(BuildTarget(Device::CPU()), 0);
+    TEST_CHECK(ThrowsWithMessage([&] { api::Compiler::Compile(add, cpu); },
+                                 "KXC_ENABLE_LLVM=ON"),
+               "LLVM-disabled CPU target should report the required build feature");
+#endif
+
+    api::CompileConfig cuda = api::CompileConfig::Create(
+        MakeContractTarget("cuda", kCUDA, 0, true), 0);
+    TEST_CHECK(ThrowsWithMessage([&] { api::Compiler::Compile(add, cuda); },
+                                 "CUDA codegen is not implemented"),
+               "CUDA target should report the unavailable codegen stage");
     return true;
 }
 
@@ -388,6 +487,8 @@ bool TestMultiOutputMetadata() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"invalid_function_rejected", TestInvalidFunctionRejected},
+        {"compile_config_validation", TestCompileConfigValidation},
+        {"compiler_target_dispatch", TestCompilerTargetDispatch},
         {"input_constant_output_order", TestInputConstantOutputOrder},
         {"constant_binding_identity", TestConstantBindingIdentity},
         {"lowered_object_validation", TestLoweredObjectValidation},
