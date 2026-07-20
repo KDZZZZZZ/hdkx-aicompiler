@@ -176,10 +176,14 @@ public:
         _refCount.fetch_add(1, std::memory_order_relaxed);
     }
 
-    /*! \brief 减少引用计数；归零时释放对象。 */
+    /*!
+     * \brief 减少引用计数；归零时释放对象。
+     *
+     * release 发布当前引用持有者对节点的写入，最后一次 decrement 的 acquire
+     * 与此前的 release sequence 配对，保证析构线程观察到全部已释放引用的写入。
+     */
     void DecRef() const {
-        if(_refCount.fetch_sub(1, std::memory_order_relaxed)==1){
-            std::atomic_thread_fence(std::memory_order_acquire);
+        if (_refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             delete this;
         }
     }
