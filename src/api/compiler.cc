@@ -161,8 +161,12 @@ CompileResult Lower(const CompileResult& input) {
 // TIR 阶段只保留优化后的唯一 PrimFunc 事实。
 CompileResult OptimizeTIR(const CompileResult& input,
                           const CompileConfig& config) {
-    tir::PrimFunc optimized = RunTIRPassPipeline(
-        input.lowered_tir(), Compiler::TIRPassPolicy(config->opt_level));
+    Array<String> passes = Compiler::TIRPassPolicy(config->opt_level);
+    if (passes.empty()) {
+        // 静态 KernelSignature 要求输出 extent 已化为 IntImm；这是 ABI 正确性步骤。
+        passes = {String("fold_constant"), String("simplify_expr")};
+    }
+    tir::PrimFunc optimized = RunTIRPassPipeline(input.lowered_tir(), passes);
     return input.AfterTIROptimization(std::move(optimized));
 }
 
