@@ -4,38 +4,14 @@
 
 #include "api/compiled_module.h"
 
-#include <cstdint>
-#include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
+#include "api/kernel_argument_validation.h"
+
 namespace kxc::api {
 namespace {
-
-// DLPack dtype 必须逐字段相等，尤其不能忽略向量 lanes。
-bool SameDType(DLDataType lhs, DLDataType rhs) {
-    return lhs.code == rhs.code && lhs.bits == rhs.bits && lhs.lanes == rhs.lanes;
-}
-
-// 把 dtype 格式化为稳定诊断文本，避免错误信息只显示枚举 code。
-std::string DTypeText(DLDataType dtype) {
-    std::ostringstream os;
-    os << static_cast<int>(dtype.code) << ':' << static_cast<int>(dtype.bits)
-       << 'x' << dtype.lanes;
-    return os.str();
-}
-
-// 参数错误统一附带 symbol、序号和名称，便于定位大型模型中的 ABI 槽位。
-[[noreturn]] void ThrowArgumentError(const codegen::KernelSignature& signature,
-                                     size_t index,
-                                     const codegen::KernelArgSpec& spec,
-                                     const std::string& detail) {
-    throw std::invalid_argument(
-        "kernel '" + std::string(signature->symbol) + "' argument[" +
-        std::to_string(index) + "] '" + std::string(spec->name) + "': " + detail);
-}
 
 // 返回 Target 所描述的物理设备，构造函数已经保证 target defined。
 Device TargetDevice(const Target& target) {
@@ -91,95 +67,6 @@ void ValidateConstants(const codegen::KernelSignature& signature,
     }
     if (constants.size() != expected_count) {
         throw std::invalid_argument("CompiledModule constant table contains unexpected keys");
-    }
-}
-
-// 对单个 NDArray 执行所有不依赖其他参数的安全检查。
-void ValidateArgument(const codegen::KernelSignature& signature,
-                      size_t index,
-                      const codegen::KernelArgSpec& spec,
-                      const runtime::NDArray& argument,
-                      const Map<String, runtime::NDArray>& constants) {
-    if (!argument.defined()) {
-        ThrowArgumentError(signature, index, spec, "NDArray is undefined");
-    }
-    if (!argument.storage().defined()) {
-        ThrowArgumentError(signature, index, spec, "Storage is undefined");
-    }
-    if (!SameDType(argument.dtype(), spec->dtype)) {
-        ThrowArgumentError(signature, index, spec,
-                           "dtype expected " + DTypeText(spec->dtype) +
-                               ", actual " + DTypeText(argument.dtype()));
-    }
-    if (argument.device() != spec->device) {
-        ThrowArgumentError(signature, index, spec,
-                           "device expected " + spec->device.ToString() +
-                               ", actual " + argument.device().ToString());
-    }
-    if (!argument.IsContiguous()) {
-        ThrowArgumentError(signature, index, spec,
-                           "layout must be contiguous");
-    }
-
-    const Array<int64_t> expected_shape = spec.shape();
-    const Array<int64_t> actual_shape = argument.shape();
-    if (actual_shape.size() != expected_shape.size()) {
-        ThrowArgumentError(signature, index, spec,
-                           "rank expected " + std::to_string(expected_shape.size()) +
-                               ", actual " + std::to_string(actual_shape.size()));
-    }
-    for (size_t dimension = 0; dimension < expected_shape.size(); ++dimension) {
-        if (actual_shape[dimension] < 0) {
-            ThrowArgumentError(signature, index, spec,
-                               "actual shape contains a negative dimension");
-        }
-        if (expected_shape[dimension] != codegen::kDynamicDimension &&
-            expected_shape[dimension] != actual_shape[dimension]) {
-            ThrowArgumentError(
-                signature, index, spec,
-                "shape dimension " + std::to_string(dimension) + " expected " +
-                    std::to_string(expected_shape[dimension]) + ", actual " +
-                    std::to_string(actual_shape[dimension]));
-        }
-    }
-
-    size_t nbytes = 0;
-    try {
-        nbytes = argument.NBytes();
-        argument.storage().ValidateRange(argument->byte_offset, nbytes);
-    } catch (const std::exception& error) {
-        ThrowArgumentError(signature, index, spec,
-                           std::string("storage range is invalid: ") + error.what());
-    }
-
-    // 零元素张量不会被内核解引用，允许其 Storage data 为 nullptr。
-    if (nbytes != 0) {
-        void* base = argument.storage().data();
-        if (!base) {
-            ThrowArgumentError(signature, index, spec,
-                               "non-empty tensor has a null data pointer");
-        }
-        const uintptr_t base_address = reinterpret_cast<uintptr_t>(base);
-        if (argument->byte_offset >
-            std::numeric_limits<uintptr_t>::max() - base_address) {
-            ThrowArgumentError(signature, index, spec,
-                               "effective data address overflows uintptr_t");
-        }
-        const uintptr_t effective_address = base_address + argument->byte_offset;
-        if (effective_address % spec->alignment != 0) {
-            ThrowArgumentError(signature, index, spec,
-                               "effective data address does not satisfy alignment " +
-                                   std::to_string(spec->alignment));
-        }
-    }
-
-    // 编译常量不可被调用方替换，否则 constant_key 将失去稳定绑定语义。
-    if (spec->role == codegen::KernelArgRole::kConstant) {
-        const runtime::NDArray& bound = constants.at(spec->constant_key);
-        if (argument.get() != bound.get()) {
-            ThrowArgumentError(signature, index, spec,
-                               "constant argument does not match the bound payload");
-        }
     }
 }
 
@@ -270,8 +157,8 @@ AsyncOperation CompiledModule::Launch(
             ", actual " + std::to_string(ordered_arguments.size()));
     }
     for (size_t i = 0; i < specs.size(); ++i) {
-        ValidateArgument(node->signature_, i, specs[i], ordered_arguments[i],
-                         node->constants_);
+        ValidateKernelArgument(node->signature_, i, specs[i],
+                               ordered_arguments[i], node->constants_);
     }
     return node->executable_.Launch(ordered_arguments, stream);
 }

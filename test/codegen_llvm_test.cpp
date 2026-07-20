@@ -16,6 +16,7 @@
 #include "codegen/codegen_c.h"
 #include "relay/relay.h"
 #include "relay/transforms/lower.h"
+#include "runtime/runtime_session.h"
 
 #if KXC_USE_LLVM
 #include <llvm/IR/LLVMContext.h>
@@ -183,6 +184,50 @@ void TestCompilerIntermediateAllocate() {
     module.Launch(arguments, DeviceStream::Default(Device::CPU())).Wait();
     ExpectNear(ReadFloats(arguments[2]), {21, 42, 63, 84});
 }
+
+/*! \brief RuntimeSession 只接收 inputs，并自动分配 add 输出。 */
+void TestRuntimeSessionLLVM() {
+    using namespace kxc;
+    Var x("x", TensorType({4}, "float32"));
+    Var y("y", TensorType({4}, "float32"));
+    Function function({x, y}, Call(relay::Op::Get("add"), {x, y}));
+    runtime::RuntimeSession session(api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2)));
+    Array<runtime::NDArray> inputs{
+        FloatArray({4}, {100, 200, 300, 400}),
+        FloatArray({4}, {1, 2, 3, 4}),
+    };
+
+    Array<runtime::NDArray> outputs = session.Run(inputs);
+    Require(outputs.size() == 1,
+            "RuntimeSession LLVM should allocate one output");
+    ExpectNear(ReadFloats(outputs[0]), {101, 202, 303, 404});
+
+    runtime::RunAsyncResult async_result = session.RunAsync(
+        inputs, DeviceStream::Create(Device::CPU()));
+    Require(async_result.outputs.size() == 1 &&
+                async_result.completion.IsReady(),
+            "LLVM RunAsync should return a completed operation and one output");
+    async_result.completion.Wait();
+    ExpectNear(ReadFloats(async_result.outputs[0]), {101, 202, 303, 404});
+}
+
+/*! \brief RuntimeSession 必须按 constant_key 自动插入 Compiler 持有的常量。 */
+void TestRuntimeSessionLLVMConstant() {
+    using namespace kxc;
+    Var x("x", TensorType({4}, "float32"));
+    runtime::NDArray constant_data =
+        FloatArray({4}, {10, 20, 30, 40});
+    Function function(
+        {x}, Call(relay::Op::Get("add"), {x, Constant(constant_data)}));
+    runtime::RuntimeSession session(api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2)));
+    Array<runtime::NDArray> outputs =
+        session.Run({FloatArray({4}, {1, 2, 3, 4})});
+    Require(outputs.size() == 1,
+            "constant RuntimeSession LLVM should allocate one output");
+    ExpectNear(ReadFloats(outputs[0]), {11, 22, 33, 44});
+}
 #endif
 
 // C emitter 仅作为诊断源码工具，测试不把它声明为可执行 backend。
@@ -205,6 +250,8 @@ int main() {
         {"relay_llvm", TestRelayLLVM},
         {"compiler_llvm", TestCompilerLLVM},
         {"compiler_intermediate_allocate", TestCompilerIntermediateAllocate},
+        {"runtime_session_llvm", TestRuntimeSessionLLVM},
+        {"runtime_session_llvm_constant", TestRuntimeSessionLLVMConstant},
 #endif
         {"diagnostic_c_source", TestDiagnosticCSource},
     };
