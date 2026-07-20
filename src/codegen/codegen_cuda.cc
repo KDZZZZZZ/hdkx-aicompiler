@@ -70,9 +70,8 @@ std::string CodeGenCUDA::Generate(const tir::PrimFunc& function,
     variable_names_.clear();
     used_names_.clear();
 
-    output_ << "#include <stdint.h>\n";
-    output_ << "#include <math.h>\n";
-    output_ << "#include <cuda_fp16.h>\n\n";
+    // NVRTC 不保证继承宿主编译器的系统头搜索路径；基础标量和 CUDA math
+    // intrinsic 均可直接使用，因此发射的常规源码保持自包含。
     output_ << "extern \"C\" __global__ void " << symbol << "(";
     for (size_t i = 0; i < function->params.size(); ++i) {
         if (i != 0) output_ << ", ";
@@ -105,17 +104,17 @@ std::string CodeGenCUDA::DTypeName(tir::DataType dtype) const {
         if (dtype.bits == 64) return "double";
     }
     if (dtype.code == 0) {
-        if (dtype.bits == 8) return "int8_t";
-        if (dtype.bits == 16) return "int16_t";
-        if (dtype.bits == 32) return "int32_t";
-        if (dtype.bits == 64) return "int64_t";
+        if (dtype.bits == 8) return "signed char";
+        if (dtype.bits == 16) return "short";
+        if (dtype.bits == 32) return "int";
+        if (dtype.bits == 64) return "long long";
     }
     if (dtype.code == 1) {
         if (dtype.bits == 1) return "bool";
-        if (dtype.bits == 8) return "uint8_t";
-        if (dtype.bits == 16) return "uint16_t";
-        if (dtype.bits == 32) return "uint32_t";
-        if (dtype.bits == 64) return "uint64_t";
+        if (dtype.bits == 8) return "unsigned char";
+        if (dtype.bits == 16) return "unsigned short";
+        if (dtype.bits == 32) return "unsigned int";
+        if (dtype.bits == 64) return "unsigned long long";
     }
     throw std::runtime_error("CodeGenCUDA: unsupported scalar dtype");
 }

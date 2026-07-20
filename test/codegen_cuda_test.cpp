@@ -29,16 +29,16 @@ void Require(bool condition, const std::string& message) {
 kxc::tir::PrimFunc MakeBoundAdd(const std::string& symbol, int64_t extent = 8) {
     using namespace kxc;
     using namespace kxc::tir;
-    Var a("a", DataType::Float(32));
-    Var b("b", DataType::Float(32));
-    Var c("c", DataType::Float(32));
-    Var thread("tx", DataType::Int(32));
+    tir::Var a("a", DataType::Float(32));
+    tir::Var b("b", DataType::Float(32));
+    tir::Var c("c", DataType::Float(32));
+    tir::Var thread("tx", DataType::Int(32));
     Stmt body = ThreadBinding(
         thread, ThreadIndexKind::kThreadIdxX, IntImm(extent, DataType::Int(32)),
         Store(c, Load(a, PrimExpr(thread)) + Load(b, PrimExpr(thread)),
               PrimExpr(thread)));
-    Array<Var> parameters{a, b, c};
-    Map<Var, Buffer> buffers;
+    Array<tir::Var> parameters{a, b, c};
+    Map<tir::Var, Buffer> buffers;
     for (const auto& parameter : parameters) {
         buffers.Set(parameter,
                     Buffer(parameter, DataType::Float(32),
@@ -101,14 +101,14 @@ void TestUnsupportedTIRRejected() {
 void TestUnboundTIRRejected() {
     using namespace kxc;
     using namespace kxc::tir;
-    Var value("value", DataType::Float(32));
-    Var output("output", DataType::Float(32));
-    Var index("i", DataType::Int(32));
+    tir::Var value("value", DataType::Float(32));
+    tir::Var output("output", DataType::Float(32));
+    tir::Var index("i", DataType::Int(32));
     Stmt body = For(index, IntImm(0, DataType::Int(32)),
                     IntImm(8, DataType::Int(32)), ForType::Serial,
                     Store(output, Load(value, PrimExpr(index)), PrimExpr(index)));
-    Array<Var> parameters{value, output};
-    Map<Var, Buffer> buffers;
+    Array<tir::Var> parameters{value, output};
+    Map<tir::Var, Buffer> buffers;
     for (const auto& parameter : parameters) {
         buffers.Set(parameter,
                     Buffer(parameter, DataType::Float(32),
@@ -119,8 +119,8 @@ void TestUnboundTIRRejected() {
     try {
         (void)codegen::CodeGenCUDA().Generate(
             PrimFunc(parameters, body, buffers), "unbound");
-    } catch (const std::runtime_error& error) {
-        rejected = std::string(error.what()).find("thread binding") !=
+    } catch (const std::exception& error) {
+        rejected = std::string(error.what()).find("thread-bound") !=
                    std::string::npos;
     }
     Require(rejected, "CodeGenCUDA accepted an unbound serial PrimFunc");
@@ -162,6 +162,7 @@ void TestMissingSymbol(const kxc::Device& device,
     const std::string source = CodeGenCUDA().Generate(
         MakeBoundAdd("actual_symbol"), "actual_symbol");
     bool rejected = false;
+    std::string diagnostic;
     try {
         (void)CUDAModule::Compile(
             source, AddSignature("missing_symbol", device),
@@ -169,10 +170,11 @@ void TestMissingSymbol(const kxc::Device& device,
                                  {8, 1, 1}),
             options);
     } catch (const std::runtime_error& error) {
-        rejected = std::string(error.what()).find("cuModuleGetFunction") !=
+        diagnostic = error.what();
+        rejected = diagnostic.find("cuModuleGetFunction") !=
                    std::string::npos;
     }
-    Require(rejected, "CUDA module accepted a missing entry symbol");
+    Require(rejected, "CUDA missing-symbol diagnostic mismatch: " + diagnostic);
 }
 
 /*! \brief 在 GPU 上执行 add，并验证 operation 独立保活输入 Storage 和 module。 */
@@ -362,8 +364,19 @@ void TestCompilerRelu(const kxc::Device& device) {
 
 }  // namespace
 
-/*! \brief 顺序执行纯源码测试和可选真实 CUDA 测试，任一失败返回非零。 */
-int main() {
+/*!
+ * \brief 顺序执行纯源码测试和可选真实 CUDA 测试，任一失败返回非零。
+ *
+ * `--memcheck` 只跳过会故意触发 CUDA_ERROR_NOT_FOUND 的符号负例，避免
+ * Compute Sanitizer 把预期 Driver 错误计入内存检查汇总。
+ */
+int main(int argc, char** argv) {
+    const bool memcheck_mode =
+        argc == 2 && std::string(argv[1]) == "--memcheck";
+    if (argc > 2 || (argc == 2 && !memcheck_mode)) {
+        std::cerr << "usage: codegen_cuda_test [--memcheck]\n";
+        return 2;
+    }
     const std::vector<std::pair<const char*, void (*)()>> source_tests = {
         {"source_emission", TestSourceEmission},
         {"unsupported_tir_rejected", TestUnsupportedTIRRejected},
@@ -385,8 +398,12 @@ int main() {
         const auto options = CompileOptions(device);
         TestNVRTCLog(options);
         std::cout << "[PASS] nvrtc_log\n";
-        TestMissingSymbol(device, options);
-        std::cout << "[PASS] missing_symbol\n";
+        if (!memcheck_mode) {
+            TestMissingSymbol(device, options);
+            std::cout << "[PASS] missing_symbol\n";
+        } else {
+            std::cout << "[SKIP] missing_symbol under Compute Sanitizer\n";
+        }
         TestAsyncLaunchLifetime(device, options);
         std::cout << "[PASS] async_launch_lifetime\n";
         TestByteOffsetLaunch(device, options);

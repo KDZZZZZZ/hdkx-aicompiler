@@ -286,6 +286,15 @@ CudaScheduleResult BindCudaThreads(const PrimFunc& function, const Target& targe
         codegen::Dim3{static_cast<uint32_t>(grid_size), 1, 1},
         codegen::Dim3{static_cast<uint32_t>(block_size), 1, 1}, 0);
     Map<String, ObjectRef> attrs = CopyAttrs(function->attrs);
+    const String symbol_key("global_symbol");
+    if (attrs.count(symbol_key)) {
+        const auto* symbol = attrs.at(symbol_key).As<StringObj>();
+        // Relay lowering 默认使用 main；CUDA 禁止 main 成为 __global__ 函数。
+        // 调度阶段重命名可保证后续 Signature、NVRTC 和 Driver lookup 同源。
+        if (symbol && symbol->data == "main") {
+            attrs.Set(symbol_key, String("kxc_cuda_main"));
+        }
+    }
     attrs.Set(String(kCudaLaunchMetadataAttr), ObjectRef(metadata));
     attrs.Set(String(kCudaWorkSizeAttr),
               IntImm(work_size, DataType::Int(64)));
