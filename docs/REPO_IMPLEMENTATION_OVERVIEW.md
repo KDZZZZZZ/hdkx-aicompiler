@@ -15,7 +15,7 @@ ONNX/手写模型
   -> Relay lowering to TE
   -> TE tensor DAG lowering to TIR PrimFunc
   -> TIR pass pipeline
-  -> Codegen C/LLVM
+  -> Codegen LLVM/CUDA
   -> CompiledKernel
   -> RuntimeSession / DeviceAPI / Disco execution
 ```
@@ -27,8 +27,8 @@ ONNX/手写模型
 - TE/TOPI 风格的 tensor compute。
 - TIR 表达式、语句和 TIR pass。
 - Relay 到 TIR 的 lowering。
-- LLVM JIT codegen 和 C 源码 codegen。
-- 自适应 runtime，包括 shape 统计、kernel cache、后台编译。
+- LLVM ORC JIT 与 CUDA NVRTC/Driver codegen。
+- 强类型 RuntimeSession，包括输入校验、常量绑定、静态输出分配和同步/异步执行。
 - CPU/CUDA DeviceAPI。
 - Disco 风格的多 worker 执行计划和 CPU CCL 模拟。
 - profiling bundle 和 Python 离线分析工具。
@@ -41,11 +41,11 @@ ONNX/手写模型
 
 | CMake 选项 | 默认值 | 作用 |
 |---|---:|---|
-| `KXC_ENABLE_CUDA` | `ON` | 检测 CUDA Toolkit，决定是否启用 CUDA DeviceAPI |
+| `KXC_ENABLE_CUDA` | `ON` | 检测 CUDA Toolkit，决定是否启用 CUDA DeviceAPI、NVRTC/Driver codegen 和 CUDA 测试 |
 | `KXC_ENABLE_LLVM` | `ON` | 检测 LLVM，决定是否启用 LLVM codegen/JIT |
 | `KXC_BUILD_RESNET18_IR_DUMP` | `ON` | 构建 ResNet18 IR dump 示例 |
 | `KXC_BUILD_PASS_TESTS` | `ON` | 构建 pass 相关测试 |
-| `KXC_BUILD_CODEGEN_TESTS` | `ON` | 构建 LLVM codegen 测试 |
+| `KXC_BUILD_CODEGEN_TESTS` | `ON` | 在 LLVM 可用时构建 LLVM codegen 测试；CUDA codegen 测试随 pass 测试和 CUDA 特性构建 |
 | `KXC_BUILD_DEBUG_EXAMPLES` | `OFF` | 构建临时调试示例 |
 
 `KXC_RUNTIME_SOURCES` 汇总了 runtime 静态库使用的 C++ 源文件。CUDA 和 LLVM 通过编译定义 `KXC_USE_CUDA=<0|1>`、`KXC_USE_LLVM=<0|1>` 向源码暴露。
@@ -414,61 +414,52 @@ tir::PrimFunc LowerToTIR(Function func);
 
 核心文件：
 
-- `include/codegen/codegen.h`
+- `include/codegen/backend.h`
+- `include/codegen/kernel_signature.h`
+- `include/codegen/compiled_kernel.h`
 - `include/codegen/codegen_c.h`
 - `include/codegen/codegen_llvm.h`
 - `include/codegen/llvm_jit.h`
-- `include/codegen/compiled_kernel.h`
+- `include/codegen/codegen_cuda.h`
+- `include/codegen/cuda_module.h`
+- `src/codegen/kernel_signature.cc`
+- `src/codegen/compiled_kernel.cc`
 - `src/codegen/codegen_c.cc`
 - `src/codegen/codegen_llvm.cc`
 - `src/codegen/llvm_jit.cc`
-- `src/codegen/compiled_kernel.cc`
+- `src/codegen/codegen_cuda.cc`
+- `src/codegen/cuda_module.cc`
 
 ### 10.1 后端类型
 
 `CodeGenBackend` 当前定义：
 
-- `kLLVM`：LLVM IR 到 JIT，默认路径。
-- `kC`：生成 C 源码，主要用于调试/备用。
-- `kCUDA`：枚举预留，当前没有完整 CUDA codegen。
+- `kLLVM`：LLVM IR 经 ORC JIT 生成 CPU 机器码。
+- `kCUDA`：CUDA C 经 NVRTC 生成 PTX，再由 Driver API 加载 GPU 内核。
 
-### 10.2 C codegen
+公共调用契约不由函数指针或后端原生句柄定义，而由以下对象共同冻结：
 
-`CodeGenC::Generate(PrimFunc, name)` 遍历 TIR，生成 C 源码字符串。`CompiledModule::SaveCSource(path)` 使用它保存源码。
+- `KernelSignature`：symbol 及 input/constant/output 的有序 `KernelArgSpec`；
+- `KernelLaunchMetadata`：执行设备、后端和 CUDA grid/block；
+- `CompiledKernel`：强持有上述契约和后端私有 `KernelLauncher`。
 
-这条路径主要用于调试可读输出。当前 `Compiler::Compile` 中如果 backend 不是 LLVM，会抛出：
+`CSourceEmitter` 仍可把 PrimFunc 生成可读 C 源码，用于诊断和教学；它不是 `CodeGenBackend`，也没有接入可执行模块装载路径。
 
-```text
-C backend compilation not fully implemented. Use LLVM backend.
-```
+### 10.2 LLVM codegen 与 JIT
 
-也就是说 C codegen 有源码生成能力，但不是完整可执行编译路径。
+`CodeGenLLVM` 把优化后的 `tir::PrimFunc` 转为 LLVM Module。`LLVMJITEngine` 使用 ORC LLJIT 优化、验证并查找 `KernelSignature.symbol`，返回强类型 `CompiledKernel`。launcher 独占 module、context、函数地址和 LLJIT 生命周期；裸函数地址不会穿过 codegen 边界。
 
-### 10.3 LLVM codegen
+LLVM launcher 在调用线程同步完成内核执行，再返回已经完成的 `AsyncOperation`。
 
-`CodeGenLLVM` 在 `KXC_USE_LLVM=1` 时编译。它把 `tir::PrimFunc` 转成 LLVM Module：
+### 10.3 CUDA codegen 与模块加载
 
-- `CreateFuncType` 根据 `PrimFunc.params` 生成函数签名。
-- `GenExpr` 递归生成 LLVM Value。
-- `GenStmt` 递归生成 basic block、loop、store、alloca 等。
-- `var_map_` 维护 TIR Var 到 LLVM Value 的映射。
-- `TakeModule()` 转移 module 所有权。
+CUDA Target 先经 `BindCudaThreads` 建立启动维度，再由 `CodeGenCUDA` 生成 CUDA C。`CUDAModule` 使用 Target 的 compute capability 选择 NVRTC architecture，编译 PTX、加载 `CUmodule` 并解析入口 symbol。
 
-### 10.4 LLVM JIT
+CUDA launcher 仅在后端内部把已校验 NDArray 转成 Driver 参数数组。`AsyncOperation` 同时保活参数 Storage、stream 和 `CompiledKernel`，GPU 工作完成前不会卸载 `CUmodule`。
 
-`LLVMJITEngine` 使用 LLVM ORC LLJIT：
+### 10.4 CompiledKernel 边界
 
-1. 初始化 native target。
-2. 可选执行 LLVM optimization pipeline。
-3. 把 module 加入 JIT。
-4. 查找目标 symbol。
-5. 构造 `CompiledKernelNode`，保存：
-   - `backend = kLLVM`
-   - `func_ptr`
-   - `kernel_name`
-   - `jit_resource`
-
-`CompiledKernel::operator()(std::vector<void*> args)` 统一调用 kernel。当前函数指针调用模型假设 kernel 接收 packed args 指针风格。
+`CompiledKernel::Launch(Array<NDArray>, DeviceStream)` 是唯一内部启动入口。公共层不暴露 `func_ptr`、`module_ptr` 或 `std::vector<void*>`；仅 LLVM/CUDA launcher 可以在完成强类型校验后进行后端 ABI 打包。
 
 ## 11. 编译 API 主链路
 
@@ -481,117 +472,51 @@ C backend compilation not fully implemented. Use LLVM backend.
 
 ### 11.1 CompileConfig
 
-`CompileConfigNode` 字段：
+`CompileConfigNode` 只包含：
 
-- `mode`：`kAOT` / `kJIT` / `kAdaptive`
-- `opt_level`
-- `target`
-- `backend`
-- Adaptive 字段：
-  - `suggested_input_shapes`
-  - `background_threads`
-  - `enable_hot_swap`
-  - `cache_dir`
-- profiling 字段：
-  - `profile_options`
+- `target`：backend kind、物理设备和能力快照的唯一事实来源；
+- `opt_level`：0 到 3 的确定性 Relay/TIR pass 策略；
+- `profile_options`：编译阶段 profiling 与 artifact 捕获配置。
 
-工厂方法：
-
-- `CompileConfig::AOT(target, opt_level)`
-- `CompileConfig::JIT(target)`
-- `CompileConfig::Adaptive(target, suggested_shapes)`
+调用方统一使用 `CompileConfig::Create(target, opt_level)`。配置中不存在 AOT/JIT/Adaptive mode，也不携带 RuntimeSession、cache 或后台线程选项。
 
 ### 11.2 Compiler::Compile
 
-非 Adaptive 模式当前主流程：
+Compiler 执行七个步骤；前六步由单向 `CompileResult` 状态机承载，最后的 assemble 在状态机完成后构造 `CompiledModule`：
 
 ```text
-Function
-  -> RunRelayPassPipeline
-  -> LowerToTIR
-  -> RunTIRPassPipeline
-  -> CodeGenLLVM
-  -> LLVMJITEngine::Compile
-  -> CompiledModule
+validate
+  -> optimize_relay
+  -> lower
+  -> optimize_tir
+  -> build_signature
+  -> build_backend
+  -> assemble
 ```
 
-根据 mode 选择 pass：
+`opt_level` 只选择 pass 集合。`build_backend` 完全按 Target dispatch：`llvm` + CPU 进入 LLVM ORC JIT，`cuda` + CUDA Device 进入 CUDA emitter、NVRTC 和 Driver API。缺少对应构建特性时返回明确错误，Compiler 不创建 RuntimeSession。
 
-- AOT：Relay/TIR 都走 `optimize_default`。
-- JIT：Relay/TIR 走较轻的 `fold_constant` 和 `simplify_expr`。
+### 11.3 CompiledModule
 
-Adaptive 模式不会立即走完整同步编译链路，而是创建 `RuntimeSession`，并对 `suggested_input_shapes` 做 warmup。
+`CompiledModule` 一次性持有 Target、优化后 TIR、`KernelSignature`、`KernelLaunchMetadata`、常量表、`CompiledKernel` 和可选 profiling context。`Launch` 只接受按签名完整排序的 `Array<NDArray>` 与同 Device 的 `DeviceStream`，在进入后端前校验数量、dtype、shape、Device、连续布局、Storage range、alignment 和常量对象身份。
 
-`CompiledModule` 有两种持有模式：
-
-| 模式 | 字段 |
-|---|---|
-| AOT/JIT | `prim_func_` + `CompiledKernel kernel_` |
-| Adaptive | `relay_func_` + `RuntimeSession session_` |
-
-## 12. Runtime 和自适应编译
+## 12. RuntimeSession
 
 核心文件：
 
 - `include/runtime/runtime_session.h`
-- `include/runtime/kernel_cache.h`
-- `include/runtime/shape_predictor.h`
-- `include/runtime/background_compiler.h`
-- `include/runtime/kernel_runner.h`
-- `src/runtime/*.cc`
+- `src/runtime/runtime_session.cc`
 
 ### 12.1 RuntimeSession
 
-`RuntimeSession` 管理自适应运行：
+`RuntimeSessionNode` 只强持有一个 ready `CompiledModule`，不持有 Compiler、cache、默认 stream、后台线程或可变调用状态。
 
-- 保存原始 Relay function 和外部 config。
-- 构造内部 AOT config：`internal_config_ = CompileConfig::AOT(...)`。
-- 创建后台编译器线程池。
-- 管理 kernel cache 和 shape predictor。
+- `Run(inputs)`：使用目标设备默认 stream，自动绑定模块常量、分配静态输出并等待完成；
+- `RunAsync(inputs, stream)`：在显式同 Device stream 上提交，返回 `RunAsyncResult { outputs, completion }`；
+- 输入在输出分配前完成校验，参数最终严格按 `KernelSignature` 顺序组装；
+- completion 保活参数 Storage 和 stream；尚未完成的 CUDA launch 还保活后端 executable。
 
-`Run(args, input_shapes)` 流程：
-
-1. 将 `input_shapes` 转 `ShapeSignature`。
-2. `ShapePredictor::Record(sig)` 记录输入形状频率。
-3. 查 `KernelCache::GetExact(sig)`。
-4. exact 命中则直接运行。
-5. exact 未命中则查 `GetFuzzy(sig)`。
-6. fuzzy 命中则运行 fallback，并可能调度后台优化。
-7. 都未命中则同步编译一次，插入 cache，运行。
-8. 调用 `MaybeScheduleOptimization(sig)`。
-
-### 12.2 ShapePredictor
-
-`ShapePredictor` 维护：
-
-- `freq_`：shape 到出现次数。
-- `recent_`：最近 shape 队列，最多 200。
-- `total_count_`。
-
-`ShouldCompile(sig, count_threshold=2, ratio=0.05)` 当前策略是：
-
-- 出现次数小于 threshold 不编译。
-- 出现次数达到 threshold 且占比足够，或单纯达到 threshold，则允许编译。
-
-### 12.3 KernelCache
-
-`KernelCache` 支持：
-
-- exact match：shape 完全一致。
-- fuzzy match：shape 维度数一致，cached 每个维度大于等于 query，并选择距离最小的 cached kernel。
-
-这意味着更大 shape 的 kernel 可以作为更小 shape 输入的 fallback，前提是代码本身能兼容这种执行方式。
-
-### 12.4 BackgroundCompiler
-
-`BackgroundCompiler` 是优先队列 + 线程池：
-
-- `CompileTask.priority` 越大越优先。
-- worker 从队列取任务后调用 `api::Compiler::Compile`。
-- 编译成功后通过 `on_complete` 回调把 module 放进 cache。
-- profiling 上下文通过 task 字段跨线程传播。
-
-当前 `RuntimeSession::MaybeScheduleOptimization` 会用 observed count 作为 priority，并用 `submitted_shapes_` 去重。
+当前不实现动态输出 shape function、shape specialization、exact/fuzzy cache、后台重编译、热替换或 ExecutionPlan module registry。这些能力若后续引入，必须建立新契约，不能恢复旧 Adaptive Runtime 的裸参数接口。
 
 ## 13. Device、Target 和 NDArray
 
@@ -612,12 +537,12 @@ Adaptive 模式不会立即走完整同步编译链路，而是创建 `RuntimeSe
 
 ### 13.1 Device
 
-`Device` 是 Object，包含：
+`Device` 是具有值语义的 ObjectRef，节点包含：
 
-- `DeviceTypeCode`：CPU/GPU/OpenCL/Metal/Unknown。
+- `DeviceTypeCode`：CPU/CUDA/OpenCL/Metal/Unknown。
 - `device_id`。
 
-`DeviceManager` 缓存 device object，`ObjectRef Device(type, id)` 是工厂函数。
+`DeviceManager` 按 `(type, id)` 规范驻留节点；`Device(type, id)`、`Device::CPU` 和 `Device::CUDA` 都返回该规范对象。
 
 ### 13.2 DeviceAPI
 
@@ -647,24 +572,24 @@ CUDA backend：
 - 编译期开关 `KXC_USE_CUDA`。
 - 支持 `cudaMalloc/cudaFree`。
 - 支持 Host/Device/Device copy。
-- 使用 thread-local `cudaStream_t` 保存当前 stream。
-- 提供 stream create/free/set/get/sync。
+- `DeviceStream` 显式持有 stream 所属 Device 和后端 handle。
+- 提供默认/自有 stream、event 记录/查询/等待和显式 sync，不维护 thread-local current stream。
 - target kind 返回 `"cuda"`。
 
 ### 13.3 NDArray
 
-`runtime::NDArray` 包装 DLTensor：
+`runtime::NDArray` 是持有 `NDArrayNode` 的 ObjectRef：
 
-- 持有 `DLTensor dl_tensor`。
-- 持有 shape vector。
-- 构造时根据 shape/dtype 分配数据。
-- 析构时释放数据。
+- 节点持有 `DLTensor` 只读视图、shape/strides 元数据和 `Storage`；
+- `NDArray::Empty/Zeros` 通过 Storage/DeviceAPI 按 alignment 分配；
+- view 共享原 Storage，并校验连续布局、byte offset 和容量；
+- 同步/异步 copy 统一经 Storage 边界，异步结果用 `AsyncOperation` 保活两端 Storage。
 
 当前 dtype 支持集中在各使用点做字符串/DLDataType 转换，例如 `"float32"`、`"int64"`。
 
 ### 13.4 Target 和 VirtualDevice
 
-`Target` 由 `BuildTarget(Device)` 或 `BuildTarget(type, id)` 创建：
+`Target` 由 `BuildTarget(Device)` 创建：
 
 - CPU target kind 通常是 `"llvm"`。
 - CUDA target kind 是 `"cuda"`。
@@ -672,7 +597,7 @@ CUDA backend：
 
 `VirtualDevice` 用于 Relay pass 和多设备规划，字段：
 
-- `device_obj`
+- `device`
 - `target`
 - `memory_scope`
 - `virtual_device_id`
@@ -817,10 +742,8 @@ bundle 文件：
 - `Compiler::Compile`
 - Relay/TIR pass pipeline
 - `LowerToTIR`
-- `RuntimeSession`
-- `BackgroundCompiler`
 - `ExecutionPlanExecutor`
-- CPU/CUDA DeviceAPI
+- CUDA CUPTI activity
 
 ### 15.2 Python agent
 
@@ -867,6 +790,10 @@ bundle 文件：
 |---|---|
 | `test/pass_pipeline_test.cpp` | Relay/TIR pass 单元测试和 pipeline 顺序测试 |
 | `test/codegen_llvm_test.cpp` | TIR/Relay 到 LLVM JIT 的 smoke test |
+| `test/codegen_cuda_test.cpp` | CUDA source、NVRTC/Driver launch 和 RuntimeSession 数值测试 |
+| `test/compiled_module_test.cpp` | CompiledModule 强类型参数、常量和启动契约测试 |
+| `test/runtime_session_test.cpp` | RuntimeSession 输入校验、装配、输出和并发局部状态测试 |
+| `test/object_test.cpp` | ObjectRef 类型、引用计数、Arena 和跨线程发布测试 |
 | `test/resnet18_ir_dump.cpp` | 手写/生成 ResNet18 Relay graph，输出 Relay/TIR 文本 |
 | `test/profile_bundle_test.cpp` | profiling bundle 结构和事件 smoke test |
 | `test/cupti_smoke_test.cpp` | CUDA/CUPTI activity 采集 smoke test，CUDA 开启时构建 |
@@ -939,10 +866,10 @@ cmake --build out/build/dev-ninja-cpu --target run_pass_pipeline_test
 - 必要时扩展 intrinsic 映射。
 - 在 `test/codegen_llvm_test.cpp` 增加直接 TIR 和 Relay lowering 两类覆盖。
 
-如果是 C：
+如果是 CUDA：
 
-- 扩展 `CodeGenC::GenExpr` / `GenStmt`。
-- 用 `SaveCSource` 或 IR dump 测试可读输出。
+- 扩展 `CodeGenCUDA::GenExpr` / `GenStmt`。
+- 同时补齐 CUDA source、NVRTC/Driver launch 和 RuntimeSession 数值测试。
 
 ## 19. 当前实现边界
 
@@ -951,9 +878,8 @@ cmake --build out/build/dev-ninja-cpu --target run_pass_pipeline_test
 - Relay type inference 不完整，很多地方依赖构图时手动填 `TensorType`。
 - `LowerToTIR` 只支持单输出 compute tensor。
 - TE schedule API 有雏形，但 lowering 当前主要生成朴素 loop nest。
-- C codegen 能生成源码，但编译执行路径未完整接入。
-- LLVM codegen 是主可执行后端，但支持的 TIR 节点集合有限。
-- CUDA 有 DeviceAPI 和 profiling/CUPTI smoke test，但没有完整 CUDA kernel codegen。
+- LLVM 和 CUDA 都已接入 Compiler 主链路，但各自支持的 TIR 节点集合仍有限。
+- CUDA 已覆盖 NVRTC、Driver launch、RuntimeSession 数值和 CUPTI smoke；复杂 schedule 与算子覆盖仍需扩展。
 - Disco execution plan executor 当前偏解释和数据移动模拟，不执行真实编译后 kernel。
 - Python ONNX 转 C++ 脚本偏实验性，路径和覆盖算子需要按实际模型维护。
 
