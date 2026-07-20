@@ -89,7 +89,8 @@ CompiledModule Compiler::Compile(Function func, CompileConfig config) {
     Function typed_func = relay::InferTypePass(func);
     Function optimized_func = relay::RunRelayPassPipeline(typed_func, relay_passes);
     optimized_func = relay::InferTypePass(optimized_func);
-    tir::PrimFunc prim_func = relay::LowerToTIR(optimized_func);
+    relay::LoweredFunction lowered = relay::LowerToTIR(optimized_func);
+    tir::PrimFunc prim_func = lowered->prim_func;
 
     Array<String> passes;
     if (config->mode == CompileMode::kAOT) {
@@ -128,16 +129,25 @@ CompiledModule Compiler::Compile(Function func, CompileConfig config) {
     if (profile_context) {
         profile_context->Flush();
     }
-    return CompiledModule(config, prim_func, kernel, profile_context);
+    return CompiledModule(config, prim_func, kernel, lowered.constants(), profile_context);
 }
 
 CompiledModule::CompiledModule(CompileConfig config, tir::PrimFunc prim_func,
                                codegen::CompiledKernel kernel,
+                               Array<relay::ConstantBinding> constants,
                                std::shared_ptr<profiling::ProfileContext> profile_context)
     : config_(config), prim_func_(prim_func), kernel_(kernel),
+      constants_(std::move(constants)),
       profile_context_(std::move(profile_context)) {
     codegen::CodeGenC codegen_c;
     c_source_ = codegen_c.Generate(prim_func, "main");
+}
+
+// 返回独立 Array，防止调用方通过共享容器别名改写模块内常量顺序。
+Array<relay::ConstantBinding> CompiledModule::GetConstants() const {
+    Array<relay::ConstantBinding> result;
+    for (const auto& binding : constants_) result.push_back(binding);
+    return result;
 }
 
 CompiledModule::CompiledModule(CompileConfig config, Function relay_func,

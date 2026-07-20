@@ -479,7 +479,7 @@ int main() {
 
         DumpRelay(f, ofs);
 
-        tir::PrimFunc pf = LowerToTIR(f);
+        tir::PrimFunc pf = LowerToTIR(f)->prim_func;
         pf = tir::RunTIRPassPipeline(
             pf, {kxc::String("fold_constant"), kxc::String("simplify_expr")});
         tir::pass::DumpPrimFunc(pf, ofs);

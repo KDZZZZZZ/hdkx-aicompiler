@@ -10,17 +10,11 @@
 
 #include "base/container.h"
 #include "base/pass.h"
+#include "codegen/backend.h"
 #include "tir/stmt.h"
 
 namespace kxc {
 namespace codegen {
-
-/*! \brief 代码生成后端类型。 */
-enum class CodeGenBackend {
-    kLLVM,  // LLVM IR → JIT（默认，高性能）
-    kC,     // C源码 → gcc（备用，可调试）
-    kCUDA,  // CUDA（GPU，未来扩展）
-};
 
 /*! \brief 代码生成产物，承载源码/模块指针和函数签名元信息。 */
 struct CodeGenResult {

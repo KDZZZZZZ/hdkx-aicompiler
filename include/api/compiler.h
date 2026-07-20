@@ -12,6 +12,7 @@
 #include "base/ndarray.h"
 #include "codegen/compiled_kernel.h"
 #include "relay/relay.h"
+#include "relay/transforms/lower.h"
 #include "tir/stmt.h"
 
 namespace kxc {
@@ -51,6 +52,7 @@ public:
     CompiledModule(CompileConfig config,
                    tir::PrimFunc prim_func,
                    codegen::CompiledKernel kernel,
+                   Array<relay::ConstantBinding> constants,
                    std::shared_ptr<profiling::ProfileContext> profile_context = nullptr);
 
     /*! \brief Adaptive 模式构造函数，持有 Relay 函数和 RuntimeSession。 */
@@ -85,6 +87,9 @@ public:
     /*! \brief 获取生成的 TIR PrimFunc，主要用于调试和保存 IR。 */
     const tir::PrimFunc& GetPrimFunc() const { return prim_func_; }
 
+    /*! \brief 返回常量绑定的独立数组，保证编译模块持有 payload 生命周期。 */
+    Array<relay::ConstantBinding> GetConstants() const;
+
     /*! \brief 将 PrimFunc 对应的 C 源码保存到指定路径。 */
     void SaveCSource(const std::string& path) const;
 
@@ -97,6 +102,8 @@ private:
     // AOT/JIT模式
     tir::PrimFunc prim_func_;
     codegen::CompiledKernel kernel_;
+    /*! \brief 与 kernel 参数段同序的常量绑定，由模块保活到最后一次引用释放。 */
+    Array<relay::ConstantBinding> constants_;
     std::string c_source_;
 
     // Adaptive模式

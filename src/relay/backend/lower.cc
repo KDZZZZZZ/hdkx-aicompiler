@@ -166,6 +166,13 @@ Array<te::Tensor> InvokeRelayToTE(const OpNode* op_node,
 // 把已完成类型推导的 Relay 数据流转换为 TE Tensor 图。
 class RelayToTEConverter : public RelayPassFunctor<Array<te::Tensor>> {
 public:
+    /*! \brief 将常量 placeholder、稳定 key 和原始 payload 保存在同一记录中。 */
+    struct ConstantRecord {
+        te::Tensor tensor;
+        String key;
+        runtime::NDArray value;
+    };
+
     // 为函数参数建立 TE placeholder 与变量映射。
     explicit RelayToTEConverter(const Function& func) {
         for (const auto& param : func->params) {
@@ -187,15 +194,16 @@ public:
 
     // 返回按函数参数顺序创建的输入 placeholder。
     const Array<te::Tensor>& input_tensors() const { return input_tensors_; }
-    // 返回为 Relay Constant 创建的常量 placeholder。
-    const Array<te::Tensor>& constant_tensors() const { return constant_tensors_; }
+    // 返回按确定性 Relay 遍历顺序建立的常量记录。
+    const std::vector<ConstantRecord>& constant_records() const {
+        return constant_records_;
+    }
 
 protected:
     std::unordered_map<const Object*, Array<te::Tensor>> memo_;
     std::unordered_map<const Object*, te::Tensor> var_map_;
     Array<te::Tensor> input_tensors_;
-    Array<te::Tensor> constant_tensors_;
-    int constant_counter_ = 0;
+    std::vector<ConstantRecord> constant_records_;
 
     // 按表达式对象身份记忆化 TE 输出集合。
     Array<te::Tensor> Visit(const Expr& expr) override {
@@ -215,16 +223,19 @@ protected:
         return {it->second};
     }
 
-    // 从 Storage-backed NDArray 元数据创建只读常量 placeholder。
+    // 从 Storage-backed NDArray 创建 placeholder，并同步记录 payload 与稳定 key。
     Array<te::Tensor> VisitConstant(const ConstantNode* op, const Expr& ref) override {
         Array<tir::PrimExpr> shape;
         for (const auto dim : op->data->shape_storage) {
             shape.push_back(tir::IntImm(dim, tir::DataType::Int(64)));
         }
         tir::DataType dtype = DTypeFromDL(op->data->dl_tensor.dtype);
-        std::string name = "const_" + std::to_string(constant_counter_++);
+        const size_t ordinal = constant_records_.size();
+        std::string name = "const_" + std::to_string(ordinal);
+        String key("relay.constant." + std::to_string(ordinal));
         te::Tensor t = te::placeholder(shape, dtype, name);
-        constant_tensors_.push_back(t);
+        // 单条记录避免 tensor、key 和 NDArray 使用平行数组后发生位置漂移。
+        constant_records_.push_back(ConstantRecord{t, std::move(key), op->data});
         return {t};
     }
 
@@ -497,8 +508,203 @@ std::string MakeOutputVarName(const te::Tensor& tensor,
 
 }  // namespace
 
-// 完成类型推导、Relay-to-TE 转换、拓扑排序并组装最终 TIR PrimFunc。
-tir::PrimFunc LowerToTIR(Function func) {
+// 构造常量绑定时立即拒绝无法映射到 PrimFunc 参数的状态。
+ConstantBinding::ConstantBinding(String key, runtime::NDArray value, int64_t param_index) {
+    auto* node = new ConstantBindingNode();
+    node->key = std::move(key);
+    node->value = std::move(value);
+    node->param_index = param_index;
+    SetData(node);
+    Validate();
+}
+
+// 从 ObjectRef 恢复绑定时检查节点类型，禁止错误静态转换。
+ConstantBinding::ConstantBinding(const ObjectRef& ref) : ObjectRef(ref) {
+    if (defined() && !As<ConstantBindingNode>()) {
+        SetData(nullptr);
+        throw std::invalid_argument("ObjectRef does not contain ConstantBindingNode");
+    }
+    if (defined()) Validate();
+}
+
+// 恢复同类型节点时也执行内容校验，防止直接 new Node 绕过公开构造函数。
+void ConstantBinding::Validate() const {
+    const auto* node = operator->();
+    if (std::string(node->key).empty()) {
+        throw std::invalid_argument("ConstantBinding key must not be empty");
+    }
+    if (!node->value.defined()) {
+        throw std::invalid_argument("ConstantBinding value must be defined");
+    }
+    if (node->param_index < 0) {
+        throw std::invalid_argument("ConstantBinding param_index must be non-negative");
+    }
+}
+
+// 返回类型安全节点；undefined 绑定没有合法的常量语义。
+const ConstantBindingNode* ConstantBinding::operator->() const {
+    const auto* node = As<ConstantBindingNode>();
+    if (!node) throw std::runtime_error("undefined or invalid ConstantBinding");
+    return node;
+}
+
+// 深拷贝 attrs key 列表，隔离 Array 共享可变实现。
+ConstantKeyList::ConstantKeyList(Array<String> keys) {
+    auto* node = new ConstantKeyListNode();
+    for (const auto& key : keys) node->keys_.push_back(key);
+    SetData(node);
+    Validate();
+}
+
+// 从 attrs 恢复时使用专用节点 type key，避免 Array<T> 元素类型擦除导致 UB。
+ConstantKeyList::ConstantKeyList(const ObjectRef& ref) : ObjectRef(ref) {
+    if (defined() && !As<ConstantKeyListNode>()) {
+        SetData(nullptr);
+        throw std::invalid_argument("ObjectRef does not contain ConstantKeyListNode");
+    }
+    if (defined()) Validate();
+}
+
+// 返回独立 key 数组，调用方不能通过副本改写 PrimFunc attrs 内的契约。
+Array<String> ConstantKeyList::keys() const {
+    Array<String> result;
+    for (const auto& key : operator->()->keys_) result.push_back(key);
+    return result;
+}
+
+// key 在单个 lowered function 内承担常量身份，因此必须非空且唯一。
+void ConstantKeyList::Validate() const {
+    std::unordered_set<std::string> seen;
+    for (const auto& key : operator->()->keys_) {
+        const std::string text = key;
+        if (text.empty() || !seen.insert(text).second) {
+            throw std::invalid_argument("ConstantKeyList keys must be non-empty and unique");
+        }
+    }
+}
+
+// 返回类型安全节点；普通 Array 或 String attrs 不能伪装为 key 列表。
+const ConstantKeyListNode* ConstantKeyList::operator->() const {
+    const auto* node = As<ConstantKeyListNode>();
+    if (!node) throw std::runtime_error("undefined or invalid ConstantKeyList");
+    return node;
+}
+
+// 组合 lowering 产物，并核对 attrs、参数槽和常量绑定的一一对应关系。
+LoweredFunction::LoweredFunction(tir::PrimFunc prim_func,
+                                 Array<ConstantBinding> constants) {
+    auto* node = new LoweredFunctionNode();
+    node->prim_func = std::move(prim_func);
+    for (const auto& binding : constants) node->constants_.push_back(binding);
+    SetData(node);
+    Validate();
+}
+
+// 从 ObjectRef 恢复 lowering 产物时检查节点类型并重新验证内容。
+LoweredFunction::LoweredFunction(const ObjectRef& ref) : ObjectRef(ref) {
+    if (defined() && !As<LoweredFunctionNode>()) {
+        SetData(nullptr);
+        throw std::invalid_argument("ObjectRef does not contain LoweredFunctionNode");
+    }
+    if (defined()) Validate();
+}
+
+// 返回独立绑定数组，防止共享容器别名改变常量参数顺序。
+Array<ConstantBinding> LoweredFunction::constants() const {
+    Array<ConstantBinding> result;
+    for (const auto& binding : operator->()->constants_) result.push_back(binding);
+    return result;
+}
+
+// 核对 attrs、参数槽、Buffer 元数据和常量 NDArray，尽早阻断错误 ABI。
+void LoweredFunction::Validate() const {
+    const auto* node = operator->();
+    const tir::PrimFunc& prim_func = node->prim_func;
+    const Array<ConstantBinding>& constants = node->constants_;
+    if (!prim_func.defined()) {
+        throw std::invalid_argument("LoweredFunction prim_func must be defined");
+    }
+
+    int64_t input_count = -1;
+    int64_t constant_count = -1;
+    int64_t output_count = -1;
+    int64_t output_param_start = -1;
+    const auto read_count = [&](const char* key, int64_t* value) {
+        const String attr_key(key);
+        if (!prim_func->attrs.count(attr_key)) return false;
+        const auto* integer = prim_func->attrs.at(attr_key).As<tir::IntImmNode>();
+        if (!integer) return false;
+        *value = integer->value;
+        return true;
+    };
+    if (!read_count("kxc.input_count", &input_count) ||
+        !read_count("kxc.constant_count", &constant_count) ||
+        !read_count("kxc.output_count", &output_count) ||
+        !read_count("kxc.output_param_start", &output_param_start)) {
+        throw std::invalid_argument(
+            "LoweredFunction requires integer parameter count attrs");
+    }
+    if (input_count < 0 || constant_count < 0 || output_count <= 0 ||
+        static_cast<size_t>(constant_count) != constants.size()) {
+        throw std::invalid_argument("LoweredFunction parameter count mismatch");
+    }
+    if (output_param_start != input_count + constant_count ||
+        output_param_start + output_count != static_cast<int64_t>(prim_func->params.size())) {
+        throw std::invalid_argument("LoweredFunction output parameter range mismatch");
+    }
+    const String constant_keys_attr("kxc.constant_keys");
+    if (!prim_func->attrs.count(constant_keys_attr)) {
+        throw std::invalid_argument("LoweredFunction requires constant key metadata");
+    }
+    const ConstantKeyList constant_key_list(prim_func->attrs.at(constant_keys_attr));
+    const Array<String> constant_keys = constant_key_list.keys();
+    if (constant_keys.size() != constants.size()) {
+        throw std::invalid_argument("LoweredFunction constant key count mismatch");
+    }
+
+    std::unordered_set<std::string> keys;
+    for (size_t i = 0; i < constants.size(); ++i) {
+        const ConstantBinding& binding = constants[i];
+        const int64_t expected_index = input_count + static_cast<int64_t>(i);
+        if (binding->param_index != expected_index ||
+            static_cast<size_t>(binding->param_index) >= prim_func->params.size()) {
+            throw std::invalid_argument(
+                "LoweredFunction constant binding parameter index mismatch");
+        }
+        if (!keys.insert(std::string(binding->key)).second) {
+            throw std::invalid_argument("LoweredFunction constant keys must be unique");
+        }
+        if (!(constant_keys[i] == binding->key)) {
+            throw std::invalid_argument(
+                "LoweredFunction constant key metadata does not match bindings");
+        }
+        const tir::Var& parameter = prim_func->params[static_cast<size_t>(binding->param_index)];
+        if (!prim_func->buffer_map.count(parameter)) {
+            throw std::invalid_argument("LoweredFunction constant parameter has no Buffer");
+        }
+        const tir::Buffer& buffer = prim_func->buffer_map.at(parameter);
+        if (DTypeFromDL(binding->value.dtype()) != buffer->dtype ||
+            buffer->shape.size() != binding->value->shape_storage.size()) {
+            throw std::invalid_argument("LoweredFunction constant dtype or rank mismatch");
+        }
+        for (size_t dim = 0; dim < buffer->shape.size(); ++dim) {
+            const auto* extent = buffer->shape[dim].As<tir::IntImmNode>();
+            if (!extent || extent->value != binding->value->shape_storage[dim]) {
+                throw std::invalid_argument("LoweredFunction constant shape mismatch");
+            }
+        }
+    }
+}
+
+// 返回类型安全节点；undefined 产物不能进入 Compiler 后续阶段。
+const LoweredFunctionNode* LoweredFunction::operator->() const {
+    const auto* node = As<LoweredFunctionNode>();
+    if (!node) throw std::runtime_error("undefined or invalid LoweredFunction");
+    return node;
+}
+
+// 完成类型推导、Relay-to-TE 转换、拓扑排序并保留常量绑定。
+LoweredFunction LowerToTIR(Function func) {
     if (!func.defined()) {
         throw std::runtime_error("LowerToTIR expects a defined function");
     }
@@ -571,14 +777,22 @@ tir::PrimFunc LowerToTIR(Function func) {
         }
         const int64_t input_count = static_cast<int64_t>(converter.input_tensors().size());
 
-        for (const auto& t : converter.constant_tensors()) {
+        Array<ConstantBinding> constant_bindings;
+        Array<String> constant_keys;
+        for (const auto& record : converter.constant_records()) {
+            const te::Tensor& t = record.tensor;
             tir::Var data_var(t->name, t->dtype);
             tir::Buffer buf(data_var, t->dtype, t->shape, {}, tir::IntImm(0), t->name, 0, 0);
             params.push_back(data_var);
             buffer_map.Set(data_var, buf);
             buffer_var_by_tensor[t.get()] = data_var;
+            const int64_t param_index = static_cast<int64_t>(params.size() - 1);
+            constant_bindings.push_back(
+                ConstantBinding(record.key, record.value, param_index));
+            constant_keys.push_back(record.key);
         }
-        const int64_t constant_count = static_cast<int64_t>(converter.constant_tensors().size());
+        const int64_t constant_count =
+            static_cast<int64_t>(converter.constant_records().size());
         const int64_t output_param_start = input_count + constant_count;
 
         std::unordered_set<const Object*> output_tensor_set;
@@ -657,6 +871,8 @@ tir::PrimFunc LowerToTIR(Function func) {
                   tir::IntImm(static_cast<int64_t>(outputs.size()), tir::DataType::Int(64)));
         attrs.Set(String("kxc.output_param_start"),
                   tir::IntImm(output_param_start, tir::DataType::Int(64)));
+        // key 列表与常量参数段同序，Codegen 无需回扫 Relay 或解析变量名。
+        attrs.Set(String("kxc.constant_keys"), ConstantKeyList(constant_keys));
         attrs = AttachPassContextAttrs(attrs, PassContext::Current());
 
         tir::PrimFunc lowered = tir::PrimFunc(params, body, buffer_map, attrs);
@@ -674,7 +890,7 @@ tir::PrimFunc LowerToTIR(Function func) {
             profile_context->WriteArtifact(prefix + ".before.relay.txt", relay_text);
             profile_context->WriteArtifact(prefix + ".after.tir.txt", tir_text);
         }
-        return lowered;
+        return LoweredFunction(lowered, constant_bindings);
     } catch (const std::exception& e) {
         span.SetStatus("error");
         span.SetMessage(e.what());

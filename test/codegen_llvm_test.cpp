@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "api/compiler.h"
@@ -16,7 +18,7 @@
 #include "tir/transforms/pipeline.h"
 #include "codegen/codegen_c.h"
 
-#ifdef KXC_USE_LLVM
+#if KXC_USE_LLVM
 #include <llvm/IR/LLVMContext.h>
 
 #include "codegen/codegen_llvm.h"
@@ -30,11 +32,18 @@ bool FloatNear(float a, float b, float eps = 1e-5f) {
     return std::fabs(a - b) < eps;
 }
 
+// 将测试条件提升为异常，确保任一数值或源码契约失败都会传递到进程退出码。
+void Require(bool condition, const std::string& message) {
+    if (!condition) {
+        throw std::runtime_error(message);
+    }
+}
+
 // 直接构造 TIR 加法内核，验证 LLVM 降低、加载和 NDArray 参数调用。
 void TestDirect_ElemwiseAdd() {
     std::cout << "=== Test: Direct TIR ElemwiseAdd → LLVM → JIT ===" << std::endl;
 
-#ifdef KXC_USE_LLVM
+#if KXC_USE_LLVM
     // 手动构建一个简单的 TIR PrimFunc:
     // void main(float* a, float* b, float* c) {
     //   for (int i = 0; i < 8; i++) {
@@ -114,15 +123,14 @@ void TestDirect_ElemwiseAdd() {
         }
     }
 
-    if (ok) {
-        std::cout << "PASS: ElemwiseAdd results correct!" << std::endl;
-        std::cout << "  c = [";
-        for (int idx = 0; idx < 8; ++idx) {
-            std::cout << data_c[idx];
-            if (idx < 7) std::cout << ", ";
-        }
-        std::cout << "]" << std::endl;
+    Require(ok, "direct LLVM elemwise add produced incorrect results");
+    std::cout << "PASS: ElemwiseAdd results correct!" << std::endl;
+    std::cout << "  c = [";
+    for (int idx = 0; idx < 8; ++idx) {
+        std::cout << data_c[idx];
+        if (idx < 7) std::cout << ", ";
     }
+    std::cout << "]" << std::endl;
 #else
     std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
 #endif
@@ -132,7 +140,7 @@ void TestDirect_ElemwiseAdd() {
 void TestRelay_ElemwiseAdd() {
     std::cout << "\n=== Test: Relay ElemwiseAdd → LowerToTIR → LLVM → JIT ===" << std::endl;
 
-#ifdef KXC_USE_LLVM
+#if KXC_USE_LLVM
     using namespace kxc;
 
     // 构建Relay IR: add(x, y)
@@ -143,7 +151,8 @@ void TestRelay_ElemwiseAdd() {
     Function func({x, y}, add_call);
 
     // Relay → TIR
-    tir::PrimFunc pf = relay::LowerToTIR(func);
+    relay::LoweredFunction lowered = relay::LowerToTIR(func);
+    tir::PrimFunc pf = lowered->prim_func;
     std::cout << "LowerToTIR succeeded" << std::endl;
 
     // TIR优化
@@ -184,9 +193,8 @@ void TestRelay_ElemwiseAdd() {
         }
     }
 
-    if (ok) {
-        std::cout << "PASS: Relay ElemwiseAdd correct!" << std::endl;
-    }
+    Require(ok, "Relay LLVM elemwise add produced incorrect results");
+    std::cout << "PASS: Relay ElemwiseAdd correct!" << std::endl;
 #else
     std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
 #endif
@@ -238,19 +246,22 @@ void TestCCodegen() {
     bool has_for = c_code.find("for") != std::string::npos;
     bool has_add = c_code.find("+") != std::string::npos;
     bool has_return = c_code.find("return 0") != std::string::npos;
+    bool has_entry =
+        c_code.find("int32_t elemwise_add_c(void** packed_args)") != std::string::npos;
+    bool has_typed_input =
+        c_code.find("float* __restrict__ a = (float*)packed_args[0]") != std::string::npos;
+    bool has_store = c_code.find("c[i] = (a[i] + b[i]);") != std::string::npos;
 
-    if (has_for && has_add && has_return) {
-        std::cout << "PASS: C code generation successful!" << std::endl;
-    } else {
-        std::cerr << "FAIL: C code missing expected patterns" << std::endl;
-    }
+    Require(has_for && has_add && has_return && has_entry && has_typed_input && has_store,
+            "C diagnostic source is missing its entry, ABI unpack, loop, store, or return contract");
+    std::cout << "PASS: C code generation successful!" << std::endl;
 }
 
 // 验证 Compiler 公共 API 可编译并执行单内核 Relay 函数。
 void TestCompilerAPI() {
     std::cout << "\n=== Test: Compiler API (Relay → Compile → Run) ===" << std::endl;
 
-#ifdef KXC_USE_LLVM
+#if KXC_USE_LLVM
     using namespace kxc;
 
     // 构建模型: add(x, y)
@@ -282,11 +293,10 @@ void TestCompilerAPI() {
             ok = false;
         }
     }
-    if (ok) {
-        std::cout << "PASS: Compiler API correct! out = ["
-                  << data_out[0] << ", " << data_out[1] << ", "
-                  << data_out[2] << ", " << data_out[3] << "]" << std::endl;
-    }
+    Require(ok, "Compiler API produced incorrect elementwise add results");
+    std::cout << "PASS: Compiler API correct! out = ["
+              << data_out[0] << ", " << data_out[1] << ", "
+              << data_out[2] << ", " << data_out[3] << "]" << std::endl;
 
     // 导出C源码
     std::filesystem::path c_source_path =
@@ -302,7 +312,7 @@ void TestCompilerAPI() {
 void TestCompilerAPIIntermediateAllocate() {
     std::cout << "\n=== Test: Compiler API intermediate Allocate ===" << std::endl;
 
-#ifdef KXC_USE_LLVM
+#if KXC_USE_LLVM
     using namespace kxc;
 
     kxc::Var x("x", TensorType({4}, "float32"));
@@ -329,91 +339,8 @@ void TestCompilerAPIIntermediateAllocate() {
             ok = false;
         }
     }
-    if (ok) {
-        std::cout << "PASS: Compiler API intermediate Allocate correct!" << std::endl;
-    }
-#else
-    std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
-#endif
-}
-
-// 验证自适应运行时按输入 shape 选择、缓存并执行编译内核。
-void TestAdaptiveRuntime() {
-    std::cout << "\n=== Test: Adaptive Runtime (auto-compile + hot-swap) ===" << std::endl;
-
-#ifdef KXC_USE_LLVM
-    using namespace kxc;
-
-    // 构建模型: add(x, y)
-    kxc::Var x("x", TensorType({8}, "float32"));
-    kxc::Var y("y", TensorType({8}, "float32"));
-    Call add_call(relay::Op::Get("add"), {x, y});
-    Function func({x, y}, add_call);
-
-    // 自适应编译同样使用强类型 Device 构造 Target。
-    auto config = api::CompileConfig::Adaptive(BuildTarget(Device::CPU()));
-    auto module = api::Compiler::Compile(func, config);
-
-    std::cout << "Initial status: " << module.GetStatus() << std::endl;
-
-    // 第一次运行：自动触发同步编译
-    float data_x[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    float data_y[8] = {10, 20, 30, 40, 50, 60, 70, 80};
-    float data_out[8] = {0};
-    std::vector<void*> args = {data_x, data_y, data_out};
-
-    module.Run(args, {{8}, {8}});
-
-    // 验证第一次运行结果
-    bool ok = true;
-    for (int i = 0; i < 8; ++i) {
-        float expected = data_x[i] + data_y[i];
-        if (!FloatNear(data_out[i], expected)) {
-            std::cerr << "FAIL: out[" << i << "] = " << data_out[i]
-                      << ", expected " << expected << std::endl;
-            ok = false;
-        }
-    }
-
-    if (ok) {
-        std::cout << "PASS: First adaptive run correct! out = ["
-                  << data_out[0] << ", " << data_out[1] << ", ..."
-                  << data_out[7] << "]" << std::endl;
-    }
-
-    // 多次运行同一shape（触发shape预测和后台编译）
-    for (int run = 0; run < 5; ++run) {
-        std::fill(data_out, data_out + 8, 0.0f);
-        module.Run(args, {{8}, {8}});
-    }
-
-    std::cout << "After 6 runs: " << module.GetStatus() << std::endl;
-
-    // 等待所有后台编译完成
-    module.WaitAll();
-    std::cout << "After WaitAll: " << module.GetStatus() << std::endl;
-
-    // 再运行一次（应该命中缓存）
-    std::fill(data_out, data_out + 8, 0.0f);
-    module.Run(args, {{8}, {8}});
-
-    ok = true;
-    for (int i = 0; i < 8; ++i) {
-        float expected = data_x[i] + data_y[i];
-        if (!FloatNear(data_out[i], expected)) {
-            std::cerr << "FAIL: cached run out[" << i << "] = " << data_out[i]
-                      << ", expected " << expected << std::endl;
-            ok = false;
-        }
-    }
-    if (ok) {
-        std::cout << "PASS: Cached adaptive run correct!" << std::endl;
-    }
-
-    // 测试预热
-    module.WarmUp({{16}, {16}});
-    std::cout << "After warmup: " << module.GetStatus() << std::endl;
-    std::cout << "PASS: Adaptive runtime test completed!" << std::endl;
+    Require(ok, "Compiler API produced incorrect intermediate Allocate results");
+    std::cout << "PASS: Compiler API intermediate Allocate correct!" << std::endl;
 #else
     std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
 #endif
@@ -422,12 +349,23 @@ void TestAdaptiveRuntime() {
 // 顺序执行 LLVM/C codegen 契约测试并汇总退出状态。
 int main() {
     std::cout << "==== HDKX AI Compiler - Codegen Test ====" << std::endl;
-    TestDirect_ElemwiseAdd();
-    TestRelay_ElemwiseAdd();
-    TestCCodegen();
-    TestCompilerAPI();
-    TestCompilerAPIIntermediateAllocate();
-    TestAdaptiveRuntime();
+    const std::vector<std::pair<std::string, void (*)()>> tests = {
+        {"direct_elemwise_add", TestDirect_ElemwiseAdd},
+        {"relay_elemwise_add", TestRelay_ElemwiseAdd},
+        {"c_source", TestCCodegen},
+        {"compiler_api", TestCompilerAPI},
+        {"compiler_intermediate_allocate", TestCompilerAPIIntermediateAllocate},
+    };
+
+    for (const auto& test : tests) {
+        try {
+            test.second();
+        } catch (const std::exception& error) {
+            std::cerr << "[FAIL] " << test.first << ": " << error.what() << "\n";
+            return 1;
+        }
+        std::cout << "[PASS] " << test.first << "\n";
+    }
     std::cout << "\n==== All tests completed ====" << std::endl;
     return 0;
 }

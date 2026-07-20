@@ -42,7 +42,7 @@ int main() {
 
     Function relay_out =
         relay::RunRelayPassPipeline(func, {String("optimize_default")});
-    tir::PrimFunc tir_out = relay::LowerToTIR(relay_out);
+    tir::PrimFunc tir_out = relay::LowerToTIR(relay_out)->prim_func;
     tir_out = tir::RunTIRPassPipeline(tir_out, {String("optimize_default")});
     (void)tir_out;
 

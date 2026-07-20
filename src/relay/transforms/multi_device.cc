@@ -510,8 +510,8 @@ Function InsertDeviceCommunicationPass(const Function& func) {
     return pass.Mutate(func);
 }
 
-// 将 Relay 计算部分降低为单个 TIR PrimFunc。
-tir::PrimFunc LowerRelayComputeToTIRPass(const Function& func) {
+// 将 Relay 计算部分降低为携带常量绑定的完整产物。
+LoweredFunction LowerRelayComputeToTIRPass(const Function& func) {
     return LowerToTIR(func);
 }
 

@@ -199,6 +199,7 @@ set(KXC_RUNTIME_SOURCES
 list(APPEND KXC_RUNTIME_SOURCES
   src/codegen/compiled_kernel.cc
   src/codegen/codegen_c.cc
+  src/codegen/kernel_signature.cc
   src/api/compile_config.cc
   src/api/compiler.cc
   src/runtime/shape_predictor.cc
@@ -307,6 +308,8 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
+  kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
+  kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
     set(KXC_ONNX_IMPORT_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.params.bin")
@@ -391,6 +394,20 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS infer_type_test
     USES_TERMINAL
     COMMENT "Run infer_type_test"
+  )
+  add_custom_target(run_compiler_contract_test
+    COMMAND "$<TARGET_FILE:compiler_contract_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS compiler_contract_test
+    USES_TERMINAL
+    COMMENT "Run compiler_contract_test"
+  )
+  add_custom_target(run_kernel_signature_test
+    COMMAND "$<TARGET_FILE:kernel_signature_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS kernel_signature_test
+    USES_TERMINAL
+    COMMENT "Run kernel_signature_test"
   )
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     add_custom_target(run_onnx_importer_test

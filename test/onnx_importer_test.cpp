@@ -5,6 +5,7 @@
 #include "api/compiler.h"
 #include "frontend/onnx_importer.h"
 #include "relay/transforms/infer_type.h"
+#include "relay/transforms/lower.h"
 #include "relay/transforms/pipeline.h"
 
 #include <algorithm>
@@ -15,7 +16,6 @@
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #ifndef KXC_ONNX_IMPORT_JSON_PATH
@@ -82,60 +82,6 @@ int ResNet18OptLevel() {
     }
     int opt_level = std::atoi(value);
     return std::clamp(opt_level, 0, 3);
-}
-
-// 按 lowering 的深度优先顺序收集 Relay 常量及其 NDArray。
-void CollectConstantsInLoweringOrder(const kxc::Expr& expr,
-                                     std::vector<kxc::runtime::NDArray>* constants,
-                                     std::unordered_set<const kxc::Object*>* visited) {
-    if (!expr.defined() || visited->count(expr.get()) != 0) {
-        return;
-    }
-    visited->insert(expr.get());
-
-    if (const auto* op = expr.As<kxc::ConstantNode>()) {
-        constants->push_back(op->data);
-        return;
-    }
-    if (const auto* op = expr.As<kxc::CallNode>()) {
-        for (const auto& arg : op->args) {
-            CollectConstantsInLoweringOrder(arg, constants, visited);
-        }
-        return;
-    }
-    if (const auto* op = expr.As<kxc::FunctionNode>()) {
-        CollectConstantsInLoweringOrder(op->body, constants, visited);
-        return;
-    }
-    if (const auto* op = expr.As<kxc::TupleNode>()) {
-        for (const auto& field : op->fields) {
-            CollectConstantsInLoweringOrder(field, constants, visited);
-        }
-        return;
-    }
-    if (const auto* op = expr.As<kxc::TupleGetItemNode>()) {
-        CollectConstantsInLoweringOrder(op->tuple, constants, visited);
-        return;
-    }
-    if (const auto* op = expr.As<kxc::LetNode>()) {
-        CollectConstantsInLoweringOrder(op->value, constants, visited);
-        CollectConstantsInLoweringOrder(op->body, constants, visited);
-        return;
-    }
-    if (const auto* op = expr.As<kxc::IfNode>()) {
-        CollectConstantsInLoweringOrder(op->cond, constants, visited);
-        CollectConstantsInLoweringOrder(op->true_branch, constants, visited);
-        CollectConstantsInLoweringOrder(op->false_branch, constants, visited);
-        return;
-    }
-}
-
-// 返回与 lowered kernel 参数顺序一致的常量数组。
-std::vector<kxc::runtime::NDArray> ConstantsInLoweringOrder(const kxc::Function& func) {
-    std::vector<kxc::runtime::NDArray> constants;
-    std::unordered_set<const kxc::Object*> visited;
-    CollectConstantsInLoweringOrder(func->body, &constants, &visited);
-    return constants;
 }
 
 // 对导入函数执行类型推导及 JIT 前所需的 Relay 规范化。
@@ -249,14 +195,14 @@ bool TestRunCompiledResNet18LLVM() {
     kxc::frontend::ImportedONNXModel imported = kxc::frontend::LoadONNXImportSpec(
         KXC_ONNX_IMPORT_JSON_PATH, KXC_ONNX_IMPORT_PARAMS_PATH);
     kxc::Function prepared = PrepareJitRelayFunction(imported.function);
-    std::vector<kxc::runtime::NDArray> constants = ConstantsInLoweringOrder(prepared);
-    TEST_CHECK(constants.size() == imported.params.size(),
-               "collected constant count should match loaded ONNX initializers");
 
     auto config = kxc::api::CompileConfig::JIT(kxc::BuildTarget(kxc::Device::CPU()));
     config->opt_level = ResNet18OptLevel();
     auto module = kxc::api::Compiler::Compile(prepared, config);
     TEST_CHECK(module.IsReady(), "ResNet18 should compile before execution");
+    const kxc::Array<kxc::relay::ConstantBinding> constants = module.GetConstants();
+    TEST_CHECK(constants.size() == imported.params.size(),
+               "compiled module constant count should match loaded ONNX initializers");
 
     // JIT ABI 仍接收底层地址，但内存所有权和设备身份由 NDArray 保持到调用结束。
     kxc::runtime::NDArray input = kxc::runtime::NDArray::Empty(
@@ -271,7 +217,7 @@ bool TestRunCompiledResNet18LLVM() {
     packed_args.reserve(1 + constants.size() + 1);
     packed_args.push_back(input->dl_tensor.data);
     for (const auto& constant : constants) {
-        packed_args.push_back(constant->dl_tensor.data);
+        packed_args.push_back(constant->value->dl_tensor.data);
     }
     packed_args.push_back(output->dl_tensor.data);
 

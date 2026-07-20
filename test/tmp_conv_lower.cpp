@@ -32,7 +32,7 @@ int main() {
         Call conv(Op::Get("nn_conv2d"), args, attrs);
         Function fn({input}, conv);
 
-        tir::PrimFunc pf = LowerToTIR(fn);
+        tir::PrimFunc pf = LowerToTIR(fn)->prim_func;
         std::cout << "ok: params=" << pf->params.size() << std::endl;
         return 0;
     } catch (const std::exception& e) {
