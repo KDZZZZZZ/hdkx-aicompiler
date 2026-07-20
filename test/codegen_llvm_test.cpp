@@ -1,371 +1,221 @@
 /*! \file test/codegen_llvm_test.cpp
- * \brief 定义编译器核心路径、pass、codegen 和 profiling 的 C++ 测试入口。
+ * \brief 验证 TIR/Relay/Compiler 到 LLVM NDArray Launch 的核心路径。
  */
 
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <filesystem>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "api/compiler.h"
+#include "base/ndarray.h"
+#include "codegen/codegen_c.h"
 #include "relay/relay.h"
 #include "relay/transforms/lower.h"
-#include "tir/transforms/pipeline.h"
-#include "codegen/codegen_c.h"
 
 #if KXC_USE_LLVM
 #include <llvm/IR/LLVMContext.h>
 
 #include "codegen/codegen_llvm.h"
-#include "codegen/compiled_kernel.h"
 #include "codegen/llvm_jit.h"
 #endif
 
-// ======== 辅助函数 ========
-// 使用绝对误差比较 LLVM 执行结果中的单精度数值。
-bool FloatNear(float a, float b, float eps = 1e-5f) {
-    return std::fabs(a - b) < eps;
-}
+namespace {
 
-// 将测试条件提升为异常，确保任一数值或源码契约失败都会传递到进程退出码。
+// 失败条件统一抛异常，main 会把任一失败转换为非零退出码。
 void Require(bool condition, const std::string& message) {
-    if (!condition) {
-        throw std::runtime_error(message);
+    if (!condition) throw std::runtime_error(message);
+}
+
+// 测试统一使用 CPU float32 NDArray，避免重新引入裸主机参数 ABI。
+kxc::runtime::NDArray FloatArray(kxc::Array<int64_t> shape,
+                                 const std::vector<float>& values = {}) {
+    kxc::runtime::NDArray array = kxc::runtime::NDArray::Empty(
+        std::move(shape), kxc::runtime::DataTypeFromString("float32"),
+        kxc::Device::CPU());
+    if (!values.empty()) {
+        Require(values.size() * sizeof(float) == array.NBytes(),
+                "host value count does not match NDArray shape");
+        array.CopyFromBytes(values.data(), array.NBytes());
+    }
+    return array;
+}
+
+// 把 CPU NDArray 拷回独立主机向量供数值断言使用。
+std::vector<float> ReadFloats(const kxc::runtime::NDArray& array) {
+    std::vector<float> values(array.NBytes() / sizeof(float));
+    array.CopyToBytes(values.data(), array.NBytes());
+    return values;
+}
+
+// 逐元素比较结果，错误信息保留第一个失败位置。
+void ExpectNear(const std::vector<float>& actual,
+                const std::vector<float>& expected,
+                float tolerance = 1e-5f) {
+    Require(actual.size() == expected.size(), "result size mismatch");
+    for (size_t i = 0; i < actual.size(); ++i) {
+        if (std::fabs(actual[i] - expected[i]) > tolerance) {
+            throw std::runtime_error("value mismatch at " + std::to_string(i));
+        }
     }
 }
 
-// 直接构造 TIR 加法内核，验证 LLVM 降低、加载和 NDArray 参数调用。
-void TestDirect_ElemwiseAdd() {
-    std::cout << "=== Test: Direct TIR ElemwiseAdd → LLVM → JIT ===" << std::endl;
-
-#if KXC_USE_LLVM
-    // 手动构建一个简单的 TIR PrimFunc:
-    // void main(float* a, float* b, float* c) {
-    //   for (int i = 0; i < 8; i++) {
-    //     c[i] = a[i] + b[i];
-    //   }
-    // }
+// 手工构造 c[i] = a[i] + b[i] 的 TIR PrimFunc。
+kxc::tir::PrimFunc MakeAddPrimFunc(const std::string& symbol) {
     using namespace kxc;
     using namespace kxc::tir;
-
     tir::Var a("a", DataType::Float(32));
     tir::Var b("b", DataType::Float(32));
     tir::Var c("c", DataType::Float(32));
     tir::Var i("i", DataType::Int(32));
-
-    // c[i] = a[i] + b[i]
-    PrimExpr load_a = Load(a, PrimExpr(i));
-    PrimExpr load_b = Load(b, PrimExpr(i));
-    PrimExpr sum = load_a + load_b;
-    Stmt store = Store(c, sum, PrimExpr(i));
-
-    // for (int i = 0; i < 8; i++)
-    Stmt loop = For(i, IntImm(0, DataType::Int(32)),
-                    IntImm(8, DataType::Int(32)), ForType::Serial, store);
-
-    // PrimFunc
-    Array<tir::Var> params = {a, b, c};
-    Map<tir::Var, Buffer> buffer_map;
-    buffer_map.Set(a, Buffer(a, DataType::Float(32),
-                             {IntImm(8, DataType::Int(64))}, {},
-                             IntImm(0), "a", 0, 0));
-    buffer_map.Set(b, Buffer(b, DataType::Float(32),
-                             {IntImm(8, DataType::Int(64))}, {},
-                             IntImm(0), "b", 0, 0));
-    buffer_map.Set(c, Buffer(c, DataType::Float(32),
-                             {IntImm(8, DataType::Int(64))}, {},
-                             IntImm(0), "c", 0, 0));
-
+    Stmt body = For(i, IntImm(0, DataType::Int(32)),
+                    IntImm(8, DataType::Int(32)), ForType::Serial,
+                    Store(c, Load(a, PrimExpr(i)) + Load(b, PrimExpr(i)), PrimExpr(i)));
+    Array<tir::Var> params{a, b, c};
+    Map<tir::Var, Buffer> buffers;
+    for (const auto& parameter : params) {
+        buffers.Set(parameter, Buffer(parameter, DataType::Float(32),
+                                      {IntImm(8, DataType::Int(64))}, {},
+                                      IntImm(0), parameter->name_hint, 0, 0));
+    }
     Map<String, ObjectRef> attrs;
-    attrs.Set(String("global_symbol"), String("elemwise_add"));
-
-    PrimFunc func(params, loop, buffer_map, attrs);
-
-    // ---- LLVM Codegen ----
-    auto llvm_ctx = std::make_unique<llvm::LLVMContext>();
-    kxc::codegen::CodeGenLLVM codegen(*llvm_ctx);
-    codegen.AddFunction(func, "elemwise_add");
-
-    // 打印LLVM IR
-    std::string ir = codegen.DumpIR();
-    std::cout << "Generated LLVM IR:\n" << ir << std::endl;
-
-    // ---- JIT Compile ----
-    auto module = codegen.TakeModule();
-
-    kxc::codegen::LLVMJITEngine jit;
-    auto kernel = jit.Compile(std::move(module), std::move(llvm_ctx),
-                              "elemwise_add", /*opt_level=*/2);
-
-    std::cout << "JIT compilation successful!" << std::endl;
-
-    // ---- Execute ----
-    float data_a[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    float data_b[8] = {10, 20, 30, 40, 50, 60, 70, 80};
-    float data_c[8] = {0};
-
-    std::vector<void*> args = {data_a, data_b, data_c};
-    kernel(args);
-
-    // ---- Verify ----
-    bool ok = true;
-    for (int idx = 0; idx < 8; ++idx) {
-        float expected = data_a[idx] + data_b[idx];
-        if (!FloatNear(data_c[idx], expected)) {
-            std::cerr << "FAIL: c[" << idx << "] = " << data_c[idx]
-                      << ", expected " << expected << std::endl;
-            ok = false;
-        }
-    }
-
-    Require(ok, "direct LLVM elemwise add produced incorrect results");
-    std::cout << "PASS: ElemwiseAdd results correct!" << std::endl;
-    std::cout << "  c = [";
-    for (int idx = 0; idx < 8; ++idx) {
-        std::cout << data_c[idx];
-        if (idx < 7) std::cout << ", ";
-    }
-    std::cout << "]" << std::endl;
-#else
-    std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
-#endif
+    attrs.Set(String("global_symbol"), String(symbol));
+    return PrimFunc(params, body, buffers, attrs);
 }
-
-// 从 Relay 加法函数走完整 lowering 路径，并验证生成内核数值。
-void TestRelay_ElemwiseAdd() {
-    std::cout << "\n=== Test: Relay ElemwiseAdd → LowerToTIR → LLVM → JIT ===" << std::endl;
 
 #if KXC_USE_LLVM
+// 编译手工 TIR，并通过强类型 CompiledKernel 启动 NDArray 参数。
+void TestDirectLLVM() {
     using namespace kxc;
+    using namespace kxc::codegen;
+    const String symbol("direct_add");
+    tir::PrimFunc function = MakeAddPrimFunc(symbol);
+    auto context = std::make_unique<llvm::LLVMContext>();
+    CodeGenLLVM codegen(*context);
+    codegen.AddFunction(function, symbol);
 
-    // 构建Relay IR: add(x, y)
-    kxc::Var x("x", TensorType({8}, "float32"));
-    kxc::Var y("y", TensorType({8}, "float32"));
+    KernelArgSpec a("a", KernelArgRole::kInput,
+                    runtime::DataTypeFromString("float32"), {8}, Device::CPU());
+    KernelArgSpec b("b", KernelArgRole::kInput,
+                    runtime::DataTypeFromString("float32"), {8}, Device::CPU());
+    KernelArgSpec c("c", KernelArgRole::kOutput,
+                    runtime::DataTypeFromString("float32"), {8}, Device::CPU(), 4, true);
+    KernelSignature signature(symbol, {a, b, c});
+    KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
+    CompiledKernel kernel = LLVMJITEngine().Compile(
+        codegen.TakeModule(), std::move(context), signature, metadata, 2);
 
-    Call add_call(relay::Op::Get("add"), {x, y});
-    Function func({x, y}, add_call);
-
-    // Relay → TIR
-    relay::LoweredFunction lowered = relay::LowerToTIR(func);
-    tir::PrimFunc pf = lowered->prim_func;
-    std::cout << "LowerToTIR succeeded" << std::endl;
-
-    // TIR优化
-    pf = RunTIRPassPipeline(pf, {String("optimize_default")});
-    std::cout << "TIR optimization succeeded" << std::endl;
-
-    // LLVM Codegen
-    auto llvm_ctx = std::make_unique<llvm::LLVMContext>();
-    kxc::codegen::CodeGenLLVM codegen(*llvm_ctx);
-    codegen.AddFunction(pf, "relay_add");
-
-    std::string ir = codegen.DumpIR();
-    std::cout << "Generated LLVM IR:\n" << ir << std::endl;
-
-    // JIT
-    auto module = codegen.TakeModule();
-    kxc::codegen::LLVMJITEngine jit;
-    auto kernel = jit.Compile(std::move(module), std::move(llvm_ctx),
-                              "relay_add", 2);
-    std::cout << "JIT compilation successful!" << std::endl;
-
-    // Execute
-    float data_x[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    float data_y[8] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
-    float data_out[8] = {0};
-
-    std::vector<void*> args = {data_x, data_y, data_out};
-    kernel(args);
-
-    // Verify
-    bool ok = true;
-    for (int idx = 0; idx < 8; ++idx) {
-        float expected = data_x[idx] + data_y[idx];
-        if (!FloatNear(data_out[idx], expected)) {
-            std::cerr << "FAIL: out[" << idx << "] = " << data_out[idx]
-                      << ", expected " << expected << std::endl;
-            ok = false;
-        }
-    }
-
-    Require(ok, "Relay LLVM elemwise add produced incorrect results");
-    std::cout << "PASS: Relay ElemwiseAdd correct!" << std::endl;
-#else
-    std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
-#endif
-}
-
-// 验证 C 源码后端生成循环、加法和返回语句。
-void TestCCodegen() {
-    std::cout << "\n=== Test: C Codegen (TIR → C source) ===" << std::endl;
-
-    using namespace kxc;
-    using namespace kxc::tir;
-
-    // Build simple TIR: c[i] = a[i] + b[i]
-    tir::Var a("a", DataType::Float(32));
-    tir::Var b("b", DataType::Float(32));
-    tir::Var c("c", DataType::Float(32));
-    tir::Var i("i", DataType::Int(32));
-
-    PrimExpr load_a = Load(a, PrimExpr(i));
-    PrimExpr load_b = Load(b, PrimExpr(i));
-    PrimExpr sum = load_a + load_b;
-    Stmt store = Store(c, sum, PrimExpr(i));
-    Stmt loop = For(i, IntImm(0, DataType::Int(32)),
-                    IntImm(4, DataType::Int(32)), ForType::Serial, store);
-
-    Array<tir::Var> params = {a, b, c};
-    Map<tir::Var, Buffer> buffer_map;
-    buffer_map.Set(a, Buffer(a, DataType::Float(32),
-                             {IntImm(4, DataType::Int(64))}, {},
-                             IntImm(0), "a", 0, 0));
-    buffer_map.Set(b, Buffer(b, DataType::Float(32),
-                             {IntImm(4, DataType::Int(64))}, {},
-                             IntImm(0), "b", 0, 0));
-    buffer_map.Set(c, Buffer(c, DataType::Float(32),
-                             {IntImm(4, DataType::Int(64))}, {},
-                             IntImm(0), "c", 0, 0));
-
-    Map<String, ObjectRef> attrs;
-    attrs.Set(String("global_symbol"), String("elemwise_add_c"));
-    PrimFunc func(params, loop, buffer_map, attrs);
-
-    // Generate C code
-    kxc::codegen::CSourceEmitter emitter;
-    std::string c_code = emitter.Generate(func, "elemwise_add_c");
-
-    std::cout << "Generated C code:\n" << c_code << std::endl;
-
-    // Verify it contains expected patterns
-    bool has_for = c_code.find("for") != std::string::npos;
-    bool has_add = c_code.find("+") != std::string::npos;
-    bool has_return = c_code.find("return 0") != std::string::npos;
-    bool has_entry =
-        c_code.find("int32_t elemwise_add_c(void** packed_args)") != std::string::npos;
-    bool has_typed_input =
-        c_code.find("float* __restrict__ a = (float*)packed_args[0]") != std::string::npos;
-    bool has_store = c_code.find("c[i] = (a[i] + b[i]);") != std::string::npos;
-
-    Require(has_for && has_add && has_return && has_entry && has_typed_input && has_store,
-            "C diagnostic source is missing its entry, ABI unpack, loop, store, or return contract");
-    std::cout << "PASS: C code generation successful!" << std::endl;
-}
-
-// 验证 Compiler 公共 API 可编译并执行单内核 Relay 函数。
-void TestCompilerAPI() {
-    std::cout << "\n=== Test: Compiler API (Relay → Compile → Run) ===" << std::endl;
-
-#if KXC_USE_LLVM
-    using namespace kxc;
-
-    // 构建模型: add(x, y)
-    kxc::Var x("x", TensorType({4}, "float32"));
-    kxc::Var y("y", TensorType({4}, "float32"));
-    Call add_call(relay::Op::Get("add"), {x, y});
-    Function func({x, y}, add_call);
-
-    // AOT 配置显式从 cpu:0 构造 Target，避免旧的设备类型/id 拼装路径。
-    auto config = api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
-    auto module = api::Compiler::Compile(func, config);
-
-    std::cout << "Status: " << module.GetStatus() << std::endl;
-
-    // 运行
-    float data_x[4] = {100, 200, 300, 400};
-    float data_y[4] = {1, 2, 3, 4};
-    float data_out[4] = {0};
-    std::vector<void*> args = {data_x, data_y, data_out};
-    module.Run(args);
-
-    // 验证
-    bool ok = true;
-    for (int i = 0; i < 4; ++i) {
-        float expected = data_x[i] + data_y[i];
-        if (!FloatNear(data_out[i], expected)) {
-            std::cerr << "FAIL: out[" << i << "] = " << data_out[i]
-                      << ", expected " << expected << std::endl;
-            ok = false;
-        }
-    }
-    Require(ok, "Compiler API produced incorrect elementwise add results");
-    std::cout << "PASS: Compiler API correct! out = ["
-              << data_out[0] << ", " << data_out[1] << ", "
-              << data_out[2] << ", " << data_out[3] << "]" << std::endl;
-
-    // 导出C源码
-    std::filesystem::path c_source_path =
-        std::filesystem::temp_directory_path() / "kxc_elemwise_add.c";
-    module.SaveCSource(c_source_path.string());
-    std::cout << "C source saved to " << c_source_path.string() << std::endl;
-#else
-    std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
-#endif
-}
-
-// 验证 Compiler 为多阶段表达式生成并正确使用中间存储。
-void TestCompilerAPIIntermediateAllocate() {
-    std::cout << "\n=== Test: Compiler API intermediate Allocate ===" << std::endl;
-
-#if KXC_USE_LLVM
-    using namespace kxc;
-
-    kxc::Var x("x", TensorType({4}, "float32"));
-    kxc::Var y("y", TensorType({4}, "float32"));
-    Call first_add(relay::Op::Get("add"), {x, y});
-    Call second_add(relay::Op::Get("add"), {first_add, y});
-    Function func({x, y}, second_add);
-
-    auto config = api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
-    auto module = api::Compiler::Compile(func, config);
-
-    float data_x[4] = {1, 2, 3, 4};
-    float data_y[4] = {10, 20, 30, 40};
-    float data_out[4] = {0};
-    std::vector<void*> args = {data_x, data_y, data_out};
-    module.Run(args);
-
-    bool ok = true;
-    for (int i = 0; i < 4; ++i) {
-        float expected = data_x[i] + data_y[i] + data_y[i];
-        if (!FloatNear(data_out[i], expected)) {
-            std::cerr << "FAIL: allocated out[" << i << "] = " << data_out[i]
-                      << ", expected " << expected << std::endl;
-            ok = false;
-        }
-    }
-    Require(ok, "Compiler API produced incorrect intermediate Allocate results");
-    std::cout << "PASS: Compiler API intermediate Allocate correct!" << std::endl;
-#else
-    std::cout << "SKIPPED: KXC_USE_LLVM not enabled" << std::endl;
-#endif
-}
-
-// 顺序执行 LLVM/C codegen 契约测试并汇总退出状态。
-int main() {
-    std::cout << "==== HDKX AI Compiler - Codegen Test ====" << std::endl;
-    const std::vector<std::pair<std::string, void (*)()>> tests = {
-        {"direct_elemwise_add", TestDirect_ElemwiseAdd},
-        {"relay_elemwise_add", TestRelay_ElemwiseAdd},
-        {"c_source", TestCCodegen},
-        {"compiler_api", TestCompilerAPI},
-        {"compiler_intermediate_allocate", TestCompilerAPIIntermediateAllocate},
+    Array<runtime::NDArray> arguments{
+        FloatArray({8}, {1, 2, 3, 4, 5, 6, 7, 8}),
+        FloatArray({8}, {10, 20, 30, 40, 50, 60, 70, 80}),
+        FloatArray({8}),
     };
+    AsyncOperation operation = kernel.Launch(
+        arguments, DeviceStream::Default(Device::CPU()));
+    Require(operation.IsReady(), "LLVM CPU launch should complete inline");
+    ExpectNear(ReadFloats(arguments[2]), {11, 22, 33, 44, 55, 66, 77, 88});
+}
 
+// Relay lowering 的签名必须与 JIT launcher 使用同一个 ObjectRef 契约。
+void TestRelayLLVM() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    Var x("x", TensorType({8}, "float32"));
+    Var y("y", TensorType({8}, "float32"));
+    Function relay_function({x, y}, Call(relay::Op::Get("add"), {x, y}));
+    relay::LoweredFunction lowered = relay::LowerToTIR(relay_function);
+    const String symbol("relay_add");
+    Map<String, runtime::NDArray> constants;
+    Target target = BuildTarget(Device::CPU());
+    KernelSignature signature = BuildKernelSignature(
+        lowered->prim_func, constants, target, symbol);
+    KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
+
+    auto context = std::make_unique<llvm::LLVMContext>();
+    CodeGenLLVM codegen(*context);
+    codegen.AddFunction(lowered->prim_func, symbol);
+    CompiledKernel kernel = LLVMJITEngine().Compile(
+        codegen.TakeModule(), std::move(context), signature, metadata, 1);
+    Array<runtime::NDArray> arguments{
+        FloatArray({8}, {1, 2, 3, 4, 5, 6, 7, 8}),
+        FloatArray({8}, {1, 1, 1, 1, 1, 1, 1, 1}),
+        FloatArray({8}),
+    };
+    kernel.Launch(arguments, DeviceStream::Default(Device::CPU())).Wait();
+    ExpectNear(ReadFloats(arguments[2]), {2, 3, 4, 5, 6, 7, 8, 9});
+}
+
+// Compiler 公共入口必须返回可通过 NDArray + DeviceStream 启动的模块。
+void TestCompilerLLVM() {
+    using namespace kxc;
+    Var x("x", TensorType({4}, "float32"));
+    Var y("y", TensorType({4}, "float32"));
+    Function function({x, y}, Call(relay::Op::Get("add"), {x, y}));
+    api::CompiledModule module = api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    Array<runtime::NDArray> arguments{
+        FloatArray({4}, {100, 200, 300, 400}),
+        FloatArray({4}, {1, 2, 3, 4}),
+        FloatArray({4}),
+    };
+    module.Launch(arguments, DeviceStream::Default(Device::CPU())).Wait();
+    ExpectNear(ReadFloats(arguments[2]), {101, 202, 303, 404});
+}
+
+// 两级 Relay 计算验证 LLVM Allocate 中间存储仍保持正确。
+void TestCompilerIntermediateAllocate() {
+    using namespace kxc;
+    Var x("x", TensorType({4}, "float32"));
+    Var y("y", TensorType({4}, "float32"));
+    Call first(relay::Op::Get("add"), {x, y});
+    Function function({x, y}, Call(relay::Op::Get("add"), {first, y}));
+    api::CompiledModule module = api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    Array<runtime::NDArray> arguments{
+        FloatArray({4}, {1, 2, 3, 4}),
+        FloatArray({4}, {10, 20, 30, 40}),
+        FloatArray({4}),
+    };
+    module.Launch(arguments, DeviceStream::Default(Device::CPU())).Wait();
+    ExpectNear(ReadFloats(arguments[2]), {21, 42, 63, 84});
+}
+#endif
+
+// C emitter 仅作为诊断源码工具，测试不把它声明为可执行 backend。
+void TestDiagnosticCSource() {
+    kxc::codegen::CSourceEmitter emitter;
+    const std::string source = emitter.Generate(MakeAddPrimFunc("diagnostic_add"),
+                                                "diagnostic_add");
+    Require(source.find("diagnostic_add") != std::string::npos &&
+                source.find("return 0") != std::string::npos,
+            "diagnostic C source is missing its entry contract");
+}
+
+}  // namespace
+
+// 顺序执行 LLVM/C 诊断测试，并把任一异常转换为可靠失败退出码。
+int main() {
+    const std::vector<std::pair<const char*, void (*)()>> tests = {
+#if KXC_USE_LLVM
+        {"direct_llvm", TestDirectLLVM},
+        {"relay_llvm", TestRelayLLVM},
+        {"compiler_llvm", TestCompilerLLVM},
+        {"compiler_intermediate_allocate", TestCompilerIntermediateAllocate},
+#endif
+        {"diagnostic_c_source", TestDiagnosticCSource},
+    };
     for (const auto& test : tests) {
         try {
             test.second();
+            std::cout << "[PASS] " << test.first << "\n";
         } catch (const std::exception& error) {
             std::cerr << "[FAIL] " << test.first << ": " << error.what() << "\n";
             return 1;
         }
-        std::cout << "[PASS] " << test.first << "\n";
     }
-    std::cout << "\n==== All tests completed ====" << std::endl;
     return 0;
 }

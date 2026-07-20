@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -47,19 +48,68 @@ void ExpectEqual(const std::vector<int32_t>& actual, const std::vector<int32_t>&
     Check(actual == expected, "integer result mismatch");
 }
 
-// 编译 Relay 函数，并用显式 CPU NDArray 输入输出执行 LLVM 内核。
+/*! \brief 描述主机测试向量与单个 NDArray 参数之间的上传或回读动作。 */
+struct HostArgument {
+    size_t bytes{0};
+    std::function<void(const kxc::runtime::NDArray&)> before_launch;
+    std::function<void(const kxc::runtime::NDArray&)> after_launch;
+};
+
+// 把只读主机向量声明为输入；实际 NDArray shape/dtype 由 KernelSignature 决定。
+template <typename T>
+HostArgument Input(const std::vector<T>& values) {
+    return HostArgument{
+        values.size() * sizeof(T),
+        [&values](const kxc::runtime::NDArray& array) {
+            array.CopyFromBytes(values.data(), array.NBytes());
+        },
+        {},
+    };
+}
+
+// 把可写主机向量声明为输出；内核完成后再从 NDArray 回读。
+template <typename T>
+HostArgument Output(std::vector<T>& values) {
+    return HostArgument{
+        values.size() * sizeof(T),
+        {},
+        [&values](const kxc::runtime::NDArray& array) {
+            array.CopyToBytes(values.data(), array.NBytes());
+        },
+    };
+}
+
+// 编译 Relay 函数，按签名分配 NDArray，并通过显式 CPU stream 执行 LLVM 内核。
 void CompileAndRun(const std::string& op_name, kxc::Function func,
-                   const std::vector<void*>& packed_args) {
+                   const std::vector<HostArgument>& host_arguments) {
 #if KXC_USE_LLVM
     auto config = kxc::api::CompileConfig::Create(
         kxc::BuildTarget(kxc::Device::CPU()), 0);
     auto module = kxc::api::Compiler::Compile(func, config);
     Check(module.IsReady(), op_name + " LLVM module should be ready");
-    module.Run(packed_args);
+    const kxc::Array<kxc::codegen::KernelArgSpec> specs = module.signature().arguments();
+    Check(specs.size() == host_arguments.size(),
+          op_name + " host argument count does not match signature");
+
+    kxc::Array<kxc::runtime::NDArray> arguments;
+    for (size_t i = 0; i < specs.size(); ++i) {
+        const auto& host = host_arguments[i];
+        kxc::runtime::NDArray array = kxc::runtime::NDArray::Empty(
+            specs[i].shape(), specs[i]->dtype, specs[i]->device);
+        Check(array.NBytes() == host.bytes,
+              op_name + " host byte count does not match argument " +
+                  std::to_string(i));
+        if (host.before_launch) host.before_launch(array);
+        arguments.push_back(std::move(array));
+    }
+    module.Launch(arguments, kxc::DeviceStream::Default(kxc::Device::CPU())).Wait();
+    for (size_t i = 0; i < arguments.size(); ++i) {
+        if (host_arguments[i].after_launch) host_arguments[i].after_launch(arguments[i]);
+    }
 #else
     (void)op_name;
     (void)func;
-    (void)packed_args;
+    (void)host_arguments;
     std::cout << "[SKIP] op numeric LLVM test: KXC_USE_LLVM=0\n";
 #endif
 }
@@ -74,7 +124,7 @@ void TestAdd() {
     std::vector<float> x_data = {1, 2, 3, 4, 5, 6};
     std::vector<float> y_data = {10, 20, 30};
     std::vector<float> out(6, 0.0f);
-    CompileAndRun("add", func, {x_data.data(), y_data.data(), out.data()});
+    CompileAndRun("add", func, {Input(x_data), Input(y_data), Output(out)});
     ExpectNear(out, {11, 22, 33, 14, 25, 36});
 }
 
@@ -88,7 +138,7 @@ void TestSubtract() {
     std::vector<float> x_data = {1, 2, 3, 4, 5, 6};
     std::vector<float> y_data = {10, 20, 30};
     std::vector<float> out(6, 0.0f);
-    CompileAndRun("subtract", func, {x_data.data(), y_data.data(), out.data()});
+    CompileAndRun("subtract", func, {Input(x_data), Input(y_data), Output(out)});
     ExpectNear(out, {-9, -18, -27, -6, -15, -24});
 }
 
@@ -102,7 +152,7 @@ void TestMul() {
     std::vector<float> x_data = {1, 2, 3, 4, 5, 6};
     std::vector<float> y_data = {10, 20, 30};
     std::vector<float> out(6, 0.0f);
-    CompileAndRun("mul", func, {x_data.data(), y_data.data(), out.data()});
+    CompileAndRun("mul", func, {Input(x_data), Input(y_data), Output(out)});
     ExpectNear(out, {10, 40, 90, 40, 100, 180});
 }
 
@@ -116,7 +166,7 @@ void TestDivide() {
     std::vector<float> x_data = {1, 2, 3, 4, 5, 6};
     std::vector<float> y_data = {10, 20, 30};
     std::vector<float> out(6, 0.0f);
-    CompileAndRun("divide", func, {x_data.data(), y_data.data(), out.data()});
+    CompileAndRun("divide", func, {Input(x_data), Input(y_data), Output(out)});
     ExpectNear(out, {0.1f, 0.1f, 0.1f, 0.4f, 0.25f, 0.2f});
 }
 
@@ -128,7 +178,7 @@ void TestSqrt() {
 
     std::vector<float> x_data = {1, 4, 9, 16};
     std::vector<float> out(4, 0.0f);
-    CompileAndRun("sqrt", func, {x_data.data(), out.data()});
+    CompileAndRun("sqrt", func, {Input(x_data), Output(out)});
     ExpectNear(out, {1, 2, 3, 4});
 }
 
@@ -142,7 +192,7 @@ void TestMatmul() {
     std::vector<float> a_data = {1, 2, 3, 4, 5, 6};
     std::vector<float> b_data = {1, 2, 3, 4, 5, 6};
     std::vector<float> out(4, 0.0f);
-    CompileAndRun("matmul", func, {a_data.data(), b_data.data(), out.data()});
+    CompileAndRun("matmul", func, {Input(a_data), Input(b_data), Output(out)});
     ExpectNear(out, {22, 28, 49, 64});
 }
 
@@ -157,7 +207,8 @@ void TestDense() {
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6};
     std::vector<float> weight_buf = {1, 0, 1, 0, 1, 1};
     std::vector<float> out(4, 0.0f);
-    CompileAndRun("nn_dense", func, {data_buf.data(), weight_buf.data(), out.data()});
+    CompileAndRun("nn_dense", func,
+                  {Input(data_buf), Input(weight_buf), Output(out)});
     ExpectNear(out, {4, 5, 10, 11});
 }
 
@@ -174,7 +225,8 @@ void TestGemm() {
     std::vector<float> b_data = {1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1};
     std::vector<float> c_data = {10, 20, 30, 40};
     std::vector<float> out(8, 0.0f);
-    CompileAndRun("nn_gemm", func, {a_data.data(), b_data.data(), c_data.data(), out.data()});
+    CompileAndRun("nn_gemm", func,
+                  {Input(a_data), Input(b_data), Input(c_data), Output(out)});
     ExpectNear(out, {11, 22, 33, 46, 14, 25, 36, 55});
 }
 
@@ -186,7 +238,7 @@ void TestRelu() {
 
     std::vector<float> x_data = {-2, -0.5f, 0, 1, 2, -3};
     std::vector<float> out(6, 0.0f);
-    CompileAndRun("nn_relu", func, {x_data.data(), out.data()});
+    CompileAndRun("nn_relu", func, {Input(x_data), Output(out)});
     ExpectNear(out, {0, 0, 0, 1, 2, 0});
 }
 
@@ -202,7 +254,8 @@ void TestConv2D() {
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6, 7, 8, 9};
     std::vector<float> weight_buf = {1, 0, 0, 1};
     std::vector<float> out(4, 0.0f);
-    CompileAndRun("nn_conv2d", func, {data_buf.data(), weight_buf.data(), out.data()});
+    CompileAndRun("nn_conv2d", func,
+                  {Input(data_buf), Input(weight_buf), Output(out)});
     ExpectNear(out, {6, 8, 12, 14});
 }
 
@@ -217,7 +270,7 @@ void TestMaxPool2D() {
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6, 7, 8,
                                    9, 10, 11, 12, 13, 14, 15, 16};
     std::vector<float> out(4, 0.0f);
-    CompileAndRun("nn_max_pool2d", func, {data_buf.data(), out.data()});
+    CompileAndRun("nn_max_pool2d", func, {Input(data_buf), Output(out)});
     ExpectNear(out, {6, 8, 14, 16});
 }
 
@@ -232,7 +285,7 @@ void TestAvgPool2D() {
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6, 7, 8,
                                    9, 10, 11, 12, 13, 14, 15, 16};
     std::vector<float> out(4, 0.0f);
-    CompileAndRun("nn_avg_pool2d", func, {data_buf.data(), out.data()});
+    CompileAndRun("nn_avg_pool2d", func, {Input(data_buf), Output(out)});
     ExpectNear(out, {3.5f, 5.5f, 11.5f, 13.5f});
 }
 
@@ -245,7 +298,7 @@ void TestGlobalAvgPool2D() {
 
     std::vector<float> data_buf = {1, 2, 3, 4, 10, 20, 30, 40};
     std::vector<float> out(2, 0.0f);
-    CompileAndRun("nn_global_avg_pool2d", func, {data_buf.data(), out.data()});
+    CompileAndRun("nn_global_avg_pool2d", func, {Input(data_buf), Output(out)});
     ExpectNear(out, {2.5f, 25.0f});
 }
 
@@ -258,7 +311,7 @@ void TestFlatten() {
 
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
     std::vector<float> out(12, 0.0f);
-    CompileAndRun("nn_flatten", func, {data_buf.data(), out.data()});
+    CompileAndRun("nn_flatten", func, {Input(data_buf), Output(out)});
     ExpectNear(out, data_buf);
 }
 
@@ -271,7 +324,7 @@ void TestReshape() {
 
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6};
     std::vector<float> out(6, 0.0f);
-    CompileAndRun("reshape", func, {data_buf.data(), out.data()});
+    CompileAndRun("reshape", func, {Input(data_buf), Output(out)});
     ExpectNear(out, data_buf);
 }
 
@@ -284,7 +337,7 @@ void TestTranspose() {
 
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6};
     std::vector<float> out(6, 0.0f);
-    CompileAndRun("transpose", func, {data_buf.data(), out.data()});
+    CompileAndRun("transpose", func, {Input(data_buf), Output(out)});
     ExpectNear(out, {1, 4, 2, 5, 3, 6});
 }
 
@@ -297,7 +350,7 @@ void TestReduceMean() {
 
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6};
     std::vector<float> out(2, 0.0f);
-    CompileAndRun("reduce_mean", func, {data_buf.data(), out.data()});
+    CompileAndRun("reduce_mean", func, {Input(data_buf), Output(out)});
     ExpectNear(out, {2.0f, 5.0f});
 }
 
@@ -310,7 +363,7 @@ void TestSoftmax() {
 
     std::vector<float> data_buf = {1, 2, 3, 1, 3, 5};
     std::vector<float> out(6, 0.0f);
-    CompileAndRun("softmax", func, {data_buf.data(), out.data()});
+    CompileAndRun("softmax", func, {Input(data_buf), Output(out)});
 
     std::vector<float> expected(6, 0.0f);
     for (size_t row = 0; row < 2; ++row) {
@@ -333,7 +386,7 @@ void TestCast() {
 
     std::vector<float> data_buf = {1.9f, -2.2f, 3.0f, 4.8f};
     std::vector<int32_t> out(4, 0);
-    CompileAndRun("cast", func, {data_buf.data(), out.data()});
+    CompileAndRun("cast", func, {Input(data_buf), Output(out)});
     ExpectEqual(out, {1, -2, 3, 4});
 }
 
@@ -348,7 +401,8 @@ void TestModelAddChain() {
     std::vector<float> x_data = {1, 2, 3, 4};
     std::vector<float> y_data = {10, 20, 30, 40};
     std::vector<float> out(4, 0.0f);
-    CompileAndRun("model_add_chain", func, {x_data.data(), y_data.data(), out.data()});
+    CompileAndRun("model_add_chain", func,
+                  {Input(x_data), Input(y_data), Output(out)});
     ExpectNear(out, {21, 42, 63, 84});
 }
 
@@ -369,7 +423,8 @@ void TestModelMLP() {
     std::vector<float> w1_data = {1, 0, 0, 1, 1, 1};
     std::vector<float> w2_data = {1, 1, 1, 1, 0, -1};
     std::vector<float> out(2, 0.0f);
-    CompileAndRun("model_mlp", func, {x_data.data(), w1_data.data(), w2_data.data(), out.data()});
+    CompileAndRun("model_mlp", func,
+                  {Input(x_data), Input(w1_data), Input(w2_data), Output(out)});
     ExpectNear(out, {6, -2});
 }
 
@@ -396,7 +451,8 @@ void TestModelCNN() {
     std::vector<float> dense_weight_buf = {1, 2};
     std::vector<float> out(2, 0.0f);
     CompileAndRun("model_cnn", func,
-                  {data_buf.data(), conv_weight_buf.data(), dense_weight_buf.data(), out.data()});
+                  {Input(data_buf), Input(conv_weight_buf), Input(dense_weight_buf),
+                   Output(out)});
     ExpectNear(out, {10, 20});
 }
 

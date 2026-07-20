@@ -94,11 +94,12 @@ kxc::Function PrepareJitRelayFunction(kxc::Function func) {
 
 // 使用确定性数据填充显式 CPU NDArray 输入。
 void FillResNet18Input(const kxc::runtime::NDArray& input) {
-    float* data = static_cast<float*>(input->dl_tensor.data);
     const size_t elements = input.NBytes() / sizeof(float);
+    std::vector<float> data(elements);
     for (size_t i = 0; i < elements; ++i) {
         data[i] = (static_cast<float>(i % 251) - 125.0f) / 125.0f;
     }
+    input.CopyFromBytes(data.data(), input.NBytes());
 }
 
 // 将运行输出与可选参考文件比较并检查误差阈值。
@@ -117,7 +118,8 @@ bool ValidateReferenceOutput(const kxc::runtime::NDArray& output) {
     TEST_CHECK(input.gcount() == static_cast<std::streamsize>(reference.size() * sizeof(float)),
                "ResNet18 reference output should contain 1000 float32 values");
 
-    const float* actual = static_cast<const float*>(output->dl_tensor.data);
+    std::vector<float> actual(1000);
+    output.CopyToBytes(actual.data(), output.NBytes());
     float max_abs_error = 0.0f;
     float max_rel_error = 0.0f;
     for (size_t i = 0; i < reference.size(); ++i) {
@@ -177,7 +179,7 @@ bool TestCompileResNet18ToLLVM() {
     config->opt_level = ResNet18OptLevel();
     auto module = kxc::api::Compiler::Compile(prepared, config);
     TEST_CHECK(module.IsReady(), "ResNet18 should compile to a ready LLVM module");
-    TEST_CHECK(module.GetPrimFunc().defined(), "ResNet18 compile should keep generated TIR");
+    TEST_CHECK(module.prim_func().defined(), "ResNet18 compile should keep generated TIR");
     return true;
 #else
     std::cout << "[SKIP] resnet18 LLVM compile: KXC_USE_LLVM=0\n";
@@ -202,11 +204,11 @@ bool TestRunCompiledResNet18LLVM() {
     config->opt_level = ResNet18OptLevel();
     auto module = kxc::api::Compiler::Compile(prepared, config);
     TEST_CHECK(module.IsReady(), "ResNet18 should compile before execution");
-    const kxc::Array<kxc::relay::ConstantBinding> constants = module.GetConstants();
+    const kxc::Map<kxc::String, kxc::runtime::NDArray> constants = module.constants();
     TEST_CHECK(constants.size() == imported.params.size(),
                "compiled module constant count should match loaded ONNX initializers");
 
-    // JIT ABI 仍接收底层地址，但内存所有权和设备身份由 NDArray 保持到调用结束。
+    // 输入、常量和输出全部作为 NDArray 句柄进入统一 Launch 契约。
     kxc::runtime::NDArray input = kxc::runtime::NDArray::Empty(
         {1, 3, 224, 224}, kxc::runtime::DataTypeFromString("float32"),
         kxc::Device::CPU());
@@ -215,23 +217,36 @@ bool TestRunCompiledResNet18LLVM() {
         kxc::Device::CPU());
     FillResNet18Input(input);
 
-    std::vector<void*> packed_args;
-    packed_args.reserve(1 + constants.size() + 1);
-    packed_args.push_back(input->dl_tensor.data);
-    for (const auto& constant : constants) {
-        packed_args.push_back(constant->value->dl_tensor.data);
+    kxc::Array<kxc::runtime::NDArray> arguments;
+    size_t input_count = 0;
+    size_t output_count = 0;
+    for (const auto& spec : module.signature().arguments()) {
+        if (spec->role == kxc::codegen::KernelArgRole::kInput) {
+            TEST_CHECK(input_count++ == 0, "ResNet18 should expose one runtime input");
+            arguments.push_back(input);
+        } else if (spec->role == kxc::codegen::KernelArgRole::kConstant) {
+            TEST_CHECK(constants.count(spec->constant_key) == 1,
+                       "signature constant key is missing from module table");
+            arguments.push_back(constants.at(spec->constant_key));
+        } else {
+            TEST_CHECK(output_count++ == 0, "ResNet18 should expose one runtime output");
+            arguments.push_back(output);
+        }
     }
-    packed_args.push_back(output->dl_tensor.data);
+    TEST_CHECK(input_count == 1 && output_count == 1,
+               "ResNet18 signature input/output count mismatch");
 
     std::cout << "[INFO] running compiled resnet18 LLVM kernel with "
-              << packed_args.size() << " packed buffers\n";
+              << arguments.size() << " NDArray arguments\n";
     std::cout.flush();
 
     const auto start = std::chrono::steady_clock::now();
-    module.Run(packed_args);
+    module.Launch(arguments,
+                  kxc::DeviceStream::Default(kxc::Device::CPU())).Wait();
     const auto end = std::chrono::steady_clock::now();
 
-    const float* out = static_cast<const float*>(output->dl_tensor.data);
+    std::vector<float> out(1000);
+    output.CopyToBytes(out.data(), output.NBytes());
     float max_abs = 0.0f;
     double sum = 0.0;
     for (size_t i = 0; i < 1000; ++i) {
