@@ -247,9 +247,10 @@ void CodeGenCUDA::GenStmt(const tir::Stmt& statement) {
         saw_thread_binding_ = true;
         const std::string variable = VarName(node->thread_var);
         Indent();
-        output_ << "const " << DTypeName(node->thread_var->dtype) << ' ' << variable
-                << " = static_cast<" << DTypeName(node->thread_var->dtype) << ">(" 
-                << ThreadBuiltin(node->thread_index) << ");\n";
+        output_ << "const " << DTypeName(node->thread_var->dtype) << ' '
+                << variable << " = static_cast<"
+                << DTypeName(node->thread_var->dtype) << ">(";
+        output_ << ThreadBuiltin(node->thread_index) << ");\n";
         // 即使 launch metadata 大于逻辑 extent，越界线程也不会进入 body；这使发射器
         // 对向上取整的 block 数保持正确，而不依赖调度器必须恰好整除。
         Indent();
