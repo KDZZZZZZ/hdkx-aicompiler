@@ -165,7 +165,7 @@ bool TestMvpElementwiseLowerToTIR() {
     kxc::Call sqrt(kxc::relay::Op::Get("sqrt"), {divide});
     kxc::Function func({x, y}, sqrt);
 
-    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func);
+    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
     TEST_CHECK(lowered.defined(), "elementwise MVP ops should lower to TIR");
     return true;
 }
@@ -175,20 +175,23 @@ bool TestMvpMatrixLowerToTIR() {
     kxc::Var b("b", kxc::TensorType({3, 4}, "float32"));
     kxc::Call matmul(kxc::relay::Op::Get("matmul"), {a, b});
     kxc::Function matmul_func({a, b}, matmul);
-    TEST_CHECK(kxc::relay::LowerToTIR(matmul_func).defined(), "matmul should lower to TIR");
+    TEST_CHECK(kxc::relay::LowerToTIR(matmul_func)->prim_func.defined(),
+               "matmul should lower to TIR");
 
     kxc::Var dense_weight("dense_weight", kxc::TensorType({5, 3}, "float32"));
     kxc::Call dense(kxc::relay::Op::Get("nn_dense"), {a, dense_weight},
                     kxc::relay::DenseAttrs::Create(5, ""));
     kxc::Function dense_func({a, dense_weight}, dense);
-    TEST_CHECK(kxc::relay::LowerToTIR(dense_func).defined(), "nn_dense should lower to TIR");
+    TEST_CHECK(kxc::relay::LowerToTIR(dense_func)->prim_func.defined(),
+               "nn_dense should lower to TIR");
 
     kxc::Var gemm_b("gemm_b", kxc::TensorType({4, 3}, "float32"));
     kxc::Var gemm_bias("gemm_bias", kxc::TensorType({4}, "float32"));
     kxc::Call gemm(kxc::relay::Op::Get("nn_gemm"), {a, gemm_b, gemm_bias},
                    kxc::relay::GemmAttrs::Create(1.0f, 1.0f, 0, 1));
     kxc::Function gemm_func({a, gemm_b, gemm_bias}, gemm);
-    TEST_CHECK(kxc::relay::LowerToTIR(gemm_func).defined(), "nn_gemm should lower to TIR");
+    TEST_CHECK(kxc::relay::LowerToTIR(gemm_func)->prim_func.defined(),
+               "nn_gemm should lower to TIR");
     return true;
 }
 
@@ -210,7 +213,7 @@ bool TestMvpNNLowerToTIR() {
                       kxc::relay::FlattenAttrs::Create(1));
     kxc::Function func({data, weight}, kxc::Tuple({max_pool, avg_pool, flatten}));
 
-    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func);
+    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
     TEST_CHECK(lowered.defined(), "NN MVP ops should lower to TIR");
     return true;
 }
@@ -228,7 +231,7 @@ bool TestMvpTransformReduceSoftmaxLowerToTIR() {
     kxc::Call cast(kxc::relay::Op::Get("cast"), {softmax}, kxc::relay::CastAttrs::Create(1));
     kxc::Function func({x}, cast);
 
-    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func);
+    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
     TEST_CHECK(lowered.defined(), "transform/reduce/softmax MVP ops should lower to TIR");
     return true;
 }
@@ -244,7 +247,7 @@ bool TestPipelineAndLoweringIntegration() {
     TEST_CHECK(CheckTensor(optimized->body.checked_type(), {4}, "float32"),
                "optimize_default should leave checked_type on body");
 
-    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func);
+    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
     TEST_CHECK(lowered.defined(), "LowerToTIR should infer missing checked_type internally");
     TEST_CHECK(CheckTensor(add.checked_type(), {4}, "float32"),
                "LowerToTIR should write checked_type through InferTypePass");

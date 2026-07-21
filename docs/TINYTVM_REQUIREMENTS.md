@@ -2,6 +2,7 @@
 
 状态：Draft  
 日期：2026-06-04  
+最近修订：2026-07-20
 适用仓库：`hdkx-aicompiler`
 
 ## 1. 背景
@@ -12,7 +13,7 @@
 Relay IR -> Relay Pass -> TE/TOPI -> TIR -> TIR Pass -> C/LLVM Codegen -> Runtime
 ```
 
-当前已有对象系统、Relay/TIR IR、部分算子注册、部分 TE/TOPI helper、Relay 到 TIR lowering、LLVM JIT smoke path、CPU/CUDA DeviceAPI 原型、Adaptive runtime、Disco 多 worker 执行计划原型和 profiling bundle 工具。
+当前已有对象系统、Relay/TIR IR、部分算子注册、部分 TE/TOPI helper、Relay 到 TIR lowering、LLVM/CUDA 编译执行链路、CPU/CUDA DeviceAPI、静态 RuntimeSession、Disco 多 worker 执行计划原型和 profiling bundle 工具。
 
 本需求文档的目标是定义“完整 TinyTVM”的可交付范围，使后续开发能围绕可运行闭环推进，而不是只停留在 IR dump、算子元数据注册或局部 smoke test。
 
@@ -410,7 +411,7 @@ R10.1 LLVM JIT 是 MVP 主执行后端。
 
 必须支持：
 
-- packed args ABI：`int32_t kernel(void** packed_args)`。
+- 后端私有 packed ABI：`int32_t kernel(void** packed_args, uint64_t count)`。
 - buffer 参数从 `packed_args` 解包。
 - scalar int/float constants。
 - load/store。
@@ -452,12 +453,11 @@ R11.1 Runtime 必须提供清晰的编译产物模型。
 
 ```cpp
 CompiledModule module = Compiler::Compile(func, config);
-module.SetInput("x", ndarray);
-module.Run();
-NDArray out = module.GetOutput(0);
+RuntimeSession session(module);
+Array<NDArray> outputs = session.Run({input});
 ```
 
-MVP 可以保留 `Run(std::vector<void*> packed_args)`，但需要在文档中明确 ABI 和参数顺序。
+公共接口必须使用 `NDArray`、`KernelSignature` 和 `DeviceStream`，不得保留 `Run(std::vector<void*>)` 或公开后端函数/模块指针。后端私有 launcher 只允许在强类型校验之后完成 ABI 打包。
 
 R11.2 Runtime 必须区分输入、权重和输出。
 
@@ -482,13 +482,14 @@ R11.4 Module 必须支持保存调试产物。
 - LLVM IR。
 - profiling bundle。
 
-R11.5 Adaptive runtime 作为增强功能。
+R11.5 动态 shape specialization 作为增强功能。
 
 完整版本需要：
 
 - shape signature 正确包含所有输入。
 - cache key 区分 target、dtype、shape、op graph hash。
-- fuzzy cache 不能错误复用不兼容 kernel。
+- 只允许 exact contract 命中；不得用模糊 shape 匹配复用不兼容 kernel。
+- 后台编译、失败传播和 module 热替换必须建立独立的所有权与并发契约。
 
 ### R12. DeviceAPI
 
@@ -669,18 +670,18 @@ MVP 不追求极致性能，但必须避免明显不可用：
 
 ## 7. 当前主要缺口
 
-基于 2026-06-04 repo 盘点，主要缺口如下：
+本节源自 2026-06-04 repo 盘点，并在 2026-07-20 对已完成的构建、Compiler/Codegen 和 RuntimeSession 状态做了更新：
 
-1. 构建验证不稳定：本机 `dev-ninja-cpu` 配置被 MSVC `rc`/`mt` 工具链问题阻塞，需要明确工具链或提供 MinGW preset。
+1. Windows MinGW CPU/LLVM 与 omen CUDA 矩阵已可运行；GitHub Workflow 当前手动关闭，仍缺少自动远端门禁。
 2. 算子注册和 lowering 不一致：很多 op 只注册元数据，没有 `FRelayToTE`。
 3. op name 不统一：`mul/multiply`、`softmax/nn_softmax`、`sub/subtract` 存在混用。
 4. Type/shape inference 不完整，很多链路依赖手动 TensorType。
 5. ONNX importer 仍是实验脚本，权重数据没有形成稳定 params/runtime 绑定。
 6. TE/TOPI 中有 placeholder 或错误替代实现，例如 `einsum` 返回空 Tensor、`min/prod` 使用 sum 占位。
 7. `LowerToTIR` 只支持单输出 compute tensor，不支持多输出和完整常量绑定。
-8. C codegen 只生成源码，未接入编译执行。
-9. LLVM codegen 支持的 TIR 节点有限，需要按 MVP 算子补齐。
-10. Runtime API 偏底层 packed args，缺少用户友好的输入/输出绑定。
+8. C emitter 只生成诊断源码，尚未形成可加载 AOT artifact。
+9. LLVM/CUDA 已接入 Compiler 主链路，但支持的 TIR 节点仍需按模型扩展。
+10. RuntimeSession 已提供强类型 inputs、常量绑定和静态输出分配；动态输出和 module registry 尚未实现。
 11. Disco executor 当前不执行真实 kernel，主要是 copy/占位行为。
 12. 测试更偏 smoke，需要补齐 per-op numeric 和模型级端到端测试。
 
@@ -749,15 +750,14 @@ MVP 不追求极致性能，但必须避免明显不可用：
 
 ### M4. Runtime 易用 API
 
-目标：从底层 packed args 过渡到模块化使用。
+目标：从完整有序 CompiledModule 参数过渡到只传 inputs 的会话接口。
 
 交付：
 
-- `SetInput`
-- `GetOutput`
-- 参数顺序管理。
-- 常量权重管理。
-- NDArray host copy。
+- `RuntimeSession::Run/RunAsync`。
+- KernelSignature 参数顺序管理。
+- 常量权重自动绑定。
+- 静态输出自动分配和 NDArray host copy。
 
 验收：
 
@@ -814,5 +814,4 @@ MVP 不追求极致性能，但必须避免明显不可用：
 3. 实现 type/shape inference pass 的 MVP 子集。
 4. 补齐 MVP 算子的 `FRelayToTE` 和 numeric tests。
 5. 正式化 ONNX importer，并处理 initializer 数据。
-6. 改 Runtime API，隐藏 packed args 参数顺序。
-
+6. 在已完成的强类型 RuntimeSession 基础上实现动态输出 shape function 和 ExecutionPlan module registry。

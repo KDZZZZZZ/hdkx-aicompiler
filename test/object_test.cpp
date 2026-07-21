@@ -8,6 +8,7 @@
 #include "te/te.h"
 #include "tir/stmt.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
@@ -78,6 +79,26 @@ class alignas(128) OveralignedNode final : public kxc::Object {};
 class ThrowingNode final : public kxc::Object {
 public:
     ThrowingNode() { throw std::runtime_error("expected constructor failure"); }
+};
+
+// 记录最后释放线程在析构时观察到的跨线程发布值。
+struct PublicationState {
+    std::atomic<int> destructor_value{0};
+};
+
+// 析构时读取普通字段，用于验证引用计数承担 release/acquire 发布语义。
+class PublicationNode final : public kxc::Object {
+public:
+    explicit PublicationNode(PublicationState* state) : state_(state) {}
+
+    ~PublicationNode() override {
+        state_->destructor_value.store(value, std::memory_order_relaxed);
+    }
+
+    int value{0};
+
+private:
+    PublicationState* state_;
 };
 
 // 验证从自身持有成员复制赋值时引用计数不会提前归零。
@@ -253,6 +274,8 @@ bool TestRelayAttrsUseObjectContainers() {
     static_assert(std::is_same_v<decltype(kxc::relay::TransposeAttrsNode::perm),
                                  kxc::Array<int64_t>>);
 
+#ifndef KXC_OBJECT_TEST_STANDALONE
+    // standalone sanitizer 不链接 Relay 算子实现；常规目标继续覆盖构造行为。
     const auto conv = kxc::relay::Conv2DAttrs::Create(
         {2, 2}, {1, 1, 1, 1}, {1, 1}, 1, 64, {3, 3}, "NCHW", "OIHW", "", "");
     TEST_CHECK(conv->strides.size() == 2 && conv->strides[0] == 2,
@@ -261,6 +284,7 @@ bool TestRelayAttrsUseObjectContainers() {
     const auto reshape = kxc::relay::ReshapeAttrs::Create({0, -1});
     TEST_CHECK(reshape->newshape.size() == 2 && reshape->newshape[1] == -1,
                "Array-backed shape attrs should preserve signed dimensions");
+#endif
     return true;
 }
 
@@ -355,6 +379,35 @@ bool TestArenaObjectDestroyedOnAnotherThread() {
     return true;
 }
 
+// 验证非最后释放线程的写入对最终析构线程可见。
+bool TestLastReleaseAcquiresPriorWrites() {
+    PublicationState state;
+    kxc::ObjectRef first(new PublicationNode(&state));
+    kxc::ObjectRef second = first;
+    auto* node = const_cast<PublicationNode*>(first.As<PublicationNode>());
+    TEST_CHECK(node != nullptr, "publication node should have the expected type");
+
+    std::atomic<bool> first_released{false};
+    std::thread writer([ref = std::move(first), node, &first_released]() mutable {
+        node->value = 42;
+        ref = kxc::ObjectRef();
+        first_released.store(true, std::memory_order_relaxed);
+    });
+    std::thread releaser(
+        [ref = std::move(second), &first_released]() mutable {
+            while (!first_released.load(std::memory_order_relaxed)) {
+                std::this_thread::yield();
+            }
+            ref = kxc::ObjectRef();
+        });
+    writer.join();
+    releaser.join();
+
+    TEST_CHECK(state.destructor_value.load(std::memory_order_relaxed) == 42,
+               "last release should acquire writes published by prior releases");
+    return true;
+}
+
 // 验证 Arena 满足超过默认值的对象对齐要求。
 bool TestOveralignedArenaObject() {
     kxc::ObjectRef object;
@@ -400,6 +453,7 @@ int main() {
     if (!TestArenaObjectEscapesOwner()) return EXIT_FAILURE;
     if (!TestArenaExhaustionFallsBackToHeap()) return EXIT_FAILURE;
     if (!TestArenaObjectDestroyedOnAnotherThread()) return EXIT_FAILURE;
+    if (!TestLastReleaseAcquiresPriorWrites()) return EXIT_FAILURE;
     if (!TestOveralignedArenaObject()) return EXIT_FAILURE;
     if (!TestThrowingArenaConstructorReleasesAllocation()) return EXIT_FAILURE;
     std::cout << "All object tests passed.\n";

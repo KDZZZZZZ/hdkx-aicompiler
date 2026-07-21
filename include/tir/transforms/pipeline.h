@@ -6,6 +6,7 @@
 
 #include "base/container.h"
 #include "tir/stmt.h"
+#include "tir/transforms/bind_cuda_threads.h"
 
 namespace kxc {
 namespace tir {

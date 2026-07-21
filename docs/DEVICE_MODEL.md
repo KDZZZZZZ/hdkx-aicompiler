@@ -1,6 +1,6 @@
 # Device 预期模型与模块交互
 
-> 本文定义 Device 子系统的目标架构和规范接口，不描述当前实现。实施顺序见 [Device Runtime 实施计划](../.omx/plans/2026-07-17-device-runtime-roadmap.md)。
+> 本文以 Device 子系统的目标架构和规范接口为主，并在各节明确标注当前落地状态与尚未实现边界。实施顺序见 [Device Runtime 实施计划](../.omx/plans/2026-07-17-device-runtime-roadmap.md)。
 
 ## 1. 目标
 
@@ -20,17 +20,20 @@ Device 子系统负责统一表达设备身份、设备内存、数据复制、�
 flowchart TB
     IR[Relay / TIR / TE] --> Compiler[Compiler / Codegen]
     Compiler --> Signature[KernelSignature]
-    Signature --> Runtime[RuntimeSession / CompiledModule]
-    Runtime --> Plan[ExecutionPlan / Disco]
+    Signature --> Runtime[CompiledModule]
+    Runtime --> Session[RuntimeSession]
+    Session --> Plan[ExecutionPlan / Disco]
 
     Plan --> NDArray
     Runtime --> NDArray
+    Session --> NDArray
     NDArray --> Storage
     Storage --> Router[Device 路由层]
     Router --> CPU[CPUDeviceAPI]
     Router --> CUDA[CUDADeviceAPI]
 
     Runtime --> Stream[DeviceStream]
+    Session --> Stream
     Plan --> Stream
     Stream --> Router
 
@@ -52,7 +55,8 @@ flowchart TB
 | 张量视图 | `NDArrayNode`, `NDArray` | dtype、shape、strides、offset 和 Storage 视图 |
 | 异步执行 | `DeviceStreamNode`, `DeviceStream` | 持有设备绑定的执行流 |
 | 内核契约 | `KernelSignature`, `KernelArgSpec` | 参数顺序、角色、dtype、shape 和 device |
-| 运行时 | `RuntimeSession`, `CompiledModule` | 校验张量、分配输出、绑定参数、启动内核 |
+| 编译模块 | `CompiledModule` | 校验完整有序参数并启动已经编译的内核 |
+| 运行时 | `RuntimeSession` | 接收 inputs、解析常量、分配静态输出并管理同步/异步结果 |
 | 放置执行 | `VirtualDevice`, `ExecutionPlan`, Disco | 从逻辑放置解析物理设备和 worker |
 
 ## 3. Device 身份模型
@@ -325,8 +329,8 @@ public:
 - D2H 的 stream 绑定来源 CUDA Device。
 - D2D 的 stream 与来源、目标的共同 CUDA Device 一致；跨 CUDA Device 在 P2P 实现前拒绝。
 - CPU 到 CPU 的异步请求可以返回已完成的 AsyncOperation。
-- 内核启动产生的 AsyncOperation 通过 `retained_executable` 持有 module、function 和 backend launch state，直到 event 完成。
-- `Wait()` 成功后可以释放 retained Storage；析构未完成操作时必须等待或把所有权移交给后端完成队列，不能直接丢弃引用。
+- 尚未完成的 CUDA 内核通过 AsyncOperation 的 `retained_executable` 持有 module、function 和 backend launch state；LLVM 在返回已完成句柄前已同步执行完毕，无需保活 executable。
+- `Wait()` / `IsReady()` 成功后回收 event；当前 retained Storage 和异步 executable 继续由完成句柄持有，直到该 ObjectRef 释放。析构未完成操作时必须等待或把所有权移交给后端完成队列，不能直接丢弃引用。
 
 ## 6. Storage 物理存储模型
 
@@ -455,62 +459,102 @@ public:
 
 ## 8. KernelSignature 与内核 ABI
 
-高层运行时只调用 backend-neutral `CompiledModule::Launch`。CPU 与 CUDA 的参数打包规则不同，不能把同一个 `std::vector<void*>` 定义为跨后端 ABI。
+公共执行边界只接受 `NDArray` 和显式 `DeviceStream`。CPU 与 CUDA 可以在各自的私有 `.cc` 实现中使用不同调用帧，但裸指针、函数地址和后端句柄不得进入 `api/`、公共 `runtime/`、PackedFunc 或 Python 接口。
+
+### 8.1 已实现的对象模型
+
+参数、签名和启动元数据均为 `Object/ObjectRef` 对象。对象构造时完成校验，对外返回的 `Array` 会复制容器节点，调用方不能通过共享别名重排已经验证的 ABI。
 
 ```cpp
-enum class KernelArgRole {
-    kInput,
-    kOutput,
-    kConstant,
+enum class KernelArgRole : int {
+    kInput = 0,
+    kConstant = 1,
+    kOutput = 2,
 };
 
-struct KernelArgSpec {
-    std::string name;
+class KernelArgSpecNode final : public Object {
+public:
+    String name;
     KernelArgRole role;
     DLDataType dtype;
-    Array<int64_t> static_shape;
-    int rank;
     Device device;
-    size_t alignment;
+    uint64_t alignment;
     bool mutable_data;
-    std::string constant_key;
+    String constant_key;
+
+private:
+    Array<int64_t> shape_;
 };
 
-struct KernelSignature {
-    std::string symbol;
-    Array<KernelArgSpec> arguments;
-    bool has_dynamic_output_shape;
+class KernelSignatureNode final : public Object {
+public:
+    String symbol;
+
+private:
+    Array<KernelArgSpec> arguments_;
+};
+
+class KernelSignature : public ObjectRef {
+public:
+    void Validate() const;
+    Array<KernelArgSpec> arguments() const;
+    bool has_dynamic_input_shape() const;
+};
+
+class KernelLaunchMetadataNode final : public Object {
+public:
+    Device device;
+    CodeGenBackend backend;
+    Dim3 grid;
+    Dim3 block;
+    uint64_t dynamic_shared_memory_bytes;
 };
 ```
 
-规则：
+当前不变量：
 
-- 参数顺序完全由 Signature 决定，不能依赖调用方约定。
-- 输入、输出和常量必须分别标记。
-- 常量参数必须带稳定的 `constant_key`，由 RuntimeSession 常量表或 ExecutionPlan constant value id 解析。
-- 静态输出由 RuntimeSession 直接分配。
-- 动态输出必须提供 shape function；未实现 shape function 时在启动前拒绝。
-- device、dtype、rank、shape、alignment 任一不匹配都在提取裸指针前报错。
+- 参数严格按 `input -> constant -> output` 分段，顺序来自最终优化后的 `PrimFunc.params`，不能由调用方重新推测。
+- 参数名在同一签名内唯一；常量 key 非空且唯一，非定值参数的 `constant_key` 必须为空。
+- 常量 payload 由 Relay lowering 保留，Compiler 在 Lower 阶段将其放置到 Target Device；`BuildKernelSignature` 使用结构化常量 key 和最终 TIR 构建契约，不重新扫描 Relay。
+- `shape` 是唯一的 rank 来源。`-1` 仅表示动态输入维度；当前没有 shape function，因此动态输出在签名构造阶段直接拒绝。
+- dtype 比较覆盖 DLPack 的 `code`、`bits` 和 `lanes`，alignment 必须是 2 的幂。
+- LLVM metadata 只允许 CPU Device 和 `1x1x1` grid/block；CUDA metadata 只允许 CUDA Device，并由 `BindCudaThreads` 固化 grid、block 和逻辑 work size。
 
-公共模块启动接口：
+### 8.2 CompiledModule 公共启动边界
+
+`CompiledModule` 同时持有 Target、最终 TIR、Signature、启动元数据、常量表和后端 `CompiledKernel`。模块构造要求 executable 与模块共享同一个 Signature 和 metadata 节点，避免装配阶段出现两份 ABI 事实。
 
 ```cpp
-class CompiledModule {
+class CompiledModule : public ObjectRef {
 public:
     AsyncOperation Launch(
-        const Array<NDArray>& ordered_arguments,
+        const Array<runtime::NDArray>& ordered_arguments,
         const DeviceStream& stream) const;
 
-    const KernelSignature& signature() const;
+    KernelSignature signature() const;
+    KernelLaunchMetadata launch_metadata() const;
+    Map<String, runtime::NDArray> constants() const;
+    Target target() const;
 };
 ```
 
-后端内部打包规则：
+`Launch` 在调用 launcher 前依次验证：
 
-- CPU 后端将 NDArray data 地址按签名顺序作为直接 buffer 参数传给 CPU 函数。
-- CUDA Driver API 的 `kernelParams` 是“指向主机参数存储单元的指针数组”。对于设备指针参数，后端先创建生命周期覆盖 `cuLaunchKernel` 调用的主机 `void*` 单元，再把这些单元的地址传入 `kernelParams`。
-- 异步启动返回的 AsyncOperation 持有全部参数 NDArray/Storage，直到 event 表示内核完成。
-- backend-specific 参数单元不得泄漏到 RuntimeSession、ExecutionPlan 或 Python。
+1. executable 和 stream 已定义且 ready；
+2. stream Device 与启动 metadata 一致；
+3. 参数数量与 Signature 完全相等；
+4. 每个 NDArray、Storage、dtype、device、rank、shape 和连续性合法；
+5. `byte_offset + NBytes()` 位于 Storage 容量内，有效数据地址满足 alignment；
+6. 常量参数必须是模块常量表中对应 key 绑定的同一个 NDArray 对象，调用方不能替换 payload；
+7. 全部检查成功后才调用 `CompiledKernel::Launch`，失败路径不产生后端副作用。
+
+当前 backend 内部规则：
+
+- LLVM launcher 在私有实现中使用 `int32_t(void** data, uint64_t count)` 调用帧。它从已经验证的 NDArray 提取有效地址，调用 ORC JIT 机器码，并返回已完成的 `AsyncOperation`。该 `void**` 不是公共 ABI。
+- 每个 LLVM 编译模块拥有独立 ORC `LLJIT`；launcher 强持有 JIT 和函数地址，模块销毁前机器码始终有效。
+- CUDA launcher 先构造有效 device pointer 的主机存储单元 `pointer_values[i]`，再令 `kernel_params[i] = &pointer_values[i]` 后调用 `cuLaunchKernel`；不能把 device pointer 数组直接冒充 Driver 参数数组。
+- CUDA NDArray 的有效地址是 `Storage.data + byte_offset`。launch 后在同一 stream 记录 event，pending `AsyncOperation` 同时保活参数 Storage、CompiledKernel、CUmodule、stream 和 event，直到完成或显式等待。
+- `CSourceEmitter` 只生成诊断 C 源码，不是可执行 backend，也不参与 Compiler dispatch。
 
 ## 9. 与编译器模块的交互
 
@@ -523,15 +567,36 @@ public:
 
 ### 9.2 Compiler 和 Codegen
 
-Compiler 输入包括 Target 和物理 Device 能力，输出包括：
+`CompileConfig` 只包含 Target、`opt_level` 和 profiling 选项：
 
-- 编译模块；
-- `KernelSignature`；
-- 目标设备类型；
-- 静态输出 shape 或 shape function；
-- CUDA grid、block、动态 shared memory 等启动元数据。
+```cpp
+CompileConfig config = CompileConfig::Create(target, opt_level);
+CompiledModule module = Compiler::Compile(function, config);
+```
 
-Codegen 不分配长期 NDArray。临时编译缓冲由普通主机内存或显式 workspace 管理。
+不存在独立 backend 字段，也不存在 AOT、JIT 或 Adaptive mode。Target 是 backend 选择的唯一事实来源：`llvm + CPU` 进入 LLVM ORC JIT，`cuda + CUDA` 进入线程绑定、CUDA C++ 发射、NVRTC PTX 编译和 Driver module 加载；kind、DeviceType、device id 或能力快照不一致时在编译入口失败。
+
+Compiler 使用不可回退的 `CompileResult` 状态机按以下顺序推进：
+
+1. `validate`：校验 CompileConfig、Target 和入口 Relay Function；
+2. `optimize_relay`：强制类型推导并执行 `opt_level` 对应的确定性 Relay pass；
+3. `lower`：原子产出 PrimFunc 和稳定常量表；
+4. `optimize_tir`：执行确定性 TIR pass，并只保留最终 TIR 事实；
+5. `build_signature`：从最终 TIR、常量表和 Target 构建 KernelSignature；
+6. `build_backend`：按 Target 构建 metadata 和 CompiledKernel；
+7. `assemble`：把所有同源对象组装为 CompiledModule。
+
+每次状态转移只允许前进一个阶段；常量表从 lowering 开始持续保活，后续阶段不能重新扫描 Relay。PassContext 会合并 CompileConfig Target 与 Relay placement，存在冲突时失败，不静默覆盖。
+
+当前 Compiler 输出包括：
+
+- 强持有最终 TIR、常量 payload 和 executable 的 `CompiledModule`；
+- 后端无关 `KernelSignature`；
+- Target 与物理 Device 快照；
+- `KernelLaunchMetadata`；
+- LLVM ORC JIT launcher，或持有 `CUmodule/CUfunction` 的 CUDA Driver launcher。
+
+Codegen 本身不分配调用方输入输出 NDArray。LLVM 编译临时对象由 RAII 管理；常量 NDArray 由 CompiledModule 持有。静态输出 shape 记录在 Signature 中，由 RuntimeSession 在调用阶段按 dtype、Device 和 alignment 自动分配；直接调用 `CompiledModule::Launch` 时仍由调用方提供完整输出参数。
 
 ### 9.3 编译执行流程
 
@@ -542,46 +607,69 @@ sequenceDiagram
     participant G as Codegen
     participant M as CompiledModule
 
-    R->>C: IR + Target + Device capability
-    C->>G: Lowered TIR
-    G-->>C: module + launch metadata
-    C-->>M: module + KernelSignature
+    R->>C: Function + CompileConfig(Target, opt_level)
+    C->>C: Relay passes -> Lower -> TIR passes
+    C->>C: Build KernelSignature
+    C->>G: final TIR + shared Signature
+    G-->>C: CompiledKernel + launch metadata
+    C-->>M: assemble target/TIR/constants/contracts/executable
 ```
 
 ## 10. 与 RuntimeSession 的交互
 
-RuntimeSession 对外提供强类型接口：
+> **实现状态：静态核心已实现。** `RuntimeSession` 位于 `include/runtime/runtime_session.h` 和 `src/runtime/runtime_session.cc`，只消费已经 ready 的 `CompiledModule`。旧 Adaptive runtime、后台编译器、shape predictor、模糊 kernel cache 和裸参数 runner 均未恢复。
+
+### 10.1 已实现能力
+
+RuntimeSession 已完成：
+
+1. 在产生输出分配前，按 KernelSignature 校验输入数量、dtype、shape、Device、连续布局、Storage range 和 alignment；
+2. 通过 `constant_key` 取得 CompiledModule 持有的同一常量对象；
+3. 按 output spec 的 shape、dtype、Device 和 alignment 自动分配静态输出；
+4. 严格遍历 Signature 组装 input、constant、output，不根据 Map 顺序或参数名推测 ABI；
+5. `Run` 使用模块 Device 的默认 stream，等待完成后返回 outputs；
+6. `RunAsync` 使用调用方提供的同 Device stream，同时返回 outputs 和 completion；
+7. completion 保活本次调用的全部参数 Storage 和 stream；尚未完成的异步后端还会保活 executable。
+
+### 10.2 公共接口
+
+RuntimeSession 是 CompiledModule 的上层消费者，不是 Compiler mode。接口只接受强类型张量：
 
 ```cpp
-struct RunAsyncResult {
+struct RunAsyncResult final {
     Array<NDArray> outputs;
     AsyncOperation completion;
 };
 
-class RuntimeSession {
+class RuntimeSession : public ObjectRef {
 public:
-    RuntimeSession(
-        Function function,
-        api::CompileConfig config,
-        Map<String, NDArray> constants);
+    explicit RuntimeSession(api::CompiledModule module);
+    explicit RuntimeSession(const ObjectRef& ref);
 
-    Array<NDArray> Run(const Array<NDArray>& inputs);
+    Array<NDArray> Run(const Array<NDArray>& inputs) const;
     RunAsyncResult RunAsync(
         const Array<NDArray>& inputs,
-        const DeviceStream& stream);
+        const DeviceStream& stream) const;
 };
 ```
 
-执行步骤：
+`RuntimeSessionNode` 只持有一个 `CompiledModule`，单次调用的 inputs、outputs、ordered arguments 和 completion 均为局部状态。`RunAsyncResult` 当前是 C++ 聚合，不注册到 PackedFunc/Python；跨语言接口需要独立的 ObjectRef result 类型，不能直接暴露该结构体 ABI。
 
-1. 根据 KernelSignature 校验输入数量、dtype、shape 和 device。
-2. 通过 `constant_key` 从 session 常量表解析常量，并保证常量 Storage 覆盖执行生命周期。
-3. 解析静态输出 shape；动态 shape 无 shape function 时拒绝执行。
-4. 在目标 Device 上分配输出 NDArray。
-5. 根据 Signature 顺序组合输入、输出和常量 NDArray。
-6. 选择或创建 DeviceStream，并调用 backend-neutral `CompiledModule::Launch`。
-7. 同步 `Run` 等待 AsyncOperation 完成后返回 outputs；`RunAsync` 同时返回 outputs 和 completion，outputs 及其 Storage 由 completion 保活至执行完成。
-8. 返回持有输出 Storage 的 NDArray。
+### 10.3 异步前置条件和资源驻留
+
+- `RunAsync` 不接收 dependency 列表，NDArray 也不记录 last-writer event。输入必须已经 ready，或其 producer 必须与本次 launch 使用同一 stream；跨 stream 消费前由调用方等待 producer completion。
+- `AsyncOperation::Wait/IsReady` 回收 event，但完成句柄仍持有 `retained_storage`，异步后端还持有 executable，直到 completion ObjectRef 自身释放。LLVM 在返回 completion 前已经同步执行完毕，因此无需把 executable 存入完成句柄。长期保存已完成 completion 仍会占用其实际持有的资源。
+- `Storage::FromExternal` 的异步安全取决于外部 owner。若没有能覆盖执行期的 deleter/所有权对象，completion 只能保活 Storage 元数据，不能延长外部 buffer 的真实生命周期。
+- CUDA 测试已覆盖同 stream H2D 后直接 launch，不在 copy 与 kernel 之间显式等待；也覆盖 module、session、inputs 和外部 stream 引用释放后仅凭 completion 完成执行。
+
+### 10.4 尚未实现的边界
+
+- 动态输出 shape function 和动态 shape specialization；
+- exact shape cache、后台重编译、失败传播和 module 热替换；
+- ExecutionPlan 到 CompiledModule 的 registry、查找和参数装配；
+- 可序列化 AOT artifact、磁盘 cache 或跨进程 module 加载。
+
+这些能力不得重新引入 `std::vector<void*>`、shape fuzzy 命中或持有 unordered_map 元素裸指针的 cache。
 
 ```mermaid
 sequenceDiagram
@@ -600,6 +688,8 @@ sequenceDiagram
     R->>A: sync when required
     R-->>U: Array<NDArray>
 ```
+
+当前 CPU LLVM 与 CUDA add/constant/relu 数值测试均通过 RuntimeSession 只传 inputs；这不表示动态 shape specialization 或 ExecutionPlan 执行已经完成。
 
 ## 11. 与 ExecutionPlan 和 Disco 的交互
 
@@ -735,7 +825,7 @@ status
 | DeviceAPI 后端 | Device、裸指针、内部 stream | 理解 IR、worker 或 ExecutionPlan |
 | Storage | Device 路由层 | 保存 shape/dtype |
 | NDArray | Storage、dtype、shape、DeviceStream | 直接调用 CUDA/系统分配函数 |
-| RuntimeSession | NDArray、KernelSignature、CompiledModule | 对外暴露裸指针 ABI |
+| RuntimeSession | NDArray、KernelSignature、CompiledModule | 编译 Relay、暴露裸指针 ABI，或重新引入旧 Adaptive/fuzzy cache |
 | ExecutionPlan/Disco | VirtualDevice、Device、NDArray、collective | 混用 worker id 和 device id |
 | Python/PackedFunc | ObjectRef 接口 | 用整数传递设备指针 |
 | DLPack | NDArray/Storage 所有权桥 | 重复释放或隐式设备复制 |
@@ -749,7 +839,7 @@ status
 3. NDArray 通过 Storage 和 DeviceAPI 持有 CPU/CUDA 内存。
 4. CPU、H2D、D2H、同设备 D2D 往返数据正确。
 5. Python、Relay 常量和 CPU CCL 不会解引用 CUDA 指针。
-6. RuntimeSession 以 NDArray 为公共输入输出，并根据 KernelSignature 启动真实内核。
+6. CompiledModule 以完整有序 NDArray 为公共参数；RuntimeSession 只接收 inputs，并根据 KernelSignature 绑定常量和分配静态 outputs。
 7. ExecutionPlan 在声明的物理设备上分配 value 并执行真实 kernel。
 8. CPU-only 构建不引用 CUDA 符号。
 9. ASan、ThreadSanitizer 和 Compute Sanitizer 未报告所有权、越界或泄漏错误。

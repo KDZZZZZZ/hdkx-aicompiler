@@ -54,12 +54,12 @@ llvm::Type* CodeGenLLVM::GetLLVMType(tir::DataType dtype) {
 }
 
 llvm::FunctionType* CodeGenLLVM::CreateFuncType(const tir::PrimFunc& func) {
-    // ABI约定: int32_t kernel(void** packed_args)
-    // packed_args[i] 指向第i个buffer的数据
-    llvm::Type* void_ptr = llvm::PointerType::get(ctx_, 0);
+    (void)func;
+    // 私有 ABI 固定为 i32 kernel(void** packed_args, uint64_t count)。
     llvm::Type* void_ptr_ptr = llvm::PointerType::get(ctx_, 0);
+    llvm::Type* count_type = llvm::Type::getInt64Ty(ctx_);
     llvm::Type* ret_type = llvm::Type::getInt32Ty(ctx_);
-    return llvm::FunctionType::get(ret_type, {void_ptr_ptr}, false);
+    return llvm::FunctionType::get(ret_type, {void_ptr_ptr, count_type}, false);
 }
 
 // ==================== 主入口 ====================
@@ -71,15 +71,47 @@ void CodeGenLLVM::AddFunction(const tir::PrimFunc& func, const std::string& name
     current_func_ = llvm::Function::Create(
         ft, llvm::Function::ExternalLinkage, name, module_.get());
 
-    // packed_args参数
+    // 两个入口参数共同描述 call frame；任何 slot 读取都必须晚于门禁。
     llvm::Value* packed_args = current_func_->getArg(0);
     packed_args->setName("packed_args");
+    llvm::Value* argument_count = current_func_->getArg(1);
+    argument_count->setName("argument_count");
 
-    // 创建entry block
+    // 参数数量不匹配返回 -1；非空帧却传入 null 返回 -2。
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(ctx_, "entry", current_func_);
+    llvm::BasicBlock* check_pointer =
+        llvm::BasicBlock::Create(ctx_, "check_pointer", current_func_);
+    llvm::BasicBlock* invalid_count =
+        llvm::BasicBlock::Create(ctx_, "invalid_count", current_func_);
+    llvm::BasicBlock* invalid_pointer =
+        llvm::BasicBlock::Create(ctx_, "invalid_pointer", current_func_);
+    llvm::BasicBlock* body = llvm::BasicBlock::Create(ctx_, "body", current_func_);
     builder_.SetInsertPoint(entry);
+    llvm::Value* expected_count = llvm::ConstantInt::get(
+        llvm::Type::getInt64Ty(ctx_), static_cast<uint64_t>(func->params.size()));
+    builder_.CreateCondBr(builder_.CreateICmpEQ(argument_count, expected_count),
+                          check_pointer, invalid_count);
 
-    // 从packed_args中提取每个buffer参数
+    builder_.SetInsertPoint(invalid_count);
+    builder_.CreateRet(llvm::ConstantInt::getSigned(
+        llvm::Type::getInt32Ty(ctx_), -1));
+
+    builder_.SetInsertPoint(check_pointer);
+    llvm::Value* null_frame = llvm::ConstantPointerNull::get(
+        llvm::PointerType::get(ctx_, 0));
+    llvm::Value* frame_is_valid =
+        func->params.empty()
+            ? llvm::ConstantInt::getTrue(ctx_)
+            : builder_.CreateICmpNE(packed_args, null_frame);
+    builder_.CreateCondBr(frame_is_valid, body, invalid_pointer);
+
+    builder_.SetInsertPoint(invalid_pointer);
+    builder_.CreateRet(llvm::ConstantInt::getSigned(
+        llvm::Type::getInt32Ty(ctx_), -2));
+
+    builder_.SetInsertPoint(body);
+
+    // 只有 count 与 frame 指针均合法后，才提取每个 buffer 地址。
     for (size_t i = 0; i < func->params.size(); ++i) {
         const auto& param = func->params[i];
 

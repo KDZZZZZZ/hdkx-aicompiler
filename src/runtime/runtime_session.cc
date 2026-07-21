@@ -1,164 +1,154 @@
 /*! \file src/runtime/runtime_session.cc
- * \brief 实现 adaptive runtime、kernel cache、shape 统计和后台编译。
+ * \brief 实现 RuntimeSession 的签名驱动参数装配和同步/异步执行。
  */
 
 #include "runtime/runtime_session.h"
 
-#include <algorithm>
-#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
-#include "base/profiling.h"
+#include "api/kernel_argument_validation.h"
 
-namespace kxc {
-namespace runtime {
-
+namespace kxc::runtime {
 namespace {
 
-profiling::EventSpec MakeRuntimeSpec(const std::string& event_type) {
-    profiling::EventSpec spec;
-    spec.component = "runtime_session";
-    spec.event_type = event_type;
-    return spec;
+/*! \brief 保存一次调用按签名组装的完整参数和其中的输出子序列。 */
+struct PreparedArguments final {
+    /*! \brief 传给 CompiledModule::Launch 的完整有序参数。 */
+    Array<NDArray> ordered;
+    /*! \brief 返回调用方的输出张量，元素与 ordered 中对应对象共享身份。 */
+    Array<NDArray> outputs;
+};
+
+/*! \brief 重新验证 ObjectRef 恢复出的 module，禁止半初始化 session。 */
+void ValidateModule(const api::CompiledModule& module) {
+    if (!module.defined() || !module.As<api::CompiledModuleNode>()) {
+        throw std::invalid_argument(
+            "RuntimeSession requires a defined CompiledModule");
+    }
+    if (!module.IsReady()) {
+        throw std::invalid_argument(
+            "RuntimeSession requires a ready CompiledModule");
+    }
+    module.signature().Validate();
+    module.launch_metadata().Validate();
+}
+
+/*! \brief 按 Signature 唯一顺序组合 inputs、module constants 和新 outputs。 */
+PreparedArguments PrepareArguments(const api::CompiledModule& module,
+                                   const Array<NDArray>& inputs) {
+    const codegen::KernelSignature signature = module.signature();
+    const Array<codegen::KernelArgSpec> specs = signature.arguments();
+    size_t expected_inputs = 0;
+    for (const auto& spec : specs) {
+        if (spec->role == codegen::KernelArgRole::kInput) ++expected_inputs;
+    }
+    if (inputs.size() != expected_inputs) {
+        throw std::invalid_argument(
+            "RuntimeSession kernel '" + std::string(signature->symbol) +
+            "' input count expected " + std::to_string(expected_inputs) +
+            ", actual " + std::to_string(inputs.size()));
+    }
+
+    size_t input_index = 0;
+    for (size_t signature_index = 0; signature_index < specs.size();
+         ++signature_index) {
+        const auto& spec = specs[signature_index];
+        if (spec->role != codegen::KernelArgRole::kInput) continue;
+        api::ValidateKernelArgument(signature, signature_index, spec,
+                                    inputs[input_index]);
+        ++input_index;
+    }
+
+    const Map<String, NDArray> constants = module.constants();
+    PreparedArguments prepared;
+    input_index = 0;
+    for (const auto& spec : specs) {
+        switch (spec->role) {
+            case codegen::KernelArgRole::kInput:
+                prepared.ordered.push_back(inputs[input_index++]);
+                break;
+            case codegen::KernelArgRole::kConstant:
+                if (!constants.count(spec->constant_key)) {
+                    throw std::runtime_error(
+                        "RuntimeSession module is missing constant '" +
+                        std::string(spec->constant_key) + "'");
+                }
+                // 必须使用模块持有的同一对象，CompiledModule 会再次验证常量身份。
+                prepared.ordered.push_back(constants.at(spec->constant_key));
+                break;
+            case codegen::KernelArgRole::kOutput: {
+                const Array<int64_t> shape = spec.shape();
+                for (int64_t dimension : shape) {
+                    if (dimension == codegen::kDynamicDimension) {
+                        throw std::runtime_error(
+                            "RuntimeSession cannot allocate dynamic output without "
+                            "a shape function");
+                    }
+                }
+                NDArray output = NDArray::Empty(
+                    shape, spec->dtype, spec->device, spec->alignment);
+                prepared.outputs.push_back(output);
+                prepared.ordered.push_back(std::move(output));
+                break;
+            }
+        }
+    }
+    return prepared;
 }
 
 }  // namespace
 
-RuntimeSession::RuntimeSession(Function relay_func, api::CompileConfig config,
-                               std::shared_ptr<profiling::ProfileContext> profile_context)
-    : relay_func_(relay_func), config_(config), profile_context_(std::move(profile_context)) {
-    int num_threads = config->background_threads;
-    if (num_threads == 0) {
-        num_threads = std::max(1u, std::thread::hardware_concurrency() / 2);
-    }
-    bg_compiler_ = std::make_unique<BackgroundCompiler>(num_threads);
-    internal_config_ = api::CompileConfig::AOT(config->target, config->opt_level);
-    internal_config_->profile_options = config->profile_options;
+/*! \brief 创建只持有一个 ready CompiledModule 的 RuntimeSession 节点。 */
+RuntimeSession::RuntimeSession(api::CompiledModule module) {
+    ValidateModule(module);
+    SetData(new RuntimeSessionNode(std::move(module)));
 }
 
-RuntimeSession::~RuntimeSession() {
-    if (bg_compiler_) {
-        bg_compiler_->WaitAll();
+/*! \brief 从 ObjectRef 恢复 RuntimeSession，并重新验证节点内容。 */
+RuntimeSession::RuntimeSession(const ObjectRef& ref) : ObjectRef(ref) {
+    if (defined() && !As<RuntimeSessionNode>()) {
+        SetData(nullptr);
+        throw std::invalid_argument(
+            "ObjectRef does not contain RuntimeSessionNode");
     }
+    if (defined()) ValidateModule(operator->()->module);
 }
 
-void RuntimeSession::Run(const std::vector<void*>& args,
-                         const std::vector<std::vector<int64_t>>& input_shapes) {
-    profiling::EventSpec session_spec = MakeRuntimeSpec("runtime_session_run");
-    session_spec.shape_signature = profiling::ShapeSignatureToString(input_shapes);
-    profiling::ScopedSpan span(profile_context_, std::move(session_spec));
-
-    ShapeSignature sig = MakeShapeSignature(input_shapes);
-    predictor_.Record(sig);
-    span.AddField("shape_hash", std::to_string(sig.Hash()));
-    span.AddMetric("shape_seen_count", static_cast<double>(predictor_.GetCount(sig)));
-
-    auto* exact_kernel = cache_.GetExact(sig);
-    if (exact_kernel) {
-        profiling::ScopedSpan hit_span(profile_context_, MakeRuntimeSpec("cache_exact_hit"));
-        hit_span.AddField("shape_hash", std::to_string(sig.Hash()));
-        exact_kernel->Run(args);
-        return;
-    }
-
-    auto* fuzzy_kernel = cache_.GetFuzzy(sig);
-    if (fuzzy_kernel) {
-        profiling::ScopedSpan hit_span(profile_context_, MakeRuntimeSpec("cache_fuzzy_hit"));
-        hit_span.AddField("shape_hash", std::to_string(sig.Hash()));
-        fuzzy_kernel->Run(args);
-        MaybeScheduleOptimization(sig);
-        return;
-    }
-
-    profiling::ScopedSpan miss_span(profile_context_, MakeRuntimeSpec("cache_miss_sync_compile"));
-    miss_span.AddField("shape_hash", std::to_string(sig.Hash()));
-    auto module = api::Compiler::Compile(relay_func_, internal_config_);
-    cache_.Put(sig, module);
-
-    auto module_ptr = cache_.GetExact(sig);
-    module_ptr->Run(args);
-    MaybeScheduleOptimization(sig);
+/*! \brief 在模块设备默认 stream 上执行，等待后返回自动分配输出。 */
+Array<NDArray> RuntimeSession::Run(const Array<NDArray>& inputs) const {
+    const DeviceStream stream =
+        DeviceStream::Default(operator->()->module.launch_metadata()->device);
+    RunAsyncResult result = RunAsync(inputs, stream);
+    result.completion.Wait();
+    return result.outputs;
 }
 
-void RuntimeSession::WarmUp(const std::vector<std::vector<int64_t>>& input_shapes) {
-    profiling::EventSpec spec = MakeRuntimeSpec("runtime_session_warmup");
-    spec.shape_signature = profiling::ShapeSignatureToString(input_shapes);
-    profiling::ScopedSpan span(profile_context_, std::move(spec));
-
-    ShapeSignature sig = MakeShapeSignature(input_shapes);
-    span.AddField("shape_hash", std::to_string(sig.Hash()));
-    if (cache_.Has(sig)) {
-        span.AddField("warmup_cache_status", "already_cached");
-        return;
+/*! \brief 校验显式 stream，组装参数并转交唯一的 CompiledModule launch。 */
+RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
+                                        const DeviceStream& stream) const {
+    const api::CompiledModule& module = operator->()->module;
+    if (!stream.defined() || !stream.As<DeviceStreamNode>()) {
+        throw std::invalid_argument(
+            "RuntimeSession RunAsync requires a defined DeviceStream");
     }
-
-    auto module = api::Compiler::Compile(relay_func_, internal_config_);
-    cache_.Put(sig, std::move(module));
+    if (stream.device() != module.launch_metadata()->device) {
+        throw std::invalid_argument(
+            "RuntimeSession stream device expected " +
+            module.launch_metadata()->device.ToString() + ", actual " +
+            stream.device().ToString());
+    }
+    PreparedArguments prepared = PrepareArguments(module, inputs);
+    AsyncOperation completion = module.Launch(prepared.ordered, stream);
+    return RunAsyncResult{std::move(prepared.outputs), std::move(completion)};
 }
 
-void RuntimeSession::WaitAll() {
-    profiling::ScopedSpan span(profile_context_, MakeRuntimeSpec("runtime_session_wait_all"));
-    if (bg_compiler_) {
-        bg_compiler_->WaitAll();
-    }
+/*! \brief 返回经过 ObjectRef 动态类型检查的 RuntimeSession 节点。 */
+const RuntimeSessionNode* RuntimeSession::operator->() const {
+    const auto* node = As<RuntimeSessionNode>();
+    if (!node) throw std::runtime_error("undefined or invalid RuntimeSession");
+    return node;
 }
 
-std::string RuntimeSession::GetStatus() const {
-    std::ostringstream oss;
-    oss << "RuntimeSession{"
-        << "cached=" << cache_.Size()
-        << ", pending=" << (bg_compiler_ ? bg_compiler_->PendingCount() : 0)
-        << ", completed=" << (bg_compiler_ ? bg_compiler_->CompletedCount() : 0)
-        << ", total_runs=" << predictor_.TotalCount() << "}";
-    return oss.str();
-}
-
-void RuntimeSession::MaybeScheduleOptimization(const ShapeSignature& sig) {
-    const int observed_count = predictor_.GetCount(sig);
-    const bool should_compile =
-        predictor_.ShouldCompile(sig, /*count_threshold=*/2, /*ratio=*/0.05);
-    if (!should_compile) {
-        return;
-    }
-
-    size_t sig_hash = sig.Hash();
-    {
-        std::lock_guard<std::mutex> lock(schedule_mu_);
-        if (submitted_shapes_.count(sig_hash)) {
-            return;
-        }
-        submitted_shapes_.insert(sig_hash);
-    }
-
-    BackgroundCompiler::CompileTask task;
-    task.relay_func = relay_func_;
-    task.config = internal_config_;
-    task.target_shape = sig;
-    task.priority = observed_count;
-    task.profile_context = profile_context_;
-    task.run_id = profiling::CurrentRunId();
-    task.parent_span_id = profiling::CurrentSpanId();
-    task.on_complete = [this, sig, run_id = task.run_id,
-                        parent_span_id = task.parent_span_id](api::CompiledModule module) {
-        cache_.Put(sig, std::move(module));
-        if (profile_context_) {
-            profiling::EventSpec spec = MakeRuntimeSpec("background_compile_completed");
-            spec.shape_signature = profiling::ShapeSignatureToString(sig.input_shapes);
-            spec.fields["shape_hash"] = std::to_string(sig.Hash());
-            profile_context_->RecordInstant(std::move(spec), run_id, parent_span_id);
-        }
-    };
-
-    if (profile_context_) {
-        profiling::EventSpec submit_spec = MakeRuntimeSpec("background_compile_submitted");
-        submit_spec.shape_signature = profiling::ShapeSignatureToString(sig.input_shapes);
-        submit_spec.fields["shape_hash"] = std::to_string(sig.Hash());
-        submit_spec.metrics["priority"] = static_cast<double>(task.priority);
-        submit_spec.metrics["seen_count"] = static_cast<double>(observed_count);
-        profile_context_->RecordInstant(std::move(submit_spec), task.run_id, task.parent_span_id);
-    }
-
-    bg_compiler_->Submit(std::move(task));
-}
-
-}  // namespace runtime
-}  // namespace kxc
+}  // namespace kxc::runtime

@@ -143,16 +143,19 @@ NDArray::NDArray(const ObjectRef& ref) : ObjectRef(ref) {
 }
 
 // 在指定设备分配未初始化的连续张量。
-NDArray NDArray::Empty(Array<int64_t> shape, DLDataType dtype, Device device) {
+NDArray NDArray::Empty(Array<int64_t> shape, DLDataType dtype, Device device,
+                       size_t alignment) {
     std::vector<int64_t> shape_storage = ToVector(shape);
     const size_t nbytes = TensorBytes(shape_storage, dtype);
     return MakeArray(std::move(shape_storage), dtype,
-                     Storage::Alloc(device, nbytes), {}, 0);
+                     Storage::Alloc(device, nbytes, alignment), {}, 0);
 }
 
 // 分配并按后端语义清零连续张量。
-NDArray NDArray::Zeros(Array<int64_t> shape, DLDataType dtype, Device device) {
-    NDArray result = Empty(std::move(shape), dtype, std::move(device));
+NDArray NDArray::Zeros(Array<int64_t> shape, DLDataType dtype, Device device,
+                       size_t alignment) {
+    NDArray result =
+        Empty(std::move(shape), dtype, std::move(device), alignment);
     const size_t nbytes = result.NBytes();
     DeviceZero(result.device(), result.storage().data(), result->byte_offset, nbytes);
     return result;

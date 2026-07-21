@@ -25,6 +25,19 @@ std::string DTypeToString(const DataType& dt) {
     return "dtype(code=" + std::to_string(dt.code) + ",bits=" + std::to_string(dt.bits) + ")";
 }
 
+// 结构化枚举只在这里映射为 CUDA 拼写，其他 pass 不处理裸 thread tag。
+const char* ThreadIndexName(ThreadIndexKind kind) {
+    switch (kind) {
+        case ThreadIndexKind::kBlockIdxX: return "blockIdx.x";
+        case ThreadIndexKind::kBlockIdxY: return "blockIdx.y";
+        case ThreadIndexKind::kBlockIdxZ: return "blockIdx.z";
+        case ThreadIndexKind::kThreadIdxX: return "threadIdx.x";
+        case ThreadIndexKind::kThreadIdxY: return "threadIdx.y";
+        case ThreadIndexKind::kThreadIdxZ: return "threadIdx.z";
+    }
+    return "unknown_thread_index";
+}
+
 class IRPrinterImpl : private TIRExprFunctor<std::string>, private TIRStmtFunctor<void> {
 public:
     IRPrinterImpl(std::ostream& os, int indent_spaces) : os_(os), indent_spaces_(indent_spaces) {}
@@ -171,6 +184,16 @@ private:
         os_ << Indent(indent_) << "for (" << op->loop_var->name_hint << " = " << PrintExpr(op->min)
             << "; " << op->loop_var->name_hint << " < (" << PrintExpr(op->min) << " + "
             << PrintExpr(op->extent) << "); " << op->loop_var->name_hint << "++) {\n";
+        PrintStmt(op->body, indent_ + indent_spaces_);
+        os_ << Indent(indent_) << "}\n";
+    }
+
+    // 打印显式绑定范围和变量，便于测试确认 pass 没有退化为 AttrStmt 字符串约定。
+    void VisitThreadBinding(const ThreadBindingNode* op, const Stmt& ref) override {
+        (void)ref;
+        os_ << Indent(indent_) << "thread_binding(" << op->thread_var->name_hint
+            << " = " << ThreadIndexName(op->thread_index)
+            << ", extent=" << PrintExpr(op->extent) << ") {\n";
         PrintStmt(op->body, indent_ + indent_spaces_);
         os_ << Indent(indent_) << "}\n";
     }

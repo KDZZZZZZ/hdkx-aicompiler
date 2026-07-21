@@ -40,7 +40,7 @@ endif()
 
 if(KXC_ENABLE_CUDA AND CUDAToolkit_FOUND)
   set(KXC_USE_CUDA 1)
-  set(KXC_CUDA_LIBS CUDA::cudart)
+  set(KXC_CUDA_LIBS CUDA::cudart CUDA::nvrtc CUDA::cuda_driver)
   message(STATUS "CUDA support: enabled")
 elseif(KXC_ENABLE_CUDA AND NOT CUDAToolkit_FOUND)
   set(KXC_USE_CUDA 0)
@@ -191,6 +191,7 @@ set(KXC_RUNTIME_SOURCES
   src/tir/transforms/vectorize_loop.cc
   src/tir/transforms/remove_no_op.cc
   src/tir/transforms/convert_for_loops_serial.cc
+  src/tir/transforms/bind_cuda_threads.cc
   src/te/te.cc
 )
 
@@ -199,18 +200,24 @@ set(KXC_RUNTIME_SOURCES
 list(APPEND KXC_RUNTIME_SOURCES
   src/codegen/compiled_kernel.cc
   src/codegen/codegen_c.cc
+  src/codegen/kernel_signature.cc
   src/api/compile_config.cc
+  src/api/compile_result.cc
+  src/api/compiled_module.cc
+  src/api/kernel_argument_validation.cc
   src/api/compiler.cc
-  src/runtime/shape_predictor.cc
-  src/runtime/kernel_cache.cc
-  src/runtime/kernel_runner.cc
-  src/runtime/background_compiler.cc
   src/runtime/runtime_session.cc
 )
 if(KXC_USE_LLVM)
   list(APPEND KXC_RUNTIME_SOURCES
     src/codegen/codegen_llvm.cc
     src/codegen/llvm_jit.cc
+  )
+endif()
+if(KXC_USE_CUDA)
+  list(APPEND KXC_RUNTIME_SOURCES
+    src/codegen/codegen_cuda.cc
+    src/codegen/cuda_module.cc
   )
 endif()
 
@@ -307,6 +314,11 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
+  kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
+  kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)
+  kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
+  kxc_add_runtime_exe(runtime_session_test test/runtime_session_test.cpp)
+  kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
     set(KXC_ONNX_IMPORT_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.params.bin")
@@ -339,6 +351,7 @@ if(KXC_BUILD_PASS_TESTS)
   endif()
   if(KXC_USE_CUDA)
     kxc_add_runtime_exe(cupti_smoke_test test/cupti_smoke_test.cpp)
+    kxc_add_runtime_exe(codegen_cuda_test test/codegen_cuda_test.cpp)
     if(TARGET CUDA::cuda_driver)
       target_link_libraries(cupti_smoke_test PRIVATE CUDA::cuda_driver)
     endif()
@@ -392,6 +405,41 @@ if(KXC_BUILD_PASS_TESTS)
     USES_TERMINAL
     COMMENT "Run infer_type_test"
   )
+  add_custom_target(run_compiler_contract_test
+    COMMAND "$<TARGET_FILE:compiler_contract_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS compiler_contract_test
+    USES_TERMINAL
+    COMMENT "Run compiler_contract_test"
+  )
+  add_custom_target(run_kernel_signature_test
+    COMMAND "$<TARGET_FILE:kernel_signature_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS kernel_signature_test
+    USES_TERMINAL
+    COMMENT "Run kernel_signature_test"
+  )
+  add_custom_target(run_compiled_module_test
+    COMMAND "$<TARGET_FILE:compiled_module_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS compiled_module_test
+    USES_TERMINAL
+    COMMENT "Run compiled_module_test"
+  )
+  add_custom_target(run_runtime_session_test
+    COMMAND "$<TARGET_FILE:runtime_session_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS runtime_session_test
+    USES_TERMINAL
+    COMMENT "Run runtime_session_test"
+  )
+  add_custom_target(run_cuda_schedule_test
+    COMMAND "$<TARGET_FILE:cuda_schedule_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS cuda_schedule_test
+    USES_TERMINAL
+    COMMENT "Run cuda_schedule_test"
+  )
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     add_custom_target(run_onnx_importer_test
       COMMAND "$<TARGET_FILE:onnx_importer_test>"
@@ -402,6 +450,13 @@ if(KXC_BUILD_PASS_TESTS)
     )
   endif()
   if(KXC_USE_CUDA)
+    add_custom_target(run_codegen_cuda_test
+      COMMAND "$<TARGET_FILE:codegen_cuda_test>"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+      DEPENDS codegen_cuda_test
+      USES_TERMINAL
+      COMMENT "Run codegen_cuda_test"
+    )
     add_custom_target(run_cupti_smoke_test
       COMMAND "$<TARGET_FILE:cupti_smoke_test>"
       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"

@@ -47,10 +47,12 @@ public:
     /*! \brief 从对象系统引用恢复 NDArray，并校验节点类型。 */
     explicit NDArray(const ObjectRef& ref);
 
-    /*! \brief 在指定 Device 上创建未初始化的连续张量。 */
-    static NDArray Empty(Array<int64_t> shape, DLDataType dtype, Device device);
-    /*! \brief 创建连续张量并由设备后端清零。 */
-    static NDArray Zeros(Array<int64_t> shape, DLDataType dtype, Device device);
+    /*! \brief 在指定 Device 上创建满足 alignment 的未初始化连续张量。 */
+    static NDArray Empty(Array<int64_t> shape, DLDataType dtype, Device device,
+                         size_t alignment = 0);
+    /*! \brief 创建满足 alignment 的连续张量并由设备后端清零。 */
+    static NDArray Zeros(Array<int64_t> shape, DLDataType dtype, Device device,
+                         size_t alignment = 0);
 
     /*! \brief 返回张量 Storage 所在的物理设备。 */
     Device device() const;

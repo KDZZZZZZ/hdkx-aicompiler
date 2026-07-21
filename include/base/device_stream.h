@@ -57,7 +57,7 @@ public:
     DeviceStream stream;
     /*! \brief 在 event 完成前不得释放的输入、输出物理存储。 */
     Array<Storage> retained_storage;
-    /*! \brief 为未来异步内核启动保留的可执行对象所有权。 */
+    /*! \brief 异步后端执行期必须保活的可执行对象；同步后端可以为空。 */
     ObjectRef retained_executable;
     /*! \brief 完成事件的拥有型后端句柄；完成或析构时释放。 */
     void* backend_event{nullptr};
@@ -83,7 +83,7 @@ public:
     /*! \brief 构造已经完成的操作，常用于同步 CPU 路径。 */
     static AsyncOperation Completed(const DeviceStream& stream,
                                     Array<Storage> retained = {});
-    /*! \brief 接管 event，并保活 storage/executable 直到完成。 */
+    /*! \brief 接管 event，并由完成句柄持续保活 storage/executable。 */
     static AsyncOperation Pending(const DeviceStream& stream, void* event,
                                   Array<Storage> retained,
                                   ObjectRef executable = ObjectRef());

@@ -94,6 +94,43 @@ public:
     For(Var loop_var, PrimExpr min, PrimExpr extent, ForType for_type, Stmt body);
 };
 
+/*! \brief CUDA 内建线程索引的结构化类别，禁止后端解析裸字符串。 */
+enum class ThreadIndexKind : int {
+    kBlockIdxX = 0,
+    kBlockIdxY = 1,
+    kBlockIdxZ = 2,
+    kThreadIdxX = 3,
+    kThreadIdxY = 4,
+    kThreadIdxZ = 5,
+};
+
+/*! \brief 在作用域内把 thread_var 绑定到一个 CUDA 内建索引。 */
+class ThreadBindingNode final : public StmtNode {
+public:
+    /*! \brief 作用域体引用的显式线程索引变量。 */
+    Var thread_var;
+    /*! \brief 变量对应的 blockIdx/threadIdx 维度。 */
+    ThreadIndexKind thread_index{ThreadIndexKind::kThreadIdxX};
+    /*! \brief 该维实际启动范围，必须是正整数表达式。 */
+    PrimExpr extent;
+    /*! \brief 在线程索引绑定作用域内执行的 TIR。 */
+    Stmt body;
+
+    KXC_OBJECT_DECLARE
+};
+KXC_OBJECT_DEFINE_WITH_KEY(ThreadBindingNode, "kxc.tir.ThreadBindingNode")
+
+/*! \brief ThreadBindingNode 的类型安全语句句柄。 */
+class ThreadBinding : public Stmt {
+public:
+    using Stmt::Stmt;
+    /*! \brief 构造并校验显式 CUDA 线程索引绑定。 */
+    ThreadBinding(Var thread_var, ThreadIndexKind thread_index,
+                  PrimExpr extent, Stmt body);
+    /*! \brief 返回经过动态类型检查的只读节点。 */
+    const ThreadBindingNode* operator->() const;
+};
+
 /*! \brief 条件分支语句节点。 */
 class IfThenElseNode : public StmtNode {
 public:

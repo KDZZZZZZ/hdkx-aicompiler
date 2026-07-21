@@ -72,6 +72,9 @@ bool ContainsFor(const Stmt& stmt) {
     if (stmt.As<ForNode>()) {
         return true;
     }
+    if (const auto* binding = stmt.As<ThreadBindingNode>()) {
+        return ContainsFor(binding->body);
+    }
     if (const auto* let_stmt = stmt.As<LetStmtNode>()) {
         return ContainsFor(let_stmt->body);
     }
@@ -103,6 +106,9 @@ bool IsSimpleStraightLineStmt(const Stmt& stmt) {
     }
     if (stmt.As<EvaluateNode>() || stmt.As<StoreNode>()) {
         return true;
+    }
+    if (const auto* binding = stmt.As<ThreadBindingNode>()) {
+        return IsSimpleStraightLineStmt(binding->body);
     }
     if (const auto* let_stmt = stmt.As<LetStmtNode>()) {
         return IsSimpleStraightLineStmt(let_stmt->body);
