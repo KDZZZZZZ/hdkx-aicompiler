@@ -124,7 +124,14 @@ else()
   message(STATUS "LLVM support: disabled by KXC_ENABLE_LLVM=OFF")
 endif()
 
-set(KXC_RUNTIME_SOURCES
+# ---------------------------------------------------------------------------
+# Phase-1 module object targets (file-architecture plan §9 stage 1).
+# Source paths are unchanged; only CMake composition is modularized.
+# Registration TUs stay in the aggregate object set so static links keep
+# global constructors (RegisterBuiltins bootstrap lands in a later stage).
+# ---------------------------------------------------------------------------
+
+set(KXC_BASE_SOURCES
   src/base/expr.cc
   src/base/device.cc
   src/base/device_api.cc
@@ -146,7 +153,9 @@ set(KXC_RUNTIME_SOURCES
   src/base/disco/executor.cc
   src/base/device/cpu_device_api.cc
   src/base/device/cuda_device_api.cc
-  src/frontend/onnx_importer.cc
+)
+
+set(KXC_RELAY_SOURCES
   src/relay/relay.cc
   src/relay/pass_utils.cc
   src/relay/type_infer.cc
@@ -175,6 +184,9 @@ set(KXC_RUNTIME_SOURCES
   src/relay/op/nn/dense.cc
   src/relay/op/nn/softmax.cc
   src/relay/op/op_ffi.cc
+)
+
+set(KXC_TIR_SOURCES
   src/tir/expr.cc
   src/tir/stmt.cc
   src/tir/pass_utils.cc
@@ -189,50 +201,131 @@ set(KXC_RUNTIME_SOURCES
   src/tir/transforms/remove_no_op.cc
   src/tir/transforms/convert_for_loops_serial.cc
   src/tir/transforms/bind_cuda_threads.cc
+)
+
+set(KXC_TE_SOURCES
   src/te/te.cc
 )
 
-# ==================== Codegen Sources (conditional) ====================
-# C codegen and runtime are always available
-list(APPEND KXC_RUNTIME_SOURCES
+set(KXC_FRONTEND_SOURCES
+  src/frontend/onnx_importer.cc
+)
+
+set(KXC_CODEGEN_COMMON_SOURCES
   src/codegen/compiled_kernel.cc
   src/codegen/codegen_c.cc
   src/codegen/kernel_signature.cc
+)
+
+set(KXC_COMPILER_API_SOURCES
   src/api/compile_config.cc
   src/api/compile_result.cc
   src/api/compiled_module.cc
   src/api/kernel_argument_validation.cc
   src/api/compiler.cc
+)
+
+set(KXC_RUNTIME_SESSION_SOURCES
   src/runtime/runtime_session.cc
 )
+
+set(KXC_CODEGEN_LLVM_SOURCES "")
 if(KXC_USE_LLVM)
-  list(APPEND KXC_RUNTIME_SOURCES
+  set(KXC_CODEGEN_LLVM_SOURCES
     src/codegen/codegen_llvm.cc
     src/codegen/llvm_jit.cc
   )
 endif()
+
+set(KXC_CODEGEN_CUDA_SOURCES "")
 if(KXC_USE_CUDA)
-  list(APPEND KXC_RUNTIME_SOURCES
+  set(KXC_CODEGEN_CUDA_SOURCES
     src/codegen/codegen_cuda.cc
     src/codegen/cuda_module.cc
   )
 endif()
 
-add_library(kxc_runtime_obj OBJECT ${KXC_RUNTIME_SOURCES})
-target_include_directories(kxc_runtime_obj PUBLIC "${KXC_INCLUDE_DIR}")
-target_compile_definitions(kxc_runtime_obj PUBLIC KXC_USE_CUDA=${KXC_USE_CUDA} KXC_USE_LLVM=${KXC_USE_LLVM})
-if(KXC_USE_CUDA)
-  target_link_libraries(kxc_runtime_obj PUBLIC ${KXC_CUDA_LIBS})
-endif()
+# Shared compile interface for every module object (paths still under include/).
+# Later stages will narrow PUBLIC deps; phase 1 keeps behavior parity.
+function(kxc_configure_module_obj target)
+  target_include_directories(${target} PUBLIC "${KXC_INCLUDE_DIR}")
+  target_compile_definitions(${target} PUBLIC
+    KXC_USE_CUDA=${KXC_USE_CUDA}
+    KXC_USE_LLVM=${KXC_USE_LLVM})
+  if(KXC_USE_CUDA)
+    target_link_libraries(${target} PUBLIC ${KXC_CUDA_LIBS})
+  endif()
+  if(KXC_USE_LLVM)
+    target_include_directories(${target} SYSTEM PUBLIC ${KXC_LLVM_INCLUDE_DIRS})
+    target_compile_definitions(${target} PUBLIC ${KXC_LLVM_DEFINITIONS}
+      KXC_MINGW_LIBGCC_PATH="${KXC_MINGW_LIBGCC_PATH}")
+  endif()
+endfunction()
+
+add_library(kxc_base_obj OBJECT ${KXC_BASE_SOURCES})
+kxc_configure_module_obj(kxc_base_obj)
+
+add_library(kxc_relay_obj OBJECT ${KXC_RELAY_SOURCES})
+kxc_configure_module_obj(kxc_relay_obj)
+
+add_library(kxc_tir_obj OBJECT ${KXC_TIR_SOURCES})
+kxc_configure_module_obj(kxc_tir_obj)
+
+add_library(kxc_te_obj OBJECT ${KXC_TE_SOURCES})
+kxc_configure_module_obj(kxc_te_obj)
+
+add_library(kxc_frontend_obj OBJECT ${KXC_FRONTEND_SOURCES})
+kxc_configure_module_obj(kxc_frontend_obj)
+
+add_library(kxc_codegen_common_obj OBJECT ${KXC_CODEGEN_COMMON_SOURCES})
+kxc_configure_module_obj(kxc_codegen_common_obj)
+
+add_library(kxc_compiler_api_obj OBJECT ${KXC_COMPILER_API_SOURCES})
+kxc_configure_module_obj(kxc_compiler_api_obj)
+
+add_library(kxc_runtime_session_obj OBJECT ${KXC_RUNTIME_SESSION_SOURCES})
+kxc_configure_module_obj(kxc_runtime_session_obj)
+
+set(KXC_MODULE_OBJECT_TARGETS
+  kxc_base_obj
+  kxc_relay_obj
+  kxc_tir_obj
+  kxc_te_obj
+  kxc_frontend_obj
+  kxc_codegen_common_obj
+  kxc_compiler_api_obj
+  kxc_runtime_session_obj
+)
+
 if(KXC_USE_LLVM)
-  target_include_directories(kxc_runtime_obj SYSTEM PUBLIC ${KXC_LLVM_INCLUDE_DIRS})
-  target_compile_definitions(kxc_runtime_obj PUBLIC ${KXC_LLVM_DEFINITIONS}
-    KXC_MINGW_LIBGCC_PATH="${KXC_MINGW_LIBGCC_PATH}")
+  add_library(kxc_codegen_llvm_obj OBJECT ${KXC_CODEGEN_LLVM_SOURCES})
+  kxc_configure_module_obj(kxc_codegen_llvm_obj)
+  list(APPEND KXC_MODULE_OBJECT_TARGETS kxc_codegen_llvm_obj)
 endif()
 
-add_library(kxc_runtime STATIC $<TARGET_OBJECTS:kxc_runtime_obj>)
+if(KXC_USE_CUDA)
+  add_library(kxc_codegen_cuda_obj OBJECT ${KXC_CODEGEN_CUDA_SOURCES})
+  kxc_configure_module_obj(kxc_codegen_cuda_obj)
+  list(APPEND KXC_MODULE_OBJECT_TARGETS kxc_codegen_cuda_obj)
+endif()
+
+# Compatibility alias: previous single object library name used by tooling.
+add_library(kxc_runtime_obj INTERFACE)
+foreach(_kxc_mod IN LISTS KXC_MODULE_OBJECT_TARGETS)
+  target_sources(kxc_runtime_obj INTERFACE $<TARGET_OBJECTS:${_kxc_mod}>)
+  target_link_libraries(kxc_runtime_obj INTERFACE ${_kxc_mod})
+endforeach()
+
+set(KXC_RUNTIME_OBJECT_FILES "")
+foreach(_kxc_mod IN LISTS KXC_MODULE_OBJECT_TARGETS)
+  list(APPEND KXC_RUNTIME_OBJECT_FILES $<TARGET_OBJECTS:${_kxc_mod}>)
+endforeach()
+
+add_library(kxc_runtime STATIC ${KXC_RUNTIME_OBJECT_FILES})
 target_include_directories(kxc_runtime PUBLIC "${KXC_INCLUDE_DIR}")
-target_compile_definitions(kxc_runtime PUBLIC KXC_USE_CUDA=${KXC_USE_CUDA} KXC_USE_LLVM=${KXC_USE_LLVM})
+target_compile_definitions(kxc_runtime PUBLIC
+  KXC_USE_CUDA=${KXC_USE_CUDA}
+  KXC_USE_LLVM=${KXC_USE_LLVM})
 if(KXC_USE_CUDA)
   target_link_libraries(kxc_runtime PUBLIC ${KXC_CUDA_LIBS})
 endif()
@@ -253,10 +346,14 @@ function(kxc_add_runtime_exe target source_file)
 
   add_executable(${target}
     "${source_file}"
-    $<TARGET_OBJECTS:kxc_runtime_obj>
+    ${KXC_RUNTIME_OBJECT_FILES}
   )
+  # Ensure module objects build before linking executables.
+  add_dependencies(${target} ${KXC_MODULE_OBJECT_TARGETS})
   target_include_directories(${target} PRIVATE "${KXC_INCLUDE_DIR}")
-  target_compile_definitions(${target} PRIVATE KXC_USE_CUDA=${KXC_USE_CUDA} KXC_USE_LLVM=${KXC_USE_LLVM})
+  target_compile_definitions(${target} PRIVATE
+    KXC_USE_CUDA=${KXC_USE_CUDA}
+    KXC_USE_LLVM=${KXC_USE_LLVM})
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
   endif()
@@ -272,6 +369,7 @@ function(kxc_add_runtime_exe target source_file)
     target_compile_options(${target} PRIVATE /utf-8 /EHsc)
   endif()
 endfunction()
+
 
 if(KXC_BUILD_RESNET18_IR_DUMP)
   kxc_add_runtime_exe(resnet18_ir_dump test/resnet18_ir_dump.cpp)
