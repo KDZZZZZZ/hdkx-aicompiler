@@ -181,7 +181,7 @@ CompileResult Lower(const CompileResult& input) {
 // TIR 阶段只保留优化后的唯一 PrimFunc 事实。
 CompileResult OptimizeTIR(const CompileResult& input,
                           const CompileConfig& config) {
-    Array<String> passes = Compiler::TIRPassPolicy(config->opt_level);
+    Array<String> passes = Compiler::TIRPassPolicy(config->opt_level, input.target());
     if (passes.empty()) {
         // 静态 KernelSignature 要求输出 extent 已化为 IntImm；这是 ABI 正确性步骤。
         passes = {String("fold_constant"), String("simplify_expr")};
@@ -270,7 +270,7 @@ CompiledModule AssembleModule(
 
 }  // namespace
 
-// 每个等级是前一级的确定超集；InferType 属于强制阶段，不放入本策略。
+// InferType 属于强制阶段，不放入策略；O3 暂不启用缺少完整结构键的 CSE。
 Array<String> Compiler::RelayPassPolicy(int opt_level) {
     if (opt_level < 0 || opt_level > 3) {
         throw std::invalid_argument("Relay pass policy requires opt_level 0..3");
@@ -280,19 +280,22 @@ Array<String> Compiler::RelayPassPolicy(int opt_level) {
         return {String("fold_tuple_get_item"), String("fold_constant"),
                 String("simplify_expr")};
     }
-    if (opt_level == 2) {
+    if (opt_level >= 2) {
         return {String("fold_tuple_get_item"), String("fold_constant"),
                 String("simplify_expr"), String("canonicalize_cast"),
                 String("remove_standalone_reshapes"),
                 String("eliminate_dead_let")};
     }
-    return {String("optimize_default")};
+    return {};
 }
 
-// TIR 等级逐步加入索引规范化、循环串行化和完整默认优化。
-Array<String> Compiler::TIRPassPolicy(int opt_level) {
+// CPU O3 使用完整循环优化；CUDA O3 保留 BindCudaThreads 所需的单层串行循环。
+Array<String> Compiler::TIRPassPolicy(int opt_level, const Target& target) {
     if (opt_level < 0 || opt_level > 3) {
         throw std::invalid_argument("TIR pass policy requires opt_level 0..3");
+    }
+    if (!target.defined() || !target.As<TargetNode>()) {
+        throw std::invalid_argument("TIR pass policy requires a defined Target");
     }
     if (opt_level == 0) return {};
     if (opt_level == 1) {
@@ -303,7 +306,15 @@ Array<String> Compiler::TIRPassPolicy(int opt_level) {
                 String("force_narrow_index_to_i32"),
                 String("convert_for_loops_serial")};
     }
-    return {String("optimize_default")};
+    if (target->kind == "cuda" && target->device_type == kCUDA) {
+        return {String("fold_constant"), String("simplify_expr"),
+                String("force_narrow_index_to_i32"), String("remove_no_op")};
+    }
+    return {String("fold_constant"), String("simplify_expr"),
+            String("force_narrow_index_to_i32"),
+            String("convert_for_loops_serial"), String("loop_partition"),
+            String("unroll_loop"), String("vectorize_loop"),
+            String("remove_no_op")};
 }
 
 // 顶层入口只负责建立 profiling/PassContext 作用域并按固定顺序调用七个阶段。

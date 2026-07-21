@@ -46,11 +46,11 @@ protected:
 
         if (op_name == "add") {
             out_value = lhs + rhs;
-        } else if (op_name == "subtract" || op_name == "sub") {
+        } else if (op_name == "subtract") {
             out_value = lhs - rhs;
-        } else if (op_name == "mul" || op_name == "multiply") {
+        } else if (op_name == "mul") {
             out_value = lhs * rhs;
-        } else if (op_name == "divide" || op_name == "div") {
+        } else if (op_name == "divide") {
             if (rhs == 0.0) {
                 return rewritten;
             }

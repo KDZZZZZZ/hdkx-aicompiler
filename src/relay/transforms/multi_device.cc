@@ -499,20 +499,10 @@ private:
 
 }  // namespace
 
-// 从函数中的 VirtualDevice 集合构造 Disco 放置上下文。
-PassContext BuildDiscoPlacementPass(const Function& func) {
-    return ::kxc::BuildDiscoPlacementPass(func);
-}
-
 // 插入并规范化跨设备复制及 collective 调用。
 Function InsertDeviceCommunicationPass(const Function& func) {
     DeviceCommunicationInserter pass;
     return pass.Mutate(func);
-}
-
-// 将 Relay 计算部分降低为携带常量绑定的完整产物。
-LoweredFunction LowerRelayComputeToTIRPass(const Function& func) {
-    return LowerToTIR(func);
 }
 
 // 生成包含放置、通信和值元数据的 ExecutionPlan。
@@ -522,7 +512,7 @@ ExecutionPlan LowerRelayToExecPlanPass(const Function& func) {
     }
     PassContext pass_ctx = PassContext::Current();
     if (!pass_ctx.defined()) {
-        pass_ctx = ::kxc::relay::BuildDiscoPlacementPass(func);
+        pass_ctx = ::kxc::BuildDiscoPlacementPass(func);
     }
     PassContext::Scope scope(pass_ctx);
     Function with_comm = InsertDeviceCommunicationPass(func);
@@ -532,17 +522,12 @@ ExecutionPlan LowerRelayToExecPlanPass(const Function& func) {
 
 KXC_REGISTER_GLOBAL("kxc.relay.transform.build_disco_placement")
     .set_body(ToPackedFunc([](Function func) -> std::string {
-        return ::kxc::relay::BuildDiscoPlacementPass(func).ToString();
+        return ::kxc::BuildDiscoPlacementPass(func).ToString();
     }));
 
 KXC_REGISTER_GLOBAL("kxc.relay.transform.insert_device_communication")
     .set_body(ToPackedFunc([](Function func) -> ObjectRef {
         return ObjectRef(InsertDeviceCommunicationPass(func));
-    }));
-
-KXC_REGISTER_GLOBAL("kxc.relay.transform.lower_compute_to_tir")
-    .set_body(ToPackedFunc([](Function func) -> ObjectRef {
-        return ObjectRef(LowerRelayComputeToTIRPass(func));
     }));
 
 KXC_REGISTER_GLOBAL("kxc.relay.transform.lower_to_exec_plan")

@@ -10,6 +10,8 @@
 #include <vector>
 
 #include "api/compiler.h"
+#include "base/disco/executor.h"
+#include "base/disco/session.h"
 #include "base/ndarray.h"
 #include "base/pass.h"
 #include "base/registry.h"
@@ -45,6 +47,14 @@ bool ThrowsWithMessage(const std::function<void()>& fn, const std::string& expec
         fn();
     } catch (const std::exception& error) {
         return std::string(error.what()).find(expected) != std::string::npos;
+    }
+    return false;
+}
+
+// 检查 Pass 策略是否包含指定名称，避免测试依赖容器内部表示。
+bool ContainsPass(const kxc::Array<kxc::String>& passes, const char* name) {
+    for (const auto& pass : passes) {
+        if (std::string(pass) == name) return true;
     }
     return false;
 }
@@ -214,7 +224,7 @@ bool TestCompilerTargetDispatch() {
     return true;
 }
 
-// opt_level 必须映射到稳定且逐级增强的 Relay/TIR pass 顺序。
+// opt_level 必须映射到稳定策略，且 CUDA O3 不得运行会破坏绑定前置结构的循环 Pass。
 bool TestCompilerPassPolicies() {
     using namespace kxc;
     const Array<String> relay0 = api::Compiler::RelayPassPolicy(0);
@@ -222,18 +232,32 @@ bool TestCompilerPassPolicies() {
     const Array<String> relay2 = api::Compiler::RelayPassPolicy(2);
     const Array<String> relay3 = api::Compiler::RelayPassPolicy(3);
     TEST_CHECK(relay0.empty() && relay1.size() == 3 && relay2.size() == 6 &&
-                   relay3.size() == 1 && std::string(relay3[0]) == "optimize_default",
+                   relay3.size() == 6,
                "Relay opt_level policy changed unexpectedly");
+    TEST_CHECK(!ContainsPass(relay3, "eliminate_common_subexpr") &&
+                   !ContainsPass(relay3, "annotate_memory_scope") &&
+                   !ContainsPass(relay3, "capture_post_dfs_index_in_spans") &&
+                   !ContainsPass(relay3, "infer_type"),
+               "Relay O3 should exclude unsafe CSE, annotation passes and duplicate InferType");
 
-    const Array<String> tir0 = api::Compiler::TIRPassPolicy(0);
-    const Array<String> tir1 = api::Compiler::TIRPassPolicy(1);
-    const Array<String> tir2 = api::Compiler::TIRPassPolicy(2);
-    const Array<String> tir3 = api::Compiler::TIRPassPolicy(3);
+    const Target cpu = BuildTarget(Device::CPU());
+    const Target cuda = MakeContractTarget("cuda", kCUDA, 0, true);
+    const Array<String> tir0 = api::Compiler::TIRPassPolicy(0, cpu);
+    const Array<String> tir1 = api::Compiler::TIRPassPolicy(1, cpu);
+    const Array<String> tir2 = api::Compiler::TIRPassPolicy(2, cpu);
+    const Array<String> tir3 = api::Compiler::TIRPassPolicy(3, cpu);
+    const Array<String> cuda3 = api::Compiler::TIRPassPolicy(3, cuda);
     TEST_CHECK(tir0.empty() && tir1.size() == 2 && tir2.size() == 4 &&
-                   tir3.size() == 1 && std::string(tir3[0]) == "optimize_default",
+                   tir3.size() == 8,
                "TIR opt_level policy changed unexpectedly");
+    TEST_CHECK(cuda3.size() == 4 && ContainsPass(cuda3, "remove_no_op") &&
+                   !ContainsPass(cuda3, "convert_for_loops_serial") &&
+                   !ContainsPass(cuda3, "loop_partition") &&
+                   !ContainsPass(cuda3, "unroll_loop") &&
+                   !ContainsPass(cuda3, "vectorize_loop"),
+               "CUDA O3 should preserve the serial loop expected by BindCudaThreads");
     TEST_CHECK(Throws([] { api::Compiler::RelayPassPolicy(-1); }) &&
-                   Throws([] { api::Compiler::TIRPassPolicy(4); }),
+                   Throws([&] { api::Compiler::TIRPassPolicy(4, cpu); }),
                "pass policy should reject an invalid opt_level");
     return true;
 }
@@ -456,7 +480,7 @@ bool TestLoweredObjectValidation() {
     return true;
 }
 
-// C++ pass 与 PackedFunc 注册入口都必须返回可恢复且保活常量 payload 的 LoweredFunction。
+// 唯一 LowerToTIR 入口必须保活常量，同时旧转发 PackedFunc 不得继续暴露。
 bool TestMultiDeviceLoweringEntry() {
     using namespace kxc;
 
@@ -466,23 +490,45 @@ bool TestMultiDeviceLoweringEntry() {
     Constant constant(data);
     Function function({input}, Call(relay::Op::Get("add"), {input, constant}));
 
-    relay::LoweredFunction direct = relay::LowerRelayComputeToTIRPass(function);
+    relay::LoweredFunction direct = relay::LowerToTIR(function);
     TEST_CHECK(direct.constants().size() == 1 &&
                    direct.constants()[0]->value.get() == data.get(),
-               "C++ multi-device lowering entry lost constant payload");
+               "LowerToTIR lost constant payload");
+    TEST_CHECK(!Registry::Global()
+                    .Get("kxc.relay.transform.lower_compute_to_tir")
+                    .defined(),
+               "obsolete lower_compute_to_tir forwarding entry should be removed");
+    return true;
+}
 
-    PackedFunc packed =
-        Registry::Global().Get("kxc.relay.transform.lower_compute_to_tir");
-    TEST_CHECK(packed.defined(), "lower_compute_to_tir PackedFunc is not registered");
-    ObjectRef retained;
-    {
-        RetValue value = packed(function);
-        retained = static_cast<ObjectRef>(value);
-    }
-    relay::LoweredFunction restored(retained);
-    TEST_CHECK(restored.constants().size() == 1 &&
-                   restored.constants()[0]->value.get() == data.get(),
-               "PackedFunc result did not retain constant payload lifetime");
+// ExecutionPlan 尚未绑定 CompiledModule 时必须明确失败，不能伪造零值或复制输入。
+bool TestExecutionPlanKernelFailsClosed() {
+    using namespace kxc;
+
+    const PassContext pass_ctx = PassContext::FromTarget(BuildTarget(Device::CPU()));
+    KernelExec kernel("add", tir::PrimFunc(), {0}, {1}, {0}, "missing_module");
+    Map<int, Array<int64_t>> shapes;
+    shapes.Set(0, {1});
+    shapes.Set(1, {1});
+    Map<int, std::string> dtypes;
+    dtypes.Set(0, "float32");
+    dtypes.Set(1, "float32");
+    ExecutionPlan plan({ObjectRef(kernel)}, {}, {0}, {}, shapes, dtypes, 2,
+                       pass_ctx, 1);
+
+    disco::DiscoSession session = disco::DiscoSession::ThreadedSession(1, 1);
+    disco::DRef input = session.Empty({1}, "float32", false, false);
+    Map<int, disco::DRef> initial_values;
+    initial_values.Set(0, input);
+    disco::ExecutionPlanExecutor executor(session);
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] { (void)executor.Execute(plan, initial_values); },
+                   "CompiledModule launch is not implemented"),
+               "ExecutionPlan kernel path should fail before producing an output");
+
+    TEST_CHECK(!Registry::Global().Get("kxc.disco.execute_plan").defined() &&
+                   !Registry::Global().Get("kxc.disco.execute_plan_json").defined(),
+               "incomplete ExecutionPlan execution should not be exposed through FFI");
     return true;
 }
 
@@ -549,6 +595,7 @@ int main() {
         {"constant_binding_identity", TestConstantBindingIdentity},
         {"lowered_object_validation", TestLoweredObjectValidation},
         {"multi_device_lowering_entry", TestMultiDeviceLoweringEntry},
+        {"execution_plan_kernel_fails_closed", TestExecutionPlanKernelFailsClosed},
         {"multi_output_metadata", TestMultiOutputMetadata},
     };
 

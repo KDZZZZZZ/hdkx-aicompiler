@@ -269,8 +269,6 @@ bool TestRelayAttrsUseObjectContainers() {
                                  kxc::Array<int64_t>>);
     static_assert(std::is_same_v<decltype(kxc::relay::ReshapeAttrsNode::newshape),
                                  kxc::Array<int64_t>>);
-    static_assert(std::is_same_v<decltype(kxc::relay::SplitAttrsNode::split),
-                                 kxc::Array<int64_t>>);
     static_assert(std::is_same_v<decltype(kxc::relay::TransposeAttrsNode::perm),
                                  kxc::Array<int64_t>>);
 

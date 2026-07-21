@@ -9,4 +9,3 @@
 #include "te/topi/reduction.h"
 #include "te/topi/transform.h"
 #include "te/topi/utils.h"
-#include "te/topi/einsum.h"

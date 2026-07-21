@@ -1,5 +1,5 @@
 /*! \file src/relay/op_attrs.cc
- * \brief 实现 Relay 节点、算子元数据、pass 工具和公共注册。
+ * \brief 实现 Relay 算子节点构造和各类 attrs 的对象工厂。
  */
 
 #include "relay/op.h"
@@ -65,52 +65,10 @@ SoftmaxAttrs SoftmaxAttrs::Create(int axis) {
     return InternalCreate(node);
 }
 
-// 创建 batch normalization 数值和开关属性。
-BatchNormAttrs BatchNormAttrs::Create(double epsilon, bool center, bool scale) {
-    auto* node = new BatchNormAttrsNode();
-    node->epsilon = epsilon;
-    node->center = center;
-    node->scale = scale;
-    return InternalCreate(node);
-}
-
 // 创建 dtype 转换属性。
 CastAttrs CastAttrs::Create(int to) {
     auto* node = new CastAttrsNode();
     node->to = to;
-    return InternalCreate(node);
-}
-
-// 创建张量拼接轴属性。
-ConcatAttrs ConcatAttrs::Create(int axis) {
-    auto* node = new ConcatAttrsNode();
-    node->axis = axis;
-    return InternalCreate(node);
-}
-
-// 创建持有 Storage-backed NDArray 的常量属性，保持张量生命周期。
-ConstantAttrs ConstantAttrs::Create(runtime::NDArray value) {
-    auto* node = new ConstantAttrsNode();
-    node->value = std::move(value);
-    return InternalCreate(node);
-}
-
-// 创建带显式填充值张量的 constant_of_shape 属性。
-ConstantOfShapeAttrs ConstantOfShapeAttrs::Create(runtime::NDArray value) {
-    auto* node = new ConstantOfShapeAttrsNode();
-    node->value = std::move(value);
-    return InternalCreate(node);
-}
-
-// 创建采用默认填充值的 constant_of_shape 属性。
-ConstantOfShapeAttrs ConstantOfShapeAttrs::Create() {
-    return InternalCreate(new ConstantOfShapeAttrsNode());
-}
-
-// 创建 gather 轴属性。
-GatherAttrs GatherAttrs::Create(int axis) {
-    auto* node = new GatherAttrsNode();
-    node->axis = axis;
     return InternalCreate(node);
 }
 
@@ -127,14 +85,6 @@ ReshapeAttrs ReshapeAttrs::Create(Array<int64_t> newshape, int allowzero) {
     auto* node = new ReshapeAttrsNode();
     node->newshape = std::move(newshape);
     node->allowzero = allowzero;
-    return InternalCreate(node);
-}
-
-// 创建 split 分段长度和分割轴属性。
-SplitAttrs SplitAttrs::Create(Array<int64_t> split, int axis) {
-    auto* node = new SplitAttrsNode();
-    node->split = std::move(split);
-    node->axis = axis;
     return InternalCreate(node);
 }
 
@@ -191,10 +141,6 @@ CollectiveAttrs CollectiveAttrs::Create(std::string kind, std::string reduce_kin
     TypeName TypeName::Create() { return InternalCreate(new TypeName##Node()); }
 
 KXC_DEFINE_SIMPLE_ATTRS_CREATE(AddAttrs)
-KXC_DEFINE_SIMPLE_ATTRS_CREATE(DivAttrs)
-KXC_DEFINE_SIMPLE_ATTRS_CREATE(EqualAttrs)
-KXC_DEFINE_SIMPLE_ATTRS_CREATE(ErfAttrs)
-KXC_DEFINE_SIMPLE_ATTRS_CREATE(ExpandAttrs)
 KXC_DEFINE_SIMPLE_ATTRS_CREATE(ReluAttrs)
 KXC_DEFINE_SIMPLE_ATTRS_CREATE(GlobalAvgPool2DAttrs)
 

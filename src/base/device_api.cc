@@ -321,19 +321,10 @@ KXC_REGISTER_GLOBAL("device_api.GetAttr")
         GetDeviceAttr(device, static_cast<DeviceAttrKind>(kind), rv);
     })));
 
-// 注册仅返回可用设备的兼容入口及显式 JSON 别名。
-KXC_REGISTER_GLOBAL("device_api.ListDevices")
-    .set_body(PackedFunc(std::function<void(Args, RetValue*)>([](Args, RetValue* rv) {
-        *rv = ListDevicesJSON();
-    })));
+// PackedFunc 边界只暴露显式 JSON 名称，避免返回类型与函数名不一致。
 KXC_REGISTER_GLOBAL("device_api.ListDevicesJSON")
     .set_body(PackedFunc(std::function<void(Args, RetValue*)>([](Args, RetValue* rv) {
         *rv = ListDevicesJSON();
-    })));
-// 注册返回完整设备诊断的兼容入口及显式 JSON 别名。
-KXC_REGISTER_GLOBAL("device_api.GetAllDeviceInfo")
-    .set_body(PackedFunc(std::function<void(Args, RetValue*)>([](Args, RetValue* rv) {
-        *rv = GetAllDeviceInfoJSON();
     })));
 KXC_REGISTER_GLOBAL("device_api.GetAllDeviceInfoJSON")
     .set_body(PackedFunc(std::function<void(Args, RetValue*)>([](Args, RetValue* rv) {

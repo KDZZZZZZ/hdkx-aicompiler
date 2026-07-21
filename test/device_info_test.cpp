@@ -128,10 +128,11 @@ bool TestCUDAAttributesDoNotRequireCUDARuntimeAvailability() {
     return true;
 }
 
-// 验证 PackedFunc JSON 入口与结构化设备枚举采用相同过滤规则。
+// 验证唯一显式 JSON PackedFunc 与结构化设备枚举采用相同过滤规则。
 bool TestRegistryJSONEntrypoints() {
-    kxc::PackedFunc get_all = kxc::Registry::Global().Get("device_api.GetAllDeviceInfo");
-    TEST_CHECK(get_all, "device_api.GetAllDeviceInfo should be registered");
+    kxc::PackedFunc get_all =
+        kxc::Registry::Global().Get("device_api.GetAllDeviceInfoJSON");
+    TEST_CHECK(get_all, "device_api.GetAllDeviceInfoJSON should be registered");
     std::string all_json = get_all().As<std::string>();
     TEST_CHECK(all_json.find("\"devices\"") != std::string::npos,
                "GetAllDeviceInfo JSON should contain devices key");
@@ -140,13 +141,17 @@ bool TestRegistryJSONEntrypoints() {
     TEST_CHECK(all_json.find("\"device_type_name\":\"cuda\"") != std::string::npos,
                "GetAllDeviceInfo JSON should contain CUDA status");
 
-    kxc::PackedFunc list_devices = kxc::Registry::Global().Get("device_api.ListDevices");
-    TEST_CHECK(list_devices, "device_api.ListDevices should be registered");
+    kxc::PackedFunc list_devices =
+        kxc::Registry::Global().Get("device_api.ListDevicesJSON");
+    TEST_CHECK(list_devices, "device_api.ListDevicesJSON should be registered");
     std::string list_json = list_devices().As<std::string>();
     TEST_CHECK(list_json.find("\"device_type_name\":\"cpu\"") != std::string::npos,
                "ListDevices JSON should contain available CPU");
     TEST_CHECK(list_json.find("\"available\":false") == std::string::npos,
                "ListDevices JSON should only include available devices");
+    TEST_CHECK(!kxc::Registry::Global().Get("device_api.GetAllDeviceInfo").defined() &&
+                   !kxc::Registry::Global().Get("device_api.ListDevices").defined(),
+               "legacy Device JSON aliases should be removed");
     return true;
 }
 

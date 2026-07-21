@@ -1,5 +1,5 @@
 /*! \file src/base/disco/executor.cc
- * \brief 实现 Disco 线程会话、执行计划解释器和 CPU/NCCL 通信后端。
+ * \brief 实现 ExecutionPlan 解释器，并把通信节点分派给注入的 CCLBackend。
  */
 
 #include "base/disco/executor.h"
@@ -7,10 +7,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "base/device.h"
 #include "base/profiling.h"
-#include "base/packedfunc.h"
-#include "base/registry.h"
 #include "relay/op.h"
 
 namespace kxc {
@@ -126,46 +123,21 @@ DRef ExecutionPlanExecutor::EnsureValue(const ExecutionPlan& plan, int value_id,
     return ref;
 }
 
-// 解释当前 kernel 节点；现阶段用零值或输入副本承接输出占位语义。
+// 真实 module lookup/launch 尚未接入；当前边界必须失败，禁止伪造输出。
 void ExecutionPlanExecutor::ExecuteKernel(const ExecutionPlan& plan, const KernelExecNode* kernel) {
-    if (!kernel || kernel->output_values.empty()) {
-        return;
-    }
+    (void)plan;
+    if (!kernel) throw std::runtime_error("ExecutionPlan contains an invalid kernel node");
     profiling::ScopedSpan kernel_span(profiling::CurrentContext(),
                                       MakeExecutorSpec("kernel_exec"));
     kernel_span.AddField("op_name", kernel->op_name);
     kernel_span.AddField("kernel_symbol", kernel->kernel_symbol);
     kernel_span.AddMetric("input_count", static_cast<double>(kernel->input_values.size()));
     kernel_span.AddMetric("output_count", static_cast<double>(kernel->output_values.size()));
-
-    // 无输入节点没有原型可复制，当前执行器为目标 worker 创建 float32 零值占位。
-    if (kernel->input_values.empty()) {
-        for (int out_id : kernel->output_values) {
-            DRef out = EnsureValue(plan, out_id, DRef());
-            Array<int64_t> scalar_shape = {1};
-            for (int worker : EffectiveWorkerSet(kernel->worker_set, 0)) {
-                session_.Set(worker, out, runtime::NDArray::Zeros(
-                                              scalar_shape,
-                                              runtime::DataTypeFromString("float32"),
-                                              Device::CPU()));
-            }
-        }
-        return;
-    }
-
-    int input_id = kernel->input_values[0];
-    if (!values_.count(input_id)) {
-        throw std::runtime_error("Kernel input value is not available");
-    }
-    DRef input = values_.at(input_id);
-    for (int out_id : kernel->output_values) {
-        DRef output = EnsureValue(plan, out_id, input);
-        for (int worker : EffectiveWorkerSet(kernel->worker_set,
-                                             ResolveWorkerForValue(plan, input_id))) {
-            ccl_backend_->Copy(session_, input, output, worker, worker);
-        }
-        values_.Set(out_id, output);
-    }
+    const std::string message =
+        "ExecutionPlan CompiledModule launch is not implemented";
+    kernel_span.SetStatus("error");
+    kernel_span.SetMessage(message);
+    throw std::runtime_error(message);
 }
 
 // 根据通信算子名和结构化 attrs 分派到 CCLBackend，并登记输出 DRef。
@@ -291,47 +263,6 @@ int ExecutionPlanExecutor::ResolveWorkerForVirtualDevice(const ExecutionPlan& pl
     // 物理 device id 与 worker id 属于不同命名空间；参与 Disco 时只能由 placement 映射。
     return 0;
 }
-
-// 注册对象、JSON 文本及 JSON 文件三类计划执行 PackedFunc 入口。
-KXC_REGISTER_GLOBAL("kxc.disco.execute_plan")
-    .set_body(ToPackedFunc([](DiscoSession session, ExecutionPlan plan) -> ObjectRef {
-        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
-        return ObjectRef(executor.Execute(plan, Map<int, DRef>()));
-    }));
-
-KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_output")
-    .set_body(ToPackedFunc([](DiscoSession session, ExecutionPlan plan) -> ObjectRef {
-        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
-        return ObjectRef(executor.ExecuteForOutput(plan, Map<int, DRef>()));
-    }));
-
-KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_json")
-    .set_body(ToPackedFunc([](DiscoSession session, std::string json_text) -> ObjectRef {
-        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
-        ExecutionPlan plan = DeserializeExecutionPlanFromJson(json_text);
-        return ObjectRef(executor.Execute(plan, Map<int, DRef>()));
-    }));
-
-KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_json_output")
-    .set_body(ToPackedFunc([](DiscoSession session, std::string json_text) -> ObjectRef {
-        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
-        ExecutionPlan plan = DeserializeExecutionPlanFromJson(json_text);
-        return ObjectRef(executor.ExecuteForOutput(plan, Map<int, DRef>()));
-    }));
-
-KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_json_file")
-    .set_body(ToPackedFunc([](DiscoSession session, std::string path) -> ObjectRef {
-        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
-        ExecutionPlan plan = LoadExecutionPlanFromJsonFile(path);
-        return ObjectRef(executor.Execute(plan, Map<int, DRef>()));
-    }));
-
-KXC_REGISTER_GLOBAL("kxc.disco.execute_plan_json_file_output")
-    .set_body(ToPackedFunc([](DiscoSession session, std::string path) -> ObjectRef {
-        ExecutionPlanExecutor executor(std::move(session), CreateCpuCCLBackend());
-        ExecutionPlan plan = LoadExecutionPlanFromJsonFile(path);
-        return ObjectRef(executor.ExecuteForOutput(plan, Map<int, DRef>()));
-    }));
 
 }  // namespace disco
 }  // namespace kxc

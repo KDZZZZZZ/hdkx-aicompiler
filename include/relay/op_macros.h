@@ -22,8 +22,6 @@ public:
     OpRegEntry& add_argument(const std::string& name, const std::string& type,
                              const std::string& description, bool is_optional = false,
                              const std::string& default_val = "");
-    OpRegEntry& set_support_level(int level);
-
     template <typename ValueType>
     OpRegEntry& set_attr(const std::string& attr_name, const ValueType& value) {
         OpNode* node = const_cast<OpNode*>(op_.operator->());

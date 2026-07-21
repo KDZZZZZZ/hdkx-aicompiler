@@ -147,9 +147,6 @@ def find_op_source_files(root: Path) -> list[Path]:
             for p in op_root.rglob("*")
             if p.suffix in {".cc", ".cpp", ".h", ".hpp"}
         )
-    common_ops = root / "src" / "relay" / "common_ops.cc"
-    if common_ops.exists():
-        files.append(common_ops)
     importer = root / "python" / "kxc_onnx" / "importer.py"
     if importer.exists():
         files.append(importer)

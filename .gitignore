@@ -43,6 +43,10 @@ test/*stdout.txt
 test/*stderr.txt
 test/resnet18_ir_dump.txt
 test/resnet18_all_output.txt
+/model_graph.dot
+/model_info.txt
+/model_report.md
+/resnet18_ir_dump.txt
 
 # Profiling / agent outputs
 profile_bundles/

@@ -30,8 +30,8 @@ public:
 
     /*! \brief 返回 opt_level 对应的确定性 Relay pass 顺序。 */
     static Array<String> RelayPassPolicy(int opt_level);
-    /*! \brief 返回 opt_level 对应的确定性 TIR pass 顺序。 */
-    static Array<String> TIRPassPolicy(int opt_level);
+    /*! \brief 返回 opt_level 和 Target 对应的确定性 TIR pass 顺序。 */
+    static Array<String> TIRPassPolicy(int opt_level, const Target& target);
 };
 
 }  // namespace api

@@ -9,8 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(KXC_ENABLE_CUDA "Enable CUDA support when toolkit is available" ON)
 option(KXC_ENABLE_LLVM "Enable LLVM backend for codegen" ON)
-option(KXC_BUILD_RESNET18_IR_DUMP "Build test/resnet18_ir_dump.cpp" ON)
-option(KXC_BUILD_DEBUG_EXAMPLES "Build temporary debug examples in test/" OFF)
+option(KXC_BUILD_RESNET18_IR_DUMP "Build the diagnostic ResNet18 IR dump tool" OFF)
 option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
 
@@ -144,7 +143,6 @@ set(KXC_RUNTIME_SOURCES
   src/base/disco/threaded_session.cc
   src/base/disco/worker.cc
   src/base/disco/ccl_cpu.cc
-  src/base/disco/ccl_nccl.cc
   src/base/disco/executor.cc
   src/base/device/cpu_device_api.cc
   src/base/device/cuda_device_api.cc
@@ -154,7 +152,6 @@ set(KXC_RUNTIME_SOURCES
   src/relay/type_infer.cc
   src/relay/op_attrs.cc
   src/relay/op_macros.cc
-  src/relay/common_ops.cc
   src/relay/backend/lower.cc
   src/relay/pass/print_ir.cc
   src/relay/transforms/pipeline.cc
@@ -286,11 +283,6 @@ if(KXC_BUILD_RESNET18_IR_DUMP)
     USES_TERMINAL
     COMMENT "Run resnet18_ir_dump and emit test/resnet18_ir_dump.txt"
   )
-endif()
-
-if(KXC_BUILD_DEBUG_EXAMPLES)
-  kxc_add_runtime_exe(tmp_conv_lower test/tmp_conv_lower.cpp)
-  kxc_add_runtime_exe(tmp_maxpool_compute test/tmp_maxpool_compute.cpp)
 endif()
 
 if(Python3_Interpreter_FOUND)

@@ -8,9 +8,7 @@
 #include "te/topi/utils.h"
 #include "base/container.h"
 #include <vector>
-#include <algorithm>
 #include <set>
-#include <stdexcept>
 
 namespace kxc {
 namespace te {
@@ -81,15 +79,6 @@ inline Tensor max(const Tensor& data, const Array<int>& axis, bool keepdims = fa
 inline Tensor min(const Tensor& data, const Array<int>& axis, bool keepdims = false, std::string name = "min") {
     return comm_reduce(data, axis, keepdims, kxc::te::min, name);
 }
-
-inline Tensor prod(const Tensor& data, const Array<int>& axis, bool keepdims = false, std::string name = "prod") {
-    (void)data;
-    (void)axis;
-    (void)keepdims;
-    (void)name;
-    throw std::runtime_error("topi::prod is not supported by the current TE reducer set");
-}
-
 
 } // namespace topi
 } // namespace te

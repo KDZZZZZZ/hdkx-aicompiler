@@ -334,10 +334,12 @@ Relay default alias:
   `simplify_expr` ->
   `canonicalize_cast` ->
   `remove_standalone_reshapes` ->
-  `eliminate_common_subexpr` ->
   `eliminate_dead_let` ->
   `annotate_memory_scope` ->
-  `capture_post_dfs_index_in_spans`
+  `capture_post_dfs_index_in_spans` ->
+  `infer_type`
+
+`eliminate_common_subexpr` 仍是显式单 Pass 入口，但当前不属于默认别名。
 
 ### TIR Pipeline Entry
 

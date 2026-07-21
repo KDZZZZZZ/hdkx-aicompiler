@@ -35,11 +35,6 @@ OpRegEntry& OpRegEntry::add_argument(const std::string& name, const std::string&
     return *this;
 }
 
-OpRegEntry& OpRegEntry::set_support_level(int level) {
-    (void)level;
-    return *this;
-}
-
 }  // namespace relay
 }  // namespace kxc
 

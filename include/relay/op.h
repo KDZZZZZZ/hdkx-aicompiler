@@ -5,7 +5,6 @@
 #pragma once
 
 #include <any>
-#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -60,7 +59,6 @@ public:                                                                         
     const NodeName* operator->() const { return static_cast<const NodeName*>(object_); }       \
                                                                                                 \
 private:                                                                                        \
-    friend class TypeName;                                                                      \
     static TypeName InternalCreate(NodeName* node) {                                            \
         TypeName attrs;                                                                         \
         attrs.SetData(node);                                                                    \
@@ -189,25 +187,6 @@ public:
     static SoftmaxAttrs Create(int axis);
 };
 
-/*! \brief nn.batch_norm 的数值稳定性和 affine 开关属性。 */
-class BatchNormAttrsNode : public BaseAttrsNode {
-public:
-    double epsilon = 1e-5;
-    bool center = true;
-    bool scale = true;
-
-    KXC_DECLARE_ATTRS_NODE
-};
-KXC_OBJECT_DEFINE(BatchNormAttrsNode)
-
-/*! \brief nn.batch_norm 属性引用类型。 */
-class BatchNormAttrs : public Attrs {
-    KXC_DECLARE_ATTRS_REF(BatchNormAttrs, BatchNormAttrsNode)
-
-public:
-    static BatchNormAttrs Create(double epsilon = 1e-5, bool center = true, bool scale = true);
-};
-
 KXC_DEFINE_SIMPLE_ATTRS(AddAttrs)
 
 /*! \brief cast 的目标 dtype 编码属性。 */
@@ -222,68 +201,6 @@ class CastAttrs : public Attrs {
 
 public:
     static CastAttrs Create(int to = 0);
-};
-
-/*! \brief concatenate 的拼接轴属性。 */
-class ConcatAttrsNode : public BaseAttrsNode {
-public:
-    int axis;
-    KXC_DECLARE_ATTRS_NODE
-};
-KXC_OBJECT_DEFINE(ConcatAttrsNode)
-class ConcatAttrs : public Attrs {
-    KXC_DECLARE_ATTRS_REF(ConcatAttrs, ConcatAttrsNode)
-
-public:
-    static ConcatAttrs Create(int axis = 0);
-};
-
-/*! \brief constant 的常量值属性。 */
-class ConstantAttrsNode : public BaseAttrsNode {
-public:
-    runtime::NDArray value;
-    KXC_DECLARE_ATTRS_NODE
-};
-KXC_OBJECT_DEFINE(ConstantAttrsNode)
-class ConstantAttrs : public Attrs {
-    KXC_DECLARE_ATTRS_REF(ConstantAttrs, ConstantAttrsNode)
-
-public:
-    static ConstantAttrs Create(runtime::NDArray value);
-};
-
-/*! \brief constant_of_shape 的填充值属性。 */
-class ConstantOfShapeAttrsNode : public BaseAttrsNode {
-public:
-    runtime::NDArray value;
-    KXC_DECLARE_ATTRS_NODE
-};
-KXC_OBJECT_DEFINE(ConstantOfShapeAttrsNode)
-class ConstantOfShapeAttrs : public Attrs {
-    KXC_DECLARE_ATTRS_REF(ConstantOfShapeAttrs, ConstantOfShapeAttrsNode)
-
-public:
-    static ConstantOfShapeAttrs Create(runtime::NDArray value);
-    static ConstantOfShapeAttrs Create();
-};
-
-KXC_DEFINE_SIMPLE_ATTRS(DivAttrs)
-KXC_DEFINE_SIMPLE_ATTRS(EqualAttrs)
-KXC_DEFINE_SIMPLE_ATTRS(ErfAttrs)
-KXC_DEFINE_SIMPLE_ATTRS(ExpandAttrs)
-
-/*! \brief gather 的索引轴属性。 */
-class GatherAttrsNode : public BaseAttrsNode {
-public:
-    int axis = 0;
-    KXC_DECLARE_ATTRS_NODE
-};
-KXC_OBJECT_DEFINE(GatherAttrsNode)
-class GatherAttrs : public Attrs {
-    KXC_DECLARE_ATTRS_REF(GatherAttrs, GatherAttrsNode)
-
-public:
-    static GatherAttrs Create(int axis = 0);
 };
 
 /*! \brief reduce.mean 的归约轴和 keepdims 属性。 */
@@ -314,21 +231,6 @@ class ReshapeAttrs : public Attrs {
 
 public:
     static ReshapeAttrs Create(Array<int64_t> newshape, int allowzero = 0);
-};
-
-/*! \brief split 的切分位置/段数和切分轴属性。 */
-class SplitAttrsNode : public BaseAttrsNode {
-public:
-    Array<int64_t> split;
-    int axis = 0;
-    KXC_DECLARE_ATTRS_NODE
-};
-KXC_OBJECT_DEFINE(SplitAttrsNode)
-class SplitAttrs : public Attrs {
-    KXC_DECLARE_ATTRS_REF(SplitAttrs, SplitAttrsNode)
-
-public:
-    static SplitAttrs Create(Array<int64_t> split, int axis = 0);
 };
 
 /*! \brief transpose 的维度置换属性。 */

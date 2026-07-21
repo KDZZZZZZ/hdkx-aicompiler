@@ -240,13 +240,6 @@ std::string AttrOutDTypeOrDefault(const std::string& out_dtype,
 
 }  // namespace
 
-// 恒等算子直接返回输入类型。
-Type IdentityInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    (void)attrs;
-    RequireArity("identity", input_types, 1);
-    return input_types[0];
-}
-
 // 推导 add 的广播结果类型。
 Type AddInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
@@ -269,24 +262,6 @@ Type MultiplyInferType(const Attrs& attrs, const Array<Type>& input_types) {
 Type DivideInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     return BinaryBroadcastInferType("divide", input_types);
-}
-
-// 推导 pow 的广播结果类型。
-Type PowInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    (void)attrs;
-    return BinaryBroadcastInferType("pow", input_types);
-}
-
-// 推导 equal 的布尔广播结果类型。
-Type EqualInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    (void)attrs;
-    return BinaryBroadcastInferType("equal", input_types, "bool");
-}
-
-// 推导 greater 的布尔广播结果类型。
-Type GreaterInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    (void)attrs;
-    return BinaryBroadcastInferType("greater", input_types, "bool");
 }
 
 // 推导保持 shape 与 dtype 的一元算子类型。
@@ -547,14 +522,6 @@ Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(out, data->dtype);
 }
 
-// 返回输入张量 rank 长度的 int64 shape 向量类型。
-Type ShapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    (void)attrs;
-    RequireArity("shape", input_types, 1);
-    const auto* data = RequireTensor("shape", input_types[0], "data");
-    return MakeTensorType({static_cast<int64_t>(data->shape.size())}, "int64");
-}
-
 // 按 perm 或逆序默认规则推导 transpose shape。
 Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("transpose", input_types, 1);
@@ -624,127 +591,6 @@ Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
                       static_cast<int>(data->shape.size()));
     }
     return input_types[0];
-}
-
-// 校验输入 rank/dtype 并沿指定轴拼接维度。
-Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    RequireArity("concatenate", input_types, 1);
-    const auto* tuple = input_types[0].As<TupleTypeNode>();
-    if (!tuple || tuple->fields.empty()) {
-        throw std::runtime_error("concatenate expects a non-empty tuple of tensors");
-    }
-    const auto* first = RequireTensor("concatenate", tuple->fields[0], "field[0]");
-    const int axis = NormalizeAxis("concatenate",
-                                   attrs.As<ConcatAttrsNode>() ? attrs.As<ConcatAttrsNode>()->axis : 0,
-                                   static_cast<int>(first->shape.size()));
-    std::vector<int64_t> out = ShapeVector(first);
-    for (size_t i = 1; i < tuple->fields.size(); ++i) {
-        const auto* current = RequireTensor("concatenate", tuple->fields[i],
-                                            "field[" + std::to_string(i) + "]");
-        RequireSameDType("concatenate", first, current);
-        if (current->shape.size() != first->shape.size()) {
-            throw std::runtime_error("concatenate rank mismatch");
-        }
-        for (size_t dim = 0; dim < out.size(); ++dim) {
-            if (static_cast<int>(dim) == axis) {
-                if (IsKnown(out[dim]) && IsKnown(current->shape[dim])) {
-                    out[dim] += current->shape[dim];
-                } else {
-                    out[dim] = -1;
-                }
-            } else if (!SameOrUnknown(out[dim], current->shape[dim])) {
-                throw std::runtime_error("concatenate non-axis dimension mismatch");
-            }
-        }
-    }
-    return MakeTensorType(out, first->dtype);
-}
-
-// 按等分数量或显式分段推导 split 的 TupleType。
-Type SplitInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    RequireArity("split", input_types, 1);
-    const auto* data = RequireTensor("split", input_types[0], "data");
-    const auto* split_attrs = attrs.As<SplitAttrsNode>();
-    if (!split_attrs || split_attrs->split.empty()) {
-        throw std::runtime_error("split requires SplitAttrs with split points or sections");
-    }
-    const int axis =
-        NormalizeAxis("split", split_attrs->axis, static_cast<int>(data->shape.size()));
-    const int64_t axis_dim = data->shape[static_cast<size_t>(axis)];
-
-    Array<Type> fields;
-    if (split_attrs->split.size() == 1) {
-        const int64_t sections = split_attrs->split[0];
-        if (sections <= 0) {
-            throw std::runtime_error("split sections must be positive");
-        }
-        int64_t segment = -1;
-        if (IsKnown(axis_dim)) {
-            if (axis_dim % sections != 0) {
-                throw std::runtime_error("split sections do not divide axis dimension");
-            }
-            segment = axis_dim / sections;
-        }
-        for (int64_t i = 0; i < sections; ++i) {
-            std::vector<int64_t> shape = ShapeVector(data);
-            shape[static_cast<size_t>(axis)] = segment;
-            fields.push_back(MakeTensorType(shape, data->dtype));
-        }
-    } else {
-        int64_t previous = 0;
-        for (int64_t point : split_attrs->split) {
-            if (point < previous || (IsKnown(axis_dim) && point > axis_dim)) {
-                throw std::runtime_error("split points must be sorted within axis dimension");
-            }
-            std::vector<int64_t> shape = ShapeVector(data);
-            shape[static_cast<size_t>(axis)] = point - previous;
-            fields.push_back(MakeTensorType(shape, data->dtype));
-            previous = point;
-        }
-        std::vector<int64_t> shape = ShapeVector(data);
-        shape[static_cast<size_t>(axis)] = IsKnown(axis_dim) ? axis_dim - previous : -1;
-        fields.push_back(MakeTensorType(shape, data->dtype));
-    }
-    return TupleType(fields);
-}
-
-// 广播条件与两个值分支，推导 where 结果类型。
-Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    (void)attrs;
-    RequireArity("where", input_types, 3);
-    const auto* cond = RequireTensor("where", input_types[0], "condition");
-    const auto* lhs = RequireTensor("where", input_types[1], "x");
-    const auto* rhs = RequireTensor("where", input_types[2], "y");
-    if (cond->dtype != "bool") {
-        throw std::runtime_error("where condition must have bool dtype");
-    }
-    RequireSameDType("where", lhs, rhs);
-    std::vector<int64_t> value_shape =
-        BroadcastShape("where", ShapeVector(lhs), ShapeVector(rhs));
-    return MakeTensorType(BroadcastShape("where", ShapeVector(cond), value_shape), lhs->dtype);
-}
-
-// 将 indices shape 插入 data 的 gather 轴位置。
-Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    RequireArity("gather", input_types, 2);
-    const auto* data = RequireTensor("gather", input_types[0], "data");
-    const auto* indices = RequireTensor("gather", input_types[1], "indices");
-    if (indices->dtype != "int32" && indices->dtype != "int64") {
-        throw std::runtime_error("gather indices must be int32 or int64");
-    }
-    const auto* gather_attrs = attrs.As<GatherAttrsNode>();
-    const int axis = NormalizeAxis("gather", gather_attrs ? gather_attrs->axis : 0,
-                                   static_cast<int>(data->shape.size()));
-    std::vector<int64_t> out;
-    for (int i = 0; i < axis; ++i) {
-        out.push_back(data->shape[static_cast<size_t>(i)]);
-    }
-    const std::vector<int64_t> index_shape = ShapeVector(indices);
-    out.insert(out.end(), index_shape.begin(), index_shape.end());
-    for (size_t i = static_cast<size_t>(axis + 1); i < data->shape.size(); ++i) {
-        out.push_back(data->shape[i]);
-    }
-    return MakeTensorType(out, data->dtype);
 }
 
 }  // namespace relay

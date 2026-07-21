@@ -43,10 +43,9 @@ ONNX/手写模型
 |---|---:|---|
 | `KXC_ENABLE_CUDA` | `ON` | 检测 CUDA Toolkit，决定是否启用 CUDA DeviceAPI、NVRTC/Driver codegen 和 CUDA 测试 |
 | `KXC_ENABLE_LLVM` | `ON` | 检测 LLVM，决定是否启用 LLVM codegen/JIT |
-| `KXC_BUILD_RESNET18_IR_DUMP` | `ON` | 构建 ResNet18 IR dump 示例 |
+| `KXC_BUILD_RESNET18_IR_DUMP` | `OFF` | 显式构建 ResNet18 IR dump 诊断工具 |
 | `KXC_BUILD_PASS_TESTS` | `ON` | 构建 pass 相关测试 |
 | `KXC_BUILD_CODEGEN_TESTS` | `ON` | 在 LLVM 可用时构建 LLVM codegen 测试；CUDA codegen 测试随 pass 测试和 CUDA 特性构建 |
-| `KXC_BUILD_DEBUG_EXAMPLES` | `OFF` | 构建临时调试示例 |
 
 `KXC_RUNTIME_SOURCES` 汇总了 runtime 静态库使用的 C++ 源文件。CUDA 和 LLVM 通过编译定义 `KXC_USE_CUDA=<0|1>`、`KXC_USE_LLVM=<0|1>` 向源码暴露。
 
@@ -54,7 +53,7 @@ ONNX/手写模型
 
 - `dev-ninja`：Debug，CUDA ON。
 - `dev-ninja-cpu`：继承 `dev-ninja`，CUDA OFF。
-- `dev-ninja-debug-examples`：额外打开 debug examples。
+- `dev-mingw-cpu`：继承 CPU 配置，使用 MinGW 且关闭 LLVM。
 
 ## 3. 顶层目录
 
@@ -66,7 +65,6 @@ ONNX/手写模型
 | `python/` | ONNX 分析/代码生成脚本，以及 profiling agent 工具 |
 | `docs/` | 设计文档、专题说明、模型报告、本文档 |
 | `resnet18.onnx` | 本地用于导入/分析的 ResNet18 模型 |
-| `model_*.md/.txt/.dot` | ONNX 模型分析产物 |
 
 ## 4. 基础对象系统
 
@@ -144,7 +142,6 @@ KXC_REGISTER_GLOBAL("name").set_body(...)
 - `src/relay/relay.cc`
 - `src/relay/op_attrs.cc`
 - `src/relay/op_macros.cc`
-- `src/relay/common_ops.cc`
 - `src/relay/op/**`
 
 ### 5.1 Relay 节点
@@ -206,7 +203,7 @@ KXC_REGISTER_OP(add)
 
 `LowerToTIR` 遇到 `CallNode` 时会查 `Call.op.attrs["FRelayToTE"]`，执行它得到 TE tensor。
 
-注意：`src/relay/common_ops.cc` 注册了一批基础 op 元数据，但真正可 lowering 的 op 需要具体 `src/relay/op/**` 文件注册 `FRelayToTE`。
+算子的 schema、type hook 和 lowering hook 统一放在 `src/relay/op/**` 的唯一注册块中；不再保留 metadata-only 的公共注册文件或历史别名。
 
 ## 6. TE 和 TOPI 层
 
@@ -334,12 +331,13 @@ TOPI 层在 `include/te/topi/` 中，用 TE 表达常见算子：
 3. `simplify_expr`
 4. `canonicalize_cast`
 5. `remove_standalone_reshapes`
-6. `eliminate_common_subexpr`
-7. `eliminate_dead_let`
-8. `annotate_memory_scope`
-9. `capture_post_dfs_index_in_spans`
+6. `eliminate_dead_let`
+7. `annotate_memory_scope`
+8. `capture_post_dfs_index_in_spans`
+9. `infer_type`
 
-`optimize_default` 是特殊 pass name，会展开为上面这组顺序。
+`optimize_default` 是特殊 pass name，会展开为上面这组顺序。`eliminate_common_subexpr`
+仍可显式调用，但因结构键尚不包含 Constant 内容和完整 Call attrs，不进入默认链。
 
 ### 8.3 TIR pass pipeline
 
@@ -760,27 +758,16 @@ bundle 文件：
 - `tools/explain_logs.py`：提取 log event。
 - `memory/store.py`：本地记录 bundle 分析历史。
 
-## 16. Python ONNX 辅助脚本
+## 16. Python ONNX 工具
 
 路径：
 
-- `python/parseonnx.py`
-- `python/parse_model.py`
-- `python/analyze_ops.py`
-- `python/onnx_to_cpp.py`
+- `python/kxc_onnx/`
 - `python/gen_resnet18_ir_dump_cpp.py`
 
-这些脚本主要用于探索 ONNX 模型和生成 C++ Relay 构图代码。
-
-当前状态更偏工具脚本/实验脚本：
-
-- `parseonnx.py` 打印 ONNX graph 信息并生成 graphviz 图。
-- `parse_model.py` 生成 markdown 模型报告和 dot 图。
-- `analyze_ops.py` 统计 ONNX op 类型、输入输出数量和 attrs。
-- `onnx_to_cpp.py` 尝试把 ONNX graph 转成 C++ Relay 构图代码。
-- `gen_resnet18_ir_dump_cpp.py` 生成 `test/resnet18_ir_dump.cpp` 风格的模型构造代码。
-
-这些脚本不是 CMake runtime 构建的一部分。
+`kxc_onnx` 是正式的 ONNX 解析、规格生成和参数导出入口。`gen_resnet18_ir_dump_cpp.py`
+复用正式 importer spec 生成 `test/resnet18_ir_dump.cpp` 风格的诊断代码；它不是另一套 importer，
+也不进入默认构建。旧的平行分析/报告/构图脚本和其版本控制生成物已经删除。
 
 ## 17. 测试和调试入口
 
@@ -797,8 +784,6 @@ bundle 文件：
 | `test/resnet18_ir_dump.cpp` | 手写/生成 ResNet18 Relay graph，输出 Relay/TIR 文本 |
 | `test/profile_bundle_test.cpp` | profiling bundle 结构和事件 smoke test |
 | `test/cupti_smoke_test.cpp` | CUDA/CUPTI activity 采集 smoke test，CUDA 开启时构建 |
-| `test/tmp_conv_lower.cpp` | 临时 conv lowering 调试 |
-| `test/tmp_maxpool_compute.cpp` | 临时 maxpool compute 调试 |
 
 CMake custom targets：
 

@@ -29,12 +29,12 @@ protected:
         if (op_name == "add") {
             if (pass_utils::IsConstZero(rhs)) simplified = lhs;
             if (!simplified.defined() && pass_utils::IsConstZero(lhs)) simplified = rhs;
-        } else if (op_name == "mul" || op_name == "multiply") {
+        } else if (op_name == "mul") {
             if (pass_utils::IsConstOne(rhs)) simplified = lhs;
             if (!simplified.defined() && pass_utils::IsConstOne(lhs)) simplified = rhs;
-        } else if (op_name == "subtract" || op_name == "sub") {
+        } else if (op_name == "subtract") {
             if (pass_utils::IsConstZero(rhs)) simplified = lhs;
-        } else if (op_name == "divide" || op_name == "div") {
+        } else if (op_name == "divide") {
             if (pass_utils::IsConstOne(rhs)) simplified = lhs;
         }
 

@@ -34,9 +34,9 @@
 | --- | --- | --- | --- |
 | `tensor.math` | `src/relay/op/tensor/math.cc` | `include/te/topi/broadcast.h`, `elemwise.h`, `nn.h` | elementwise、broadcast、matmul |
 | `tensor.reduce` | `src/relay/op/tensor/reduce.cc` | `include/te/topi/reduction.h` | sum/mean/max/min 类 reduce |
-| `tensor.transform` | `src/relay/op/tensor/transform.cc` | `include/te/topi/transform.h` | reshape、transpose、flatten、split、gather |
+| `tensor.transform` | `src/relay/op/tensor/transform.cc` | `include/te/topi/transform.h` | reshape、transpose、flatten、cast |
 | `nn` | `src/relay/op/nn/*.cc` | `include/te/topi/nn.h` | conv、dense、pool、activation、softmax |
-| `device` | `src/relay/common_ops.cc` | 不使用 TOPI | execution plan 通信 op |
+| `device` | 新增时创建专用 `src/relay/op/device/*.cc` | 不使用 TOPI | execution plan 通信 op；当前不在 19 算子 MVP 矩阵中 |
 
 ## Lowering 选择
 

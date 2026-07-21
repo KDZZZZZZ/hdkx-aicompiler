@@ -26,21 +26,16 @@ using FInferType = std::function<Type(const Attrs&, const Array<Type>&)>;
 
 | 规则 | 直接可用函数 | 适用场景 |
 | --- | --- | --- |
-| identity | `IdentityInferType` | 输出类型完全等于第一个输入 |
 | unary same | `UnarySameInferType` | 单输入，shape/dtype 不变，例如 `sqrt`, `nn_relu` |
 | binary broadcast | `AddInferType`, `SubtractInferType`, `MultiplyInferType`, `DivideInferType` | 二元 broadcast，输出 dtype 等于输入 |
-| bool broadcast | `EqualInferType`, `GreaterInferType` | 二元比较，输出 dtype 是 `bool` |
 | cast | `CastInferType` | 输出 shape 不变，dtype 来自 `CastAttrs` |
 | matmul-like | `MatMulInferType`, `DenseInferType`, `GemmInferType` | rank-2 矩阵类 |
 | conv/pool | `Conv2DInferType`, `Pool2DInferType`, `GlobalAvgPool2DInferType` | NCHW/OIHW MVP |
 | transform | `FlattenInferType`, `ReshapeInferType`, `TransposeInferType` | shape 由 attrs 或输入 rank 决定 |
 | reduce | `ReduceMeanInferType` | axis/keepdims reduce |
 | softmax | `SoftmaxInferType` | shape/dtype 不变，但检查 axis |
-| tuple output | `SplitInferType` | 返回 `TupleType(fields)` |
-| indexed output | `GatherInferType` | 输出 shape 由 data 和 indices 组合 |
-| conditional | `WhereInferType` | condition/x/y broadcast |
 
-如果没有合适规则，新增 `XxxInferType`。不要在 op 注册里复用一个语义不相同的近似规则。
+如果没有合适规则，新增 `XxxInferType`，并同时加入算子 contract、注册和测试。不要只恢复历史声明，也不要在 op 注册里复用语义不相同的近似规则。
 
 ## 输入和错误约束
 

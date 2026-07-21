@@ -92,7 +92,7 @@
 - Registry:
   - `kxc.relay.transform.run_pipeline`
 - 默认别名：
-  - `optimize_default -> fold_tuple_get_item -> simplify_expr -> eliminate_dead_let`
+  - `optimize_default -> fold_tuple_get_item -> fold_constant -> simplify_expr -> canonicalize_cast -> remove_standalone_reshapes -> eliminate_dead_let -> annotate_memory_scope -> capture_post_dfs_index_in_spans -> infer_type`
 
 #### TIR
 
@@ -227,7 +227,9 @@ This repository now includes a second batch of passes (6 Relay + 4 TIR).
 
 Relay optimize_default order:
 
-- fold_tuple_get_item -> fold_constant -> simplify_expr -> canonicalize_cast -> remove_standalone_reshapes -> eliminate_common_subexpr -> eliminate_dead_let -> annotate_memory_scope -> capture_post_dfs_index_in_spans
+- fold_tuple_get_item -> fold_constant -> simplify_expr -> canonicalize_cast -> remove_standalone_reshapes -> eliminate_dead_let -> annotate_memory_scope -> capture_post_dfs_index_in_spans -> infer_type
+
+`eliminate_common_subexpr` 保留显式入口，但结构键完善前不进入默认链。
 
 ### New TIR Pass Entries
 

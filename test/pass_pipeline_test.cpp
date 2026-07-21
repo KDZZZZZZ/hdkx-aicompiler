@@ -394,6 +394,19 @@ bool TestRelayPipeline() {
     kxc::Function twice =
         kxc::relay::RunRelayPassPipeline(once, {kxc::String("optimize_default")});
     TEST_CHECK(RelayText(once) == RelayText(twice), "Relay optimize_default should be idempotent");
+
+    // 默认链不能启用结构键不完整的 CSE，否则不同常量会被错误视为同一表达式。
+    kxc::Var first("first");
+    kxc::Var second("second");
+    kxc::Expr add_one = MakeRelayBinary("add", x, MakeRelayScalarFloat(1.0f));
+    kxc::Expr add_two = MakeRelayBinary("add", x, MakeRelayScalarFloat(2.0f));
+    kxc::Function distinct_constants(
+        {x}, kxc::Let(first, add_one,
+                      kxc::Let(second, add_two, kxc::Tuple({first, second}))));
+    kxc::Function safe_default = kxc::relay::RunRelayPassPipeline(
+        distinct_constants, {kxc::String("optimize_default")});
+    TEST_CHECK(CountLetNodes(safe_default->body) == 2,
+               "Relay optimize_default must not merge expressions with different constants");
     return true;
 }
 

@@ -113,10 +113,10 @@ const std::unordered_map<std::string, RelayPassFunc>& GetRelayPassTable() {
 }
 
 Array<String> GetDefaultPassOrder() {
+    // CSE 的结构键尚不包含 Constant 内容和完整 Call attrs，只允许显式调用。
     return {String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"),
             String("canonicalize_cast"), String("remove_standalone_reshapes"),
-            String("eliminate_common_subexpr"), String("eliminate_dead_let"),
-            String("annotate_memory_scope"),
+            String("eliminate_dead_let"), String("annotate_memory_scope"),
             String("capture_post_dfs_index_in_spans"),
             String("infer_type")};
 }

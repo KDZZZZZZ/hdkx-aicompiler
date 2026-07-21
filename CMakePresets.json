@@ -15,8 +15,7 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "KXC_ENABLE_CUDA": "ON",
-        "KXC_BUILD_RESNET18_IR_DUMP": "ON",
-        "KXC_BUILD_DEBUG_EXAMPLES": "OFF"
+        "KXC_BUILD_RESNET18_IR_DUMP": "OFF"
       }
     },
     {
@@ -35,14 +34,6 @@
         "CMAKE_CXX_COMPILER": "g++",
         "KXC_ENABLE_LLVM": "OFF"
       }
-    },
-    {
-      "name": "dev-ninja-debug-examples",
-      "displayName": "Dev Ninja (Debug, extra examples)",
-      "inherits": "dev-ninja",
-      "cacheVariables": {
-        "KXC_BUILD_DEBUG_EXAMPLES": "ON"
-      }
     }
   ],
   "buildPresets": [
@@ -57,10 +48,6 @@
     {
       "name": "dev-mingw-cpu",
       "configurePreset": "dev-mingw-cpu"
-    },
-    {
-      "name": "dev-ninja-debug-examples",
-      "configurePreset": "dev-ninja-debug-examples"
     }
   ]
 }

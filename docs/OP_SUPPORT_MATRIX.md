@@ -60,6 +60,5 @@ cmake --build out/build/<llvm-build> --target run_onnx_importer_test
 当前状态：
 
 - `topi::min` 已接入真实 `te::min` reducer。
-- `topi::prod` 没有 TE reducer 类型，当前显式 unsupported。
-- `topi::einsum` 没有 parser/lowering，当前显式 unsupported。
+- 未实现的 `topi::prod` 和 `topi::einsum` 公共 helper 已删除；调用方不能把“存在但只会抛错”误判为支持。
 - `topi::concatenate` 的空输入路径显式失败。
