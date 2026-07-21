@@ -5,6 +5,7 @@
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -193,12 +194,14 @@ void TestAsyncLaunchLifetime(
     const DeviceStream stream = DeviceStream::Create(device);
     NDArray output;
     AsyncOperation operation;
+    std::weak_ptr<const KernelLauncher> launcher;
     {
         CompiledKernel kernel = CUDAModule::Compile(
             source, AddSignature(symbol, device, kExtent),
             KernelLaunchMetadata(device, CodeGenBackend::kCUDA, {1, 1, 1},
-                                 {static_cast<uint32_t>(kExtent), 1, 1}),
+                                  {static_cast<uint32_t>(kExtent), 1, 1}),
             options);
+        launcher = kernel->launcher;
         NDArray a = NDArray::Empty({kExtent}, dtype, device);
         NDArray b = NDArray::Empty({kExtent}, dtype, device);
         output = NDArray::Empty({kExtent}, dtype, device);
@@ -219,6 +222,8 @@ void TestAsyncLaunchLifetime(
         // 离开作用域后 kernel、arguments、a、b 的外部引用全部释放；operation 必须
         // 独立持有这些异步依赖，直到 event 完成。
     }
+    Require(!launcher.expired(),
+            "pending CUDA operation did not retain its CUmodule launcher");
     operation.Wait();
     std::vector<float> actual(kExtent);
     output.CopyToBytes(actual.data(), actual.size() * sizeof(float));
@@ -227,6 +232,12 @@ void TestAsyncLaunchLifetime(
         Require(std::fabs(actual[i] - expected[i]) < 1e-5f,
                 "CUDA add result mismatch at " + std::to_string(i));
     }
+    Require(!launcher.expired(),
+            "CUDA operation released its launcher before the completion handle");
+    // completion 仍统一持有 executable；释放最后一个句柄后必须触发 launcher 析构和 module unload。
+    operation = AsyncOperation();
+    Require(launcher.expired(),
+            "CUDA launcher survived after the final completion reference was released");
 }
 
 /*! \brief 非零 byte_offset 必须传递逻辑首元素地址，且不能覆盖相邻哨兵。 */

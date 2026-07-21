@@ -5,6 +5,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -36,14 +37,15 @@ bool Throws(const std::function<void()>& function) {
 }
 
 // CPU-only 构建不查询真实 GPU，测试使用显式且完整的 CUDA Target 快照。
-kxc::Target MakeCudaTarget(int64_t max_threads = 128, int exists = 1) {
+kxc::Target MakeCudaTarget(int64_t max_threads = 128, int exists = 1,
+                           int64_t max_shared_memory = 48 * 1024) {
     auto* node = new kxc::TargetNode();
     node->kind = "cuda";
     node->device_type = kxc::kCUDA;
     node->device_id = 0;
     node->attrs.exists = exists;
     node->attrs.max_threads_per_block = max_threads;
-    node->attrs.max_shared_memory_per_block = 48 * 1024;
+    node->attrs.max_shared_memory_per_block = max_shared_memory;
     return kxc::Target(kxc::ObjectRef(node));
 }
 
@@ -164,6 +166,8 @@ bool TestRejectInvalidContracts() {
                "dynamic extent should be rejected");
     TEST_CHECK(Throws([&] { BindCudaThreads(valid, MakeCudaTarget(0)); }),
                "missing max_threads capability should be rejected");
+    TEST_CHECK(Throws([&] { BindCudaThreads(valid, MakeCudaTarget(128, 1, -1)); }),
+               "missing shared-memory capability should be rejected");
     TEST_CHECK(Throws([&] { BindCudaThreads(valid, MakeCudaTarget(128, 0)); }),
                "unavailable CUDA target should be rejected");
     TEST_CHECK(Throws([&] { BindCudaThreads(valid, BuildTarget(Device::CPU())); }),
@@ -177,6 +181,37 @@ bool TestRejectInvalidContracts() {
     return true;
 }
 
+// 第一阶段不支持循环内分配；同时必须在生成 uint32 grid 前拒绝超大工作量。
+bool TestRejectAllocationAndLaunchOverflow() {
+    using namespace kxc;
+    using namespace kxc::tir;
+    const DataType i64 = DataType::Int(64);
+    const DataType f32 = DataType::Float(32);
+    PrimFunc base = MakeElementwiseFunction(8);
+    const auto* loop = base->body.As<ForNode>();
+    TEST_CHECK(loop != nullptr, "elementwise fixture lost its outer loop");
+
+    tir::Var scratch("scratch", f32);
+    Stmt allocation = Allocate(
+        scratch, f32, {IntImm(8, i64)}, IntImm(1, DataType::Bool()), loop->body);
+    PrimFunc allocated(
+        base->params,
+        For(loop->loop_var, loop->min, loop->extent, loop->for_type, allocation),
+        base->buffer_map, base->attrs);
+    TEST_CHECK(Throws([&] { BindCudaThreads(allocated, MakeCudaTarget()); }),
+               "loop-local allocation should be rejected before CUDA codegen");
+
+    const int64_t too_large_work =
+        static_cast<int64_t>(std::numeric_limits<uint32_t>::max()) * 128 + 1;
+    TEST_CHECK(
+        Throws([&] {
+            BindCudaThreads(MakeElementwiseFunction(too_large_work),
+                            MakeCudaTarget(128));
+        }),
+        "grid dimension beyond uint32 should be rejected");
+    return true;
+}
+
 }  // namespace
 
 // 顺序运行全部契约测试，使 CI 输出保留具体失败类别。
@@ -186,6 +221,8 @@ int main() {
         {"relu_pipeline_registration", TestReluPipelineRegistration},
         {"reject_reduction_and_conflict", TestRejectReductionAndWriteConflict},
         {"reject_invalid_contracts", TestRejectInvalidContracts},
+        {"reject_allocation_and_launch_overflow",
+         TestRejectAllocationAndLaunchOverflow},
     };
     int failures = 0;
     for (const auto& test : tests) {
