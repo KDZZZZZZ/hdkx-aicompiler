@@ -9,7 +9,8 @@
 #include <utility>
 #include <vector>
 
-#include "codegen/kernel_signature.h"
+#include "kxc/runtime/kernel_abi.h"
+#include "../src/compiler/internal/kernel_abi_builder.h"
 
 namespace {
 

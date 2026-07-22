@@ -12,12 +12,13 @@
 #include <utility>
 #include <vector>
 
-#include "api/compiler.h"
-#include "base/ndarray.h"
-#include "codegen/codegen_c.h"
-#include "relay/relay.h"
-#include "relay/transforms/lower.h"
-#include "runtime/runtime_session.h"
+#include "kxc/compiler/compiler.h"
+#include "kxc/runtime/ndarray.h"
+#include "../src/codegen/c/internal/codegen_c.h"
+#include "kxc/relay/relay.h"
+#include "kxc/relay/op.h"
+#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "kxc/runtime/session.h"
 
 #if KXC_USE_LLVM
 #include <llvm/IR/BasicBlock.h>
@@ -26,8 +27,9 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>
 
-#include "codegen/codegen_llvm.h"
-#include "codegen/llvm_jit.h"
+#include "../src/codegen/llvm/internal/codegen_llvm.h"
+#include "../src/compiler/internal/kernel_abi_builder.h"
+#include "../src/codegen/llvm/internal/llvm_jit.h"
 #endif
 
 namespace {

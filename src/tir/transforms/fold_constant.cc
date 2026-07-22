@@ -2,13 +2,13 @@
  * \brief 实现 TIR 优化 pass 和 pipeline。
  */
 
-#include "tir/transforms/fold_constant.h"
+#include "kxc/tir/transforms/fold_constant.h"
 
 #include <cmath>
 #include <cstdint>
 #include <limits>
 
-#include "base/pass.h"
+#include "kxc/tir/visitor.h"
 
 namespace kxc {
 namespace tir {

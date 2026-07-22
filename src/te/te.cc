@@ -2,13 +2,24 @@
  * \brief 实现 TE tensor、compute、reduce 和 schedule helper。
  */
 
-#include "te/te.h"
+#include "kxc/te/te.h"
+#include "kxc/support/object_registration.h"
 
 #include <algorithm>
 #include <functional>
 
 namespace kxc {
 namespace te {
+
+KXC_OBJECT_DEFINE(OperationNode)
+KXC_OBJECT_DEFINE(TensorNode)
+KXC_OBJECT_DEFINE(ProducerLoadNode)
+KXC_OBJECT_DEFINE_WITH_KEY(IterVarNode, "kxc.te.IterVarNode")
+KXC_OBJECT_DEFINE(StageNode)
+KXC_OBJECT_DEFINE(ReduceNode)
+KXC_OBJECT_DEFINE(PlaceholderOpNode)
+KXC_OBJECT_DEFINE(ComputeOpNode)
+KXC_OBJECT_DEFINE(ScheduleNode)
 
 Tensor::Tensor(Array<tir::PrimExpr> shape, tir::DataType dtype, Operation op, int value_index) {
     auto* node = new TensorNode();

@@ -2,10 +2,29 @@
  * \brief 实现 Relay 算子节点构造和各类 attrs 的对象工厂。
  */
 
-#include "relay/op.h"
+#include "kxc/relay/op.h"
+#include "kxc/support/object_registration.h"
 
 namespace kxc {
 namespace relay {
+
+KXC_OBJECT_DEFINE(OpNode)
+KXC_OBJECT_DEFINE(BaseAttrsNode)
+KXC_OBJECT_DEFINE(Conv2DAttrsNode)
+KXC_OBJECT_DEFINE(DenseAttrsNode)
+KXC_OBJECT_DEFINE(MaxPool2DAttrsNode)
+KXC_OBJECT_DEFINE(SoftmaxAttrsNode)
+KXC_OBJECT_DEFINE(AddAttrsNode)
+KXC_OBJECT_DEFINE(CastAttrsNode)
+KXC_OBJECT_DEFINE(ReduceMeanAttrsNode)
+KXC_OBJECT_DEFINE(ReshapeAttrsNode)
+KXC_OBJECT_DEFINE(TransposeAttrsNode)
+KXC_OBJECT_DEFINE(ReluAttrsNode)
+KXC_OBJECT_DEFINE(GlobalAvgPool2DAttrsNode)
+KXC_OBJECT_DEFINE(FlattenAttrsNode)
+KXC_OBJECT_DEFINE(GemmAttrsNode)
+KXC_OBJECT_DEFINE(DeviceCopyAttrsNode)
+KXC_OBJECT_DEFINE(CollectiveAttrsNode)
 
 // 构造并持有算子的稳定名称与说明元数据。
 Op::Op(std::string name, std::string description) {

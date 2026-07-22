@@ -2,7 +2,7 @@
  * \brief 实现 Relay 节点、算子元数据、pass 工具和公共注册。
  */
 
-#include "relay/op_macros.h"
+#include "kxc/relay/op_macros.h"
 
 namespace kxc {
 namespace relay {
@@ -37,4 +37,3 @@ OpRegEntry& OpRegEntry::add_argument(const std::string& name, const std::string&
 
 }  // namespace relay
 }  // namespace kxc
-

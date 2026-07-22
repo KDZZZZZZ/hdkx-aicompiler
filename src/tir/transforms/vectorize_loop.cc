@@ -2,12 +2,12 @@
  * \brief 实现 TIR 优化 pass 和 pipeline。
  */
 
-#include "tir/transforms/vectorize_loop.h"
+#include "kxc/tir/transforms/vectorize_loop.h"
 
 #include <cstdint>
 
-#include "base/pass.h"
-#include "tir/pass_utils.h"
+#include "kxc/tir/visitor.h"
+#include "kxc/tir/pass_utils.h"
 
 namespace kxc {
 namespace tir {
@@ -49,4 +49,3 @@ PrimFunc VectorizeLoopPass(const PrimFunc& func) {
 
 }  // namespace tir
 }  // namespace kxc
-

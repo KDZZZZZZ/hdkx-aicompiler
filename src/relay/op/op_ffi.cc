@@ -2,10 +2,10 @@
  * \brief 注册 Relay MVP 算子的 canonical Python `_make` 构造入口。
  */
 
-#include "base/packedfunc.h"
-#include "base/registry.h"
-#include "relay/op.h"
-#include "relay/relay.h"
+#include "kxc/ffi/packed_func.h"
+#include "kxc/ffi/registration.h"
+#include "kxc/relay/op.h"
+#include "kxc/relay/relay.h"
 
 #include <string>
 
@@ -158,3 +158,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_gemm").set_body(ToPackedFunc(MakeNNGe
 
 }  // namespace relay
 }  // namespace kxc
+
+namespace kxc::builtin_anchor {
+void RelayOpFfi() {}
+}  // namespace kxc::builtin_anchor

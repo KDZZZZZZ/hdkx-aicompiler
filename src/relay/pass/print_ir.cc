@@ -2,11 +2,11 @@
  * \brief 实现 Relay IR 文本打印和调试工具。
  */
 
-#include "relay/pass/print_ir.h"
+#include "kxc/relay/pass/print_ir.h"
 
 #include <sstream>
 
-#include "relay/op.h"
+#include "kxc/relay/op.h"
 
 namespace kxc {
 namespace relay {

@@ -2,7 +2,8 @@
  * \brief 实现保守的一维 CUDA thread-binding 调度与启动元数据计算。
  */
 
-#include "tir/transforms/bind_cuda_threads.h"
+#include "kxc/tir/transforms/bind_cuda_threads.h"
+#include "kxc/support/object_registration.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -11,10 +12,13 @@
 #include <unordered_set>
 #include <utility>
 
-#include "base/pass.h"
-#include "tir/pass_utils.h"
+#include "kxc/tir/visitor.h"
+#include "kxc/tir/pass_utils.h"
 
 namespace kxc::tir {
+
+KXC_OBJECT_DEFINE_WITH_KEY(CudaScheduleResultNode, "kxc.tir.CudaScheduleResultNode")
+
 namespace {
 
 // 判断表达式是否正是指定循环变量；第一阶段不猜测复杂下标的单射性。
@@ -169,15 +173,15 @@ void ValidateCudaTarget(const Target& target) {
 
 // 节点构造器只由强类型结果句柄调用并一次性接管两个同源对象。
 CudaScheduleResultNode::CudaScheduleResultNode(
-    PrimFunc prim_func, codegen::KernelLaunchMetadata launch_metadata)
+    PrimFunc prim_func, CudaLaunchConfig launch_config)
     : prim_func_(std::move(prim_func)),
-      launch_metadata_(std::move(launch_metadata)) {}
+      launch_config_(launch_config) {}
 
 // 构造后立即验证 metadata attr 与独立访问器共享同一 Object 节点。
 CudaScheduleResult::CudaScheduleResult(
-    PrimFunc prim_func, codegen::KernelLaunchMetadata launch_metadata) {
+    PrimFunc prim_func, CudaLaunchConfig launch_config) {
     SetData(new CudaScheduleResultNode(std::move(prim_func),
-                                       std::move(launch_metadata)));
+                                       launch_config));
     Validate();
 }
 
@@ -194,8 +198,8 @@ CudaScheduleResult::CudaScheduleResult(const ObjectRef& ref) : ObjectRef(ref) {
 PrimFunc CudaScheduleResult::prim_func() const { return operator->()->prim_func_; }
 
 // 返回与函数 attr 同源的启动元数据句柄。
-codegen::KernelLaunchMetadata CudaScheduleResult::launch_metadata() const {
-    return operator->()->launch_metadata_;
+CudaLaunchConfig CudaScheduleResult::launch_config() const {
+    return operator->()->launch_config_;
 }
 
 // 结果校验以 Object 身份保证 metadata 不存在两个可漂移事实来源。
@@ -204,12 +208,30 @@ void CudaScheduleResult::Validate() const {
     if (!node->prim_func_.defined() || !node->prim_func_.As<PrimFuncNode>()) {
         throw std::invalid_argument("CudaScheduleResult requires a PrimFunc");
     }
-    node->launch_metadata_.Validate();
-    const String key(kCudaLaunchMetadataAttr);
-    if (!node->prim_func_->attrs.count(key) ||
-        node->prim_func_->attrs.at(key).get() != node->launch_metadata_.get()) {
+    const CudaLaunchConfig& config = node->launch_config_;
+    if (config.grid_x == 0 || config.grid_y == 0 || config.grid_z == 0 ||
+        config.block_x == 0 || config.block_y == 0 || config.block_z == 0) {
         throw std::invalid_argument(
-            "CudaScheduleResult metadata attr does not share result metadata");
+            "CudaScheduleResult requires positive launch dimensions");
+    }
+    const String key(kCudaLaunchMetadataAttr);
+    if (!node->prim_func_->attrs.count(key)) {
+        throw std::invalid_argument(
+            "CudaScheduleResult launch config attr is missing");
+    }
+    const auto* values =
+        node->prim_func_->attrs.at(key).As<ArrayNode<int64_t>>();
+    if (!values || values->data.size() != 7 ||
+        values->data[0] != config.grid_x ||
+        values->data[1] != config.grid_y ||
+        values->data[2] != config.grid_z ||
+        values->data[3] != config.block_x ||
+        values->data[4] != config.block_y ||
+        values->data[5] != config.block_z ||
+        values->data[6] !=
+            static_cast<int64_t>(config.dynamic_shared_memory_bytes)) {
+        throw std::invalid_argument(
+            "CudaScheduleResult launch config attr does not match result");
     }
 }
 
@@ -280,11 +302,9 @@ CudaScheduleResult BindCudaThreads(const PrimFunc& function, const Target& targe
         ThreadBinding(thread_var, ThreadIndexKind::kThreadIdxX,
                       block_extent, rewritten_body));
 
-    const Device device(kCUDA, target->device_id);
-    codegen::KernelLaunchMetadata metadata(
-        device, codegen::CodeGenBackend::kCUDA,
-        codegen::Dim3{static_cast<uint32_t>(grid_size), 1, 1},
-        codegen::Dim3{static_cast<uint32_t>(block_size), 1, 1}, 0);
+    CudaLaunchConfig launch_config;
+    launch_config.grid_x = static_cast<uint32_t>(grid_size);
+    launch_config.block_x = static_cast<uint32_t>(block_size);
     Map<String, ObjectRef> attrs = CopyAttrs(function->attrs);
     const String symbol_key("global_symbol");
     if (attrs.count(symbol_key)) {
@@ -295,23 +315,42 @@ CudaScheduleResult BindCudaThreads(const PrimFunc& function, const Target& targe
             attrs.Set(symbol_key, String("kxc_cuda_main"));
         }
     }
-    attrs.Set(String(kCudaLaunchMetadataAttr), ObjectRef(metadata));
+    attrs.Set(String(kCudaLaunchMetadataAttr),
+              Array<int64_t>{
+                  launch_config.grid_x, launch_config.grid_y,
+                  launch_config.grid_z, launch_config.block_x,
+                  launch_config.block_y, launch_config.block_z,
+                  static_cast<int64_t>(
+                      launch_config.dynamic_shared_memory_bytes)});
     attrs.Set(String(kCudaWorkSizeAttr),
               IntImm(work_size, DataType::Int(64)));
     PrimFunc scheduled(function->params, bound_body, function->buffer_map, attrs);
-    return CudaScheduleResult(scheduled, metadata);
+    return CudaScheduleResult(scheduled, launch_config);
 }
 
 // metadata 必须使用专用节点类型，错误 attr 不能通过静态转换造成 UB。
-codegen::KernelLaunchMetadata GetCudaLaunchMetadata(const PrimFunc& function) {
+CudaLaunchConfig GetCudaLaunchConfig(const PrimFunc& function) {
     if (!function.defined() || !function.As<PrimFuncNode>()) {
-        throw std::invalid_argument("GetCudaLaunchMetadata requires a PrimFunc");
+        throw std::invalid_argument("GetCudaLaunchConfig requires a PrimFunc");
     }
     const String key(kCudaLaunchMetadataAttr);
     if (!function->attrs.count(key)) {
-        throw std::invalid_argument("PrimFunc has no CUDA launch metadata");
+        throw std::invalid_argument("PrimFunc has no CUDA launch config");
     }
-    return codegen::KernelLaunchMetadata(function->attrs.at(key));
+    const auto* values = function->attrs.at(key).As<ArrayNode<int64_t>>();
+    if (!values || values->data.size() != 7) {
+        throw std::invalid_argument("PrimFunc CUDA launch config is malformed");
+    }
+    CudaLaunchConfig config;
+    config.grid_x = static_cast<uint32_t>(values->data[0]);
+    config.grid_y = static_cast<uint32_t>(values->data[1]);
+    config.grid_z = static_cast<uint32_t>(values->data[2]);
+    config.block_x = static_cast<uint32_t>(values->data[3]);
+    config.block_y = static_cast<uint32_t>(values->data[4]);
+    config.block_z = static_cast<uint32_t>(values->data[5]);
+    config.dynamic_shared_memory_bytes =
+        static_cast<uint64_t>(values->data[6]);
+    return config;
 }
 
 }  // namespace kxc::tir

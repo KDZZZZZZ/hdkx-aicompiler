@@ -2,9 +2,9 @@
  * \brief 实现 TIR 优化 pass 和 pipeline。
  */
 
-#include "tir/transforms/convert_for_loops_serial.h"
+#include "kxc/tir/transforms/convert_for_loops_serial.h"
 
-#include "base/pass.h"
+#include "kxc/tir/visitor.h"
 
 namespace kxc {
 namespace tir {

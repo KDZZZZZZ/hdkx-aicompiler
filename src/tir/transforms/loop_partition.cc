@@ -2,13 +2,13 @@
  * \brief 实现 TIR 优化 pass 和 pipeline。
  */
 
-#include "tir/transforms/loop_partition.h"
+#include "kxc/tir/transforms/loop_partition.h"
 
 #include <cstdint>
 #include <string>
 
-#include "base/pass.h"
-#include "tir/pass_utils.h"
+#include "kxc/tir/visitor.h"
+#include "kxc/tir/pass_utils.h"
 
 namespace kxc {
 namespace tir {

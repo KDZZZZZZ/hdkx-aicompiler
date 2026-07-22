@@ -2,7 +2,7 @@
  * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
  */
 
-#include "relay/transforms/pipeline.h"
+#include "kxc/relay/transforms/pipeline.h"
 
 #include <functional>
 #include <sstream>
@@ -10,20 +10,20 @@
 #include <string>
 #include <unordered_map>
 
-#include "base/profiling.h"
-#include "base/packedfunc.h"
-#include "base/registry.h"
-#include "relay/pass/print_ir.h"
-#include "relay/transforms/annotate_memory_scope.h"
-#include "relay/transforms/canonicalize_cast.h"
-#include "relay/transforms/capture_post_dfs_index_in_spans.h"
-#include "relay/transforms/eliminate_dead_let.h"
-#include "relay/transforms/eliminate_common_subexpr.h"
-#include "relay/transforms/fold_constant.h"
-#include "relay/transforms/fold_tuple_get_item.h"
-#include "relay/transforms/infer_type.h"
-#include "relay/transforms/remove_standalone_reshapes.h"
-#include "relay/transforms/simplify_expr.h"
+#include "kxc/profiling/profiling.h"
+#include "kxc/ffi/packed_func.h"
+#include "kxc/ffi/registration.h"
+#include "kxc/relay/pass/print_ir.h"
+#include "kxc/relay/transforms/annotate_memory_scope.h"
+#include "kxc/relay/transforms/canonicalize_cast.h"
+#include "kxc/relay/transforms/capture_post_dfs_index_in_spans.h"
+#include "kxc/relay/transforms/eliminate_dead_let.h"
+#include "kxc/relay/transforms/eliminate_common_subexpr.h"
+#include "kxc/relay/transforms/fold_constant.h"
+#include "kxc/relay/transforms/fold_tuple_get_item.h"
+#include "kxc/relay/transforms/infer_type.h"
+#include "kxc/relay/transforms/remove_standalone_reshapes.h"
+#include "kxc/relay/transforms/simplify_expr.h"
 
 namespace kxc {
 namespace relay {
@@ -213,3 +213,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.transform.infer_type")
 
 }  // namespace relay
 }  // namespace kxc
+
+namespace kxc::builtin_anchor {
+void RelayPasses() {}
+}  // namespace kxc::builtin_anchor

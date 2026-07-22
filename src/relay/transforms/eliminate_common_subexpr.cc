@@ -2,13 +2,13 @@
  * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
  */
 
-#include "relay/transforms/eliminate_common_subexpr.h"
+#include "kxc/relay/transforms/eliminate_common_subexpr.h"
 
 #include <string>
 #include <unordered_map>
 
-#include "base/pass.h"
-#include "relay/pass_utils.h"
+#include "kxc/relay/visitor.h"
+#include "kxc/relay/pass_utils.h"
 
 namespace kxc {
 namespace relay {
@@ -60,4 +60,3 @@ Function EliminateCommonSubexprPass(const Function& func) {
 
 }  // namespace relay
 }  // namespace kxc
-

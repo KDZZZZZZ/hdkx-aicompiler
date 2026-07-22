@@ -9,17 +9,19 @@
 #include <utility>
 #include <vector>
 
-#include "api/compiler.h"
-#include "base/disco/executor.h"
-#include "base/disco/session.h"
-#include "base/ndarray.h"
-#include "base/pass.h"
-#include "base/registry.h"
-#include "codegen/kernel_signature.h"
-#include "relay/op.h"
-#include "relay/relay.h"
-#include "relay/transforms/lower.h"
-#include "relay/transforms/multi_device.h"
+#include "kxc/compiler/compiler.h"
+#include "kxc/distributed/executor.h"
+#include "kxc/distributed/session.h"
+#include "kxc/runtime/ndarray.h"
+#include "kxc/pass/context.h"
+#include "kxc/relay/visitor.h"
+#include "kxc/ffi/registry.h"
+#include "kxc/runtime/kernel_abi.h"
+#include "../src/compiler/internal/kernel_abi_builder.h"
+#include "kxc/relay/op.h"
+#include "kxc/relay/relay.h"
+#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "kxc/compiler/distributed/multi_device.h"
 
 namespace {
 
@@ -274,7 +276,7 @@ bool TestPassContextTargetMerge() {
     Var input("input", TensorType({1}, "float32"));
     Function function({input}, input);
     const PassContext merged =
-        PassContext::MergeTarget(PassContext::FromRelay(function), cpu);
+        PassContext::MergeTarget(relay::PassContextFromRelay(function), cpu);
     TEST_CHECK(merged.default_target()->kind == "llvm" &&
                    merged.default_device() == Device::CPU(),
                "target was not installed into an unplaced Relay function");
@@ -283,7 +285,7 @@ bool TestPassContextTargetMerge() {
     input.set_virtual_device(VirtualDevice(cuda));
     Function conflicting({input}, input);
     TEST_CHECK(Throws([&] {
-                   PassContext::MergeTarget(PassContext::FromRelay(conflicting), cpu);
+                   PassContext::MergeTarget(relay::PassContextFromRelay(conflicting), cpu);
                }),
                "conflicting Relay placement should not be overwritten");
     return true;
@@ -514,7 +516,7 @@ bool TestExecutionPlanKernelFailsClosed() {
     dtypes.Set(0, "float32");
     dtypes.Set(1, "float32");
     ExecutionPlan plan({ObjectRef(kernel)}, {}, {0}, {}, shapes, dtypes, 2,
-                       pass_ctx, 1);
+                       pass_ctx, DiscoPlacement(), 1);
 
     disco::DiscoSession session = disco::DiscoSession::ThreadedSession(1, 1);
     disco::DRef input = session.Empty({1}, "float32", false, false);

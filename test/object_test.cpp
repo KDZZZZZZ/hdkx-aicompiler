@@ -2,11 +2,12 @@
  * \brief 验证 ObjectRef 生命周期语义和运行时类型元数据。
  */
 
-#include "base/container.h"
-#include "relay/op.h"
-#include "relay/relay.h"
-#include "te/te.h"
-#include "tir/stmt.h"
+#include "kxc/support/arena.h"
+#include "kxc/support/container.h"
+#include "kxc/relay/op.h"
+#include "kxc/relay/relay.h"
+#include "kxc/te/te.h"
+#include "kxc/tir/stmt.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -18,9 +19,9 @@
 #include <utility>
 
 #ifdef KXC_OBJECT_TEST_STANDALONE
-namespace kxc {
-thread_local Arena* current_arena = nullptr;
-}  // namespace kxc
+#include "../src/support/arena.cc"
+#include "../src/support/type_registry.cc"
+#include "../src/support/object.cc"
 #endif
 
 namespace {

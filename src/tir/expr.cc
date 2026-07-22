@@ -2,10 +2,31 @@
  * \brief 实现 TIR 节点构造、工具函数和 pass 基础能力。
  */
 
-#include "tir/expr.h"
+#include "kxc/tir/expr.h"
+#include "kxc/support/object_registration.h"
 
 namespace kxc {
 namespace tir {
+
+KXC_OBJECT_DEFINE(PrimExprNode)
+KXC_OBJECT_DEFINE(IntImmNode)
+KXC_OBJECT_DEFINE(FloatImmNode)
+KXC_OBJECT_DEFINE_WITH_KEY(VarNode, "kxc.tir.VarNode")
+KXC_OBJECT_DEFINE(AddNode)
+KXC_OBJECT_DEFINE(SubNode)
+KXC_OBJECT_DEFINE(MulNode)
+KXC_OBJECT_DEFINE(DivNode)
+KXC_OBJECT_DEFINE(ModNode)
+KXC_OBJECT_DEFINE(MinNode)
+KXC_OBJECT_DEFINE(MaxNode)
+KXC_OBJECT_DEFINE(EQNode)
+KXC_OBJECT_DEFINE(LTNode)
+KXC_OBJECT_DEFINE(AndNode)
+KXC_OBJECT_DEFINE(OrNode)
+KXC_OBJECT_DEFINE(NotNode)
+KXC_OBJECT_DEFINE(LoadNode)
+KXC_OBJECT_DEFINE_WITH_KEY(CallNode, "kxc.tir.CallNode")
+KXC_OBJECT_DEFINE(SelectNode)
 
 IntImm::IntImm(int64_t value, DataType dtype) {
     auto* node = new IntImmNode();

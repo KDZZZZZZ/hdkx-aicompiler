@@ -2,10 +2,10 @@
  * \brief 注册 Relay 算子及其 FRelayToTE compute。
  */
 
-#include "relay/op_macros.h"
-#include "relay/op_attr_types.h"
-#include "relay/type_infer.h"
-#include "te/topi/nn.h"
+#include "kxc/relay/op_macros.h"
+#include "kxc/relay/op_attr_types.h"
+#include "kxc/relay/type_infer.h"
+#include "kxc/te/topi/nn.h"
 #include <stdexcept>
 
 namespace kxc {
@@ -28,3 +28,7 @@ KXC_REGISTER_OP(nn_relu)
 
 } // namespace relay
 } // namespace kxc
+
+namespace kxc::builtin_anchor {
+void RelayActivationOps() {}
+}  // namespace kxc::builtin_anchor

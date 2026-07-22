@@ -2,12 +2,25 @@
  * \brief 实现 Relay IR 句柄和类型辅助函数。
  */
 
-#include "relay/relay.h"
+#include "kxc/relay/relay.h"
+#include "kxc/support/object_registration.h"
 
 #include <sstream>
 #include <utility>
 
 namespace kxc {
+
+KXC_OBJECT_DEFINE(TensorTypeNode)
+KXC_OBJECT_DEFINE(TupleTypeNode)
+KXC_OBJECT_DEFINE(IdNode)
+KXC_OBJECT_DEFINE_WITH_KEY(VarNode, "kxc.relay.VarNode")
+KXC_OBJECT_DEFINE(ConstantNode)
+KXC_OBJECT_DEFINE_WITH_KEY(CallNode, "kxc.relay.CallNode")
+KXC_OBJECT_DEFINE(FunctionNode)
+KXC_OBJECT_DEFINE(TupleNode)
+KXC_OBJECT_DEFINE(TupleGetItemNode)
+KXC_OBJECT_DEFINE(IfNode)
+KXC_OBJECT_DEFINE(LetNode)
 
 TensorType::TensorType(Array<int64_t> shape, std::string dtype) {
     auto* node = new TensorTypeNode();

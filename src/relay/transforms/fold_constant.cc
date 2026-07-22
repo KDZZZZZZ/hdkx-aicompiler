@@ -2,13 +2,13 @@
  * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
  */
 
-#include "relay/transforms/fold_constant.h"
+#include "kxc/relay/transforms/fold_constant.h"
 
 #include <cmath>
 #include <string>
 
-#include "base/pass.h"
-#include "relay/pass_utils.h"
+#include "kxc/relay/visitor.h"
+#include "kxc/relay/pass_utils.h"
 
 namespace kxc {
 namespace relay {
@@ -84,4 +84,3 @@ Function FoldConstantPass(const Function& func) {
 
 }  // namespace relay
 }  // namespace kxc
-

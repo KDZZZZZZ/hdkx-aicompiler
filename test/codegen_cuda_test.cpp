@@ -11,14 +11,14 @@
 #include <utility>
 #include <vector>
 
-#include "api/compiler.h"
-#include "base/device_api.h"
-#include "base/ndarray.h"
-#include "codegen/codegen_cuda.h"
-#include "codegen/cuda_module.h"
-#include "codegen/kernel_signature.h"
-#include "relay/op.h"
-#include "runtime/runtime_session.h"
+#include "kxc/compiler/compiler.h"
+#include "kxc/runtime/device_api.h"
+#include "kxc/runtime/ndarray.h"
+#include "../src/codegen/cuda/internal/codegen_cuda.h"
+#include "../src/codegen/cuda/internal/cuda_module.h"
+#include "kxc/runtime/kernel_abi.h"
+#include "kxc/relay/op.h"
+#include "kxc/runtime/session.h"
 
 namespace {
 

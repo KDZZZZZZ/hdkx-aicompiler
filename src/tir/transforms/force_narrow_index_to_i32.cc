@@ -2,10 +2,10 @@
  * \brief 实现 TIR 优化 pass 和 pipeline。
  */
 
-#include "tir/transforms/force_narrow_index_to_i32.h"
+#include "kxc/tir/transforms/force_narrow_index_to_i32.h"
 
-#include "base/pass.h"
-#include "tir/pass_utils.h"
+#include "kxc/tir/visitor.h"
+#include "kxc/tir/pass_utils.h"
 
 namespace kxc {
 namespace tir {
@@ -117,4 +117,3 @@ PrimFunc ForceNarrowIndexToI32Pass(const PrimFunc& func) {
 
 }  // namespace tir
 }  // namespace kxc
-

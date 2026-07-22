@@ -2,16 +2,16 @@
  * \brief 实现 Relay 静态类型和 shape 推导。
  */
 
-#include "relay/transforms/infer_type.h"
+#include "kxc/relay/transforms/infer_type.h"
 
 #include <any>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 
-#include "base/pass.h"
-#include "relay/op_attr_types.h"
-#include "relay/op.h"
+#include "kxc/relay/visitor.h"
+#include "kxc/relay/op_attr_types.h"
+#include "kxc/relay/op.h"
 
 namespace kxc {
 namespace relay {

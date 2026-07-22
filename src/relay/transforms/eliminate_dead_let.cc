@@ -2,10 +2,10 @@
  * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
  */
 
-#include "relay/transforms/eliminate_dead_let.h"
+#include "kxc/relay/transforms/eliminate_dead_let.h"
 
-#include "base/pass.h"
-#include "relay/pass_utils.h"
+#include "kxc/relay/visitor.h"
+#include "kxc/relay/pass_utils.h"
 
 namespace kxc {
 namespace relay {

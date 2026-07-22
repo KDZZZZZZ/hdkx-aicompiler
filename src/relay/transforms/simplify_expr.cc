@@ -2,10 +2,10 @@
  * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
  */
 
-#include "relay/transforms/simplify_expr.h"
+#include "kxc/relay/transforms/simplify_expr.h"
 
-#include "base/pass.h"
-#include "relay/pass_utils.h"
+#include "kxc/relay/visitor.h"
+#include "kxc/relay/pass_utils.h"
 
 namespace kxc {
 namespace relay {

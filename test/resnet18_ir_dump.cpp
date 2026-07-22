@@ -2,11 +2,11 @@
  * \brief 定义编译器核心路径、pass、codegen 和 profiling 的 C++ 测试入口。
  */
 
-#include "relay/relay.h"
-#include "relay/op.h"
-#include "relay/transforms/lower.h"
-#include "tir/pass/print_ir.h"
-#include "tir/transforms/pipeline.h"
+#include "kxc/relay/relay.h"
+#include "kxc/relay/op.h"
+#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "kxc/tir/pass/print_ir.h"
+#include "kxc/tir/transforms/pipeline.h"
 
 #include <fstream>
 #include <iostream>

@@ -2,12 +2,12 @@
  * \brief 注册 Relay tensor transform 算子及其 FRelayToTE compute。
  */
 
-#include "relay/op_macros.h"
-#include "relay/op.h"
-#include "relay/op_attr_types.h"
-#include "relay/type_infer.h"
-#include "te/topi/elemwise.h"
-#include "te/topi/transform.h"
+#include "kxc/relay/op_macros.h"
+#include "kxc/relay/op.h"
+#include "kxc/relay/op_attr_types.h"
+#include "kxc/relay/type_infer.h"
+#include "kxc/te/topi/elemwise.h"
+#include "kxc/te/topi/transform.h"
 
 #include <stdexcept>
 #include <string>
@@ -257,3 +257,7 @@ KXC_REGISTER_OP(cast)
 
 }  // namespace relay
 }  // namespace kxc
+
+namespace kxc::builtin_anchor {
+void RelayTensorTransformOps() {}
+}  // namespace kxc::builtin_anchor

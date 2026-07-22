@@ -2,10 +2,10 @@
  * \brief 测试 Relay 类型和 shape 推导。
  */
 
-#include "relay/op.h"
-#include "relay/transforms/infer_type.h"
-#include "relay/transforms/lower.h"
-#include "relay/transforms/pipeline.h"
+#include "kxc/relay/op.h"
+#include "kxc/relay/transforms/infer_type.h"
+#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "kxc/relay/transforms/pipeline.h"
 
 #include <exception>
 #include <functional>

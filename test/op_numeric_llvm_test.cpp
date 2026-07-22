@@ -2,8 +2,8 @@
  * \brief 验证 Relay 算子在 LLVM 后端上的数值正确性。
  */
 
-#include "api/compiler.h"
-#include "relay/op.h"
+#include "kxc/compiler/compiler.h"
+#include "kxc/relay/op.h"
 
 #include <algorithm>
 #include <cmath>

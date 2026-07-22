@@ -2,12 +2,12 @@
  * \brief 注册 Relay tensor math 算子及其编译 hook。
  */
 
-#include "relay/op_macros.h"
-#include "relay/op_attr_types.h"
-#include "relay/type_infer.h"
-#include "te/topi/broadcast.h"
-#include "te/topi/elemwise.h"
-#include "te/topi/nn.h"
+#include "kxc/relay/op_macros.h"
+#include "kxc/relay/op_attr_types.h"
+#include "kxc/relay/type_infer.h"
+#include "kxc/te/topi/broadcast.h"
+#include "kxc/te/topi/elemwise.h"
+#include "kxc/te/topi/nn.h"
 
 #include <stdexcept>
 
@@ -135,3 +135,7 @@ KXC_REGISTER_OP(matmul)
 
 }  // namespace relay
 }  // namespace kxc
+
+namespace kxc::builtin_anchor {
+void RelayTensorMathOps() {}
+}  // namespace kxc::builtin_anchor

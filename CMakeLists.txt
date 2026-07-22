@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.23)
 
 project(hdkx_aicompiler LANGUAGES C CXX)
 
@@ -32,6 +32,139 @@ if(MSVC)
 endif()
 
 set(KXC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
+set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/include")
+
+set(KXC_PUBLIC_HEADERS
+  include/kxc/compiler/compile_config.h
+  include/kxc/compiler/compiler.h
+  include/kxc/compiler/lowering/relay_to_tir.h
+  include/kxc/distributed/ccl_backend.h
+  include/kxc/distributed/dref.h
+  include/kxc/distributed/execution_plan.h
+  include/kxc/distributed/executor.h
+  include/kxc/distributed/placement.h
+  include/kxc/distributed/session.h
+  include/kxc/distributed/worker.h
+  include/kxc/ffi/detail/packed_func_inl.h
+  include/kxc/ffi/packed_func.h
+  include/kxc/ffi/registration.h
+  include/kxc/ffi/registry.h
+  include/kxc/frontend/onnx_importer.h
+  include/kxc/ir/expr.h
+  include/kxc/pass/context.h
+  include/kxc/profiling/profiling.h
+  include/kxc/compiler/distributed/multi_device.h
+  include/kxc/relay/op.h
+  include/kxc/relay/op_attr_types.h
+  include/kxc/relay/op_macros.h
+  include/kxc/relay/pass/print_ir.h
+  include/kxc/relay/pass_utils.h
+  include/kxc/relay/relay.h
+  include/kxc/relay/transforms/annotate_memory_scope.h
+  include/kxc/relay/transforms/canonicalize_cast.h
+  include/kxc/relay/transforms/capture_post_dfs_index_in_spans.h
+  include/kxc/relay/transforms/eliminate_common_subexpr.h
+  include/kxc/relay/transforms/eliminate_dead_let.h
+  include/kxc/relay/transforms/fold_constant.h
+  include/kxc/relay/transforms/fold_tuple_get_item.h
+  include/kxc/relay/transforms/infer_type.h
+  include/kxc/relay/transforms/pipeline.h
+  include/kxc/relay/transforms/remove_standalone_reshapes.h
+  include/kxc/relay/transforms/simplify_expr.h
+  include/kxc/relay/type_infer.h
+  include/kxc/relay/visitor.h
+  include/kxc/runtime/compiled_module.h
+  include/kxc/runtime/device.h
+  include/kxc/runtime/device_api.h
+  include/kxc/runtime/device_info.h
+  include/kxc/runtime/device_stream.h
+  include/kxc/runtime/kernel_abi.h
+  include/kxc/runtime/ndarray.h
+  include/kxc/runtime/session.h
+  include/kxc/runtime/storage.h
+  include/kxc/support/arena.h
+  include/kxc/support/container.h
+  include/kxc/support/detail/array_inl.h
+  include/kxc/support/detail/map_inl.h
+  include/kxc/support/object.h
+  include/kxc/support/object_registration.h
+  include/kxc/target/target.h
+  include/kxc/target/virtual_device.h
+  include/kxc/te/te.h
+  include/kxc/te/topi.h
+  include/kxc/te/topi/broadcast.h
+  include/kxc/te/topi/elemwise.h
+  include/kxc/te/topi/nn.h
+  include/kxc/te/topi/reduction.h
+  include/kxc/te/topi/tags.h
+  include/kxc/te/topi/transform.h
+  include/kxc/te/topi/utils.h
+  include/kxc/tir/expr.h
+  include/kxc/tir/pass/print_ir.h
+  include/kxc/tir/pass_utils.h
+  include/kxc/tir/stmt.h
+  include/kxc/tir/transforms/bind_cuda_threads.h
+  include/kxc/tir/transforms/convert_for_loops_serial.h
+  include/kxc/tir/transforms/fold_constant.h
+  include/kxc/tir/transforms/force_narrow_index_to_i32.h
+  include/kxc/tir/transforms/loop_partition.h
+  include/kxc/tir/transforms/pipeline.h
+  include/kxc/tir/transforms/remove_no_op.h
+  include/kxc/tir/transforms/simplify_expr.h
+  include/kxc/tir/transforms/unroll_loop.h
+  include/kxc/tir/transforms/vectorize_loop.h
+  include/kxc/tir/visitor.h
+)
+
+add_library(kxc_dlpack INTERFACE)
+add_library(kxc::dlpack ALIAS kxc_dlpack)
+set_target_properties(kxc_dlpack PROPERTIES EXPORT_NAME dlpack)
+target_include_directories(kxc_dlpack INTERFACE
+  $<BUILD_INTERFACE:${KXC_DLPACK_INCLUDE_DIR}>
+  $<INSTALL_INTERFACE:include>)
+target_sources(kxc_dlpack INTERFACE
+  FILE_SET dlpack_headers TYPE HEADERS
+  BASE_DIRS "${KXC_DLPACK_INCLUDE_DIR}"
+  FILES third_party/dlpack/include/dlpack/dlpack.h)
+
+add_library(kxc_public_api INTERFACE)
+add_library(kxc::public_api ALIAS kxc_public_api)
+set_target_properties(kxc_public_api PROPERTIES EXPORT_NAME public_api)
+target_include_directories(kxc_public_api INTERFACE
+  $<BUILD_INTERFACE:${KXC_INCLUDE_DIR}>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(kxc_public_api INTERFACE kxc_dlpack)
+
+set(KXC_PUBLIC_MODULE_TARGETS "")
+foreach(_kxc_public_module IN ITEMS
+    support ffi runtime profiling target pass ir tir te relay distributed
+    frontend compiler)
+  set(_kxc_module_headers "")
+  foreach(_kxc_header IN LISTS KXC_PUBLIC_HEADERS)
+    if(_kxc_header MATCHES "^include/kxc/${_kxc_public_module}/")
+      list(APPEND _kxc_module_headers "${_kxc_header}")
+    endif()
+  endforeach()
+  if(NOT _kxc_module_headers)
+    message(FATAL_ERROR "No public headers declared for module ${_kxc_public_module}")
+  endif()
+
+  set(_kxc_module_target "kxc_${_kxc_public_module}_api")
+  add_library(${_kxc_module_target} INTERFACE)
+  add_library(kxc::${_kxc_public_module}_api ALIAS ${_kxc_module_target})
+  set_target_properties(${_kxc_module_target} PROPERTIES
+    EXPORT_NAME "${_kxc_public_module}_api")
+  target_include_directories(${_kxc_module_target} INTERFACE
+    $<BUILD_INTERFACE:${KXC_INCLUDE_DIR}>
+    $<INSTALL_INTERFACE:include>)
+  target_link_libraries(${_kxc_module_target} INTERFACE kxc_dlpack)
+  target_sources(${_kxc_module_target} INTERFACE
+    FILE_SET public_headers TYPE HEADERS
+    BASE_DIRS "${KXC_INCLUDE_DIR}"
+    FILES ${_kxc_module_headers})
+  target_link_libraries(kxc_public_api INTERFACE ${_kxc_module_target})
+  list(APPEND KXC_PUBLIC_MODULE_TARGETS ${_kxc_module_target})
+endforeach()
 
 if(KXC_ENABLE_CUDA)
   find_package(CUDAToolkit QUIET)
@@ -125,56 +258,72 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# Phase-1 module object targets (file-architecture plan §9 stage 1).
-# Source paths are unchanged; only CMake composition is modularized.
-# Registration TUs stay in the aggregate object set so static links keep
-# global constructors (RegisterBuiltins bootstrap lands in a later stage).
+# Module object targets. Each source group owns one architectural layer;
+# external SDK usage is attached only to the objects that require it.
+# Registration translation units remain in the aggregate object set so static
+# links keep their global constructors.
 # ---------------------------------------------------------------------------
 
-set(KXC_BASE_SOURCES
-  src/base/expr.cc
-  src/base/device.cc
-  src/base/device_api.cc
-  src/base/device_stream.cc
-  src/base/storage.cc
-  src/base/profiling.cc
-  src/base/target.cc
-  src/base/virtual_device.cc
-  src/base/disco_placement.cc
-  src/base/execution_plan.cc
-  src/base/ndarray.cc
-  src/base/tensor.cc
-  src/base/pass.cc
-  src/base/op.cc
-  src/base/disco/dref.cc
-  src/base/disco/threaded_session.cc
-  src/base/disco/worker.cc
-  src/base/disco/ccl_cpu.cc
-  src/base/disco/executor.cc
-  src/base/device/cpu_device_api.cc
-  src/base/device/cuda_device_api.cc
+set(KXC_SUPPORT_SOURCES
+  src/support/arena.cc
+  src/support/object.cc
+  src/support/type_registry.cc
+  src/support/string.cc
 )
 
-set(KXC_RELAY_SOURCES
+set(KXC_FFI_SOURCES
+  src/ffi/builtin_registry.cc
+  src/ffi/registry.cc
+  src/ffi/packed_func.cc
+)
+
+set(KXC_IR_SOURCES
+  src/ir/expr.cc
+)
+
+set(KXC_RUNTIME_CORE_SOURCES
+  src/runtime/device.cc
+  src/runtime/device_api.cc
+  src/runtime/device_stream.cc
+  src/runtime/storage.cc
+  src/runtime/ndarray.cc
+  src/runtime/device/cpu_device_api.cc
+  src/runtime/kernel_abi.cc
+)
+
+set(KXC_RUNTIME_CUDA_SOURCES
+  src/runtime/device/cuda_device_api.cc
+)
+
+set(KXC_PROFILING_SOURCES
+  src/profiling/options.cc
+  src/profiling/profiling.cc)
+set(KXC_TARGET_SOURCES
+  src/target/target.cc
+  src/target/virtual_device.cc)
+set(KXC_PASS_SOURCES src/pass/context.cc)
+
+set(KXC_DISTRIBUTED_PLACEMENT_SOURCES
+  src/distributed/placement.cc)
+
+set(KXC_DISTRIBUTED_PLAN_SOURCES
+  src/distributed/execution_plan.cc
+  src/distributed/execution_plan_json.cc)
+
+set(KXC_DISTRIBUTED_RUNTIME_SOURCES
+  src/distributed/dref.cc
+  src/distributed/threaded_session.cc
+  src/distributed/worker.cc
+  src/distributed/ccl_cpu.cc
+  src/distributed/executor.cc)
+
+set(KXC_RELAY_IR_SOURCES
+  src/relay/visitor.cc
   src/relay/relay.cc
-  src/relay/pass_utils.cc
   src/relay/type_infer.cc
   src/relay/op_attrs.cc
   src/relay/op_macros.cc
-  src/relay/backend/lower.cc
-  src/relay/pass/print_ir.cc
-  src/relay/transforms/pipeline.cc
-  src/relay/transforms/fold_constant.cc
-  src/relay/transforms/simplify_expr.cc
-  src/relay/transforms/canonicalize_cast.cc
-  src/relay/transforms/remove_standalone_reshapes.cc
-  src/relay/transforms/fold_tuple_get_item.cc
-  src/relay/transforms/infer_type.cc
-  src/relay/transforms/eliminate_common_subexpr.cc
-  src/relay/transforms/eliminate_dead_let.cc
-  src/relay/transforms/capture_post_dfs_index_in_spans.cc
-  src/relay/transforms/annotate_memory_scope.cc
-  src/relay/transforms/multi_device.cc
+  src/relay/op_registry.cc
   src/relay/op/tensor/math.cc
   src/relay/op/tensor/reduce.cc
   src/relay/op/tensor/transform.cc
@@ -186,9 +335,30 @@ set(KXC_RELAY_SOURCES
   src/relay/op/op_ffi.cc
 )
 
-set(KXC_TIR_SOURCES
+set(KXC_RELAY_PASS_SOURCES
+  src/relay/pass_utils.cc
+  src/relay/pass/print_ir.cc
+  src/relay/transforms/pipeline.cc
+  src/relay/transforms/fold_constant.cc
+  src/relay/transforms/simplify_expr.cc
+  src/relay/transforms/canonicalize_cast.cc
+  src/relay/transforms/remove_standalone_reshapes.cc
+  src/relay/transforms/fold_tuple_get_item.cc
+  src/relay/transforms/infer_type.cc
+  src/relay/transforms/eliminate_common_subexpr.cc
+  src/relay/transforms/eliminate_dead_let.cc
+  src/relay/transforms/capture_post_dfs_index_in_spans.cc
+  src/relay/transforms/annotate_memory_scope.cc)
+
+set(KXC_RELAY_DISTRIBUTED_SOURCES
+  src/relay/distributed/plan_adapter.cc)
+
+set(KXC_TIR_IR_SOURCES
+  src/tir/visitor.cc
   src/tir/expr.cc
-  src/tir/stmt.cc
+  src/tir/stmt.cc)
+
+set(KXC_TIR_PASS_SOURCES
   src/tir/pass_utils.cc
   src/tir/pass/print_ir.cc
   src/tir/transforms/pipeline.cc
@@ -205,71 +375,131 @@ set(KXC_TIR_SOURCES
 
 set(KXC_TE_SOURCES
   src/te/te.cc
+  src/te/topi/broadcast.cc
+  src/te/topi/elemwise.cc
+  src/te/topi/nn.cc
+  src/te/topi/reduction.cc
+  src/te/topi/transform.cc
+  src/te/topi/utils.cc
 )
 
 set(KXC_FRONTEND_SOURCES
   src/frontend/onnx_importer.cc
 )
 
-set(KXC_CODEGEN_COMMON_SOURCES
-  src/codegen/compiled_kernel.cc
-  src/codegen/codegen_c.cc
-  src/codegen/kernel_signature.cc
+set(KXC_CODEGEN_COMMON_SOURCES src/codegen/common/compiled_kernel.cc)
+set(KXC_CODEGEN_C_SOURCES src/codegen/c/codegen_c.cc)
+
+set(KXC_RUNTIME_EXECUTABLE_SOURCES
+  src/runtime/compiled_module.cc
+  src/runtime/kernel_argument_validation.cc
 )
 
-set(KXC_COMPILER_API_SOURCES
-  src/api/compile_config.cc
-  src/api/compile_result.cc
-  src/api/compiled_module.cc
-  src/api/kernel_argument_validation.cc
-  src/api/compiler.cc
+set(KXC_COMPILER_SOURCES
+  src/compiler/compile_config.cc
+  src/compiler/compile_state.cc
+  src/compiler/compiler.cc
+  src/compiler/kernel_abi_builder.cc
+  src/compiler/lowering/lowered_function.cc
+  src/compiler/lowering/relay_to_tir.cc
+  src/compiler/distributed/multi_device.cc
 )
 
 set(KXC_RUNTIME_SESSION_SOURCES
-  src/runtime/runtime_session.cc
+  src/runtime/session.cc
 )
 
 set(KXC_CODEGEN_LLVM_SOURCES "")
 if(KXC_USE_LLVM)
   set(KXC_CODEGEN_LLVM_SOURCES
-    src/codegen/codegen_llvm.cc
-    src/codegen/llvm_jit.cc
+    src/codegen/llvm/codegen_llvm.cc
+    src/codegen/llvm/codegen_llvm_stmt.cc
+    src/codegen/llvm/llvm_jit.cc
   )
 endif()
 
 set(KXC_CODEGEN_CUDA_SOURCES "")
 if(KXC_USE_CUDA)
   set(KXC_CODEGEN_CUDA_SOURCES
-    src/codegen/codegen_cuda.cc
-    src/codegen/cuda_module.cc
+    src/codegen/cuda/codegen_cuda.cc
+    src/codegen/cuda/cuda_module.cc
   )
 endif()
 
-# Shared compile interface for every module object (paths still under include/).
-# Later stages will narrow PUBLIC deps; phase 1 keeps behavior parity.
 function(kxc_configure_module_obj target)
-  target_include_directories(${target} PUBLIC "${KXC_INCLUDE_DIR}")
-  target_compile_definitions(${target} PUBLIC
+  target_link_libraries(${target} PRIVATE kxc_public_api)
+  target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
     KXC_USE_LLVM=${KXC_USE_LLVM})
+endfunction()
+
+function(kxc_enable_cuda target)
   if(KXC_USE_CUDA)
-    target_link_libraries(${target} PUBLIC ${KXC_CUDA_LIBS})
+    target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
   endif()
+endfunction()
+
+function(kxc_enable_llvm target)
   if(KXC_USE_LLVM)
-    target_include_directories(${target} SYSTEM PUBLIC ${KXC_LLVM_INCLUDE_DIRS})
-    target_compile_definitions(${target} PUBLIC ${KXC_LLVM_DEFINITIONS}
+    target_include_directories(${target} SYSTEM PRIVATE ${KXC_LLVM_INCLUDE_DIRS})
+    target_compile_definitions(${target} PRIVATE ${KXC_LLVM_DEFINITIONS}
       KXC_MINGW_LIBGCC_PATH="${KXC_MINGW_LIBGCC_PATH}")
   endif()
 endfunction()
 
-add_library(kxc_base_obj OBJECT ${KXC_BASE_SOURCES})
-kxc_configure_module_obj(kxc_base_obj)
+add_library(kxc_support_obj OBJECT ${KXC_SUPPORT_SOURCES})
+kxc_configure_module_obj(kxc_support_obj)
 
-add_library(kxc_relay_obj OBJECT ${KXC_RELAY_SOURCES})
+add_library(kxc_ffi_obj OBJECT ${KXC_FFI_SOURCES})
+kxc_configure_module_obj(kxc_ffi_obj)
+
+add_library(kxc_ir_obj OBJECT ${KXC_IR_SOURCES})
+kxc_configure_module_obj(kxc_ir_obj)
+
+add_library(kxc_runtime_core_obj OBJECT ${KXC_RUNTIME_CORE_SOURCES})
+kxc_configure_module_obj(kxc_runtime_core_obj)
+kxc_enable_cuda(kxc_runtime_core_obj)
+
+add_library(kxc_runtime_cuda_obj OBJECT ${KXC_RUNTIME_CUDA_SOURCES})
+kxc_configure_module_obj(kxc_runtime_cuda_obj)
+kxc_enable_cuda(kxc_runtime_cuda_obj)
+
+add_library(kxc_profiling_obj OBJECT ${KXC_PROFILING_SOURCES})
+kxc_configure_module_obj(kxc_profiling_obj)
+kxc_enable_cuda(kxc_profiling_obj)
+
+add_library(kxc_target_obj OBJECT ${KXC_TARGET_SOURCES})
+kxc_configure_module_obj(kxc_target_obj)
+
+add_library(kxc_pass_core_obj OBJECT ${KXC_PASS_SOURCES})
+kxc_configure_module_obj(kxc_pass_core_obj)
+
+add_library(kxc_distributed_placement_obj OBJECT
+  ${KXC_DISTRIBUTED_PLACEMENT_SOURCES})
+kxc_configure_module_obj(kxc_distributed_placement_obj)
+
+add_library(kxc_distributed_plan_obj OBJECT ${KXC_DISTRIBUTED_PLAN_SOURCES})
+kxc_configure_module_obj(kxc_distributed_plan_obj)
+
+add_library(kxc_distributed_runtime_obj OBJECT
+  ${KXC_DISTRIBUTED_RUNTIME_SOURCES})
+kxc_configure_module_obj(kxc_distributed_runtime_obj)
+
+add_library(kxc_relay_obj OBJECT ${KXC_RELAY_IR_SOURCES})
 kxc_configure_module_obj(kxc_relay_obj)
 
-add_library(kxc_tir_obj OBJECT ${KXC_TIR_SOURCES})
+add_library(kxc_relay_passes_obj OBJECT ${KXC_RELAY_PASS_SOURCES})
+kxc_configure_module_obj(kxc_relay_passes_obj)
+
+add_library(kxc_relay_distributed_obj OBJECT
+  ${KXC_RELAY_DISTRIBUTED_SOURCES})
+kxc_configure_module_obj(kxc_relay_distributed_obj)
+
+add_library(kxc_tir_obj OBJECT ${KXC_TIR_IR_SOURCES})
 kxc_configure_module_obj(kxc_tir_obj)
+
+add_library(kxc_tir_passes_obj OBJECT ${KXC_TIR_PASS_SOURCES})
+kxc_configure_module_obj(kxc_tir_passes_obj)
 
 add_library(kxc_te_obj OBJECT ${KXC_TE_SOURCES})
 kxc_configure_module_obj(kxc_te_obj)
@@ -280,40 +510,65 @@ kxc_configure_module_obj(kxc_frontend_obj)
 add_library(kxc_codegen_common_obj OBJECT ${KXC_CODEGEN_COMMON_SOURCES})
 kxc_configure_module_obj(kxc_codegen_common_obj)
 
-add_library(kxc_compiler_api_obj OBJECT ${KXC_COMPILER_API_SOURCES})
-kxc_configure_module_obj(kxc_compiler_api_obj)
+add_library(kxc_codegen_c_obj OBJECT ${KXC_CODEGEN_C_SOURCES})
+kxc_configure_module_obj(kxc_codegen_c_obj)
+
+add_library(kxc_runtime_executable_obj OBJECT ${KXC_RUNTIME_EXECUTABLE_SOURCES})
+kxc_configure_module_obj(kxc_runtime_executable_obj)
+
+add_library(kxc_compiler_obj OBJECT ${KXC_COMPILER_SOURCES})
+kxc_configure_module_obj(kxc_compiler_obj)
+kxc_enable_cuda(kxc_compiler_obj)
+kxc_enable_llvm(kxc_compiler_obj)
 
 add_library(kxc_runtime_session_obj OBJECT ${KXC_RUNTIME_SESSION_SOURCES})
 kxc_configure_module_obj(kxc_runtime_session_obj)
 
 set(KXC_MODULE_OBJECT_TARGETS
-  kxc_base_obj
+  kxc_support_obj
+  kxc_ffi_obj
+  kxc_ir_obj
+  kxc_runtime_core_obj
+  kxc_runtime_cuda_obj
+  kxc_profiling_obj
+  kxc_target_obj
+  kxc_pass_core_obj
+  kxc_distributed_placement_obj
+  kxc_distributed_plan_obj
+  kxc_distributed_runtime_obj
   kxc_relay_obj
+  kxc_relay_passes_obj
+  kxc_relay_distributed_obj
   kxc_tir_obj
+  kxc_tir_passes_obj
   kxc_te_obj
   kxc_frontend_obj
   kxc_codegen_common_obj
-  kxc_compiler_api_obj
+  kxc_codegen_c_obj
+  kxc_runtime_executable_obj
+  kxc_compiler_obj
   kxc_runtime_session_obj
 )
 
 if(KXC_USE_LLVM)
   add_library(kxc_codegen_llvm_obj OBJECT ${KXC_CODEGEN_LLVM_SOURCES})
   kxc_configure_module_obj(kxc_codegen_llvm_obj)
+  kxc_enable_llvm(kxc_codegen_llvm_obj)
   list(APPEND KXC_MODULE_OBJECT_TARGETS kxc_codegen_llvm_obj)
 endif()
 
 if(KXC_USE_CUDA)
   add_library(kxc_codegen_cuda_obj OBJECT ${KXC_CODEGEN_CUDA_SOURCES})
   kxc_configure_module_obj(kxc_codegen_cuda_obj)
+  kxc_enable_cuda(kxc_codegen_cuda_obj)
   list(APPEND KXC_MODULE_OBJECT_TARGETS kxc_codegen_cuda_obj)
 endif()
 
 # Compatibility alias: previous single object library name used by tooling.
 add_library(kxc_runtime_obj INTERFACE)
+target_link_libraries(kxc_runtime_obj INTERFACE kxc_public_api)
 foreach(_kxc_mod IN LISTS KXC_MODULE_OBJECT_TARGETS)
   target_sources(kxc_runtime_obj INTERFACE $<TARGET_OBJECTS:${_kxc_mod}>)
-  target_link_libraries(kxc_runtime_obj INTERFACE ${_kxc_mod})
 endforeach()
 
 set(KXC_RUNTIME_OBJECT_FILES "")
@@ -322,21 +577,17 @@ foreach(_kxc_mod IN LISTS KXC_MODULE_OBJECT_TARGETS)
 endforeach()
 
 add_library(kxc_runtime STATIC ${KXC_RUNTIME_OBJECT_FILES})
-target_include_directories(kxc_runtime PUBLIC "${KXC_INCLUDE_DIR}")
-target_compile_definitions(kxc_runtime PUBLIC
-  KXC_USE_CUDA=${KXC_USE_CUDA}
-  KXC_USE_LLVM=${KXC_USE_LLVM})
+add_library(kxc::runtime ALIAS kxc_runtime)
+set_target_properties(kxc_runtime PROPERTIES EXPORT_NAME runtime)
+target_link_libraries(kxc_runtime PUBLIC kxc_public_api)
 if(KXC_USE_CUDA)
-  target_link_libraries(kxc_runtime PUBLIC ${KXC_CUDA_LIBS})
+  target_link_libraries(kxc_runtime PRIVATE ${KXC_CUDA_LIBS})
 endif()
 if(KXC_USE_LLVM)
-  target_include_directories(kxc_runtime SYSTEM PUBLIC ${KXC_LLVM_INCLUDE_DIRS})
-  target_compile_definitions(kxc_runtime PUBLIC ${KXC_LLVM_DEFINITIONS}
-    KXC_MINGW_LIBGCC_PATH="${KXC_MINGW_LIBGCC_PATH}")
-  target_link_libraries(kxc_runtime PUBLIC ${LLVM_LIBS} ${LLVM_SYSTEM_LIBS})
-  target_link_options(kxc_runtime PUBLIC ${LLVM_LDFLAGS_LIST})
+  target_link_libraries(kxc_runtime PRIVATE ${LLVM_LIBS} ${LLVM_SYSTEM_LIBS})
+  target_link_options(kxc_runtime PRIVATE ${LLVM_LDFLAGS_LIST})
   # LLVM archives contain bitcode (LTO), use lld to handle them
-  target_link_options(kxc_runtime PUBLIC -fuse-ld=lld)
+  target_link_options(kxc_runtime PRIVATE -fuse-ld=lld)
 endif()
 
 function(kxc_add_runtime_exe target source_file)
@@ -350,7 +601,7 @@ function(kxc_add_runtime_exe target source_file)
   )
   # Ensure module objects build before linking executables.
   add_dependencies(${target} ${KXC_MODULE_OBJECT_TARGETS})
-  target_include_directories(${target} PRIVATE "${KXC_INCLUDE_DIR}")
+  target_link_libraries(${target} PRIVATE kxc_public_api)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
     KXC_USE_LLVM=${KXC_USE_LLVM})
@@ -393,12 +644,59 @@ if(Python3_Interpreter_FOUND)
     USES_TERMINAL
     COMMENT "Check Relay operator implementation contract"
   )
+  add_custom_target(check_include_layers
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_include_layers.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    USES_TERMINAL
+    COMMENT "Check module include directions"
+  )
+  add_custom_target(check_public_headers
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_public_headers.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --compile
+            --compiler "${CMAKE_CXX_COMPILER}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    USES_TERMINAL
+    COMMENT "Check and compile public headers"
+  )
 else()
   message(WARNING "Python3 was not found; skipping check_relay_op_contract target.")
 endif()
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+  cmake/kxcConfig.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
+  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/kxc"
+  NO_SET_AND_CHECK_MACRO)
+install(TARGETS kxc_runtime
+  EXPORT kxcTargets
+  ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(TARGETS kxc_public_api
+  EXPORT kxcTargets)
+foreach(_kxc_module_target IN LISTS KXC_PUBLIC_MODULE_TARGETS)
+  install(TARGETS ${_kxc_module_target}
+    EXPORT kxcTargets
+    FILE_SET public_headers DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+endforeach()
+install(TARGETS kxc_dlpack
+  EXPORT kxcTargets
+  FILE_SET dlpack_headers DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(EXPORT kxcTargets
+  NAMESPACE kxc::
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/kxc")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/kxc")
+
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(object_test test/object_test.cpp)
+  kxc_add_runtime_exe(packed_func_test test/packed_func_test.cpp)
+  kxc_add_runtime_exe(registry_test test/registry_test.cpp)
+  kxc_add_runtime_exe(type_registration_test test/type_registration_test.cpp)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
   kxc_add_runtime_exe(device_info_test test/device_info_test.cpp)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)

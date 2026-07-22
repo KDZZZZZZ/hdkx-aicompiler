@@ -2,9 +2,9 @@
  * \brief 实现 TIR IR 文本打印工具。
  */
 
-#include "tir/pass/print_ir.h"
+#include "kxc/tir/pass/print_ir.h"
 
-#include "base/pass.h"
+#include "kxc/tir/visitor.h"
 
 #include <sstream>
 #include <string>
@@ -291,4 +291,3 @@ void DumpPrimFunc(const PrimFunc& func, std::ostream& os, int indent_spaces) {
 }  // namespace pass
 }  // namespace tir
 }  // namespace kxc
-

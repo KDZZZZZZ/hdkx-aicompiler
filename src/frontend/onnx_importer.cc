@@ -2,7 +2,7 @@
  * \brief 实现 ONNX 图、属性和 Storage-backed 常量张量的导入。
  */
 
-#include "frontend/onnx_importer.h"
+#include "kxc/frontend/onnx_importer.h"
 
 #include <cctype>
 #include <cmath>
@@ -13,7 +13,7 @@
 #include <stdexcept>
 #include <utility>
 
-#include "relay/op.h"
+#include "kxc/relay/op.h"
 
 namespace kxc {
 namespace frontend {

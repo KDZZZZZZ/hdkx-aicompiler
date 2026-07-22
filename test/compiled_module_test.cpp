@@ -10,7 +10,8 @@
 #include <utility>
 #include <vector>
 
-#include "api/compiled_module.h"
+#include "kxc/runtime/compiled_module.h"
+#include "../src/runtime/internal/compiled_module_node.h"
 
 namespace {
 
@@ -100,8 +101,8 @@ ModuleFixture MakeStaticFixture(uint64_t alignment = 1) {
     Map<String, runtime::NDArray> constants;
     constants.Set(String("relay.constant.0"), constant);
 
-    api::CompiledModule module(BuildTarget(cpu), tir::PrimFunc(), signature, metadata,
-                               constants, executable);
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu), tir::PrimFunc(), signature, metadata, constants, executable);
     return ModuleFixture{module, {input_array, constant, output_array}, constant,
                          std::move(launcher)};
 }
@@ -114,8 +115,8 @@ kxc::api::CompiledModule MakeModule(
     using namespace kxc::codegen;
     KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
     CompiledKernel executable(signature, metadata, launcher);
-    return api::CompiledModule(BuildTarget(Device::CPU()), tir::PrimFunc(), signature,
-                               metadata, {}, executable);
+    return api::internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()), tir::PrimFunc(), signature, metadata, {}, executable);
 }
 
 // 验证合法调用到达后端一次，并返回保活 Storage 的同步完成操作。
@@ -165,8 +166,9 @@ bool TestObjectAndReadinessChecks() {
     CompiledKernel executable(signature, metadata, launcher);
     TEST_CHECK(!executable.IsReady(), "disabled launcher should not be ready");
     TEST_CHECK(Throws([&] {
-                   api::CompiledModule invalid(BuildTarget(Device::CPU()), tir::PrimFunc(),
-                                               signature, metadata, {}, executable);
+                   api::CompiledModule invalid = api::internal::BuildCompiledModule(
+                       BuildTarget(Device::CPU()), tir::PrimFunc(), signature,
+                       metadata, {}, executable);
                }),
                "module assembly should reject a non-ready executable");
     return true;

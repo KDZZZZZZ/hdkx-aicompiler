@@ -2,10 +2,10 @@
  * \brief 实现 TIR 优化 pass 和 pipeline。
  */
 
-#include "tir/transforms/remove_no_op.h"
+#include "kxc/tir/transforms/remove_no_op.h"
 
-#include "base/pass.h"
-#include "tir/pass_utils.h"
+#include "kxc/tir/visitor.h"
+#include "kxc/tir/pass_utils.h"
 
 namespace kxc {
 namespace tir {

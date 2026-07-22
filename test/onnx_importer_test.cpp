@@ -2,11 +2,11 @@
  * \brief 验证 ONNX 导入后的图结构、常量张量和编译执行流程。
  */
 
-#include "api/compiler.h"
-#include "frontend/onnx_importer.h"
-#include "relay/transforms/infer_type.h"
-#include "relay/transforms/lower.h"
-#include "relay/transforms/pipeline.h"
+#include "kxc/compiler/compiler.h"
+#include "kxc/frontend/onnx_importer.h"
+#include "kxc/relay/transforms/infer_type.h"
+#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "kxc/relay/transforms/pipeline.h"
 
 #include <algorithm>
 #include <chrono>
@@ -179,7 +179,8 @@ bool TestCompileResNet18ToLLVM() {
     config->opt_level = ResNet18OptLevel();
     auto module = kxc::api::Compiler::Compile(prepared, config);
     TEST_CHECK(module.IsReady(), "ResNet18 should compile to a ready LLVM module");
-    TEST_CHECK(module.prim_func().defined(), "ResNet18 compile should keep generated TIR");
+    TEST_CHECK(module.signature().defined(),
+               "ResNet18 compile should produce a kernel ABI");
     return true;
 #else
     std::cout << "[SKIP] resnet18 LLVM compile: KXC_USE_LLVM=0\n";

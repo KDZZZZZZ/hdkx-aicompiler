@@ -2,11 +2,11 @@
  * \brief 注册 Relay reduce 算子及其 TE lowering hook。
  */
 
-#include "relay/op_attr_types.h"
-#include "relay/op_macros.h"
-#include "relay/type_infer.h"
-#include "te/topi/reduction.h"
-#include "te/topi/utils.h"
+#include "kxc/relay/op_attr_types.h"
+#include "kxc/relay/op_macros.h"
+#include "kxc/relay/type_infer.h"
+#include "kxc/te/topi/reduction.h"
+#include "kxc/te/topi/utils.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -115,3 +115,7 @@ KXC_REGISTER_OP(reduce_mean)
 
 }  // namespace relay
 }  // namespace kxc
+
+namespace kxc::builtin_anchor {
+void RelayTensorReduceOps() {}
+}  // namespace kxc::builtin_anchor

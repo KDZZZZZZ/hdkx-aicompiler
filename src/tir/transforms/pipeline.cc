@@ -2,7 +2,7 @@
  * \brief 实现 TIR 优化 pass 和 pipeline。
  */
 
-#include "tir/transforms/pipeline.h"
+#include "kxc/tir/transforms/pipeline.h"
 
 #include <functional>
 #include <sstream>
@@ -10,20 +10,20 @@
 #include <string>
 #include <unordered_map>
 
-#include "base/profiling.h"
-#include "base/pass.h"
-#include "base/packedfunc.h"
-#include "base/registry.h"
-#include "tir/pass/print_ir.h"
-#include "tir/transforms/bind_cuda_threads.h"
-#include "tir/transforms/convert_for_loops_serial.h"
-#include "tir/transforms/fold_constant.h"
-#include "tir/transforms/force_narrow_index_to_i32.h"
-#include "tir/transforms/loop_partition.h"
-#include "tir/transforms/remove_no_op.h"
-#include "tir/transforms/simplify_expr.h"
-#include "tir/transforms/unroll_loop.h"
-#include "tir/transforms/vectorize_loop.h"
+#include "kxc/profiling/profiling.h"
+#include "kxc/tir/visitor.h"
+#include "kxc/ffi/packed_func.h"
+#include "kxc/ffi/registration.h"
+#include "kxc/tir/pass/print_ir.h"
+#include "kxc/tir/transforms/bind_cuda_threads.h"
+#include "kxc/tir/transforms/convert_for_loops_serial.h"
+#include "kxc/tir/transforms/fold_constant.h"
+#include "kxc/tir/transforms/force_narrow_index_to_i32.h"
+#include "kxc/tir/transforms/loop_partition.h"
+#include "kxc/tir/transforms/remove_no_op.h"
+#include "kxc/tir/transforms/simplify_expr.h"
+#include "kxc/tir/transforms/unroll_loop.h"
+#include "kxc/tir/transforms/vectorize_loop.h"
 
 namespace kxc {
 namespace tir {
@@ -57,7 +57,7 @@ PrimFunc RunSinglePass(const PrimFunc& func, const std::string& pass_name);
 // Pipeline adapter 优先使用当前上下文，否则从 TIR attrs 恢复唯一 Target。
 PrimFunc BindCudaThreadsPipelinePass(const PrimFunc& func) {
     PassContext pass_ctx = PassContext::Current();
-    if (!pass_ctx.defined()) pass_ctx = PassContext::FromTIR(func);
+    if (!pass_ctx.defined()) pass_ctx = PassContextFromTIR(func);
     if (!pass_ctx.defined() || !pass_ctx.default_target().defined()) {
         throw std::runtime_error("bind_cuda_threads requires a Target in PassContext");
     }
@@ -231,3 +231,7 @@ KXC_REGISTER_GLOBAL("kxc.tir.transform.bind_cuda_threads")
 
 }  // namespace tir
 }  // namespace kxc
+
+namespace kxc::builtin_anchor {
+void TirPasses() {}
+}  // namespace kxc::builtin_anchor

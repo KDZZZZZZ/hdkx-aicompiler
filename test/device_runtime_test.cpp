@@ -2,11 +2,11 @@
  * \brief 验证 Device、Storage、NDArray、stream 及 CPU/CUDA 复制契约。
  */
 
-#include "base/device.h"
-#include "base/device_api.h"
-#include "base/device_stream.h"
-#include "base/ndarray.h"
-#include "base/storage.h"
+#include "kxc/runtime/device.h"
+#include "kxc/runtime/device_api.h"
+#include "kxc/runtime/device_stream.h"
+#include "kxc/runtime/ndarray.h"
+#include "kxc/runtime/storage.h"
 
 #include <cstdint>
 #include <cstdlib>

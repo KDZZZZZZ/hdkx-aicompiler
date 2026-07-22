@@ -11,10 +11,11 @@
 #include <utility>
 #include <vector>
 
-#include "base/pass.h"
-#include "tir/pass/print_ir.h"
-#include "tir/transforms/bind_cuda_threads.h"
-#include "tir/transforms/pipeline.h"
+#include "kxc/pass/context.h"
+#include "kxc/tir/visitor.h"
+#include "kxc/tir/pass/print_ir.h"
+#include "kxc/tir/transforms/bind_cuda_threads.h"
+#include "kxc/tir/transforms/pipeline.h"
 
 namespace {
 
@@ -83,11 +84,13 @@ bool TestElementwiseSchedule() {
     CudaScheduleResult result = BindCudaThreads(MakeElementwiseFunction(1000),
                                                 MakeCudaTarget(128));
     PrimFunc scheduled = result.prim_func();
-    codegen::KernelLaunchMetadata metadata = result.launch_metadata();
-    TEST_CHECK(metadata->grid.x == 8 && metadata->block.x == 128,
+    CudaLaunchConfig launch = result.launch_config();
+    TEST_CHECK(launch.grid_x == 8 && launch.block_x == 128,
                "grid/block dimensions were not derived from work size");
-    TEST_CHECK(GetCudaLaunchMetadata(scheduled).get() == metadata.get(),
-               "PrimFunc attr and schedule result must share metadata identity");
+    CudaLaunchConfig stored = GetCudaLaunchConfig(scheduled);
+    TEST_CHECK(stored.grid_x == launch.grid_x &&
+                   stored.block_x == launch.block_x,
+               "PrimFunc attr and schedule result must share launch values");
 
     const auto* block = scheduled->body.As<ThreadBindingNode>();
     TEST_CHECK(block && block->thread_index == ThreadIndexKind::kBlockIdxX,
@@ -118,8 +121,8 @@ bool TestReluPipelineRegistration() {
     PassContext::Scope scope(PassContext::FromTarget(target));
     PrimFunc scheduled = RunTIRPassPipeline(
         MakeElementwiseFunction(65, true), {String("bind_cuda_threads")});
-    codegen::KernelLaunchMetadata metadata = GetCudaLaunchMetadata(scheduled);
-    TEST_CHECK(metadata->grid.x == 2 && metadata->block.x == 64,
+    CudaLaunchConfig launch = GetCudaLaunchConfig(scheduled);
+    TEST_CHECK(launch.grid_x == 2 && launch.block_x == 64,
                "pipeline adapter produced incorrect relu launch dimensions");
     return true;
 }

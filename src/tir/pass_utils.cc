@@ -2,7 +2,7 @@
  * \brief 实现 TIR 节点构造、工具函数和 pass 基础能力。
  */
 
-#include "tir/pass_utils.h"
+#include "kxc/tir/pass_utils.h"
 
 #include <cstdint>
 #include <limits>

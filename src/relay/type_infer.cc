@@ -2,7 +2,7 @@
  * \brief 实现 Relay 算子共享的类型推导规则。
  */
 
-#include "relay/type_infer.h"
+#include "kxc/relay/type_infer.h"
 
 #include <algorithm>
 #include <sstream>

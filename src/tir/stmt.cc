@@ -2,12 +2,30 @@
  * \brief 实现 TIR 节点构造、工具函数和 pass 基础能力。
  */
 
-#include "tir/stmt.h"
+#include "kxc/tir/stmt.h"
+#include "kxc/support/object_registration.h"
 
 #include <stdexcept>
 
 namespace kxc {
 namespace tir {
+
+KXC_OBJECT_DEFINE(StmtNode)
+KXC_OBJECT_DEFINE(LetStmtNode)
+KXC_OBJECT_DEFINE(StoreNode)
+KXC_OBJECT_DEFINE(ForNode)
+KXC_OBJECT_DEFINE_WITH_KEY(ThreadBindingNode, "kxc.tir.ThreadBindingNode")
+KXC_OBJECT_DEFINE(IfThenElseNode)
+KXC_OBJECT_DEFINE(AllocateNode)
+KXC_OBJECT_DEFINE(AttrStmtNode)
+KXC_OBJECT_DEFINE(RangeNode)
+KXC_OBJECT_DEFINE_WITH_KEY(IterVarNode, "kxc.tir.IterVarNode")
+KXC_OBJECT_DEFINE(BufferNode)
+KXC_OBJECT_DEFINE(BufferRegionNode)
+KXC_OBJECT_DEFINE(BlockNode)
+KXC_OBJECT_DEFINE(SeqStmtNode)
+KXC_OBJECT_DEFINE(EvaluateNode)
+KXC_OBJECT_DEFINE(PrimFuncNode)
 
 LetStmt::LetStmt(Var var, PrimExpr value, Stmt body) {
     auto* node = new LetStmtNode();
@@ -166,4 +184,3 @@ PrimFunc::PrimFunc(Array<Var> params, Stmt body, Map<Var, Buffer> buffer_map,
 
 }  // namespace tir
 }  // namespace kxc
-

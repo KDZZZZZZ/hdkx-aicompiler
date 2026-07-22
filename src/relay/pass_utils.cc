@@ -2,7 +2,7 @@
  * \brief 实现 Relay 节点、算子元数据、pass 工具和公共注册。
  */
 
-#include "relay/pass_utils.h"
+#include "kxc/relay/pass_utils.h"
 
 #include <cstdint>
 #include <functional>
@@ -10,9 +10,9 @@
 #include <string>
 #include <unordered_map>
 
-#include "base/pass.h"
-#include "relay/op.h"
-#include "relay/pass/print_ir.h"
+#include "kxc/relay/visitor.h"
+#include "kxc/relay/op.h"
+#include "kxc/relay/pass/print_ir.h"
 
 namespace kxc {
 namespace relay {

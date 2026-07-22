@@ -2,11 +2,11 @@
  * \brief 验证 Device/Target 信息查询契约。
  */
 
-#include "base/device.h"
-#include "base/device_api.h"
-#include "base/packedfunc.h"
-#include "base/registry.h"
-#include "base/target.h"
+#include "kxc/runtime/device.h"
+#include "kxc/runtime/device_api.h"
+#include "kxc/ffi/packed_func.h"
+#include "kxc/ffi/registry.h"
+#include "kxc/target/target.h"
 
 #include <exception>
 #include <iostream>

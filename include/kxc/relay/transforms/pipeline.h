@@ -1,0 +1,16 @@
+/*! \file include/kxc/relay/transforms/pipeline.h
+ * \brief 声明 Relay 优化 pass、multi-device 处理和 lowering 入口。
+ */
+
+#pragma once
+
+#include "kxc/support/container.h"
+#include "kxc/relay/relay.h"
+
+namespace kxc {
+namespace relay {
+
+Function RunRelayPassPipeline(const Function& func, const Array<String>& pass_names);
+
+}  // namespace relay
+}  // namespace kxc

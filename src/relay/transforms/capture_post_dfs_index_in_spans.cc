@@ -2,7 +2,7 @@
  * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
  */
 
-#include "relay/transforms/capture_post_dfs_index_in_spans.h"
+#include "kxc/relay/transforms/capture_post_dfs_index_in_spans.h"
 
 #include <algorithm>
 #include <functional>
@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "relay/op.h"
+#include "kxc/relay/op.h"
 
 namespace kxc {
 namespace relay {

@@ -13,8 +13,9 @@
 #include <utility>
 #include <vector>
 
-#include "api/compiled_module.h"
-#include "runtime/runtime_session.h"
+#include "kxc/runtime/compiled_module.h"
+#include "kxc/runtime/session.h"
+#include "../src/runtime/internal/compiled_module_node.h"
 
 namespace {
 
@@ -130,8 +131,9 @@ kxc::api::CompiledModule MakeModule(
     using namespace kxc::codegen;
     KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
     CompiledKernel executable(signature, metadata, launcher);
-    return api::CompiledModule(BuildTarget(Device::CPU()), tir::PrimFunc(),
-                               signature, metadata, constants, executable);
+    return api::internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()), tir::PrimFunc(), signature, metadata,
+        constants, executable);
 }
 
 /*! \brief 构造 input -> constant -> output 的静态 session fixture。 */
@@ -309,8 +311,8 @@ bool TestInputDeviceValidationBeforeAllocation() {
     KernelLaunchMetadata metadata(cuda, CodeGenBackend::kCUDA);
     auto launcher = std::make_shared<RecordingLauncher>();
     CompiledKernel executable(signature, metadata, launcher);
-    api::CompiledModule module(BuildTarget(cuda), tir::PrimFunc(), signature,
-                               metadata, {}, executable);
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(cuda), tir::PrimFunc(), signature, metadata, {}, executable);
     runtime::RuntimeSession session(module);
     std::string message;
     TEST_CHECK(
@@ -401,8 +403,8 @@ bool TestConcurrentArgumentAssembly() {
     auto launcher = std::make_shared<ConcurrentLauncher>();
     KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
     CompiledKernel executable(signature, metadata, launcher);
-    api::CompiledModule module(BuildTarget(Device::CPU()), tir::PrimFunc(),
-                               signature, metadata, {}, executable);
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()), tir::PrimFunc(), signature, metadata, {}, executable);
     runtime::RuntimeSession session(module);
     std::atomic<int> failures{0};
     std::vector<std::thread> threads;

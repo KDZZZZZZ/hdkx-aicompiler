@@ -2,9 +2,9 @@
  * \brief 定义编译器核心路径、pass、codegen 和 profiling 的 C++ 测试入口。
  */
 
-#include "base/device.h"
-#include "base/device_api.h"
-#include "base/profiling.h"
+#include "kxc/runtime/device.h"
+#include "kxc/runtime/device_api.h"
+#include "kxc/profiling/profiling.h"
 
 #include <filesystem>
 #include <fstream>
