@@ -1,24 +1,28 @@
 /*! \file src/relay/transforms/pipeline.cc
- * \brief 实现 Relay 优化 pass 及其 pipeline 集成。
+ * \brief Implements Relay pass pipeline integration and PassSpec binding.
  */
 
 #include "kxc/relay/transforms/pipeline.h"
 
 #include <functional>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
-#include "kxc/profiling/profiling.h"
 #include "kxc/ffi/packed_func.h"
 #include "kxc/ffi/registration.h"
+#include "kxc/pass/pass.h"
+#include "kxc/profiling/profiling.h"
 #include "kxc/relay/pass/print_ir.h"
 #include "kxc/relay/transforms/annotate_memory_scope.h"
 #include "kxc/relay/transforms/canonicalize_cast.h"
 #include "kxc/relay/transforms/capture_post_dfs_index_in_spans.h"
-#include "kxc/relay/transforms/eliminate_dead_let.h"
 #include "kxc/relay/transforms/eliminate_common_subexpr.h"
+#include "kxc/relay/transforms/eliminate_dead_let.h"
 #include "kxc/relay/transforms/fold_constant.h"
 #include "kxc/relay/transforms/fold_tuple_get_item.h"
 #include "kxc/relay/transforms/infer_type.h"
@@ -31,6 +35,14 @@ namespace relay {
 namespace {
 
 using RelayPassFunc = std::function<Function(const Function&)>;
+
+struct RelayPassBinding {
+    const char* name;
+    const char* implementation_key;
+    RelayPassFunc function;
+    bool in_default_pipeline;
+    bool idempotent;
+};
 
 std::string SanitizeArtifactName(const std::string& pass_name) {
     std::string out;
@@ -47,6 +59,81 @@ std::string SanitizeArtifactName(const std::string& pass_name) {
 }
 
 Function RunSinglePass(const Function& func, const std::string& pass_name);
+
+const std::vector<RelayPassBinding>& GetRelayPassBindings() {
+    static const std::vector<RelayPassBinding> bindings = {
+        {"fold_tuple_get_item", "kxc.relay.transform.fold_tuple_get_item", FoldTupleGetItemPass,
+         true, true},
+        {"fold_constant", "kxc.relay.transform.fold_constant", FoldConstantPass, true, true},
+        {"simplify_expr", "kxc.relay.transform.simplify_expr", SimplifyExprPass, true, true},
+        {"canonicalize_cast", "kxc.relay.transform.canonicalize_cast", CanonicalizeCastPass, true,
+         true},
+        {"remove_standalone_reshapes", "kxc.relay.transform.remove_standalone_reshapes",
+         RemoveStandaloneReshapesPass, true, true},
+        {"eliminate_common_subexpr", "kxc.relay.transform.eliminate_common_subexpr",
+         EliminateCommonSubexprPass, false, true},
+        {"eliminate_dead_let", "kxc.relay.transform.eliminate_dead_let", EliminateDeadLetPass,
+         true, true},
+        {"annotate_memory_scope", "kxc.relay.transform.annotate_memory_scope",
+         AnnotateMemoryScopePass, true, true},
+        {"capture_post_dfs_index_in_spans",
+         "kxc.relay.transform.capture_post_dfs_index_in_spans",
+         CapturePostDfsIndexInSpansPass, true, true},
+        {"infer_type", "kxc.relay.transform.infer_type", InferTypePass, true, true},
+    };
+    return bindings;
+}
+
+PassSpec MakeRelayPassSpec(const RelayPassBinding& binding) {
+    PassSpec spec;
+    spec.name = String(binding.name);
+    spec.schema_version = 1;
+    spec.dialect = IRDialect::kRelay;
+    spec.scope = PassScope::kGraph;
+    spec.phase = String("relay_optimize");
+    spec.opt_level = binding.in_default_pipeline ? 1 : 3;
+    spec.produced_invariants = binding.name == std::string("infer_type")
+                                   ? Array<String>{String("checked_type")}
+                                   : Array<String>{};
+    spec.may_change_ir = true;
+    spec.deterministic = true;
+    spec.idempotent = binding.idempotent;
+    spec.thread_safe = false;
+    spec.target_dependent = false;
+    spec.implementation_key = String(binding.implementation_key);
+    return spec;
+}
+
+const std::unordered_map<std::string, RelayPassFunc>& GetRelayImplementationTable() {
+    static const std::unordered_map<std::string, RelayPassFunc> table = [] {
+        std::unordered_map<std::string, RelayPassFunc> out;
+        for (const RelayPassBinding& binding : GetRelayPassBindings()) {
+            out.emplace(binding.implementation_key, binding.function);
+        }
+        return out;
+    }();
+    return table;
+}
+
+void EnsureRelayPassSpecsRegistered() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        Array<PassSpec> specs;
+        for (const RelayPassBinding& binding : GetRelayPassBindings()) {
+            PassSpec spec = MakeRelayPassSpec(binding);
+            specs.push_back(spec);
+            PassRegistry::Global().Register(std::move(spec));
+        }
+        ValidatePassSpecs(specs);
+    });
+}
+
+Array<String> GetDefaultPassOrder() {
+    return {String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"),
+            String("canonicalize_cast"), String("remove_standalone_reshapes"),
+            String("eliminate_dead_let"), String("annotate_memory_scope"),
+            String("capture_post_dfs_index_in_spans"), String("infer_type")};
+}
 
 Function RunInstrumentedPass(const Function& func, const std::string& pass_name) {
     auto profile_context = profiling::CurrentContext();
@@ -96,36 +183,17 @@ Function RunInstrumentedPass(const Function& func, const std::string& pass_name)
     }
 }
 
-const std::unordered_map<std::string, RelayPassFunc>& GetRelayPassTable() {
-    static const std::unordered_map<std::string, RelayPassFunc> table = {
-        {"fold_tuple_get_item", FoldTupleGetItemPass},
-        {"fold_constant", FoldConstantPass},
-        {"simplify_expr", SimplifyExprPass},
-        {"canonicalize_cast", CanonicalizeCastPass},
-        {"remove_standalone_reshapes", RemoveStandaloneReshapesPass},
-        {"eliminate_common_subexpr", EliminateCommonSubexprPass},
-        {"eliminate_dead_let", EliminateDeadLetPass},
-        {"annotate_memory_scope", AnnotateMemoryScopePass},
-        {"capture_post_dfs_index_in_spans", CapturePostDfsIndexInSpansPass},
-        {"infer_type", InferTypePass},
-    };
-    return table;
-}
-
-Array<String> GetDefaultPassOrder() {
-    // CSE 的结构键尚不包含 Constant 内容和完整 Call attrs，只允许显式调用。
-    return {String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"),
-            String("canonicalize_cast"), String("remove_standalone_reshapes"),
-            String("eliminate_dead_let"), String("annotate_memory_scope"),
-            String("capture_post_dfs_index_in_spans"),
-            String("infer_type")};
-}
-
 Function RunSinglePass(const Function& func, const std::string& pass_name) {
-    const auto& pass_table = GetRelayPassTable();
-    auto it = pass_table.find(pass_name);
+    EnsureRelayPassSpecsRegistered();
+    const PassSpec& spec = PassRegistry::Global().Get(IRDialect::kRelay, String(pass_name));
+    ValidatePassSpecForPipeline(spec, IRDialect::kRelay, PassScope::kGraph, "relay_optimize");
+
+    const std::string implementation_key = static_cast<std::string>(spec.implementation_key);
+    const auto& pass_table = GetRelayImplementationTable();
+    auto it = pass_table.find(implementation_key);
     if (it == pass_table.end()) {
-        throw std::runtime_error("Unknown Relay pass in pipeline: " + pass_name);
+        throw std::runtime_error("Relay pass " + pass_name +
+                                 " has no implementation binding: " + implementation_key);
     }
     return it->second(func);
 }
@@ -133,6 +201,7 @@ Function RunSinglePass(const Function& func, const std::string& pass_name) {
 }  // namespace
 
 Function RunRelayPassPipeline(const Function& func, const Array<String>& pass_names) {
+    EnsureRelayPassSpecsRegistered();
     if (!func.defined()) {
         throw std::runtime_error("RunRelayPassPipeline expects a defined Function");
     }
@@ -154,6 +223,19 @@ Function RunRelayPassPipeline(const Function& func, const Array<String>& pass_na
         current = RunInstrumentedPass(current, pass_name);
     }
     return current;
+}
+
+Array<String> RelayDefaultPassOrder() {
+    return GetDefaultPassOrder();
+}
+
+Array<PassSpec> RelayRegisteredPassSpecs() {
+    EnsureRelayPassSpecsRegistered();
+    std::vector<PassSpec> specs;
+    for (const RelayPassBinding& binding : GetRelayPassBindings()) {
+        specs.push_back(PassRegistry::Global().Get(IRDialect::kRelay, String(binding.name)));
+    }
+    return Array<PassSpec>(std::move(specs));
 }
 
 KXC_REGISTER_GLOBAL("kxc.relay.transform.run_pipeline")

@@ -35,6 +35,43 @@ CPP_FUNCTION_START_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\)\s*(?:const\s*)?\{"
 )
 
+OPERATOR_FIELD_ORDER = [
+    "schema_version",
+    "category",
+    "num_inputs",
+    "min_inputs",
+    "max_inputs",
+    "attrs",
+    "output_arity",
+    "type_relation_key",
+    "effect",
+    "deterministic",
+    "alias",
+    "lowering",
+    "lowering_key",
+    "ffi",
+    "tests",
+    "onnx_ops",
+]
+REQUIRED_OPERATOR_FIELDS = {
+    "schema_version",
+    "category",
+    "num_inputs",
+    "attrs",
+    "output_arity",
+    "type_relation_key",
+    "effect",
+    "deterministic",
+    "alias",
+    "lowering",
+    "lowering_key",
+    "ffi",
+    "tests",
+    "onnx_ops",
+}
+ALLOWED_EFFECTS = {"pure", "stateful", "device_communication"}
+ALLOWED_LOWERINGS = {"single", "multi", "exec_plan", "none"}
+
 
 @dataclass
 class Registration:
@@ -42,6 +79,8 @@ class Registration:
     file: str
     line: int
     num_inputs: int | None
+    min_inputs: int | None
+    max_inputs: int | None
     arg_count: int
     has_description: bool
     tattrs: str | None
@@ -115,6 +154,98 @@ def normalize_attr_value(value: str) -> str:
     return value
 
 
+def operator_contract_issues(op: str, spec: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    missing = sorted(REQUIRED_OPERATOR_FIELDS - set(spec))
+    if missing:
+        issues.append(f"{op}: missing OperatorSpec field(s): {', '.join(missing)}")
+
+    known_order = [key for key in OPERATOR_FIELD_ORDER if key in spec]
+    actual_known = [key for key in spec if key in OPERATOR_FIELD_ORDER]
+    if actual_known != known_order:
+        issues.append(
+            f"{op}: OperatorSpec fields are not in stable order; expected "
+            + ", ".join(known_order)
+        )
+
+    schema_version = spec.get("schema_version")
+    if not isinstance(schema_version, int) or schema_version <= 0:
+        issues.append(f"{op}: schema_version must be a positive integer")
+
+    num_inputs = spec.get("num_inputs")
+    if not isinstance(num_inputs, int) or num_inputs < -1:
+        issues.append(f"{op}: num_inputs must be an integer >= -1")
+    if num_inputs == -1:
+        min_inputs = spec.get("min_inputs")
+        max_inputs = spec.get("max_inputs")
+        if not isinstance(min_inputs, int) or min_inputs < 0:
+            issues.append(f"{op}: variable arity requires non-negative min_inputs")
+        if not isinstance(max_inputs, int) or max_inputs < 0:
+            issues.append(f"{op}: variable arity requires non-negative max_inputs")
+        if isinstance(min_inputs, int) and isinstance(max_inputs, int) and min_inputs > max_inputs:
+            issues.append(f"{op}: min_inputs cannot exceed max_inputs")
+
+    if not isinstance(spec.get("category"), str) or not spec.get("category"):
+        issues.append(f"{op}: category must be a non-empty string")
+    attrs = spec.get("attrs")
+    if attrs is not None and not isinstance(attrs, str):
+        issues.append(f"{op}: attrs must be a string or null")
+    if not isinstance(spec.get("output_arity"), int) or spec.get("output_arity") < 0:
+        issues.append(f"{op}: output_arity must be a non-negative integer")
+    if not isinstance(spec.get("type_relation_key"), str) or not spec.get("type_relation_key"):
+        issues.append(f"{op}: type_relation_key must be a non-empty string")
+    if spec.get("effect") not in ALLOWED_EFFECTS:
+        issues.append(f"{op}: effect must be one of {sorted(ALLOWED_EFFECTS)}")
+    if not isinstance(spec.get("deterministic"), bool):
+        issues.append(f"{op}: deterministic must be boolean")
+    if spec.get("effect") == "pure" and spec.get("deterministic") is not True:
+        issues.append(f"{op}: pure operators must be deterministic")
+    if not isinstance(spec.get("alias"), str) or not spec.get("alias"):
+        issues.append(f"{op}: alias must be a non-empty string")
+
+    lowering = spec.get("lowering")
+    lowering_key = spec.get("lowering_key")
+    if lowering not in ALLOWED_LOWERINGS:
+        issues.append(f"{op}: lowering must be one of {sorted(ALLOWED_LOWERINGS)}")
+    if not isinstance(lowering_key, str):
+        issues.append(f"{op}: lowering_key must be a string")
+    elif lowering == "single" and lowering_key != "FRelayToTE":
+        issues.append(f"{op}: single lowering requires lowering_key FRelayToTE")
+    elif lowering == "multi" and lowering_key != "FRelayToTEMulti":
+        issues.append(f"{op}: multi lowering requires lowering_key FRelayToTEMulti")
+    elif lowering == "exec_plan" and not lowering_key:
+        issues.append(f"{op}: exec_plan lowering requires a lowering_key")
+    elif lowering == "none" and lowering_key:
+        issues.append(f"{op}: none lowering must have an empty lowering_key")
+
+    if not isinstance(spec.get("ffi"), bool):
+        issues.append(f"{op}: ffi must be boolean")
+    if not isinstance(spec.get("tests"), bool):
+        issues.append(f"{op}: tests must be boolean")
+    onnx_ops = spec.get("onnx_ops")
+    if not isinstance(onnx_ops, list) or not all(isinstance(item, str) for item in onnx_ops):
+        issues.append(f"{op}: onnx_ops must be a string array")
+    return issues
+
+
+def validate_contract_shape(data: dict[str, Any]) -> None:
+    operators = data.get("operators")
+    if not isinstance(operators, dict):
+        raise ValueError("contract must contain an 'operators' object")
+    ordered_names = list(operators)
+    if ordered_names != sorted(ordered_names):
+        raise ValueError("operators must be serialized in canonical sorted order")
+
+    issues: list[str] = []
+    for op, spec in operators.items():
+        if not isinstance(spec, dict):
+            issues.append(f"{op}: operator entry must be an object")
+            continue
+        issues.extend(operator_contract_issues(op, spec))
+    if issues:
+        raise ValueError("invalid relay op contract:\n" + "\n".join(f"- {issue}" for issue in issues))
+
+
 def load_contract(root: Path, matrix_arg: str | None) -> tuple[Path, dict[str, Any]]:
     matrix_path = Path(matrix_arg) if matrix_arg else root / "test" / "relay_op_contract.json"
     if not matrix_path.is_absolute():
@@ -123,6 +254,7 @@ def load_contract(root: Path, matrix_arg: str | None) -> tuple[Path, dict[str, A
         data = json.load(f)
     if "operators" not in data or not isinstance(data["operators"], dict):
         raise ValueError(f"{matrix_path} must contain an 'operators' object")
+    validate_contract_shape(data)
     return matrix_path, data
 
 
@@ -183,7 +315,16 @@ def parse_registrations(root: Path, terms: list[str]) -> dict[str, list[Registra
             raw_block = raw[match.start():block_end]
 
             num_inputs_match = re.search(r"\.set_num_inputs\s*\(\s*(-?\d+)\s*\)", block)
+            arity_range_match = re.search(
+                r"\.set_input_arity_range\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", block
+            )
             num_inputs = int(num_inputs_match.group(1)) if num_inputs_match else None
+            min_inputs = None
+            max_inputs = None
+            if arity_range_match:
+                num_inputs = -1
+                min_inputs = int(arity_range_match.group(1))
+                max_inputs = int(arity_range_match.group(2))
 
             attrs_by_key: dict[str, str] = {}
             for _value_type, key, value in SET_ATTR_RE.findall(block):
@@ -194,6 +335,8 @@ def parse_registrations(root: Path, terms: list[str]) -> dict[str, list[Registra
                 file=relpath(root, path),
                 line=line_number(raw, match.start()),
                 num_inputs=num_inputs,
+                min_inputs=min_inputs,
+                max_inputs=max_inputs,
                 arg_count=len(re.findall(r"\.add_argument\s*\(", block)),
                 has_description=".describe" in block,
                 tattrs=attrs_by_key.get("TAttrs"),
@@ -417,7 +560,9 @@ def registration_schema_issues(reg: Registration, expected: dict[str, Any] | Non
     if not reg.has_description:
         issues.append(f"{reg.file}:{reg.line} missing describe()")
     if reg.num_inputs is None:
-        issues.append(f"{reg.file}:{reg.line} missing set_num_inputs()")
+        issues.append(
+            f"{reg.file}:{reg.line} missing set_num_inputs() or set_input_arity_range()"
+        )
     else:
         input_issue = expected_input_issue(
             expected,
@@ -427,6 +572,15 @@ def registration_schema_issues(reg: Registration, expected: dict[str, Any] | Non
         )
         if input_issue:
             issues.append(f"{reg.file}:{reg.line} {input_issue}")
+        if expected and expected.get("num_inputs") == -1:
+            expected_min = expected.get("min_inputs")
+            expected_max = expected.get("max_inputs")
+            if reg.min_inputs != expected_min or reg.max_inputs != expected_max:
+                issues.append(
+                    f"{reg.file}:{reg.line} schema input range is "
+                    f"[{reg.min_inputs}, {reg.max_inputs}], expected "
+                    f"[{expected_min}, {expected_max}]"
+                )
 
     required_arg_count = 0
     if expected:
@@ -510,19 +664,28 @@ def analyze(
             issues.extend(registration_schema_issues(reg, expected))
             if not reg.infer_type:
                 issues.append(f"{reg.file}:{reg.line} missing FInferType")
+            if expected and expected.get("type_relation_key") == "FInferType" and not reg.infer_type:
+                issues.append(f"{reg.file}:{reg.line} missing type relation key FInferType")
 
             expected_lowering = expected.get("lowering") if expected else None
+            expected_lowering_key = expected.get("lowering_key") if expected else None
             if expected_lowering == "single":
+                if expected_lowering_key != "FRelayToTE":
+                    issues.append(f"{reg.file}:{reg.line} single lowering key must be FRelayToTE")
                 if not reg.single_lowering:
                     issues.append(f"{reg.file}:{reg.line} missing FRelayToTE")
                 if reg.multi_lowering:
                     issues.append(f"{reg.file}:{reg.line} should not register FRelayToTEMulti")
             elif expected_lowering == "multi":
+                if expected_lowering_key != "FRelayToTEMulti":
+                    issues.append(f"{reg.file}:{reg.line} multi lowering key must be FRelayToTEMulti")
                 if not reg.multi_lowering:
                     issues.append(f"{reg.file}:{reg.line} missing FRelayToTEMulti")
                 if reg.single_lowering:
                     issues.append(f"{reg.file}:{reg.line} should not register FRelayToTE")
             elif expected_lowering == "exec_plan":
+                if not expected_lowering_key:
+                    issues.append(f"{reg.file}:{reg.line} exec_plan lowering key is missing")
                 if reg.single_lowering or reg.multi_lowering:
                     issues.append(
                         f"{reg.file}:{reg.line} exec_plan op should not register TE lowering hooks"

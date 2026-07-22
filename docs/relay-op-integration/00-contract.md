@@ -78,3 +78,19 @@ checker 会检查：
 | 禁止占位 | op/TOPI/importer 源码中出现占位标记或 `return te::Tensor()` |
 
 checker 只能证明结构完整；TIR/LLVM 是否真的能承接，必须靠测试实际编译和运行。
+## OperatorSpec metadata
+
+Each public Relay operator has a metadata-only `OperatorSpec`. The spec is the
+compilation contract; implementation handles stay in the legacy attribute map
+under stable keys such as `FInferType`, `FRelayToTE`, and `FRelayToTEMulti`.
+
+Required machine-readable fields in `test/relay_op_contract.json`: `schema_version`,
+`category`, arity, `attrs`, `output_arity`, `type_relation_key`, `effect`,
+`deterministic`, `alias`, `lowering`, `lowering_key`, `ffi`, `tests`, and
+`onnx_ops`.
+
+`Op::Get(name)` is lookup-only for every operator. Registration uses
+`Op::Register(name)` through `KXC_REGISTER_OP`, or
+`Op::Register(OperatorSpec)` for metadata-only external/control entries owned by
+another compiler layer. Unknown names are never materialized implicitly and
+operator behavior must not be inferred from a name whitelist.

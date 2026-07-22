@@ -261,3 +261,31 @@ TIR:
 - kxc::tir::LoopPartitionPass(const tir::PrimFunc&)
 - kxc::tir::UnrollLoopPass(const tir::PrimFunc&)
 - kxc::tir::VectorizeLoopPass(const tir::PrimFunc&)
+
+## PassSpec Contract Update (2026-07-22)
+
+Pass scheduling now has an IR-independent metadata layer:
+
+- Public metadata: `include/kxc/pass/pass.h`
+- Registry implementation: `src/pass/pass.cc`
+- Machine contract: `test/pass_contract.json`
+- Checker: `python/tools/check_pass_contract.py`
+- Contract document: `docs/PASS_CONTRACT.md`
+
+`PassSpec` records canonical pass identity, dialect, scope, phase, opt level,
+behavioral claims, and a stable `implementation_key`. It does not store function
+objects or concrete rewrite logic.
+
+Relay and TIR pipeline files keep their existing pass algorithms and default
+orders, but now bind each implementation through a `PassSpec` and validate
+dialect, scope, phase, and implementation key before dispatch.
+
+The default pipeline orders remain:
+
+- Relay: `fold_tuple_get_item -> fold_constant -> simplify_expr -> canonicalize_cast -> remove_standalone_reshapes -> eliminate_dead_let -> annotate_memory_scope -> capture_post_dfs_index_in_spans -> infer_type`
+- TIR: `fold_constant -> simplify_expr -> force_narrow_index_to_i32 -> convert_for_loops_serial -> loop_partition -> unroll_loop -> vectorize_loop -> remove_no_op`
+
+Explicit-only passes remain registered but outside default order:
+
+- Relay: `eliminate_common_subexpr`
+- TIR: `bind_cuda_threads`

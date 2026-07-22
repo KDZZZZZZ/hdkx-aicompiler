@@ -86,7 +86,7 @@ This operator computes a 2D convolution of input `data` with `weight`.
 The `data` input should have shape `(batch_size, in_channels, height, width)`
 if layout is `NCHW`.
 )doc")
-    .set_num_inputs(-1)
+    .set_input_arity_range(2, 3)
     .add_argument("data", "Tensor", "The input tensor.")
     .add_argument("weight", "Tensor", "The weight tensor.")
     .set_attr<std::string>("TAttrs", "Conv2DAttrs") // Bind to C++ Attribute Struct

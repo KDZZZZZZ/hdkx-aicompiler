@@ -3,6 +3,7 @@
  */
 
 #include "kxc/target/target.h"
+#include "kxc/pass/pass.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/pass/print_ir.h"
 #include "kxc/relay/transforms/annotate_memory_scope.h"
@@ -90,6 +91,28 @@ std::string TIRText(const kxc::tir::PrimFunc& func) {
     std::ostringstream os;
     kxc::tir::pass::DumpPrimFunc(func, os);
     return os.str();
+}
+
+std::vector<std::string> ToStdVector(const kxc::Array<kxc::String>& values) {
+    std::vector<std::string> out;
+    for (const auto& value : values) {
+        out.push_back(static_cast<std::string>(value));
+    }
+    return out;
+}
+
+kxc::PassSpec MakeTestSpec(const char* name, kxc::IRDialect dialect, kxc::PassScope scope,
+                           const char* phase, const char* implementation_key) {
+    kxc::PassSpec spec;
+    spec.name = kxc::String(name);
+    spec.schema_version = 1;
+    spec.dialect = dialect;
+    spec.scope = scope;
+    spec.phase = kxc::String(phase);
+    spec.opt_level = 1;
+    spec.deterministic = true;
+    spec.implementation_key = kxc::String(implementation_key);
+    return spec;
 }
 
 // 递归统计 Relay 表达式中的 Let 节点数量。
@@ -395,6 +418,17 @@ bool TestRelayPipeline() {
         kxc::relay::RunRelayPassPipeline(once, {kxc::String("optimize_default")});
     TEST_CHECK(RelayText(once) == RelayText(twice), "Relay optimize_default should be idempotent");
 
+    for (const auto& spec : kxc::relay::RelayRegisteredPassSpecs()) {
+        if (!spec.idempotent) continue;
+        kxc::Function pass_once =
+            kxc::relay::RunRelayPassPipeline(func, {spec.name});
+        kxc::Function pass_twice =
+            kxc::relay::RunRelayPassPipeline(pass_once, {spec.name});
+        TEST_CHECK(RelayText(pass_once) == RelayText(pass_twice),
+                   "Relay pass declares idempotence but changes on its second run: " +
+                       static_cast<std::string>(spec.name));
+    }
+
     // 默认链不能启用结构键不完整的 CSE，否则不同常量会被错误视为同一表达式。
     kxc::Var first("first");
     kxc::Var second("second");
@@ -407,6 +441,103 @@ bool TestRelayPipeline() {
         distinct_constants, {kxc::String("optimize_default")});
     TEST_CHECK(CountLetNodes(safe_default->body) == 2,
                "Relay optimize_default must not merge expressions with different constants");
+    return true;
+}
+
+bool TestPassSpecValidation() {
+    kxc::PassSpec valid = MakeTestSpec("unit_test_valid", kxc::IRDialect::kRelay,
+                                       kxc::PassScope::kGraph, "relay_optimize",
+                                       "kxc.test.pass.valid");
+    kxc::ValidatePassSpec(valid);
+    kxc::ValidatePassSpecForPipeline(valid, kxc::IRDialect::kRelay, kxc::PassScope::kGraph,
+                                     "relay_optimize");
+
+    bool duplicate_thrown = false;
+    try {
+        kxc::ValidatePassSpecs({valid, valid});
+    } catch (const std::exception&) {
+        duplicate_thrown = true;
+    }
+    TEST_CHECK(duplicate_thrown, "duplicate pass identity should fail validation");
+
+    kxc::PassSpec missing_key = valid;
+    missing_key.name = kxc::String("unit_test_missing_key");
+    missing_key.implementation_key = kxc::String("");
+    bool missing_key_thrown = false;
+    try {
+        kxc::ValidatePassSpec(missing_key);
+    } catch (const std::exception&) {
+        missing_key_thrown = true;
+    }
+    TEST_CHECK(missing_key_thrown, "missing implementation key should fail validation");
+
+    kxc::PassSpec bad_scope = MakeTestSpec("unit_test_bad_scope", kxc::IRDialect::kRelay,
+                                          kxc::PassScope::kPrimFunc, "relay_optimize",
+                                          "kxc.test.pass.bad_scope");
+    bool bad_scope_thrown = false;
+    try {
+        kxc::ValidatePassSpec(bad_scope);
+    } catch (const std::exception&) {
+        bad_scope_thrown = true;
+    }
+    TEST_CHECK(bad_scope_thrown, "Relay prim_func scope should fail validation");
+
+    kxc::PassSpec tir_spec = MakeTestSpec("unit_test_tir", kxc::IRDialect::kTIR,
+                                         kxc::PassScope::kPrimFunc, "tir_optimize",
+                                         "kxc.test.pass.tir");
+    bool dialect_thrown = false;
+    try {
+        kxc::ValidatePassSpecForPipeline(tir_spec, kxc::IRDialect::kRelay,
+                                         kxc::PassScope::kGraph, "relay_optimize");
+    } catch (const std::exception&) {
+        dialect_thrown = true;
+    }
+    TEST_CHECK(dialect_thrown, "pipeline dialect mismatch should fail validation");
+    return true;
+}
+
+bool TestPassSpecPipelineMetadata() {
+    const std::vector<std::string> relay_default = ToStdVector(kxc::relay::RelayDefaultPassOrder());
+    const std::vector<std::string> expected_relay = {
+        "fold_tuple_get_item", "fold_constant", "simplify_expr", "canonicalize_cast",
+        "remove_standalone_reshapes", "eliminate_dead_let", "annotate_memory_scope",
+        "capture_post_dfs_index_in_spans", "infer_type"};
+    TEST_CHECK(relay_default == expected_relay, "Relay default pass order changed");
+
+    bool saw_cse = false;
+    for (const auto& spec : kxc::relay::RelayRegisteredPassSpecs()) {
+        kxc::ValidatePassSpecForPipeline(spec, kxc::IRDialect::kRelay, kxc::PassScope::kGraph,
+                                         "relay_optimize");
+        const std::string name = static_cast<std::string>(spec.name);
+        const std::string key = static_cast<std::string>(spec.implementation_key);
+        TEST_CHECK(key == "kxc.relay.transform." + name,
+                   "Relay implementation key should match FFI transform name");
+        if (name == "eliminate_common_subexpr") saw_cse = true;
+    }
+    TEST_CHECK(saw_cse, "explicit-only Relay CSE pass should still have a PassSpec");
+
+    const std::vector<std::string> tir_default = ToStdVector(kxc::tir::TIRDefaultPassOrder());
+    const std::vector<std::string> expected_tir = {
+        "fold_constant", "simplify_expr", "force_narrow_index_to_i32",
+        "convert_for_loops_serial", "loop_partition", "unroll_loop", "vectorize_loop",
+        "remove_no_op"};
+    TEST_CHECK(tir_default == expected_tir, "TIR default pass order changed");
+
+    bool saw_bind_cuda = false;
+    for (const auto& spec : kxc::tir::TIRRegisteredPassSpecs()) {
+        kxc::ValidatePassSpecForPipeline(
+            spec, kxc::IRDialect::kTIR, kxc::PassScope::kPrimFunc,
+            static_cast<std::string>(spec.phase));
+        const std::string name = static_cast<std::string>(spec.name);
+        const std::string key = static_cast<std::string>(spec.implementation_key);
+        TEST_CHECK(key == "kxc.tir.transform." + name,
+                   "TIR implementation key should match FFI transform name");
+        if (name == "bind_cuda_threads") {
+            saw_bind_cuda = true;
+            TEST_CHECK(spec.target_dependent, "bind_cuda_threads should be target dependent");
+        }
+    }
+    TEST_CHECK(saw_bind_cuda, "CUDA binding pass should still have a PassSpec");
     return true;
 }
 
@@ -645,6 +776,16 @@ bool TestTIRPipeline() {
     kxc::tir::PrimFunc twice =
         kxc::tir::RunTIRPassPipeline(once, {kxc::String("optimize_default")});
     TEST_CHECK(TIRText(once) == TIRText(twice), "TIR optimize_default should be idempotent");
+    for (const auto& spec : kxc::tir::TIRRegisteredPassSpecs()) {
+        if (!spec.idempotent) continue;
+        kxc::tir::PrimFunc pass_once =
+            kxc::tir::RunTIRPassPipeline(func, {spec.name});
+        kxc::tir::PrimFunc pass_twice =
+            kxc::tir::RunTIRPassPipeline(pass_once, {spec.name});
+        TEST_CHECK(TIRText(pass_once) == TIRText(pass_twice),
+                   "TIR pass declares idempotence but changes on its second run: " +
+                       static_cast<std::string>(spec.name));
+    }
     return true;
 }
 
@@ -663,6 +804,8 @@ int main() {
         {"relay_capture_post_dfs_index_in_spans", TestRelayCapturePostDfsIndexInSpans},
         {"relay_annotate_memory_scope", TestRelayAnnotateMemoryScope},
         {"relay_pipeline", TestRelayPipeline},
+        {"pass_spec_validation", TestPassSpecValidation},
+        {"pass_spec_pipeline_metadata", TestPassSpecPipelineMetadata},
         {"tir_simplify_expr", TestTIRSimplifyExpr},
         {"tir_fold_constant", TestTIRFoldConstant},
         {"tir_force_narrow_index_to_i32", TestTIRForceNarrowIndexToI32},

@@ -21,6 +21,23 @@ namespace relay {
 
 namespace {
 
+OperatorSpec DeviceCopyOperatorSpec() {
+    OperatorSpec spec;
+    spec.name = "device.copy";
+    spec.category = "device";
+    spec.input_arity.num_inputs = 1;
+    spec.output_arity = 1;
+    spec.type_relation_key = "device_copy";
+    spec.effect = OperatorEffectKind::kDeviceCommunication;
+    spec.deterministic = true;
+    spec.alias_contract = "no_alias";
+    spec.lowering_kind = OperatorLoweringKind::kExecPlan;
+    spec.lowering_key = "exec_plan";
+    return spec;
+}
+
+const Op kDeviceCopyOpRegistration = Op::Register(DeviceCopyOperatorSpec());
+
 // 从 Relay 节点读取可选的编译期 VirtualDevice 放置信息。
 VirtualDevice GetVirtualDeviceFromExpr(const Expr& expr) {
     if (!expr.defined()) {

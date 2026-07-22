@@ -52,6 +52,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/frontend/onnx_importer.h
   include/kxc/ir/expr.h
   include/kxc/pass/context.h
+  include/kxc/pass/pass.h
   include/kxc/profiling/profiling.h
   include/kxc/compiler/distributed/multi_device.h
   include/kxc/relay/op.h
@@ -301,7 +302,9 @@ set(KXC_PROFILING_SOURCES
 set(KXC_TARGET_SOURCES
   src/target/target.cc
   src/target/virtual_device.cc)
-set(KXC_PASS_SOURCES src/pass/context.cc)
+set(KXC_PASS_SOURCES
+  src/pass/context.cc
+  src/pass/pass.cc)
 
 set(KXC_DISTRIBUTED_PLACEMENT_SOURCES
   src/distributed/placement.cc)
@@ -644,6 +647,15 @@ if(Python3_Interpreter_FOUND)
     USES_TERMINAL
     COMMENT "Check Relay operator implementation contract"
   )
+  add_custom_target(check_pass_contract
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_pass_contract.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/pass_contract.json"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    USES_TERMINAL
+    COMMENT "Check Relay and TIR pass contracts"
+  )
   add_custom_target(check_include_layers
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_include_layers.py"
@@ -703,6 +715,8 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
+  kxc_add_runtime_exe(operator_compilation_test test/operator_compilation_test.cpp)
+  kxc_add_runtime_exe(compiler_extension_contract_test test/compiler_extension_contract_test.cpp)
   kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
   kxc_add_runtime_exe(runtime_session_test test/runtime_session_test.cpp)

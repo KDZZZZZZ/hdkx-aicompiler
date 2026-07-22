@@ -7,6 +7,7 @@
 #include <any>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "kxc/support/container.h"
 #include "relay.h"
@@ -23,6 +24,41 @@ struct ArgumentInfo {
     std::string default_value_desc;
 };
 
+struct InputArity {
+    int num_inputs = -1;
+    int min_inputs = -1;
+    int max_inputs = -1;
+};
+
+enum class OperatorEffectKind {
+    kPure,
+    kStateful,
+    kDeviceCommunication,
+};
+
+enum class OperatorLoweringKind {
+    kNone,
+    kSingleTE,
+    kMultiTE,
+    kExecPlan,
+};
+
+struct OperatorSpec {
+    std::string name;
+    int schema_version = 1;
+    std::string category;
+    InputArity input_arity;
+    Array<ArgumentInfo> arguments;
+    std::string attrs_type_key;
+    int output_arity = 1;
+    std::string type_relation_key;
+    OperatorEffectKind effect = OperatorEffectKind::kPure;
+    bool deterministic = true;
+    std::string alias_contract = "none";
+    OperatorLoweringKind lowering_kind = OperatorLoweringKind::kNone;
+    std::string lowering_key;
+};
+
 /*! \brief Relay 算子对象，保存算子名称、描述、输入数和任意属性。 */
 class OpNode : public RelayNode {
 public:
@@ -31,6 +67,8 @@ public:
     Array<ArgumentInfo> arguments;
     int num_inputs = -1;
     std::unordered_map<std::string, std::any> attrs;
+    OperatorSpec spec;
+    bool has_spec = false;
 
     KXC_OBJECT_DECLARE
 };
@@ -41,14 +79,27 @@ class Op : public Relay {
 public:
     using Relay::Relay;
 
-    /*! \brief 构造一个算子引用，并注册/查找对应名称的算子节点。 */
+    /*! \brief 构造一个尚未进入全局注册表的算子引用。 */
     explicit Op(std::string name, std::string description = "");
 
     const OpNode* operator->() const { return static_cast<const OpNode*>(object_); }
 
     /*! \brief 从全局算子表中获取指定名称的算子。 */
     static const Op& Get(const std::string& name);
+    static const Op* TryGet(const std::string& name);
+    static Op Register(const std::string& name);
+    static Op Register(OperatorSpec spec);
+
+    const OperatorSpec& spec() const { return operator->()->spec; }
+    bool has_spec() const { return operator->()->has_spec; }
 };
+
+void CheckOperatorRegistry();
+void ValidateOperatorSpec(const OperatorSpec& spec);
+std::vector<OperatorSpec> ListOperatorSpecs();
+std::string SerializeOperatorSpec(const OperatorSpec& spec);
+const char* OperatorEffectKindToString(OperatorEffectKind effect);
+const char* OperatorLoweringKindToString(OperatorLoweringKind kind);
 
 #define KXC_DECLARE_ATTRS_NODE KXC_OBJECT_DECLARE
 

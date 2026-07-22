@@ -1,19 +1,22 @@
 /*! \file src/tir/transforms/pipeline.cc
- * \brief 实现 TIR 优化 pass 和 pipeline。
+ * \brief Implements TIR pass pipeline integration and PassSpec binding.
  */
 
 #include "kxc/tir/transforms/pipeline.h"
 
 #include <functional>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
-#include "kxc/profiling/profiling.h"
-#include "kxc/tir/visitor.h"
 #include "kxc/ffi/packed_func.h"
 #include "kxc/ffi/registration.h"
+#include "kxc/pass/pass.h"
+#include "kxc/profiling/profiling.h"
 #include "kxc/tir/pass/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/convert_for_loops_serial.h"
@@ -24,6 +27,7 @@
 #include "kxc/tir/transforms/simplify_expr.h"
 #include "kxc/tir/transforms/unroll_loop.h"
 #include "kxc/tir/transforms/vectorize_loop.h"
+#include "kxc/tir/visitor.h"
 
 namespace kxc {
 namespace tir {
@@ -31,6 +35,16 @@ namespace tir {
 namespace {
 
 using TIRPassFunc = std::function<PrimFunc(const PrimFunc&)>;
+
+struct TIRPassBinding {
+    const char* name;
+    const char* implementation_key;
+    TIRPassFunc function;
+    bool in_default_pipeline;
+    bool idempotent;
+    bool target_dependent;
+    const char* phase;
+};
 
 std::string SanitizeArtifactName(const std::string& pass_name) {
     std::string out;
@@ -54,7 +68,6 @@ std::string PrimFuncToText(const PrimFunc& func) {
 
 PrimFunc RunSinglePass(const PrimFunc& func, const std::string& pass_name);
 
-// Pipeline adapter 优先使用当前上下文，否则从 TIR attrs 恢复唯一 Target。
 PrimFunc BindCudaThreadsPipelinePass(const PrimFunc& func) {
     PassContext pass_ctx = PassContext::Current();
     if (!pass_ctx.defined()) pass_ctx = PassContextFromTIR(func);
@@ -62,6 +75,77 @@ PrimFunc BindCudaThreadsPipelinePass(const PrimFunc& func) {
         throw std::runtime_error("bind_cuda_threads requires a Target in PassContext");
     }
     return BindCudaThreads(func, pass_ctx.default_target()).prim_func();
+}
+
+const std::vector<TIRPassBinding>& GetTIRPassBindings() {
+    static const std::vector<TIRPassBinding> bindings = {
+        {"fold_constant", "kxc.tir.transform.fold_constant", FoldConstantPass, true, true, false,
+         "tir_optimize"},
+        {"simplify_expr", "kxc.tir.transform.simplify_expr", SimplifyExprPass, true, true, false,
+         "tir_optimize"},
+        {"force_narrow_index_to_i32", "kxc.tir.transform.force_narrow_index_to_i32",
+         ForceNarrowIndexToI32Pass, true, true, false, "tir_optimize"},
+        {"loop_partition", "kxc.tir.transform.loop_partition", LoopPartitionPass, true, true,
+         false, "tir_optimize"},
+        {"unroll_loop", "kxc.tir.transform.unroll_loop", UnrollLoopPass, true, true, false,
+         "tir_optimize"},
+        {"vectorize_loop", "kxc.tir.transform.vectorize_loop", VectorizeLoopPass, true, true,
+         false, "tir_optimize"},
+        {"remove_no_op", "kxc.tir.transform.remove_no_op", RemoveNoOpPass, true, true, false,
+         "tir_optimize"},
+        {"convert_for_loops_serial", "kxc.tir.transform.convert_for_loops_serial",
+         ConvertForLoopsSerialPass, true, true, false, "tir_optimize"},
+        {"bind_cuda_threads", "kxc.tir.transform.bind_cuda_threads", BindCudaThreadsPipelinePass,
+         false, false, true, "tir_schedule"},
+    };
+    return bindings;
+}
+
+PassSpec MakeTIRPassSpec(const TIRPassBinding& binding) {
+    PassSpec spec;
+    spec.name = String(binding.name);
+    spec.schema_version = 1;
+    spec.dialect = IRDialect::kTIR;
+    spec.scope = PassScope::kPrimFunc;
+    spec.phase = String(binding.phase);
+    spec.opt_level = binding.in_default_pipeline ? 1 : 3;
+    spec.may_change_ir = true;
+    spec.deterministic = true;
+    spec.idempotent = binding.idempotent;
+    spec.thread_safe = false;
+    spec.target_dependent = binding.target_dependent;
+    spec.implementation_key = String(binding.implementation_key);
+    return spec;
+}
+
+const std::unordered_map<std::string, TIRPassFunc>& GetTIRImplementationTable() {
+    static const std::unordered_map<std::string, TIRPassFunc> table = [] {
+        std::unordered_map<std::string, TIRPassFunc> out;
+        for (const TIRPassBinding& binding : GetTIRPassBindings()) {
+            out.emplace(binding.implementation_key, binding.function);
+        }
+        return out;
+    }();
+    return table;
+}
+
+void EnsureTIRPassSpecsRegistered() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        Array<PassSpec> specs;
+        for (const TIRPassBinding& binding : GetTIRPassBindings()) {
+            PassSpec spec = MakeTIRPassSpec(binding);
+            specs.push_back(spec);
+            PassRegistry::Global().Register(std::move(spec));
+        }
+        ValidatePassSpecs(specs);
+    });
+}
+
+Array<String> GetDefaultPassOrder() {
+    return {String("fold_constant"), String("simplify_expr"), String("force_narrow_index_to_i32"),
+            String("convert_for_loops_serial"), String("loop_partition"),
+            String("unroll_loop"), String("vectorize_loop"), String("remove_no_op")};
 }
 
 PrimFunc RunInstrumentedPass(const PrimFunc& func, const std::string& pass_name) {
@@ -112,32 +196,18 @@ PrimFunc RunInstrumentedPass(const PrimFunc& func, const std::string& pass_name)
     }
 }
 
-const std::unordered_map<std::string, TIRPassFunc>& GetTIRPassTable() {
-    static const std::unordered_map<std::string, TIRPassFunc> table = {
-        {"fold_constant", FoldConstantPass},
-        {"simplify_expr", SimplifyExprPass},
-        {"force_narrow_index_to_i32", ForceNarrowIndexToI32Pass},
-        {"loop_partition", LoopPartitionPass},
-        {"unroll_loop", UnrollLoopPass},
-        {"vectorize_loop", VectorizeLoopPass},
-        {"remove_no_op", RemoveNoOpPass},
-        {"convert_for_loops_serial", ConvertForLoopsSerialPass},
-        {"bind_cuda_threads", BindCudaThreadsPipelinePass},
-    };
-    return table;
-}
-
-Array<String> GetDefaultPassOrder() {
-    return {String("fold_constant"), String("simplify_expr"), String("force_narrow_index_to_i32"),
-            String("convert_for_loops_serial"), String("loop_partition"),
-            String("unroll_loop"), String("vectorize_loop"), String("remove_no_op")};
-}
-
 PrimFunc RunSinglePass(const PrimFunc& func, const std::string& pass_name) {
-    const auto& pass_table = GetTIRPassTable();
-    auto it = pass_table.find(pass_name);
+    EnsureTIRPassSpecsRegistered();
+    const PassSpec& spec = PassRegistry::Global().Get(IRDialect::kTIR, String(pass_name));
+    const std::string phase = static_cast<std::string>(spec.phase);
+    ValidatePassSpecForPipeline(spec, IRDialect::kTIR, PassScope::kPrimFunc, phase);
+
+    const std::string implementation_key = static_cast<std::string>(spec.implementation_key);
+    const auto& pass_table = GetTIRImplementationTable();
+    auto it = pass_table.find(implementation_key);
     if (it == pass_table.end()) {
-        throw std::runtime_error("Unknown TIR pass in pipeline: " + pass_name);
+        throw std::runtime_error("TIR pass " + pass_name +
+                                 " has no implementation binding: " + implementation_key);
     }
     return it->second(func);
 }
@@ -145,6 +215,7 @@ PrimFunc RunSinglePass(const PrimFunc& func, const std::string& pass_name) {
 }  // namespace
 
 PrimFunc RunTIRPassPipeline(const PrimFunc& func, const Array<String>& pass_names) {
+    EnsureTIRPassSpecsRegistered();
     if (!func.defined()) {
         throw std::runtime_error("RunTIRPassPipeline expects a defined PrimFunc");
     }
@@ -166,6 +237,19 @@ PrimFunc RunTIRPassPipeline(const PrimFunc& func, const Array<String>& pass_name
         current = RunInstrumentedPass(current, pass_name);
     }
     return current;
+}
+
+Array<String> TIRDefaultPassOrder() {
+    return GetDefaultPassOrder();
+}
+
+Array<PassSpec> TIRRegisteredPassSpecs() {
+    EnsureTIRPassSpecsRegistered();
+    std::vector<PassSpec> specs;
+    for (const TIRPassBinding& binding : GetTIRPassBindings()) {
+        specs.push_back(PassRegistry::Global().Get(IRDialect::kTIR, String(binding.name)));
+    }
+    return Array<PassSpec>(std::move(specs));
 }
 
 KXC_REGISTER_GLOBAL("kxc.tir.transform.run_pipeline")
