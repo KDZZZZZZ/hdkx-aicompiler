@@ -84,21 +84,30 @@ void VerifyModule(const llvm::Module& module, const char* stage) {
  * launcher 析构前 LLJIT 始终存活。调用帧在每次 Launch 的栈上独立构造，
  * 因此同一编译模块可以被多个 CPU 线程并发执行。
  */
+class LLVMJITResource final {
+public:
+    explicit LLVMJITResource(std::unique_ptr<llvm::orc::LLJIT> value)
+        : jit(std::move(value)) {}
+
+    std::unique_ptr<llvm::orc::LLJIT> jit;
+};
+
 class LLVMKernelLauncher final : public KernelLauncher {
 public:
     /*! \brief 接管 JIT、函数地址、符号和固定参数数量。 */
-    LLVMKernelLauncher(std::unique_ptr<llvm::orc::LLJIT> jit,
+    LLVMKernelLauncher(std::shared_ptr<LLVMJITResource> resource,
                        LLVMKernelFunction function,
                        String symbol,
                        uint64_t expected_count)
-        : jit_(std::move(jit)),
+        : resource_(std::move(resource)),
           function_(function),
           symbol_(std::move(symbol)),
           expected_count_(expected_count) {}
 
     // JIT、函数地址和非空 symbol 同时存在时才允许进入机器码。
     bool IsReady() const noexcept override {
-        return jit_ != nullptr && function_ != nullptr && !std::string(symbol_).empty();
+        return resource_ != nullptr && resource_->jit != nullptr &&
+               function_ != nullptr && !std::string(symbol_).empty();
     }
 
     // 将已验证 NDArray 转为 CPU 私有 call frame，并同步调用机器码。
@@ -138,7 +147,7 @@ public:
 
 private:
     /*! \brief 机器码、JITDylib 和 module 的唯一所有者。 */
-    std::unique_ptr<llvm::orc::LLJIT> jit_;
+    std::shared_ptr<LLVMJITResource> resource_;
     /*! \brief 在 jit_ 生命周期内有效的强类型入口地址。 */
     LLVMKernelFunction function_{nullptr};
     /*! \brief 用于错误诊断的稳定入口符号。 */
@@ -184,24 +193,43 @@ CompiledKernel LLVMJITEngine::Compile(
     const KernelSignature& signature,
     const KernelLaunchMetadata& launch_metadata,
     int opt_level) const {
-    if (!module || !context) {
-        throw std::invalid_argument("LLVM Compile requires module and context");
+    std::vector<CompiledKernel> kernels = CompileMany(
+        std::move(module), std::move(context), {signature},
+        {launch_metadata}, opt_level);
+    return std::move(kernels.front());
+}
+
+std::vector<CompiledKernel> LLVMJITEngine::CompileMany(
+    std::unique_ptr<llvm::Module> module,
+    std::unique_ptr<llvm::LLVMContext> context,
+    const std::vector<KernelSignature>& signatures,
+    const std::vector<KernelLaunchMetadata>& launch_metadata,
+    int opt_level) const {
+    if (!module || !context || signatures.empty()) {
+        throw std::invalid_argument(
+            "LLVM CompileMany requires a module, context, and signatures");
     }
-    signature.Validate();
-    launch_metadata.Validate();
-    if (launch_metadata->backend != CodeGenBackend::kLLVM ||
-        launch_metadata->device.device_type() != kCPU) {
-        throw std::invalid_argument("LLVM Compile requires LLVM/CPU launch metadata");
+    if (signatures.size() != launch_metadata.size()) {
+        throw std::invalid_argument(
+            "LLVM CompileMany signature and metadata counts must match");
     }
-    for (const auto& argument : signature.arguments()) {
-        if (argument->device != launch_metadata->device) {
+    for (size_t i = 0; i < signatures.size(); ++i) {
+        signatures[i].Validate();
+        launch_metadata[i].Validate();
+        if (launch_metadata[i]->backend != CodeGenBackend::kLLVM ||
+            launch_metadata[i]->device.device_type() != kCPU) {
             throw std::invalid_argument(
-                "LLVM signature argument device does not match launch metadata");
+                "LLVM CompileMany requires LLVM/CPU launch metadata");
         }
-        // 当前标量 TIR lowering 不生成 LLVM 向量 load/store，不能静默接受 lanes。
-        if (argument->dtype.lanes != 1) {
-            throw std::invalid_argument(
-                "LLVM backend does not support vector-lane NDArray arguments");
+        for (const auto& argument : signatures[i].arguments()) {
+            if (argument->device != launch_metadata[i]->device) {
+                throw std::invalid_argument(
+                    "LLVM signature argument device does not match launch metadata");
+            }
+            if (argument->dtype.lanes != 1) {
+                throw std::invalid_argument(
+                    "LLVM backend does not support vector-lane NDArray arguments");
+            }
         }
     }
 
@@ -218,24 +246,32 @@ CompiledKernel LLVMJITEngine::Compile(
     std::unique_ptr<llvm::orc::LLJIT> jit = std::move(*jit_result);
     AddHostRuntimeSymbols(jit.get());
     AddMinGWRuntimeArchive(jit.get());
-
     if (auto error = jit->addIRModule(
-            llvm::orc::ThreadSafeModule(std::move(module), std::move(context)))) {
+            llvm::orc::ThreadSafeModule(std::move(module),
+                                        std::move(context)))) {
         throw std::runtime_error("Failed to add module to LLVM JIT: " +
                                  llvm::toString(std::move(error)));
     }
 
-    const std::string symbol = signature->symbol;
-    auto address = jit->lookup(symbol);
-    if (!address) {
-        throw std::runtime_error("Failed to lookup LLVM function '" + symbol +
-                                 "': " + llvm::toString(address.takeError()));
+    auto resource = std::make_shared<LLVMJITResource>(std::move(jit));
+    std::vector<CompiledKernel> kernels;
+    kernels.reserve(signatures.size());
+    for (size_t i = 0; i < signatures.size(); ++i) {
+        const std::string symbol = signatures[i]->symbol;
+        auto address = resource->jit->lookup(symbol);
+        if (!address) {
+            throw std::runtime_error(
+                "Failed to lookup LLVM function '" + symbol + "': " +
+                llvm::toString(address.takeError()));
+        }
+        LLVMKernelFunction function = address->toPtr<LLVMKernelFunction>();
+        auto launcher = std::make_shared<LLVMKernelLauncher>(
+            resource, function, signatures[i]->symbol,
+            static_cast<uint64_t>(signatures[i].arguments().size()));
+        kernels.emplace_back(signatures[i], launch_metadata[i],
+                             std::move(launcher));
     }
-    LLVMKernelFunction function = address->toPtr<LLVMKernelFunction>();
-    auto launcher = std::make_shared<LLVMKernelLauncher>(
-        std::move(jit), function, signature->symbol,
-        static_cast<uint64_t>(signature.arguments().size()));
-    return CompiledKernel(signature, launch_metadata, std::move(launcher));
+    return kernels;
 }
 
 }  // namespace kxc::codegen

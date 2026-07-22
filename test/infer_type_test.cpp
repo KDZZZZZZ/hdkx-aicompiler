@@ -167,6 +167,14 @@ bool TestMvpElementwiseLowerToTIR() {
 
     kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
     TEST_CHECK(lowered.defined(), "elementwise MVP ops should lower to TIR");
+    const kxc::Array<kxc::relay::LoweredFunction> units =
+        kxc::relay::LowerOperatorCallsToTIR(func);
+    TEST_CHECK(units.size() == 5,
+               "five checked elementwise Calls must lower to five PrimFuncs");
+    for (const auto& unit : units) {
+        TEST_CHECK(unit.defined() && unit->prim_func.defined(),
+                   "per-operator lowering must preserve inferred type completeness");
+    }
     return true;
 }
 

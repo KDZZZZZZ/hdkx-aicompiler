@@ -1,7 +1,10 @@
 #pragma once
 
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "kxc/profiling/profiling.h"
 #include "kxc/target/target.h"
@@ -11,31 +14,37 @@
 
 namespace kxc::api {
 
+namespace internal {
+
+struct CompiledModuleEntry final {
+    tir::PrimFunc prim_func;
+    codegen::KernelSignature signature;
+    codegen::KernelLaunchMetadata launch_metadata;
+    codegen::CompiledKernel executable;
+};
+
+}  // namespace internal
+
 class CompiledModuleNode final : public Object {
 public:
     CompiledModuleNode(Target target,
-                       tir::PrimFunc prim_func,
-                       codegen::KernelSignature signature,
-                       codegen::KernelLaunchMetadata launch_metadata,
+                       std::vector<internal::CompiledModuleEntry> entries,
                        Map<String, runtime::NDArray> constants,
-                       codegen::CompiledKernel executable,
                        std::shared_ptr<profiling::ProfileContext> profile_context)
         : target_(std::move(target)),
-          prim_func_(std::move(prim_func)),
-          signature_(std::move(signature)),
-          launch_metadata_(std::move(launch_metadata)),
           constants_(std::move(constants)),
-          executable_(std::move(executable)),
-          profile_context_(std::move(profile_context)) {}
+          profile_context_(std::move(profile_context)) {
+        for (auto& entry : entries) {
+            entries_.emplace(std::string(entry.signature->symbol),
+                             std::move(entry));
+        }
+    }
 
     KXC_OBJECT_DECLARE
 
     Target target_;
-    tir::PrimFunc prim_func_;
-    codegen::KernelSignature signature_;
-    codegen::KernelLaunchMetadata launch_metadata_;
+    std::unordered_map<std::string, internal::CompiledModuleEntry> entries_;
     Map<String, runtime::NDArray> constants_;
-    codegen::CompiledKernel executable_;
     std::shared_ptr<profiling::ProfileContext> profile_context_;
 };
 
@@ -43,11 +52,8 @@ namespace internal {
 
 CompiledModule BuildCompiledModule(
     Target target,
-    tir::PrimFunc prim_func,
-    codegen::KernelSignature signature,
-    codegen::KernelLaunchMetadata launch_metadata,
+    std::vector<CompiledModuleEntry> entries,
     Map<String, runtime::NDArray> constants,
-    codegen::CompiledKernel executable,
     std::shared_ptr<profiling::ProfileContext> profile_context = nullptr);
 
 }  // namespace internal

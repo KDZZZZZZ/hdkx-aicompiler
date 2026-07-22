@@ -94,6 +94,21 @@ std::string CodeGenCUDA::Generate(const tir::PrimFunc& function,
     return output_.str();
 }
 
+std::string CodeGenCUDA::GenerateModule(
+    const std::vector<std::pair<tir::PrimFunc, std::string>>& functions) {
+    if (functions.empty()) {
+        throw std::invalid_argument(
+            "CodeGenCUDA GenerateModule requires at least one PrimFunc");
+    }
+    std::string source;
+    for (const auto& function : functions) {
+        CodeGenCUDA emitter;
+        source += emitter.Generate(function.first, function.second);
+        source.push_back('\n');
+    }
+    return source;
+}
+
 std::string CodeGenCUDA::DTypeName(tir::DataType dtype) const {
     if (dtype.lanes != 1) {
         throw std::runtime_error("CodeGenCUDA: vector dtype is unsupported");

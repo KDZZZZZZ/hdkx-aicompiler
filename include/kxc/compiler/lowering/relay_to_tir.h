@@ -79,5 +79,14 @@ public:
  */
 LoweredFunction LowerToTIR(Function func);
 
+/*!
+ * \brief Independently lower each ordinary compute Call to one PrimFunc.
+ *
+ * This migration entry preserves the legacy LowerToTIR whole-graph API while
+ * exposing per-operator cardinality. Compiler state consumes the richer private
+ * LoweredGraph contract in the next migration stage.
+ */
+Array<LoweredFunction> LowerOperatorCallsToTIR(Function func);
+
 }
 }

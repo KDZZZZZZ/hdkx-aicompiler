@@ -4,6 +4,7 @@
 
 #include "kxc/compiler/compiler.h"
 #include "kxc/relay/op.h"
+#include "kxc/runtime/session.h"
 
 #include <algorithm>
 #include <cmath>
@@ -85,26 +86,42 @@ void CompileAndRun(const std::string& op_name, kxc::Function func,
 #if KXC_USE_LLVM
     auto config = kxc::api::CompileConfig::Create(
         kxc::BuildTarget(kxc::Device::CPU()), 0);
-    auto module = kxc::api::Compiler::Compile(func, config);
-    Check(module.IsReady(), op_name + " LLVM module should be ready");
-    const kxc::Array<kxc::codegen::KernelArgSpec> specs = module.signature().arguments();
-    Check(specs.size() == host_arguments.size(),
-          op_name + " host argument count does not match signature");
+    auto compiled = kxc::api::Compiler::Compile(func, config);
+    Check(compiled.module.IsReady(), op_name + " LLVM module should be ready");
+    const auto values = compiled.plan.values();
+    const auto find_value = [&](int64_t value_id) {
+        for (const auto& value : values) {
+            if (value->value_id == value_id) return value;
+        }
+        throw std::runtime_error(op_name + " plan references an unknown value");
+    };
+    const auto input_ids = compiled.plan.input_value_ids();
+    const auto output_ids = compiled.plan.output_value_ids();
+    Check(input_ids.size() + output_ids.size() == host_arguments.size(),
+          op_name + " host argument count does not match graph ABI");
 
-    kxc::Array<kxc::runtime::NDArray> arguments;
-    for (size_t i = 0; i < specs.size(); ++i) {
+    kxc::Array<kxc::runtime::NDArray> inputs;
+    for (size_t i = 0; i < input_ids.size(); ++i) {
+        const auto spec = find_value(input_ids[i]);
         const auto& host = host_arguments[i];
         kxc::runtime::NDArray array = kxc::runtime::NDArray::Empty(
-            specs[i].shape(), specs[i]->dtype, specs[i]->device);
+            spec.shape(), spec->dtype, spec->device);
         Check(array.NBytes() == host.bytes,
-              op_name + " host byte count does not match argument " +
+              op_name + " host byte count does not match input " +
                   std::to_string(i));
         if (host.before_launch) host.before_launch(array);
-        arguments.push_back(std::move(array));
+        inputs.push_back(std::move(array));
     }
-    module.Launch(arguments, kxc::DeviceStream::Default(kxc::Device::CPU())).Wait();
-    for (size_t i = 0; i < arguments.size(); ++i) {
-        if (host_arguments[i].after_launch) host_arguments[i].after_launch(arguments[i]);
+    kxc::runtime::RuntimeSession session(compiled.module, compiled.plan);
+    const auto outputs = session.Run(inputs);
+    Check(outputs.size() == output_ids.size(),
+          op_name + " runtime output count does not match graph ABI");
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        const auto& host = host_arguments[input_ids.size() + i];
+        Check(outputs[i].NBytes() == host.bytes,
+              op_name + " host byte count does not match output " +
+                  std::to_string(i));
+        if (host.after_launch) host.after_launch(outputs[i]);
     }
 #else
     (void)op_name;

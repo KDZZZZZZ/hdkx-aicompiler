@@ -465,20 +465,64 @@ void TestRelayLLVM() {
     ExpectNear(ReadFloats(arguments[2]), {2, 3, 4, 5, 6, 7, 8, 9});
 }
 
+void TestLLVMBatchModule() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const DLDataType f32 = runtime::DataTypeFromString("float32");
+    const auto make_signature = [&](const char* symbol) {
+        return KernelSignature(
+            symbol,
+            {KernelArgSpec("a", KernelArgRole::kInput, f32, {4},
+                           Device::CPU()),
+             KernelArgSpec("b", KernelArgRole::kInput, f32, {4},
+                           Device::CPU()),
+             KernelArgSpec("out", KernelArgRole::kOutput, f32, {4},
+                           Device::CPU(), 4, true)});
+    };
+    std::vector<KernelSignature> signatures{
+        make_signature("batch_add_a"), make_signature("batch_add_b")};
+    std::vector<KernelLaunchMetadata> metadata{
+        KernelLaunchMetadata(Device::CPU(), CodeGenBackend::kLLVM),
+        KernelLaunchMetadata(Device::CPU(), CodeGenBackend::kLLVM)};
+    auto context = std::make_unique<llvm::LLVMContext>();
+    CodeGenLLVM codegen(*context);
+    codegen.AddFunctions({{MakeAddPrimFunc("batch_add_a", 4), "batch_add_a"},
+                          {MakeAddPrimFunc("batch_add_b", 4), "batch_add_b"}});
+    std::vector<CompiledKernel> kernels = LLVMJITEngine().CompileMany(
+        codegen.TakeModule(), std::move(context), signatures, metadata, 2);
+    Require(kernels.size() == 2 && kernels[0].IsReady() &&
+                kernels[1].IsReady(),
+            "LLVM batch compilation must return one kernel per symbol");
+    kernels.erase(kernels.begin());
+    Array<runtime::NDArray> arguments{
+        FloatArray({4}, {1, 2, 3, 4}),
+        FloatArray({4}, {10, 20, 30, 40}), FloatArray({4})};
+    kernels[0]
+        .Launch(arguments, DeviceStream::Default(Device::CPU()))
+        .Wait();
+    ExpectNear(ReadFloats(arguments[2]), {11, 22, 33, 44});
+}
+
 // Compiler 公共入口必须返回可通过 NDArray + DeviceStream 启动的模块。
 void TestCompilerLLVM() {
     using namespace kxc;
     Var x("x", TensorType({4}, "float32"));
     Var y("y", TensorType({4}, "float32"));
     Function function({x, y}, Call(relay::Op::Get("add"), {x, y}));
-    api::CompiledModule module = api::Compiler::Compile(
+    api::CompiledGraph compiled = api::Compiler::Compile(
         function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
     Array<runtime::NDArray> arguments{
         FloatArray({4}, {100, 200, 300, 400}),
         FloatArray({4}, {1, 2, 3, 4}),
         FloatArray({4}),
     };
-    module.Launch(arguments, DeviceStream::Default(Device::CPU())).Wait();
+    Require(compiled.plan.calls().size() == 1 &&
+                compiled.module.entry_count() == 1,
+            "single Relay add must compile to one explicit entry");
+    compiled.module
+        .Launch(compiled.plan.calls()[0]->symbol, arguments,
+                DeviceStream::Default(Device::CPU()))
+        .Wait();
     ExpectNear(ReadFloats(arguments[2]), {101, 202, 303, 404});
 }
 
@@ -489,15 +533,17 @@ void TestCompilerIntermediateAllocate() {
     Var y("y", TensorType({4}, "float32"));
     Call first(relay::Op::Get("add"), {x, y});
     Function function({x, y}, Call(relay::Op::Get("add"), {first, y}));
-    api::CompiledModule module = api::Compiler::Compile(
+    api::CompiledGraph compiled = api::Compiler::Compile(
         function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
-    Array<runtime::NDArray> arguments{
+    runtime::RuntimeSession session(compiled.module, compiled.plan);
+    Array<runtime::NDArray> outputs = session.Run({
         FloatArray({4}, {1, 2, 3, 4}),
         FloatArray({4}, {10, 20, 30, 40}),
-        FloatArray({4}),
-    };
-    module.Launch(arguments, DeviceStream::Default(Device::CPU())).Wait();
-    ExpectNear(ReadFloats(arguments[2]), {21, 42, 63, 84});
+    });
+    Require(compiled.module.entry_count() == 2 &&
+                compiled.plan.calls().size() == 2 && outputs.size() == 1,
+            "two Relay calls must compile and execute as two entries");
+    ExpectNear(ReadFloats(outputs[0]), {21, 42, 63, 84});
 }
 
 /*! \brief RuntimeSession 只接收 inputs，并自动分配 add 输出。 */
@@ -506,8 +552,9 @@ void TestRuntimeSessionLLVM() {
     Var x("x", TensorType({4}, "float32"));
     Var y("y", TensorType({4}, "float32"));
     Function function({x, y}, Call(relay::Op::Get("add"), {x, y}));
-    runtime::RuntimeSession session(api::Compiler::Compile(
-        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2)));
+    api::CompiledGraph compiled = api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    runtime::RuntimeSession session(compiled.module, compiled.plan);
     Array<runtime::NDArray> inputs{
         FloatArray({4}, {100, 200, 300, 400}),
         FloatArray({4}, {1, 2, 3, 4}),
@@ -535,8 +582,9 @@ void TestRuntimeSessionLLVMConstant() {
         FloatArray({4}, {10, 20, 30, 40});
     Function function(
         {x}, Call(relay::Op::Get("add"), {x, Constant(constant_data)}));
-    runtime::RuntimeSession session(api::Compiler::Compile(
-        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2)));
+    api::CompiledGraph compiled = api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    runtime::RuntimeSession session(compiled.module, compiled.plan);
     Array<runtime::NDArray> outputs =
         session.Run({FloatArray({4}, {1, 2, 3, 4})});
     Require(outputs.size() == 1,
@@ -568,6 +616,7 @@ int main() {
         {"llvm_validation_and_lookup_errors", TestLLVMValidationAndLookupErrors},
         {"llvm_jit_lifetime", TestLLVMJITLifetime},
         {"relay_llvm", TestRelayLLVM},
+        {"llvm_batch_module", TestLLVMBatchModule},
         {"compiler_llvm", TestCompilerLLVM},
         {"compiler_intermediate_allocate", TestCompilerIntermediateAllocate},
         {"runtime_session_llvm", TestRuntimeSessionLLVM},

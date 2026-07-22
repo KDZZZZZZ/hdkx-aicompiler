@@ -97,34 +97,46 @@ private:
  *
  * CUfunction 的有效期从属于 CUmodule，因此二者由同一个不可复制 launcher 保存。
  */
+class CudaModuleResource final {
+public:
+    CudaModuleResource(Device device, CUmodule module)
+        : device(std::move(device)), module(module) {}
+
+    ~CudaModuleResource() {
+        if (module == nullptr) return;
+        try {
+            SelectDevice(device);
+            CheckDriver(cuModuleUnload(module), "cuModuleUnload");
+        } catch (const std::exception& error) {
+            std::cerr << "CUDA module release failed for "
+                      << device.ToString() << ": " << error.what() << '\n';
+        }
+    }
+
+    Device device;
+    CUmodule module{nullptr};
+};
+
 class CudaModuleLauncher final : public KernelLauncher {
 public:
-    CudaModuleLauncher(Device device, CUmodule module, CUfunction function,
+    CudaModuleLauncher(std::shared_ptr<CudaModuleResource> resource,
+                       CUfunction function,
                        KernelLaunchMetadata metadata, size_t argument_count)
-        : device_(std::move(device)),
-          module_(module),
+        : resource_(std::move(resource)),
+          device_(resource_->device),
           function_(function),
           metadata_(std::move(metadata)),
           argument_count_(argument_count) {}
 
-    ~CudaModuleLauncher() override {
-        if (module_ == nullptr) return;
-        try {
-            SelectDevice(device_);
-            CheckDriver(cuModuleUnload(module_), "cuModuleUnload");
-        } catch (const std::exception& error) {
-            // 析构边界不能抛异常；驱动回收失败仅保留可诊断信息。
-            std::cerr << "CUDA module release failed for " << device_.ToString()
-                      << ": " << error.what() << '\n';
-        }
-    }
+    ~CudaModuleLauncher() override = default;
 
     CudaModuleLauncher(const CudaModuleLauncher&) = delete;
     CudaModuleLauncher& operator=(const CudaModuleLauncher&) = delete;
 
     /*! \brief module 和入口函数均成功解析后 launcher 才视为可启动。 */
     bool IsReady() const noexcept override {
-        return module_ != nullptr && function_ != nullptr;
+        return resource_ != nullptr && resource_->module != nullptr &&
+               function_ != nullptr;
     }
 
     /*! \brief 按 CUDA Driver 参数 ABI 提交内核并返回拥有完成 event 的操作。 */
@@ -218,8 +230,8 @@ public:
     }
 
 private:
+    std::shared_ptr<CudaModuleResource> resource_;
     Device device_;
-    CUmodule module_{nullptr};
     CUfunction function_{nullptr};
     KernelLaunchMetadata metadata_;
     size_t argument_count_{0};
@@ -275,37 +287,56 @@ CompiledKernel CUDAModule::Compile(const std::string& source,
                                    KernelSignature signature,
                                    KernelLaunchMetadata metadata,
                                    const CUDACompileOptions& options) {
-    signature.Validate();
-    metadata.Validate();
-    const auto* launch = metadata.operator->();
-    if (launch->backend != CodeGenBackend::kCUDA ||
-        launch->device.device_type() != kCUDA) {
-        throw std::invalid_argument("CUDAModule requires CUDA launch metadata");
+    std::vector<CompiledKernel> kernels = CompileMany(
+        source, {signature}, {metadata}, options);
+    return std::move(kernels.front());
+}
+
+std::vector<CompiledKernel> CUDAModule::CompileMany(
+    const std::string& source,
+    const std::vector<KernelSignature>& signatures,
+    const std::vector<KernelLaunchMetadata>& metadata,
+    const CUDACompileOptions& options) {
+    if (signatures.empty() || signatures.size() != metadata.size()) {
+        throw std::invalid_argument(
+            "CUDAModule CompileMany requires matching non-empty contracts");
+    }
+    Device device;
+    for (size_t i = 0; i < signatures.size(); ++i) {
+        signatures[i].Validate();
+        metadata[i].Validate();
+        if (metadata[i]->backend != CodeGenBackend::kCUDA ||
+            metadata[i]->device.device_type() != kCUDA) {
+            throw std::invalid_argument(
+                "CUDAModule CompileMany requires CUDA launch metadata");
+        }
+        if (i == 0) {
+            device = metadata[i]->device;
+        } else if (metadata[i]->device != device) {
+            throw std::invalid_argument(
+                "CUDAModule CompileMany requires one CUDA device");
+        }
     }
 
     const std::string ptx = CompileToPTX(source, options);
-    SelectDevice(launch->device);
+    SelectDevice(device);
     CUmodule module = nullptr;
     CheckDriver(cuModuleLoadDataEx(&module, ptx.data(), 0, nullptr, nullptr),
                 "cuModuleLoadDataEx");
-    try {
+    auto resource = std::make_shared<CudaModuleResource>(device, module);
+    std::vector<CompiledKernel> kernels;
+    kernels.reserve(signatures.size());
+    for (size_t i = 0; i < signatures.size(); ++i) {
         CUfunction function = nullptr;
-        const std::string symbol = signature.operator->()->symbol;
-        CheckDriver(cuModuleGetFunction(&function, module, symbol.c_str()),
+        const std::string symbol = signatures[i]->symbol;
+        CheckDriver(cuModuleGetFunction(&function, resource->module,
+                                        symbol.c_str()),
                     "cuModuleGetFunction");
         auto launcher = std::make_shared<CudaModuleLauncher>(
-            launch->device, module, function, metadata,
-            signature.arguments().size());
-        return CompiledKernel(std::move(signature), std::move(metadata),
-                              std::move(launcher));
-    } catch (...) {
-        std::exception_ptr original = std::current_exception();
-        try {
-            CheckDriver(cuModuleUnload(module), "cuModuleUnload");
-        } catch (...) {
-        }
-        std::rethrow_exception(original);
+            resource, function, metadata[i], signatures[i].arguments().size());
+        kernels.emplace_back(signatures[i], metadata[i], std::move(launcher));
     }
+    return kernels;
 }
 
 }  // namespace kxc::codegen

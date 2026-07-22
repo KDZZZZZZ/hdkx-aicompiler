@@ -1,25 +1,34 @@
 /*! \file src/compiler/compiler.cc
- * \brief 实现 Target 驱动、显式分阶段的 Relay 到后端编译管线。
+ * \brief Implements the target-driven per-operator compiler pipeline.
  */
 
 #include "kxc/compiler/compiler.h"
 
+#include <algorithm>
 #include <cctype>
+#include <limits>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
-#include "../compiler/internal/compile_state.h"
-#include "kxc/pass/context.h"
-#include "kxc/relay/visitor.h"
-#include "kxc/profiling/profiling.h"
-#include "kxc/runtime/kernel_abi.h"
-#include "../compiler/internal/kernel_abi_builder.h"
+#include "internal/compile_state.h"
+#include "internal/kernel_abi_builder.h"
+#include "internal/lowered_graph.h"
+#include "internal/primitive_cache.h"
 #include "../runtime/internal/compiled_module_node.h"
+#include "../runtime/internal/memory_plan.h"
+#include "kxc/pass/context.h"
+#include "kxc/profiling/profiling.h"
 #include "kxc/relay/pass/print_ir.h"
 #include "kxc/relay/transforms/infer_type.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/relay/transforms/pipeline.h"
+#include "kxc/relay/visitor.h"
 #include "kxc/tir/pass/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/pipeline.h"
@@ -39,7 +48,6 @@
 namespace kxc::api {
 namespace {
 
-// 已有 profiling 作用域优先复用；否则只在配置启用时创建 bundle。
 std::shared_ptr<profiling::ProfileContext> MaybeCreateProfileContext(
     const CompileConfig& config) {
     if (profiling::CurrentContext()) return profiling::CurrentContext();
@@ -47,7 +55,6 @@ std::shared_ptr<profiling::ProfileContext> MaybeCreateProfileContext(
     return profiling::ProfileContext::Create(config->profile_options);
 }
 
-// Compiler 阶段事件统一携带 Target、device 和优化等级，便于跨后端比较。
 profiling::EventSpec MakeStageEvent(const char* stage,
                                     const CompileConfig& config) {
     profiling::EventSpec spec;
@@ -65,38 +72,112 @@ profiling::EventSpec MakeStageEvent(const char* stage,
     return spec;
 }
 
-// 将当前阶段唯一 IR、symbol 和 backend 写入阶段 span，不维护第二份编译状态。
+std::string PrimitiveContext(const PrimitiveCompileState& primitive) {
+    return "unit " + std::to_string(primitive.unit_id) + " ('" +
+           std::string(primitive.symbol) + "', " +
+           std::string(primitive.operator_identity) + ")";
+}
+
+uint64_t PlannedStorageBytes(const runtime::ExecutablePlan& plan) {
+    std::unordered_map<int64_t, uint64_t> bytes_by_storage;
+    for (const auto& value : plan.values()) {
+        uint64_t elements = 1;
+        bool dynamic = false;
+        for (int64_t dimension : value.shape()) {
+            if (dimension < 0) {
+                dynamic = true;
+                break;
+            }
+            if (dimension != 0 &&
+                elements > std::numeric_limits<uint64_t>::max() /
+                               static_cast<uint64_t>(dimension)) {
+                return std::numeric_limits<uint64_t>::max();
+            }
+            elements *= static_cast<uint64_t>(dimension);
+        }
+        if (dynamic) continue;
+        const uint64_t element_bytes =
+            static_cast<uint64_t>(value->dtype.bits / 8) *
+            static_cast<uint64_t>(value->dtype.lanes);
+        if (element_bytes != 0 &&
+            elements > std::numeric_limits<uint64_t>::max() / element_bytes) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        bytes_by_storage[value->storage_id] =
+            std::max(bytes_by_storage[value->storage_id],
+                     elements * element_bytes);
+    }
+    uint64_t total = 0;
+    for (const auto& item : bytes_by_storage) {
+        if (total > std::numeric_limits<uint64_t>::max() - item.second) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        total += item.second;
+    }
+    return total;
+}
+
 void AddResultFields(profiling::ScopedSpan* span, const CompileResult& result) {
     const CompileStage stage = result.stage();
     if (stage == CompileStage::kRelayOptimized) {
         const std::string text = relay::pass::ToText(result.optimized_relay());
         span->AddField("ir_hash", profiling::HashText(text));
         span->AddMetric("ir_bytes", static_cast<double>(text.size()));
+        return;
     }
-    if (static_cast<int>(stage) >= static_cast<int>(CompileStage::kLowered)) {
-        const tir::PrimFunc function =
-            stage == CompileStage::kLowered ? result.lowered_tir()
-                                             : result.optimized_tir();
+    if (static_cast<int>(stage) < static_cast<int>(CompileStage::kLowered)) {
+        return;
+    }
+    const std::vector<PrimitiveCompileState> primitives = result.primitives();
+    span->AddMetric("primitive_count", static_cast<double>(primitives.size()));
+    std::unordered_set<int64_t> storage_ids;
+    for (const auto& value : result.plan().values()) {
+        storage_ids.insert(value->storage_id);
+    }
+    span->AddMetric("value_count",
+                    static_cast<double>(result.plan().values().size()));
+    span->AddMetric("storage_slot_count",
+                    static_cast<double>(storage_ids.size()));
+    span->AddMetric(
+        "storage_reuse_count",
+        static_cast<double>(result.plan().values().size() -
+                            storage_ids.size()));
+    span->AddMetric("planned_peak_storage_bytes",
+                    static_cast<double>(PlannedStorageBytes(result.plan())));
+    size_t cache_hits = 0;
+    for (const PrimitiveCompileState& primitive : primitives) {
+        const std::string prefix = "unit." + std::to_string(primitive.unit_id) + ".";
         std::ostringstream stream;
-        tir::pass::DumpPrimFunc(function, stream);
+        tir::pass::DumpPrimFunc(primitive.tir, stream);
         const std::string text = stream.str();
-        span->AddField("ir_hash", profiling::HashText(text));
-        span->AddMetric("ir_bytes", static_cast<double>(text.size()));
-    }
-    if (static_cast<int>(stage) >=
-        static_cast<int>(CompileStage::kSignatureBuilt)) {
-        span->AddField("symbol", std::string(result.signature()->symbol));
+        span->AddField(prefix + "symbol", std::string(primitive.symbol));
+        span->AddField(prefix + "operator",
+                       std::string(primitive.operator_identity));
+        span->AddField(prefix + "ir_hash", profiling::HashText(text));
+        span->AddMetric(prefix + "ir_bytes", static_cast<double>(text.size()));
+        if (primitive.launch_metadata) {
+            span->AddField(
+                prefix + "backend",
+                (*primitive.launch_metadata)->backend ==
+                        codegen::CodeGenBackend::kLLVM
+                    ? "llvm"
+                    : "cuda");
+            span->AddMetric(prefix + "cache_hit",
+                            primitive.cache_hit ? 1.0 : 0.0);
+            if (primitive.cache_hit) ++cache_hits;
+        }
     }
     if (stage == CompileStage::kBackendCompiled) {
-        span->AddField(
-            "backend",
-            result.launch_metadata()->backend == codegen::CodeGenBackend::kLLVM
-                ? "llvm"
-                : "cuda");
+        span->AddMetric("cache_hits", static_cast<double>(cache_hits));
+        span->AddMetric(
+            "cache_hit_rate",
+            primitives.empty()
+                ? 0.0
+                : static_cast<double>(cache_hits) /
+                      static_cast<double>(primitives.size()));
     }
 }
 
-// 所有阶段共享错误包装和 profiling 状态，失败信息明确指出责任阶段。
 template <typename Fn>
 CompileResult RunStage(const char* stage, const CompileConfig& config, Fn&& fn) {
     profiling::ScopedSpan span(profiling::CurrentContext(),
@@ -113,7 +194,19 @@ CompileResult RunStage(const char* stage, const CompileConfig& config, Fn&& fn) 
     }
 }
 
-// global_symbol 必须是后端可直接导出的 C 标识符，禁止隐式改名造成 lookup 漂移。
+template <typename Fn>
+auto RunPrimitiveStage(const char* stage,
+                       const PrimitiveCompileState& primitive, Fn&& fn)
+    -> decltype(fn()) {
+    try {
+        return fn();
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string(stage) + " failed for " +
+                                 PrimitiveContext(primitive) + ": " +
+                                 error.what());
+    }
+}
+
 String ReadKernelSymbol(const tir::PrimFunc& function) {
     const String key("global_symbol");
     if (!function->attrs.count(key)) {
@@ -121,7 +214,8 @@ String ReadKernelSymbol(const tir::PrimFunc& function) {
     }
     const auto* value = function->attrs.at(key).As<StringObj>();
     if (!value || value->data.empty()) {
-        throw std::invalid_argument("PrimFunc global_symbol must be a non-empty String");
+        throw std::invalid_argument(
+            "PrimFunc global_symbol must be a non-empty String");
     }
     const std::string& symbol = value->data;
     const auto is_head = [](unsigned char ch) {
@@ -135,19 +229,55 @@ String ReadKernelSymbol(const tir::PrimFunc& function) {
     }
     for (size_t i = 1; i < symbol.size(); ++i) {
         if (!is_tail(static_cast<unsigned char>(symbol[i]))) {
-            throw std::invalid_argument("PrimFunc global_symbol is not a C identifier");
+            throw std::invalid_argument(
+                "PrimFunc global_symbol is not a C identifier");
         }
     }
     return String(symbol);
 }
 
-// Validate 阶段建立状态机起点；配置和 Relay 节点错误不会进入 pass。
+tir::PrimFunc RefreshStructuralHash(const tir::PrimFunc& function) {
+    const String structural_hash_key("kxc.structural_hash");
+    Map<String, ObjectRef> attrs;
+    for (const auto& item : function->attrs) {
+        if (!(item.first == structural_hash_key)) {
+            attrs.Set(item.first, item.second);
+        }
+    }
+    tir::PrimFunc canonical(function->params, function->body,
+                            function->buffer_map, attrs);
+    std::ostringstream stream;
+    tir::pass::DumpPrimFunc(canonical, stream);
+    attrs.Set(structural_hash_key,
+              String(profiling::HashText(stream.str())));
+    return tir::PrimFunc(function->params, function->body,
+                         function->buffer_map, std::move(attrs));
+}
+
+Map<String, runtime::NDArray> PlaceConstants(
+    const Map<String, runtime::NDArray>& source, const Target& target) {
+    Map<String, runtime::NDArray> result;
+    const Device target_device(target->device_type, target->device_id);
+    for (const auto& item : source) {
+        runtime::NDArray value = item.second;
+#if KXC_USE_CUDA
+        if (value.device() != target_device) value = value.CopyTo(target_device);
+#else
+        if (target_device.device_type() != kCUDA &&
+            value.device() != target_device) {
+            value = value.CopyTo(target_device);
+        }
+#endif
+        result.Set(item.first, std::move(value));
+    }
+    return result;
+}
+
 CompileResult ValidateInput(Function function, const CompileConfig& config) {
     config.Validate();
     return CompileResult::Validate(config->target, std::move(function));
 }
 
-// Relay 优化阶段先后执行强制类型推导、等级策略和最终类型确认。
 CompileResult OptimizeRelay(const CompileResult& input,
                             const CompileConfig& config) {
     Function typed = relay::InferTypePass(input.validated_relay());
@@ -157,112 +287,241 @@ CompileResult OptimizeRelay(const CompileResult& input,
     return input.AfterRelayOptimization(std::move(optimized));
 }
 
-// Lower 阶段原子发布 PrimFunc 与常量 payload，后续不得重新扫描 Relay 常量。
-CompileResult Lower(const CompileResult& input) {
-    relay::LoweredFunction lowered = relay::LowerToTIR(input.optimized_relay());
-    Map<String, runtime::NDArray> constants;
-    const Device target_device(input.target()->device_type,
-                               input.target()->device_id);
-    for (const auto& binding : lowered.constants()) {
-        runtime::NDArray value = binding->value;
-#if KXC_USE_CUDA
-        // 常量是最终内核参数，必须在签名冻结前与 Target 位于同一设备。
-        // 模块持有迁移后的唯一 payload，Launch 再按 constant_key 注入该对象。
-        if (value.device() != target_device) value = value.CopyTo(target_device);
-#else
-        // CUDA-off 构建保留 lowering payload，后端阶段负责返回精确 feature 错误。
-        if (target_device.device_type() != kCUDA &&
-            value.device() != target_device) {
-            value = value.CopyTo(target_device);
-        }
-#endif
-        constants.Set(binding->key, std::move(value));
+CompileResult LowerOperators(const CompileResult& input) {
+    const Device device(input.target()->device_type, input.target()->device_id);
+    internal::LoweredGraph lowered =
+        internal::LowerGraph(input.optimized_relay(), device);
+    std::vector<PrimitiveCompileState> primitives;
+    primitives.reserve(lowered.primitives.size());
+    for (const internal::LoweredPrimitive& source : lowered.primitives) {
+        PrimitiveCompileState primitive;
+        primitive.unit_id = source.unit_id;
+        primitive.symbol = source.symbol;
+        primitive.operator_identity = source.operator_identity;
+        primitive.structural_hash = source.structural_hash;
+        primitive.tir = source.lowered->prim_func;
+        primitives.push_back(std::move(primitive));
     }
-    return input.AfterLowering(lowered->prim_func, constants);
+    return input.AfterLowering(
+        std::move(primitives), runtime::internal::PlanMemory(lowered.plan),
+        PlaceConstants(lowered.constants, input.target()));
 }
 
-// TIR 阶段只保留优化后的唯一 PrimFunc 事实。
 CompileResult OptimizeTIR(const CompileResult& input,
                           const CompileConfig& config) {
-    Array<String> passes = Compiler::TIRPassPolicy(config->opt_level, input.target());
+    Array<String> passes =
+        Compiler::TIRPassPolicy(config->opt_level, input.target());
     if (passes.empty()) {
-        // 静态 KernelSignature 要求输出 extent 已化为 IntImm；这是 ABI 正确性步骤。
         passes = {String("fold_constant"), String("simplify_expr")};
     }
-    tir::PrimFunc optimized = RunTIRPassPipeline(input.lowered_tir(), passes);
+    std::vector<tir::PrimFunc> optimized;
+    for (const PrimitiveCompileState& primitive : input.primitives()) {
+        optimized.push_back(RunPrimitiveStage(
+            "optimize_tir", primitive, [&] {
+                tir::PrimFunc result =
+                    RunTIRPassPipeline(primitive.tir, passes);
 #if KXC_USE_CUDA
-    if (input.target()->kind == "cuda" && input.target()->device_type == kCUDA) {
-        // CUDA thread binding 是后端 ABI 的一部分，必须在 Signature 冻结前完成。
-        optimized = tir::BindCudaThreads(optimized, input.target()).prim_func();
-    }
+                if (input.target()->kind == "cuda" &&
+                    input.target()->device_type == kCUDA) {
+                    result = tir::BindCudaThreads(result, input.target()).prim_func();
+                }
 #endif
+                return RefreshStructuralHash(result);
+            }));
+    }
     return input.AfterTIROptimization(std::move(optimized));
 }
 
-// Signature 阶段从最终 TIR、保活常量和显式 Target 构造公共 ABI。
-CompileResult BuildSignature(const CompileResult& input) {
-    const String symbol = ReadKernelSymbol(input.optimized_tir());
-    codegen::KernelSignature signature = codegen::BuildKernelSignature(
-        input.optimized_tir(), input.constants(), input.target(), symbol);
-    return input.AfterSignature(std::move(signature));
+const char* BackendVersion(const Target& target) {
+    if (target->kind == "llvm" && target->device_type == kCPU) {
+        return "llvm-orc-v1";
+    }
+    if (target->kind == "cuda" && target->device_type == kCUDA) {
+        return "cuda-nvrtc-driver-v1";
+    }
+    throw std::invalid_argument("Primitive cache target has no backend version");
 }
 
-// Backend 阶段只按 Target dispatch，并一次性发布 metadata 与 executable。
-CompileResult BuildBackend(const CompileResult& input,
-                           const CompileConfig& config) {
+CompileResult BuildSignatures(const CompileResult& input,
+                              const CompileConfig& config) {
+    std::vector<codegen::KernelSignature> signatures;
+    std::vector<bool> cache_hits;
+    for (const PrimitiveCompileState& primitive : input.primitives()) {
+        const std::string cache_key = internal::BuildPrimitiveCacheKey(
+            primitive.structural_hash, input.target(), config->opt_level,
+            BackendVersion(input.target()));
+        const auto cached = internal::LookupPrimitiveCache(cache_key);
+        if (cached) {
+            if (!(cached->signature->symbol == primitive.symbol) ||
+                !cached->kernel.IsReady()) {
+                throw std::logic_error(
+                    PrimitiveContext(primitive) +
+                    " cache entry does not match its stable symbol");
+            }
+            signatures.push_back(cached->signature);
+            cache_hits.push_back(true);
+            continue;
+        }
+        signatures.push_back(RunPrimitiveStage(
+            "build_signature", primitive, [&] {
+                const String symbol = ReadKernelSymbol(primitive.tir);
+                if (!(symbol == primitive.symbol)) {
+                    throw std::invalid_argument(
+                        "PrimFunc global_symbol drifted from unit symbol");
+                }
+                return codegen::BuildKernelSignature(
+                    primitive.tir, input.constants(), input.target(), symbol);
+            }));
+        cache_hits.push_back(false);
+    }
+    return input.AfterSignatures(std::move(signatures), std::move(cache_hits));
+}
+
+CompileResult BuildBackends(const CompileResult& input,
+                            const CompileConfig& config) {
     const Target target = input.target();
     const Device device(target->device_type, target->device_id);
-    if (target->kind == "llvm" && target->device_type == kCPU) {
+    const std::vector<PrimitiveCompileState> primitives = input.primitives();
+    std::vector<std::optional<codegen::KernelLaunchMetadata>> metadata_slots(
+        primitives.size());
+    std::vector<std::optional<codegen::CompiledKernel>> kernel_slots(
+        primitives.size());
+    std::vector<std::string> cache_keys;
+    std::vector<size_t> misses;
+    cache_keys.reserve(primitives.size());
+    for (size_t i = 0; i < primitives.size(); ++i) {
+        const PrimitiveCompileState& primitive = primitives[i];
+        if (!primitive.signature) {
+            throw std::logic_error(
+                PrimitiveContext(primitive) + " has no signature");
+        }
+        cache_keys.push_back(internal::BuildPrimitiveCacheKey(
+            primitive.structural_hash, target, config->opt_level,
+            BackendVersion(target)));
+        if (!primitive.cache_hit) {
+            misses.push_back(i);
+            continue;
+        }
+        const auto cached = internal::PeekPrimitiveCache(cache_keys.back());
+        if (!cached || cached->signature.get() != primitive.signature->get() ||
+            !cached->kernel.IsReady()) {
+            throw std::logic_error(
+                PrimitiveContext(primitive) +
+                " cache entry disappeared or changed during compilation");
+        }
+        metadata_slots[i] = cached->launch_metadata;
+        kernel_slots[i] = cached->kernel;
+    }
+
+    if (!misses.empty() && target->kind == "llvm" &&
+        target->device_type == kCPU) {
 #if KXC_USE_LLVM
-        codegen::KernelLaunchMetadata metadata(
-            device, codegen::CodeGenBackend::kLLVM);
         auto llvm_context = std::make_unique<llvm::LLVMContext>();
         codegen::CodeGenLLVM codegen(*llvm_context);
-        codegen.AddFunction(input.optimized_tir(), input.signature()->symbol);
+        std::vector<std::pair<tir::PrimFunc, std::string>> functions;
+        std::vector<codegen::KernelSignature> signatures;
+        std::vector<codegen::KernelLaunchMetadata> metadata;
+        functions.reserve(misses.size());
+        signatures.reserve(misses.size());
+        metadata.reserve(misses.size());
+        for (size_t index : misses) {
+            const PrimitiveCompileState& primitive = primitives[index];
+            functions.emplace_back(primitive.tir,
+                                   std::string(primitive.symbol));
+            signatures.push_back(*primitive.signature);
+            metadata.emplace_back(
+                device, codegen::CodeGenBackend::kLLVM);
+        }
+        codegen.AddFunctions(functions);
         codegen::LLVMJITEngine jit;
-        codegen::CompiledKernel kernel = jit.Compile(
-            codegen.TakeModule(), std::move(llvm_context), input.signature(),
+        std::vector<codegen::CompiledKernel> compiled = jit.CompileMany(
+            codegen.TakeModule(), std::move(llvm_context), signatures,
             metadata, config->opt_level);
-        return input.AfterBackend(metadata, kernel);
+        for (size_t i = 0; i < misses.size(); ++i) {
+            const size_t index = misses[i];
+            metadata_slots[index] = metadata[i];
+            kernel_slots[index] = compiled[i];
+        }
 #else
         throw std::runtime_error(
             "Compiler target 'llvm' requires a build with KXC_ENABLE_LLVM=ON");
 #endif
-    }
-    if (target->kind == "cuda" && target->device_type == kCUDA) {
+    } else if (!misses.empty() && target->kind == "cuda" &&
+               target->device_type == kCUDA) {
 #if KXC_USE_CUDA
-        const tir::CudaLaunchConfig launch =
-            tir::GetCudaLaunchConfig(input.optimized_tir());
-        codegen::KernelLaunchMetadata metadata(
-            device, codegen::CodeGenBackend::kCUDA,
-            codegen::Dim3{launch.grid_x, launch.grid_y, launch.grid_z},
-            codegen::Dim3{launch.block_x, launch.block_y, launch.block_z},
-            launch.dynamic_shared_memory_bytes);
-        codegen::CodeGenCUDA emitter;
-        const std::string source = emitter.Generate(
-            input.optimized_tir(), std::string(input.signature()->symbol));
+        std::vector<std::pair<tir::PrimFunc, std::string>> functions;
+        std::vector<codegen::KernelSignature> signatures;
+        std::vector<codegen::KernelLaunchMetadata> metadata;
+        functions.reserve(misses.size());
+        signatures.reserve(misses.size());
+        metadata.reserve(misses.size());
+        for (size_t index : misses) {
+            const PrimitiveCompileState& primitive = primitives[index];
+            const tir::CudaLaunchConfig launch_config =
+                tir::GetCudaLaunchConfig(primitive.tir);
+            functions.emplace_back(primitive.tir,
+                                   std::string(primitive.symbol));
+            signatures.push_back(*primitive.signature);
+            metadata.emplace_back(
+                device, codegen::CodeGenBackend::kCUDA,
+                codegen::Dim3{launch_config.grid_x, launch_config.grid_y,
+                              launch_config.grid_z},
+                codegen::Dim3{launch_config.block_x, launch_config.block_y,
+                              launch_config.block_z},
+                launch_config.dynamic_shared_memory_bytes);
+        }
         if (target->attrs.compute_version_major <= 0 ||
             target->attrs.compute_version_minor < 0) {
             throw std::runtime_error(
                 "CUDA Target has no usable compute capability");
         }
+        codegen::CodeGenCUDA emitter;
+        const std::string source = emitter.GenerateModule(functions);
         codegen::CUDACompileOptions options;
         options.architecture =
-            "compute_" + std::to_string(target->attrs.compute_version_major) +
+            "compute_" +
+            std::to_string(target->attrs.compute_version_major) +
             std::to_string(target->attrs.compute_version_minor);
-        options.source_name = std::string(input.signature()->symbol) + ".cu";
-        codegen::CompiledKernel kernel = codegen::CUDAModule::Compile(
-            source, input.signature(), metadata, options);
-        return input.AfterBackend(metadata, kernel);
+        options.source_name = "kxc_operator_module.cu";
+        std::vector<codegen::CompiledKernel> compiled =
+            codegen::CUDAModule::CompileMany(source, signatures, metadata,
+                                             options);
+        for (size_t i = 0; i < misses.size(); ++i) {
+            const size_t index = misses[i];
+            metadata_slots[index] = metadata[i];
+            kernel_slots[index] = compiled[i];
+        }
 #else
         throw std::runtime_error(
             "Compiler target 'cuda' requires a build with KXC_ENABLE_CUDA=ON");
 #endif
+    } else if (!misses.empty()) {
+        throw std::runtime_error("Compiler Target has no matching backend");
     }
-    throw std::runtime_error("Compiler Target has no matching backend");
+
+    std::vector<codegen::KernelLaunchMetadata> metadata;
+    std::vector<codegen::CompiledKernel> kernels;
+    metadata.reserve(primitives.size());
+    kernels.reserve(primitives.size());
+    for (size_t i = 0; i < primitives.size(); ++i) {
+        if (!metadata_slots[i] || !kernel_slots[i]) {
+            throw std::logic_error(
+                PrimitiveContext(primitives[i]) +
+                " backend batch did not produce an executable");
+        }
+        if (!primitives[i].cache_hit) {
+            internal::StorePrimitiveCache(
+                cache_keys[i],
+                internal::CachedPrimitive{*primitives[i].signature,
+                                          *metadata_slots[i],
+                                          *kernel_slots[i]});
+        }
+        metadata.push_back(*metadata_slots[i]);
+        kernels.push_back(*kernel_slots[i]);
+    }
+    return input.AfterBackends(std::move(metadata), std::move(kernels));
 }
 
-// Assemble 阶段只转移已经完成 Backend 状态的对象，不再推导任何契约。
 CompiledModule AssembleModule(
     const CompileResult& result,
     std::shared_ptr<profiling::ProfileContext> profile_context) {
@@ -270,40 +529,76 @@ CompiledModule AssembleModule(
     if (result.stage() != CompileStage::kBackendCompiled) {
         throw std::logic_error("AssembleModule requires backend_compiled state");
     }
+    std::vector<internal::CompiledModuleEntry> entries;
+    for (const PrimitiveCompileState& primitive : result.primitives()) {
+        entries.push_back(internal::CompiledModuleEntry{
+            primitive.tir, *primitive.signature, *primitive.launch_metadata,
+            *primitive.kernel});
+    }
     return internal::BuildCompiledModule(
-        result.target(), result.optimized_tir(), result.signature(),
-        result.launch_metadata(), result.constants(), result.kernel(),
+        result.target(), std::move(entries), result.constants(),
         std::move(profile_context));
+}
+
+CompiledGraph CompilePipeline(Function function, CompileConfig config) {
+    config.Validate();
+    auto profile_context = MaybeCreateProfileContext(config);
+    const std::string run_id =
+        profile_context ? profile_context->NextRunId("compile") : "";
+    profiling::ActivationScope activation(profile_context, run_id);
+    profiling::ScopedSpan compile_span(
+        profile_context, MakeStageEvent("compile", config), run_id);
+
+    const PassContext pass_context = PassContext::MergeTarget(
+        relay::PassContextFromRelay(function), config->target);
+    PassContext::Scope pass_scope(pass_context);
+
+    CompileResult result = RunStage(
+        "validate", config, [&] { return ValidateInput(function, config); });
+    result = RunStage("optimize_relay", config,
+                      [&] { return OptimizeRelay(result, config); });
+    result = RunStage("lower", config, [&] { return LowerOperators(result); });
+    result = RunStage("optimize_tir", config,
+                      [&] { return OptimizeTIR(result, config); });
+    result = RunStage("build_signature", config,
+                      [&] { return BuildSignatures(result, config); });
+    result = RunStage("build_backend", config,
+                      [&] { return BuildBackends(result, config); });
+
+    profiling::ScopedSpan assemble_span(
+        profile_context, MakeStageEvent("assemble", config), run_id);
+    CompiledModule module = AssembleModule(result, profile_context);
+    AddResultFields(&assemble_span, result);
+    if (profile_context) profile_context->Flush();
+    return CompiledGraph{std::move(module), result.plan()};
 }
 
 }  // namespace
 
-// InferType 属于强制阶段，不放入策略；O3 暂不启用缺少完整结构键的 CSE。
 Array<String> Compiler::RelayPassPolicy(int opt_level) {
     if (opt_level < 0 || opt_level > 3) {
-        throw std::invalid_argument("Relay pass policy requires opt_level 0..3");
+        throw std::invalid_argument(
+            "Relay pass policy requires opt_level 0..3");
     }
     if (opt_level == 0) return {};
     if (opt_level == 1) {
         return {String("fold_tuple_get_item"), String("fold_constant"),
                 String("simplify_expr")};
     }
-    if (opt_level >= 2) {
-        return {String("fold_tuple_get_item"), String("fold_constant"),
-                String("simplify_expr"), String("canonicalize_cast"),
-                String("remove_standalone_reshapes"),
-                String("eliminate_dead_let")};
-    }
-    return {};
+    return {String("fold_tuple_get_item"), String("fold_constant"),
+            String("simplify_expr"), String("canonicalize_cast"),
+            String("remove_standalone_reshapes"),
+            String("eliminate_dead_let")};
 }
 
-// CPU O3 使用完整循环优化；CUDA O3 保留 BindCudaThreads 所需的单层串行循环。
 Array<String> Compiler::TIRPassPolicy(int opt_level, const Target& target) {
     if (opt_level < 0 || opt_level > 3) {
-        throw std::invalid_argument("TIR pass policy requires opt_level 0..3");
+        throw std::invalid_argument(
+            "TIR pass policy requires opt_level 0..3");
     }
     if (!target.defined() || !target.As<TargetNode>()) {
-        throw std::invalid_argument("TIR pass policy requires a defined Target");
+        throw std::invalid_argument(
+            "TIR pass policy requires a defined Target");
     }
     if (opt_level == 0) return {};
     if (opt_level == 1) {
@@ -325,39 +620,7 @@ Array<String> Compiler::TIRPassPolicy(int opt_level, const Target& target) {
             String("remove_no_op")};
 }
 
-// 顶层入口只负责建立 profiling/PassContext 作用域并按固定顺序调用七个阶段。
-CompiledModule Compiler::Compile(Function function, CompileConfig config) {
-    config.Validate();
-    auto profile_context = MaybeCreateProfileContext(config);
-    const std::string run_id =
-        profile_context ? profile_context->NextRunId("compile") : "";
-    profiling::ActivationScope activation(profile_context, run_id);
-    profiling::ScopedSpan compile_span(
-        profile_context, MakeStageEvent("compile", config), run_id);
-
-    // Relay placement 缺失时写入 config Target，存在时只允许完全相同身份。
-    const PassContext pass_context = PassContext::MergeTarget(
-        relay::PassContextFromRelay(function), config->target);
-    PassContext::Scope pass_scope(pass_context);
-
-    CompileResult result = RunStage(
-        "validate", config, [&] { return ValidateInput(function, config); });
-    result = RunStage("optimize_relay", config,
-                      [&] { return OptimizeRelay(result, config); });
-    result = RunStage("lower", config, [&] { return Lower(result); });
-    result = RunStage("optimize_tir", config,
-                      [&] { return OptimizeTIR(result, config); });
-    result = RunStage("build_signature", config,
-                      [&] { return BuildSignature(result); });
-    result = RunStage("build_backend", config,
-                      [&] { return BuildBackend(result, config); });
-
-    profiling::ScopedSpan assemble_span(
-        profile_context, MakeStageEvent("assemble", config), run_id);
-    CompiledModule module = AssembleModule(result, profile_context);
-    AddResultFields(&assemble_span, result);
-    if (profile_context) profile_context->Flush();
-    return module;
+CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
+    return CompilePipeline(std::move(function), std::move(config));
 }
-
 }  // namespace kxc::api

@@ -6,11 +6,17 @@
 
 #include "kxc/compiler/compile_config.h"
 #include "kxc/runtime/compiled_module.h"
+#include "kxc/runtime/executable_plan.h"
 #include "kxc/support/container.h"
 #include "kxc/relay/relay.h"
 
 namespace kxc {
 namespace api {
+
+struct CompiledGraph final {
+    CompiledModule module;
+    runtime::ExecutablePlan plan;
+};
 
 /*!
  * \brief Relay Function 到可执行模块的统一编译入口。
@@ -26,7 +32,7 @@ public:
      * \param config 编译配置。
      * \return 可运行的编译模块。
      */
-    static CompiledModule Compile(Function func, CompileConfig config);
+    static CompiledGraph Compile(Function func, CompileConfig config);
 
     /*! \brief 返回 opt_level 对应的确定性 Relay pass 顺序。 */
     static Array<String> RelayPassPolicy(int opt_level);

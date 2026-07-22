@@ -7,6 +7,7 @@
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/relay/transforms/pipeline.h"
+#include "kxc/runtime/session.h"
 
 #include <algorithm>
 #include <chrono>
@@ -177,10 +178,12 @@ bool TestCompileResNet18ToLLVM() {
     auto config = kxc::api::CompileConfig::Create(
         kxc::BuildTarget(kxc::Device::CPU()), 1);
     config->opt_level = ResNet18OptLevel();
-    auto module = kxc::api::Compiler::Compile(prepared, config);
-    TEST_CHECK(module.IsReady(), "ResNet18 should compile to a ready LLVM module");
-    TEST_CHECK(module.signature().defined(),
-               "ResNet18 compile should produce a kernel ABI");
+    auto compiled = kxc::api::Compiler::Compile(prepared, config);
+    TEST_CHECK(compiled.module.IsReady(),
+               "ResNet18 should compile to a ready LLVM module");
+    TEST_CHECK(compiled.module.entry_count() == compiled.plan.calls().size() &&
+                   compiled.module.entry_count() > 1,
+               "ResNet18 should compile to one entry per operator call");
     return true;
 #else
     std::cout << "[SKIP] resnet18 LLVM compile: KXC_USE_LLVM=0\n";
@@ -203,9 +206,10 @@ bool TestRunCompiledResNet18LLVM() {
     auto config = kxc::api::CompileConfig::Create(
         kxc::BuildTarget(kxc::Device::CPU()), 1);
     config->opt_level = ResNet18OptLevel();
-    auto module = kxc::api::Compiler::Compile(prepared, config);
-    TEST_CHECK(module.IsReady(), "ResNet18 should compile before execution");
-    const kxc::Map<kxc::String, kxc::runtime::NDArray> constants = module.constants();
+    auto compiled = kxc::api::Compiler::Compile(prepared, config);
+    TEST_CHECK(compiled.module.IsReady(), "ResNet18 should compile before execution");
+    const kxc::Map<kxc::String, kxc::runtime::NDArray> constants =
+        compiled.module.constants();
     TEST_CHECK(constants.size() == imported.params.size(),
                "compiled module constant count should match loaded ONNX initializers");
 
@@ -213,38 +217,19 @@ bool TestRunCompiledResNet18LLVM() {
     kxc::runtime::NDArray input = kxc::runtime::NDArray::Empty(
         {1, 3, 224, 224}, kxc::runtime::DataTypeFromString("float32"),
         kxc::Device::CPU());
-    kxc::runtime::NDArray output = kxc::runtime::NDArray::Empty(
-        {1, 1000}, kxc::runtime::DataTypeFromString("float32"),
-        kxc::Device::CPU());
     FillResNet18Input(input);
 
-    kxc::Array<kxc::runtime::NDArray> arguments;
-    size_t input_count = 0;
-    size_t output_count = 0;
-    for (const auto& spec : module.signature().arguments()) {
-        if (spec->role == kxc::codegen::KernelArgRole::kInput) {
-            TEST_CHECK(input_count++ == 0, "ResNet18 should expose one runtime input");
-            arguments.push_back(input);
-        } else if (spec->role == kxc::codegen::KernelArgRole::kConstant) {
-            TEST_CHECK(constants.count(spec->constant_key) == 1,
-                       "signature constant key is missing from module table");
-            arguments.push_back(constants.at(spec->constant_key));
-        } else {
-            TEST_CHECK(output_count++ == 0, "ResNet18 should expose one runtime output");
-            arguments.push_back(output);
-        }
-    }
-    TEST_CHECK(input_count == 1 && output_count == 1,
-               "ResNet18 signature input/output count mismatch");
-
     std::cout << "[INFO] running compiled resnet18 LLVM kernel with "
-              << arguments.size() << " NDArray arguments\n";
+              << compiled.plan.calls().size() << " kernel calls\n";
     std::cout.flush();
 
     const auto start = std::chrono::steady_clock::now();
-    module.Launch(arguments,
-                  kxc::DeviceStream::Default(kxc::Device::CPU())).Wait();
+    kxc::runtime::RuntimeSession session(compiled.module, compiled.plan);
+    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({input});
     const auto end = std::chrono::steady_clock::now();
+    TEST_CHECK(outputs.size() == 1,
+               "ResNet18 graph plan should return one runtime output");
+    const kxc::runtime::NDArray output = outputs[0];
 
     std::vector<float> out(1000);
     output.CopyToBytes(out.data(), output.NBytes());

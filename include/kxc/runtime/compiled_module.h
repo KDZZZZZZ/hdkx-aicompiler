@@ -16,11 +16,15 @@ class CompiledModule : public ObjectRef {
 public:
     explicit CompiledModule(const ObjectRef& ref);
 
-    AsyncOperation Launch(const Array<runtime::NDArray>& ordered_arguments,
+    AsyncOperation Launch(const String& symbol,
+                          const Array<runtime::NDArray>& ordered_arguments,
                           const DeviceStream& stream) const;
-    codegen::KernelSignature signature() const;
-    codegen::KernelLaunchMetadata launch_metadata() const;
+    codegen::KernelSignature signature(const String& symbol) const;
+    codegen::KernelLaunchMetadata launch_metadata(const String& symbol) const;
     Map<String, runtime::NDArray> constants() const;
+    bool HasFunction(const String& symbol) const;
+    size_t entry_count() const;
+    Array<String> symbols() const;
     bool IsReady() const noexcept;
     String GetStatus() const;
     String GetProfileBundlePath() const;

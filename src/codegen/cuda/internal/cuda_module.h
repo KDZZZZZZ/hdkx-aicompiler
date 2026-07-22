@@ -47,6 +47,13 @@ public:
                                   KernelSignature signature,
                                   KernelLaunchMetadata metadata,
                                   const CUDACompileOptions& options);
+
+    /*! \brief Loads one PTX module and returns symbol launchers sharing its owner. */
+    static std::vector<CompiledKernel> CompileMany(
+        const std::string& source,
+        const std::vector<KernelSignature>& signatures,
+        const std::vector<KernelLaunchMetadata>& metadata,
+        const CUDACompileOptions& options);
 };
 
 }  // namespace kxc::codegen

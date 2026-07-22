@@ -317,7 +317,7 @@ Function BuildResNet18Function() {
     Call node_5_Conv(Op::Get("nn_conv2d"), args_5, attrs_5);
     // ONNX Node 6: Add (/layer1/layer1.0/Add)
     std::vector<Expr> args_6 = {node_5_Conv, node_2_MaxPool};
-    Call node_6_Add(Op::Get("add"), args_6, AddAttrs::Create());
+    Call node_6_Add(Op::Get("add"), args_6);
     // ONNX Node 7: Relu (/layer1/layer1.0/relu_1/Relu)
     std::vector<Expr> args_7 = {node_6_Add};
     Call node_7_Relu(Op::Get("nn_relu"), args_7, ReluAttrs::Create());
@@ -334,7 +334,7 @@ Function BuildResNet18Function() {
     Call node_10_Conv(Op::Get("nn_conv2d"), args_10, attrs_10);
     // ONNX Node 11: Add (/layer1/layer1.1/Add)
     std::vector<Expr> args_11 = {node_10_Conv, node_7_Relu};
-    Call node_11_Add(Op::Get("add"), args_11, AddAttrs::Create());
+    Call node_11_Add(Op::Get("add"), args_11);
     // ONNX Node 12: Relu (/layer1/layer1.1/relu_1/Relu)
     std::vector<Expr> args_12 = {node_11_Add};
     Call node_12_Relu(Op::Get("nn_relu"), args_12, ReluAttrs::Create());
@@ -355,7 +355,7 @@ Function BuildResNet18Function() {
     Call node_16_Conv(Op::Get("nn_conv2d"), args_16, attrs_16);
     // ONNX Node 17: Add (/layer2/layer2.0/Add)
     std::vector<Expr> args_17 = {node_15_Conv, node_16_Conv};
-    Call node_17_Add(Op::Get("add"), args_17, AddAttrs::Create());
+    Call node_17_Add(Op::Get("add"), args_17);
     // ONNX Node 18: Relu (/layer2/layer2.0/relu_1/Relu)
     std::vector<Expr> args_18 = {node_17_Add};
     Call node_18_Relu(Op::Get("nn_relu"), args_18, ReluAttrs::Create());
@@ -372,7 +372,7 @@ Function BuildResNet18Function() {
     Call node_21_Conv(Op::Get("nn_conv2d"), args_21, attrs_21);
     // ONNX Node 22: Add (/layer2/layer2.1/Add)
     std::vector<Expr> args_22 = {node_21_Conv, node_18_Relu};
-    Call node_22_Add(Op::Get("add"), args_22, AddAttrs::Create());
+    Call node_22_Add(Op::Get("add"), args_22);
     // ONNX Node 23: Relu (/layer2/layer2.1/relu_1/Relu)
     std::vector<Expr> args_23 = {node_22_Add};
     Call node_23_Relu(Op::Get("nn_relu"), args_23, ReluAttrs::Create());
@@ -393,7 +393,7 @@ Function BuildResNet18Function() {
     Call node_27_Conv(Op::Get("nn_conv2d"), args_27, attrs_27);
     // ONNX Node 28: Add (/layer3/layer3.0/Add)
     std::vector<Expr> args_28 = {node_26_Conv, node_27_Conv};
-    Call node_28_Add(Op::Get("add"), args_28, AddAttrs::Create());
+    Call node_28_Add(Op::Get("add"), args_28);
     // ONNX Node 29: Relu (/layer3/layer3.0/relu_1/Relu)
     std::vector<Expr> args_29 = {node_28_Add};
     Call node_29_Relu(Op::Get("nn_relu"), args_29, ReluAttrs::Create());
@@ -410,7 +410,7 @@ Function BuildResNet18Function() {
     Call node_32_Conv(Op::Get("nn_conv2d"), args_32, attrs_32);
     // ONNX Node 33: Add (/layer3/layer3.1/Add)
     std::vector<Expr> args_33 = {node_32_Conv, node_29_Relu};
-    Call node_33_Add(Op::Get("add"), args_33, AddAttrs::Create());
+    Call node_33_Add(Op::Get("add"), args_33);
     // ONNX Node 34: Relu (/layer3/layer3.1/relu_1/Relu)
     std::vector<Expr> args_34 = {node_33_Add};
     Call node_34_Relu(Op::Get("nn_relu"), args_34, ReluAttrs::Create());
@@ -431,7 +431,7 @@ Function BuildResNet18Function() {
     Call node_38_Conv(Op::Get("nn_conv2d"), args_38, attrs_38);
     // ONNX Node 39: Add (/layer4/layer4.0/Add)
     std::vector<Expr> args_39 = {node_37_Conv, node_38_Conv};
-    Call node_39_Add(Op::Get("add"), args_39, AddAttrs::Create());
+    Call node_39_Add(Op::Get("add"), args_39);
     // ONNX Node 40: Relu (/layer4/layer4.0/relu_1/Relu)
     std::vector<Expr> args_40 = {node_39_Add};
     Call node_40_Relu(Op::Get("nn_relu"), args_40, ReluAttrs::Create());
@@ -448,7 +448,7 @@ Function BuildResNet18Function() {
     Call node_43_Conv(Op::Get("nn_conv2d"), args_43, attrs_43);
     // ONNX Node 44: Add (/layer4/layer4.1/Add)
     std::vector<Expr> args_44 = {node_43_Conv, node_40_Relu};
-    Call node_44_Add(Op::Get("add"), args_44, AddAttrs::Create());
+    Call node_44_Add(Op::Get("add"), args_44);
     // ONNX Node 45: Relu (/layer4/layer4.1/relu_1/Relu)
     std::vector<Expr> args_45 = {node_44_Add};
     Call node_45_Relu(Op::Get("nn_relu"), args_45, ReluAttrs::Create());

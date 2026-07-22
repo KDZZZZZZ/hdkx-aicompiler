@@ -5,6 +5,12 @@
 #include "kxc/relay/op.h"
 #include "kxc/support/object_registration.h"
 
+#include <algorithm>
+#include <cstring>
+#include <iomanip>
+#include <sstream>
+#include <stdexcept>
+
 namespace kxc {
 namespace relay {
 
@@ -25,6 +31,231 @@ KXC_OBJECT_DEFINE(FlattenAttrsNode)
 KXC_OBJECT_DEFINE(GemmAttrsNode)
 KXC_OBJECT_DEFINE(DeviceCopyAttrsNode)
 KXC_OBJECT_DEFINE(CollectiveAttrsNode)
+
+namespace {
+
+void AppendLengthDelimited(std::string* output, std::string_view value) {
+    *output += std::to_string(value.size());
+    output->push_back(':');
+    output->append(value.data(), value.size());
+}
+
+std::string EncodeIntArray(const Array<int64_t>& values) {
+    std::string result = std::to_string(values.size());
+    result.push_back('[');
+    for (int64_t value : values) {
+        AppendLengthDelimited(&result, std::to_string(value));
+    }
+    result.push_back(']');
+    return result;
+}
+
+std::string EncodeFloatBits(float value) {
+    static_assert(sizeof(float) == sizeof(uint32_t));
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    std::ostringstream stream;
+    stream << std::hex << std::setw(8) << std::setfill('0') << bits;
+    return stream.str();
+}
+
+}  // namespace
+
+void CanonicalAttrWriter::AddEncoded(std::string_view name,
+                                     std::string_view type,
+                                     const std::string& payload) {
+    const std::string owned_name(name);
+    if (std::find(field_names_.begin(), field_names_.end(), owned_name) !=
+        field_names_.end()) {
+        throw std::invalid_argument(
+            "Canonical attrs serialization contains a duplicate field: " +
+            owned_name);
+    }
+    field_names_.push_back(owned_name);
+    AppendLengthDelimited(&buffer_, name);
+    AppendLengthDelimited(&buffer_, type);
+    AppendLengthDelimited(&buffer_, payload);
+}
+
+void CanonicalAttrWriter::Add(std::string_view name, bool value) {
+    AddEncoded(name, "bool", value ? "1" : "0");
+}
+
+void CanonicalAttrWriter::Add(std::string_view name, int value) {
+    AddEncoded(name, "int", std::to_string(value));
+}
+
+void CanonicalAttrWriter::Add(std::string_view name, int64_t value) {
+    AddEncoded(name, "int64", std::to_string(value));
+}
+
+void CanonicalAttrWriter::Add(std::string_view name, float value) {
+    AddEncoded(name, "float32-bits", EncodeFloatBits(value));
+}
+
+void CanonicalAttrWriter::Add(std::string_view name,
+                              const std::string& value) {
+    AddEncoded(name, "string", value);
+}
+
+void CanonicalAttrWriter::Add(std::string_view name,
+                              const Array<int64_t>& value) {
+    AddEncoded(name, "int64-array", EncodeIntArray(value));
+}
+
+void CanonicalAttrWriter::Add(std::string_view name,
+                              const VirtualDevice& value) {
+    CanonicalAttrWriter nested;
+    nested.Add("defined", value.defined());
+    if (value.defined()) {
+        const VirtualDeviceNode* node = value.operator->();
+        nested.Add("device_defined", node->device.defined());
+        if (node->device.defined()) {
+            nested.Add("device_type",
+                       static_cast<int>(node->device.device_type()));
+            nested.Add("device_id", node->device.device_id());
+        }
+        nested.Add("target_defined", node->target.defined());
+        if (node->target.defined()) {
+            const TargetNode* target = node->target.operator->();
+            nested.Add("target_kind", target->kind);
+            nested.Add("target_device_type",
+                       static_cast<int>(target->device_type));
+            nested.Add("target_device_id", target->device_id);
+            nested.Add("target_exists", target->attrs.exists);
+            nested.Add("target_max_threads_per_block",
+                       target->attrs.max_threads_per_block);
+            nested.Add("target_warp_size", target->attrs.warp_size);
+            nested.Add("target_max_shared_memory_per_block",
+                       target->attrs.max_shared_memory_per_block);
+            nested.Add("target_compute_version",
+                       target->attrs.compute_version);
+            nested.Add("target_device_name", target->attrs.device_name);
+            nested.Add("target_max_clock_rate_khz",
+                       target->attrs.max_clock_rate_khz);
+            nested.Add("target_max_registers_per_block",
+                       target->attrs.max_registers_per_block);
+            nested.Add("target_api_version", target->attrs.api_version);
+            nested.Add("target_driver_version", target->attrs.driver_version);
+            nested.Add("target_l2_cache_size_bytes",
+                       target->attrs.l2_cache_size_bytes);
+            nested.Add("target_total_global_memory",
+                       target->attrs.total_global_memory);
+            nested.Add("target_available_global_memory",
+                       target->attrs.available_global_memory);
+            nested.Add("target_max_shared_memory_per_multiprocessor",
+                       target->attrs.max_shared_memory_per_multiprocessor);
+            nested.Add("target_max_registers_per_multiprocessor",
+                       target->attrs.max_registers_per_multiprocessor);
+            nested.Add("target_max_threads_per_multiprocessor",
+                       target->attrs.max_threads_per_multiprocessor);
+            nested.Add("target_compute_version_major",
+                       target->attrs.compute_version_major);
+            nested.Add("target_compute_version_minor",
+                       target->attrs.compute_version_minor);
+            nested.Add("target_multi_processor_count",
+                       target->attrs.multi_processor_count);
+            nested.Add("target_arch", target->attrs.arch);
+        }
+        nested.Add("memory_scope", node->memory_scope);
+        nested.Add("virtual_device_id", node->virtual_device_id);
+    }
+    AddEncoded(name, "virtual-device", nested.Finish());
+}
+
+std::string CanonicalAttrWriter::Finish() const {
+    return buffer_;
+}
+
+std::string SerializeAttrs(const Attrs& attrs) {
+    if (!attrs.defined()) return "<none>";
+    const auto* node = attrs.As<BaseAttrsNode>();
+    if (!node) {
+        throw std::invalid_argument(
+            "Canonical attrs serialization requires BaseAttrsNode");
+    }
+    CanonicalAttrWriter writer;
+    node->SerializeCanonical(writer);
+    std::string result = "kxc.attrs.v1";
+    AppendLengthDelimited(&result, node->GetTypeKey());
+    AppendLengthDelimited(&result, writer.Finish());
+    return result;
+}
+
+void Conv2DAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("strides", strides);
+    writer.Add("padding", padding);
+    writer.Add("dilation", dilation);
+    writer.Add("groups", groups);
+    writer.Add("channels", channels);
+    writer.Add("kernel_size", kernel_size);
+    writer.Add("data_layout", data_layout);
+    writer.Add("kernel_layout", kernel_layout);
+    writer.Add("out_layout", out_layout);
+    writer.Add("out_dtype", out_dtype);
+}
+
+void DenseAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("units", units);
+    writer.Add("out_dtype", out_dtype);
+}
+
+void MaxPool2DAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("pool_size", pool_size);
+    writer.Add("strides", strides);
+    writer.Add("padding", padding);
+    writer.Add("dilation", dilation);
+    writer.Add("layout", layout);
+    writer.Add("ceil_mode", ceil_mode);
+}
+
+void SoftmaxAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axis", axis);
+}
+
+void CastAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("to", to);
+}
+
+void ReduceMeanAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axes", axes);
+    writer.Add("keepdims", keepdims);
+}
+
+void ReshapeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("newshape", newshape);
+    writer.Add("allowzero", allowzero);
+}
+
+void TransposeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("perm", perm);
+}
+
+void FlattenAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axis", axis);
+}
+
+void GemmAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("alpha", alpha);
+    writer.Add("beta", beta);
+    writer.Add("transA", transA);
+    writer.Add("transB", transB);
+}
+
+void DeviceCopyAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("src_virtual_device", src_virtual_device);
+    writer.Add("dst_virtual_device", dst_virtual_device);
+    writer.Add("async", async);
+    writer.Add("in_group", in_group);
+}
+
+void CollectiveAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("kind", kind);
+    writer.Add("reduce_kind", reduce_kind);
+    writer.Add("in_group", in_group);
+    writer.Add("group_id", group_id);
+    writer.Add("root_worker", root_worker);
+}
 
 // 构造并持有算子的稳定名称与说明元数据。
 Op::Op(std::string name, std::string description) {

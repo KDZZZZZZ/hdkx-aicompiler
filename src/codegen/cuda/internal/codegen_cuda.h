@@ -8,6 +8,8 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "kxc/tir/stmt.h"
 
@@ -25,6 +27,10 @@ public:
     /*! \brief 重置单次生成状态，并按 PrimFunc.params 的稳定顺序生成 CUDA 源码。 */
     std::string Generate(const tir::PrimFunc& function,
                          const std::string& symbol);
+
+    /*! \brief Emits several independent kernels into one NVRTC translation unit. */
+    std::string GenerateModule(
+        const std::vector<std::pair<tir::PrimFunc, std::string>>& functions);
 
 private:
     /*! \brief 递归生成一个标量表达式；undefined 和未知节点均视为 codegen 错误。 */

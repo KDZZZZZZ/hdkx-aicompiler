@@ -16,6 +16,10 @@
 | `tests` | bool | `true`, `false` | 是否要求测试引用 |
 | `onnx_ops` | array | ONNX op 名称列表 | 非空时 importer 必须有映射 |
 
+所有非空 attrs 节点必须通过 `SerializeCanonical(CanonicalAttrWriter&)` 按
+schema 顺序写入全部字段。该序列化必须只依赖字段值，不得包含对象地址、注册
+顺序或进程状态；字段遗漏或重复均属于 operator contract 违规。
+
 ## Canonical name
 
 | 场景 | 规则 |

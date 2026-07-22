@@ -6,6 +6,7 @@
 
 #include <any>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -57,6 +58,27 @@ struct OperatorSpec {
     std::string alias_contract = "none";
     OperatorLoweringKind lowering_kind = OperatorLoweringKind::kNone;
     std::string lowering_key;
+};
+
+/*! \brief Typed writer for deterministic, length-delimited attrs fingerprints. */
+class CanonicalAttrWriter {
+public:
+    void Add(std::string_view name, bool value);
+    void Add(std::string_view name, int value);
+    void Add(std::string_view name, int64_t value);
+    void Add(std::string_view name, float value);
+    void Add(std::string_view name, const std::string& value);
+    void Add(std::string_view name, const Array<int64_t>& value);
+    void Add(std::string_view name, const VirtualDevice& value);
+
+    std::string Finish() const;
+
+private:
+    void AddEncoded(std::string_view name, std::string_view type,
+                    const std::string& payload);
+
+    std::string buffer_;
+    std::vector<std::string> field_names_;
 };
 
 /*! \brief Relay 算子对象，保存算子名称、描述、输入数和任意属性。 */
@@ -118,6 +140,9 @@ private:                                                                        
 #define KXC_DEFINE_SIMPLE_ATTRS(TypeName)             \
     class TypeName##Node : public BaseAttrsNode {     \
     public:                                            \
+        void SerializeCanonical(CanonicalAttrWriter& writer) const override { \
+            (void)writer;                              \
+        }                                              \
         KXC_DECLARE_ATTRS_NODE                         \
     };                                                 \
     class TypeName : public Attrs {                   \
@@ -131,6 +156,7 @@ private:                                                                        
 class BaseAttrsNode : public Object {
 public:
     virtual void VisitAttrs(AttrVisitor& visitor) { (void)visitor; }
+    virtual void SerializeCanonical(CanonicalAttrWriter& writer) const = 0;
 
     KXC_DECLARE_ATTRS_NODE
 };
@@ -144,6 +170,9 @@ public:
 
     const BaseAttrsNode* operator->() const { return static_cast<const BaseAttrsNode*>(object_); }
 };
+
+/*! \brief Returns a stable type-and-value serialization for compilation identity. */
+std::string SerializeAttrs(const Attrs& attrs);
 
 /*! \brief nn.conv2d 的卷积窗口、布局和输出通道属性。 */
 class Conv2DAttrsNode : public BaseAttrsNode {
@@ -160,6 +189,7 @@ public:
     std::string out_dtype;
 
     void VisitAttrs(AttrVisitor& visitor) override { (void)visitor; }
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
 
     KXC_DECLARE_ATTRS_NODE
 };
@@ -182,6 +212,7 @@ class DenseAttrsNode : public BaseAttrsNode {
 public:
     int64_t units;
     std::string out_dtype;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 
@@ -203,6 +234,7 @@ public:
     std::string layout;
     bool ceil_mode;
 
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 
@@ -220,6 +252,7 @@ public:
 class SoftmaxAttrsNode : public BaseAttrsNode {
 public:
     int axis;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 
@@ -237,6 +270,7 @@ KXC_DEFINE_SIMPLE_ATTRS(AddAttrs)
 class CastAttrsNode : public BaseAttrsNode {
 public:
     int to;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 class CastAttrs : public Attrs {
@@ -251,6 +285,7 @@ class ReduceMeanAttrsNode : public BaseAttrsNode {
 public:
     Array<int64_t> axes;
     int64_t keepdims = 1;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 class ReduceMeanAttrs : public Attrs {
@@ -265,6 +300,7 @@ class ReshapeAttrsNode : public BaseAttrsNode {
 public:
     Array<int64_t> newshape;
     int allowzero = 0;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 class ReshapeAttrs : public Attrs {
@@ -278,6 +314,7 @@ public:
 class TransposeAttrsNode : public BaseAttrsNode {
 public:
     Array<int64_t> perm;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 class TransposeAttrs : public Attrs {
@@ -294,6 +331,7 @@ KXC_DEFINE_SIMPLE_ATTRS(GlobalAvgPool2DAttrs)
 class FlattenAttrsNode : public BaseAttrsNode {
 public:
     int axis = 1;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 class FlattenAttrs : public Attrs {
@@ -310,6 +348,7 @@ public:
     float beta = 1.0f;
     int transA = 0;
     int transB = 0;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 class GemmAttrs : public Attrs {
@@ -327,6 +366,7 @@ public:
     VirtualDevice dst_virtual_device;
     bool async = false;
     bool in_group = true;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 class DeviceCopyAttrs : public Attrs {
@@ -346,6 +386,7 @@ public:
     bool in_group = true;
     int group_id = 0;
     int root_worker = 0;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
 class CollectiveAttrs : public Attrs {

@@ -23,6 +23,7 @@ struct FailedAsyncRetention {
     DeviceStream stream;
     Array<Storage> storage;
     ObjectRef executable;
+    std::shared_ptr<void> context;
     void* event;
 };
 
@@ -31,6 +32,7 @@ void RetainFailedNode(const AsyncOperationNode& node) noexcept {
     try {
         (void)new FailedAsyncRetention{node.stream, node.retained_storage,
                                        node.retained_executable,
+                                       node.retained_context,
                                        node.backend_event};
     } catch (...) {
         std::terminate();
@@ -167,6 +169,38 @@ AsyncOperation AsyncOperation::Pending(const DeviceStream& stream, void* event,
     node->retained_storage = std::move(retained);
     node->retained_executable = std::move(executable);
     return operation;
+}
+
+void AsyncOperation::RetainDependencies(Array<Storage> retained,
+                                        std::shared_ptr<void> context) const {
+    if (!context) {
+        throw std::invalid_argument(
+            "AsyncOperation retained context must not be null");
+    }
+    const auto* node = operator->();
+    std::lock_guard<std::mutex> lock(node->mutex);
+    if (node->retained_context) {
+        throw std::logic_error(
+            "AsyncOperation graph dependencies are already attached");
+    }
+    auto* mutable_node = const_cast<AsyncOperationNode*>(node);
+    for (const auto& storage : retained) {
+        if (!storage.defined()) {
+            throw std::invalid_argument(
+                "AsyncOperation cannot retain undefined Storage");
+        }
+        bool already_retained = false;
+        for (const auto& existing : mutable_node->retained_storage) {
+            if (existing.get() == storage.get()) {
+                already_retained = true;
+                break;
+            }
+        }
+        if (!already_retained) {
+            mutable_node->retained_storage.push_back(storage);
+        }
+    }
+    mutable_node->retained_context = std::move(context);
 }
 
 // 阻塞等待并恰好释放一次完成 event。

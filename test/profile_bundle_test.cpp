@@ -52,8 +52,8 @@ int main() {
         api::CompileConfig::Create(BuildTarget(Device::CPU()), 1);
 #if KXC_USE_LLVM
     // LLVM 构建额外经过真实 Compiler，锁定七个显式阶段都进入同一 bundle。
-    api::CompiledModule module = api::Compiler::Compile(func, config);
-    if (!module.IsReady()) {
+    api::CompiledGraph compiled = api::Compiler::Compile(func, config);
+    if (!compiled.module.IsReady() || !compiled.plan.defined()) {
         std::cerr << "Compiler profiling fixture did not produce a ready module\n";
         return 1;
     }
@@ -140,16 +140,34 @@ int main() {
                 line.find("\"opt_level\":\"1\"") != std::string::npos;
             if (stage != "validate") {
                 fields_valid = fields_valid &&
-                               line.find("\"ir_hash\":") != std::string::npos;
+                               (stage == "optimize_relay"
+                                    ? line.find("\"ir_hash\":") !=
+                                          std::string::npos
+                                    : line.find("\"unit.0.ir_hash\":") !=
+                                          std::string::npos);
             }
             if (stage == "build_signature" || stage == "build_backend" ||
                 stage == "assemble") {
                 fields_valid = fields_valid &&
-                               line.find("\"symbol\":") != std::string::npos;
+                               line.find("\"unit.0.symbol\":") !=
+                                   std::string::npos;
             }
             if (stage == "build_backend" || stage == "assemble") {
                 fields_valid = fields_valid &&
-                               line.find("\"backend\":\"llvm\"") !=
+                               line.find("\"unit.0.backend\":\"llvm\"") !=
+                                   std::string::npos &&
+                               line.find("\"cache_hit_rate\":") !=
+                                   std::string::npos;
+            }
+            if (stage == "lower" || stage == "optimize_tir" ||
+                stage == "build_signature" || stage == "build_backend" ||
+                stage == "assemble") {
+                fields_valid = fields_valid &&
+                               line.find("\"primitive_count\":") !=
+                                   std::string::npos &&
+                               line.find("\"storage_slot_count\":") !=
+                                   std::string::npos &&
+                               line.find("\"planned_peak_storage_bytes\":") !=
                                    std::string::npos;
             }
             compiler_stage_fields_valid = compiler_stage_fields_valid && fields_valid;

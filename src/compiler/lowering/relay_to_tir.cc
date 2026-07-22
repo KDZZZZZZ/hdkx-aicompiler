@@ -3,6 +3,7 @@
  */
 
 #include "kxc/compiler/lowering/relay_to_tir.h"
+#include "../internal/te_to_tir.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/op.h"
@@ -15,6 +16,7 @@
 #include "kxc/tir/expr.h"
 #include "kxc/tir/visitor.h"
 
+#include <algorithm>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -168,12 +170,7 @@ Array<te::Tensor> InvokeRelayToTE(const OpNode* op_node,
 // 把已完成类型推导的 Relay 数据流转换为 TE Tensor 图。
 class RelayToTEConverter : public RelayPassFunctor<Array<te::Tensor>> {
 public:
-    /*! \brief 将常量 placeholder、稳定 key 和原始 payload 保存在同一记录中。 */
-    struct ConstantRecord {
-        te::Tensor tensor;
-        String key;
-        runtime::NDArray value;
-    };
+    using ConstantRecord = internal::ConstantTensor;
 
     // 为函数参数建立 TE placeholder 与变量映射。
     explicit RelayToTEConverter(const Function& func) {
@@ -339,10 +336,19 @@ void FindProducerLoads(const tir::PrimExpr& expr, std::vector<te::Tensor>* deps)
 // 对 TE 张量依赖图执行 DFS，生成生产者在前的拓扑顺序。
 void CollectOpsDFS(const te::Tensor& t,
                    std::unordered_set<const Object*>* visited,
-                   std::unordered_map<const Object*, te::Tensor>* op_output,
+                   std::unordered_map<const Object*, std::vector<te::Tensor>>* op_outputs,
                    std::vector<te::Operation>* topo) {
     if (!t.defined() || !t->op.defined()) return;
     const Object* op_ptr = t->op.get();
+    auto& outputs = (*op_outputs)[op_ptr];
+    bool recorded = false;
+    for (const auto& existing : outputs) {
+        if (existing.get() == t.get()) {
+            recorded = true;
+            break;
+        }
+    }
+    if (!recorded) outputs.push_back(t);
     if (visited->count(op_ptr)) return;
 
     if (auto* cop = t->op.As<te::ComputeOpNode>()) {
@@ -350,13 +356,12 @@ void CollectOpsDFS(const te::Tensor& t,
             std::vector<te::Tensor> deps;
             FindProducerLoads(body_expr, &deps);
             for (const auto& dep : deps) {
-                CollectOpsDFS(dep, visited, op_output, topo);
+                CollectOpsDFS(dep, visited, op_outputs, topo);
             }
         }
     }
 
     visited->insert(op_ptr);
-    (*op_output)[op_ptr] = t;
     topo->push_back(t->op);
 }
 
@@ -427,7 +432,7 @@ tir::Stmt WrapDataLoops(const te::ComputeOpNode* op, tir::Stmt body) {
     return body;
 }
 
-// 将单输出 TE ComputeOp 降为 TIR Store、数据循环和可选归约循环。
+// 将 TE ComputeOp 的指定 value_index 降为 TIR Store、数据循环和可选归约循环。
 tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
                            const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor,
                            const ExprLowerer& expr_lowerer) {
@@ -438,10 +443,10 @@ tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
     if (op->body.empty()) {
         throw std::runtime_error("ComputeOp body is empty");
     }
-    if (op->body.size() != 1) {
-        throw std::runtime_error("LowerComputeStmt does not support multi-body TE compute for tensor '" +
-                                 out_tensor->name + "': body_count=" +
-                                 std::to_string(op->body.size()));
+    if (out_tensor->value_index < 0 ||
+        static_cast<size_t>(out_tensor->value_index) >= op->body.size()) {
+        throw std::runtime_error(
+            "LowerComputeStmt tensor value_index is outside ComputeOp body");
     }
 
     auto out_it = buffer_var_by_tensor.find(out_tensor.get());
@@ -454,7 +459,7 @@ tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
     for (const auto& ax : op->axis) data_indices.push_back(ax);
     tir::PrimExpr out_index = FlattenIndex(data_indices, op->shape);
 
-    tir::PrimExpr body_expr = op->body[0];
+    tir::PrimExpr body_expr = op->body[static_cast<size_t>(out_tensor->value_index)];
     if (auto* red = body_expr.As<te::ReduceNode>()) {
         if (red->source.size() != 1) {
             throw std::runtime_error("Only single-source reduce is supported");
@@ -510,6 +515,194 @@ std::string MakeOutputVarName(const te::Tensor& tensor,
 
 }  // namespace
 
+namespace internal {
+
+LoweredFunction LowerTensorGraphToTIR(
+    const Array<te::Tensor>& inputs,
+    const std::vector<ConstantTensor>& constants,
+    const Array<te::Tensor>& outputs,
+    const PrimFuncIdentity& identity) {
+    if (std::string(identity.symbol).empty()) {
+        throw std::invalid_argument("PrimFunc identity requires a non-empty symbol");
+    }
+    if (identity.unit_id >= 0 &&
+        (std::string(identity.operator_name).empty() ||
+         identity.operator_schema_version <= 0 ||
+         std::string(identity.structural_hash).empty())) {
+        throw std::invalid_argument(
+            "Per-unit PrimFunc identity requires operator and structural metadata");
+    }
+    if (outputs.empty()) {
+        throw std::invalid_argument("TE-to-TIR lowering requires output tensors");
+    }
+
+    std::unordered_map<const Object*, size_t> output_index_by_tensor;
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        const te::Tensor& output = outputs[i];
+        if (!output.defined()) {
+            throw std::invalid_argument("TE-to-TIR output tensor is undefined");
+        }
+        if (!output_index_by_tensor.emplace(output.get(), i).second) {
+            throw std::invalid_argument(
+                "TE-to-TIR output tensors must be distinct logical values");
+        }
+        if (!output->op.As<te::ComputeOpNode>()) {
+            throw std::invalid_argument(
+                "TE-to-TIR public outputs must be produced by ComputeOp");
+        }
+    }
+
+    std::unordered_set<const Object*> visited_ops;
+    std::unordered_map<const Object*, std::vector<te::Tensor>> op_output_tensors;
+    std::vector<te::Operation> topo_ops;
+    for (const auto& output : outputs) {
+        CollectOpsDFS(output, &visited_ops, &op_output_tensors, &topo_ops);
+    }
+    for (auto& entry : op_output_tensors) {
+        std::sort(entry.second.begin(), entry.second.end(),
+                  [](const te::Tensor& lhs, const te::Tensor& rhs) {
+                      return lhs->value_index < rhs->value_index;
+                  });
+    }
+
+    Array<tir::Var> params;
+    Map<tir::Var, tir::Buffer> buffer_map;
+    std::unordered_map<const Object*, tir::Var> buffer_var_by_tensor;
+    for (const auto& tensor : inputs) {
+        if (!tensor.defined()) {
+            throw std::invalid_argument("TE-to-TIR input tensor is undefined");
+        }
+        tir::Var data_var(tensor->name, tensor->dtype);
+        tir::Buffer buffer(data_var, tensor->dtype, tensor->shape, {},
+                           tir::IntImm(0), tensor->name, 0, 0);
+        params.push_back(data_var);
+        buffer_map.Set(data_var, buffer);
+        buffer_var_by_tensor[tensor.get()] = data_var;
+    }
+    const int64_t input_count = static_cast<int64_t>(inputs.size());
+
+    Array<ConstantBinding> constant_bindings;
+    Array<String> constant_keys;
+    for (const auto& record : constants) {
+        if (!record.tensor.defined() || !record.value.defined() ||
+            std::string(record.key).empty()) {
+            throw std::invalid_argument(
+                "TE-to-TIR constant tensor record is incomplete");
+        }
+        const te::Tensor& tensor = record.tensor;
+        tir::Var data_var(tensor->name, tensor->dtype);
+        tir::Buffer buffer(data_var, tensor->dtype, tensor->shape, {},
+                           tir::IntImm(0), tensor->name, 0, 0);
+        params.push_back(data_var);
+        buffer_map.Set(data_var, buffer);
+        buffer_var_by_tensor[tensor.get()] = data_var;
+        const int64_t param_index = static_cast<int64_t>(params.size() - 1);
+        constant_bindings.push_back(
+            ConstantBinding(record.key, record.value, param_index));
+        constant_keys.push_back(record.key);
+    }
+    const int64_t constant_count = static_cast<int64_t>(constants.size());
+    const int64_t output_param_start = input_count + constant_count;
+
+    std::unordered_set<const Object*> public_outputs;
+    std::unordered_set<std::string> used_output_names;
+    for (size_t index = 0; index < outputs.size(); ++index) {
+        const te::Tensor& tensor = outputs[index];
+        public_outputs.insert(tensor.get());
+        const std::string name =
+            MakeOutputVarName(tensor, index, &used_output_names);
+        tir::Var data_var(name, tensor->dtype);
+        tir::Buffer buffer(data_var, tensor->dtype, tensor->shape, {},
+                           tir::IntImm(0), name, 0, 0);
+        params.push_back(data_var);
+        buffer_map.Set(data_var, buffer);
+        buffer_var_by_tensor[tensor.get()] = data_var;
+    }
+
+    std::vector<te::Tensor> intermediates;
+    for (const auto& operation : topo_ops) {
+        if (!operation.As<te::ComputeOpNode>()) continue;
+        const auto tensors_it = op_output_tensors.find(operation.get());
+        if (tensors_it == op_output_tensors.end()) continue;
+        for (const auto& tensor : tensors_it->second) {
+            if (public_outputs.count(tensor.get()) != 0) continue;
+            tir::Var local_var(tensor->name, tensor->dtype);
+            buffer_var_by_tensor[tensor.get()] = local_var;
+            intermediates.push_back(tensor);
+        }
+    }
+
+    ExprLowerer expr_lowerer(buffer_var_by_tensor);
+    Array<tir::Stmt> compute_sequence;
+    for (const auto& operation : topo_ops) {
+        if (operation.As<te::PlaceholderOpNode>()) continue;
+        const auto tensors_it = op_output_tensors.find(operation.get());
+        if (tensors_it == op_output_tensors.end() || tensors_it->second.empty()) {
+            throw std::runtime_error(
+                "Missing tensor outputs during TE statement lowering");
+        }
+        for (const auto& tensor : tensors_it->second) {
+            if (!tensor->op.As<te::ComputeOpNode>()) {
+                throw std::runtime_error(
+                    "Unsupported non-compute operation in TIR lowering");
+            }
+            try {
+                compute_sequence.push_back(
+                    LowerComputeStmt(tensor, buffer_var_by_tensor, expr_lowerer));
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    "LowerComputeStmt failed for tensor '" + tensor->name +
+                    "': " + error.what());
+            }
+        }
+    }
+
+    tir::Stmt body;
+    if (compute_sequence.size() == 1) {
+        body = compute_sequence[0];
+    } else if (!compute_sequence.empty()) {
+        body = tir::SeqStmt(compute_sequence);
+    }
+    for (auto it = intermediates.rbegin(); it != intermediates.rend(); ++it) {
+        const te::Tensor& tensor = *it;
+        body = tir::Allocate(buffer_var_by_tensor.at(tensor.get()), tensor->dtype,
+                             tensor->shape,
+                             tir::IntImm(1, tir::DataType::Bool()), body);
+    }
+
+    Map<String, ObjectRef> attrs;
+    attrs.Set("global_symbol", identity.symbol);
+    attrs.Set("tir.noalias", tir::IntImm(1, tir::DataType::Bool()));
+    attrs.Set("kxc.input_count",
+              tir::IntImm(input_count, tir::DataType::Int(64)));
+    attrs.Set("kxc.constant_count",
+              tir::IntImm(constant_count, tir::DataType::Int(64)));
+    attrs.Set("kxc.output_count",
+              tir::IntImm(static_cast<int64_t>(outputs.size()),
+                          tir::DataType::Int(64)));
+    attrs.Set("kxc.output_param_start",
+              tir::IntImm(output_param_start, tir::DataType::Int(64)));
+    attrs.Set("kxc.constant_keys", codegen::KernelConstantKeys(constant_keys));
+    if (identity.unit_id >= 0) {
+        const String operator_identity(
+            std::string(identity.operator_name) + "@v" +
+            std::to_string(identity.operator_schema_version));
+        attrs.Set("kxc.unit_id",
+                  tir::IntImm(identity.unit_id, tir::DataType::Int(64)));
+        attrs.Set("kxc.operator_name", identity.operator_name);
+        attrs.Set("kxc.operator_schema_version",
+                  tir::IntImm(identity.operator_schema_version,
+                              tir::DataType::Int(64)));
+        attrs.Set("kxc.operator_identity", operator_identity);
+        attrs.Set("kxc.structural_hash", identity.structural_hash);
+    }
+    attrs = tir::AttachPassContextAttrs(attrs, PassContext::Current());
+    return LoweredFunction(tir::PrimFunc(params, body, buffer_map, attrs),
+                           constant_bindings);
+}
+
+}  // namespace internal
+
 // 完成类型推导、Relay-to-TE 转换、拓扑排序并保留常量绑定。
 LoweredFunction LowerToTIR(Function func) {
     if (!func.defined()) {
@@ -542,148 +735,10 @@ LoweredFunction LowerToTIR(Function func) {
         if (outputs.empty()) {
             throw std::runtime_error("LowerToTIR produced no output tensors");
         }
-        std::unordered_map<const Object*, size_t> output_index_by_tensor;
-        for (size_t i = 0; i < outputs.size(); ++i) {
-            const te::Tensor& out_tensor = outputs[i];
-            if (!out_tensor.defined()) {
-                throw std::runtime_error("LowerToTIR output tensor " +
-                                         std::to_string(i) + " is undefined");
-            }
-            auto duplicate = output_index_by_tensor.find(out_tensor.get());
-            if (duplicate != output_index_by_tensor.end()) {
-                throw std::runtime_error(
-                    "LowerToTIR does not support duplicate output tensor '" +
-                    out_tensor->name + "' at output " + std::to_string(i) +
-                    "; first seen at output " + std::to_string(duplicate->second));
-            }
-            output_index_by_tensor[out_tensor.get()] = i;
-            if (!out_tensor->op.As<te::ComputeOpNode>()) {
-                throw std::runtime_error(
-                    "LowerToTIR requires output tensor " + std::to_string(i) +
-                    " ('" + out_tensor->name + "') to lower to a compute tensor");
-            }
-        }
-
-        std::unordered_set<const Object*> visited_ops;
-        std::unordered_map<const Object*, te::Tensor> op_output_tensor;
-        std::vector<te::Operation> topo_ops;
-        for (const auto& out_tensor : outputs) {
-            CollectOpsDFS(out_tensor, &visited_ops, &op_output_tensor, &topo_ops);
-        }
-
-        Array<tir::Var> params;
-        Map<tir::Var, tir::Buffer> buffer_map;
-        std::unordered_map<const Object*, tir::Var> buffer_var_by_tensor;
-
-        for (const auto& t : converter.input_tensors()) {
-            tir::Var data_var(t->name, t->dtype);
-            tir::Buffer buf(data_var, t->dtype, t->shape, {}, tir::IntImm(0), t->name, 0, 0);
-            params.push_back(data_var);
-            buffer_map.Set(data_var, buf);
-            buffer_var_by_tensor[t.get()] = data_var;
-        }
-        const int64_t input_count = static_cast<int64_t>(converter.input_tensors().size());
-
-        Array<ConstantBinding> constant_bindings;
-        Array<String> constant_keys;
-        for (const auto& record : converter.constant_records()) {
-            const te::Tensor& t = record.tensor;
-            tir::Var data_var(t->name, t->dtype);
-            tir::Buffer buf(data_var, t->dtype, t->shape, {}, tir::IntImm(0), t->name, 0, 0);
-            params.push_back(data_var);
-            buffer_map.Set(data_var, buf);
-            buffer_var_by_tensor[t.get()] = data_var;
-            const int64_t param_index = static_cast<int64_t>(params.size() - 1);
-            constant_bindings.push_back(
-                ConstantBinding(record.key, record.value, param_index));
-            constant_keys.push_back(record.key);
-        }
-        const int64_t constant_count =
-            static_cast<int64_t>(converter.constant_records().size());
-        const int64_t output_param_start = input_count + constant_count;
-
-        std::unordered_set<const Object*> output_tensor_set;
-        std::unordered_set<std::string> used_output_names;
-        for (size_t i = 0; i < outputs.size(); ++i) {
-            const te::Tensor& out_tensor = outputs[i];
-            output_tensor_set.insert(out_tensor.get());
-            std::string out_name = MakeOutputVarName(out_tensor, i, &used_output_names);
-            tir::Var out_var(out_name, out_tensor->dtype);
-            tir::Buffer out_buf(out_var, out_tensor->dtype, out_tensor->shape, {},
-                                tir::IntImm(0), out_name, 0, 0);
-            params.push_back(out_var);
-            buffer_map.Set(out_var, out_buf);
-            buffer_var_by_tensor[out_tensor.get()] = out_var;
-        }
-
-        std::vector<te::Tensor> intermediates;
-        for (const auto& op : topo_ops) {
-            if (!op.As<te::ComputeOpNode>()) continue;
-            auto t_it = op_output_tensor.find(op.get());
-            if (t_it == op_output_tensor.end()) continue;
-            te::Tensor t = t_it->second;
-            if (output_tensor_set.count(t.get()) != 0) continue;
-            tir::Var local_var(t->name, t->dtype);
-            buffer_var_by_tensor[t.get()] = local_var;
-            intermediates.push_back(t);
-        }
-
-        ExprLowerer expr_lowerer(buffer_var_by_tensor);
-
-        Array<tir::Stmt> compute_seq;
-        for (const auto& op : topo_ops) {
-            if (op.As<te::PlaceholderOpNode>()) {
-                continue;
-            }
-            auto t_it = op_output_tensor.find(op.get());
-            if (t_it == op_output_tensor.end()) {
-                throw std::runtime_error(
-                    "Missing tensor for operation during statement lowering");
-            }
-            te::Tensor t = t_it->second;
-            if (!t->op.As<te::ComputeOpNode>()) {
-                throw std::runtime_error("Unsupported non-compute operation in TIR lowering");
-            }
-            try {
-                compute_seq.push_back(LowerComputeStmt(t, buffer_var_by_tensor, expr_lowerer));
-            } catch (const std::exception& e) {
-                throw std::runtime_error("LowerComputeStmt failed for tensor '" + t->name +
-                                         "': " + e.what());
-            }
-        }
-
-        tir::Stmt body;
-        if (compute_seq.empty()) {
-            body = tir::Stmt();
-        } else if (compute_seq.size() == 1) {
-            body = compute_seq[0];
-        } else {
-            body = tir::SeqStmt(compute_seq);
-        }
-
-        for (int i = static_cast<int>(intermediates.size()) - 1; i >= 0; --i) {
-            const auto& t = intermediates[i];
-            tir::Var data_var = buffer_var_by_tensor[t.get()];
-            body = tir::Allocate(data_var, t->dtype, t->shape,
-                                 tir::IntImm(1, tir::DataType::Bool()), body);
-        }
-
-        Map<String, ObjectRef> attrs;
-        attrs.Set(String("global_symbol"), String("main"));
-        attrs.Set(String("tir.noalias"), tir::IntImm(1, tir::DataType::Bool()));
-        attrs.Set(String("kxc.input_count"), tir::IntImm(input_count, tir::DataType::Int(64)));
-        attrs.Set(String("kxc.constant_count"),
-                  tir::IntImm(constant_count, tir::DataType::Int(64)));
-        attrs.Set(String("kxc.output_count"),
-                  tir::IntImm(static_cast<int64_t>(outputs.size()), tir::DataType::Int(64)));
-        attrs.Set(String("kxc.output_param_start"),
-                  tir::IntImm(output_param_start, tir::DataType::Int(64)));
-        // key 列表与常量参数段同序，Codegen 无需回扫 Relay 或解析变量名。
-        attrs.Set(String("kxc.constant_keys"),
-                  codegen::KernelConstantKeys(constant_keys));
-        attrs = tir::AttachPassContextAttrs(attrs, PassContext::Current());
-
-        tir::PrimFunc lowered = tir::PrimFunc(params, body, buffer_map, attrs);
+        LoweredFunction lowered_result = internal::LowerTensorGraphToTIR(
+            converter.input_tensors(), converter.constant_records(), outputs,
+            internal::PrimFuncIdentity{String("main")});
+        const tir::PrimFunc& lowered = lowered_result->prim_func;
         std::ostringstream tir_os;
         tir::pass::DumpPrimFunc(lowered, tir_os);
         const std::string tir_text = tir_os.str();
@@ -698,7 +753,7 @@ LoweredFunction LowerToTIR(Function func) {
             profile_context->WriteArtifact(prefix + ".before.relay.txt", relay_text);
             profile_context->WriteArtifact(prefix + ".after.tir.txt", tir_text);
         }
-        return LoweredFunction(lowered, constant_bindings);
+        return lowered_result;
     } catch (const std::exception& e) {
         span.SetStatus("error");
         span.SetMessage(e.what());

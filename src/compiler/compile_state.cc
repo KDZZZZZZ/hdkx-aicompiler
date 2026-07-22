@@ -1,11 +1,13 @@
 /*! \file src/compiler/compile_state.cc
- * \brief 实现 CompileResult 的阶段校验、不可变复制和单向状态转移。
+ * \brief Implements validation and transitions for multi-primitive compile state.
  */
 
 #include "internal/compile_state.h"
 #include "kxc/support/object_registration.h"
 
 #include <stdexcept>
+#include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace kxc::api {
@@ -14,13 +16,12 @@ KXC_OBJECT_DEFINE_WITH_KEY(CompileResultNode, "kxc.api.CompileResultNode")
 
 namespace {
 
-// 判断状态是否已经到达指定阶段，供只读访问器统一控制字段可见性。
 bool HasReached(CompileStage current, CompileStage required) {
     return static_cast<int>(current) >= static_cast<int>(required);
 }
 
-// 强制状态转移只能前进一步，避免跳过签名或重复执行同一 pipeline 阶段。
-void RequireStage(CompileStage actual, CompileStage expected, const char* operation) {
+void RequireStage(CompileStage actual, CompileStage expected,
+                  const char* operation) {
     if (actual != expected) {
         throw std::logic_error(std::string(operation) + " requires stage " +
                                std::to_string(static_cast<int>(expected)) +
@@ -29,27 +30,31 @@ void RequireStage(CompileStage actual, CompileStage expected, const char* operat
     }
 }
 
-// 校验 Relay 句柄确实包含 FunctionNode，避免继承构造器带入其他 Relay 节点。
 void ValidateFunction(const Function& function, const char* field) {
-    if (!function.defined() || !function.As<FunctionNode>()) {
-        throw std::invalid_argument(std::string(field) + " must contain FunctionNode");
-    }
-    if (!function->body.defined()) {
+    if (!function.defined() || !function.As<FunctionNode>() ||
+        !function->body.defined()) {
         throw std::invalid_argument(std::string(field) + " must have a body");
     }
 }
 
-// 校验 TIR 句柄的动态节点类型和最小可编译结构。
-void ValidatePrimFunc(const tir::PrimFunc& function, const char* field) {
-    if (!function.defined() || !function.As<tir::PrimFuncNode>()) {
-        throw std::invalid_argument(std::string(field) + " must contain PrimFuncNode");
-    }
-    if (!function->body.defined()) {
-        throw std::invalid_argument(std::string(field) + " must have a body");
+void ValidatePrimFunc(const tir::PrimFunc& function,
+                      const std::string& context) {
+    if (!function.defined() || !function.As<tir::PrimFuncNode>() ||
+        !function->body.defined()) {
+        throw std::invalid_argument(context +
+                                    " must contain a PrimFunc with a body");
     }
 }
 
-// 深拷贝 Map 容器节点，隔离项目 Map 的共享可变实现。
+void ValidateTarget(const Target& target) {
+    if (!target.defined() || !target.As<TargetNode>() ||
+        target->device_type == kUnknown || target->device_id < 0 ||
+        target->kind.empty()) {
+        throw std::invalid_argument("CompileResult target identity is incomplete");
+    }
+    (void)Device(target->device_type, target->device_id);
+}
+
 Map<String, runtime::NDArray> CopyConstants(
     const Map<String, runtime::NDArray>& constants) {
     Map<String, runtime::NDArray> result;
@@ -57,57 +62,96 @@ Map<String, runtime::NDArray> CopyConstants(
     return result;
 }
 
-// 常量 key 和 payload 在 Lower 阶段一经写入就必须完整可解释。
 void ValidateConstants(const Map<String, runtime::NDArray>& constants) {
     for (const auto& item : constants) {
-        if (std::string(item.first).empty()) {
-            throw std::invalid_argument("CompileResult constant key must not be empty");
-        }
-        if (!item.second.defined() || !item.second.As<runtime::NDArrayNode>()) {
+        if (std::string(item.first).empty() || !item.second.defined() ||
+            !item.second.As<runtime::NDArrayNode>()) {
             throw std::invalid_argument(
-                "CompileResult constant value must contain NDArrayNode");
+                "CompileResult constants require non-empty keys and NDArrays");
         }
     }
 }
 
-// Target 是后续签名与后端选择的唯一设备事实来源。
-void ValidateTarget(const Target& target) {
-    if (!target.defined() || !target.As<TargetNode>()) {
-        throw std::invalid_argument("CompileResult target must contain TargetNode");
-    }
-    if (target->device_type == kUnknown || target->device_id < 0 ||
-        target->kind.empty()) {
-        throw std::invalid_argument("CompileResult target identity is incomplete");
-    }
-    // Device 构造器统一执行 device type/id 的项目级合法性检查。
-    (void)Device(target->device_type, target->device_id);
+std::string PrimitiveContext(const PrimitiveCompileState& primitive) {
+    return "unit " + std::to_string(primitive.unit_id) + " ('" +
+           std::string(primitive.symbol) + "', " +
+           std::string(primitive.operator_identity) + ")";
 }
 
-// 签名中的物理设备必须与全流程唯一 Target 一致。
+int64_t ReadIntAttr(const tir::PrimFunc& function, const char* key,
+                    const std::string& context) {
+    const String attr_key(key);
+    if (!function->attrs.count(attr_key)) {
+        throw std::invalid_argument(context + " is missing PrimFunc attr " + key);
+    }
+    const auto* value = function->attrs.at(attr_key).As<tir::IntImmNode>();
+    if (!value) {
+        throw std::invalid_argument(context + " has non-integer PrimFunc attr " + key);
+    }
+    return value->value;
+}
+
+String ReadStringAttr(const tir::PrimFunc& function, const char* key,
+                      const std::string& context) {
+    const String attr_key(key);
+    if (!function->attrs.count(attr_key)) {
+        throw std::invalid_argument(context + " is missing PrimFunc attr " + key);
+    }
+    const auto* value = function->attrs.at(attr_key).As<StringObj>();
+    if (!value || value->data.empty()) {
+        throw std::invalid_argument(context + " has invalid PrimFunc attr " + key);
+    }
+    return String(value->data);
+}
+
 void ValidateSignatureTarget(const codegen::KernelSignature& signature,
-                             const Target& target) {
+                             const Target& target,
+                             const std::string& context) {
     signature.Validate();
     const Array<codegen::KernelArgSpec> arguments = signature.arguments();
     if (arguments.empty()) {
-        throw std::invalid_argument("CompileResult signature has no arguments");
+        throw std::invalid_argument(context + " signature has no arguments");
     }
     const Device expected(target->device_type, target->device_id);
-    if (arguments[0]->device != expected) {
-        throw std::invalid_argument("CompileResult signature device does not match Target");
+    for (const auto& argument : arguments) {
+        if (argument->device != expected) {
+            throw std::invalid_argument(context +
+                                        " signature device does not match Target");
+        }
+    }
+}
+
+void ValidatePrimitiveIdentity(const PrimitiveCompileState& primitive,
+                               size_t index) {
+    if (primitive.unit_id != static_cast<int64_t>(index) ||
+        std::string(primitive.symbol).empty() ||
+        std::string(primitive.operator_identity).empty() ||
+        std::string(primitive.structural_hash).empty()) {
+        throw std::invalid_argument(
+            "CompileResult primitive identities must be dense and non-empty");
+    }
+    const std::string context = PrimitiveContext(primitive);
+    ValidatePrimFunc(primitive.tir, context);
+    if (ReadIntAttr(primitive.tir, "kxc.unit_id", context) != primitive.unit_id ||
+        !(ReadStringAttr(primitive.tir, "global_symbol", context) ==
+          primitive.symbol) ||
+        !(ReadStringAttr(primitive.tir, "kxc.operator_identity", context) ==
+          primitive.operator_identity) ||
+        !(ReadStringAttr(primitive.tir, "kxc.structural_hash", context) ==
+          primitive.structural_hash)) {
+        throw std::invalid_argument(context +
+                                    " identity drifted from PrimFunc metadata");
     }
 }
 
 }  // namespace
 
-// 内部只接管完整节点；所有公开创建路径仍会调用 ValidateState。
 CompileResult::CompileResult(CompileResultNode* node) : ObjectRef(node) {}
 
-// Validate 是状态机唯一入口，不允许用空 Target 或非 Function Relay 起步。
 CompileResult CompileResult::Validate(Target target, Function relay) {
     ValidateTarget(target);
     ValidateFunction(relay, "validated relay");
     auto* node = new CompileResultNode();
-    node->stage_ = CompileStage::kValidated;
     node->target_ = std::move(target);
     node->relay_ = std::move(relay);
     CompileResult result(node);
@@ -115,7 +159,6 @@ CompileResult CompileResult::Validate(Target target, Function relay) {
     return result;
 }
 
-// 对象系统恢复路径必须重新检查内容，不能只验证节点 RTTI。
 CompileResult::CompileResult(const ObjectRef& ref) : ObjectRef(ref) {
     if (defined() && !As<CompileResultNode>()) {
         SetData(nullptr);
@@ -124,8 +167,8 @@ CompileResult::CompileResult(const ObjectRef& ref) : ObjectRef(ref) {
     if (defined()) ValidateState();
 }
 
-// Relay 优化只替换唯一 Relay 字段，其余事实从前一快照继承。
-CompileResult CompileResult::AfterRelayOptimization(Function optimized_relay) const {
+CompileResult CompileResult::AfterRelayOptimization(
+    Function optimized_relay) const {
     const auto* current = operator->();
     RequireStage(current->stage_, CompileStage::kValidated,
                  "AfterRelayOptimization");
@@ -139,102 +182,109 @@ CompileResult CompileResult::AfterRelayOptimization(Function optimized_relay) co
     return result;
 }
 
-// Lowering 首次引入 TIR 和常量，二者必须在同一个原子状态转移中发布。
 CompileResult CompileResult::AfterLowering(
-    tir::PrimFunc lowered_tir,
+    std::vector<PrimitiveCompileState> lowered_primitives,
+    runtime::ExecutablePlan plan,
     const Map<String, runtime::NDArray>& constants) const {
     const auto* current = operator->();
     RequireStage(current->stage_, CompileStage::kRelayOptimized,
                  "AfterLowering");
-    ValidatePrimFunc(lowered_tir, "lowered TIR");
+    plan.Validate();
     ValidateConstants(constants);
     auto* next = new CompileResultNode();
     next->stage_ = CompileStage::kLowered;
     next->target_ = current->target_;
     next->relay_ = current->relay_;
-    next->tir_ = std::move(lowered_tir);
+    next->primitives_ = std::move(lowered_primitives);
+    next->plan_ = std::move(plan);
     next->constants_ = CopyConstants(constants);
     CompileResult result(next);
     result.ValidateState();
     return result;
 }
 
-// TIR 优化覆盖唯一 TIR 字段，不同时保留可能漂移的 lowered 副本。
-CompileResult CompileResult::AfterTIROptimization(tir::PrimFunc optimized_tir) const {
+CompileResult CompileResult::AfterTIROptimization(
+    std::vector<tir::PrimFunc> optimized_tir) const {
     const auto* current = operator->();
     RequireStage(current->stage_, CompileStage::kLowered,
                  "AfterTIROptimization");
-    ValidatePrimFunc(optimized_tir, "optimized TIR");
+    if (optimized_tir.size() != current->primitives_.size()) {
+        throw std::invalid_argument(
+            "AfterTIROptimization primitive count changed");
+    }
     auto* next = new CompileResultNode();
     next->stage_ = CompileStage::kTIROptimized;
     next->target_ = current->target_;
     next->relay_ = current->relay_;
-    next->tir_ = std::move(optimized_tir);
+    next->primitives_ = current->primitives_;
+    for (size_t i = 0; i < optimized_tir.size(); ++i) {
+        next->primitives_[i].tir = std::move(optimized_tir[i]);
+        next->primitives_[i].structural_hash = ReadStringAttr(
+            next->primitives_[i].tir, "kxc.structural_hash",
+            PrimitiveContext(next->primitives_[i]));
+    }
+    next->plan_ = current->plan_;
     next->constants_ = CopyConstants(current->constants_);
     CompileResult result(next);
     result.ValidateState();
     return result;
 }
 
-// Signature 必须匹配唯一 Target，且只在 TIR 已稳定后才能绑定。
-CompileResult CompileResult::AfterSignature(
-    codegen::KernelSignature signature) const {
+CompileResult CompileResult::AfterSignatures(
+    std::vector<codegen::KernelSignature> signatures,
+    std::vector<bool> cache_hits) const {
     const auto* current = operator->();
     RequireStage(current->stage_, CompileStage::kTIROptimized,
-                 "AfterSignature");
-    ValidateSignatureTarget(signature, current->target_);
+                 "AfterSignatures");
+    if (signatures.size() != current->primitives_.size()) {
+        throw std::invalid_argument("AfterSignatures primitive count changed");
+    }
+    if (cache_hits.empty()) cache_hits.resize(signatures.size(), false);
+    if (cache_hits.size() != signatures.size()) {
+        throw std::invalid_argument("AfterSignatures cache-hit count changed");
+    }
     auto* next = new CompileResultNode();
     next->stage_ = CompileStage::kSignatureBuilt;
     next->target_ = current->target_;
     next->relay_ = current->relay_;
-    next->tir_ = current->tir_;
+    next->primitives_ = current->primitives_;
+    for (size_t i = 0; i < signatures.size(); ++i) {
+        next->primitives_[i].signature = std::move(signatures[i]);
+        next->primitives_[i].cache_hit = cache_hits[i];
+    }
+    next->plan_ = current->plan_;
     next->constants_ = CopyConstants(current->constants_);
-    next->signature_ = std::move(signature);
     CompileResult result(next);
     result.ValidateState();
     return result;
 }
 
-// Backend 发布必须一次性带齐 metadata 与 kernel，并共享同一签名/metadata 节点。
-CompileResult CompileResult::AfterBackend(
-    codegen::KernelLaunchMetadata launch_metadata,
-    codegen::CompiledKernel kernel) const {
+CompileResult CompileResult::AfterBackends(
+    std::vector<codegen::KernelLaunchMetadata> launch_metadata,
+    std::vector<codegen::CompiledKernel> kernels) const {
     const auto* current = operator->();
     RequireStage(current->stage_, CompileStage::kSignatureBuilt,
-                 "AfterBackend");
-    if (!launch_metadata.defined()) {
-        throw std::invalid_argument("AfterBackend requires launch metadata");
+                 "AfterBackends");
+    if (launch_metadata.size() != current->primitives_.size() ||
+        kernels.size() != current->primitives_.size()) {
+        throw std::invalid_argument("AfterBackends primitive count changed");
     }
-    launch_metadata.Validate();
-    if (launch_metadata->device !=
-        Device(current->target_->device_type, current->target_->device_id)) {
-        throw std::invalid_argument("Backend metadata device does not match Target");
-    }
-    if (!kernel.defined() || !kernel.IsReady()) {
-        throw std::invalid_argument("AfterBackend requires a ready CompiledKernel");
-    }
-    // 对象身份约束保证 Result、metadata 和 kernel 不会各自维护可漂移副本。
-    if (kernel.signature().get() != current->signature_->get() ||
-        kernel.launch_metadata().get() != launch_metadata.get()) {
-        throw std::invalid_argument(
-            "CompiledKernel must share CompileResult signature and metadata objects");
-    }
-
     auto* next = new CompileResultNode();
     next->stage_ = CompileStage::kBackendCompiled;
     next->target_ = current->target_;
     next->relay_ = current->relay_;
-    next->tir_ = current->tir_;
+    next->primitives_ = current->primitives_;
+    for (size_t i = 0; i < kernels.size(); ++i) {
+        next->primitives_[i].launch_metadata = std::move(launch_metadata[i]);
+        next->primitives_[i].kernel = std::move(kernels[i]);
+    }
+    next->plan_ = current->plan_;
     next->constants_ = CopyConstants(current->constants_);
-    next->signature_ = current->signature_;
-    next->launch_metadata_ = std::move(launch_metadata);
-    next->kernel_ = std::move(kernel);
     CompileResult result(next);
     result.ValidateState();
     return result;
 }
 
-// 每次状态转移和 ObjectRef 恢复都执行全量校验，尽早发现半初始化节点。
 void CompileResult::ValidateState() const {
     const auto* node = operator->();
     ValidateTarget(node->target_);
@@ -248,47 +298,77 @@ void CompileResult::ValidateState() const {
     }
     ValidateFunction(*node->relay_, "CompileResult relay");
 
-    const bool needs_tir = HasReached(node->stage_, CompileStage::kLowered);
-    if (needs_tir != node->tir_.has_value()) {
-        throw std::invalid_argument("CompileResult TIR presence does not match stage");
+    const bool needs_primitives =
+        HasReached(node->stage_, CompileStage::kLowered);
+    if (needs_primitives != !node->primitives_.empty() ||
+        needs_primitives != node->plan_.has_value()) {
+        throw std::invalid_argument(
+            "CompileResult primitive/plan presence does not match stage");
     }
-    if (node->tir_) ValidatePrimFunc(*node->tir_, "CompileResult TIR");
-    if (!needs_tir && node->constants_.size() != 0) {
+    if (!needs_primitives && node->constants_.size() != 0) {
         throw std::invalid_argument(
             "CompileResult constants cannot exist before lowering");
     }
     ValidateConstants(node->constants_);
+    if (!needs_primitives) return;
 
+    node->plan_->Validate();
+    const Array<runtime::KernelCall> calls = node->plan_->calls();
+    if (calls.size() != node->primitives_.size()) {
+        throw std::invalid_argument(
+            "CompileResult plan and primitive counts do not match");
+    }
+    std::unordered_set<std::string> symbols;
     const bool needs_signature =
         HasReached(node->stage_, CompileStage::kSignatureBuilt);
-    if (needs_signature != node->signature_.has_value()) {
-        throw std::invalid_argument("CompileResult signature presence does not match stage");
-    }
-    if (node->signature_) ValidateSignatureTarget(*node->signature_, node->target_);
-
     const bool needs_backend =
         HasReached(node->stage_, CompileStage::kBackendCompiled);
-    if (needs_backend != node->launch_metadata_.has_value() ||
-        needs_backend != node->kernel_.has_value()) {
-        throw std::invalid_argument("CompileResult backend fields do not match stage");
-    }
-    if (needs_backend) {
-        node->launch_metadata_->Validate();
-        const Device expected(node->target_->device_type, node->target_->device_id);
-        if ((*node->launch_metadata_)->device != expected ||
-            !node->kernel_->IsReady() ||
-            node->kernel_->signature().get() != node->signature_->get() ||
-            node->kernel_->launch_metadata().get() !=
-                node->launch_metadata_->get()) {
-            throw std::invalid_argument("CompileResult backend objects are inconsistent");
+    const Device expected(node->target_->device_type, node->target_->device_id);
+    for (size_t i = 0; i < node->primitives_.size(); ++i) {
+        const PrimitiveCompileState& primitive = node->primitives_[i];
+        ValidatePrimitiveIdentity(primitive, i);
+        const std::string context = PrimitiveContext(primitive);
+        if (!symbols.insert(std::string(primitive.symbol)).second ||
+            !(calls[i]->symbol == primitive.symbol)) {
+            throw std::invalid_argument(context +
+                                        " plan symbol is missing or duplicated");
+        }
+        if (needs_signature != primitive.signature.has_value()) {
+            throw std::invalid_argument(context +
+                                        " signature presence does not match stage");
+        }
+        if (!needs_signature && primitive.cache_hit) {
+            throw std::invalid_argument(
+                context + " cache state exists before signature construction");
+        }
+        if (primitive.signature) {
+            ValidateSignatureTarget(*primitive.signature, node->target_, context);
+            if (!((*primitive.signature)->symbol == primitive.symbol)) {
+                throw std::invalid_argument(context + " signature symbol drifted");
+            }
+        }
+        if (needs_backend != primitive.launch_metadata.has_value() ||
+            needs_backend != primitive.kernel.has_value()) {
+            throw std::invalid_argument(context +
+                                        " backend presence does not match stage");
+        }
+        if (needs_backend) {
+            primitive.launch_metadata->Validate();
+            if ((*primitive.launch_metadata)->device != expected ||
+                !primitive.kernel->IsReady() ||
+                primitive.kernel->signature().get() !=
+                    primitive.signature->get() ||
+                primitive.kernel->launch_metadata().get() !=
+                    primitive.launch_metadata->get()) {
+                throw std::invalid_argument(context +
+                                            " backend objects are inconsistent");
+            }
         }
     }
 }
 
-// 返回阶段枚举，不允许调用方直接修改节点状态。
 CompileStage CompileResult::stage() const { return operator->()->stage_; }
 
-// 使用稳定英文标识，便于日志、profiling 和测试比较。
 std::string CompileResult::stage_name() const {
     switch (stage()) {
         case CompileStage::kValidated: return "validated";
@@ -298,86 +378,46 @@ std::string CompileResult::stage_name() const {
         case CompileStage::kSignatureBuilt: return "signature_built";
         case CompileStage::kBackendCompiled: return "backend_compiled";
     }
-    throw std::runtime_error("CompileResult contains an unknown stage");
+    throw std::runtime_error("CompileResult has an unknown stage");
 }
 
-// Target 在所有阶段都存在，并始终返回同一不可变对象句柄。
 Target CompileResult::target() const { return operator->()->target_; }
 
-// Validate 阶段从结果本身提供 pipeline 输入，Compiler 不需要保留第二份外部事实。
 Function CompileResult::validated_relay() const {
-    const auto* node = operator->();
-    if (node->stage_ != CompileStage::kValidated) {
-        throw std::logic_error(
-            "validated Relay is only available at the Validate stage");
+    if (stage() != CompileStage::kValidated) {
+        throw std::logic_error("validated_relay is visible only at validated stage");
     }
-    return *node->relay_;
+    return *operator->()->relay_;
 }
 
-// 入口函数不冒充优化结果，只有 Relay pipeline 完成后才允许读取。
 Function CompileResult::optimized_relay() const {
-    const auto* node = operator->();
-    if (!HasReached(node->stage_, CompileStage::kRelayOptimized)) {
-        throw std::logic_error("optimized Relay is not available yet");
+    if (!HasReached(stage(), CompileStage::kRelayOptimized)) {
+        throw std::logic_error("optimized_relay requires relay_optimized stage");
     }
-    return *node->relay_;
+    return *operator->()->relay_;
 }
 
-// Lowered TIR 在完成下一阶段后已被替换，禁止把旧事实继续向后传播。
-tir::PrimFunc CompileResult::lowered_tir() const {
-    const auto* node = operator->();
-    if (node->stage_ != CompileStage::kLowered) {
-        throw std::logic_error("lowered TIR is only available at the Lower stage");
+std::vector<PrimitiveCompileState> CompileResult::primitives() const {
+    if (!HasReached(stage(), CompileStage::kLowered)) {
+        throw std::logic_error("primitives require lowered stage");
     }
-    return *node->tir_;
+    return operator->()->primitives_;
 }
 
-// TIR pipeline 完成后，后续所有阶段共享同一个优化结果。
-tir::PrimFunc CompileResult::optimized_tir() const {
-    const auto* node = operator->();
-    if (!HasReached(node->stage_, CompileStage::kTIROptimized)) {
-        throw std::logic_error("optimized TIR is not available yet");
+runtime::ExecutablePlan CompileResult::plan() const {
+    if (!HasReached(stage(), CompileStage::kLowered)) {
+        throw std::logic_error("plan requires lowered stage");
     }
-    return *node->tir_;
+    return *operator->()->plan_;
 }
 
-// Lower 之前没有常量契约；之后返回深拷贝以隔离 Map::Set。
 Map<String, runtime::NDArray> CompileResult::constants() const {
-    const auto* node = operator->();
-    if (!HasReached(node->stage_, CompileStage::kLowered)) {
-        throw std::logic_error("constants are not available before lowering");
+    if (!HasReached(stage(), CompileStage::kLowered)) {
+        throw std::logic_error("constants require lowered stage");
     }
-    return CopyConstants(node->constants_);
+    return CopyConstants(operator->()->constants_);
 }
 
-// Signature 阶段之后只返回同一个已验证签名节点。
-codegen::KernelSignature CompileResult::signature() const {
-    const auto* node = operator->();
-    if (!node->signature_) {
-        throw std::logic_error("kernel signature is not available yet");
-    }
-    return *node->signature_;
-}
-
-// 启动元数据只能来自最终 CompiledKernel 的同源对象。
-codegen::KernelLaunchMetadata CompileResult::launch_metadata() const {
-    const auto* node = operator->();
-    if (!node->launch_metadata_) {
-        throw std::logic_error("launch metadata is not available yet");
-    }
-    return *node->launch_metadata_;
-}
-
-// 只有 Backend 阶段可以向 CompiledModule 暴露可执行资源。
-codegen::CompiledKernel CompileResult::kernel() const {
-    const auto* node = operator->();
-    if (!node->kernel_) {
-        throw std::logic_error("compiled kernel is not available yet");
-    }
-    return *node->kernel_;
-}
-
-// 所有访问均通过动态类型检查，undefined 或伪造句柄明确失败。
 const CompileResultNode* CompileResult::operator->() const {
     const auto* node = As<CompileResultNode>();
     if (!node) throw std::runtime_error("undefined or invalid CompileResult");

@@ -179,6 +179,47 @@ void TestMissingSymbol(const kxc::Device& device,
     Require(rejected, "CUDA missing-symbol diagnostic mismatch: " + diagnostic);
 }
 
+void TestBatchModule(const kxc::Device& device,
+                     const kxc::codegen::CUDACompileOptions& options) {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    constexpr int64_t kExtent = 8;
+    const std::string source = CodeGenCUDA().GenerateModule(
+        {{MakeBoundAdd("batch_add_a", kExtent), "batch_add_a"},
+         {MakeBoundAdd("batch_add_b", kExtent), "batch_add_b"}});
+    std::vector<KernelSignature> signatures{
+        AddSignature("batch_add_a", device, kExtent),
+        AddSignature("batch_add_b", device, kExtent)};
+    std::vector<KernelLaunchMetadata> metadata{
+        KernelLaunchMetadata(device, CodeGenBackend::kCUDA, {1, 1, 1},
+                             {static_cast<uint32_t>(kExtent), 1, 1}),
+        KernelLaunchMetadata(device, CodeGenBackend::kCUDA, {1, 1, 1},
+                             {static_cast<uint32_t>(kExtent), 1, 1})};
+    std::vector<CompiledKernel> kernels = CUDAModule::CompileMany(
+        source, signatures, metadata, options);
+    Require(kernels.size() == 2 && kernels[0].IsReady() &&
+                kernels[1].IsReady(),
+            "CUDA batch compilation must return one kernel per symbol");
+    kernels.erase(kernels.begin());
+    const DLDataType dtype = runtime::DataTypeFromString("float32");
+    runtime::NDArray lhs = runtime::NDArray::Empty({kExtent}, dtype, device);
+    runtime::NDArray rhs = runtime::NDArray::Empty({kExtent}, dtype, device);
+    runtime::NDArray output = runtime::NDArray::Empty({kExtent}, dtype, device);
+    const std::vector<float> lhs_values(kExtent, 2.0f);
+    const std::vector<float> rhs_values(kExtent, 3.0f);
+    lhs.CopyFromBytes(lhs_values.data(), lhs.NBytes());
+    rhs.CopyFromBytes(rhs_values.data(), rhs.NBytes());
+    kernels[0]
+        .Launch({lhs, rhs, output}, DeviceStream::Create(device))
+        .Wait();
+    std::vector<float> actual(kExtent);
+    output.CopyToBytes(actual.data(), output.NBytes());
+    for (float value : actual) {
+        Require(std::fabs(value - 5.0f) < 1e-5f,
+                "CUDA batch module result mismatch");
+    }
+}
+
 /*! \brief 在 GPU 上执行 add，并验证 operation 独立保活输入 Storage 和 module。 */
 void TestAsyncLaunchLifetime(
     const kxc::Device& device,
@@ -290,28 +331,34 @@ std::vector<float> CompileAndRunRelay(
     using namespace kxc;
     runtime::RunAsyncResult run_result;
     {
-        api::CompiledModule module = api::Compiler::Compile(
+        api::CompiledGraph compiled = api::Compiler::Compile(
             function, api::CompileConfig::Create(BuildTarget(device), 2));
-        runtime::RuntimeSession session(module);
-        const Array<codegen::KernelArgSpec> specs =
-            module.signature().arguments();
+        runtime::RuntimeSession session(compiled.module, compiled.plan);
+        const Array<runtime::ValueSpec> value_specs = compiled.plan.values();
+        const auto find_value = [&](int64_t value_id) {
+            for (const auto& value : value_specs) {
+                if (value->value_id == value_id) return value;
+            }
+            throw std::runtime_error(
+                "Compiler CUDA plan references an unknown input value");
+        };
         const DeviceStream stream = DeviceStream::Create(device);
         Array<runtime::NDArray> device_inputs;
         Array<runtime::NDArray> host_inputs;
         Array<AsyncOperation> uploads;
         size_t input_index = 0;
-        for (const auto& spec : specs) {
-            if (spec->role != codegen::KernelArgRole::kInput) continue;
+        for (int64_t value_id : compiled.plan.input_value_ids()) {
+            const runtime::ValueSpec spec = find_value(value_id);
             Require(input_index < inputs.size(),
-                    "Compiler CUDA signature has too many inputs");
+                    "Compiler CUDA plan has too many inputs");
             const auto& values = inputs[input_index++];
             runtime::NDArray host = runtime::NDArray::Empty(
-                spec.shape(), spec->dtype, Device::CPU(), spec->alignment);
+                spec.shape(), spec->dtype, Device::CPU());
             Require(values.size() * sizeof(float) == host.NBytes(),
                     "Compiler CUDA input byte count mismatch");
             host.CopyFromBytes(values.data(), host.NBytes());
             runtime::NDArray input = runtime::NDArray::Empty(
-                spec.shape(), spec->dtype, spec->device, spec->alignment);
+                spec.shape(), spec->dtype, spec->device);
             uploads.push_back(input.CopyFromAsync(host, stream));
             host_inputs.push_back(std::move(host));
             device_inputs.push_back(std::move(input));
@@ -428,6 +475,8 @@ int main(int argc, char** argv) {
         }
         TestAsyncLaunchLifetime(device, options);
         std::cout << "[PASS] async_launch_lifetime\n";
+        TestBatchModule(device, options);
+        std::cout << "[PASS] batch_module\n";
         TestByteOffsetLaunch(device, options);
         std::cout << "[PASS] byte_offset_launch\n";
         TestCompilerAdd(device);

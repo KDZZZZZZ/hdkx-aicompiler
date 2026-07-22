@@ -77,6 +77,8 @@ public:
     bool IsReady() const noexcept;
     /*! \brief 返回参数签名句柄。 */
     KernelSignature signature() const;
+    /*! \brief 返回后端入口的稳定符号。 */
+    String symbol() const;
     /*! \brief 返回启动元数据句柄。 */
     KernelLaunchMetadata launch_metadata() const;
     /*! \brief 返回经过动态类型检查的只读节点。 */

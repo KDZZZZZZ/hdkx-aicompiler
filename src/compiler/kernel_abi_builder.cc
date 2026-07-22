@@ -127,8 +127,7 @@ KernelSignature BuildKernelSignature(const tir::PrimFunc& function,
   }
   const KernelConstantKeys key_list(function->attrs.at(constant_keys_attr));
   const Array<String> constant_keys = key_list.keys();
-  if (constant_keys.size() != static_cast<size_t>(constant_count) ||
-      constants.size() != static_cast<size_t>(constant_count)) {
+  if (constant_keys.size() != static_cast<size_t>(constant_count)) {
     throw std::invalid_argument("PrimFunc constant key count is inconsistent");
   }
 

@@ -62,6 +62,8 @@ bool CompiledKernel::IsReady() const noexcept {
 // 返回 ObjectRef 句柄会共享不可变节点，不复制或暴露后端原生资源。
 KernelSignature CompiledKernel::signature() const { return operator->()->signature; }
 
+String CompiledKernel::symbol() const { return operator->()->signature->symbol; }
+
 // 启动元数据与 launcher 由同一 CompiledKernelNode 保持一致生命周期。
 KernelLaunchMetadata CompiledKernel::launch_metadata() const {
     return operator->()->launch_metadata;

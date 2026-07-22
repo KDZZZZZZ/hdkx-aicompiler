@@ -102,7 +102,10 @@ ModuleFixture MakeStaticFixture(uint64_t alignment = 1) {
     constants.Set(String("relay.constant.0"), constant);
 
     api::CompiledModule module = api::internal::BuildCompiledModule(
-        BuildTarget(cpu), tir::PrimFunc(), signature, metadata, constants, executable);
+        BuildTarget(cpu),
+        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
+                                            metadata, executable}},
+        constants);
     return ModuleFixture{module, {input_array, constant, output_array}, constant,
                          std::move(launcher)};
 }
@@ -116,14 +119,29 @@ kxc::api::CompiledModule MakeModule(
     KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
     CompiledKernel executable(signature, metadata, launcher);
     return api::internal::BuildCompiledModule(
-        BuildTarget(Device::CPU()), tir::PrimFunc(), signature, metadata, {}, executable);
+        BuildTarget(Device::CPU()),
+        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
+                                            metadata, executable}},
+        {});
+}
+
+kxc::api::internal::CompiledModuleEntry MakeEntry(
+    const kxc::codegen::KernelSignature& signature,
+    const std::shared_ptr<RecordingLauncher>& launcher) {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
+    CompiledKernel executable(signature, metadata, launcher);
+    return api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
+                                              metadata, executable};
 }
 
 // 验证合法调用到达后端一次，并返回保活 Storage 的同步完成操作。
 bool TestValidLaunchAndAccessors() {
     ModuleFixture fixture = MakeStaticFixture();
     const kxc::DeviceStream stream = kxc::DeviceStream::Default(kxc::Device::CPU());
-    kxc::AsyncOperation operation = fixture.module.Launch(fixture.arguments, stream);
+    kxc::AsyncOperation operation =
+        fixture.module.Launch("fixture_kernel", fixture.arguments, stream);
 
     TEST_CHECK(operation.IsReady(), "CPU fake launch should complete inline");
     TEST_CHECK(fixture.launcher->calls == 1,
@@ -135,8 +153,10 @@ bool TestValidLaunchAndAccessors() {
     TEST_CHECK(fixture.module.IsReady() &&
                    std::string(fixture.module.GetStatus()) == "ready",
                "assembled module should report ready");
-    TEST_CHECK(fixture.module.signature()->symbol == "fixture_kernel" &&
-                   fixture.module.launch_metadata()->device == kxc::Device::CPU(),
+    TEST_CHECK(fixture.module.signature("fixture_kernel")->symbol ==
+                       "fixture_kernel" &&
+                   fixture.module.launch_metadata("fixture_kernel")->device ==
+                       kxc::Device::CPU(),
                "module accessors should preserve signature and metadata");
 
     // 修改返回 Map 不得删除或替换模块内部常量绑定。
@@ -167,8 +187,10 @@ bool TestObjectAndReadinessChecks() {
     TEST_CHECK(!executable.IsReady(), "disabled launcher should not be ready");
     TEST_CHECK(Throws([&] {
                    api::CompiledModule invalid = api::internal::BuildCompiledModule(
-                       BuildTarget(Device::CPU()), tir::PrimFunc(), signature,
-                       metadata, {}, executable);
+                       BuildTarget(Device::CPU()),
+                       {api::internal::CompiledModuleEntry{
+                           tir::PrimFunc(), signature, metadata, executable}},
+                       {});
                }),
                "module assembly should reject a non-ready executable");
     return true;
@@ -178,12 +200,13 @@ bool TestObjectAndReadinessChecks() {
 bool TestStreamAndCountChecks() {
     ModuleFixture fixture = MakeStaticFixture();
     TEST_CHECK(Throws([&] {
-                   fixture.module.Launch(fixture.arguments, kxc::DeviceStream());
+                   fixture.module.Launch("fixture_kernel", fixture.arguments,
+                                         kxc::DeviceStream());
                }),
                "undefined stream should fail");
     TEST_CHECK(Throws([&] {
                    fixture.module.Launch(
-                       fixture.arguments,
+                       "fixture_kernel", fixture.arguments,
                        kxc::DeviceStream::Default(kxc::Device::CUDA()));
                }),
                "stream on another device should fail");
@@ -191,7 +214,8 @@ bool TestStreamAndCountChecks() {
     kxc::Array<kxc::runtime::NDArray> too_few{fixture.arguments[0], fixture.constant};
     TEST_CHECK(Throws([&] {
                    fixture.module.Launch(
-                       too_few, kxc::DeviceStream::Default(kxc::Device::CPU()));
+                       "fixture_kernel", too_few,
+                       kxc::DeviceStream::Default(kxc::Device::CPU()));
                }),
                "argument count mismatch should fail");
     TEST_CHECK(fixture.launcher->calls == 0,
@@ -207,7 +231,9 @@ bool TestTensorMetadataChecks() {
     auto bad_arguments = fixture.arguments;
     bad_arguments[0] = kxc::runtime::NDArray();
     std::string message;
-    TEST_CHECK(Throws([&] { fixture.module.Launch(bad_arguments, stream); }, &message),
+    TEST_CHECK(Throws([&] {
+                   fixture.module.Launch("fixture_kernel", bad_arguments, stream);
+               }, &message),
                "undefined NDArray should fail");
     TEST_CHECK(message.find("fixture_kernel") != std::string::npos &&
                    message.find("argument[0]") != std::string::npos &&
@@ -217,23 +243,31 @@ bool TestTensorMetadataChecks() {
     bad_arguments = fixture.arguments;
     bad_arguments[0] = kxc::runtime::NDArray::Empty(
         {2, 3}, kxc::runtime::DataTypeFromString("int32"), kxc::Device::CPU());
-    TEST_CHECK(Throws([&] { fixture.module.Launch(bad_arguments, stream); }),
+    TEST_CHECK(Throws([&] {
+                   fixture.module.Launch("fixture_kernel", bad_arguments, stream);
+               }),
                "dtype mismatch should fail");
 
     bad_arguments = fixture.arguments;
     bad_arguments[0] = kxc::runtime::NDArray::Empty(
         {2, 3}, DLDataType{kDLFloat, 32, 2}, kxc::Device::CPU());
-    TEST_CHECK(Throws([&] { fixture.module.Launch(bad_arguments, stream); }),
+    TEST_CHECK(Throws([&] {
+                   fixture.module.Launch("fixture_kernel", bad_arguments, stream);
+               }),
                "dtype lanes mismatch should fail");
 
     bad_arguments = fixture.arguments;
     bad_arguments[0] = kxc::runtime::NDArray::Empty({6}, Float32(), kxc::Device::CPU());
-    TEST_CHECK(Throws([&] { fixture.module.Launch(bad_arguments, stream); }),
+    TEST_CHECK(Throws([&] {
+                   fixture.module.Launch("fixture_kernel", bad_arguments, stream);
+               }),
                "rank mismatch should fail");
 
     bad_arguments = fixture.arguments;
     bad_arguments[0] = kxc::runtime::NDArray::Empty({2, 4}, Float32(), kxc::Device::CPU());
-    TEST_CHECK(Throws([&] { fixture.module.Launch(bad_arguments, stream); }),
+    TEST_CHECK(Throws([&] {
+                   fixture.module.Launch("fixture_kernel", bad_arguments, stream);
+               }),
                "static shape mismatch should fail");
     TEST_CHECK(fixture.launcher->calls == 0,
                "metadata failures must not reach launcher");
@@ -255,7 +289,8 @@ bool TestDynamicInputShape() {
         runtime::NDArray::Empty({3, 4}, Float32(), Device::CPU()),
         runtime::NDArray::Empty({3, 4}, Float32(), Device::CPU()),
     };
-    module.Launch(arguments, DeviceStream::Default(Device::CPU()));
+    module.Launch(signature->symbol, arguments,
+                  DeviceStream::Default(Device::CPU()));
     TEST_CHECK(launcher->calls == 1, "dynamic input shape should launch");
     return true;
 }
@@ -269,7 +304,8 @@ bool TestLayoutRangeAndAlignmentChecks() {
         layout_fixture.arguments[0].As<kxc::runtime::NDArrayNode>());
     layout_node->strides_storage = {4, 1};
     TEST_CHECK(Throws([&] {
-                   layout_fixture.module.Launch(layout_fixture.arguments, stream);
+                   layout_fixture.module.Launch(
+                       "fixture_kernel", layout_fixture.arguments, stream);
                }),
                "non-contiguous layout should fail");
     TEST_CHECK(layout_fixture.launcher->calls == 0,
@@ -280,7 +316,8 @@ bool TestLayoutRangeAndAlignmentChecks() {
         range_fixture.arguments[0].As<kxc::runtime::NDArrayNode>());
     range_node->byte_offset = range_node->storage.capacity_bytes();
     TEST_CHECK(Throws([&] {
-                   range_fixture.module.Launch(range_fixture.arguments, stream);
+                   range_fixture.module.Launch(
+                       "fixture_kernel", range_fixture.arguments, stream);
                }),
                "out-of-range byte offset should fail");
 
@@ -290,7 +327,8 @@ bool TestLayoutRangeAndAlignmentChecks() {
         {7}, Float32(), kxc::Device::CPU());
     alignment_fixture.arguments[0] = backing.CreateView({2, 3}, {3, 1}, 1);
     TEST_CHECK(Throws([&] {
-                   alignment_fixture.module.Launch(alignment_fixture.arguments, stream);
+                   alignment_fixture.module.Launch(
+                       "fixture_kernel", alignment_fixture.arguments, stream);
                }),
                "misaligned effective address should fail");
     TEST_CHECK(alignment_fixture.launcher->calls == 0,
@@ -314,7 +352,8 @@ bool TestAlignedOffsetAndZeroSize() {
     runtime::NDArray offset_input = backing.CreateView({1}, {1}, sizeof(float));
     Array<runtime::NDArray> offset_arguments{
         offset_input, runtime::NDArray::Empty({1}, Float32(), Device::CPU())};
-    offset_module.Launch(offset_arguments, DeviceStream::Default(Device::CPU()));
+    offset_module.Launch(offset_signature->symbol, offset_arguments,
+                         DeviceStream::Default(Device::CPU()));
     TEST_CHECK(offset_launcher->calls == 1,
                "aligned non-zero offset should reach launcher");
 
@@ -328,7 +367,8 @@ bool TestAlignedOffsetAndZeroSize() {
     Array<runtime::NDArray> empty_arguments{
         runtime::NDArray::Empty({0}, Float32(), Device::CPU()),
         runtime::NDArray::Empty({0}, Float32(), Device::CPU())};
-    empty_module.Launch(empty_arguments, DeviceStream::Default(Device::CPU()));
+    empty_module.Launch(empty_signature->symbol, empty_arguments,
+                        DeviceStream::Default(Device::CPU()));
     TEST_CHECK(empty_launcher->calls == 1,
                "zero-size null data should skip address alignment and launch");
     return true;
@@ -341,11 +381,160 @@ bool TestConstantIdentityCheck() {
     arguments[1] = kxc::runtime::NDArray::Zeros({3}, Float32(), kxc::Device::CPU());
     TEST_CHECK(Throws([&] {
                    fixture.module.Launch(
-                       arguments, kxc::DeviceStream::Default(kxc::Device::CPU()));
+                       "fixture_kernel", arguments,
+                       kxc::DeviceStream::Default(kxc::Device::CPU()));
                }),
                "replacement constant should fail");
     TEST_CHECK(fixture.launcher->calls == 0,
                "constant identity failure must not reach launcher");
+    return true;
+}
+
+bool TestMultiEntrySymbolDispatchAndAccessors() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    KernelSignature first(
+        "entry_a",
+        {KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {1},
+                       Device::CPU(), 1, true)});
+    KernelSignature second(
+        "entry_b",
+        {KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {2},
+                       Device::CPU(), 1, true)});
+    auto first_launcher = std::make_shared<RecordingLauncher>();
+    auto second_launcher = std::make_shared<RecordingLauncher>();
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()),
+        {MakeEntry(first, first_launcher), MakeEntry(second, second_launcher)},
+        {});
+
+    TEST_CHECK(module.entry_count() == 2, "module should expose two entries");
+    TEST_CHECK(module.HasFunction("entry_a") && module.HasFunction("entry_b") &&
+                   !module.HasFunction("missing"),
+               "HasFunction should answer by symbol");
+    TEST_CHECK(module.symbols().size() == 2,
+               "symbols accessor should return every entry symbol");
+    TEST_CHECK(module.signature("entry_b")->symbol == "entry_b" &&
+                   module.launch_metadata("entry_b")->device == Device::CPU(),
+               "symbol accessors should return the requested entry metadata");
+    module.Launch("entry_b",
+                  {runtime::NDArray::Zeros({2}, Float32(), Device::CPU())},
+                  DeviceStream::Default(Device::CPU()));
+    TEST_CHECK(first_launcher->calls == 0 && second_launcher->calls == 1,
+               "symbol launch should dispatch only to the requested entry");
+    return true;
+}
+
+bool TestUnknownDuplicateAndMismatchedSymbolDispatch() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    KernelSignature first(
+        "entry_a",
+        {KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {1},
+                       Device::CPU(), 1, true)});
+    KernelSignature second(
+        "entry_b",
+        {KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {2},
+                       Device::CPU(), 1, true)});
+    auto first_launcher = std::make_shared<RecordingLauncher>();
+    auto second_launcher = std::make_shared<RecordingLauncher>();
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()),
+        {MakeEntry(first, first_launcher), MakeEntry(second, second_launcher)},
+        {});
+
+    TEST_CHECK(Throws([&] { module.signature("unknown"); }),
+               "unknown symbol metadata lookup should fail");
+    TEST_CHECK(Throws([&] {
+                   module.Launch(
+                       "unknown",
+                       {runtime::NDArray::Zeros({1}, Float32(), Device::CPU())},
+                       DeviceStream::Default(Device::CPU()));
+               }),
+               "unknown symbol launch should fail");
+    TEST_CHECK(Throws([&] {
+                   module.Launch(
+                       "entry_b",
+                       {runtime::NDArray::Zeros({1}, Float32(), Device::CPU())},
+                       DeviceStream::Default(Device::CPU()));
+               }),
+               "dispatch should validate against the requested symbol signature");
+    TEST_CHECK(first_launcher->calls == 0 && second_launcher->calls == 0,
+               "failed symbol dispatch must not reach any launcher");
+
+    auto duplicate_launcher = std::make_shared<RecordingLauncher>();
+    TEST_CHECK(Throws([&] {
+                   api::internal::BuildCompiledModule(
+                       BuildTarget(Device::CPU()),
+                       {MakeEntry(first, first_launcher),
+                        MakeEntry(first, duplicate_launcher)},
+                       {});
+               }),
+               "duplicate symbols should fail during module assembly");
+    return true;
+}
+
+bool TestSharedConstantsAcrossEntries() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    KernelArgSpec shared("weight", KernelArgRole::kConstant, Float32(), {3},
+                         cpu, 1, false, "relay.constant.shared");
+    KernelSignature first(
+        "constant_entry_a",
+        {shared, KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3},
+                               cpu, 1, true)});
+    KernelSignature second(
+        "constant_entry_b",
+        {shared, KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3},
+                               cpu, 1, true)});
+    runtime::NDArray constant = runtime::NDArray::Zeros({3}, Float32(), cpu);
+    Map<String, runtime::NDArray> constants;
+    constants.Set(String("relay.constant.shared"), constant);
+    auto first_launcher = std::make_shared<RecordingLauncher>();
+    auto second_launcher = std::make_shared<RecordingLauncher>();
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu),
+        {MakeEntry(first, first_launcher), MakeEntry(second, second_launcher)},
+        constants);
+
+    TEST_CHECK(module.constants().size() == 1,
+               "shared constant keys should be deduplicated in the module table");
+    module.Launch("constant_entry_a",
+                  {constant, runtime::NDArray::Zeros({3}, Float32(), cpu)},
+                  DeviceStream::Default(cpu));
+    module.Launch("constant_entry_b",
+                  {constant, runtime::NDArray::Zeros({3}, Float32(), cpu)},
+                  DeviceStream::Default(cpu));
+    TEST_CHECK(first_launcher->calls == 1 && second_launcher->calls == 1,
+               "both entries should launch with the shared module constant");
+
+    Map<String, runtime::NDArray> unexpected = constants;
+    unexpected.Set(String("unexpected"), constant);
+    TEST_CHECK(Throws([&] {
+                   api::internal::BuildCompiledModule(
+                       BuildTarget(cpu),
+                       {MakeEntry(first, first_launcher),
+                        MakeEntry(second, second_launcher)},
+                       unexpected);
+               }),
+               "constant union validation should reject unexpected keys");
+
+    KernelArgSpec conflicting("weight", KernelArgRole::kConstant, Float32(), {4},
+                              cpu, 1, false, "relay.constant.shared");
+    KernelSignature conflict_signature(
+        "constant_entry_conflict",
+        {conflicting, KernelArgSpec("output", KernelArgRole::kOutput, Float32(),
+                                    {4}, cpu, 1, true)});
+    auto conflict_launcher = std::make_shared<RecordingLauncher>();
+    TEST_CHECK(Throws([&] {
+                   api::internal::BuildCompiledModule(
+                       BuildTarget(cpu),
+                       {MakeEntry(first, first_launcher),
+                        MakeEntry(conflict_signature, conflict_launcher)},
+                       constants);
+               }),
+               "shared constant keys with different contracts should fail");
     return true;
 }
 
@@ -362,6 +551,11 @@ int main() {
         {"layout_range_and_alignment_checks", TestLayoutRangeAndAlignmentChecks},
         {"aligned_offset_and_zero_size", TestAlignedOffsetAndZeroSize},
         {"constant_identity_check", TestConstantIdentityCheck},
+        {"multi_entry_symbol_dispatch_and_accessors",
+         TestMultiEntrySymbolDispatchAndAccessors},
+        {"unknown_duplicate_and_mismatched_symbol_dispatch",
+         TestUnknownDuplicateAndMismatchedSymbolDispatch},
+        {"shared_constants_across_entries", TestSharedConstantsAcrossEntries},
     };
 
     int failures = 0;

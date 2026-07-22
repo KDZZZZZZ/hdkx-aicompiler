@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <memory>
 #include <mutex>
 
 #include "kxc/support/container.h"
@@ -58,6 +59,7 @@ public:
     Array<Storage> retained_storage;
     /*! \brief 异步后端执行期必须保活的可执行对象；同步后端可以为空。 */
     ObjectRef retained_executable;
+    std::shared_ptr<void> retained_context;
     /*! \brief 完成事件的拥有型后端句柄；完成或析构时释放。 */
     void* backend_event{nullptr};
     /*! \brief event 已完成且资源已回收时为 true。 */
@@ -85,6 +87,9 @@ public:
     static AsyncOperation Pending(const DeviceStream& stream, void* event,
                                   Array<Storage> retained,
                                   ObjectRef executable = ObjectRef());
+
+    void RetainDependencies(Array<Storage> retained,
+                            std::shared_ptr<void> context) const;
 
     /*! \brief 阻塞等待并释放 event；可重复调用。 */
     void Wait() const;

@@ -17,9 +17,12 @@
 #include "kxc/relay/visitor.h"
 #include "kxc/ffi/registry.h"
 #include "kxc/runtime/kernel_abi.h"
+#include "../src/compiler/internal/compile_state.h"
 #include "../src/compiler/internal/kernel_abi_builder.h"
+#include "../src/compiler/internal/lowered_graph.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
+#include "kxc/relay/transforms/infer_type.h"
 #include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/compiler/distributed/multi_device.h"
 
@@ -359,6 +362,18 @@ bool TestInputConstantOutputOrder() {
     TEST_CHECK(std::string(arguments[1]->constant_key) == "relay.constant.0" &&
                    arguments[2]->mutable_data,
                "signature constant key or output mutability mismatch");
+
+    Map<String, runtime::NDArray> graph_constant_pool = ConstantMap(result);
+    graph_constant_pool.Set(
+        String("relay.constant.used.by.other.unit"),
+        runtime::NDArray::Zeros({1}, runtime::DataTypeFromString("float32"),
+                                Device::CPU()));
+    const codegen::KernelSignature from_graph_pool =
+        codegen::BuildKernelSignature(lowered, graph_constant_pool,
+                                      BuildTarget(Device::CPU()),
+                                      "contract_add_graph_pool");
+    TEST_CHECK(from_graph_pool.arguments().size() == arguments.size(),
+               "per-unit ABI builder must accept a graph-level constant superset");
     return true;
 }
 
@@ -583,6 +598,68 @@ bool TestMultiOutputMetadata() {
     return true;
 }
 
+bool TestMultiPrimitiveCompileStateIdentity() {
+    using namespace kxc;
+    using namespace kxc::api;
+    TensorType type({4}, "float32");
+    Var lhs("lhs", type);
+    Var rhs("rhs", type);
+    Call first(relay::Op::Get("add"), {lhs, rhs});
+    Function function({lhs, rhs}, Call(relay::Op::Get("mul"), {first, rhs}));
+    Function typed = relay::InferTypePass(function);
+    api::internal::LoweredGraph lowered =
+        api::internal::LowerGraph(typed, Device::CPU());
+
+    std::vector<PrimitiveCompileState> primitives;
+    std::vector<tir::PrimFunc> tir_functions;
+    for (const api::internal::LoweredPrimitive& source : lowered.primitives) {
+        PrimitiveCompileState primitive;
+        primitive.unit_id = source.unit_id;
+        primitive.symbol = source.symbol;
+        primitive.operator_identity = source.operator_identity;
+        primitive.structural_hash = source.structural_hash;
+        primitive.tir = source.lowered->prim_func;
+        primitives.push_back(primitive);
+        tir_functions.push_back(primitive.tir);
+    }
+
+    CompileResult state = CompileResult::Validate(BuildTarget(Device::CPU()), typed)
+                              .AfterRelayOptimization(typed)
+                              .AfterLowering(primitives, lowered.plan,
+                                             lowered.constants);
+    TEST_CHECK(state.primitives().size() == 2 && state.plan().calls().size() == 2,
+               "compile state must preserve two ordered operator units");
+    state = state.AfterTIROptimization(tir_functions);
+
+    std::vector<codegen::KernelSignature> signatures;
+    for (const PrimitiveCompileState& primitive : state.primitives()) {
+        signatures.push_back(codegen::BuildKernelSignature(
+            primitive.tir, state.constants(), state.target(), primitive.symbol));
+    }
+    state = state.AfterSignatures(signatures);
+    TEST_CHECK(state.stage() == CompileStage::kSignatureBuilt &&
+                   state.primitives()[0].signature.has_value() &&
+                   state.primitives()[1].signature.has_value(),
+               "signature stage must bind one signature to each unit");
+
+    std::swap(tir_functions[0], tir_functions[1]);
+    CompileResult lowered_state =
+        CompileResult::Validate(BuildTarget(Device::CPU()), typed)
+            .AfterRelayOptimization(typed)
+            .AfterLowering(primitives, lowered.plan, lowered.constants);
+    TEST_CHECK(Throws([&] {
+                   (void)lowered_state.AfterTIROptimization(tir_functions);
+               }),
+               "reordered PrimFuncs must fail unit identity validation");
+
+    std::swap(signatures[0], signatures[1]);
+    CompileResult optimized_state = lowered_state.AfterTIROptimization(
+        {primitives[0].tir, primitives[1].tir});
+    TEST_CHECK(Throws([&] { (void)optimized_state.AfterSignatures(signatures); }),
+               "reordered signatures must fail symbol validation");
+    return true;
+}
+
 }  // namespace
 
 // 顺序运行所有契约用例并汇总失败，确保 CI 能看到可靠的非零退出码。
@@ -599,6 +676,7 @@ int main() {
         {"multi_device_lowering_entry", TestMultiDeviceLoweringEntry},
         {"execution_plan_kernel_fails_closed", TestExecutionPlanKernelFailsClosed},
         {"multi_output_metadata", TestMultiOutputMetadata},
+        {"multi_primitive_compile_state", TestMultiPrimitiveCompileStateIdentity},
     };
 
     int failures = 0;

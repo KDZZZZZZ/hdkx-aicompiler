@@ -5,6 +5,7 @@
 #pragma once
 
 #include "kxc/runtime/compiled_module.h"
+#include "kxc/runtime/executable_plan.h"
 
 namespace kxc::runtime {
 
@@ -17,7 +18,7 @@ class RuntimeSessionNode;
 
 class RuntimeSession : public ObjectRef {
 public:
-    explicit RuntimeSession(api::CompiledModule module);
+    RuntimeSession(api::CompiledModule module, ExecutablePlan plan);
     explicit RuntimeSession(const ObjectRef& ref);
 
     Array<NDArray> Run(const Array<NDArray>& inputs) const;

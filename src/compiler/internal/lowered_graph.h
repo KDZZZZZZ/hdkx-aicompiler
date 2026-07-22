@@ -1,0 +1,35 @@
+/*! \file src/compiler/internal/lowered_graph.h
+ * \brief Internal multi-PrimFunc lowering result for one checked Relay graph.
+ */
+
+#pragma once
+
+#include <vector>
+
+#include "compilation_unit.h"
+#include "kxc/compiler/lowering/relay_to_tir.h"
+
+namespace kxc::api::internal {
+
+struct LoweredPrimitive {
+    int64_t unit_id{-1};
+    String symbol;
+    String operator_identity;
+    String structural_hash;
+    relay::LoweredFunction lowered;
+};
+
+struct LoweredGraph {
+    PartitionedGraph partitioned;
+    std::vector<LoweredPrimitive> primitives;
+    runtime::ExecutablePlan plan;
+    Map<String, runtime::NDArray> constants;
+};
+
+relay::LoweredFunction LowerCompilationUnit(
+    const ValueGraph& graph, const CompilationUnit& unit);
+LoweredGraph LowerGraph(Function function,
+                        Device device = Device::CPU());
+void ValidateLoweredGraph(const LoweredGraph& graph);
+
+}  // namespace kxc::api::internal

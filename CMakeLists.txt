@@ -79,6 +79,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/device_api.h
   include/kxc/runtime/device_info.h
   include/kxc/runtime/device_stream.h
+  include/kxc/runtime/executable_plan.h
   include/kxc/runtime/kernel_abi.h
   include/kxc/runtime/ndarray.h
   include/kxc/runtime/session.h
@@ -197,19 +198,34 @@ if(KXC_ENABLE_LLVM AND LLVM_FOUND)
     set(KXC_LLVM_LINK_MODE --link-shared)
   endif()
 
+  set(KXC_LLVM_CONFIG_EXECUTABLE "")
+  if(WIN32 AND EXISTS "${LLVM_TOOLS_BINARY_DIR}/llvm-config.exe")
+    set(KXC_LLVM_CONFIG_EXECUTABLE
+      "${LLVM_TOOLS_BINARY_DIR}/llvm-config.exe")
+  elseif(EXISTS "${LLVM_TOOLS_BINARY_DIR}/llvm-config")
+    set(KXC_LLVM_CONFIG_EXECUTABLE
+      "${LLVM_TOOLS_BINARY_DIR}/llvm-config")
+  else()
+    find_program(KXC_LLVM_CONFIG_EXECUTABLE NAMES llvm-config)
+  endif()
+  if(NOT KXC_LLVM_CONFIG_EXECUTABLE)
+    message(FATAL_ERROR
+      "LLVM was found, but llvm-config is required to determine link flags")
+  endif()
+
   # 使用 llvm-config 获取与当前平台匹配的链接参数。
   execute_process(
-    COMMAND llvm-config ${KXC_LLVM_LINK_MODE} --ldflags
+    COMMAND "${KXC_LLVM_CONFIG_EXECUTABLE}" ${KXC_LLVM_LINK_MODE} --ldflags
     OUTPUT_VARIABLE LLVM_LDFLAGS
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
   execute_process(
-    COMMAND llvm-config ${KXC_LLVM_LINK_MODE} --libs core support irreader executionengine orcjit native passes
+    COMMAND "${KXC_LLVM_CONFIG_EXECUTABLE}" ${KXC_LLVM_LINK_MODE} --libs core support irreader executionengine orcjit native passes
     OUTPUT_VARIABLE LLVM_LIBS_STR
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
   execute_process(
-    COMMAND llvm-config ${KXC_LLVM_LINK_MODE} --system-libs
+    COMMAND "${KXC_LLVM_CONFIG_EXECUTABLE}" ${KXC_LLVM_LINK_MODE} --system-libs
     OUTPUT_VARIABLE LLVM_SYSTEM_LIBS_STR
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
@@ -286,6 +302,8 @@ set(KXC_RUNTIME_CORE_SOURCES
   src/runtime/device.cc
   src/runtime/device_api.cc
   src/runtime/device_stream.cc
+    src/runtime/executable_plan.cc
+    src/runtime/memory_plan.cc
   src/runtime/storage.cc
   src/runtime/ndarray.cc
   src/runtime/device/cpu_device_api.cc
@@ -399,11 +417,15 @@ set(KXC_RUNTIME_EXECUTABLE_SOURCES
 )
 
 set(KXC_COMPILER_SOURCES
-  src/compiler/compile_config.cc
+    src/compiler/cache/primitive_cache.cc
+    src/compiler/compile_config.cc
   src/compiler/compile_state.cc
   src/compiler/compiler.cc
+  src/compiler/graph/partition.cc
+  src/compiler/graph/value_graph.cc
   src/compiler/kernel_abi_builder.cc
   src/compiler/lowering/lowered_function.cc
+  src/compiler/lowering/lowered_graph.cc
   src/compiler/lowering/relay_to_tir.cc
   src/compiler/distributed/multi_device.cc
 )
@@ -712,6 +734,8 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
   kxc_add_runtime_exe(device_info_test test/device_info_test.cpp)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
+  kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
+  kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)

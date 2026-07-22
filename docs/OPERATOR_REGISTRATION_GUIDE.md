@@ -35,6 +35,9 @@ src/relay/op/
 class SoftmaxAttrsNode : public BaseAttrsNode {
 public:
     int axis;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override {
+        writer.Add("axis", axis);
+    }
     
     // 必须实现 GetTypeId
     const TypeIndex GetTypeId() const override { return kKXC_OBJECT_TYPE + 20; }
@@ -62,6 +65,10 @@ public:
     }
 };
 ```
+
+`SerializeCanonical` 是编译身份契约的一部分：必须按 schema 顺序写入每个
+字段且不得遗漏或重复。字段名、字段类型和字段值共同参与 compilation-unit
+hash；无字段 attrs 应使用 `KXC_DEFINE_SIMPLE_ATTRS`。
 
 ### 第二步：注册算子 (C++ Source)
 

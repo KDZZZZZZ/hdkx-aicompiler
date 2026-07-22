@@ -7,6 +7,7 @@
 #if KXC_USE_LLVM
 
 #include <memory>
+#include <vector>
 
 #include "../../internal/compiled_kernel.h"
 
@@ -34,6 +35,14 @@ public:
                            const KernelSignature& signature,
                            const KernelLaunchMetadata& launch_metadata,
                            int opt_level = 2) const;
+
+    /*! \brief Compiles one module and returns symbol-specific kernels sharing one JIT. */
+    std::vector<CompiledKernel> CompileMany(
+        std::unique_ptr<llvm::Module> module,
+        std::unique_ptr<llvm::LLVMContext> context,
+        const std::vector<KernelSignature>& signatures,
+        const std::vector<KernelLaunchMetadata>& launch_metadata,
+        int opt_level = 2) const;
 
     /*! \brief 按 0 到 3 的优化等级运行 LLVM 默认 module pipeline。 */
     void Optimize(llvm::Module* module, int opt_level) const;

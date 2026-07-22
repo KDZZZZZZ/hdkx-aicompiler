@@ -9,9 +9,17 @@
 #include <utility>
 #include <vector>
 
+#include "../src/compiler/internal/lowered_graph.h"
+#include "../src/compiler/internal/primitive_cache.h"
+#include "kxc/compiler/compiler.h"
 #include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/relay/op.h"
+#include "kxc/relay/op_attr_types.h"
+#include "kxc/relay/op_macros.h"
+#include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/relay.h"
+#include "kxc/runtime/session.h"
+#include "kxc/te/te.h"
 
 namespace {
 
@@ -96,6 +104,18 @@ bool HasGlobalSymbol(const kxc::tir::PrimFunc& function, const char* expected) {
     }
 }
 
+bool ReadStringAttr(const kxc::tir::PrimFunc& function, const char* key,
+                    std::string* value) {
+    const kxc::String attr_key(key);
+    if (!function.defined() || !function->attrs.count(attr_key)) return false;
+    try {
+        *value = std::string(kxc::String(function->attrs.at(attr_key)));
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 std::vector<GraphFixture> MakeFixtures() {
     using namespace kxc;
     const TensorType tensor_type({4}, "float32");
@@ -161,23 +181,286 @@ bool TestWholeGraphSinglePrimFuncBaseline() {
 bool TestPerOperatorTargetCardinality() {
     for (const auto& fixture : MakeFixtures()) {
         const size_t expected_units = CountUniqueCalls(fixture.function);
-        const kxc::relay::LoweredFunction lowered =
-            kxc::relay::LowerToTIR(fixture.function);
-        const size_t current_primfuncs =
-            lowered.defined() && lowered->prim_func.defined() ? 1U : 0U;
+        const kxc::api::internal::LoweredGraph lowered =
+            kxc::api::internal::LowerGraph(fixture.function);
         TEST_CHECK(expected_units == fixture.expected_compute_calls,
                    std::string(fixture.name) +
                        " must allocate exactly one target unit per compute Call");
-        TEST_CHECK(expected_units > 1,
+        TEST_CHECK(lowered.primitives.size() == expected_units &&
+                       lowered.plan.calls().size() == expected_units,
                    std::string(fixture.name) +
-                       " must remain a multi-operator migration fixture");
-        TEST_CHECK(current_primfuncs != expected_units,
+                       " must produce exactly one PrimFunc and KernelCall per compute Call");
+        TEST_CHECK(lowered.plan.output_value_ids().size() ==
+                       static_cast<size_t>(fixture.expected_graph_outputs),
+                   std::string(fixture.name) + " graph output value count changed");
+
+        std::unordered_set<std::string> symbols;
+        for (size_t index = 0; index < lowered.primitives.size(); ++index) {
+            const auto& primitive = lowered.primitives[index];
+            int64_t unit_id = -1;
+            std::string identity;
+            TEST_CHECK(primitive.lowered.defined() &&
+                           primitive.lowered->prim_func.defined() &&
+                           ReadIntAttr(primitive.lowered->prim_func, "kxc.unit_id",
+                                       &unit_id) &&
+                           unit_id == static_cast<int64_t>(index),
+                       std::string(fixture.name) + " PrimFunc unit id mismatch");
+            TEST_CHECK(ReadStringAttr(primitive.lowered->prim_func,
+                                      "kxc.operator_identity", &identity) &&
+                           identity == std::string(primitive.operator_identity),
+                       std::string(fixture.name) +
+                           " PrimFunc operator identity mismatch");
+            TEST_CHECK(symbols.insert(std::string(primitive.symbol)).second,
+                       std::string(fixture.name) + " PrimFunc symbols must be unique");
+        }
+
+        const kxc::Array<kxc::relay::LoweredFunction> public_results =
+            kxc::relay::LowerOperatorCallsToTIR(fixture.function);
+        TEST_CHECK(public_results.size() == expected_units,
                    std::string(fixture.name) +
-                       " unexpectedly satisfies the future per-operator PrimFunc contract; "
-                       "update this characterization when unit lowering is implemented");
+                       " public per-operator lowering cardinality mismatch");
     }
     return true;
 }
+
+bool TestProducerCallsRemainOutsideConsumerPrimFunc() {
+    const GraphFixture chain = MakeFixtures()[0];
+    const kxc::api::internal::LoweredGraph lowered =
+        kxc::api::internal::LowerGraph(chain.function);
+    TEST_CHECK(lowered.primitives.size() == 2,
+               "chain must lower to two independent primitives");
+    int64_t first_inputs = -1;
+    int64_t second_inputs = -1;
+    TEST_CHECK(ReadIntAttr(lowered.primitives[0].lowered->prim_func,
+                           "kxc.input_count", &first_inputs) &&
+                   ReadIntAttr(lowered.primitives[1].lowered->prim_func,
+                               "kxc.input_count", &second_inputs) &&
+                   first_inputs == 2 && second_inputs == 2,
+               "each chain unit must expose only its two boundary values");
+    TEST_CHECK(lowered.primitives[1].lowered->prim_func->params.size() == 3,
+               "consumer PrimFunc ABI must be two inputs plus one output");
+    return true;
+}
+
+bool TestSharedConstantUsesStableGraphValueKey() {
+    using namespace kxc;
+    TensorType type({4}, "float32");
+    Var input("input", type);
+    runtime::NDArray payload = runtime::NDArray::Zeros(
+        {4}, DLDataType{kDLFloat, 32, 1}, Device::CPU());
+    Constant constant(payload);
+    Call first = Add(input, constant);
+    Function function({input}, Multiply(first, constant));
+
+    const api::internal::LoweredGraph lowered =
+        api::internal::LowerGraph(function);
+    TEST_CHECK(lowered.primitives.size() == 2 && lowered.constants.size() == 1,
+               "shared constant must be deduplicated graph-wide");
+    TEST_CHECK(lowered.plan.constant_value_ids().size() == 1 &&
+                   lowered.plan.constant_value_ids()[0] == 1,
+               "ExecutablePlan must preserve ordered graph constant value ids");
+    for (const auto& primitive : lowered.primitives) {
+        const Array<relay::ConstantBinding> constants =
+            primitive.lowered.constants();
+        TEST_CHECK(constants.size() == 1 &&
+                       constants[0]->key == "relay.constant.v1",
+                   "each user unit must bind only the stable constant value key it uses");
+    }
+    return true;
+}
+
+const kxc::relay::Op& MultiOutputTestOp() {
+    using namespace kxc;
+    using namespace kxc::relay;
+    static bool registered = false;
+    if (!registered) {
+        OperatorSpec spec;
+        spec.name = "test_multi_output";
+        spec.category = "test";
+        spec.input_arity.num_inputs = 1;
+        spec.output_arity = 2;
+        spec.type_relation_key = "FInferType";
+        spec.lowering_kind = OperatorLoweringKind::kMultiTE;
+        spec.lowering_key = "FRelayToTEMulti";
+        Op op = Op::Register(spec);
+        OpRegEntry(op)
+            .set_attr<FInferType>(
+                "FInferType",
+                FInferType([](const Attrs&, const Array<Type>& inputs) {
+                    if (inputs.size() != 1 || !inputs[0].As<TensorTypeNode>()) {
+                        throw std::runtime_error(
+                            "test_multi_output expects one tensor input");
+                    }
+                    return TupleType({inputs[0], inputs[0]});
+                }))
+            .set_attr<FRelayToTEMulti>(
+                "FRelayToTEMulti",
+                FRelayToTEMulti([](const Attrs&,
+                                   const Array<te::Tensor>& inputs,
+                                   const Type&) {
+                    if (inputs.size() != 1) {
+                        throw std::runtime_error(
+                            "test_multi_output lowering expects one tensor");
+                    }
+                    te::Tensor first = te::compute(
+                        inputs[0]->shape,
+                        [&](const Array<tir::Var>& axes) {
+                            return inputs[0](axes);
+                        },
+                        "multi_first");
+                    te::Tensor second = te::compute(
+                        inputs[0]->shape,
+                        [&](const Array<tir::Var>& axes) {
+                            return inputs[0](axes) +
+                                   tir::FloatImm(1.0f, inputs[0]->dtype);
+                        },
+                        "multi_second");
+                    return Array<te::Tensor>{first, second};
+                }));
+        registered = true;
+    }
+    return Op::Get("test_multi_output");
+}
+
+bool TestSingleUnitSupportsMultipleOutputs() {
+    using namespace kxc;
+    TensorType type({4}, "float32");
+    Var input("input", type);
+    Call call(MultiOutputTestOp(), {input});
+    Function function({input}, call);
+    const api::internal::LoweredGraph lowered =
+        api::internal::LowerGraph(function);
+    TEST_CHECK(lowered.primitives.size() == 1 &&
+                   lowered.plan.output_value_ids().size() == 2,
+               "one multi-output Call must remain one unit with two stable values");
+    int64_t output_count = -1;
+    TEST_CHECK(ReadIntAttr(lowered.primitives[0].lowered->prim_func,
+                           "kxc.output_count", &output_count) &&
+                   output_count == 2 &&
+                   lowered.primitives[0].lowered->prim_func->params.size() == 3,
+               "multi-output PrimFunc ABI must contain one input and two outputs");
+    return true;
+}
+
+#if KXC_USE_LLVM
+
+kxc::runtime::NDArray FilledTensor(float value) {
+    using namespace kxc;
+    runtime::NDArray result = runtime::NDArray::Empty(
+        {4}, runtime::DataTypeFromString("float32"), Device::CPU());
+    std::vector<float> payload(4, value);
+    result.CopyFromBytes(payload.data(), payload.size() * sizeof(float));
+    return result;
+}
+
+bool TensorEquals(const kxc::runtime::NDArray& value, float expected) {
+    std::vector<float> payload(4);
+    value.CopyToBytes(payload.data(), payload.size() * sizeof(float));
+    for (float actual : payload) {
+        if (actual != expected) return false;
+    }
+    return true;
+}
+
+bool TestOperatorGraphsExecuteNumerically() {
+    using namespace kxc;
+    const auto fixtures = MakeFixtures();
+    const std::vector<std::vector<float>> expected{
+        {9.0f}, {9.0f, 6.0f}, {15.0f}, {3.0f, 2.0f}};
+    for (size_t fixture_index = 0; fixture_index < fixtures.size();
+         ++fixture_index) {
+        const auto artifacts = api::Compiler::Compile(
+            fixtures[fixture_index].function,
+            api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+        TEST_CHECK(artifacts.module.entry_count() ==
+                           fixtures[fixture_index].expected_compute_calls &&
+                       artifacts.plan.calls().size() ==
+                           fixtures[fixture_index].expected_compute_calls,
+                   std::string(fixtures[fixture_index].name) +
+                       " compiled entry/call cardinality mismatch");
+        runtime::RuntimeSession session(artifacts.module, artifacts.plan);
+        Array<runtime::NDArray> inputs;
+        inputs.push_back(FilledTensor(1.0f));
+        inputs.push_back(FilledTensor(2.0f));
+        if (artifacts.plan.input_value_ids().size() == 3) {
+            inputs.push_back(FilledTensor(3.0f));
+        }
+        const Array<runtime::NDArray> outputs = session.Run(inputs);
+        TEST_CHECK(outputs.size() == expected[fixture_index].size(),
+                   std::string(fixtures[fixture_index].name) +
+                       " runtime output count mismatch");
+        for (size_t output_index = 0; output_index < outputs.size();
+             ++output_index) {
+            TEST_CHECK(TensorEquals(outputs[output_index],
+                                    expected[fixture_index][output_index]),
+                       std::string(fixtures[fixture_index].name) +
+                           " runtime numeric result mismatch");
+        }
+    }
+    return true;
+}
+
+bool TestSharedConstantExecutesNumerically() {
+    using namespace kxc;
+    TensorType type({4}, "float32");
+    Var input("input", type);
+    runtime::NDArray payload = FilledTensor(3.0f);
+    Constant constant(payload);
+    Call first = Add(input, constant);
+    Function function({input}, Multiply(first, constant));
+    const auto artifacts = api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    runtime::RuntimeSession session(artifacts.module, artifacts.plan);
+    const Array<runtime::NDArray> outputs = session.Run({FilledTensor(2.0f)});
+    TEST_CHECK(artifacts.module.constants().size() == 1 &&
+                   artifacts.plan.constant_value_ids().size() == 1 &&
+                   outputs.size() == 1 && TensorEquals(outputs[0], 15.0f),
+               "shared constant must remain one value and feed both kernels");
+    return true;
+}
+
+bool TestMultiOutputExecutesNumerically() {
+    using namespace kxc;
+    TensorType type({4}, "float32");
+    Var input("input", type);
+    Function function({input}, Call(MultiOutputTestOp(), {input}));
+    const auto artifacts = api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    runtime::RuntimeSession session(artifacts.module, artifacts.plan);
+    const Array<runtime::NDArray> outputs = session.Run({FilledTensor(5.0f)});
+    TEST_CHECK(artifacts.module.entry_count() == 1 && outputs.size() == 2 &&
+                   TensorEquals(outputs[0], 5.0f) &&
+                   TensorEquals(outputs[1], 6.0f),
+               "one primitive with two outputs must preserve numeric output order");
+    return true;
+}
+
+bool TestPrimitiveCacheUsesFullStableIdentity() {
+    using namespace kxc;
+    api::internal::ClearPrimitiveCacheForTesting();
+    TensorType type({4}, "float32");
+    Var lhs("lhs", type);
+    Var rhs("rhs", type);
+    Function function({lhs, rhs}, Multiply(Add(lhs, rhs), rhs));
+    const api::CompileConfig config =
+        api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+
+    const auto first = api::Compiler::Compile(function, config);
+    const api::internal::PrimitiveCacheStats after_first =
+        api::internal::GetPrimitiveCacheStats();
+    const auto second = api::Compiler::Compile(function, config);
+    const api::internal::PrimitiveCacheStats after_second =
+        api::internal::GetPrimitiveCacheStats();
+    TEST_CHECK(first.module.entry_count() == 2 &&
+                   second.module.entry_count() == 2 &&
+                   after_first.misses == 2 && after_first.hits == 0 &&
+                   after_first.entries == 2 && after_second.misses == 2 &&
+                   after_second.hits == 2,
+               "repeat compilation should hit full primitive cache keys");
+    return true;
+}
+
+#endif
 
 }  // namespace
 
@@ -185,6 +468,20 @@ int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"whole_graph_single_primfunc_baseline", TestWholeGraphSinglePrimFuncBaseline},
         {"per_operator_target_cardinality", TestPerOperatorTargetCardinality},
+        {"producer_calls_remain_outside_consumer",
+         TestProducerCallsRemainOutsideConsumerPrimFunc},
+        {"shared_constant_uses_stable_key", TestSharedConstantUsesStableGraphValueKey},
+        {"single_unit_supports_multiple_outputs", TestSingleUnitSupportsMultipleOutputs},
+#if KXC_USE_LLVM
+        {"operator_graphs_execute_numerically",
+         TestOperatorGraphsExecuteNumerically},
+        {"shared_constant_executes_numerically",
+         TestSharedConstantExecutesNumerically},
+        {"multi_output_executes_numerically",
+         TestMultiOutputExecutesNumerically},
+        {"primitive_cache_uses_full_stable_identity",
+         TestPrimitiveCacheUsesFullStableIdentity},
+#endif
     };
     bool ok = true;
     for (const auto& test : tests) {

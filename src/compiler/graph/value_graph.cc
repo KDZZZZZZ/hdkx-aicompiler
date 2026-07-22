@@ -1,0 +1,206 @@
+/*! \file src/compiler/graph/value_graph.cc
+ * \brief Builds deterministic stable value ids from checked Relay data flow.
+ */
+
+#include "../internal/value_graph.h"
+
+#include <stdexcept>
+#include <string>
+#include <unordered_set>
+#include <utility>
+
+namespace kxc::api::internal {
+namespace {
+
+class ValueGraphBuilder {
+public:
+    explicit ValueGraphBuilder(Function function) {
+        if (!function.defined()) {
+            throw std::invalid_argument("BuildValueGraph requires a defined Function");
+        }
+        graph_.function = std::move(function);
+    }
+
+    ValueGraph Build() {
+        for (const auto& parameter : graph_.function->params) {
+            if (!parameter->type_annotation.As<TensorTypeNode>()) {
+                throw std::invalid_argument(
+                    "BuildValueGraph requires TensorType function parameters");
+            }
+            const int64_t id = AddValue(parameter, ValueOrigin::kParameter, 0,
+                                        parameter->type_annotation);
+            graph_.input_value_ids.push_back(id);
+        }
+
+        const std::vector<int64_t> outputs = Resolve(graph_.function->body);
+        if (outputs.empty()) {
+            throw std::invalid_argument("BuildValueGraph requires graph outputs");
+        }
+        for (int64_t output_id : outputs) {
+            if (output_id < 0 ||
+                static_cast<size_t>(output_id) >= graph_.values.size()) {
+                throw std::logic_error("BuildValueGraph produced an invalid output id");
+            }
+            graph_.values[static_cast<size_t>(output_id)].is_graph_output = true;
+            graph_.output_value_ids.push_back(output_id);
+        }
+        return std::move(graph_);
+    }
+
+private:
+    ValueGraph graph_;
+
+    int64_t AddValue(const Expr& source, ValueOrigin origin, int64_t output_index,
+                     const Type& type) {
+        if (!source.defined() || !type.defined()) {
+            throw std::invalid_argument(
+                "Stable graph values require a source and checked type");
+        }
+        if (!type.As<TensorTypeNode>()) {
+            throw std::invalid_argument(
+                "Stable graph value leaves must have TensorType");
+        }
+        const int64_t id = static_cast<int64_t>(graph_.values.size());
+        graph_.values.push_back(
+            ValueInfo{id, origin, source, output_index, type, false});
+        graph_.value_ids_by_expr[source.get()].push_back(id);
+        if (origin == ValueOrigin::kConstant) {
+            graph_.constant_value_ids.push_back(id);
+        }
+        return id;
+    }
+
+    std::vector<int64_t> Resolve(const Expr& expr) {
+        if (!expr.defined()) {
+            throw std::invalid_argument("BuildValueGraph encountered undefined Relay Expr");
+        }
+        const auto memo_it = graph_.value_ids_by_expr.find(expr.get());
+        if (memo_it != graph_.value_ids_by_expr.end()) return memo_it->second;
+
+        if (expr.As<VarNode>()) {
+            throw std::invalid_argument(
+                "BuildValueGraph encountered a free or unbound Var");
+        }
+        if (expr.As<ConstantNode>()) {
+            return {AddValue(expr, ValueOrigin::kConstant, 0,
+                             RequireCheckedType(expr, "Constant"))};
+        }
+        if (const auto* call = expr.As<CallNode>()) {
+            return ResolveCall(expr, call);
+        }
+        if (const auto* tuple = expr.As<TupleNode>()) {
+            std::vector<int64_t> fields;
+            for (const auto& field : tuple->fields) {
+                const std::vector<int64_t> field_values = Resolve(field);
+                fields.insert(fields.end(), field_values.begin(), field_values.end());
+            }
+            graph_.value_ids_by_expr.emplace(expr.get(), fields);
+            return fields;
+        }
+        if (const auto* get_item = expr.As<TupleGetItemNode>()) {
+            const std::vector<int64_t> tuple_values = Resolve(get_item->tuple);
+            if (get_item->index < 0 ||
+                static_cast<size_t>(get_item->index) >= tuple_values.size()) {
+                throw std::invalid_argument(
+                    "TupleGetItem index is outside the stable value list");
+            }
+            std::vector<int64_t> selected = {
+                tuple_values[static_cast<size_t>(get_item->index)]};
+            graph_.value_ids_by_expr.emplace(expr.get(), selected);
+            return selected;
+        }
+        throw std::invalid_argument(
+            "BuildValueGraph supports parameters, constants, calls, tuples, and tuple fields");
+    }
+
+    Type RequireCheckedType(const Expr& expr, const char* kind) const {
+        const Type type = expr.checked_type();
+        if (!type.defined()) {
+            throw std::invalid_argument(std::string("BuildValueGraph requires checked_type for ") +
+                                        kind);
+        }
+        return type;
+    }
+
+    std::vector<int64_t> ResolveCall(const Expr& expr, const CallNode* call) {
+        Array<int64_t> argument_ids;
+        Array<int64_t> unique_ids;
+        std::unordered_set<int64_t> seen_inputs;
+        for (const auto& argument : call->args) {
+            for (int64_t id : Resolve(argument)) {
+                argument_ids.push_back(id);
+                if (seen_inputs.insert(id).second) unique_ids.push_back(id);
+            }
+        }
+        // PrimFunc ABI is [non-constant inputs][constants][outputs]. Logical
+        // argument_value_ids above retains original grouping/order/duplicates.
+        Array<int64_t> input_ids;
+        for (int64_t id : unique_ids) {
+            if (graph_.values[static_cast<size_t>(id)].origin !=
+                ValueOrigin::kConstant) {
+                input_ids.push_back(id);
+            }
+        }
+        for (int64_t id : unique_ids) {
+            if (graph_.values[static_cast<size_t>(id)].origin ==
+                ValueOrigin::kConstant) {
+                input_ids.push_back(id);
+            }
+        }
+
+        const auto* op = call->op.As<relay::OpNode>();
+        if (!op || !op->has_spec) {
+            throw std::invalid_argument(
+                "BuildValueGraph requires every Call to reference a specified operator");
+        }
+        relay::ValidateOperatorSpec(op->spec);
+
+        const Type output_type = RequireCheckedType(expr, "Call");
+        std::vector<Type> leaf_types;
+        if (output_type.As<TensorTypeNode>()) {
+            leaf_types.push_back(output_type);
+        } else if (const auto* tuple_type = output_type.As<TupleTypeNode>()) {
+            for (const auto& field_type : tuple_type->fields) {
+                if (!field_type.As<TensorTypeNode>()) {
+                    throw std::invalid_argument(
+                        "BuildValueGraph does not support nested tuple Call outputs");
+                }
+                leaf_types.push_back(field_type);
+            }
+        } else {
+            throw std::invalid_argument(
+                "BuildValueGraph Call output must be TensorType or TupleType");
+        }
+
+        if (op->spec.output_arity >= 0 &&
+            static_cast<size_t>(op->spec.output_arity) != leaf_types.size()) {
+            throw std::invalid_argument("OperatorSpec output arity does not match checked type for op: " +
+                                        op->name);
+        }
+
+        Array<int64_t> output_ids;
+        std::vector<int64_t> result;
+        for (size_t index = 0; index < leaf_types.size(); ++index) {
+            const int64_t id = AddValue(expr, ValueOrigin::kCallOutput,
+                                        static_cast<int64_t>(index), leaf_types[index]);
+            output_ids.push_back(id);
+            result.push_back(id);
+        }
+        graph_.calls.push_back(CallInfo{expr, op->name, op->spec.lowering_kind,
+                                        argument_ids, input_ids, output_ids});
+        return result;
+    }
+};
+
+}  // namespace
+
+bool IsOrdinaryCompute(relay::OperatorLoweringKind kind) {
+    return kind == relay::OperatorLoweringKind::kSingleTE ||
+           kind == relay::OperatorLoweringKind::kMultiTE;
+}
+
+ValueGraph BuildValueGraph(const Function& function) {
+    return ValueGraphBuilder(function).Build();
+}
+
+}  // namespace kxc::api::internal

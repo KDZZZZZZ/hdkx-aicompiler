@@ -9,6 +9,8 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
@@ -28,6 +30,10 @@ public:
 
     /*! \brief 将 PrimFunc 编译为 LLVM Module 中的一个 Function。 */
     void AddFunction(const tir::PrimFunc& func, const std::string& name = "main");
+
+    /*! \brief Adds several independently addressable PrimFuncs to one module. */
+    void AddFunctions(
+        const std::vector<std::pair<tir::PrimFunc, std::string>>& functions);
 
     /*! \brief 取出生成的 LLVM Module，所有权转移给调用方。 */
     std::unique_ptr<llvm::Module> TakeModule();

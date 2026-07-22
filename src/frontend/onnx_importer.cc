@@ -423,7 +423,7 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
             ReadBool(Field(attrs, "ceil_mode", "pool attrs"), "pool attrs.ceil_mode")));
     }
     if (op_name == "add") {
-        return ObjectRef(relay::AddAttrs::Create());
+        return ObjectRef();
     }
     if (op_name == "nn_global_avg_pool2d") {
         return ObjectRef(relay::GlobalAvgPool2DAttrs::Create());

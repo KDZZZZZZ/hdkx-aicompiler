@@ -143,6 +143,17 @@ void CodeGenLLVM::AddFunction(const tir::PrimFunc& func, const std::string& name
     }
 }
 
+void CodeGenLLVM::AddFunctions(
+    const std::vector<std::pair<tir::PrimFunc, std::string>>& functions) {
+    if (functions.empty()) {
+        throw std::invalid_argument(
+            "CodeGenLLVM AddFunctions requires at least one PrimFunc");
+    }
+    for (const auto& function : functions) {
+        AddFunction(function.first, function.second);
+    }
+}
+
 std::unique_ptr<llvm::Module> CodeGenLLVM::TakeModule() {
     return std::move(module_);
 }

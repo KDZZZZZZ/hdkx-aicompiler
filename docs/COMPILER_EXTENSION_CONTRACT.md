@@ -22,7 +22,10 @@ An operator must be added in this order:
 
 1. Declare its machine-readable contract in `test/relay_op_contract.json`.
 2. Define or reuse an attrs schema with typed fields, defaults, legal ranges,
-   and stable serialization order.
+   and stable serialization order. Every non-fieldless `BaseAttrsNode` must
+   implement `SerializeCanonical(CanonicalAttrWriter&)` and emit every field
+   exactly once in schema order; compilation-unit identity includes this
+   type-and-value serialization.
 3. Register a complete `OperatorSpec`, type-relation binding, and lowering
    binding.
 4. Implement type validation and output-type inference.
@@ -95,6 +98,22 @@ CompiledModule + ExecutablePlan
 RuntimeSession
   -> NDArray allocation, launch, and completion only
 ```
+
+Backend batching does not weaken unit identity: multiple PrimFuncs for one
+target may share one LLVM JIT or CUDA module, but each unit keeps its own
+symbol, signature, launch metadata, module entry, and `KernelCall`.
+
+Primitive cache keys must contain the optimized PrimFunc structural hash, the
+complete compile-relevant target identity, optimization level, kernel ABI
+version, and backend implementation version. Operator name, shape, registry
+order, or symbol alone is never a valid cache key.
+
+Executable-plan storage reuse is a physical allocation decision, not a value
+identity or aliasing mechanism. Only equal-contract intermediates with strictly
+non-overlapping call intervals may share a storage id. Inputs, constants, graph
+outputs, declared aliases, and async-live values always retain dedicated
+storage. Runtime execution remains ordered on one stream and retains replaced
+storage until the final completion object is safe to release.
 
 The allowed dependencies are one-way:
 

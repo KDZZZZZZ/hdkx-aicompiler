@@ -16,6 +16,7 @@
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/session.h"
 #include "../src/runtime/internal/compiled_module_node.h"
+#include "../src/runtime/internal/memory_plan.h"
 
 namespace {
 
@@ -115,9 +116,90 @@ public:
     mutable std::atomic<int> calls{0};
 };
 
+class BinaryElementwiseLauncher final : public kxc::codegen::KernelLauncher {
+public:
+    explicit BinaryElementwiseLauncher(bool multiply)
+        : multiply_(multiply) {}
+
+    bool IsReady() const noexcept override { return true; }
+
+    kxc::AsyncOperation Launch(
+        const kxc::Array<kxc::runtime::NDArray>& arguments,
+        const kxc::DeviceStream& stream,
+        const kxc::ObjectRef&) const override {
+        if (arguments.size() != 3) {
+            throw std::invalid_argument(
+                "binary elementwise launcher expects two inputs and one output");
+        }
+        std::vector<float> lhs(4);
+        std::vector<float> rhs(4);
+        std::vector<float> output(4);
+        arguments[0].CopyToBytes(lhs.data(), lhs.size() * sizeof(float));
+        arguments[1].CopyToBytes(rhs.data(), rhs.size() * sizeof(float));
+        for (size_t i = 0; i < output.size(); ++i) {
+            output[i] = multiply_ ? lhs[i] * rhs[i] : lhs[i] + rhs[i];
+        }
+        arguments[2].CopyFromBytes(output.data(),
+                                   output.size() * sizeof(float));
+        ++calls;
+        last_arguments = arguments;
+        kxc::Array<kxc::Storage> retained;
+        for (const auto& argument : arguments) {
+            retained.push_back(argument.storage());
+        }
+        return kxc::AsyncOperation::Completed(stream, std::move(retained));
+    }
+
+    mutable int calls{0};
+    mutable kxc::Array<kxc::runtime::NDArray> last_arguments;
+
+private:
+    bool multiply_{false};
+};
+
+kxc::runtime::ExecutablePlan MakePlan(
+    const kxc::codegen::KernelSignature& signature) {
+    using namespace kxc;
+    Array<runtime::ValueSpec> values;
+    Array<int64_t> call_inputs;
+    Array<int64_t> call_outputs;
+    Array<int64_t> graph_inputs;
+    Array<int64_t> constants;
+    Array<int64_t> graph_outputs;
+    int64_t value_id = 0;
+    for (const auto& argument : signature.arguments()) {
+        const bool is_input =
+            argument->role == codegen::KernelArgRole::kInput;
+        const bool is_constant =
+            argument->role == codegen::KernelArgRole::kConstant;
+        const bool is_output =
+            argument->role == codegen::KernelArgRole::kOutput;
+        values.push_back(runtime::ValueSpec(
+            value_id, value_id, argument.shape(), argument->dtype,
+            argument->device, is_input, is_constant, is_output));
+        if (is_output) {
+            call_outputs.push_back(value_id);
+            graph_outputs.push_back(value_id);
+        } else {
+            call_inputs.push_back(value_id);
+            if (is_input) graph_inputs.push_back(value_id);
+            if (is_constant) constants.push_back(value_id);
+        }
+        ++value_id;
+    }
+    return runtime::ExecutablePlan(
+        std::move(values),
+        Array<runtime::KernelCall>{runtime::KernelCall(
+            signature->symbol, std::move(call_inputs),
+            std::move(call_outputs))},
+        std::move(graph_inputs), std::move(constants),
+        std::move(graph_outputs));
+}
+
 /*! \brief 保存 session 测试所需的模块、常量和 fake launcher。 */
 struct SessionFixture {
     kxc::api::CompiledModule module;
+    kxc::runtime::ExecutablePlan plan;
     kxc::runtime::NDArray constant;
     std::shared_ptr<RecordingLauncher> launcher;
 };
@@ -132,8 +214,10 @@ kxc::api::CompiledModule MakeModule(
     KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
     CompiledKernel executable(signature, metadata, launcher);
     return api::internal::BuildCompiledModule(
-        BuildTarget(Device::CPU()), tir::PrimFunc(), signature, metadata,
-        constants, executable);
+        BuildTarget(Device::CPU()),
+        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
+                                            metadata, executable}},
+        constants);
 }
 
 /*! \brief 构造 input -> constant -> output 的静态 session fixture。 */
@@ -152,7 +236,8 @@ SessionFixture MakeStaticFixture() {
     Map<String, runtime::NDArray> constants;
     constants.Set(String("relay.constant.0"), constant);
     auto launcher = std::make_shared<RecordingLauncher>();
-    return {MakeModule(signature, constants, launcher), constant,
+    return {MakeModule(signature, constants, launcher), MakePlan(signature),
+            constant,
             std::move(launcher)};
 }
 
@@ -161,7 +246,8 @@ bool TestConstructionAndTypeChecks() {
     using namespace kxc;
     TEST_CHECK(Throws([] {
                    runtime::RuntimeSession invalid{
-                       api::CompiledModule(ObjectRef())};
+                       api::CompiledModule(ObjectRef()),
+                       runtime::ExecutablePlan()};
                }),
                "undefined CompiledModule should fail");
     TEST_CHECK(Throws([] {
@@ -169,10 +255,13 @@ bool TestConstructionAndTypeChecks() {
                }),
                "Device ObjectRef should not become RuntimeSession");
     SessionFixture fixture = MakeStaticFixture();
-    runtime::RuntimeSession session(fixture.module);
+    runtime::RuntimeSession session(fixture.module, fixture.plan);
     TEST_CHECK(session.defined(), "valid module should create a session");
     fixture.launcher->ready = false;
-    TEST_CHECK(Throws([&] { runtime::RuntimeSession invalid(fixture.module); }),
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(fixture.module,
+                                                   fixture.plan);
+               }),
                "defined but no longer ready module should fail");
     return true;
 }
@@ -181,7 +270,7 @@ bool TestConstructionAndTypeChecks() {
 bool TestSynchronousAssembly() {
     using namespace kxc;
     SessionFixture fixture = MakeStaticFixture();
-    runtime::RuntimeSession session(fixture.module);
+    runtime::RuntimeSession session(fixture.module, fixture.plan);
     runtime::NDArray input =
         runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
     Array<runtime::NDArray> outputs = session.Run({input});
@@ -213,7 +302,7 @@ bool TestAsyncResultLifetime() {
     SessionFixture fixture = MakeStaticFixture();
     runtime::RunAsyncResult result;
     {
-        runtime::RuntimeSession session(fixture.module);
+        runtime::RuntimeSession session(fixture.module, fixture.plan);
         runtime::NDArray input =
             runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
         result = session.RunAsync(
@@ -231,7 +320,7 @@ bool TestAsyncResultLifetime() {
 bool TestInputValidation() {
     using namespace kxc;
     SessionFixture fixture = MakeStaticFixture();
-    runtime::RuntimeSession session(fixture.module);
+    runtime::RuntimeSession session(fixture.module, fixture.plan);
     const DeviceStream stream = DeviceStream::Default(Device::CPU());
     TEST_CHECK(Throws([&] { session.RunAsync({}, stream); }),
                "missing input should fail");
@@ -281,7 +370,7 @@ bool TestInputValidation() {
 bool TestStreamValidation() {
     using namespace kxc;
     SessionFixture fixture = MakeStaticFixture();
-    runtime::RuntimeSession session(fixture.module);
+    runtime::RuntimeSession session(fixture.module, fixture.plan);
     runtime::NDArray input =
         runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
     TEST_CHECK(Throws([&] { session.RunAsync({input}, DeviceStream()); }),
@@ -312,8 +401,11 @@ bool TestInputDeviceValidationBeforeAllocation() {
     auto launcher = std::make_shared<RecordingLauncher>();
     CompiledKernel executable(signature, metadata, launcher);
     api::CompiledModule module = api::internal::BuildCompiledModule(
-        BuildTarget(cuda), tir::PrimFunc(), signature, metadata, {}, executable);
-    runtime::RuntimeSession session(module);
+        BuildTarget(cuda),
+        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
+                                            metadata, executable}},
+        {});
+    runtime::RuntimeSession session(module, MakePlan(signature));
     std::string message;
     TEST_CHECK(
         Throws(
@@ -342,7 +434,8 @@ bool TestDynamicInput() {
          KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3, 4},
                        Device::CPU(), 1, true)});
     auto launcher = std::make_shared<RecordingLauncher>();
-    runtime::RuntimeSession session(MakeModule(signature, {}, launcher));
+    runtime::RuntimeSession session(MakeModule(signature, {}, launcher),
+                                    MakePlan(signature));
     Array<runtime::NDArray> outputs = session.Run(
         {runtime::NDArray::Zeros({3, 4}, Float32(), Device::CPU())});
     TEST_CHECK(outputs.size() == 1 &&
@@ -373,7 +466,7 @@ bool TestZeroInputAndMultipleOutputs() {
     constants.Set(String("relay.constant.0"), constant);
     auto launcher = std::make_shared<RecordingLauncher>();
     runtime::RuntimeSession session(
-        MakeModule(signature, constants, launcher));
+        MakeModule(signature, constants, launcher), MakePlan(signature));
 
     Array<runtime::NDArray> outputs = session.Run({});
     TEST_CHECK(outputs.size() == 2 && outputs[0].shape().empty() &&
@@ -404,8 +497,11 @@ bool TestConcurrentArgumentAssembly() {
     KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
     CompiledKernel executable(signature, metadata, launcher);
     api::CompiledModule module = api::internal::BuildCompiledModule(
-        BuildTarget(Device::CPU()), tir::PrimFunc(), signature, metadata, {}, executable);
-    runtime::RuntimeSession session(module);
+        BuildTarget(Device::CPU()),
+        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
+                                            metadata, executable}},
+        {});
+    runtime::RuntimeSession session(module, MakePlan(signature));
     std::atomic<int> failures{0};
     std::vector<std::thread> threads;
     constexpr int kThreads = 8;
@@ -461,6 +557,132 @@ bool TestConcurrentArgumentAssembly() {
     return true;
 }
 
+bool TestMultiEntryPlanExecution() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    const Array<int64_t> shape{4};
+    KernelSignature add_signature(
+        "plan_add",
+        {KernelArgSpec("lhs", KernelArgRole::kInput, Float32(), shape, cpu),
+         KernelArgSpec("rhs", KernelArgRole::kInput, Float32(), shape, cpu),
+         KernelArgSpec("out", KernelArgRole::kOutput, Float32(), shape, cpu,
+                       32, true)});
+    KernelSignature mul_signature(
+        "plan_mul",
+        {KernelArgSpec("lhs", KernelArgRole::kInput, Float32(), shape, cpu),
+         KernelArgSpec("rhs", KernelArgRole::kInput, Float32(), shape, cpu),
+         KernelArgSpec("out", KernelArgRole::kOutput, Float32(), shape, cpu,
+                       64, true)});
+    KernelLaunchMetadata add_metadata(cpu, CodeGenBackend::kLLVM);
+    KernelLaunchMetadata mul_metadata(cpu, CodeGenBackend::kLLVM);
+    auto add_launcher = std::make_shared<BinaryElementwiseLauncher>(false);
+    auto mul_launcher = std::make_shared<BinaryElementwiseLauncher>(true);
+    CompiledKernel add_kernel(add_signature, add_metadata, add_launcher);
+    CompiledKernel mul_kernel(mul_signature, mul_metadata, mul_launcher);
+    std::vector<api::internal::CompiledModuleEntry> entries{
+        {tir::PrimFunc(), add_signature, add_metadata, add_kernel},
+        {tir::PrimFunc(), mul_signature, mul_metadata, mul_kernel},
+    };
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu), std::move(entries), {});
+
+    Array<runtime::ValueSpec> values{
+        runtime::ValueSpec(0, 0, shape, Float32(), cpu, true),
+        runtime::ValueSpec(1, 1, shape, Float32(), cpu, true),
+        runtime::ValueSpec(2, 2, shape, Float32(), cpu, true),
+        runtime::ValueSpec(3, 3, shape, Float32(), cpu),
+        runtime::ValueSpec(4, 4, shape, Float32(), cpu, false, false, true),
+    };
+    runtime::ExecutablePlan plan(
+        values,
+        {runtime::KernelCall("plan_add", {0, 1}, {3}),
+         runtime::KernelCall("plan_mul", {3, 2}, {4})},
+        {0, 1, 2}, {}, {4});
+    runtime::RuntimeSession session(module, plan);
+
+    auto filled = [&](float value) {
+        runtime::NDArray array =
+            runtime::NDArray::Empty(shape, Float32(), cpu);
+        std::vector<float> payload(4, value);
+        array.CopyFromBytes(payload.data(), payload.size() * sizeof(float));
+        return array;
+    };
+    Array<runtime::NDArray> outputs =
+        session.Run({filled(1.0f), filled(2.0f), filled(3.0f)});
+    std::vector<float> actual(4);
+    outputs[0].CopyToBytes(actual.data(), actual.size() * sizeof(float));
+    bool numeric_ok = true;
+    for (float value : actual) numeric_ok = numeric_ok && value == 9.0f;
+    TEST_CHECK(outputs.size() == 1 && numeric_ok && add_launcher->calls == 1 &&
+                   mul_launcher->calls == 1,
+               "RuntimeSession must execute every plan call in order");
+    TEST_CHECK(add_launcher->last_arguments[2].get() ==
+                   mul_launcher->last_arguments[0].get() &&
+                   outputs[0].get() == mul_launcher->last_arguments[2].get() &&
+                   add_launcher->last_arguments[2].storage()->alignment >= 32 &&
+                   outputs[0].storage()->alignment >= 64,
+               "stable intermediate/output values or alignments were not preserved");
+
+    runtime::ExecutablePlan bad_plan(
+        values,
+        {runtime::KernelCall("plan_add", {0, 1}, {3}),
+         runtime::KernelCall("missing_mul", {3, 2}, {4})},
+        {0, 1, 2}, {}, {4});
+    TEST_CHECK(Throws([&] { runtime::RuntimeSession invalid(module, bad_plan); }),
+               "session construction must reject plan/module symbol drift");
+    return true;
+}
+
+bool TestPlannedIntermediateStorageReuse() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    const Array<int64_t> shape{4};
+    std::vector<std::shared_ptr<RecordingLauncher>> launchers;
+    std::vector<api::internal::CompiledModuleEntry> entries;
+    Array<runtime::KernelCall> calls;
+    for (int i = 0; i < 4; ++i) {
+        const String symbol("reuse_" + std::to_string(i));
+        KernelSignature signature(
+            symbol,
+            {KernelArgSpec("input", KernelArgRole::kInput, Float32(), shape,
+                           cpu),
+             KernelArgSpec("output", KernelArgRole::kOutput, Float32(), shape,
+                           cpu, 16, true)});
+        KernelLaunchMetadata metadata(cpu, CodeGenBackend::kLLVM);
+        auto launcher = std::make_shared<RecordingLauncher>();
+        entries.push_back({tir::PrimFunc(), signature, metadata,
+                           CompiledKernel(signature, metadata, launcher)});
+        launchers.push_back(std::move(launcher));
+        calls.push_back(runtime::KernelCall(symbol, {i}, {i + 1}));
+    }
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu), std::move(entries), {});
+    Array<runtime::ValueSpec> values{
+        runtime::ValueSpec(0, 0, shape, Float32(), cpu, true),
+        runtime::ValueSpec(1, 1, shape, Float32(), cpu),
+        runtime::ValueSpec(2, 2, shape, Float32(), cpu),
+        runtime::ValueSpec(3, 3, shape, Float32(), cpu),
+        runtime::ValueSpec(4, 4, shape, Float32(), cpu, false, false, true),
+    };
+    runtime::ExecutablePlan plan = runtime::internal::PlanMemory(
+        runtime::ExecutablePlan(values, calls, {0}, {}, {4}));
+    runtime::RuntimeSession session(module, plan);
+    const Array<runtime::NDArray> outputs = session.Run(
+        {runtime::NDArray::Zeros(shape, Float32(), cpu)});
+
+    TEST_CHECK(plan.values()[1]->storage_id == plan.values()[3]->storage_id &&
+                   launchers[0]->last_arguments[1].storage().get() ==
+                       launchers[2]->last_arguments[1].storage().get() &&
+                   launchers[1]->last_arguments[1].storage().get() !=
+                       launchers[2]->last_arguments[1].storage().get() &&
+                   outputs[0].storage().get() !=
+                       launchers[2]->last_arguments[1].storage().get(),
+               "runtime must realize planned intermediate reuse without reusing outputs");
+    return true;
+}
+
 }  // namespace
 
 /*! \brief 顺序执行 RuntimeSession 契约用例，并将任一失败转换为非零退出码。 */
@@ -476,6 +698,9 @@ int main() {
         {"dynamic_input", TestDynamicInput},
         {"zero_input_and_multiple_outputs", TestZeroInputAndMultipleOutputs},
         {"concurrent_argument_assembly", TestConcurrentArgumentAssembly},
+        {"multi_entry_plan_execution", TestMultiEntryPlanExecution},
+        {"planned_intermediate_storage_reuse",
+         TestPlannedIntermediateStorageReuse},
     };
     int failures = 0;
     for (const auto& test : tests) {
