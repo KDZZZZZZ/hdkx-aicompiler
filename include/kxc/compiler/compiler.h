@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "kxc/compiler/compile_config.h"
+#include "kxc/compiler/control_flow.h"
 #include "kxc/compiler/foundation_contract.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
@@ -41,6 +42,19 @@ struct CompiledGraph final {
     ArtifactKey graph_artifact_key;
 };
 
+/*! \brief Gated, resolved static-exact control-flow artifact set.
+ *
+ * `plan` is runtime-only: it contains resolved module entries, ABI, launch
+ * metadata, immutable module constants, and opaque retention leases, but no
+ * Relay, TE, cache lookup, or compiler callback.  Relay has If but no Loop
+ * node; this API does not claim generic Relay loops or recursion.
+ */
+struct CompiledControlFlowGraph final {
+    runtime::ControlExecutionPlan plan;
+    std::vector<ArtifactPin> artifact_pins;
+    ControlFlowArtifactAuthority authority;
+};
+
 /*!
  * \brief Relay Function 到可执行模块的统一编译入口。
  *
@@ -56,6 +70,17 @@ public:
      * \return 可运行的编译模块。
      */
     static CompiledGraph Compile(Function func, CompileConfig config);
+
+    /*! \brief Explicit default-OFF production path for static CPU Relay If.
+     *
+     * Requires KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=ON, CPU:0/default
+     * stream, real available backend artifacts, and nonzero authority
+     * generation plus a nonempty lease_id.  Compiler::Compile remains the
+     * static-dataflow API and continues to reject Relay If.
+     */
+    static CompiledControlFlowGraph CompileControlFlowExact(
+        Function func, CompileConfig config,
+        ControlFlowArtifactAuthority authority);
 
     /*! \brief Builds the canonical whole-graph compile identity used by adapters. */
     static ArtifactKey BuildGraphArtifactKey(const Function& func,

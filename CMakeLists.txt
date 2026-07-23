@@ -18,6 +18,8 @@ option(KXC_ENABLE_REGION_TASK_DAG
   "Enable experimental RuntimeSession execution of frozen Region task DAGs" OFF)
 option(KXC_ENABLE_CONTROL_RUNTIME
   "Enable experimental static-exact CPU control runtime execution" OFF)
+option(KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+  "Enable default-OFF real-artifact static CPU Relay If compilation" OFF)
 option(KXC_ENABLE_SHAPE_PRODUCTION_EXACT
   "Enable the production exact Relay/compiler/shape adapter" OFF)
 option(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
@@ -473,6 +475,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/control_flow/control_plan_adapter.cc
   src/compiler/control_flow/executable_capability.cc
   src/compiler/control_flow/relay_control_plan.cc
+  src/compiler/control_flow/production_control_flow.cc
   src/compiler/compile_state.cc
   src/compiler/foundation_contract.cc
   src/compiler/identity.cc
@@ -522,6 +525,7 @@ function(kxc_configure_module_obj target)
     KXC_USE_LLVM=${KXC_USE_LLVM}
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
+    KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
 endfunction()
@@ -705,6 +709,7 @@ function(kxc_add_runtime_exe target source_file)
     KXC_USE_LLVM=${KXC_USE_LLVM}
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
+    KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
   if(KXC_USE_CUDA)

@@ -4,6 +4,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "kxc/relay/relay.h"
@@ -20,15 +22,21 @@ namespace kxc::api {
  */
 runtime::ControlPlan LowerRelayToControlPlan(Function function);
 
-/*! \brief Experimental fixture module-entry binding for one ControlPlan kernel. */
+/*! \brief One ControlPlan kernel binding: fixture revision or retained production authority. */
 struct ControlKernelBinding final {
     runtime::TaskId task_id{-1};
     CompiledModule module;
     String entry_symbol;
-    /*! \brief Caller label only; it proves no freshness, lease, or hot-swap safety. */
+    /*! \brief Legacy fixture label; set only for fixture bindings. */
     std::uint64_t binding_revision{0};
     /*! \brief Exact input-then-constant ABI ids, preserving source order per role. */
     std::vector<runtime::ValueId> abi_non_output_value_ids;
+    /*! \brief Supplied control-plane generation for a production selection. */
+    std::uint64_t authority_generation{0};
+    /*! \brief Supplied non-empty control-plane lease identity for production. */
+    std::string authority_lease;
+    /*! \brief Opaque required production retention; runtime neither interprets nor calls it. */
+    std::shared_ptr<const void> retention_lease;
 };
 
 /*! \brief Binds a verified ControlPlan v2 into runtime-only execution schema v1.
@@ -41,5 +49,11 @@ struct ControlKernelBinding final {
 runtime::ControlExecutionPlan BindControlPlanForRuntime(
     const runtime::ControlPlan& plan,
     const std::vector<ControlKernelBinding>& bindings);
+
+/*! \brief Required, externally supplied authority for gated production binding. */
+struct ControlFlowArtifactAuthority final {
+    std::uint64_t generation{0};
+    std::string lease_id;
+};
 
 }  // namespace kxc::api

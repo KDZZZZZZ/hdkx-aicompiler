@@ -15,12 +15,19 @@
 
 #include "kxc/compiler/compiler.h"
 #include "kxc/compiler/control_flow.h"
+#include "kxc/relay/op.h"
 #include "kxc/runtime/control_session.h"
 #include "support/control_plan_reference_executor.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 
 #ifndef KXC_ENABLE_CONTROL_RUNTIME
 #define KXC_ENABLE_CONTROL_RUNTIME 0
+#endif
+#ifndef KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+#define KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION 0
+#endif
+#ifndef KXC_USE_LLVM
+#define KXC_USE_LLVM 0
 #endif
 
 namespace {
@@ -468,6 +475,63 @@ bool TestCompilerDefaultStillRejectsIf() {
     return true;
 }
 
+bool TestProductionControlFlowGateAndArtifacts() {
+    const kxc::TensorType boolean({}, "bool");
+    const kxc::TensorType integer({}, "int64");
+    kxc::Var predicate("production_predicate", boolean);
+    kxc::Var lhs("production_lhs", integer);
+    kxc::Var rhs("production_rhs", integer);
+    const kxc::Function function(
+        {predicate, lhs, rhs},
+        kxc::If(predicate,
+                kxc::Call(kxc::relay::Op::Get("add"), {lhs, rhs}),
+                kxc::Call(kxc::relay::Op::Get("mul"), {lhs, rhs})));
+    const auto config =
+        kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
+    const kxc::api::ControlFlowArtifactAuthority authority{41, "control-test-lease"};
+    const std::string error = ErrorText([&] {
+        (void)kxc::api::Compiler::CompileControlFlowExact(function, config,
+                                                            authority);
+    });
+#if !KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+    CHECK(error.find("disabled by KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION") !=
+              std::string::npos,
+          "production Relay If API must remain default-OFF");
+#elif !KXC_USE_LLVM
+    CHECK(error.find("KXC_ENABLE_LLVM=ON") != std::string::npos,
+          "enabled production API must fail closed without a real LLVM backend");
+#else
+    CHECK(error.empty(), "enabled production API must resolve real compiler artifacts");
+    const auto compiled = kxc::api::Compiler::CompileControlFlowExact(
+        function, config, authority);
+    CHECK(!compiled.artifact_pins.empty() &&
+              compiled.authority.generation == authority.generation &&
+              compiled.authority.lease_id == authority.lease_id,
+          "resolved production plan must retain real pins and supplied authority");
+    for (const auto& region : compiled.plan.regions()) {
+        for (const auto& task : region.tasks) {
+            if (task.kind != ControlExecutionTaskKind::kKernel) continue;
+            CHECK(task.kernel.authority_generation() == authority.generation &&
+                      task.kernel.authority_lease() == authority.lease_id &&
+                      task.kernel.binding_revision() == 0,
+                  "production bindings must use generation/lease, never fixture revision");
+        }
+    }
+#if KXC_ENABLE_CONTROL_RUNTIME
+    ControlRuntimeSession session(compiled.plan);
+    const ControlRunResult yes =
+        session.Run({ScalarBool(true), ScalarI64(2), ScalarI64(3)});
+    const ControlRunResult no =
+        session.Run({ScalarBool(false), ScalarI64(2), ScalarI64(3)});
+    CHECK(yes.outputs.size() == 1 && no.outputs.size() == 1 &&
+              ReadI64(yes.outputs[0]) == 5 && ReadI64(no.outputs[0]) == 6 &&
+              yes.events != no.events,
+          "real true/false compiler artifacts must execute distinct Relay If branches");
+#endif
+#endif
+    return true;
+}
+
 bool TestBindingAndBranchDifferential() {
     BranchFixture fixture;
     const ControlPlan original = BranchPlan();
@@ -859,6 +923,37 @@ bool TestBindingAndValidationNegatives() {
     zero_revision[0].binding_revision = 0;
     CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, zero_revision); }),
           "binding_revision zero must fail");
+    auto mixed_authority = bindings;
+    mixed_authority[0].authority_generation = 71;
+    mixed_authority[0].authority_lease = "mixed";
+    mixed_authority[0].retention_lease = std::make_shared<const int>(1);
+    CHECK(Throws([&] {
+              (void)kxc::api::BindControlPlanForRuntime(branch, mixed_authority);
+          }),
+          "fixture revision and production authority must be mutually exclusive");
+    auto missing_retention = bindings;
+    missing_retention[0].binding_revision = 0;
+    missing_retention[0].authority_generation = 72;
+    missing_retention[0].authority_lease = "missing-retention";
+    CHECK(Throws([&] {
+              (void)kxc::api::BindControlPlanForRuntime(branch, missing_retention);
+          }),
+          "production authority must retain an opaque artifact lease");
+    auto production_authority = bindings;
+    const auto production_retention = std::make_shared<const int>(1);
+    const std::weak_ptr<const int> production_weak = production_retention;
+    production_authority[0].binding_revision = 0;
+    production_authority[0].authority_generation = 73;
+    production_authority[0].authority_lease = "retained";
+    production_authority[0].retention_lease = production_retention;
+    const ControlExecutionPlan retained_authority =
+        kxc::api::BindControlPlanForRuntime(branch, production_authority);
+    production_authority[0].retention_lease.reset();
+    CHECK(!production_weak.expired() &&
+              retained_authority.regions()[1].tasks[0].kernel.authority_generation() == 73 &&
+              retained_authority.regions()[1].tasks[0].kernel.authority_lease() == "retained" &&
+              retained_authority.regions()[1].tasks[0].kernel.binding_revision() == 0,
+          "production generation, lease, and opaque retention must survive immutable binding");
     auto wrong_abi = bindings;
     wrong_abi[0].abi_non_output_value_ids = {0};
     CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, wrong_abi); }),
@@ -1024,6 +1119,8 @@ bool TestAsyncCompletionRetention() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"compiler_default_rejects_if", TestCompilerDefaultStillRejectsIf},
+        {"production_control_flow_gate_and_artifacts",
+         TestProductionControlFlowGateAndArtifacts},
         {"binding_and_branch_differential", TestBindingAndBranchDifferential},
         {"loop_differential_and_bound", TestLoopDifferentialAndBound},
         {"read_only_input_aliasing_and_abi_order",

@@ -67,10 +67,14 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
         plan.constant_values.begin(), plan.constant_values.end());
     std::unordered_map<runtime::TaskId, const ControlKernelBinding*> binding_by_task;
     for (const auto& binding : bindings) {
+        const bool production = binding.authority_generation != 0;
         if (binding.task_id < 0 || !binding.module.defined() ||
-            binding.entry_symbol == "" || binding.binding_revision == 0 ||
-            !binding.module.HasFunction(binding.entry_symbol)) {
-            Fail("each fixture binding requires task id, ready module entry, and binding_revision > 0");
+            binding.entry_symbol == "" ||
+            !binding.module.HasFunction(binding.entry_symbol) ||
+            (production == binding.authority_lease.empty()) ||
+            (production == (binding.binding_revision != 0)) ||
+            (production && !binding.retention_lease)) {
+            Fail("each binding requires task id, ready module entry, exactly one fixture revision or retained production authority");
         }
         if (!binding_by_task.emplace(binding.task_id, &binding).second) {
             Fail("duplicate binding task id");
@@ -118,7 +122,8 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
                     const ControlKernelBinding& supplied = *found->second;
                     runtime::BoundControlKernel kernel(
                         supplied.module, supplied.entry_symbol,
-                        supplied.binding_revision);
+                        supplied.binding_revision, supplied.authority_generation,
+                        supplied.authority_lease, supplied.retention_lease);
                     const Array<codegen::KernelArgSpec> signature = kernel.signature().arguments();
                     std::size_t expected_non_outputs = 0;
                     for (const auto& argument : signature) {

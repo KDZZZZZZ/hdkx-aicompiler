@@ -5,6 +5,7 @@
 #include "kxc/compiler/control_flow.h"
 
 #include "../internal/executable_capability.h"
+#include "internal_lowering.h"
 
 #include <algorithm>
 #include <any>
@@ -141,7 +142,7 @@ class ControlPlanBuilder final {
 public:
     explicit ControlPlanBuilder(Function function) : function_(std::move(function)) {}
 
-    runtime::ControlPlan Build() {
+    internal::ControlPlanLowering BuildWithSidecar() {
         if (!function_.defined()) {
             throw std::invalid_argument("LowerRelayToControlPlan requires a defined Function");
         }
@@ -186,7 +187,8 @@ public:
         entry.live_outs = outputs;
         FinalizeRegions();
         plan_.ValidateStaticExact();
-        return std::move(plan_);
+        return internal::ControlPlanLowering{std::move(plan_),
+                                                   std::move(kernel_functions_)};
     }
 
 private:
@@ -200,6 +202,7 @@ private:
     std::unordered_map<runtime::RegionId, std::size_t> region_index_;
     std::unordered_map<runtime::RegionId, RegionState> region_state_;
     std::unordered_map<const Object*, Leaves> constants_;
+    std::unordered_map<runtime::TaskId, Function> kernel_functions_;
 
     runtime::ControlRegion& Region(runtime::RegionId id) {
         return plan_.regions.at(region_index_.at(id));
@@ -316,7 +319,7 @@ private:
         return dependencies;
     }
 
-    void AddTask(runtime::RegionId region, runtime::ControlTask task) {
+    runtime::TaskId AddTask(runtime::RegionId region, runtime::ControlTask task) {
         RegionState& state = State(region);
         task.id = next_task_++;
         task.dependencies = Dependencies(region, task.inputs);
@@ -327,6 +330,7 @@ private:
             state.local_values.insert(output);
             state.local_producers.emplace(output, stored.id);
         }
+        return stored.id;
     }
 
     Leaves LowerCall(const Expr& expr, const CallNode* call, runtime::RegionId region,
@@ -379,7 +383,24 @@ private:
         task.kernel_ref = "relay.kernel.v2;" + relay::SerializeOperatorSpec(op->spec) +
                           ";attrs=" + relay::SerializeAttrs(relay::Attrs(call->attrs));
         task.source_locator = path;
-        AddTask(region, std::move(task));
+        const runtime::TaskId task_id = AddTask(region, std::move(task));
+        Array<Var> parameters;
+        std::unordered_set<const Object*> seen_parameters;
+        for (const Expr& argument : call->args) {
+            if (argument.As<ConstantNode>()) continue;
+            const auto* variable = argument.As<VarNode>();
+            if (!variable) {
+                Fail(path, "frozen kernel sidecar requires ANF atomic arguments");
+            }
+            if (seen_parameters.insert(argument.get()).second) {
+                parameters.push_back(Var(ObjectRef(argument)));
+            }
+        }
+        // Preserve the real Call object graph (Op, attrs, constants, and lexical
+        // operands) rather than trying to reconstruct it from kernel_ref text.
+        kernel_functions_.emplace(
+            task_id, Function(std::move(parameters),
+                              Call(call->op, call->args, call->attrs)));
         return outputs;
     }
 
@@ -523,7 +544,13 @@ private:
 }  // namespace
 
 runtime::ControlPlan LowerRelayToControlPlan(Function function) {
-    return ControlPlanBuilder(std::move(function)).Build();
+    return ControlPlanBuilder(std::move(function)).BuildWithSidecar().plan;
 }
+
+namespace internal {
+ControlPlanLowering LowerRelayToControlPlanWithSidecar(Function function) {
+    return ControlPlanBuilder(std::move(function)).BuildWithSidecar();
+}
+}  // namespace internal
 
 }  // namespace kxc::api

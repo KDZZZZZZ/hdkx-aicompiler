@@ -16,12 +16,15 @@ using ControlExecutionValueId = std::int64_t;
 using ControlExecutionRegionId = std::int64_t;
 using ControlExecutionTaskId = std::int64_t;
 
-/*! \brief Experimental entry snapshot bound to one ready fixture module. */
+/*! \brief Experimental entry snapshot bound to one ready module artifact. */
 class BoundControlKernel final {
 public:
     BoundControlKernel() = default;
     BoundControlKernel(api::CompiledModule module, String entry_symbol,
-                       std::uint64_t binding_revision);
+                       std::uint64_t binding_revision,
+                       std::uint64_t authority_generation = 0,
+                       std::string authority_lease = {},
+                       std::shared_ptr<const void> retention_lease = {});
 
     void Validate() const;
     AsyncOperation Launch(const Array<NDArray>& ordered_arguments,
@@ -32,8 +35,11 @@ public:
     NDArray Constant(const String& key) const;
     /*! \brief Compares bytes/contracts without exposing the execution snapshot. */
     bool MatchesConstant(const String& key, const NDArray& candidate) const;
-    /*! \brief Caller label only, with no authority, freshness, or hot-swap proof. */
+    /*! \brief Fixture-only caller label, with no authority, freshness, or hot-swap proof. */
     std::uint64_t binding_revision() const;
+    /*! \brief Control-plane authority, when this is a production binding. */
+    std::uint64_t authority_generation() const;
+    const std::string& authority_lease() const;
     Device device() const;
     bool defined() const noexcept;
 

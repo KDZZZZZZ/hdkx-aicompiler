@@ -495,13 +495,17 @@ struct BoundControlKernel::State final {
     State(api::CompiledModule module, codegen::KernelSignature signature,
           codegen::KernelLaunchMetadata metadata,
           codegen::CompiledKernel executable, Map<String, NDArray> constants,
-          std::uint64_t binding_revision)
+          std::uint64_t binding_revision, std::uint64_t authority_generation,
+          std::string authority_lease, std::shared_ptr<const void> retention_lease)
         : module(std::move(module)),
           signature(std::move(signature)),
           metadata(std::move(metadata)),
           executable(std::move(executable)),
           constants(std::move(constants)),
-          binding_revision(binding_revision) {}
+          binding_revision(binding_revision),
+          authority_generation(authority_generation),
+          authority_lease(std::move(authority_lease)),
+          retention_lease(std::move(retention_lease)) {}
 
     api::CompiledModule module;
     codegen::KernelSignature signature;
@@ -509,15 +513,26 @@ struct BoundControlKernel::State final {
     codegen::CompiledKernel executable;
     Map<String, NDArray> constants;
     const std::uint64_t binding_revision{0};
+    const std::uint64_t authority_generation{0};
+    const std::string authority_lease;
+    // Keeps compiler-owned immutable pins alive without exposing compiler API.
+    const std::shared_ptr<const void> retention_lease;
 };
 
 BoundControlKernel::BoundControlKernel(api::CompiledModule module,
                                        String entry_symbol,
-                                       std::uint64_t binding_revision) {
+                                       std::uint64_t binding_revision,
+                                       std::uint64_t authority_generation,
+                                       std::string authority_lease,
+                                       std::shared_ptr<const void> retention_lease) {
+    const bool production = authority_generation != 0;
     if (!module.defined() || !module.IsReady() || entry_symbol == "" ||
-        binding_revision == 0 || !module.HasFunction(entry_symbol)) {
+        !module.HasFunction(entry_symbol) ||
+        (production == authority_lease.empty()) ||
+        (production == (binding_revision != 0)) ||
+        (production && !retention_lease)) {
         throw std::invalid_argument(
-            "BoundControlKernel requires a ready fixture module entry and binding_revision > 0");
+            "BoundControlKernel requires a ready module entry and exactly one fixture revision or retained production authority");
     }
     const auto* node = module.As<api::CompiledModuleNode>();
     const auto entry = node->entries_.find(std::string(entry_symbol));
@@ -536,12 +551,15 @@ BoundControlKernel::BoundControlKernel(api::CompiledModule module,
     Map<String, NDArray> constants = SnapshotCpuConstants(module, signature);
     state_ = std::make_shared<State>(
         std::move(module), signature, metadata, executable,
-        std::move(constants), binding_revision);
+        std::move(constants), binding_revision, authority_generation,
+        std::move(authority_lease), std::move(retention_lease));
     Validate();
 }
 
 void BoundControlKernel::Validate() const {
-    if (!state_ || state_->binding_revision == 0 || !state_->module.defined() ||
+    if (!state_ ||
+        (state_->binding_revision == 0 && state_->authority_generation == 0) ||
+        !state_->module.defined() ||
         !state_->executable.defined() || !state_->executable.IsReady() ||
         state_->executable.signature().get() != state_->signature.get() ||
         state_->executable.launch_metadata().get() != state_->metadata.get()) {
@@ -638,6 +656,16 @@ bool BoundControlKernel::MatchesConstant(
 std::uint64_t BoundControlKernel::binding_revision() const {
     if (!state_) throw std::runtime_error("undefined BoundControlKernel");
     return state_->binding_revision;
+}
+
+std::uint64_t BoundControlKernel::authority_generation() const {
+    if (!state_) throw std::runtime_error("undefined BoundControlKernel");
+    return state_->authority_generation;
+}
+
+const std::string& BoundControlKernel::authority_lease() const {
+    if (!state_) throw std::runtime_error("undefined BoundControlKernel");
+    return state_->authority_lease;
 }
 
 Device BoundControlKernel::device() const { return launch_metadata()->device; }
