@@ -134,6 +134,10 @@ DispatchKey::DispatchKey(std::string artifact_family,
     RequireNonEmpty(artifact_family, "artifact family");
     RequireNonEmpty(shape_layout_valid_extent,
                     "shape/layout/valid-extent contract");
+    if (shape_layout_valid_extent.find("-1") != std::string::npos) {
+        throw std::invalid_argument(
+            "dispatch identity cannot use legacy -1 as shape applicability");
+    }
     RequireNonEmpty(variant_policy_version, "variant policy version");
     AppendField(&canonical_bytes_, "kind", "dispatch-key-v1");
     AppendField(&canonical_bytes_, "artifact_family", artifact_family);
