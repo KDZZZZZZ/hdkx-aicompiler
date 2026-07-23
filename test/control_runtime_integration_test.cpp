@@ -193,6 +193,24 @@ ControlPlan ConstantOrderPlan() {
     return plan;
 }
 
+ControlPlan SharedConstantBranchPlan() {
+    ControlPlan plan = BranchPlan();
+    plan.values.push_back(I64(5));
+    plan.constant_values = {5};
+    plan.regions[0].live_ins = {0, 1, 5};
+    plan.regions[0].effect = Reads({0, 1, 5});
+    plan.regions[0].tasks[0].inputs = {0, 1, 5};
+    plan.regions[0].tasks[0].effect = Reads({0, 1, 5});
+    for (std::size_t i = 1; i < plan.regions.size(); ++i) {
+        plan.regions[i].live_ins = {1, 5};
+        plan.regions[i].effect = Reads({1, 5});
+        plan.regions[i].tasks[0].inputs = {1, 5};
+        plan.regions[i].tasks[0].argument_values = {1, 5};
+        plan.regions[i].tasks[0].effect = Reads({1, 5});
+    }
+    return plan;
+}
+
 ControlPlan RepeatedOperandPlan() {
     ControlPlan plan;
     plan.values = {I64(0), I64(1)};
@@ -351,6 +369,29 @@ Fixture MakeConstantOrderFixture() {
     constants.Set("constant.b", ScalarI64(3, 32));
     auto launcher = std::make_shared<ScalarLauncher>(ScalarOp::kConstantOrder);
     return {MakeModule("constant_order_entry", arguments, launcher, constants),
+            std::move(launcher)};
+}
+
+Fixture MakeSharedConstantFixture(
+    const char* symbol, std::size_t alignment, std::int64_t value,
+    Array<std::int64_t> shape = {}) {
+    using namespace kxc::codegen;
+    Array<KernelArgSpec> arguments{
+        KernelArgSpec("input", KernelArgRole::kInput, Type("int64"), {},
+                      Device::CPU()),
+        KernelArgSpec("constant", KernelArgRole::kConstant, Type("int64"),
+                      shape, Device::CPU(), alignment, false,
+                      "constant.shared"),
+        KernelArgSpec("output", KernelArgRole::kOutput, Type("int64"), {},
+                      Device::CPU(), 1, true),
+    };
+    NDArray payload =
+        NDArray::Empty(shape, Type("int64"), Device::CPU(), alignment);
+    payload.CopyFromBytes(&value, sizeof(value));
+    Map<String, NDArray> constants;
+    constants.Set("constant.shared", std::move(payload));
+    auto launcher = std::make_shared<ScalarLauncher>(ScalarOp::kSum);
+    return {MakeModule(symbol, arguments, launcher, constants),
             std::move(launcher)};
 }
 
@@ -723,6 +764,79 @@ bool TestConstantAbiOrderAndResolvedValidation() {
     return true;
 }
 
+bool TestSharedConstantAlignmentAcrossRegions() {
+    const ControlPlan plan = SharedConstantBranchPlan();
+    Fixture then_fixture =
+        MakeSharedConstantFixture("shared_then_entry", 64, 2);
+    Fixture else_fixture =
+        MakeSharedConstantFixture("shared_else_entry", 32, 2);
+    const std::vector<kxc::api::ControlKernelBinding> bindings{
+        {21, then_fixture.module, "shared_then_entry", 20, {1, 5}},
+        {22, else_fixture.module, "shared_else_entry", 21, {1, 5}},
+    };
+    const ControlExecutionPlan bound =
+        kxc::api::BindControlPlanForRuntime(plan, bindings);
+
+    Fixture wrong_bytes =
+        MakeSharedConstantFixture("wrong_bytes_entry", 32, 3);
+    auto wrong_bytes_bindings = bindings;
+    wrong_bytes_bindings[1] =
+        {22, wrong_bytes.module, "wrong_bytes_entry", 22, {1, 5}};
+    Fixture wrong_contract = MakeSharedConstantFixture(
+        "wrong_contract_entry", 32, 2, {1});
+    auto wrong_contract_bindings = bindings;
+    wrong_contract_bindings[1] =
+        {22, wrong_contract.module, "wrong_contract_entry", 23, {1, 5}};
+    CHECK(Throws([&] {
+              (void)kxc::api::BindControlPlanForRuntime(
+                  plan, wrong_bytes_bindings);
+          }) && Throws([&] {
+              (void)kxc::api::BindControlPlanForRuntime(
+                  plan, wrong_contract_bindings);
+          }) && then_fixture.launcher->calls == 0 &&
+              else_fixture.launcher->calls == 0 &&
+              wrong_bytes.launcher->calls == 0 &&
+              wrong_contract.launcher->calls == 0,
+          "shared constants must reject genuine byte and contract mismatches before launch");
+
+    const auto& regions = bound.spec().regions;
+    NDArray then_copy =
+        regions[1].tasks[0].kernel.Constant("constant.shared");
+    NDArray else_copy =
+        regions[2].tasks[0].kernel.Constant("constant.shared");
+    const std::int64_t changed = 99;
+    then_fixture.module.constants().at("constant.shared")
+        .CopyFromBytes(&changed, sizeof(changed));
+    else_fixture.module.constants().at("constant.shared")
+        .CopyFromBytes(&changed, sizeof(changed));
+    then_copy.CopyFromBytes(&changed, sizeof(changed));
+    else_copy.CopyFromBytes(&changed, sizeof(changed));
+    CHECK(ReadI64(regions[1].tasks[0].kernel.Constant("constant.shared")) == 2 &&
+              ReadI64(regions[2].tasks[0].kernel.Constant("constant.shared")) == 2,
+          "module constants and returned copies must not mutate private snapshots");
+
+#if KXC_ENABLE_CONTROL_RUNTIME
+    ControlRuntimeSession session(bound);
+    const ControlRunResult then_result =
+        session.Run({ScalarBool(true), ScalarI64(5)});
+    const ControlRunResult else_result =
+        session.Run({ScalarBool(false), ScalarI64(5)});
+    CHECK(then_result.outputs.size() == 1 &&
+              ReadI64(then_result.outputs[0]) == 7 &&
+              else_result.outputs.size() == 1 &&
+              ReadI64(else_result.outputs[0]) == 7 &&
+              then_fixture.launcher->calls == 1 &&
+              else_fixture.launcher->calls == 1,
+          "one logical constant must satisfy 64- and 32-byte consumers across branches");
+#else
+    CHECK(Throws([&] { ControlRuntimeSession disabled(bound); }) &&
+              then_fixture.launcher->calls == 0 &&
+              else_fixture.launcher->calls == 0,
+          "gate-off shared constant plan must not launch");
+#endif
+    return true;
+}
+
 bool TestBindingAndValidationNegatives() {
     BranchFixture fixture;
     const ControlPlan branch = BranchPlan();
@@ -916,6 +1030,8 @@ int main() {
          TestReadOnlyInputAliasingAndAbiOrder},
         {"constant_abi_order_and_resolved_validation",
          TestConstantAbiOrderAndResolvedValidation},
+        {"shared_constant_alignment_across_regions",
+         TestSharedConstantAlignmentAcrossRegions},
         {"binding_and_validation_negatives", TestBindingAndValidationNegatives},
         {"async_completion_retention", TestAsyncCompletionRetention},
     };

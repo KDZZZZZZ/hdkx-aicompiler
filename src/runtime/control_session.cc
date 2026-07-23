@@ -153,7 +153,11 @@ void CollectConstantBindings(const ControlExecutionRegion& region,
                         arguments[i]->constant_key, previous->second)) {
                     Fail("one logical constant has inconsistent fixture payloads");
                 }
-                constants->insert_or_assign(value_id, payload);
+                if (previous == constants->end() ||
+                    previous->second.storage()->alignment <
+                        arguments[i]->alignment) {
+                    constants->insert_or_assign(value_id, payload);
+                }
             }
         } else if (task.kind == ControlExecutionTaskKind::kBranch) {
             CollectConstantBindings(Region(index, task.branch.then_region), index, constants, visited);
