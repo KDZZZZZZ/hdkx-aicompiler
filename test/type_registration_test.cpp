@@ -6,6 +6,7 @@
 #include "kxc/support/container.h"
 #include "kxc/runtime/device.h"
 #include "kxc/runtime/executable_plan.h"
+#include "kxc/runtime/task_plan.h"
 #include "kxc/relay/relay.h"
 #include "kxc/te/te.h"
 #include "kxc/tir/expr.h"
@@ -63,6 +64,9 @@ bool TestStableRegistrations() {
         "kxc.runtime.ValueSpecNode",
         "kxc.runtime.KernelCallNode",
         "kxc.runtime.ExecutablePlanNode",
+        "kxc.runtime.RegionSpecNode",
+        "kxc.runtime.TaskSpecNode",
+        "kxc.runtime.FrozenTaskPlanNode",
         "OpNode",
         "BaseAttrsNode",
         "Conv2DAttrsNode",

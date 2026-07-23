@@ -9,6 +9,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(KXC_ENABLE_CUDA "Enable CUDA support when toolkit is available" ON)
 option(KXC_ENABLE_LLVM "Enable LLVM backend for codegen" ON)
+option(KXC_ENABLE_REGION_TASK_DAG
+  "Enable experimental RuntimeSession execution of frozen Region task DAGs" OFF)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build the diagnostic ResNet18 IR dump tool" OFF)
 option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
@@ -84,6 +86,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/ndarray.h
   include/kxc/runtime/session.h
   include/kxc/runtime/storage.h
+  include/kxc/runtime/task_plan.h
   include/kxc/support/arena.h
   include/kxc/support/container.h
   include/kxc/support/detail/array_inl.h
@@ -302,8 +305,9 @@ set(KXC_RUNTIME_CORE_SOURCES
   src/runtime/device.cc
   src/runtime/device_api.cc
   src/runtime/device_stream.cc
-    src/runtime/executable_plan.cc
-    src/runtime/memory_plan.cc
+  src/runtime/executable_plan.cc
+  src/runtime/memory_plan.cc
+  src/runtime/task_plan.cc
   src/runtime/storage.cc
   src/runtime/ndarray.cc
   src/runtime/device/cpu_device_api.cc
@@ -455,7 +459,8 @@ function(kxc_configure_module_obj target)
   target_link_libraries(${target} PRIVATE kxc_public_api)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
-    KXC_USE_LLVM=${KXC_USE_LLVM})
+    KXC_USE_LLVM=${KXC_USE_LLVM}
+    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>)
 endfunction()
 
 function(kxc_enable_cuda target)
@@ -629,7 +634,8 @@ function(kxc_add_runtime_exe target source_file)
   target_link_libraries(${target} PRIVATE kxc_public_api)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
-    KXC_USE_LLVM=${KXC_USE_LLVM})
+    KXC_USE_LLVM=${KXC_USE_LLVM}
+    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>)
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
   endif()
@@ -735,6 +741,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(device_info_test test/device_info_test.cpp)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
+  kxc_add_runtime_exe(task_plan_test test/task_plan_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
@@ -815,6 +822,14 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS device_runtime_test
     USES_TERMINAL
     COMMENT "Run device_runtime_test"
+  )
+
+  add_custom_target(run_task_plan_test
+    COMMAND "$<TARGET_FILE:task_plan_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS task_plan_test
+    USES_TERMINAL
+    COMMENT "Run task_plan_test"
   )
 
   add_custom_target(run_profile_bundle_test
