@@ -142,8 +142,11 @@ bool TestPlanContractsAndExactAbiMismatch() {
         return RuntimeShapeLaunchResult{};
     }, 8));
     const auto over_budget = budget.Run({Input(3)});  // 6 float32 elements.
-    CHECK(!over_budget.ok() && !Has(over_budget, RuntimeShapeEventKind::kAllocate),
-          "budget failure precedes allocation and launch");
+    CHECK(!over_budget.ok() &&
+          over_budget.failure_kind() == RuntimeShapeFailureKind::kResourceExhausted &&
+          over_budget.outputs().empty() && over_budget.retained_device_bytes() == 0 &&
+          !Has(over_budget, RuntimeShapeEventKind::kAllocate),
+          "typed budget failure precedes allocation and publishes no storage");
     RuntimeShapeSession max_bytes(MakePlan([](const RuntimeShapeLaunchArgs&) {
         return RuntimeShapeLaunchResult{};
     }, 4096, 8));
@@ -222,6 +225,15 @@ bool TestScalarAbiAndRequiredInputData() {
     wrong_bytes.bytes -= sizeof(float);
     CHECK(!RuntimeShapeSession(RuntimeShapePlan(spec)).Run({wrong_bytes}).ok(),
           "required input byte size fails before ShapeEval");
+    RuntimeShapeInput guard_miss = valid;
+    guard_miss.shape[0] = 5;
+    guard_miss.bytes = 5 * sizeof(float);
+    const auto missed = RuntimeShapeSession(RuntimeShapePlan(spec)).Run({guard_miss});
+    CHECK(!missed.ok() &&
+          missed.failure_kind() == RuntimeShapeFailureKind::kApplicabilityMiss &&
+          missed.outputs().empty() && missed.retained_device_bytes() == 0 &&
+          !Has(missed, RuntimeShapeEventKind::kAllocate),
+          "typed guard miss precedes allocation and publishes no storage");
     RuntimeShapePlanSpec gap = spec;
     gap.runtime_extent_abi[0].ordinal = 1;
     gap.entry.exact_abi_fingerprint = RuntimeShapePlan::ExactAbiFingerprint(
@@ -302,6 +314,41 @@ bool TestSynchronousFakeRetentionAndLeases() {
     return true;
 }
 
+bool TestConcurrentResultSnapshots() {
+    auto completion = FakeRuntimeShapeCompletion::Pending();
+    RuntimeShapeSession session(MakePlan([&completion](const RuntimeShapeLaunchArgs&) {
+        return RuntimeShapeLaunchResult{true, "", completion};
+    }));
+    const auto result = session.RunAsync({Input(2)});
+    std::atomic<bool> start{false};
+    std::vector<std::thread> readers;
+    for (int index = 0; index != 4; ++index) {
+        readers.emplace_back([&] {
+            while (!start.load(std::memory_order_acquire)) {
+            }
+            for (int iteration = 0; iteration != 2000; ++iteration) {
+                const auto events = result.events();
+                const auto& outputs = result.outputs();
+                const auto& reason = result.failure_reason();
+                (void)events;
+                (void)outputs;
+                (void)reason;
+                (void)result.ok();
+                (void)result.failure_kind();
+                (void)result.retained_device_bytes();
+                (void)result.IsReady();
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    std::thread waiter([&] { result.Wait(); });
+    for (auto& reader : readers) reader.join();
+    waiter.join();
+    CHECK(result.ok() && result.IsReady() && Has(result, RuntimeShapeEventKind::kCompletion),
+          "concurrent result polling/getters use immutable snapshots and atomic completion state");
+    return true;
+}
+
 bool TestConcurrentLaunchesAreSerialized() {
     std::atomic<int> launches{0};
     std::atomic<int> active{0};
@@ -344,6 +391,7 @@ int main() {
         {"scalar_data", TestScalarAbiAndRequiredInputData},
         {"callback_raii", TestCallbackFailureAndOwnerTransfer},
         {"leases", TestSynchronousFakeRetentionAndLeases},
+        {"result_snapshots", TestConcurrentResultSnapshots},
         {"concurrency", TestConcurrentLaunchesAreSerialized},
     };
     for (const auto& test : tests) if (!test.second()) return 1;

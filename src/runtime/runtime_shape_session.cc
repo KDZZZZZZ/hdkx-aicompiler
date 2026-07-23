@@ -1,11 +1,13 @@
 /*! \file src/runtime/runtime_shape_session.cc */
 
 #include "kxc/runtime/runtime_shape_session.h"
+#include "kxc/runtime/device_api.h"
 
 #include <algorithm>
 #include <atomic>
 #include <limits>
 #include <set>
+#include <cctype>
 #include <new>
 #include <stdexcept>
 #include <unordered_map>
@@ -18,10 +20,18 @@ namespace {
 #ifndef KXC_ENABLE_RUNTIME_SHAPE_TASKS
 #define KXC_ENABLE_RUNTIME_SHAPE_TASKS 0
 #endif
+#ifndef KXC_ENABLE_RUNTIME_SHAPE_CUDA
+#define KXC_ENABLE_RUNTIME_SHAPE_CUDA 0
+#endif
+#ifndef KXC_USE_CUDA
+#define KXC_USE_CUDA 0
+#endif
 
 constexpr std::size_t kMaxExpressionDepth = 64;
 constexpr std::size_t kMaxExpressionNodes = 4096;
 std::atomic<bool> fail_next_owner_transfer{false};
+std::atomic<bool> fail_next_cuda_event_record{false};
+std::atomic<bool> fail_next_cuda_retention{false};
 
 [[noreturn]] void Fail(const std::string& detail) {
     throw std::invalid_argument("RuntimeShape: " + detail);
@@ -73,10 +83,38 @@ std::vector<RuntimeShapeExtent> EvaluateShape(
     return result;
 }
 
-void ValidateInputContract(const RuntimeShapeInputContract& contract) {
+bool IsCudaDeviceContract(const std::string& value) {
+    if (value.size() <= 5 || value.compare(0, 5, "CUDA:") != 0) return false;
+    for (std::size_t index = 5; index < value.size(); ++index) {
+        if (!std::isdigit(static_cast<unsigned char>(value[index]))) return false;
+    }
+    try {
+        return std::stoll(value.substr(5)) >= 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+::kxc::Device DeviceForContract(const std::string& value) {
+    if (value == "CPU:0") return ::kxc::Device::CPU();
+    if (!IsCudaDeviceContract(value)) Fail("invalid device contract '" + value + "'");
+    try {
+        return ::kxc::Device::CUDA(std::stoi(value.substr(5)));
+    } catch (...) {
+        Fail("invalid CUDA device contract '" + value + "'");
+    }
+}
+
+void ValidateInputContract(const RuntimeShapeInputContract& contract,
+                           RuntimeShapeExecutionKind execution_kind) {
     if (contract.dtype.empty()) Fail("input dtype is empty");
     (void)DTypeBytes(contract.dtype);
-    if (contract.device != "CPU:0") Fail("v1 requires input device CPU:0");
+    if ((execution_kind == RuntimeShapeExecutionKind::kSynchronousCpu &&
+         contract.device != "CPU:0") ||
+        (execution_kind == RuntimeShapeExecutionKind::kCudaAsync &&
+         !IsCudaDeviceContract(contract.device))) {
+        Fail("input device does not match execution kind");
+    }
     if (contract.abi_version != RuntimeShapePlan::kAbiVersion) {
         Fail("input ABI version does not match");
     }
@@ -96,7 +134,8 @@ void ValidateInputContract(const RuntimeShapeInputContract& contract) {
     }
 }
 
-void ValidateContract(const RuntimeShapeTensorContract& contract) {
+void ValidateContract(const RuntimeShapeTensorContract& contract,
+                      RuntimeShapeExecutionKind execution_kind) {
     if (contract.dtype.empty()) Fail("output dtype is empty");
     (void)DTypeBytes(contract.dtype);
     if (contract.logical.empty() || contract.logical.size() != contract.physical.size() ||
@@ -117,7 +156,12 @@ void ValidateContract(const RuntimeShapeTensorContract& contract) {
         Fail("v1 requires layout contiguous.row_major");
     }
     if (contract.scope != "global") Fail("v1 requires global scope");
-    if (contract.device != "CPU:0") Fail("v1 requires output device CPU:0");
+    if ((execution_kind == RuntimeShapeExecutionKind::kSynchronousCpu &&
+         contract.device != "CPU:0") ||
+        (execution_kind == RuntimeShapeExecutionKind::kCudaAsync &&
+         !IsCudaDeviceContract(contract.device))) {
+        Fail("output device does not match execution kind");
+    }
     if (contract.abi_version != RuntimeShapePlan::kAbiVersion) {
         Fail("output ABI version does not match");
     }
@@ -377,6 +421,14 @@ void FailNextRuntimeShapeOwnerTransferForTest() noexcept {
     fail_next_owner_transfer.store(true, std::memory_order_release);
 }
 
+void FailNextRuntimeShapeCudaEventRecordForTest() noexcept {
+    fail_next_cuda_event_record.store(true, std::memory_order_release);
+}
+
+void FailNextRuntimeShapeCudaRetentionForTest() noexcept {
+    fail_next_cuda_retention.store(true, std::memory_order_release);
+}
+
 }  // namespace detail
 
 struct RuntimeShapePlan::Impl {
@@ -395,7 +447,9 @@ std::string RuntimeShapePlan::ExactAbiFingerprint(
     const std::vector<RuntimeShapeTensorContract>& outputs,
     const std::vector<RuntimeShapeExtentScalar>& runtime_extent_abi,
     const std::string& artifact_identity,
-    const std::string& tail_policy_identity) {
+    const std::string& tail_policy_identity,
+    RuntimeShapeExecutionKind execution_kind,
+    const std::string& device_contract) {
     std::string bytes;
     AppendString(bytes, "kxc.runtime_shape.trusted_sync_abi.v1");
     AppendU64(bytes, inputs.size());
@@ -450,6 +504,13 @@ std::string RuntimeShapePlan::ExactAbiFingerprint(
     }
     AppendString(bytes, artifact_identity);
     AppendString(bytes, tail_policy_identity);
+    // Preserve the established CPU v1 bytes; async ABI adds an explicit contract.
+    if (execution_kind != RuntimeShapeExecutionKind::kSynchronousCpu ||
+        !device_contract.empty()) {
+        AppendString(bytes, "kxc.runtime_shape.execution.v1");
+        AppendU64(bytes, static_cast<std::uint64_t>(execution_kind));
+        AppendString(bytes, device_contract);
+    }
     return bytes;
 }
 
@@ -460,14 +521,14 @@ void RuntimeShapePlan::Validate() const {
     const auto& spec = impl_->spec;
     if (spec.abi_version != kAbiVersion) Fail("plan ABI version does not match");
     if (spec.inputs.empty() || spec.outputs.empty()) Fail("plan requires inputs and outputs");
-    for (const auto& input : spec.inputs) ValidateInputContract(input);
+    for (const auto& input : spec.inputs) ValidateInputContract(input, spec.entry.execution_kind);
     for (const auto& input : spec.inputs) for (const auto& guard : input.axis_guards) {
         if (guard.equal_to && (guard.equal_to->input_index >= spec.inputs.size() ||
                                guard.equal_to->axis >= spec.inputs[guard.equal_to->input_index].rank)) {
             Fail("input axis equality guard is out of range");
         }
     }
-    for (const auto& output : spec.outputs) ValidateContract(output);
+    for (const auto& output : spec.outputs) ValidateContract(output, spec.entry.execution_kind);
     std::unordered_set<std::string> scalar_names;
     std::unordered_set<std::string> scalar_symbols;
     std::set<std::pair<std::size_t, std::size_t>> scalar_axes;
@@ -493,16 +554,33 @@ void RuntimeShapePlan::Validate() const {
     if (!spec.entry.tail_policy_identity.empty() && spec.entry.artifact_identity.empty()) {
         Fail("tail policy identity requires an artifact identity");
     }
-    (void)ExactAbiFingerprint(spec.inputs, spec.outputs, spec.runtime_extent_abi,
-                              spec.entry.artifact_identity, spec.entry.tail_policy_identity);
-    if (!spec.entry.ready || !spec.entry.launcher || spec.entry.module_label.empty() ||
-        spec.entry.entry_symbol.empty()) {
-        Fail("plan requires a selected ready bound launcher entry");
+    const bool cuda_async = spec.entry.execution_kind == RuntimeShapeExecutionKind::kCudaAsync;
+    if (cuda_async) {
+        if (!IsCudaDeviceContract(spec.entry.device_contract)) {
+            Fail("CUDA async entry requires a CUDA:N device contract");
+        }
+        for (const auto& input : spec.inputs) {
+            if (input.device != spec.entry.device_contract) {
+                Fail("CUDA async entry has mixed input devices");
+            }
+        }
+        for (const auto& output : spec.outputs) {
+            if (output.device != spec.entry.device_contract) {
+                Fail("CUDA async entry has mixed output devices");
+            }
+        }
+    } else if (spec.entry.execution_kind != RuntimeShapeExecutionKind::kSynchronousCpu) {
+        Fail("unknown runtime shape execution kind");
+    }
+    if (!spec.entry.ready || spec.entry.module_label.empty() || spec.entry.entry_symbol.empty() ||
+        (cuda_async && !spec.entry.cuda_launcher) || (!cuda_async && !spec.entry.launcher)) {
+        Fail("plan requires a selected ready launcher for its execution kind");
     }
     if (spec.entry.abi_version != kAbiVersion) Fail("entry ABI version does not match");
     if (spec.entry.exact_abi_fingerprint !=
         ExactAbiFingerprint(spec.inputs, spec.outputs, spec.runtime_extent_abi,
-                            spec.entry.artifact_identity, spec.entry.tail_policy_identity)) {
+                            spec.entry.artifact_identity, spec.entry.tail_policy_identity,
+                            spec.entry.execution_kind, spec.entry.device_contract)) {
         Fail("entry exact ABI fingerprint does not match plan contracts");
     }
 }
@@ -517,25 +595,71 @@ std::mutex& RuntimeShapePlan::launcher_mutex() const {
     return impl_->launcher_mutex;
 }
 
+struct RuntimeShapeAsyncRetention {
+    RuntimeShapePlan plan;
+    std::shared_ptr<void> caller_lease;
+    std::vector<std::shared_ptr<void>> input_owners;
+    std::vector<::kxc::Storage> input_storage;
+};
+
 struct RuntimeShapeAsyncResult::State {
     RuntimeShapePlan plan;
     std::shared_ptr<void> caller_lease;
     std::vector<std::shared_ptr<void>> input_owners;
-    bool ok{false};
+    std::vector<::kxc::Storage> input_storage;
+    ::kxc::DeviceStream stream;
+    std::atomic<bool> ok{false};
+    std::atomic<RuntimeShapeFailureKind> failure_kind{RuntimeShapeFailureKind::kNone};
+    // These collections and base text are immutable once RunImpl returns.
     std::string failure_reason;
     std::vector<RuntimeShapeOutput> outputs;
     std::vector<RuntimeShapeEvent> events;
     std::shared_ptr<FakeRuntimeShapeCompletion> fake_completion;
+    ::kxc::AsyncOperation completion;
+    std::size_t retained_device_bytes{0};
+    std::atomic<bool> completion_observed{false};
+    std::atomic<bool> completion_failed{false};
+    // An unrecorded event is intentionally leaked with a quarantined run.
+    void* quarantined_event{nullptr};
+    bool quarantined{false};
 };
+
+namespace {
+
+// A callback that might have submitted work but provides no usable completion
+// leaves no safe release point.  Keep the whole run alive for process lifetime.
+template <typename State>
+void QuarantineRunState(const std::shared_ptr<State>& state) noexcept {
+    try {
+        static auto* retained = new std::vector<std::shared_ptr<State>>();
+        static auto* mutex = new std::mutex();
+        std::lock_guard<std::mutex> lock(*mutex);
+        retained->push_back(state);
+    } catch (...) {
+        std::terminate();
+    }
+}
+
+}  // namespace
 
 RuntimeShapeAsyncResult::RuntimeShapeAsyncResult(std::shared_ptr<State> state)
     : state_(std::move(state)) {}
 
-bool RuntimeShapeAsyncResult::ok() const noexcept { return state_ && state_->ok; }
+bool RuntimeShapeAsyncResult::ok() const noexcept {
+    return state_ && state_->ok.load(std::memory_order_acquire);
+}
 
 const std::string& RuntimeShapeAsyncResult::failure_reason() const noexcept {
     static const std::string empty;
-    return state_ ? state_->failure_reason : empty;
+    static const std::string completion_failure("CUDA completion observation failed");
+    if (!state_) return empty;
+    return state_->completion_failed.load(std::memory_order_acquire)
+        ? completion_failure : state_->failure_reason;
+}
+
+RuntimeShapeFailureKind RuntimeShapeAsyncResult::failure_kind() const noexcept {
+    return state_ ? state_->failure_kind.load(std::memory_order_acquire)
+                  : RuntimeShapeFailureKind::kShapeAbiRejected;
 }
 
 const std::vector<RuntimeShapeOutput>& RuntimeShapeAsyncResult::outputs() const noexcept {
@@ -543,40 +667,150 @@ const std::vector<RuntimeShapeOutput>& RuntimeShapeAsyncResult::outputs() const 
     return state_ ? state_->outputs : empty;
 }
 
-const std::vector<RuntimeShapeEvent>& RuntimeShapeAsyncResult::events() const noexcept {
-    static const std::vector<RuntimeShapeEvent> empty;
-    return state_ ? state_->events : empty;
+std::vector<RuntimeShapeEvent> RuntimeShapeAsyncResult::events() const {
+    if (!state_) return {};
+    auto snapshot = state_->events;
+    if (state_->completion_observed.load(std::memory_order_acquire)) {
+        snapshot.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kCompletion,
+            static_cast<std::size_t>(-1), 0,
+            "CUDA completion observed; ownership retained"});
+        snapshot.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kRetire,
+            static_cast<std::size_t>(-1), state_->retained_device_bytes,
+            "completion observed; logical retirement eligible, not physical free"});
+    }
+    if (state_->completion_failed.load(std::memory_order_acquire)) {
+        snapshot.push_back(FailureEvent(failure_reason()));
+    }
+    return snapshot;
 }
 
+namespace {
+template <typename State>
+void MarkCompletion(const std::shared_ptr<State>& state) noexcept {
+    // Polling only publishes atomic observation state; result collections stay immutable.
+    state->completion_observed.store(true, std::memory_order_release);
+}
+
+template <typename State>
+void MarkCompletionFailure(const std::shared_ptr<State>& state) noexcept {
+    // Never clear outputs or allocate telemetry while another thread may read a snapshot.
+    state->completion_failed.store(true, std::memory_order_release);
+    state->failure_kind.store(RuntimeShapeFailureKind::kCompletionFailed,
+                              std::memory_order_release);
+    state->ok.store(false, std::memory_order_release);
+}
+
+RuntimeShapeFailureKind ClassifyShapeFailure(const std::string& reason) {
+    if (reason.find("guard") != std::string::npos ||
+        reason.find("outside its ABI domain") != std::string::npos) {
+        return RuntimeShapeFailureKind::kApplicabilityMiss;
+    }
+    if (reason.find("budget") != std::string::npos ||
+        reason.find("max_bytes") != std::string::npos ||
+        reason.find("out of memory") != std::string::npos) {
+        return RuntimeShapeFailureKind::kResourceExhausted;
+    }
+    return RuntimeShapeFailureKind::kShapeAbiRejected;
+}
+}  // namespace
+
 bool RuntimeShapeAsyncResult::IsReady() const noexcept {
-    return !state_ || !state_->fake_completion || state_->fake_completion->IsReady();
+    if (!state_) return true;
+    if (state_->completion.defined()) {
+        try {
+            if (!state_->completion.IsReady()) return false;
+            MarkCompletion(state_);
+            return true;
+        } catch (...) {
+            MarkCompletionFailure(state_);
+            return false;
+        }
+    }
+    if (!state_->fake_completion) return true;
+    if (!state_->fake_completion->IsReady()) return false;
+    MarkCompletion(state_);
+    return true;
 }
 
 void RuntimeShapeAsyncResult::Wait() const noexcept {
-    if (state_ && state_->fake_completion) state_->fake_completion->Complete();
+    if (!state_) return;
+    if (state_->completion.defined()) {
+        try {
+            state_->completion.Wait();
+            MarkCompletion(state_);
+        } catch (...) {
+            MarkCompletionFailure(state_);
+        }
+        return;
+    }
+    if (state_->fake_completion) {
+        state_->fake_completion->Complete();
+        MarkCompletion(state_);
+    }
+}
+
+std::size_t RuntimeShapeAsyncResult::retained_device_bytes() const noexcept {
+    return state_ ? state_->retained_device_bytes : 0;
 }
 
 RuntimeShapeSession::RuntimeShapeSession(RuntimeShapePlan plan) : plan_(std::move(plan)) {}
 
 RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
     const std::vector<RuntimeShapeInput>& inputs, std::shared_ptr<void> caller_lease) const {
+    return RunImpl(inputs, ::kxc::DeviceStream(), std::move(caller_lease));
+}
+
+RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
+    const std::vector<RuntimeShapeInput>& inputs, ::kxc::DeviceStream stream,
+    std::shared_ptr<void> caller_lease) const {
+    return RunImpl(inputs, std::move(stream), std::move(caller_lease));
+}
+
+RuntimeShapeAsyncResult RuntimeShapeSession::RunImpl(
+    const std::vector<RuntimeShapeInput>& inputs, ::kxc::DeviceStream stream,
+    std::shared_ptr<void> caller_lease) const {
     auto state = std::make_shared<RuntimeShapeAsyncResult::State>();
-    state->plan = plan_;  // Retains the trusted-entry module lease with this result.
+    state->plan = plan_;
     state->caller_lease = std::move(caller_lease);
-    const auto fail = [&](const std::string& reason) {
-        state->ok = false;
+    const auto fail = [&](RuntimeShapeFailureKind kind, const std::string& reason) {
+        state->ok.store(false, std::memory_order_release);
+        state->failure_kind.store(kind, std::memory_order_release);
         state->failure_reason = reason;
-        state->outputs.clear();  // Failed launches never publish or reuse allocations.
-        state->events.push_back(FailureEvent(reason));
+        state->outputs.clear();
+        state->retained_device_bytes = 0;
+        // Failure telemetry is optional: allocation failure must still return the result.
+        try {
+            state->events.push_back(FailureEvent(reason));
+        } catch (...) {
+        }
         return RuntimeShapeAsyncResult(state);
     };
 #if !KXC_ENABLE_RUNTIME_SHAPE_TASKS
     (void)inputs;
-    return fail("disabled by KXC_ENABLE_RUNTIME_SHAPE_TASKS");
+    (void)stream;
+    return fail(RuntimeShapeFailureKind::kDisabled, "disabled by KXC_ENABLE_RUNTIME_SHAPE_TASKS");
 #else
     try {
         plan_.Validate();
         const auto& spec = plan_.spec();
+        const bool cuda_async = spec.entry.execution_kind == RuntimeShapeExecutionKind::kCudaAsync;
+#if !KXC_ENABLE_RUNTIME_SHAPE_CUDA || !KXC_USE_CUDA
+        if (cuda_async) {
+            return fail(RuntimeShapeFailureKind::kDisabled,
+                        "disabled by KXC_ENABLE_RUNTIME_SHAPE_CUDA or CUDA backend");
+        }
+#endif
+        const ::kxc::Device execution_device = cuda_async
+            ? DeviceForContract(spec.entry.device_contract) : ::kxc::Device::CPU();
+        if (cuda_async) {
+            if (!stream.defined()) stream = ::kxc::DeviceStream::Default(execution_device);
+            if (stream.device() != execution_device) {
+                return fail(RuntimeShapeFailureKind::kShapeAbiRejected,
+                            "CUDA stream device does not match entry device contract");
+            }
+            // Preserve the stream even when a callback fails to return completion.
+            state->stream = stream;
+        }
         if (inputs.size() != spec.inputs.size()) Fail("input count does not match");
         std::vector<std::vector<RuntimeShapeExtent>> input_shapes;
         input_shapes.reserve(inputs.size());
@@ -588,29 +822,36 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
             if (input.device != contract.device) Fail("input device does not match");
             if (input.abi_version != contract.abi_version) Fail("input ABI version does not match");
             const std::size_t expected_bytes = CheckedBytes(input.shape, DTypeBytes(input.dtype));
-            if (contract.requires_data || input.data || input.bytes != 0 || input.owner) {
+            if (cuda_async) {
+                if (!input.storage.defined() || input.storage.device() != execution_device ||
+                    input.storage.capacity_bytes() < expected_bytes || input.bytes != expected_bytes ||
+                    input.data != input.storage.data() ||
+                    (expected_bytes != 0 && input.data == nullptr)) {
+                    Fail("CUDA input storage, pointer, byte size, or device does not match contract");
+                }
+            } else if (contract.requires_data || input.data || input.bytes != 0 || input.owner) {
                 if (input.bytes != expected_bytes || (expected_bytes != 0 && input.data == nullptr)) {
                     Fail("input data pointer or byte size does not match shape contract");
                 }
-                state->input_owners.push_back(input.owner);
             }
+            state->input_owners.push_back(input.owner);
+            if (cuda_async) state->input_storage.push_back(input.storage);
             for (const auto& guard : contract.axis_guards) {
                 const RuntimeShapeExtent extent = input.shape[guard.axis];
                 if (extent < guard.lower || extent > guard.upper ||
                     extent % guard.divisible_by != 0 ||
                     (guard.exact && extent != *guard.exact)) {
-                    Fail("input axis guard mismatch");
+                    return fail(RuntimeShapeFailureKind::kApplicabilityMiss,
+                                "input axis guard mismatch");
                 }
             }
             input_shapes.push_back(input.shape);
         }
-        for (std::size_t index = 0; index < inputs.size(); ++index) {
-            for (const auto& guard : spec.inputs[index].axis_guards) {
-                if (guard.equal_to &&
-                    inputs[index].shape[guard.axis] !=
-                        inputs[guard.equal_to->input_index].shape[guard.equal_to->axis]) {
-                    Fail("input axis equality guard mismatch");
-                }
+        for (std::size_t index = 0; index < inputs.size(); ++index) for (const auto& guard : spec.inputs[index].axis_guards) {
+            if (guard.equal_to && inputs[index].shape[guard.axis] !=
+                inputs[guard.equal_to->input_index].shape[guard.equal_to->axis]) {
+                return fail(RuntimeShapeFailureKind::kApplicabilityMiss,
+                            "input axis equality guard mismatch");
             }
         }
         std::vector<RuntimeShapeExtent> runtime_extent_values;
@@ -618,13 +859,14 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
         for (const auto& scalar : spec.runtime_extent_abi) {
             const auto value = inputs[scalar.input_index].shape[scalar.axis];
             if (value < scalar.lower || value > scalar.upper || value % scalar.divisible_by != 0) {
-                Fail("runtime extent scalar value is outside its ABI domain");
+                return fail(RuntimeShapeFailureKind::kApplicabilityMiss,
+                            "runtime extent scalar value is outside its ABI domain");
             }
             runtime_extent_values.push_back(value);
         }
         state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kShapeEval,
                                                    static_cast<std::size_t>(-1), 0,
-                                                   "CPU:0/default"});
+                                                   cuda_async ? spec.entry.device_contract : "CPU:0/default"});
         std::vector<OutputEvaluation> evaluated;
         evaluated.reserve(spec.outputs.size());
         std::size_t total_bytes = 0;
@@ -635,60 +877,203 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
             output.physical = EvaluateShape(contract.physical, input_shapes);
             output.valid = EvaluateShape(contract.valid, input_shapes);
             for (std::size_t axis = 0; axis < output.logical.size(); ++axis) {
-                if (output.valid[axis] > output.logical[axis] ||
-                    output.logical[axis] > output.physical[axis]) {
+                if (output.valid[axis] > output.logical[axis] || output.logical[axis] > output.physical[axis]) {
                     Fail("valid <= logical <= physical is violated");
                 }
             }
             output.bytes = CheckedBytes(output.physical, DTypeBytes(contract.dtype));
-            if (output.bytes > contract.max_bytes) Fail("output exceeds max_bytes");
+            if (output.bytes > contract.max_bytes) return fail(RuntimeShapeFailureKind::kResourceExhausted,
+                                                                "output exceeds max_bytes");
             if (output.bytes > std::numeric_limits<std::size_t>::max() - total_bytes) {
-                Fail("run byte budget overflow");
+                return fail(RuntimeShapeFailureKind::kResourceExhausted, "run byte budget overflow");
             }
             total_bytes += output.bytes;
             evaluated.push_back(OutputEvaluation{std::move(output)});
         }
-        if (total_bytes > spec.run_byte_budget) Fail("run byte budget exceeded");
-
+        if (total_bytes > spec.run_byte_budget) {
+            return fail(RuntimeShapeFailureKind::kResourceExhausted, "run byte budget exceeded");
+        }
         for (std::size_t index = 0; index < evaluated.size(); ++index) {
             auto& output = evaluated[index].output;
-            AllocationOwner allocation = AllocateOutput(output.bytes, output.contract.alignment);
-            if (fail_next_owner_transfer.exchange(false, std::memory_order_acq_rel)) {
-                throw std::bad_alloc();  // Tests RAII cleanup; not a shared_ptr control-block injector.
+            if (cuda_async) {
+                output.storage_ = ::kxc::Storage::Alloc(execution_device, output.bytes,
+                                                         output.contract.alignment);
+                output.data = output.storage_.data();
+            } else {
+                AllocationOwner allocation = AllocateOutput(output.bytes, output.contract.alignment);
+                if (fail_next_owner_transfer.exchange(false, std::memory_order_acq_rel)) throw std::bad_alloc();
+                output.owner_ = std::shared_ptr<void>(std::move(allocation));
+                output.data = output.owner_.get();
             }
-            output.owner_ = std::shared_ptr<void>(std::move(allocation));
-            output.data = output.owner_.get();
             state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kAllocate, index,
-                                                       output.bytes, "CPU:0/default"});
+                output.bytes, cuda_async ? spec.entry.device_contract : "CPU:0/default"});
             state->outputs.push_back(std::move(output));
         }
+        if (!cuda_async) {
+            RuntimeShapeLaunchResult launch;
+            try {
+                std::lock_guard<std::mutex> lock(plan_.launcher_mutex());
+                launch = spec.entry.launcher(RuntimeShapeLaunchArgs{inputs, state->outputs,
+                    runtime_extent_values, spec.entry.exact_abi_fingerprint});
+            } catch (const std::exception& error) {
+                return fail(RuntimeShapeFailureKind::kLaunchRejected,
+                            std::string("bound launcher threw: ") + error.what());
+            } catch (...) {
+                return fail(RuntimeShapeFailureKind::kLaunchRejected,
+                            "bound launcher threw a non-standard exception");
+            }
+            if (!launch.accepted) return fail(RuntimeShapeFailureKind::kLaunchRejected,
+                launch.failure_reason.empty() ? "bound launcher rejected launch" : launch.failure_reason);
+            state->fake_completion = std::move(launch.fake_completion);
+            state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kKernel,
+                static_cast<std::size_t>(-1), 0, spec.entry.entry_symbol});
+            state->ok.store(true, std::memory_order_release);
+            return RuntimeShapeAsyncResult(std::move(state));
+        }
+        // Completion provenance is runtime-owned: create the event before the
+        // callback and record it on the exact supplied stream after callback return.
+        ::kxc::DeviceAPI* api = ::kxc::GetDeviceAPI(execution_device.device_type());
+        void* event = nullptr;
+        try {
+            event = api->CreateEvent(execution_device);
+        } catch (...) {
+            return fail(RuntimeShapeFailureKind::kSubmissionFailed,
+                        "CUDA completion event creation failed before callback");
+        }
+        const auto free_event = [&]() noexcept {
+            if (!event) return;
+            try {
+                api->FreeEvent(execution_device, event);
+            } catch (...) {
+            }
+            event = nullptr;
+        };
+        ::kxc::AsyncOperation completion;
+        const auto quarantine = [&](const char* reason, ::kxc::AsyncOperation operation,
+                                    void* raw_event = nullptr) noexcept {
+            // Synchronization could not prove submitted work complete. Retain every
+            // run dependency (and any raw event) to process exit rather than release.
+            state->completion = std::move(operation);
+            state->quarantined_event = raw_event;
+            state->quarantined = true;
+            state->retained_device_bytes = total_bytes;
+            QuarantineRunState(state);
+            state->ok.store(false, std::memory_order_release);
+            state->failure_kind.store(RuntimeShapeFailureKind::kSubmissionFailed,
+                                      std::memory_order_release);
+            try {
+                state->failure_reason = reason;
+                state->events.push_back(FailureEvent(reason));
+            } catch (...) {
+            }
+            return RuntimeShapeAsyncResult(state);
+        };
+        const auto synchronize_for_cleanup = [&]() noexcept {
+            try {
+                stream.Sync();
+                MarkCompletion(state);
+                return true;
+            } catch (...) {
+                return false;
+            }
+        };
 
-        RuntimeShapeLaunchResult launch;
+        RuntimeShapeCudaLaunchResult launch;
+        bool callback_threw = false;
         try {
             std::lock_guard<std::mutex> lock(plan_.launcher_mutex());
-            launch = spec.entry.launcher(RuntimeShapeLaunchArgs{
-                inputs, state->outputs, runtime_extent_values, spec.entry.exact_abi_fingerprint});
-        } catch (const std::exception& error) {
-            return fail(std::string("bound launcher threw: ") + error.what());
+            launch = spec.entry.cuda_launcher(RuntimeShapeCudaLaunchArgs{inputs, state->outputs,
+                runtime_extent_values, spec.entry.exact_abi_fingerprint, stream});
         } catch (...) {
-            return fail("bound launcher threw a non-standard exception");
+            callback_threw = true;
         }
-        if (!launch.accepted) {
-            return fail(launch.failure_reason.empty() ? "bound launcher rejected launch"
-                                                       : launch.failure_reason);
+        if (!callback_threw && !launch.accepted) {
+            // The callback contract explicitly proves no submission on rejection.
+            free_event();
+            return fail(RuntimeShapeFailureKind::kLaunchRejected,
+                        launch.failure_reason.empty() ? "CUDA launcher rejected submission"
+                                                      : launch.failure_reason);
         }
-        state->fake_completion = std::move(launch.fake_completion);
-        state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kKernel,
-                                                   static_cast<std::size_t>(-1), 0,
-                                                   spec.entry.entry_symbol});
-        state->ok = true;
+
+        try {
+            if (fail_next_cuda_event_record.exchange(false, std::memory_order_acq_rel)) {
+                throw std::runtime_error("injected CUDA completion event record failure");
+            }
+            api->RecordEvent(execution_device, event, stream->backend_handle);
+        } catch (...) {
+            if (synchronize_for_cleanup()) {
+                free_event();
+                return fail(RuntimeShapeFailureKind::kSubmissionFailed,
+                            "CUDA completion event recording failed");
+            }
+            return quarantine("CUDA completion event recording failed; run state quarantined", {}, event);
+        }
+
+        try {
+            completion = ::kxc::AsyncOperation::Pending(stream, event, {});
+            event = nullptr;
+        } catch (...) {
+            // Pending construction releases its event if possible; stream sync is
+            // still required because callback work may already be executing.
+            if (synchronize_for_cleanup()) {
+                return fail(RuntimeShapeFailureKind::kSubmissionFailed,
+                            "CUDA completion ownership creation failed");
+            }
+            return quarantine("CUDA completion ownership creation failed; run state quarantined", {});
+        }
+        try {
+            auto retention = std::make_shared<RuntimeShapeAsyncRetention>();
+            retention->plan = plan_;
+            retention->caller_lease = state->caller_lease;
+            retention->input_owners = state->input_owners;
+            retention->input_storage = state->input_storage;
+            ::kxc::Array<::kxc::Storage> output_storage;
+            for (const auto& output : state->outputs) output_storage.push_back(output.storage_);
+            if (fail_next_cuda_retention.exchange(false, std::memory_order_acq_rel)) {
+                throw std::bad_alloc();
+            }
+            completion.RetainDependencies(std::move(output_storage), retention);
+        } catch (...) {
+            if (!synchronize_for_cleanup()) {
+                return quarantine("CUDA completion retention failed; run state quarantined",
+                                  std::move(completion));
+            }
+            try {
+                completion.Wait();
+            } catch (...) {
+            }
+            return fail(RuntimeShapeFailureKind::kSubmissionFailed,
+                        "CUDA completion retention failed");
+        }
+        if (callback_threw) {
+            if (!synchronize_for_cleanup()) {
+                return quarantine("CUDA launcher threw after possible submission; run state quarantined",
+                                  std::move(completion));
+            }
+            try {
+                completion.Wait();
+            } catch (...) {
+            }
+            return fail(RuntimeShapeFailureKind::kSubmissionFailed,
+                        "CUDA launcher threw after possible submission");
+        }
+        state->completion = std::move(completion);
+        state->retained_device_bytes = total_bytes;
+        try {
+            state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kSubmission,
+                static_cast<std::size_t>(-1), total_bytes, spec.entry.entry_symbol});
+        } catch (...) {
+            // Submission is valid even when optional telemetry allocation fails.
+        }
+        state->ok.store(true, std::memory_order_release);
         return RuntimeShapeAsyncResult(std::move(state));
     } catch (const std::bad_alloc&) {
-        return fail("output allocation failed: out of memory");
+        return fail(RuntimeShapeFailureKind::kResourceExhausted, "output allocation failed: out of memory");
     } catch (const std::exception& error) {
-        return fail(error.what());
+        return fail(ClassifyShapeFailure(error.what()), error.what());
     } catch (...) {
-        return fail("runtime shape execution threw a non-standard exception");
+        return fail(RuntimeShapeFailureKind::kShapeAbiRejected,
+                    "runtime shape execution threw a non-standard exception");
     }
 #endif
 }

@@ -1,5 +1,5 @@
 /*! \file include/kxc/runtime/runtime_shape_session.h
- * \brief CPU:0/default-stream ShapeEval -> Allocate -> Kernel session.
+ * \brief Restricted CPU synchronous and opt-in CUDA asynchronous shape session.
  */
 #pragma once
 
@@ -11,7 +11,28 @@
 
 namespace kxc::runtime {
 
-enum class RuntimeShapeEventKind { kShapeEval, kAllocate, kKernel, kFailure };
+/*! \brief Stable failure outcome for an upper control plane; no fallback is implicit. */
+enum class RuntimeShapeFailureKind {
+    kNone,
+    kDisabled,
+    kApplicabilityMiss,
+    kShapeAbiRejected,
+    kResourceExhausted,
+    kLaunchRejected,
+    kSubmissionFailed,
+    kCompletionFailed,
+};
+
+enum class RuntimeShapeEventKind {
+    kShapeEval,
+    kAllocate,
+    kKernel,
+    kSubmission,
+    kCompletion,
+    /*! \brief Observed-completion retirement eligibility, never physical deallocation. */
+    kRetire,
+    kFailure,
+};
 
 struct RuntimeShapeEvent {
     RuntimeShapeEventKind kind{RuntimeShapeEventKind::kFailure};
@@ -20,16 +41,22 @@ struct RuntimeShapeEvent {
     std::string detail;
 };
 
-/*! \brief Result owns plan, module lease, outputs, run state, and caller lease. */
 class RuntimeShapeAsyncResult final {
 public:
     bool ok() const noexcept;
+    /*! \brief Base failure text is immutable; completion failure returns static text. */
     const std::string& failure_reason() const noexcept;
+    RuntimeShapeFailureKind failure_kind() const noexcept;
+    /*! \brief Immutable outputs published by RunAsync/Run. */
     const std::vector<RuntimeShapeOutput>& outputs() const noexcept;
-    const std::vector<RuntimeShapeEvent>& events() const noexcept;
+    /*! \brief Returns a thread-safe value snapshot, including observed completion telemetry. */
+    std::vector<RuntimeShapeEvent> events() const;
+    /*! \brief Delegates CUDA completion polling; CPU fake completion remains test-only. */
     bool IsReady() const noexcept;
-    /*! \brief Completes only the fake lifetime-simulation seam. */
+    /*! \brief Delegates CUDA completion waiting; CPU fake completion remains test-only. */
     void Wait() const noexcept;
+    /*! \brief Exact CUDA output bytes held by this result, not process residency. */
+    std::size_t retained_device_bytes() const noexcept;
 
 private:
     struct State;
@@ -38,26 +65,27 @@ private:
     friend class RuntimeShapeSession;
 };
 
-/*! \brief Separate default-off synchronous dynamic-output session; no allocation reuse.
- *
- * RunAsync is named for API compatibility only: it executes shape evaluation,
- * allocation, and the trusted launcher synchronously before returning. It
- * cannot claim real device async safety. A pending FakeRuntimeShapeCompletion
- * only simulates result lifetime after that synchronous launch.
- */
+/*! \brief Frozen shape executor with separate CPU and CUDA callback contracts. */
 class RuntimeShapeSession final {
 public:
     explicit RuntimeShapeSession(RuntimeShapePlan plan);
 
-    /*! \brief Synchronous launch; never a real device-async submission. */
+    /*! \brief Preserves the existing CPU trusted synchronous call shape. */
     RuntimeShapeAsyncResult RunAsync(
         const std::vector<RuntimeShapeInput>& inputs,
+        std::shared_ptr<void> caller_lease = {}) const;
+    /*! \brief CUDA entries use this overload; stream may be undefined for CUDA default stream. */
+    RuntimeShapeAsyncResult RunAsync(
+        const std::vector<RuntimeShapeInput>& inputs, ::kxc::DeviceStream stream,
         std::shared_ptr<void> caller_lease = {}) const;
     RuntimeShapeAsyncResult Run(const std::vector<RuntimeShapeInput>& inputs,
                                 std::shared_ptr<void> caller_lease = {}) const;
     const RuntimeShapePlan& plan() const noexcept;
 
 private:
+    RuntimeShapeAsyncResult RunImpl(const std::vector<RuntimeShapeInput>& inputs,
+                                    ::kxc::DeviceStream stream,
+                                    std::shared_ptr<void> caller_lease) const;
     RuntimeShapePlan plan_;
 };
 

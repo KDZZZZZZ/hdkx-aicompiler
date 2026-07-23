@@ -20,6 +20,8 @@ option(KXC_ENABLE_CONTROL_RUNTIME
   "Enable experimental static-exact CPU control runtime execution" OFF)
 option(KXC_ENABLE_RUNTIME_SHAPE_TASKS
   "Enable experimental CPU-only dynamic runtime shape tasks" OFF)
+option(KXC_ENABLE_RUNTIME_SHAPE_CUDA
+  "Enable experimental genuine CUDA async runtime shape tasks" OFF)
 option(KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
   "Enable default-OFF real-artifact static CPU Relay If compilation" OFF)
 option(KXC_ENABLE_SHAPE_PRODUCTION_EXACT
@@ -225,7 +227,8 @@ foreach(_kxc_public_module IN ITEMS
 endforeach()
 target_link_libraries(kxc_compiler_api INTERFACE kxc_shape_api)
 target_compile_definitions(kxc_runtime_api INTERFACE
-  KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>)
+  KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>
+  KXC_ENABLE_RUNTIME_SHAPE_CUDA=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_CUDA}>)
 
 target_compile_definitions(kxc_compiler_api INTERFACE
   KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>
@@ -245,6 +248,10 @@ elseif(KXC_ENABLE_CUDA AND NOT CUDAToolkit_FOUND)
 else()
   set(KXC_USE_CUDA 0)
   message(STATUS "CUDA support: disabled by KXC_ENABLE_CUDA=OFF")
+endif()
+if(KXC_ENABLE_RUNTIME_SHAPE_CUDA AND
+   (NOT KXC_ENABLE_RUNTIME_SHAPE_TASKS OR NOT KXC_USE_CUDA))
+  message(FATAL_ERROR "KXC_ENABLE_RUNTIME_SHAPE_CUDA requires runtime shape tasks and a compiled CUDA backend")
 endif()
 
 # ==================== LLVM Support ====================
@@ -559,6 +566,7 @@ function(kxc_configure_module_obj target)
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
     KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>
+    KXC_ENABLE_RUNTIME_SHAPE_CUDA=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_CUDA}>
     KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
@@ -747,6 +755,7 @@ function(kxc_add_runtime_exe target source_file)
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
     KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>
+    KXC_ENABLE_RUNTIME_SHAPE_CUDA=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_CUDA}>
     KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
@@ -1041,13 +1050,19 @@ if(KXC_BUILD_PASS_TESTS)
   if(KXC_ENABLE_RUNTIME_SHAPE_TASKS)
     kxc_add_runtime_exe(runtime_shape_session_test test/runtime_shape_session_test.cpp)
   endif()
+  if(KXC_ENABLE_RUNTIME_SHAPE_CUDA AND KXC_USE_CUDA)
+    kxc_add_runtime_exe(runtime_shape_cuda_async_test test/runtime_shape_cuda_async_test.cpp)
+  endif()
   add_executable(runtime_shape_gate_off_test
     test/runtime_shape_gate_off_test.cpp
     src/runtime/runtime_shape_session.cc)
-  target_include_directories(runtime_shape_gate_off_test PRIVATE "${KXC_INCLUDE_DIR}")
+  target_include_directories(runtime_shape_gate_off_test PRIVATE "${KXC_INCLUDE_DIR}"
+    "${KXC_DLPACK_INCLUDE_DIR}")
   target_compile_definitions(runtime_shape_gate_off_test PRIVATE
     KXC_ENABLE_RUNTIME_SHAPE_TASKS=0)
-  target_link_libraries(runtime_shape_gate_off_test PRIVATE Threads::Threads)
+  add_dependencies(runtime_shape_gate_off_test kxc_runtime)
+  target_link_libraries(runtime_shape_gate_off_test PRIVATE "$<TARGET_FILE:kxc_runtime>" Threads::Threads)
+  kxc_enable_cuda(runtime_shape_gate_off_test)
   kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
 
   set(KXC_CONTROL_FLOW_TESTS
@@ -1098,6 +1113,11 @@ if(KXC_BUILD_PASS_TESTS)
     add_test(NAME runtime_shape_session_test COMMAND runtime_shape_session_test)
     set_tests_properties(runtime_shape_session_test PROPERTIES
       LABELS "runtime-shape;cpu;dynamic-shape")
+  endif()
+  if(KXC_ENABLE_RUNTIME_SHAPE_CUDA AND KXC_USE_CUDA)
+    add_test(NAME runtime_shape_cuda_async_test COMMAND runtime_shape_cuda_async_test)
+    set_tests_properties(runtime_shape_cuda_async_test PROPERTIES
+      LABELS "runtime-shape;cuda;hardware" SKIP_RETURN_CODE 77)
   endif()
 
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
