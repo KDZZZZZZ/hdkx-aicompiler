@@ -1,10 +1,10 @@
 # 编译器基础架构审查：按单元编译、形状语义与可替换执行
 
-> **审查日期：** 2026-07-22
-> **源码基线：** `dev` / `3b95aca188122ff52ebdb2f43d390d21273ff3e2`（`feat: compile relay graphs per operator`）
-> **审查范围：** 当前工作树中的已跟踪 C++/Python 契约、测试和文档；[GitHub Issue #14](https://github.com/KDZZZZZZ/hdkx-aicompiler/issues/14) 与历史提交 `0b1d65b` 仅作自适应编译设计取证。
-> **验证证据：** 同一 HEAD 已通过 19/19 Relay operator contract、19/19 Pass contract，以及 `graph_partition_test`、`operator_compilation_test`、`runtime_session_test`、`kernel_signature_test`、`infer_type_test`、`pass_pipeline_test`、`compiler_extension_contract_test`。
-> **本次文档变更：** 只新增并静态检查本文，未重新构建二进制；历史自适应实现只作设计取证。
+> **审查日期：** 2026-07-22  
+> **源码基线：** `dev` / `3b95aca188122ff52ebdb2f43d390d21273ff3e2`（`feat: compile relay graphs per operator`）  
+> **审查范围：** 当前工作树中的已跟踪 C++/Python 契约、测试和文档；[GitHub Issue #14](https://github.com/KDZZZZZZ/hdkx-aicompiler/issues/14) 与历史提交 `0b1d65b` 仅作自适应编译设计取证。  
+> **验证证据：** 同一 HEAD 已通过 19/19 Relay operator contract、19/19 Pass contract，以及 `graph_partition_test`、`operator_compilation_test`、`runtime_session_test`、`kernel_signature_test`、`infer_type_test`、`pass_pipeline_test`、`compiler_extension_contract_test`。  
+> **本次文档变更：** 只新增并静态检查本文，未重新构建二进制；历史自适应实现只作设计取证。  
 > **文档定位：** 目标架构审查与迁移准则，不是“当前已经实现”的能力声明。
 
 ## 1. 执行摘要

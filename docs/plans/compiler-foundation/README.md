@@ -1,7 +1,7 @@
 # 编译器基础路线图
 
-> **状态：** 规划中（尚未开始实现）
-> **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
+> **状态：** 规划中（尚未开始实现）  
+> **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **范围：** 为现有 per-unit 编译、multi-entry module、`ExecutablePlan` 与静态 `RuntimeSession` 建立可演进的契约；本文不是当前能力声明。
 
 ## 1. 总目标与边界

@@ -1,8 +1,8 @@
 # 04：动态图与控制流
 
-> **状态：** 规划中；不表示当前已实现
-> **所属路线：** [编译器基础路线图](README.md)
-> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
+> **状态：** 规划中；不表示当前已实现  
+> **所属路线：** [编译器基础路线图](README.md)  
+> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **范围：** 把当前静态 data-flow 路径扩展为可验证的结构化控制流；不在本计划实现代码。
 ## 1. 背景与问题界定
 当前 `ValueGraph` 只将参数、常量、`Call`、tuple 与 tuple field 建成稳定 value id。

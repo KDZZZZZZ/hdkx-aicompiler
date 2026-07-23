@@ -1,10 +1,10 @@
 # 03：自适应编译与安全热替换
 
-> **状态：** 规划中；不表示当前已有 adaptive runtime
-> **所属路线：** [编译器基础路线图](README.md)
-> **共同基础：** [01：契约、identity 与 cache](01-core-contracts-identity-cache.md)
-> **可选集成：** [02：Shape 系统与特化](02-shape-system-and-specialization.md)；static exact 热替换不等待 02
-> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
+> **状态：** 规划中；不表示当前已有 adaptive runtime  
+> **所属路线：** [编译器基础路线图](README.md)  
+> **共同基础：** [01：契约、identity 与 cache](01-core-contracts-identity-cache.md)  
+> **可选集成：** [02：Shape 系统与特化](02-shape-system-and-specialization.md)；static exact 热替换不等待 02  
+> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **范围：** 编译协调、版本发布、回退、canary、观测；**不解决 shape 基数**。
 
 ## 1. 目标与边界

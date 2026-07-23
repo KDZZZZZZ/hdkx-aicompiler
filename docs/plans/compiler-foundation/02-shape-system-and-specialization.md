@@ -1,10 +1,10 @@
 # 02：Shape 系统与特化
 
-> **状态：** 规划中；不表示当前已支持 dynamic shape
-> **所属路线：** [编译器基础路线图](README.md)
-> **共同基础：** [01：契约、identity 与 cache](01-core-contracts-identity-cache.md)
-> **并行轨道：** [03：自适应编译与安全热替换](03-adaptive-compilation-hot-swap.md)
-> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
+> **状态：** 规划中；不表示当前已支持 dynamic shape  
+> **所属路线：** [编译器基础路线图](README.md)  
+> **共同基础：** [01：契约、identity 与 cache](01-core-contracts-identity-cache.md)  
+> **并行轨道：** [03：自适应编译与安全热替换](03-adaptive-compilation-hot-swap.md)  
+> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **范围：** Shape 语义、GraphTemplate、profile 与 specialization；热替换控制面属于 03。
 
 ## 1. 目标与当前边界
