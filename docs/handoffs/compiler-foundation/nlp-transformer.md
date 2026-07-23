@@ -4,7 +4,7 @@
 >
 > 基线：`525950a`（`baseline/compiler-foundation-w1`）
 >
-> 当前验证提交：`299b27e`
+> 当前验证提交：`8f0c664`
 >
 > 状态：实现与本地证据完成，尚未 push、merge 或取得 production approval。
 
@@ -147,6 +147,7 @@ CI 的 LLVM job 已选择 `op_numeric_llvm_test` 与条件 `onnx_importer_test`�
 | `0d38af1` | 最小 exact Transformer composition fixture |
 | `1b53ba8` | strict ONNX attrs、bool Constant reification、组合 reifier 与多轴 LayerNorm coverage |
 | `299b27e` | CUDA injective validation、Gather/reduction rejection 与 Concat ABI shape 修复 |
+| `8f0c664` | C++ reifier 对 Gather/Where 非 canonical attrs 的 fail-closed 修正 |
 
 ## 6. 集成注意事项
 
