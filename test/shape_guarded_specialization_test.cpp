@@ -207,7 +207,7 @@ bool TestPolymorphicGuardedContract() {
                                    graph.key().capability_fingerprint(), 8192);
         }), "missing runtime scalar ABI must reject");
 
-  CHECK(Throws([&] { 
+  CHECK(Throws([&] {
           (void)BuildPolymorphicProfile(graph, s64,
               Polymorphic(graph, Guard(1, 128, 32), RuntimeExtentScalar{1, "extent_s", "s", 1, 128, 32}));
         }), "reordered runtime scalar ordinal must reject");
