@@ -156,6 +156,7 @@ public:
 
         const Leaves outputs = LowerTerminal(function_->body, root, &environment,
                                              "function.body");
+        ValidateAliasPlacement(Expr(ObjectRef(function_)), outputs, "function");
         if (outputs.empty()) Fail("function.body", "requires at least one tensor graph output");
         std::unordered_set<runtime::ValueId> output_set;
         for (const runtime::ValueId output : outputs) {
@@ -212,6 +213,19 @@ private:
         return plan_.values[static_cast<std::size_t>(id)];
     }
 
+    void ValidateAliasPlacement(const Expr& alias, const Leaves& leaves,
+                                const std::string& path) const {
+        const auto* relay_node = dynamic_cast<const RelayNode*>(alias.get());
+        if (!relay_node || !relay_node->virtual_device_.defined()) return;
+        const Device expected = DeviceFor(alias, path);
+        for (runtime::ValueId leaf : leaves) {
+            if (Value(leaf).device != expected) {
+                Fail(path,
+                     "structural alias placement requires an explicit copy task");
+            }
+        }
+    }
+
     Leaves AddLeaves(const Expr& source, const Type& type,
                      const std::string& path) {
         std::vector<Type> leaf_types;
@@ -260,6 +274,7 @@ private:
         } else {
             Fail(path, "ANF lowering expected an atomic Var or Constant");
         }
+        ValidateAliasPlacement(expr, ids, path);
         for (const runtime::ValueId id : ids) MarkRead(region, id);
         return ids;
     }
@@ -352,8 +367,10 @@ private:
         return outputs;
     }
 
-    Leaves LowerTupleGetItem(const TupleGetItemNode* get_item, runtime::RegionId region,
-                             const Env& environment, const std::string& path) {
+    Leaves LowerTupleGetItem(const Expr& expr,
+                             const TupleGetItemNode* get_item,
+                             runtime::RegionId region, const Env& environment,
+                             const std::string& path) {
         const Leaves tuple = ResolveAtomic(get_item->tuple, region, environment,
                                            path + ".tuple");
         const auto* tuple_type = get_item->tuple.checked_type().As<TupleTypeNode>();
@@ -374,8 +391,12 @@ private:
         if (begin + selected_types.size() > tuple.size()) {
             Fail(path, "TupleGetItem flattening is inconsistent with its checked TupleType");
         }
-        return Leaves(tuple.begin() + static_cast<std::ptrdiff_t>(begin),
-                      tuple.begin() + static_cast<std::ptrdiff_t>(begin + selected_types.size()));
+        Leaves selected(
+            tuple.begin() + static_cast<std::ptrdiff_t>(begin),
+            tuple.begin() +
+                static_cast<std::ptrdiff_t>(begin + selected_types.size()));
+        ValidateAliasPlacement(expr, selected, path);
+        return selected;
     }
 
     Leaves LowerIf(const Expr& expr, const IfNode* if_node, runtime::RegionId parent,
@@ -445,10 +466,11 @@ private:
                                                    path + ".fields[" + std::to_string(i) + "]");
                 values.insert(values.end(), field.begin(), field.end());
             }
+            ValidateAliasPlacement(expr, values, path);
             return values;
         }
         if (const auto* get_item = expr.As<TupleGetItemNode>()) {
-            return LowerTupleGetItem(get_item, region, environment, path);
+            return LowerTupleGetItem(expr, get_item, region, environment, path);
         }
         Fail(path, "encountered unsupported non-ANF Relay value");
     }
@@ -457,6 +479,8 @@ private:
                          const std::string& path) {
         if (const auto* let = expr.As<LetNode>()) {
             const Leaves value = LowerValue(let->value, region, *environment, path + ".value");
+            ValidateAliasPlacement(Expr(ObjectRef(let->var)), value,
+                                   path + ".var");
             const auto existing = environment->find(let->var.get());
             const bool had_existing = existing != environment->end();
             const Leaves saved = had_existing ? existing->second : Leaves{};

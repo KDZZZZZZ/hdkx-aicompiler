@@ -26,6 +26,7 @@ using kxc::If;
 using kxc::Let;
 using kxc::TensorType;
 using kxc::Tuple;
+using kxc::TupleGetItem;
 using kxc::Var;
 using kxc::runtime::ControlPlan;
 using kxc::runtime::ControlTask;
@@ -76,6 +77,25 @@ bool TestCanonicalAndRepeatedArguments() {
     TEST_CHECK(plan.CanonicalText() ==
                    kxc::api::LowerRelayToControlPlan(equivalent).CanonicalText(),
                "equivalent Relay must have deterministic ControlPlan text");
+
+    Var px("px", kI64), py("py", kI64), pz("pz", kI64);
+    Tuple nested({Add(px, py), Tuple({Add(py, pz), Add(pz, px)})});
+    Function projection({px, py, pz}, TupleGetItem(nested, 1));
+    ControlPlan projection_plan =
+        kxc::api::LowerRelayToControlPlan(projection);
+    TEST_CHECK(projection_plan.graph_outputs.size() == 2 &&
+                   projection_plan.regions[0].tasks.size() == 3,
+               "nested tuple projection must preserve selected leaves and pure dead work");
+    const auto projection_result =
+        ControlPlanReferenceExecutor(ArithmeticKernels()).Execute(
+            projection_plan,
+            {{projection_plan.graph_inputs[0], FakeValue::I64(1)},
+             {projection_plan.graph_inputs[1], FakeValue::I64(2)},
+             {projection_plan.graph_inputs[2], FakeValue::I64(3)}});
+    TEST_CHECK(
+        projection_result.values.at(projection_plan.graph_outputs[0]).integer == 5 &&
+            projection_result.values.at(projection_plan.graph_outputs[1]).integer == 4,
+        "nested tuple projection must execute the complete selected field");
     return true;
 }
 
@@ -170,6 +190,19 @@ bool TestStaticAndControlGates() {
     });
     TEST_CHECK(ordinal_error.find("one explicit device") != std::string::npos,
                "ControlPlan must preserve and compare CUDA device ordinals");
+
+    Var structural_x("structural_x", kI64);
+    Var structural_y("structural_y", kI64);
+    Tuple placed_tuple({structural_x, structural_y});
+    placed_tuple.set_virtual_device(
+        kxc::VirtualDevice::ForDevice(kxc::Device::CUDA(1)));
+    const std::string structural_error = ErrorText([&] {
+        (void)kxc::api::LowerRelayToControlPlan(
+            Function({structural_x, structural_y}, placed_tuple));
+    });
+    TEST_CHECK(structural_error.find("structural alias placement") !=
+                   std::string::npos,
+               "placed structural aliases must not erase device identity");
 
     const kxc::relay::Op& add = kxc::relay::Op::Get("add");
     auto* add_node = const_cast<kxc::relay::OpNode*>(add.operator->());

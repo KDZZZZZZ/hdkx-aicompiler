@@ -236,7 +236,6 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
     ValidateEffects(region.effect, region.live_ins, "region");
     ValidateAlias(region.alias, state, "region");
     std::unordered_set<ValueId> available(region.live_ins.begin(), region.live_ins.end());
-    std::unordered_set<ValueId> produced_here;
     std::unordered_set<TaskId> previous_tasks;
     std::unordered_map<ValueId, TaskId> local_producers;
     for (const ControlTask& task : region.tasks) {
@@ -309,7 +308,6 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
                 Fail("task output is not a fresh value");
             }
             available.insert(output);
-            produced_here.insert(output);
             local_producers.emplace(output, task.id);
         }
         previous_tasks.insert(task.id);
@@ -317,15 +315,6 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
     for (ValueId output : region.live_outs) {
         Value(state, output, "region live_out");
         if (!available.count(output)) Fail("region live_out is unavailable");
-    }
-    for (ValueId produced : produced_here) {
-        if (std::find(region.live_outs.begin(), region.live_outs.end(), produced) == region.live_outs.end()) {
-            bool used_later = false;
-            for (const ControlTask& task : region.tasks) {
-                if (std::find(task.inputs.begin(), task.inputs.end(), produced) != task.inputs.end()) used_later = true;
-            }
-            if (!used_later) Fail("region omits a produced value from its consumer/live-out closure");
-        }
     }
     state.active.erase(id);
     state.visited.insert(id);
