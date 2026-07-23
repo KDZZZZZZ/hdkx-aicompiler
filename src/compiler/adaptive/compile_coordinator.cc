@@ -88,17 +88,23 @@ struct Waiter final {
 
 struct Flight final {
     Flight(CompileRequest request_value, std::uint32_t attempt_value,
-           std::uint64_t sequence_value)
+           std::uint64_t sequence_value, std::uint64_t root_request_id_value)
         : request(std::move(request_value)),
           identity(request),
           attempt(attempt_value),
           sequence(sequence_value),
+          root_request_id(root_request_id_value),
+          queued_at(std::chrono::steady_clock::now()),
           cancellation(std::make_shared<CancellationToken::State>()) {}
 
     CompileRequest request;
     RequestIdentity identity;
     std::uint32_t attempt{1};
     std::uint64_t sequence{0};
+    std::uint64_t root_request_id{0};
+    std::chrono::steady_clock::time_point queued_at;
+    std::chrono::steady_clock::time_point compile_started_at;
+    std::chrono::steady_clock::time_point validating_at;
     FlightState state{FlightState::kQueued};
     bool discard{false};
     std::shared_ptr<CancellationToken::State> cancellation;
@@ -107,9 +113,12 @@ struct Flight final {
 
 struct TerminalRecord final {
     TerminalRecord(CompileResult result_value, std::uint64_t stamp_value)
-        : result(std::move(result_value)), stamp(stamp_value) {}
+        : result(std::move(result_value)), stamp(stamp_value) {
+        if (result.artifact()) bytes = result.artifact()->byte_size();
+    }
     CompileResult result;
     std::uint64_t stamp{0};
+    std::size_t bytes{0};
 };
 
 int KindOrder(RequestKind kind) {
@@ -127,6 +136,9 @@ int KindOrder(RequestKind kind) {
 AdaptiveEvent EventFor(const Flight& flight, AdaptiveEventKind kind) {
     AdaptiveEvent event;
     event.kind = kind;
+    event.request_id = flight.root_request_id;
+    event.attempt = flight.attempt;
+    event.priority = flight.request.priority();
     event.slot_key = flight.request.artifact_key().slot_key().canonical();
     event.artifact_key = flight.request.artifact_key().canonical();
     event.dispatch_key = flight.request.dispatch_key().canonical();
@@ -149,8 +161,10 @@ public:
                 "CompileCoordinator requires an ArtifactCompiler");
         }
         if (options_.worker_count == 0 || options_.max_queue_size == 0 ||
+            options_.max_waiters_per_flight == 0 ||
             options_.max_terminal_records == 0 ||
-            options_.max_artifact_bytes == 0) {
+            options_.max_artifact_bytes == 0 ||
+            options_.max_cached_artifact_bytes == 0) {
             throw std::invalid_argument(
                 "CompileCoordinator bounds must be non-zero");
         }
@@ -184,11 +198,14 @@ public:
 
     CompileTicket Request(CompileRequest request) {
         const RequestIdentity identity(request);
+        const auto request_time = Now();
         std::shared_ptr<std::promise<CompileResult>> promise =
             std::make_shared<std::promise<CompileResult>>();
         std::shared_future<CompileResult> future = promise->get_future().share();
         AdaptiveEvent event;
+        AdaptiveEvent displaced_event;
         bool emit_event = false;
+        bool emit_displaced_event = false;
         std::uint64_t request_id = 0;
 
         {
@@ -210,7 +227,8 @@ public:
             } else {
                 const auto terminal = terminal_.find(identity);
                 if (terminal != terminal_.end() &&
-                    !RetryExpiredLocked(terminal->second.result)) {
+                    !RetryExpiredLocked(terminal->second.result,
+                                        request_time)) {
                     terminal->second.stamp = next_stamp_++;
                     promise->set_value(terminal->second.result);
                     MarkCompletedLocked(request_id);
@@ -220,11 +238,30 @@ public:
                 std::uint32_t attempt = 1;
                 if (terminal != terminal_.end()) {
                     attempt = terminal->second.result.attempt() + 1;
+                    cached_artifact_bytes_ -= terminal->second.bytes;
                     terminal_.erase(terminal);
                 }
 
                 const auto active = in_flight_.find(identity);
-                if (active != in_flight_.end()) {
+                if (active != in_flight_.end() &&
+                    active->second->waiters.size() >=
+                        options_.max_waiters_per_flight) {
+                    CompileResult result = CompileResult::Failure(
+                        CompileStatus::kRejected,
+                        CompileFailureCategory::kBackpressure,
+                        "singleflight waiter budget is full", attempt, true,
+                        request_time);
+                    promise->set_value(result);
+                    MarkCompletedLocked(request_id);
+                    ++metrics_.rejected;
+                    event = EventForRequest(
+                        request, AdaptiveEventKind::kBudgetRejected);
+                    event.request_id = request_id;
+                    event.waiter_count = active->second->waiters.size();
+                    event.queue_depth = queue_.size();
+                    event.diagnostic = result.diagnostic();
+                    emit_event = true;
+                } else if (active != in_flight_.end()) {
                     active->second->waiters.emplace(request_id,
                                                     Waiter(promise));
                     waiter_flights_[request_id] = active->second;
@@ -234,35 +271,45 @@ public:
                     event.request_id = request_id;
                     event.queue_depth = queue_.size();
                     emit_event = true;
-                } else if (queue_.size() >= options_.max_queue_size) {
-                    CompileResult result = CompileResult::Failure(
-                        CompileStatus::kRejected,
-                        CompileFailureCategory::kBackpressure,
-                        "compile queue is full", attempt, true, Now());
-                    promise->set_value(result);
-                    MarkCompletedLocked(request_id);
-                    ++metrics_.rejected;
-                    event = EventForRequest(
-                        request, AdaptiveEventKind::kBudgetRejected);
-                    event.request_id = request_id;
-                    event.queue_depth = queue_.size();
-                    event.diagnostic = result.diagnostic();
-                    emit_event = true;
                 } else {
-                    auto flight = std::make_shared<Flight>(
-                        std::move(request), attempt, next_sequence_++);
-                    flight->waiters.emplace(request_id, Waiter(promise));
-                    in_flight_.emplace(flight->identity, flight);
-                    waiter_flights_[request_id] = flight;
-                    queue_.push_back(flight);
-                    event = EventFor(*flight, AdaptiveEventKind::kQueued);
-                    event.request_id = request_id;
-                    event.queue_depth = queue_.size();
-                    emit_event = true;
-                    condition_.notify_one();
+                    if (queue_.size() >= options_.max_queue_size &&
+                        request.kind() != RequestKind::kPrewarm) {
+                        emit_displaced_event = EvictOnePrewarmLocked(
+                            request_time, &displaced_event);
+                    }
+                    if (queue_.size() >= options_.max_queue_size) {
+                        CompileResult result = CompileResult::Failure(
+                            CompileStatus::kRejected,
+                            CompileFailureCategory::kBackpressure,
+                            "compile queue is full", attempt, true,
+                            request_time);
+                        promise->set_value(result);
+                        MarkCompletedLocked(request_id);
+                        ++metrics_.rejected;
+                        event = EventForRequest(
+                            request, AdaptiveEventKind::kBudgetRejected);
+                        event.request_id = request_id;
+                        event.queue_depth = queue_.size();
+                        event.diagnostic = result.diagnostic();
+                        emit_event = true;
+                    } else {
+                        auto flight = std::make_shared<Flight>(
+                            std::move(request), attempt, next_sequence_++,
+                            request_id);
+                        flight->waiters.emplace(request_id, Waiter(promise));
+                        in_flight_.emplace(flight->identity, flight);
+                        waiter_flights_[request_id] = flight;
+                        queue_.push_back(flight);
+                        event = EventFor(*flight, AdaptiveEventKind::kQueued);
+                        event.request_id = request_id;
+                        event.queue_depth = queue_.size();
+                        emit_event = true;
+                        condition_.notify_one();
+                    }
                 }
             }
         }
+        if (emit_displaced_event) Emit(displaced_event);
         if (emit_event) Emit(event);
         return CompileTicket(request_id, std::move(future));
     }
@@ -314,7 +361,14 @@ public:
                 if (flight->state == FlightState::kQueued) {
                     queue_.erase(std::remove(queue_.begin(), queue_.end(), flight),
                                  queue_.end());
-                    in_flight_.erase(flight->identity);
+                }
+                // An abandoned active flight must never accept a later waiter.
+                // The old worker may finish, but pointer-checked completion cannot
+                // erase or publish a replacement flight for the same full key.
+                const auto active = in_flight_.find(flight->identity);
+                if (active != in_flight_.end() &&
+                    active->second == flight) {
+                    in_flight_.erase(active);
                 }
             }
         }
@@ -330,62 +384,96 @@ public:
         result.active = active_count_;
         result.in_flight_keys = in_flight_.size();
         result.terminal_records = terminal_.size();
+        result.waiters = waiter_flights_.size();
+        result.cached_artifact_bytes = cached_artifact_bytes_;
         return result;
     }
 
     void Shutdown() {
-        std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (joined_) return;
-            if (!stopping_) {
-                stopping_ = true;
-                AdaptiveEvent started;
-                started.kind = AdaptiveEventKind::kShutdownStarted;
-                shutdown_events_.push_back(std::move(started));
-
-                for (const auto& item : in_flight_) {
-                    const auto& flight = item.second;
-                    flight->discard = true;
-                    flight->cancellation->requested.store(
-                        true, std::memory_order_release);
-                    for (const auto& waiter : flight->waiters) {
-                        waiter.second.promise->set_value(CompileResult::Failure(
-                            CompileStatus::kCancelled,
-                            CompileFailureCategory::kShutdown,
-                            "compile coordinator shutdown", flight->attempt,
-                            false));
-                        waiter_flights_.erase(waiter.first);
-                        MarkCompletedLocked(waiter.first);
-                        ++metrics_.cancelled;
-                        AdaptiveEvent cancelled = EventFor(
-                            *flight, AdaptiveEventKind::kCancelled);
-                        cancelled.request_id = waiter.first;
-                        cancelled.diagnostic =
-                            "compile coordinator shutdown";
-                        shutdown_events_.push_back(std::move(cancelled));
-                    }
-                    flight->waiters.clear();
-                }
-                queue_.clear();
-                in_flight_.clear();
-            }
+        RequestStop();
+        if (IsWorkerThread()) {
+            // A worker may request stop from a compiler/observer callback, but
+            // only a management thread can join that worker deterministically.
+            return;
         }
-        condition_.notify_all();
-        EmitShutdownEvents();
+
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (joined_) return;
+            if (join_in_progress_) {
+                if (joining_thread_ == std::this_thread::get_id()) return;
+                shutdown_condition_.wait(lock, [this] { return joined_; });
+                return;
+            }
+            join_in_progress_ = true;
+            joining_thread_ = std::this_thread::get_id();
+        }
+
         for (auto& worker : workers_) {
             if (worker.joinable()) worker.join();
         }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            joined_ = true;
-        }
+        EmitShutdownEvents();
         AdaptiveEvent completed;
         completed.kind = AdaptiveEventKind::kShutdownCompleted;
         Emit(completed);
+
+        {
+            std::lock_guard<std::mutex> lock(shutdown_mutex_);
+            joined_ = true;
+            join_in_progress_ = false;
+            joining_thread_ = std::thread::id();
+        }
+        shutdown_condition_.notify_all();
     }
 
 private:
+    void RequestStop() {
+        bool notify = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) return;
+            stopping_ = true;
+            notify = true;
+            AdaptiveEvent started;
+            started.kind = AdaptiveEventKind::kShutdownStarted;
+            shutdown_events_.push_back(std::move(started));
+
+            for (const auto& item : in_flight_) {
+                const auto& flight = item.second;
+                flight->discard = true;
+                flight->cancellation->requested.store(
+                    true, std::memory_order_release);
+                for (const auto& waiter : flight->waiters) {
+                    waiter.second.promise->set_value(CompileResult::Failure(
+                        CompileStatus::kCancelled,
+                        CompileFailureCategory::kShutdown,
+                        "compile coordinator shutdown", flight->attempt,
+                        false));
+                    waiter_flights_.erase(waiter.first);
+                    MarkCompletedLocked(waiter.first);
+                    ++metrics_.cancelled;
+                    AdaptiveEvent cancelled = EventFor(
+                        *flight, AdaptiveEventKind::kCancelled);
+                    cancelled.request_id = waiter.first;
+                    cancelled.diagnostic = "compile coordinator shutdown";
+                    shutdown_events_.push_back(std::move(cancelled));
+                }
+                flight->waiters.clear();
+            }
+            queue_.clear();
+            in_flight_.clear();
+        }
+        if (notify) condition_.notify_all();
+    }
+
+    bool IsWorkerThread() const noexcept {
+        const std::thread::id current = std::this_thread::get_id();
+        for (const auto& worker : workers_) {
+            if (worker.get_id() == current) return true;
+        }
+        return false;
+    }
+
     std::chrono::steady_clock::time_point Now() const {
         return options_.now();
     }
@@ -394,6 +482,7 @@ private:
                                   AdaptiveEventKind kind) const {
         AdaptiveEvent event;
         event.kind = kind;
+        event.priority = request.priority();
         event.slot_key = request.artifact_key().slot_key().canonical();
         event.artifact_key = request.artifact_key().canonical();
         event.dispatch_key = request.dispatch_key().canonical();
@@ -402,9 +491,11 @@ private:
         return event;
     }
 
-    bool RetryExpiredLocked(const CompileResult& result) const {
+    static bool RetryExpiredLocked(
+        const CompileResult& result,
+        std::chrono::steady_clock::time_point now) {
         return result.status() == CompileStatus::kFailed &&
-               result.retryable() && Now() >= result.retry_after();
+               result.retryable() && now >= result.retry_after();
     }
 
     void Emit(const AdaptiveEvent& event) const noexcept {
@@ -425,6 +516,49 @@ private:
         for (const auto& event : events) Emit(event);
     }
 
+    bool EvictOnePrewarmLocked(
+        std::chrono::steady_clock::time_point now,
+        AdaptiveEvent* event) {
+        auto victim = queue_.end();
+        for (auto queued = queue_.begin(); queued != queue_.end(); ++queued) {
+            if ((*queued)->request.kind() != RequestKind::kPrewarm) continue;
+            if (victim == queue_.end() ||
+                (*queued)->request.priority() <
+                    (*victim)->request.priority() ||
+                ((*queued)->request.priority() ==
+                     (*victim)->request.priority() &&
+                 (*queued)->sequence > (*victim)->sequence)) {
+                victim = queued;
+            }
+        }
+        if (victim == queue_.end()) return false;
+
+        const auto flight = *victim;
+        *event = EventFor(*flight, AdaptiveEventKind::kBudgetRejected);
+        event->queue_depth = queue_.size() - 1;
+        event->diagnostic = "queued prewarm displaced by demand";
+        const CompileResult rejected = CompileResult::Failure(
+            CompileStatus::kRejected,
+            CompileFailureCategory::kBackpressure,
+            event->diagnostic, flight->attempt, true, now);
+        for (const auto& waiter : flight->waiters) {
+            waiter.second.promise->set_value(rejected);
+            waiter_flights_.erase(waiter.first);
+            MarkCompletedLocked(waiter.first);
+            ++metrics_.rejected;
+        }
+        flight->waiters.clear();
+        flight->discard = true;
+        flight->cancellation->requested.store(true,
+                                               std::memory_order_release);
+        const auto active = in_flight_.find(flight->identity);
+        if (active != in_flight_.end() && active->second == flight) {
+            in_flight_.erase(active);
+        }
+        queue_.erase(victim);
+        return true;
+    }
+
     void MarkCompletedLocked(std::uint64_t request_id) {
         completed_ids_.insert(request_id);
         completed_order_.push_back(request_id);
@@ -438,15 +572,23 @@ private:
 
     void StoreTerminalLocked(const RequestIdentity& identity,
                              CompileResult result) {
-        terminal_.erase(identity);
-        terminal_.emplace(identity,
-                          TerminalRecord(std::move(result), next_stamp_++));
-        while (terminal_.size() > options_.max_terminal_records) {
+        const auto existing = terminal_.find(identity);
+        if (existing != terminal_.end()) {
+            cached_artifact_bytes_ -= existing->second.bytes;
+            terminal_.erase(existing);
+        }
+        const auto inserted = terminal_.emplace(
+            identity, TerminalRecord(std::move(result), next_stamp_++));
+        cached_artifact_bytes_ += inserted.first->second.bytes;
+        while (terminal_.size() > options_.max_terminal_records ||
+               cached_artifact_bytes_ >
+                   options_.max_cached_artifact_bytes) {
             const auto oldest = std::min_element(
                 terminal_.begin(), terminal_.end(),
                 [](const auto& lhs, const auto& rhs) {
                     return lhs.second.stamp < rhs.second.stamp;
                 });
+            cached_artifact_bytes_ -= oldest->second.bytes;
             terminal_.erase(oldest);
         }
     }
@@ -536,10 +678,14 @@ private:
                 flight = PopNextLocked();
                 if (flight->discard) continue;
                 flight->state = FlightState::kCompiling;
+                flight->compile_started_at =
+                    std::chrono::steady_clock::now();
                 ++active_count_;
                 ++metrics_.compile_attempts;
                 started = EventFor(*flight, AdaptiveEventKind::kCompileStarted);
                 started.queue_depth = queue_.size();
+                started.queue_wait = flight->compile_started_at -
+                                     flight->queued_at;
             }
             Emit(started);
 
@@ -572,8 +718,13 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 flight->state = FlightState::kValidating;
+                flight->validating_at = std::chrono::steady_clock::now();
                 validating =
                     EventFor(*flight, AdaptiveEventKind::kValidating);
+                validating.queue_wait = flight->compile_started_at -
+                                        flight->queued_at;
+                validating.compile_time = flight->validating_at -
+                                          flight->compile_started_at;
             }
             Emit(validating);
             FinishFlight(flight, ValidateAttempt(*flight, std::move(attempt)));
@@ -599,16 +750,25 @@ private:
                     ++metrics_.ready;
                     StoreTerminalLocked(flight->identity, result);
                     event = EventFor(*flight, AdaptiveEventKind::kReady);
+                    event.artifact_bytes = result.artifact()->byte_size();
                 } else if (result.status() == CompileStatus::kFailed) {
                     ++metrics_.failed;
                     StoreTerminalLocked(flight->identity, result);
                     event = EventFor(*flight, AdaptiveEventKind::kFailed);
+                    event.failure_category = result.failure_category();
                     event.diagnostic = result.diagnostic();
                 } else {
                     event = EventFor(*flight, AdaptiveEventKind::kCancelled);
+                    event.failure_category = result.failure_category();
                     event.diagnostic = result.diagnostic();
                 }
                 event.queue_depth = queue_.size();
+                event.queue_wait = flight->compile_started_at -
+                                   flight->queued_at;
+                event.compile_time = flight->validating_at -
+                                     flight->compile_started_at;
+                event.validation_time = std::chrono::steady_clock::now() -
+                                        flight->validating_at;
                 emit_event = true;
             }
 
@@ -629,8 +789,11 @@ private:
     mutable std::mutex mutex_;
     std::mutex shutdown_mutex_;
     std::condition_variable condition_;
+    std::condition_variable shutdown_condition_;
     bool stopping_{false};
     bool joined_{false};
+    bool join_in_progress_{false};
+    std::thread::id joining_thread_;
     std::vector<std::thread> workers_;
     std::vector<std::shared_ptr<Flight>> queue_;
     std::map<RequestIdentity, std::shared_ptr<Flight>> in_flight_;
@@ -643,6 +806,7 @@ private:
     std::uint64_t next_sequence_{1};
     std::uint64_t next_stamp_{1};
     std::size_t active_count_{0};
+    std::size_t cached_artifact_bytes_{0};
     CoordinatorSnapshot metrics_;
 };
 

@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -68,20 +69,28 @@ class KernelSlot::State final {
 public:
     State(KernelSlotKey slot_key_value,
           PlanAbiFingerprint required_abi_value,
-          AdaptiveObserver observer_value)
+          KernelSlotOptions options_value)
         : slot_key(std::move(slot_key_value)),
           required_abi(std::move(required_abi_value)),
-          observer(std::move(observer_value)) {}
+          options(std::move(options_value)) {
+        if (options.max_dispatches == 0 ||
+            options.max_retained_generations < 2) {
+            throw std::invalid_argument(
+                "KernelSlot dispatch bound must be non-zero and generation retention must be at least two");
+        }
+    }
 
     PublishResult Publish(std::shared_ptr<const KernelArtifact> candidate,
-                          PublicationMode mode, CanaryPolicy canary) {
+                          PublicationMode mode, CanaryPolicy canary,
+                          bool executable_ready) {
         PublishResult result;
         AdaptiveEvent event;
         bool should_emit = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             const std::string validation_error =
-                ValidateCandidate(candidate, mode, canary);
+                ValidateCandidate(candidate, mode, canary,
+                                  executable_ready);
             if (!validation_error.empty()) {
                 result.diagnostic = validation_error;
                 return result;
@@ -92,6 +101,17 @@ public:
             }
 
             const DispatchKey& dispatch = candidate->applicability();
+            if (stable_heads.count(dispatch) == 0 &&
+                stable_heads.size() >= options.max_dispatches) {
+                result.diagnostic =
+                    "kernel slot exact dispatch budget is full";
+                return result;
+            }
+            if (!MakeRecordSpace()) {
+                result.diagnostic =
+                    "kernel slot generation retention budget is full";
+                return result;
+            }
             const auto prior = stable_heads.find(dispatch);
             const Generation predecessor =
                 prior == stable_heads.end() ? 0 : prior->second;
@@ -104,6 +124,7 @@ public:
                 stable_heads.insert_or_assign(dispatch, generation);
                 canary_heads.erase(dispatch);
                 canary_policies.erase(dispatch);
+                rollback_eligible.insert(generation);
             } else {
                 canary_heads.insert_or_assign(dispatch, generation);
                 canary_policies.insert_or_assign(dispatch, canary);
@@ -186,6 +207,7 @@ public:
             stable_heads.insert_or_assign(dispatch_key, generation);
             canary_heads.erase(canary);
             canary_policies.erase(dispatch_key);
+            rollback_eligible.insert(generation);
             result = SlotActionResult{true, generation, predecessor, ""};
             event = SlotEvent(slot_key, required_abi,
                               *record->second->artifact,
@@ -221,6 +243,7 @@ public:
                 stable == stable_heads.end() ? 0 : stable->second;
             canary_heads.erase(canary);
             canary_policies.erase(dispatch_key);
+            rollback_eligible.erase(generation);
             result = SlotActionResult{true, generation, predecessor, ""};
             event = SlotEvent(slot_key, required_abi,
                               *record->second->artifact,
@@ -246,9 +269,11 @@ public:
             std::lock_guard<std::mutex> lock(mutex);
             const auto target = records.find(generation);
             if (target == records.end() ||
+                rollback_eligible.count(generation) == 0 ||
                 target->second->artifact->applicability() != dispatch_key) {
-                return SlotActionResult{false, generation, 0,
-                                        "rollback generation does not match dispatch"};
+                return SlotActionResult{
+                    false, generation, 0,
+                    "rollback generation is not a retained healthy stable"};
             }
             const auto stable = stable_heads.find(dispatch_key);
             const Generation predecessor =
@@ -285,10 +310,11 @@ public:
 private:
     std::string ValidateCandidate(
         const std::shared_ptr<const KernelArtifact>& candidate,
-        PublicationMode mode, CanaryPolicy canary) const {
+        PublicationMode mode, CanaryPolicy canary,
+        bool executable_ready) const {
         if (!candidate || candidate->key().slot_key() != slot_key ||
             candidate->compatible_abi() != required_abi ||
-            !candidate->executable() || !candidate->executable()->IsReady()) {
+            !candidate->executable() || !executable_ready) {
             return "candidate does not match the slot and exact Plan ABI";
         }
         switch (mode) {
@@ -310,10 +336,37 @@ private:
         return "publication mode is invalid";
     }
 
+    bool IsHead(Generation generation) const {
+        for (const auto& head : stable_heads) {
+            if (head.second == generation) return true;
+        }
+        for (const auto& head : canary_heads) {
+            if (head.second == generation) return true;
+        }
+        return false;
+    }
+
+    bool MakeRecordSpace() {
+        while (records.size() >= options.max_retained_generations) {
+            auto reclaim = records.end();
+            for (auto record = records.begin(); record != records.end();
+                 ++record) {
+                if (!IsHead(record->first)) {
+                    reclaim = record;
+                    break;
+                }
+            }
+            if (reclaim == records.end()) return false;
+            rollback_eligible.erase(reclaim->first);
+            records.erase(reclaim);
+        }
+        return true;
+    }
+
     void Emit(const AdaptiveEvent& event) const noexcept {
-        if (!observer) return;
+        if (!options.observer) return;
         try {
-            observer(event);
+            options.observer(event);
         } catch (...) {
             // Slot observability never changes publication or routing state.
         }
@@ -322,28 +375,33 @@ private:
 public:
     const KernelSlotKey slot_key;
     const PlanAbiFingerprint required_abi;
-    const AdaptiveObserver observer;
+    const KernelSlotOptions options;
     mutable std::mutex mutex;
     Generation last_generation{0};
     std::map<Generation, std::shared_ptr<const VariantRecord>> records;
     std::map<DispatchKey, Generation> stable_heads;
     std::map<DispatchKey, Generation> canary_heads;
     std::map<DispatchKey, CanaryPolicy> canary_policies;
+    std::set<Generation> rollback_eligible;
 };
 
 KernelSlot::KernelSlot(KernelSlotKey slot_key,
                        PlanAbiFingerprint required_abi,
-                       AdaptiveObserver observer)
+                       KernelSlotOptions options)
     : state_(std::make_unique<State>(std::move(slot_key),
                                      std::move(required_abi),
-                                     std::move(observer))) {}
+                                     std::move(options))) {}
 
 KernelSlot::~KernelSlot() = default;
 
 PublishResult KernelSlot::Publish(
     std::shared_ptr<const KernelArtifact> candidate, PublicationMode mode,
     CanaryPolicy canary) {
-    return state_->Publish(std::move(candidate), mode, canary);
+    const bool executable_ready =
+        candidate && candidate->executable() &&
+        candidate->executable()->IsReady();
+    return state_->Publish(std::move(candidate), mode, canary,
+                           executable_ready);
 }
 
 ArtifactLease KernelSlot::Acquire(
@@ -375,21 +433,35 @@ SlotActionResult KernelSlot::Rollback(const DispatchKey& dispatch_key,
 
 KernelSlotSnapshot KernelSlot::Snapshot() const { return state_->Snapshot(); }
 
+ExactPlanBinding::ExactPlanBinding(
+    KernelSlotKey slot_key, DispatchKey dispatch_key,
+    PlanAbiFingerprint required_abi)
+    : slot_key_(std::move(slot_key)),
+      dispatch_key_(std::move(dispatch_key)),
+      required_abi_(std::move(required_abi)) {}
+
 FrozenPlanVariant::FrozenPlanVariant(
-    PlanVariantKey key, std::vector<ArtifactLease> leases,
+    PlanVariantKey key, std::vector<ExactPlanBinding> bindings,
+    std::vector<ArtifactLease> leases,
     std::shared_ptr<const PlanExecutable> executable)
     : key_(std::move(key)),
+      bindings_(std::move(bindings)),
       leases_(std::move(leases)),
       executable_(std::move(executable)) {
-    if (leases_.empty()) {
+    if (bindings_.empty() || bindings_.size() != leases_.size()) {
         throw std::invalid_argument(
-            "frozen plan variant requires at least one artifact lease");
+            "frozen plan variant requires one lease per exact binding");
     }
-    for (const auto& lease : leases_) {
+    for (std::size_t i = 0; i < leases_.size(); ++i) {
+        const auto& lease = leases_[i];
+        const auto& binding = bindings_[i];
         if (!lease.valid() || !lease.artifact()->executable() ||
-            !lease.artifact()->executable()->IsReady()) {
+            !lease.artifact()->executable()->IsReady() ||
+            lease.artifact()->key().slot_key() != binding.slot_key() ||
+            lease.artifact()->applicability() != binding.dispatch_key() ||
+            lease.artifact()->compatible_abi() != binding.required_abi()) {
             throw std::invalid_argument(
-                "frozen plan variant contains an invalid artifact lease");
+                "frozen plan variant lease does not match its exact binding");
         }
     }
     if (!executable_ || !executable_->IsReady()) {

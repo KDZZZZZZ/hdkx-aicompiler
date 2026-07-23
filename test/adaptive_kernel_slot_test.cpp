@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -36,17 +37,28 @@ using kxc::api::adaptive::CompileCoordinator;
 using kxc::api::adaptive::CompileRequest;
 using kxc::api::adaptive::DispatchKey;
 using kxc::api::adaptive::ExactPlanAssembler;
+using kxc::api::adaptive::ExactPlanBinding;
 using kxc::api::adaptive::FrozenPlanVariant;
 using kxc::api::adaptive::KernelArtifact;
 using kxc::api::adaptive::KernelArtifactKey;
 using kxc::api::adaptive::KernelSlot;
 using kxc::api::adaptive::KernelSlotKey;
+using kxc::api::adaptive::KernelSlotOptions;
 using kxc::api::adaptive::PlanAbiFingerprint;
 using kxc::api::adaptive::PlanExecutable;
 using kxc::api::adaptive::PlanVariantKey;
 using kxc::api::adaptive::PublicationMode;
 using kxc::api::adaptive::RequestKind;
 using kxc::api::adaptive::RoutingContext;
+
+bool Throws(const std::function<void()>& function) {
+    try {
+        function();
+    } catch (const std::exception&) {
+        return true;
+    }
+    return false;
+}
 
 constexpr const char* kSlot = "unit:add|target:fake-cpu";
 constexpr const char* kDispatch = "exact:f32[4]|contiguous";
@@ -117,10 +129,11 @@ public:
 class FakePlanAssembler final : public ExactPlanAssembler {
 public:
     std::shared_ptr<const FrozenPlanVariant> Assemble(
-        PlanVariantKey key, std::vector<ArtifactLease> leases) override {
+        PlanVariantKey key, std::vector<ExactPlanBinding> bindings,
+        std::vector<ArtifactLease> leases) override {
         ++calls;
         auto plan = std::make_shared<const FrozenPlanVariant>(
-            std::move(key), std::move(leases),
+            std::move(key), std::move(bindings), std::move(leases),
             std::make_shared<const FakePlanExecutable>("fake-static-plan"));
         last = plan;
         return plan;
@@ -129,6 +142,12 @@ public:
     int calls{0};
     std::shared_ptr<const FrozenPlanVariant> last;
 };
+
+ExactPlanBinding Binding() {
+    return ExactPlanBinding(KernelSlotKey(kSlot),
+                            DispatchKey::Exact(kDispatch),
+                            PlanAbiFingerprint(kAbi));
+}
 
 class EventLog final {
 public:
@@ -198,7 +217,7 @@ bool TestLeaseAndFrozenPlanRetainOldGeneration() {
                                  PlanAbiFingerprint(kAbi));
         FakePlanAssembler assembler;
         frozen = assembler.Assemble(PlanVariantKey("plan:model@1:v1"),
-                                    {old_lease});
+                                    {Binding()}, {old_lease});
         TEST_CHECK(slot.Publish(Artifact("v2")).published &&
                        slot.Acquire(DispatchKey::Exact(kDispatch),
                                     PlanAbiFingerprint(kAbi))
@@ -220,10 +239,42 @@ bool TestLeaseAndFrozenPlanRetainOldGeneration() {
     return true;
 }
 
+bool TestFrozenPlanRejectsIncompatibleLease() {
+    KernelSlot slot{KernelSlotKey(kSlot), PlanAbiFingerprint(kAbi)};
+    TEST_CHECK(slot.Publish(Artifact("v1")).published,
+               "plan fixture artifact should publish");
+    const ArtifactLease lease = slot.Acquire(
+        DispatchKey::Exact(kDispatch), PlanAbiFingerprint(kAbi));
+    TEST_CHECK(Throws([&] {
+                   FrozenPlanVariant invalid(
+                       PlanVariantKey("plan:bad-abi"),
+                       {ExactPlanBinding(KernelSlotKey(kSlot),
+                                         DispatchKey::Exact(kDispatch),
+                                         PlanAbiFingerprint("abi:wrong"))},
+                       {lease},
+                       std::make_shared<const FakePlanExecutable>("plan"));
+               }),
+               "plan assembly must reject an ABI-incompatible lease");
+    TEST_CHECK(Throws([&] {
+                   FrozenPlanVariant invalid(
+                       PlanVariantKey("plan:bad-dispatch"),
+                       {ExactPlanBinding(KernelSlotKey(kSlot),
+                                         DispatchKey::Exact("exact:f32[8]"),
+                                         PlanAbiFingerprint(kAbi))},
+                       {lease},
+                       std::make_shared<const FakePlanExecutable>("plan"));
+               }),
+               "plan assembly must reject a dispatch-incompatible lease");
+    return true;
+}
+
 bool TestCanaryWithdrawPromoteAndRollback() {
     EventLog events;
-    KernelSlot slot(KernelSlotKey(kSlot), PlanAbiFingerprint(kAbi),
-                    [&](const AdaptiveEvent& event) { events.Record(event); });
+    KernelSlot slot(
+        KernelSlotKey(kSlot), PlanAbiFingerprint(kAbi),
+        KernelSlotOptions{64, 64, [&](const AdaptiveEvent& event) {
+                              events.Record(event);
+                          }});
     const auto stable = slot.Publish(Artifact("stable"));
     TEST_CHECK(stable.published, "stable predecessor should publish");
 
@@ -252,6 +303,11 @@ bool TestCanaryWithdrawPromoteAndRollback() {
                            .generation() == stable.generation &&
                    routed.generation() == canary.generation,
                "withdrawal affects future acquire, not an in-flight lease");
+    TEST_CHECK(!slot.Rollback(DispatchKey::Exact(kDispatch),
+                              canary.generation,
+                              "must not restore quarantined canary")
+                    .changed,
+               "withdrawn canary must never become a rollback target");
 
     const auto next_canary = slot.Publish(
         Artifact("canary-good"), PublicationMode::kCanary,
@@ -342,8 +398,8 @@ bool TestConcurrentPublishAcquireStress() {
     const auto snapshot = slot.Snapshot();
     TEST_CHECK(failures.load(std::memory_order_relaxed) == 0 &&
                    snapshot.last_generation == kPublishes + 1 &&
-                   snapshot.record_count == kPublishes + 1,
-               "concurrent publish/acquire must preserve immutable generations");
+                   snapshot.record_count <= 64,
+               "concurrent publish/acquire must preserve bounded immutable generations");
     return true;
 }
 
@@ -359,7 +415,7 @@ bool TestFakeCompilerToPlanAssemblerFlow() {
     const ArtifactLease first_lease = slot.Acquire(
         DispatchKey::Exact(kDispatch), PlanAbiFingerprint(kAbi));
     const auto first_plan = assembler.Assemble(
-        PlanVariantKey("plan:model@1:v1"), {first_lease});
+        PlanVariantKey("plan:model@1:v1"), {Binding()}, {first_lease});
 
     const auto second_compile = coordinator.Request(Request("v2")).Get();
     TEST_CHECK(second_compile.ready(), "fake v2 compile should be ready");
@@ -389,6 +445,8 @@ int main() {
          TestGenerationAndExactPublicationGate},
         {"lease_and_frozen_plan_retain_old_generation",
          TestLeaseAndFrozenPlanRetainOldGeneration},
+        {"frozen_plan_rejects_incompatible_lease",
+         TestFrozenPlanRejectsIncompatibleLease},
         {"canary_withdraw_promote_and_rollback",
          TestCanaryWithdrawPromoteAndRollback},
         {"canary_requires_healthy_predecessor",

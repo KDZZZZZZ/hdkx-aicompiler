@@ -17,7 +17,7 @@
 
 namespace kxc::api::adaptive {
 
-/*! \brief A validated canonical key with value equality, never hash-only identity. */
+/*! \brief Non-empty canonical bytes from Core Track, compared by full value. */
 template <typename Tag>
 class CanonicalKey final {
 public:
@@ -53,7 +53,7 @@ struct PlanVariantKeyTag final {};
 
 /*! \brief Stable unit/target publication identity supplied by Core Track. */
 using KernelSlotKey = CanonicalKey<KernelSlotKeyTag>;
-/*! \brief Complete static-exact Plan ABI canonical fingerprint. */
+/*! \brief Complete static-exact Plan ABI fingerprint supplied by its canonicalizer. */
 using PlanAbiFingerprint = CanonicalKey<PlanAbiFingerprintTag>;
 /*! \brief Frozen plan identity, separate from artifact and graph value identity. */
 using PlanVariantKey = CanonicalKey<PlanVariantKeyTag>;
@@ -347,6 +347,14 @@ struct AdaptiveEvent final {
     std::uint64_t predecessor_generation{0};
     std::size_t waiter_count{0};
     std::size_t queue_depth{0};
+    std::uint32_t attempt{0};
+    int priority{0};
+    CompileFailureCategory failure_category{
+        CompileFailureCategory::kDeterministic};
+    std::size_t artifact_bytes{0};
+    std::chrono::nanoseconds queue_wait{0};
+    std::chrono::nanoseconds compile_time{0};
+    std::chrono::nanoseconds validation_time{0};
     std::string slot_key;
     std::string artifact_key;
     std::string dispatch_key;
@@ -366,8 +374,10 @@ struct RetryPolicy final {
 struct CoordinatorOptions final {
     std::size_t worker_count{1};
     std::size_t max_queue_size{64};
+    std::size_t max_waiters_per_flight{1024};
     std::size_t max_terminal_records{256};
     std::size_t max_artifact_bytes{256U * 1024U * 1024U};
+    std::size_t max_cached_artifact_bytes{512U * 1024U * 1024U};
     RetryPolicy retry_policy;
     std::function<std::chrono::steady_clock::time_point()> now;
     AdaptiveObserver observer;
@@ -379,6 +389,8 @@ struct CoordinatorSnapshot final {
     std::size_t active{0};
     std::size_t in_flight_keys{0};
     std::size_t terminal_records{0};
+    std::size_t waiters{0};
+    std::size_t cached_artifact_bytes{0};
     std::uint64_t requests{0};
     std::uint64_t merged{0};
     std::uint64_t compile_attempts{0};
@@ -456,6 +468,12 @@ struct SlotActionResult final {
     std::string diagnostic;
 };
 
+struct KernelSlotOptions final {
+    std::size_t max_dispatches{64};
+    std::size_t max_retained_generations{64};
+    AdaptiveObserver observer;
+};
+
 struct KernelSlotSnapshot final {
     KernelSlotSnapshot(KernelSlotKey slot_key_value,
                        PlanAbiFingerprint required_abi_value)
@@ -475,7 +493,7 @@ class KernelSlot final {
 public:
     KernelSlot(KernelSlotKey slot_key,
                PlanAbiFingerprint required_abi,
-               AdaptiveObserver observer = {});
+               KernelSlotOptions options = {});
     ~KernelSlot();
 
     KernelSlot(const KernelSlot&) = delete;
@@ -511,14 +529,36 @@ public:
     virtual std::string DebugName() const = 0;
 };
 
-/*! \brief Immutable plan variant retaining every selected artifact lease. */
+/*! \brief One plan call's required exact slot, dispatch, and Plan ABI. */
+class ExactPlanBinding final {
+public:
+    ExactPlanBinding(KernelSlotKey slot_key, DispatchKey dispatch_key,
+                     PlanAbiFingerprint required_abi);
+
+    const KernelSlotKey& slot_key() const noexcept { return slot_key_; }
+    const DispatchKey& dispatch_key() const noexcept { return dispatch_key_; }
+    const PlanAbiFingerprint& required_abi() const noexcept {
+        return required_abi_;
+    }
+
+private:
+    KernelSlotKey slot_key_;
+    DispatchKey dispatch_key_;
+    PlanAbiFingerprint required_abi_;
+};
+
+/*! \brief Immutable plan variant retaining every exact selected artifact lease. */
 class FrozenPlanVariant final {
 public:
     FrozenPlanVariant(PlanVariantKey key,
+                      std::vector<ExactPlanBinding> bindings,
                       std::vector<ArtifactLease> leases,
                       std::shared_ptr<const PlanExecutable> executable);
 
     const PlanVariantKey& key() const noexcept { return key_; }
+    const std::vector<ExactPlanBinding>& bindings() const noexcept {
+        return bindings_;
+    }
     const std::vector<ArtifactLease>& leases() const noexcept {
         return leases_;
     }
@@ -528,6 +568,7 @@ public:
 
 private:
     PlanVariantKey key_;
+    std::vector<ExactPlanBinding> bindings_;
     std::vector<ArtifactLease> leases_;
     std::shared_ptr<const PlanExecutable> executable_;
 };
@@ -537,7 +578,8 @@ class ExactPlanAssembler {
 public:
     virtual ~ExactPlanAssembler() = default;
     virtual std::shared_ptr<const FrozenPlanVariant> Assemble(
-        PlanVariantKey key, std::vector<ArtifactLease> leases) = 0;
+        PlanVariantKey key, std::vector<ExactPlanBinding> bindings,
+        std::vector<ArtifactLease> leases) = 0;
 };
 
 }  // namespace kxc::api::adaptive
