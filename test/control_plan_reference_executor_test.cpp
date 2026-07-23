@@ -25,7 +25,7 @@ ControlValueSpec Bool(ValueId id) {
                             "value" + std::to_string(id)};
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {
-    ControlTask task; task.id = id; task.kind = ControlTaskKind::kKernel; task.inputs = std::move(in); task.outputs = std::move(out); task.kernel_ref = ref; task.source_locator = ref; task.effect = Reads(task.inputs); return task;
+    ControlTask task; task.id = id; task.kind = ControlTaskKind::kKernel; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out); task.kernel_ref = ref; task.source_locator = ref; task.effect = Reads(task.inputs); return task;
 }
 
 ControlPlan BranchPlan() {
@@ -61,6 +61,32 @@ FakeKernelCallback Callback() {
 bool Has(const ControlTrace& trace, const std::string& event) {
     for (const std::string& candidate : trace.events) if (candidate == event) return true;
     return false;
+}
+
+bool TestConstantSourceAndRepeatedOperand() {
+    ControlPlan plan;
+    plan.values = {I64(0), I64(1)};
+    plan.entry_region = 10;
+    plan.region_order = {10};
+    plan.constant_values = {0};
+    plan.graph_outputs = {1};
+    ControlTask add = Kernel(20, {0}, {1}, "add");
+    add.argument_values = {0, 0};
+    plan.regions = {
+        {10, {0}, {1}, {add}, Reads({0}), {}, "entry"},
+    };
+    ControlPlanReferenceExecutor executor(
+        [](const ControlTask&, const std::vector<FakeValue>& values) {
+            if (values.size() != 2) {
+                throw std::invalid_argument("logical argument order was lost");
+            }
+            return std::vector<FakeValue>{
+                FakeValue::I64(values[0].integer + values[1].integer)};
+        });
+    ReferenceExecution result = executor.Execute(plan, {{0, FakeValue::I64(3)}});
+    CHECK(result.values.at(1).integer == 6,
+          "constants and repeated logical operands must remain executable");
+    return true;
 }
 
 bool TestTrueFalseAndUnselectedEffects() {
@@ -147,6 +173,7 @@ bool TestMultipleCarriedAndContracts() {
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
+        {"constant_source_repeated_operand", TestConstantSourceAndRepeatedOperand},
         {"true_false_unselected", TestTrueFalseAndUnselectedEffects},
         {"nested_if_multiple_phi", TestNestedIfAndMultiplePhi},
         {"loop_trips_determinism", TestLoopTripsAndDeterminism},

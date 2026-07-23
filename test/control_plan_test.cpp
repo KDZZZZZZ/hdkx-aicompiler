@@ -31,7 +31,7 @@ ControlValueSpec Bool(ValueId id) {
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {
     ControlTask task;
-    task.id = id; task.kind = ControlTaskKind::kKernel; task.inputs = std::move(in); task.outputs = std::move(out);
+    task.id = id; task.kind = ControlTaskKind::kKernel; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out);
     task.kernel_ref = ref; task.source_locator = ref;
     task.effect = Reads(task.inputs); return task;
 }
@@ -98,6 +98,13 @@ bool TestValidAndCanonical() {
           "canonical text must follow ids and explicit region_order");
     LoopPlan().Validate();
     LinearPlan().Validate();
+    ControlPlan repeated_operand = LinearPlan();
+    repeated_operand.regions[0].tasks[0].argument_values = {0, 0};
+    repeated_operand.Validate();
+    ControlPlan constant_source = LinearPlan();
+    constant_source.graph_inputs.clear();
+    constant_source.constant_values = {0};
+    constant_source.Validate();
 
     ControlPlan cuda_data = BranchPlan();
     for (std::size_t i = 1; i < cuda_data.values.size(); ++i) {

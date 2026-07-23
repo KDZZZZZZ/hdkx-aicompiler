@@ -52,6 +52,8 @@ struct State {
     std::unordered_map<RegionId, const ControlRegion*> regions;
     std::unordered_map<TaskId, const ControlTask*> tasks;
     std::unordered_set<ValueId> graph_inputs;
+    std::unordered_set<ValueId> constant_values;
+    std::unordered_set<ValueId> source_values;
     std::unordered_set<ValueId> body_arguments;
     std::unordered_map<ValueId, std::pair<RegionId, RegionId>> body_argument_regions;
     std::unordered_map<ValueId, TaskId> producers;
@@ -259,17 +261,25 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
         ValidateEffects(task.effect, task.inputs, "task");
         ValidateAlias(task.alias, state, "task");
         if (task.kind == ControlTaskKind::kKernel) {
+            std::vector<ValueId> unique_arguments = task.argument_values;
+            std::sort(unique_arguments.begin(), unique_arguments.end());
+            unique_arguments.erase(
+                std::unique(unique_arguments.begin(), unique_arguments.end()),
+                unique_arguments.end());
             if (task.kernel_ref.empty() || task.outputs.empty() ||
-                !IsEmpty(task.branch) || !IsEmpty(task.loop)) {
+                !IsEmpty(task.branch) || !IsEmpty(task.loop) ||
+                !SameIds(task.inputs, unique_arguments)) {
                 Fail("kernel task has an invalid kind-specific contract");
             }
         } else if (task.kind == ControlTaskKind::kBranch) {
-            if (!task.kernel_ref.empty() || !IsEmpty(task.loop)) {
+            if (!task.kernel_ref.empty() || !task.argument_values.empty() ||
+                !IsEmpty(task.loop)) {
                 Fail("branch task has an invalid kind-specific contract");
             }
             ValidateBranch(state, task, available);
         } else if (task.kind == ControlTaskKind::kLoop) {
-            if (!task.kernel_ref.empty() || !IsEmpty(task.branch)) {
+            if (!task.kernel_ref.empty() || !task.argument_values.empty() ||
+                !IsEmpty(task.branch)) {
                 Fail("loop task has an invalid kind-specific contract");
             }
             ValidateLoop(state, task, available);
@@ -278,7 +288,7 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
         }
         for (ValueId output : task.outputs) {
             Value(state, output, "task output");
-            if (state.graph_inputs.count(output) || state.body_arguments.count(output) ||
+            if (state.source_values.count(output) || state.body_arguments.count(output) ||
                 available.count(output)) {
                 Fail("task output is not a fresh value");
             }
@@ -355,9 +365,21 @@ void VerifyControlPlan(const ControlPlan& plan) {
         }
     }
     RequireUnique(plan.graph_inputs, "graph inputs");
+    RequireUnique(plan.constant_values, "constant values");
     RequireUnique(plan.graph_outputs, "graph outputs");
     if (plan.graph_outputs.empty()) Fail("graph outputs are required");
-    for (ValueId id : plan.graph_inputs) { Value(state, id, "graph input"); state.graph_inputs.insert(id); }
+    for (ValueId id : plan.graph_inputs) {
+        Value(state, id, "graph input");
+        state.graph_inputs.insert(id);
+        state.source_values.insert(id);
+    }
+    for (ValueId id : plan.constant_values) {
+        Value(state, id, "constant value");
+        state.constant_values.insert(id);
+        if (!state.source_values.insert(id).second) {
+            Fail("graph inputs and constant values must be disjoint");
+        }
+    }
     for (ValueId id : plan.graph_outputs) Value(state, id, "graph output");
     RequireUnique(plan.region_order, "region order");
     if (plan.region_order.size() != plan.regions.size()) {
@@ -390,8 +412,8 @@ void VerifyControlPlan(const ControlPlan& plan) {
     }
     for (const auto& value : state.values) {
         const ValueId id = value.first;
-        if (state.graph_inputs.count(id) || state.body_arguments.count(id)) {
-            if (state.graph_inputs.count(id) && state.body_arguments.count(id)) {
+        if (state.source_values.count(id) || state.body_arguments.count(id)) {
+            if (state.source_values.count(id) && state.body_arguments.count(id)) {
                 Fail("loop body_argument must be local to its loop");
             }
             if (state.producers.count(id)) Fail("source value has a producer");
@@ -399,12 +421,16 @@ void VerifyControlPlan(const ControlPlan& plan) {
             Fail("non-source value has no producer");
         }
     }
-    std::unordered_set<ValueId> root_available = state.graph_inputs;
+    std::unordered_set<ValueId> root_available = state.source_values;
     ValidateRegion(state, plan.entry_region, root_available);
     if (state.visited.size() != state.regions.size()) Fail("all regions must be reachable from the entry region");
     const ControlRegion& entry = Region(state, plan.entry_region, "entry");
-    if (!SameIds(entry.live_ins, plan.graph_inputs) || !SameIds(entry.live_outs, plan.graph_outputs)) {
-        Fail("entry region live-ins/live-outs must exactly match graph inputs/outputs");
+    std::vector<ValueId> entry_sources = plan.graph_inputs;
+    entry_sources.insert(entry_sources.end(), plan.constant_values.begin(),
+                         plan.constant_values.end());
+    if (!SameIds(entry.live_ins, entry_sources) ||
+        !SameIds(entry.live_outs, plan.graph_outputs)) {
+        Fail("entry region boundaries must match graph sources/outputs");
     }
 }
 
@@ -431,6 +457,8 @@ std::string ControlPlan::CanonicalText() const {
     PrintIds(out, region_order);
     out << "\ninputs=";
     PrintIds(out, graph_inputs);
+    out << " constants=";
+    PrintIds(out, constant_values);
     out << " outputs=";
     PrintIds(out, graph_outputs);
     out << "\n";
@@ -441,7 +469,7 @@ std::string ControlPlan::CanonicalText() const {
         out << "region " << region.id << " in="; PrintIds(out, region.live_ins); out << " out="; PrintIds(out, region.live_outs);
         out << " loc=" << Quote(region.source_locator) << " "; PrintEffect(out, region.effect); out << " "; PrintAlias(out, region.alias); out << "\n";
         for (const ControlTask& task : region.tasks) {
-            out << "  task " << task.id << " kind=" << static_cast<int>(task.kind) << " in="; PrintIds(out, task.inputs); out << " out="; PrintIds(out, task.outputs); out << " dep="; PrintIds(out, task.dependencies);
+            out << "  task " << task.id << " kind=" << static_cast<int>(task.kind) << " in="; PrintIds(out, task.inputs); out << " args="; PrintIds(out, task.argument_values); out << " out="; PrintIds(out, task.outputs); out << " dep="; PrintIds(out, task.dependencies);
             out << " ref=" << Quote(task.kernel_ref) << " loc=" << Quote(task.source_locator) << " "; PrintEffect(out, task.effect); out << " "; PrintAlias(out, task.alias);
             if (task.kind == ControlTaskKind::kBranch) {
                 out << " branch=" << task.branch.predicate << ':' << task.branch.then_region << ':' << task.branch.else_region;

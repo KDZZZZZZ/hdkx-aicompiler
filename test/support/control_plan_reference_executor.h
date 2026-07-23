@@ -50,9 +50,12 @@ public:
         plan.Validate();
         if (!kernel_) throw std::invalid_argument("reference executor requires a kernel callback");
         ReferenceExecution result;
-        for (const ValueId id : plan.graph_inputs) {
+        std::vector<ValueId> source_values = plan.graph_inputs;
+        source_values.insert(source_values.end(), plan.constant_values.begin(),
+                             plan.constant_values.end());
+        for (const ValueId id : source_values) {
             const auto it = inputs.find(id);
-            if (it == inputs.end()) throw std::invalid_argument("missing graph input");
+            if (it == inputs.end()) throw std::invalid_argument("missing graph source value");
             CheckContract(plan, id, it->second);
             result.values.emplace(id, it->second);
         }
@@ -97,14 +100,17 @@ private:
     void ExecuteTask(const ControlPlan& plan,
                      const std::unordered_map<RegionId, const ControlRegion*>& regions,
                      const ControlTask& task, ReferenceExecution* result) const {
-        std::vector<FakeValue> arguments;
-        arguments.reserve(task.inputs.size());
         for (const ValueId input : task.inputs) {
-            arguments.push_back(Read(result->values, input));
+            (void)Read(result->values, input);
             result->trace.events.push_back("read:" + std::to_string(task.id) + ":" + std::to_string(input));
         }
         result->trace.events.push_back("task:" + std::to_string(task.id));
         if (task.kind == ControlTaskKind::kKernel) {
+            std::vector<FakeValue> arguments;
+            arguments.reserve(task.argument_values.size());
+            for (const ValueId argument : task.argument_values) {
+                arguments.push_back(Read(result->values, argument));
+            }
             const std::vector<FakeValue> outputs = kernel_(task, arguments);
             if (outputs.size() != task.outputs.size()) throw std::invalid_argument("kernel output arity mismatch");
             for (std::size_t i = 0; i < outputs.size(); ++i) Write(plan, task, task.outputs[i], outputs[i], result);

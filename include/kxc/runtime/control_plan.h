@@ -76,6 +76,8 @@ struct ControlTask {
     TaskId id{-1};
     ControlTaskKind kind{ControlTaskKind::kKernel};
     std::vector<ValueId> inputs;
+    /*! \brief Ordered logical kernel operands; duplicates are significant. */
+    std::vector<ValueId> argument_values;
     std::vector<ValueId> outputs;
     std::vector<TaskId> dependencies;
     std::string kernel_ref;
@@ -106,6 +108,7 @@ struct ControlPlan {
     std::vector<RegionId> region_order;
     std::vector<ControlRegion> regions;
     std::vector<ValueId> graph_inputs;
+    std::vector<ValueId> constant_values;
     std::vector<ValueId> graph_outputs;
 
     /*! \throws std::invalid_argument if this is not a static-exact v1 plan. */
