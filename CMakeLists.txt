@@ -26,6 +26,13 @@ option(KXC_ENABLE_SHAPE_PRODUCTION_EXACT
   "Enable the production exact Relay/compiler/shape adapter" OFF)
 option(KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE
   "Enable the experimental restricted symbolic Shape decision adapter" OFF)
+option(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE
+  "Enable the default-off restricted Shape trusted runtime bridge" OFF)
+if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE AND
+   (NOT KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE OR NOT KXC_ENABLE_RUNTIME_SHAPE_TASKS OR
+    NOT KXC_ENABLE_SHAPE_PRODUCTION_EXACT))
+  message(FATAL_ERROR "KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE requires restricted symbolic Shape, runtime shape tasks, and production exact Shape gates")
+endif()
 option(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
   "Enable default-off experimental adapter for a production compiler path" OFF)
 option(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
@@ -73,6 +80,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/pipeline.h
   include/kxc/compiler/shape_exact.h
   include/kxc/compiler/restricted_symbolic_shape.h
+  include/kxc/compiler/restricted_shape_runtime_bridge.h
   include/kxc/compiler/lowering/relay_to_tir.h
   include/kxc/distributed/ccl_backend.h
   include/kxc/distributed/dref.h
@@ -502,6 +510,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/compiler.cc
   src/compiler/shape_exact.cc
   src/compiler/restricted_symbolic_shape.cc
+  src/compiler/restricted_shape_runtime_bridge.cc
   src/compiler/graph/partition.cc
   src/compiler/graph/value_graph.cc
   src/compiler/kernel_abi_builder.cc
@@ -553,6 +562,7 @@ function(kxc_configure_module_obj target)
     KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
+    KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE=$<BOOL:${KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>
     KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2}>)
 endfunction()
@@ -740,6 +750,7 @@ function(kxc_add_runtime_exe target source_file)
     KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
+    KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE=$<BOOL:${KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>
     KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2}>)
   if(KXC_USE_CUDA)
@@ -894,6 +905,12 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
   kxc_add_runtime_exe(shape_production_exact_test test/shape_production_exact_test.cpp)
   kxc_add_runtime_exe(restricted_symbolic_shape_test test/restricted_symbolic_shape_test.cpp)
+  kxc_add_runtime_exe(restricted_shape_runtime_bridge_gate_off_test
+    test/restricted_shape_runtime_bridge_gate_off_test.cpp)
+  if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE)
+    kxc_add_runtime_exe(restricted_shape_runtime_bridge_test
+      test/restricted_shape_runtime_bridge_test.cpp)
+  endif()
   kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
   kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
   if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
@@ -909,6 +926,15 @@ if(KXC_BUILD_PASS_TESTS)
     set_tests_properties(shape_production_exact_test PROPERTIES LABELS "shape-production;cpu")
     add_test(NAME restricted_symbolic_shape_test COMMAND restricted_symbolic_shape_test)
     set_tests_properties(restricted_symbolic_shape_test PROPERTIES LABELS "shape-restricted-symbolic;cpu")
+    add_test(NAME restricted_shape_runtime_bridge_gate_off_test
+      COMMAND restricted_shape_runtime_bridge_gate_off_test)
+    set_tests_properties(restricted_shape_runtime_bridge_gate_off_test PROPERTIES
+      LABELS "shape-restricted-runtime-bridge;cpu;gate-off")
+    if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE)
+      add_test(NAME restricted_shape_runtime_bridge_test COMMAND restricted_shape_runtime_bridge_test)
+      set_tests_properties(restricted_shape_runtime_bridge_test PROPERTIES
+        LABELS "shape-restricted-runtime-bridge;runtime-shape;cpu")
+    endif()
     add_custom_target(run_restricted_symbolic_shape_test
       COMMAND "$<TARGET_FILE:restricted_symbolic_shape_test>"
       DEPENDS restricted_symbolic_shape_test

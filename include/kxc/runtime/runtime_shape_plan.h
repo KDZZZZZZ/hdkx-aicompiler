@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,11 +48,42 @@ private:
     friend class RuntimeShapePlan;
 };
 
+struct RuntimeShapeInputAxisReference {
+    std::size_t input_index{0};
+    std::size_t axis{0};
+};
+
+struct RuntimeShapeInputAxisGuard {
+    std::size_t axis{0};
+    RuntimeShapeExtent lower{0};
+    RuntimeShapeExtent upper{0};
+    RuntimeShapeExtent divisible_by{1};
+    std::optional<RuntimeShapeExtent> exact;
+    /*! \brief Optional equality to a previously checked input axis. */
+    std::optional<RuntimeShapeInputAxisReference> equal_to;
+};
+
 struct RuntimeShapeInputContract {
     std::string dtype;
     std::size_t rank{0};
     std::string device{"CPU:0"};
     std::uint32_t abi_version{1};
+    /*! \brief Immutable axis constraints checked before ShapeEval or allocation. */
+    std::vector<RuntimeShapeInputAxisGuard> axis_guards;
+    /*! \brief Require an exact-size, non-null (unless empty) CPU data buffer. */
+    bool requires_data{false};
+};
+
+/*! \brief Ordered polymorphic scalar ABI mapped to one runtime input axis. */
+struct RuntimeShapeExtentScalar {
+    std::uint32_t ordinal{0};
+    std::string name;
+    std::string symbol;
+    std::size_t input_index{0};
+    std::size_t axis{0};
+    RuntimeShapeExtent lower{0};
+    RuntimeShapeExtent upper{0};
+    RuntimeShapeExtent divisible_by{1};
 };
 
 /*! \brief Shape and allocation contract for one dynamic output. */
@@ -73,6 +105,10 @@ struct RuntimeShapeInput {
     std::string dtype;
     std::string device{"CPU:0"};
     std::uint32_t abi_version{1};
+    /*! \brief Optional caller-owned CPU input storage. */
+    const void* data{nullptr};
+    std::size_t bytes{0};
+    std::shared_ptr<void> owner;
 };
 
 struct RuntimeShapeOutput {
@@ -110,6 +146,8 @@ void FailNextRuntimeShapeOwnerTransferForTest() noexcept;
 struct RuntimeShapeLaunchArgs {
     const std::vector<RuntimeShapeInput>& inputs;
     const std::vector<RuntimeShapeOutput>& outputs;
+    /*! \brief Evaluated values in the ordered polymorphic scalar ABI. */
+    const std::vector<RuntimeShapeExtent>& runtime_extent_values;
     /*! \brief Canonical full ABI bytes for this synchronous launch. */
     const std::string& exact_abi_fingerprint;
 };
@@ -142,6 +180,10 @@ struct RuntimeShapeReadyEntry {
     RuntimeShapeBoundLauncher launcher;
     /*! \brief Opaque module-side lifetime owner retained by every result. */
     std::shared_ptr<void> module_lease;
+    /*! \brief Selected artifact identity bound into the canonical entry ABI. */
+    std::string artifact_identity;
+    /*! \brief Exact canonical bucket tail-policy identity; empty for non-buckets. */
+    std::string tail_policy_identity;
 };
 
 struct RuntimeShapePlanSpec {
@@ -149,6 +191,8 @@ struct RuntimeShapePlanSpec {
     std::uint32_t abi_version{kAbiVersion};
     std::vector<RuntimeShapeInputContract> inputs;
     std::vector<RuntimeShapeTensorContract> outputs;
+    /*! \brief Ordered scalar ABI for polymorphic plans; empty otherwise. */
+    std::vector<RuntimeShapeExtentScalar> runtime_extent_abi;
     RuntimeShapeReadyEntry entry;
     std::size_t run_byte_budget{0};
 };
@@ -163,7 +207,10 @@ public:
     /*! \brief Deterministic full canonical ABI bytes for a trusted entry binding. */
     static std::string ExactAbiFingerprint(
         const std::vector<RuntimeShapeInputContract>& inputs,
-        const std::vector<RuntimeShapeTensorContract>& outputs);
+        const std::vector<RuntimeShapeTensorContract>& outputs,
+        const std::vector<RuntimeShapeExtentScalar>& runtime_extent_abi = {},
+        const std::string& artifact_identity = {},
+        const std::string& tail_policy_identity = {});
 
     bool defined() const noexcept;
     void Validate() const;
