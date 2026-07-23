@@ -18,6 +18,8 @@ option(KXC_ENABLE_REGION_TASK_DAG
   "Enable experimental RuntimeSession execution of frozen Region task DAGs" OFF)
 option(KXC_ENABLE_CONTROL_RUNTIME
   "Enable experimental static-exact CPU control runtime execution" OFF)
+option(KXC_ENABLE_RUNTIME_SHAPE_TASKS
+  "Enable experimental CPU-only dynamic runtime shape tasks" OFF)
 option(KXC_ENABLE_SHAPE_PRODUCTION_EXACT
   "Enable the production exact Relay/compiler/shape adapter" OFF)
 option(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
@@ -107,6 +109,8 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/executable_plan.h
   include/kxc/runtime/kernel_abi.h
   include/kxc/runtime/ndarray.h
+  include/kxc/runtime/runtime_shape_plan.h
+  include/kxc/runtime/runtime_shape_session.h
   include/kxc/runtime/session.h
   include/kxc/runtime/storage.h
   include/kxc/runtime/task_executor.h
@@ -199,6 +203,8 @@ foreach(_kxc_public_module IN ITEMS
   list(APPEND KXC_PUBLIC_MODULE_TARGETS ${_kxc_module_target})
 endforeach()
 target_link_libraries(kxc_compiler_api INTERFACE kxc_shape_api)
+target_compile_definitions(kxc_runtime_api INTERFACE
+  KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>)
 
 target_compile_definitions(kxc_compiler_api INTERFACE
   KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
@@ -350,6 +356,7 @@ set(KXC_RUNTIME_CORE_SOURCES
   src/runtime/task_plan.cc
   src/runtime/storage.cc
   src/runtime/ndarray.cc
+  src/runtime/runtime_shape_session.cc
   src/runtime/device/cpu_device_api.cc
   src/runtime/kernel_abi.cc
 )
@@ -522,6 +529,7 @@ function(kxc_configure_module_obj target)
     KXC_USE_LLVM=${KXC_USE_LLVM}
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
+    KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
 endfunction()
@@ -705,6 +713,7 @@ function(kxc_add_runtime_exe target source_file)
     KXC_USE_LLVM=${KXC_USE_LLVM}
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
+    KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
   if(KXC_USE_CUDA)
@@ -938,6 +947,16 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
   kxc_add_runtime_exe(runtime_session_test test/runtime_session_test.cpp)
+  if(KXC_ENABLE_RUNTIME_SHAPE_TASKS)
+    kxc_add_runtime_exe(runtime_shape_session_test test/runtime_shape_session_test.cpp)
+  endif()
+  add_executable(runtime_shape_gate_off_test
+    test/runtime_shape_gate_off_test.cpp
+    src/runtime/runtime_shape_session.cc)
+  target_include_directories(runtime_shape_gate_off_test PRIVATE "${KXC_INCLUDE_DIR}")
+  target_compile_definitions(runtime_shape_gate_off_test PRIVATE
+    KXC_ENABLE_RUNTIME_SHAPE_TASKS=0)
+  target_link_libraries(runtime_shape_gate_off_test PRIVATE Threads::Threads)
   kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
 
   set(KXC_CONTROL_FLOW_TESTS
@@ -981,6 +1000,14 @@ if(KXC_BUILD_PASS_TESTS)
       LABELS "runtime-plan;cpu;core"
       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   endforeach()
+  add_test(NAME runtime_shape_gate_off_test COMMAND runtime_shape_gate_off_test)
+  set_tests_properties(runtime_shape_gate_off_test PROPERTIES
+    LABELS "runtime-shape;cpu;gate-off")
+  if(KXC_ENABLE_RUNTIME_SHAPE_TASKS)
+    add_test(NAME runtime_shape_session_test COMMAND runtime_shape_session_test)
+    set_tests_properties(runtime_shape_session_test PROPERTIES
+      LABELS "runtime-shape;cpu;dynamic-shape")
+  endif()
 
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
