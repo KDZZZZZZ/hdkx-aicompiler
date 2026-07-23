@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/mohitmishra786/low-level-dev-skills",
+  "source_path": "skills/runtimes/sanitizers",
+  "source_ref": "main",
+  "retrieved_at": "2026-07-22T17:32:00Z",
+  "archive_sha256": "469d7e6d11dca90eb335604f2ca87a0e1f4e4c19f15cac19f063059106bd253c",
+  "license_file": "LICENSE.upstream",
+  "local_changes": ["Inserted a local safety policy in SKILL.md"]
+}

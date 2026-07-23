@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/sumimi/modern-cpp-agent-skills",
+  "source_path": ".github/skills/cpp-modern-cpp",
+  "source_ref": "main",
+  "retrieved_at": "2026-07-22T17:32:00Z",
+  "archive_sha256": "c406c1224ae31682df04a4a3633bfa4abaabc978b5fc1dc4c974c05e68fdd33e",
+  "license_file": "LICENSE.upstream"
+}
