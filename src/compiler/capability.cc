@@ -21,6 +21,16 @@ namespace {
 class Verifier final {
 public:
     explicit Verifier(const CapabilityRequest& request) : request_(request) {
+        result_.requested_mode = request.requested_mode;
+        result_.pipeline_fingerprint = request.pipeline_fingerprint;
+        if (request.target.defined() && request.target.As<TargetNode>()) {
+            result_.target_identity =
+                request.target->kind + ":" +
+                std::to_string(static_cast<int>(request.target->device_type)) +
+                ":" + std::to_string(request.target->device_id);
+        } else {
+            result_.target_identity = "undefined";
+        }
         result_.normalized_requirements = {
             "relay.static_exact.v1", "relay.registered_operator_calls",
             "relay.tensor_or_flat_tuple_values", "compiler.per_unit_lowering"};
@@ -79,7 +89,7 @@ private:
             !request_.function.As<FunctionNode>() ||
             !request_.function->body.defined()) {
             AddIssue(root, "Function", "defined_function",
-                     "function and body must be defined");
+                     "validated relay must have a body");
             return;
         }
         for (size_t i = 0; i < request_.function->params.size(); ++i) {
@@ -314,7 +324,10 @@ const char* ToString(CapabilityMode mode) {
 std::string CapabilityResult::Diagnostic() const {
     if (supported) return "supported";
     std::ostringstream stream;
-    stream << "executable capability rejected";
+    stream << "executable capability rejected (mode=" << ToString(requested_mode)
+           << ", target=" << target_identity << ", pipeline="
+           << (pipeline_fingerprint.empty() ? "<none>" : pipeline_fingerprint)
+           << ")";
     for (const CapabilityIssue& issue : issues) {
         stream << "\n- " << issue.diagnostic_locator << " ["
                << issue.relay_node_kind << "] missing "

@@ -6,9 +6,7 @@
 
 #include <algorithm>
 #include <condition_variable>
-#include <limits>
 #include <mutex>
-#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -144,35 +142,59 @@ void EvictReadyArtifacts(PrimitiveCache* cache) {
     }
 }
 
+void AppendTargetField(std::string* canonical, const std::string& name,
+                       const std::string& value) {
+    *canonical += std::to_string(name.size()) + ":" + name + "=" +
+                  std::to_string(value.size()) + ":" + value + ";";
+}
+
 std::string TargetFingerprint(const Target& target) {
     if (!target.defined() || !target.As<TargetNode>()) {
         throw std::invalid_argument(
             "primitive artifact identity requires a defined Target");
     }
     const TargetNode* node = target.operator->();
-    std::ostringstream out;
-    out << "target-v1|kind=" << node->kind
-        << "|device_type=" << static_cast<int>(node->device_type)
-        << "|device_id=" << node->device_id
-        << "|exists=" << node->attrs.exists
-        << "|device_name=" << node->attrs.device_name
-        << "|arch=" << node->attrs.arch
-        << "|max_clock_khz=" << node->attrs.max_clock_rate_khz
-        << "|max_registers_block=" << node->attrs.max_registers_per_block
-        << "|api_version=" << node->attrs.api_version
-        << "|driver_version=" << node->attrs.driver_version
-        << "|l2_bytes=" << node->attrs.l2_cache_size_bytes
-        << "|global_bytes=" << node->attrs.total_global_memory
-        << "|shared_mem_sm="
-        << node->attrs.max_shared_memory_per_multiprocessor
-        << "|registers_sm=" << node->attrs.max_registers_per_multiprocessor
-        << "|threads_sm=" << node->attrs.max_threads_per_multiprocessor
-        << "|threads_block=" << node->attrs.max_threads_per_block
-        << "|warp=" << node->attrs.warp_size
-        << "|compute_major=" << node->attrs.compute_version_major
-        << "|compute_minor=" << node->attrs.compute_version_minor
-        << "|multiprocessors=" << node->attrs.multi_processor_count;
-    return out.str();
+    std::string out;
+    AppendTargetField(&out, "kind", "target-v1");
+    AppendTargetField(&out, "target_kind", node->kind);
+    AppendTargetField(&out, "device_type",
+                      std::to_string(static_cast<int>(node->device_type)));
+    AppendTargetField(&out, "device_id", std::to_string(node->device_id));
+    AppendTargetField(&out, "exists", std::to_string(node->attrs.exists));
+    AppendTargetField(&out, "device_name", node->attrs.device_name);
+    AppendTargetField(&out, "arch", node->attrs.arch);
+    AppendTargetField(&out, "max_clock_khz",
+                      std::to_string(node->attrs.max_clock_rate_khz));
+    AppendTargetField(&out, "max_registers_block",
+                      std::to_string(node->attrs.max_registers_per_block));
+    AppendTargetField(&out, "api_version",
+                      std::to_string(node->attrs.api_version));
+    AppendTargetField(&out, "driver_version",
+                      std::to_string(node->attrs.driver_version));
+    AppendTargetField(&out, "l2_bytes",
+                      std::to_string(node->attrs.l2_cache_size_bytes));
+    AppendTargetField(&out, "global_bytes",
+                      std::to_string(node->attrs.total_global_memory));
+    AppendTargetField(
+        &out, "shared_mem_sm",
+        std::to_string(node->attrs.max_shared_memory_per_multiprocessor));
+    AppendTargetField(
+        &out, "registers_sm",
+        std::to_string(node->attrs.max_registers_per_multiprocessor));
+    AppendTargetField(
+        &out, "threads_sm",
+        std::to_string(node->attrs.max_threads_per_multiprocessor));
+    AppendTargetField(&out, "threads_block",
+                      std::to_string(node->attrs.max_threads_per_block));
+    AppendTargetField(&out, "warp",
+                      std::to_string(node->attrs.warp_size));
+    AppendTargetField(&out, "compute_major",
+                      std::to_string(node->attrs.compute_version_major));
+    AppendTargetField(&out, "compute_minor",
+                      std::to_string(node->attrs.compute_version_minor));
+    AppendTargetField(&out, "multiprocessors",
+                      std::to_string(node->attrs.multi_processor_count));
+    return out;
 }
 
 PrimitiveFailureRecord FailureWithRemaining(

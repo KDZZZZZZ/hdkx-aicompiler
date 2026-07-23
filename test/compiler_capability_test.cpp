@@ -56,8 +56,11 @@ bool TestStaticExactAcceptedAtEveryBoundary() {
             CapabilityRequest{function, target, "model/main", "pipeline-v1",
                               boundary, CapabilityMode::kStaticExact, true});
         TEST_CHECK(result.supported && result.issues.empty() &&
-                       result.normalized_requirements.size() == 4,
-                   "current static-exact add graph should be executable");
+                       result.normalized_requirements.size() == 4 &&
+                       result.target_identity.find("llvm") != std::string::npos &&
+                       result.pipeline_fingerprint == "pipeline-v1" &&
+                       result.requested_mode == CapabilityMode::kStaticExact,
+                   "current static-exact add graph should expose normalized context");
     }
     return true;
 }

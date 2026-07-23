@@ -364,12 +364,23 @@ const char* BackendVersion(const Target& target) {
     throw std::invalid_argument("Primitive cache target has no backend version");
 }
 
-std::string CurrentPipelineFingerprint(const CompileConfig& config) {
+void AppendPipelineIdentityField(std::string* canonical,
+                                 const std::string& name,
+                                 const std::string& value) {
+    *canonical += std::to_string(name.size()) + ":" + name + "=" +
+                  std::to_string(value.size()) + ":" + value + ";";
+}
+
+std::string CurrentPipelineIdentity(const CompileConfig& config) {
     const NormalizedPipeline relay_pipeline = ResolveRelayPipeline(config);
     const NormalizedPipeline tir_pipeline = ResolveTIRPipeline(config);
-    return "compiler-pipeline-v2|relay=" +
-           std::string(relay_pipeline.fingerprint) + "|tir=" +
-           std::string(tir_pipeline.fingerprint);
+    std::string canonical;
+    AppendPipelineIdentityField(&canonical, "kind", "compiler-pipeline-v2");
+    AppendPipelineIdentityField(&canonical, "relay",
+                                std::string(relay_pipeline.canonical_bytes));
+    AppendPipelineIdentityField(&canonical, "tir",
+                                std::string(tir_pipeline.canonical_bytes));
+    return canonical;
 }
 
 bool SameDType(DLDataType lhs, DLDataType rhs) {
@@ -478,7 +489,7 @@ CompileResult BuildBackends(const CompileResult& input,
     std::vector<std::optional<codegen::CompiledKernel>> kernel_slots(
         primitives.size());
     const std::string pipeline_fingerprint =
-        CurrentPipelineFingerprint(config);
+        CurrentPipelineIdentity(config);
     std::vector<internal::PrimitiveCacheLease> leases;
     std::vector<internal::PrimitiveArtifactPin> pins(primitives.size());
     std::vector<size_t> misses;

@@ -48,6 +48,24 @@ std::string GraphValueLocator::CanonicalBytes() const {
     return canonical;
 }
 
+std::string LinkSymbol::CanonicalBytes() const {
+    RequireNonEmpty(value, "link symbol");
+    std::string canonical;
+    AppendField(&canonical, "kind", "link-symbol-v1");
+    AppendField(&canonical, "symbol", value);
+    return canonical;
+}
+
+std::string StorageId::CanonicalBytes() const {
+    if (value < 0) {
+        throw std::invalid_argument("storage id must be non-negative");
+    }
+    std::string canonical;
+    AppendField(&canonical, "kind", "plan-storage-id-v1");
+    AppendField(&canonical, "storage_id", std::to_string(value));
+    return canonical;
+}
+
 UnitSemanticKey::UnitSemanticKey(std::string canonical_bytes,
                                  std::string index_digest)
     : canonical_bytes_(std::move(canonical_bytes)) {

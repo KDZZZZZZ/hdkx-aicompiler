@@ -16,7 +16,7 @@
 | Artifact lifecycle | `2b0a2e3` | Immutable `PrimitiveArtifactPin`, eviction-safe ownership, production same-key singleflight, bounded entries/bytes/in-flight/failures, retry records and explicit backpressure; symbol/signature alias validation. |
 | Metadata/pipeline authority | `22b6c3d` | JSON -> generated C++ -> strict checker chain for operator/pass metadata; implementation-only binding tables; `PipelineResolver` is production order/invariant/fingerprint source. |
 | Frozen cross-track contract | `0acdb8d` | CoreContract v1 artifact/request/ticket/outcome/observer/selected-plan DTOs and deterministic capability/resolver/store/coordinator/assembler fakes. |
-| Legacy/docs convergence | `docs(compiler): converge core foundation status` | Whole-graph `LowerToTIR` is compatibility/testing only; stale guides are archived; production claims point to per-unit `Compiler::Compile`. |
+| Legacy/docs convergence | `8e3c45a` | Whole-graph `LowerToTIR` is compatibility/testing only; stale guides are archived; production claims point to per-unit `Compiler::Compile`. |
 
 ## Frozen v1 integration surface
 

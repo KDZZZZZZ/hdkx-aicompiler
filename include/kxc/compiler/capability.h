@@ -51,6 +51,9 @@ struct CapabilityResult final {
     bool supported{false};
     std::vector<std::string> missing_capabilities;
     std::string diagnostic_locator;
+    std::string target_identity;
+    std::string pipeline_fingerprint;
+    CapabilityMode requested_mode{CapabilityMode::kStaticExact};
     std::vector<std::string> normalized_requirements;
     std::vector<CapabilityIssue> issues;
 
