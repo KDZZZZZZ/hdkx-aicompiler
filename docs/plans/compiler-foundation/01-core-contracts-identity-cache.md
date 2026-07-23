@@ -1,8 +1,8 @@
 # 01：共同基础——契约、identity 与 artifact cache
 
-> **状态：** 规划中（尚未开始实现）  
-> **所属路线：** [编译器基础路线图](README.md)  
-> **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
+> **状态：** 规划中（尚未开始实现）
+> **所属路线：** [编译器基础路线图](README.md)
+> **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
 > **前置：** 无；本轨的最小冻结接口应允许 02–06 使用 mock/fake 并行开发。
 
 ## 1. 目标

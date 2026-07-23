@@ -1,8 +1,8 @@
 # 05：Region 执行计划与运行时
 
-> **状态：** 规划中；不表示当前已实现  
-> **所属路线：** [编译器基础路线图](README.md)  
-> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
+> **状态：** 规划中；不表示当前已实现
+> **所属路线：** [编译器基础路线图](README.md)
+> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
 > **范围：** 从 per-Call partition policy 演进为 region、task DAG 与 dependency-aware runtime；不实现代码。
 ## 1. 当前基线与演进原则
 当前链路将普通 compute `Call` 分成一个 `CompilationUnit`、一个 `PrimFunc` 与一个

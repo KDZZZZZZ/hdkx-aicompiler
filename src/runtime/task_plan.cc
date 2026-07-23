@@ -455,6 +455,12 @@ void FrozenTaskPlan::Validate() const {
     std::unordered_map<int64_t, ValueSpec> values_by_id;
     for (const auto& value : node->values_) {
         value.Validate();
+        for (int64_t dimension : value.shape()) {
+            if (dimension < 0) {
+                throw std::invalid_argument(
+                    "FrozenTaskPlan v1 requires exact static shapes");
+            }
+        }
         if (!values_by_id.emplace(value->value_id, value).second) {
             throw std::invalid_argument(
                 "FrozenTaskPlan value ids must be unique");
@@ -597,6 +603,25 @@ void FrozenTaskPlan::Validate() const {
         }
 
         const std::set<int64_t> region_tasks = ToSet(region.task_ids());
+        if (region->effect == RegionEffect::kOrdered) {
+            std::vector<int64_t> ordered_actions;
+            for (int64_t task_id : region_tasks) {
+                if (tasks_by_id.at(task_id)->kind != TaskKind::kAllocate) {
+                    ordered_actions.push_back(task_id);
+                }
+            }
+            for (size_t i = 0; i < ordered_actions.size(); ++i) {
+                for (size_t j = i + 1; j < ordered_actions.size(); ++j) {
+                    if (!HappensBefore(graph, ordered_actions[i],
+                                       ordered_actions[j]) &&
+                        !HappensBefore(graph, ordered_actions[j],
+                                       ordered_actions[i])) {
+                        throw std::invalid_argument(
+                            "Ordered region actions require explicit dependencies");
+                    }
+                }
+            }
+        }
         std::set<int64_t> expected_live_ins;
         std::set<int64_t> expected_live_outs;
         std::set<int64_t> expected_constants;

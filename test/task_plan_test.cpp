@@ -131,6 +131,28 @@ bool TestTaskKindContracts() {
     return true;
 }
 
+bool TestStaticExactRejectsDynamicDimensions() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const Device cpu = Device::CPU();
+    TEST_CHECK(Throws([&] {
+                   FrozenTaskPlan plan(
+                       kFrozenTaskPlanVersion,
+                       {ValueSpec(0, 0, {-1, 4}, Float32(), cpu, true),
+                        ValueSpec(1, 1, {3, 4}, Float32(), cpu, false, false,
+                                  true)},
+                       {TaskSpec(0, TaskKind::kAllocate, cpu, {}, {1}, {},
+                                 String(), 0, 0, 16),
+                        TaskSpec(1, TaskKind::kKernel, cpu, {0}, {1}, {0},
+                                 "dynamic")},
+                       {RegionSpec(0, RegionKind::kPerCall, "", {0, 1}, {0},
+                                   {1}, {})},
+                       {0}, {}, {1});
+               }),
+               "frozen v1 plans must reject every dynamic dimension");
+    return true;
+}
+
 bool TestCyclesAndMissingDependencies() {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -280,6 +302,18 @@ bool TestOrderedEffectRequiresDependencies() {
                        {0}, {}, {0});
                }),
                "effectful regions require explicit total dependency order");
+    TEST_CHECK(Throws([&] {
+                   FrozenTaskPlan plan(
+                       kFrozenTaskPlanVersion,
+                       {ValueSpec(0, 0, {1}, Float32(), cpu, true, false,
+                                  true)},
+                       {TaskSpec(10, TaskKind::kEvent, cpu, {}, {}, {}),
+                        TaskSpec(20, TaskKind::kSync, cpu, {}, {}, {})},
+                       {RegionSpec(0, RegionKind::kPerCall, "", {10, 20}, {},
+                                   {}, {}, RegionEffect::kOrdered)},
+                       {0}, {}, {0});
+               }),
+               "actions within one effectful region require explicit order");
     return true;
 }
 
@@ -303,6 +337,8 @@ int main() {
         {"frozen_dto_and_deterministic_topology",
          TestFrozenDtoAndDeterministicTopology},
         {"task_kind_contracts", TestTaskKindContracts},
+        {"static_exact_rejects_dynamic_dimensions",
+         TestStaticExactRejectsDynamicDimensions},
         {"cycles_and_missing_dependencies", TestCyclesAndMissingDependencies},
         {"producer_allocation_and_boundary_validation",
          TestProducerAllocationAndBoundaryValidation},

@@ -242,7 +242,9 @@ SessionFixture MakeStaticFixture() {
 }
 
 kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(
-    bool with_shape_eval = false, uint64_t kernel_alignment = 64) {
+    bool with_shape_eval = false, uint64_t kernel_alignment = 64,
+    kxc::runtime::RegionKind kernel_region_kind =
+        kxc::runtime::RegionKind::kPerCall) {
     using namespace kxc;
     using namespace kxc::runtime;
     const Device cpu = Device::CPU();
@@ -270,10 +272,9 @@ kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(
     }
     tasks.push_back(TaskSpec(22, TaskKind::kSync, cpu, {}, {}, {21}));
     Array<RegionSpec> regions{
-        RegionSpec(0, RegionKind::kPerCall, "", {10, 11, 12}, {0, 1}, {2},
+        RegionSpec(0, kernel_region_kind, "", {10, 11, 12}, {0, 1}, {2},
                    {1}, RegionEffect::kOrdered),
-        RegionSpec(1, RegionKind::kLibrary, "copy.region", {20, 21, 22}, {2},
-                   {3}, {}),
+        RegionSpec(1, RegionKind::kPerCall, "", {20, 21, 22}, {2}, {3}, {}),
     };
     return FrozenTaskPlan(kFrozenTaskPlanVersion, std::move(values),
                           std::move(tasks), std::move(regions), {0}, {1}, {3});
@@ -442,6 +443,25 @@ bool TestFrozenTaskDagExecutionAndRetention() {
     TEST_CHECK(result.completion->retained_storage.size() == 4,
                "task completion must retain input, constant, intermediate, and output");
     result.completion.Wait();
+
+    SessionFixture library_fixture = MakeStaticFixture();
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(
+                       library_fixture.module,
+                       MakeStaticTaskPlan(false, 64,
+                                          runtime::RegionKind::kLibrary));
+               }) &&
+                   library_fixture.launcher->calls == 0,
+               "library regions without their dedicated ABI must fail before launch");
+    SessionFixture fusion_fixture = MakeStaticFixture();
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(
+                       fusion_fixture.module,
+                       MakeStaticTaskPlan(false, 64,
+                                          runtime::RegionKind::kFusion));
+               }) &&
+                   fusion_fixture.launcher->calls == 0,
+               "fusion regions without verified provenance must fail before launch");
     TEST_CHECK(Throws([&] {
                    runtime::RuntimeSession invalid(fixture.module,
                                                    MakeStaticTaskPlan(true));
@@ -589,14 +609,26 @@ bool TestDynamicInput() {
          KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3, 4},
                        Device::CPU(), 1, true)});
     auto launcher = std::make_shared<RecordingLauncher>();
-    runtime::RuntimeSession session(MakeModule(signature, {}, launcher),
-                                    MakePlan(signature));
-    Array<runtime::NDArray> outputs = session.Run(
-        {runtime::NDArray::Zeros({3, 4}, Float32(), Device::CPU())});
+    api::CompiledModule module = MakeModule(signature, {}, launcher);
+    runtime::ExecutablePlan plan = MakePlan(signature);
+    runtime::NDArray input =
+        runtime::NDArray::Zeros({3, 4}, Float32(), Device::CPU());
+    runtime::RuntimeSession session(module, plan);
+    Array<runtime::NDArray> outputs = session.Run({input});
     TEST_CHECK(outputs.size() == 1 &&
                    SameShape(outputs[0].shape(), {3, 4}) &&
                    launcher->calls == 1,
-               "dynamic input should launch with static output allocation");
+               "legacy per-Call dynamic input should retain its baseline behavior");
+
+    runtime::RuntimeSession requested_task_dag(
+        module, plan, runtime::RuntimeExecutionMode::kTaskDAG);
+    const Array<runtime::NDArray> fallback_outputs =
+        requested_task_dag.Run({input});
+    TEST_CHECK(!requested_task_dag.UsesTaskDAG() &&
+                   fallback_outputs.size() == 1 &&
+                   SameShape(fallback_outputs[0].shape(), {3, 4}) &&
+                   launcher->calls == 2,
+               "dynamic dimensions must never enter the static-exact task DAG");
     return true;
 }
 

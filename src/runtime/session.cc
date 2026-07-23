@@ -264,9 +264,19 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
     }
     plan.Validate();
     for (const auto& region : plan.regions()) {
-        if (region->kind == RegionKind::kControlFlow) {
-            throw std::invalid_argument(
-                "RuntimeSession task DAG does not execute control-flow regions");
+        switch (region->kind) {
+            case RegionKind::kPerCall:
+                break;
+            case RegionKind::kFusion:
+                throw std::invalid_argument(
+                    "RuntimeSession task DAG requires verified fusion provenance");
+            case RegionKind::kLibrary:
+                throw std::invalid_argument(
+                    "RuntimeSession task DAG requires a library descriptor, "
+                    "workspace, stream, and error ABI");
+            case RegionKind::kControlFlow:
+                throw std::invalid_argument(
+                    "RuntimeSession task DAG does not execute control-flow regions");
         }
     }
 
