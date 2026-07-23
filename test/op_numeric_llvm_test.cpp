@@ -464,6 +464,47 @@ void TestWhere() {
     ExpectNear(out, {10, 10, 10, 1, 2, 3});
 }
 
+// 验证 LayerNorm 的常量行、微小方差行和仿射参数语义。
+void TestLayerNorm() {
+    kxc::Var data("data", kxc::TensorType({2, 4}, "float32"));
+    kxc::Var scale("scale", kxc::TensorType({4}, "float32"));
+    kxc::Var bias("bias", kxc::TensorType({4}, "float32"));
+    constexpr float epsilon = 1e-5f;
+    kxc::Call call(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
+                   kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float32"));
+    kxc::Function func({data, scale, bias}, call);
+
+    const std::vector<float> data_buf = {
+        5.0f, 5.0f, 5.0f, 5.0f,
+        1.0f, 1.0001f, 0.9999f, 1.0002f,
+    };
+    const std::vector<float> scale_buf = {1.5f, -2.0f, 0.5f, 3.0f};
+    const std::vector<float> bias_buf = {0.25f, -0.5f, 1.0f, 2.0f};
+    std::vector<float> out(8, 0.0f);
+    CompileAndRun("nn_layer_norm", func,
+                  {Input(data_buf), Input(scale_buf), Input(bias_buf), Output(out)});
+
+    std::vector<float> expected(8, 0.0f);
+    for (size_t row = 0; row < 2; ++row) {
+        const size_t offset = row * 4;
+        float mean = 0.0f;
+        for (size_t column = 0; column < 4; ++column) mean += data_buf[offset + column];
+        mean /= 4.0f;
+        float variance = 0.0f;
+        for (size_t column = 0; column < 4; ++column) {
+            const float centered = data_buf[offset + column] - mean;
+            variance += centered * centered;
+        }
+        variance /= 4.0f;
+        const float inverse_stddev = 1.0f / std::sqrt(variance + epsilon);
+        for (size_t column = 0; column < 4; ++column) {
+            expected[offset + column] = (data_buf[offset + column] - mean) * inverse_stddev *
+                                        scale_buf[column] + bias_buf[column];
+        }
+    }
+    ExpectNear(out, expected, 2e-4f);
+}
+
 // 验证 Cast 的目标 dtype 与数值转换。
 void TestCast() {
     kxc::Var data("data", kxc::TensorType({4}, "float32"));
@@ -619,6 +660,7 @@ int main() {
         {"softmax", TestSoftmax},
         {"gather", TestGather},
         {"where", TestWhere},
+        {"nn_layer_norm", TestLayerNorm},
         {"cast", TestCast},
         {"model_add_chain", TestModelAddChain},
         {"model_mlp", TestModelMLP},

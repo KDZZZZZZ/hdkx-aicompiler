@@ -227,6 +227,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.lowering_key = "FRelayToTE";
         return spec;
     }
+    if (name == "nn_layer_norm") {
+        OperatorSpec spec;
+        spec.name = "nn_layer_norm";
+        spec.schema_version = 1;
+        spec.category = "nn";
+        spec.input_arity.num_inputs = 3;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "LayerNormAttrs";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
     if (name == "nn_max_pool2d") {
         OperatorSpec spec;
         spec.name = "nn_max_pool2d";

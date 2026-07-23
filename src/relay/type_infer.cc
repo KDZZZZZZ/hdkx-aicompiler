@@ -5,6 +5,7 @@
 #include "kxc/relay/type_infer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -658,6 +659,50 @@ Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
     const auto* softmax_attrs = attrs.As<SoftmaxAttrsNode>();
     NormalizeAxis("softmax", softmax_attrs ? softmax_attrs->axis : -1,
                   static_cast<int>(data->shape.size()));
+    return input_types[0];
+}
+
+Type LayerNormInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("nn_layer_norm", input_types, 3);
+    const auto* data = RequireTensor("nn_layer_norm", input_types[0], "data");
+    const auto* scale = RequireTensor("nn_layer_norm", input_types[1], "scale");
+    const auto* bias = RequireTensor("nn_layer_norm", input_types[2], "bias");
+    const auto* layer_norm_attrs = attrs.As<LayerNormAttrsNode>();
+    if (!layer_norm_attrs) {
+        throw std::runtime_error("nn_layer_norm requires LayerNormAttrs");
+    }
+    if (data->dtype != "float32" || scale->dtype != "float32" || bias->dtype != "float32") {
+        throw std::runtime_error("nn_layer_norm requires float32 data, scale, and bias");
+    }
+    if (data->shape.empty()) {
+        throw std::runtime_error("nn_layer_norm requires data rank >= 1");
+    }
+    for (size_t index = 0; index < data->shape.size(); ++index) {
+        if (data->shape[index] < 0) {
+            throw std::runtime_error("nn_layer_norm requires non-negative static data dimensions");
+        }
+    }
+    const int axis = NormalizeAxis("nn_layer_norm", layer_norm_attrs->axis,
+                                   static_cast<int>(data->shape.size()));
+    if (!std::isfinite(layer_norm_attrs->epsilon) || layer_norm_attrs->epsilon <= 0.0f) {
+        throw std::runtime_error("nn_layer_norm epsilon must be finite and > 0");
+    }
+    if (layer_norm_attrs->accumulation_dtype != "float32") {
+        throw std::runtime_error("nn_layer_norm accumulation_dtype must be float32");
+    }
+    const size_t suffix_rank = data->shape.size() - static_cast<size_t>(axis);
+    if (scale->shape.size() != suffix_rank || bias->shape.size() != suffix_rank) {
+        throw std::runtime_error("nn_layer_norm scale and bias shapes must exactly equal data.shape[axis:]");
+    }
+    for (size_t index = 0; index < suffix_rank; ++index) {
+        const int64_t extent = data->shape[static_cast<size_t>(axis) + index];
+        if (extent <= 0) {
+            throw std::runtime_error("nn_layer_norm normalized suffix dimensions must be > 0");
+        }
+        if (scale->shape[index] != extent || bias->shape[index] != extent) {
+            throw std::runtime_error("nn_layer_norm scale and bias shapes must exactly equal data.shape[axis:]");
+        }
+    }
     return input_types[0];
 }
 

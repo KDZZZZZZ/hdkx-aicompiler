@@ -28,5 +28,6 @@ Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type LayerNormInferType(const Attrs& attrs, const Array<Type>& input_types);
 }  // namespace relay
 }  // namespace kxc

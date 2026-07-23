@@ -16,7 +16,7 @@
 
 ## 当前 contract 范围
 
-下列 21 个算子已列入 Relay contract checker。此表只声明 checker 范围，**不是**
+下列 22 个算子已列入 Relay contract checker。此表只声明 checker 范围，**不是**
 production support 的肯定结论；production approval 保持 pending，直到下方 closure
 项目完成。
 
@@ -31,6 +31,7 @@ production support 的肯定结论；production approval 保持 pending，直到
 | `matmul` | tensor.math | declared | pending |
 | `nn_dense` | nn | declared | pending |
 | `nn_gemm` | nn | declared | pending |
+| `nn_layer_norm` | nn | declared | pending |
 | `nn_relu` | nn | declared | pending |
 | `nn_conv2d` | nn | declared | pending |
 | `nn_max_pool2d` | nn | declared | pending |
@@ -82,6 +83,7 @@ approval 仍按 target 单独判断。NLP 轨新增的实现边界同样不改�
 - ONNX opset < 13 Softmax 的 trailing-flatten 语义不能直接映射为当前 Relay 单轴 softmax，因此 importer fail closed。
 - `gather` 的静态 type/TE contract 支持 int32/int64 indices 和 axis 归一化；ONNX 有效索引域为 `[-extent, extent - 1]`。KXC 对该域外的运行时索引作确定性的 typed zero-fill 扩展；LLVM numeric coverage 已接入但本机未运行，CUDA 通用间接-Load gate 保持拒绝。
 - `where` 的静态 ONNX/Relay/TE vertical slice 已覆盖三输入 trailing-axis 广播：condition 必须为 `bool`，x/y 必须同 dtype，且 branch dtype 仅限 `{float32,float64,int32,int64,int8,uint8,bool}`。LLVM numeric 源码以 `uint8_t` 提供 byte-backed bool condition ABI；本机未运行 LLVM，CUDA 未支持且未验证。`where` 只是逐元素选择，**不定义 masked-softmax 或 all-masked-row 行为**。
+- `nn_layer_norm` 是 exact-static affine LayerNorm：三个输入均为 float32，data rank >= 1 且非负静态，axis suffix 必须为正，scale/bias 必须严格等于该 suffix，epsilon 有限且 > 0，accumulation dtype 固定为 float32。ONNX 仅导入 opset >= 17 的单输出 `LayerNormalization`；CUDA nested reduction 由通用 schedule gate fail closed。
 
 - [x] per-unit executable capability 正反例（含真实 lowering/schedule/backend proof）
 - [x] normalized production pipeline、executable invariant 与 public static-exact transaction/pin adapter

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ ONNX_TO_RELAY = {
     "Transpose": "transpose",
     "Gather": "gather",
     "Where": "where",
+    "LayerNormalization": "nn_layer_norm",
 }
 
 
@@ -126,6 +128,30 @@ def import_onnx_model(
                 "only single-output nodes are supported in the static-shape MVP"
             )
 
+        if node.op_type == "LayerNormalization":
+            node_name = node.name or "<unnamed>"
+            if opset_version < 17:
+                raise UnsupportedONNXOpError(
+                    f"Unsupported ONNX LayerNormalization opset {opset_version} in node "
+                    f"'{node_name}': opset >= 17 is required"
+                )
+            if len(node.input) != 3 or not all(node.input):
+                raise ValueError(
+                    f"LayerNormalization node '{node_name}' requires exactly three non-empty inputs"
+                )
+            if not node.output[0]:
+                raise ValueError(
+                    f"LayerNormalization node '{node_name}' requires exactly one non-empty output"
+                )
+            missing = [name for name in node.input if name not in available_values]
+            if missing:
+                raise ValueError(
+                    f"LayerNormalization node '{node_name}' has unresolved prior input(s): {missing}"
+                )
+            inferred_static_specs[node.output[0]] = _infer_layer_normalization_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
         if node.op_type == "MatMul":
             inferred_static_specs[node.output[0]] = _infer_matmul_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
@@ -312,6 +338,70 @@ def _infer_gather_spec(
     return result
 
 
+def _infer_layer_normalization_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    data, scale, bias = (
+        _resolve_static_input("LayerNormalization", node_name, name, input_specs, params,
+                              inferred_specs, value_info_by_name, default_batch)
+        for name in node.input
+    )
+    if data.dtype != "float32" or scale.dtype != "float32" or bias.dtype != "float32":
+        raise ValueError(
+            f"LayerNormalization node '{node_name}' requires float32 data, scale, and bias"
+        )
+    if not data.shape:
+        raise ValueError(f"LayerNormalization node '{node_name}' requires data rank >= 1")
+    if any(dim < 0 for dim in data.shape):
+        raise ValueError(
+            f"LayerNormalization node '{node_name}' requires non-negative static data dimensions"
+        )
+    attrs = _attrs_by_name(node)
+    unsupported = set(attrs) - {"axis", "epsilon", "stash_type"}
+    if unsupported:
+        raise ValueError(
+            f"LayerNormalization node '{node_name}' has unsupported attribute(s): "
+            f"{sorted(unsupported)}"
+        )
+    axis = _int_attr(attrs, "axis", -1)
+    if axis < 0:
+        axis += len(data.shape)
+    if axis < 0 or axis >= len(data.shape):
+        raise ValueError(f"LayerNormalization node '{node_name}' axis {axis} is out of range")
+    epsilon = _float_attr(attrs, "epsilon", 1e-5)
+    if not math.isfinite(epsilon) or epsilon <= 0.0:
+        raise ValueError(
+            f"LayerNormalization node '{node_name}' epsilon must be finite and > 0"
+        )
+    stash_type = _int_attr(attrs, "stash_type", 1)
+    if stash_type != 1:
+        raise ValueError(
+            f"LayerNormalization node '{node_name}' only supports stash_type default/1 (float32)"
+        )
+    suffix = data.shape[axis:]
+    if any(dim <= 0 for dim in suffix):
+        raise ValueError(
+            f"LayerNormalization node '{node_name}' normalized suffix dimensions must be > 0"
+        )
+    if scale.shape != suffix or bias.shape != suffix:
+        raise ValueError(
+            f"LayerNormalization node '{node_name}' scale and bias shapes must exactly equal "
+            "data.shape[axis:]"
+        )
+    result = TensorSpec(name=node.output[0], shape=list(data.shape), dtype="float32")
+    _validate_declared_output(
+        "LayerNormalization", node_name, result, output_declarations, default_batch
+    )
+    return result
+
+
 def _broadcast_shapes(op_type: str, node_name: str, left: list[int], right: list[int]) -> list[int]:
     result: list[int] = []
     for left_dim, right_dim in zip(reversed(left), reversed(right)):
@@ -484,6 +574,18 @@ def _convert_attrs(
         return {"perm": _list_attr(attrs, "perm", [])}
     if node.op_type == "Gather":
         return {"axis": _int_attr(attrs, "axis", 0)}
+    if node.op_type == "LayerNormalization":
+        node_name = node.name or "<unnamed>"
+        if opset_version < 17:
+            raise UnsupportedONNXOpError(
+                f"Unsupported ONNX LayerNormalization opset {opset_version} in node "
+                f"'{node_name}': opset >= 17 is required"
+            )
+        return {
+            "axis": _int_attr(attrs, "axis", -1),
+            "epsilon": _float_attr(attrs, "epsilon", 1e-5),
+            "accumulation_dtype": "float32",
+        }
     if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul", "Where"}:
         return {}
     raise UnsupportedONNXOpError(

@@ -138,6 +138,32 @@ void WriteWhereFixture(const TemporaryDirectory& directory,
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+void WriteLayerNormFixture(const TemporaryDirectory& directory,
+                           const std::string& output_shape,
+                           const std::string& attrs =
+                               R"json({"axis": 1, "epsilon": 0.00001, "accumulation_dtype": "float32"})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "data", "shape": [2, 3, 4], "dtype": "float32"},
+      {"name": "scale", "shape": [3, 4], "dtype": "float32"},
+      {"name": "bias", "shape": [3, 4], "dtype": "float32"}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "layer_norm", "op_name": "nn_layer_norm", "inputs": ["data", "scale", "bias"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
 bool TestValidStaticMatMulSoftmaxTranspose() {
     TemporaryDirectory directory;
     WriteFixture(directory, "[2, 2, 3]", "[2, 4, 2]");
@@ -219,6 +245,48 @@ bool TestWhereUnsupportedBranchDTypeIsRejected() {
     return true;
 }
 
+bool TestValidStaticLayerNorm() {
+    TemporaryDirectory directory;
+    WriteLayerNormFixture(directory, "[2, 3, 4]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static LayerNorm import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 3, 4}, "float32"),
+               "reified LayerNorm output should preserve data shape and dtype");
+    return true;
+}
+
+bool TestLayerNormDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteLayerNormFixture(directory, "[2, 3, 5]");
+
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "declared LayerNorm output shape must match inferred output");
+    return true;
+}
+
+bool TestLayerNormUnsupportedAttrsAreRejected() {
+    TemporaryDirectory directory;
+    WriteLayerNormFixture(
+        directory, "[2, 3, 4]",
+        R"json({"axis": 1, "epsilon": 0.00001, "accumulation_dtype": "float32", "stash_type": 1})json");
+
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "LayerNorm import spec must reject attrs outside the exact canonical set");
+    return true;
+}
+
 bool TestNegativeInputDimensionIsRejected() {
     TemporaryDirectory directory;
     WriteFixture(directory, "[-1, 2, 3]", "[1, 4, 2]");
@@ -268,6 +336,9 @@ int main() {
         {"valid_static_where", TestValidStaticWhere},
         {"where_declared_output_mismatch", TestWhereDeclaredOutputMismatchIsRejected},
         {"where_unsupported_branch_dtype", TestWhereUnsupportedBranchDTypeIsRejected},
+        {"valid_static_layer_norm", TestValidStaticLayerNorm},
+        {"layer_norm_declared_output_mismatch", TestLayerNormDeclaredOutputMismatchIsRejected},
+        {"layer_norm_unsupported_attrs", TestLayerNormUnsupportedAttrsAreRejected},
         {"negative_input_dimension", TestNegativeInputDimensionIsRejected},
         {"declared_output_shape_mismatch", TestDeclaredOutputShapeMismatchIsRejected},
         {"declared_output_dtype_mismatch", TestDeclaredOutputDTypeMismatchIsRejected},

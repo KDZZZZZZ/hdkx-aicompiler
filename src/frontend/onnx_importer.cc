@@ -443,6 +443,18 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
         return ObjectRef(relay::SoftmaxAttrs::Create(
             ReadInt(Field(attrs, "axis", "softmax attrs"), "softmax attrs.axis")));
     }
+    if (op_name == "nn_layer_norm") {
+        const std::string ctx = "layer_norm attrs";
+        if (attrs.o.size() != 3 || !OptionalField(attrs, "axis") ||
+            !OptionalField(attrs, "epsilon") || !OptionalField(attrs, "accumulation_dtype")) {
+            throw std::runtime_error("LayerNorm import attrs must contain axis, epsilon, and accumulation_dtype");
+        }
+        return ObjectRef(relay::LayerNormAttrs::Create(
+            ReadInt(Field(attrs, "axis", ctx), ctx + ".axis"),
+            ReadFloat(Field(attrs, "epsilon", ctx), ctx + ".epsilon"),
+            ReadString(Field(attrs, "accumulation_dtype", ctx),
+                       ctx + ".accumulation_dtype")));
+    }
     if (op_name == "transpose") {
         return ObjectRef(relay::TransposeAttrs::Create(
             ToArray(ReadInt64Vector(Field(attrs, "perm", "transpose attrs"),

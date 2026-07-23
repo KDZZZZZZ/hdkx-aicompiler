@@ -244,6 +244,24 @@
         "GlobalAveragePool"
       ]
     },
+    "nn_layer_norm": {
+      "schema_version": 1,
+      "category": "nn",
+      "num_inputs": 3,
+      "attrs": "LayerNormAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "LayerNormalization"
+      ]
+    },
     "nn_max_pool2d": {
       "schema_version": 1,
       "category": "nn",

@@ -85,6 +85,21 @@ bool TestRelayOperatorRegistryLookupAndSpecs() {
                    Contains(gather_attrs, "axis"),
                "gather attrs serialization should include the canonical axis");
 
+    const kxc::relay::Op& layer_norm = kxc::relay::Op::Get("nn_layer_norm");
+    TEST_CHECK(layer_norm->name == "nn_layer_norm" &&
+                   layer_norm.spec().attrs_type_key == "LayerNormAttrs" &&
+                   layer_norm.spec().input_arity.num_inputs == 3,
+               "LayerNorm should expose its three-input canonical attrs contract");
+    TEST_CHECK(kxc::Registry::Global().Get("kxc.relay.op._make.nn_layer_norm").defined(),
+               "LayerNorm canonical FFI helper should be registered");
+    const std::string layer_norm_attrs = kxc::relay::SerializeAttrs(
+        kxc::relay::LayerNormAttrs::Create(-2, 0.125f, "float32"));
+    TEST_CHECK(Contains(layer_norm_attrs, "LayerNormAttrsNode") &&
+                   Contains(layer_norm_attrs, "axis") &&
+                   Contains(layer_norm_attrs, "epsilon") &&
+                   Contains(layer_norm_attrs, "accumulation_dtype"),
+               "LayerNorm attrs serialization should include all canonical fields");
+
     const kxc::relay::Op& where = kxc::relay::Op::Get("where");
     TEST_CHECK(where->name == "where" && where.spec().attrs_type_key.empty() &&
                    where.spec().input_arity.num_inputs == 3,

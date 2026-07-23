@@ -20,6 +20,7 @@ KXC_OBJECT_DEFINE(Conv2DAttrsNode)
 KXC_OBJECT_DEFINE(DenseAttrsNode)
 KXC_OBJECT_DEFINE(MaxPool2DAttrsNode)
 KXC_OBJECT_DEFINE(SoftmaxAttrsNode)
+KXC_OBJECT_DEFINE(LayerNormAttrsNode)
 KXC_OBJECT_DEFINE(AddAttrsNode)
 KXC_OBJECT_DEFINE(CastAttrsNode)
 KXC_OBJECT_DEFINE(ReduceMeanAttrsNode)
@@ -214,6 +215,12 @@ void SoftmaxAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("axis", axis);
 }
 
+void LayerNormAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axis", axis);
+    writer.Add("epsilon", epsilon);
+    writer.Add("accumulation_dtype", accumulation_dtype);
+}
+
 void CastAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("to", to);
 }
@@ -317,6 +324,15 @@ MaxPool2DAttrs MaxPool2DAttrs::Create(Array<int64_t> strides, Array<int64_t> pad
 SoftmaxAttrs SoftmaxAttrs::Create(int axis) {
     auto* node = new SoftmaxAttrsNode();
     node->axis = axis;
+    return InternalCreate(node);
+}
+
+LayerNormAttrs LayerNormAttrs::Create(int axis, float epsilon,
+                                      std::string accumulation_dtype) {
+    auto* node = new LayerNormAttrsNode();
+    node->axis = axis;
+    node->epsilon = epsilon;
+    node->accumulation_dtype = std::move(accumulation_dtype);
     return InternalCreate(node);
 }
 

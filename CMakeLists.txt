@@ -382,6 +382,7 @@ set(KXC_RELAY_IR_SOURCES
   src/relay/op/nn/convolution.cc
   src/relay/op/nn/pooling.cc
   src/relay/op/nn/dense.cc
+  src/relay/op/nn/layer_norm.cc
   src/relay/op/nn/softmax.cc
   src/relay/op/op_ffi.cc
 )

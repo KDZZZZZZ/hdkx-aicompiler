@@ -354,59 +354,62 @@
     },
     "normalization": {
       "frontend": {
-        "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "status": "implemented",
+        "gate": "onnx_layer_normalization_opset17_static_exact",
+        "reason": "ONNX LayerNormalization opset >= 17 imports only three resolved float32 inputs, one output, stash_type default/1, and exact static shape/axis/epsilon contracts.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py"
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "status": "implemented",
+        "gate": "layer_norm_exact_static_float32",
+        "reason": "Relay nn_layer_norm requires exact-static float32 data/scale/bias, exact suffix affine shapes, finite positive epsilon, and float32 accumulation.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "status": "implemented",
+        "gate": "layer_norm_suffix_reduction_float32",
+        "reason": "One Relay call lowers to internal float32 sum/mean/centered/variance/inv_std TE stages over every normalized suffix axis.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/op/nn/layer_norm.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "llvm_layer_norm_numeric_test_not_run_local",
+        "reason": "Conditional LLVM numeric coverage includes constant rows and tiny variance, but local LLVM is unavailable.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "cuda": {
         "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
+        "gate": "cuda_reduction_unsupported",
+        "reason": "CUDA nested reductions are rejected by the normalized generic target schedule; no CPU fallback or device numeric support is claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/compiler_capability_test.cpp"
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "reference_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "status": "implemented",
+        "gate": "layer_norm_llvm_runtime_test_not_run_local",
+        "reason": "The conditional LLVM numeric test wires LayerNorm through Compiler and RuntimeSession; local LLVM is unavailable.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "numeric": {
-        "status": "unsupported",
-        "gate": "no_numeric_gate",
-        "reason": "No numeric fixture in Phase A.",
+        "status": "implemented",
+        "gate": "layer_norm_llvm_numeric_test_not_run_local",
+        "reason": "Formula coverage is encoded in the conditional LLVM numeric test, including constant and tiny-variance rows.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "profile": {

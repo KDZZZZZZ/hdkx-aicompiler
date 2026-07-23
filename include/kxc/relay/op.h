@@ -264,6 +264,23 @@ public:
     static SoftmaxAttrs Create(int axis);
 };
 
+/*! \brief nn.layer_norm axis, epsilon, and required accumulation dtype. */
+class LayerNormAttrsNode : public BaseAttrsNode {
+public:
+    int axis = -1;
+    float epsilon = 1e-5f;
+    std::string accumulation_dtype = "float32";
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class LayerNormAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(LayerNormAttrs, LayerNormAttrsNode)
+
+public:
+    static LayerNormAttrs Create(int axis = -1, float epsilon = 1e-5f,
+                                 std::string accumulation_dtype = "float32");
+};
+
 KXC_DEFINE_SIMPLE_ATTRS(AddAttrs)
 
 /*! \brief cast 的目标 dtype 编码属性。 */

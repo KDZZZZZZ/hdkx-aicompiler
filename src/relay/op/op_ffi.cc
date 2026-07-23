@@ -102,6 +102,14 @@ Call MakeNNDense(Expr data, Expr weight, int units, std::string out_dtype) {
     return Call(GetOp("nn_dense"), {data, weight}, DenseAttrs::Create(units, std::move(out_dtype)));
 }
 
+// 构造 exact-static affine LayerNorm 调用。
+Call MakeNNLayerNorm(Expr data, Expr scale, Expr bias, int axis, double epsilon,
+                     std::string accumulation_dtype) {
+    return Call(GetOp("nn_layer_norm"), {data, scale, bias},
+                LayerNormAttrs::Create(axis, static_cast<float>(epsilon),
+                                       std::move(accumulation_dtype)));
+}
+
 // 构造 ReLU 调用。
 Call MakeNNRelu(Expr data) {
     return Call(GetOp("nn_relu"), {data}, ReluAttrs::Create());
@@ -160,6 +168,8 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.transpose").set_body(ToPackedFunc(MakeTr
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.gather").set_body(ToPackedFunc(MakeGather));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_conv2d").set_body(ToPackedFunc(MakeNNConv2D));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_dense").set_body(ToPackedFunc(MakeNNDense));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_layer_norm")
+    .set_body(ToPackedFunc(MakeNNLayerNorm));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_relu").set_body(ToPackedFunc(MakeNNRelu));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_max_pool2d").set_body(ToPackedFunc(MakeNNMaxPool2D));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_avg_pool2d").set_body(ToPackedFunc(MakeNNAvgPool2D));

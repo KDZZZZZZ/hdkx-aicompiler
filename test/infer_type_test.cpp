@@ -10,6 +10,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -298,6 +299,109 @@ bool TestWhereInferAndLoweringContract() {
     return true;
 }
 
+bool TestLayerNormInferAndLoweringContract() {
+    kxc::Var data("data", kxc::TensorType({2, 3, 4}, "float32"));
+    kxc::Var scale("scale", kxc::TensorType({3, 4}, "float32"));
+    kxc::Var bias("bias", kxc::TensorType({3, 4}, "float32"));
+    kxc::Call layer_norm(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
+                         kxc::relay::LayerNormAttrs::Create(-2, 1e-5f, "float32"));
+    kxc::Function function({data, scale, bias}, layer_norm);
+    kxc::relay::InferTypePass(function);
+    TEST_CHECK(CheckTensor(layer_norm.checked_type(), {2, 3, 4}, "float32"),
+               "LayerNorm must preserve data shape and dtype");
+    TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined(),
+               "valid static LayerNorm should lower to TIR");
+    TEST_CHECK(kxc::relay::LowerOperatorCallsToTIR(function).size() == 1,
+               "one LayerNorm Relay Call must produce one lowering unit");
+
+    kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
+    kxc::Var scalar_affine("scalar_affine", kxc::TensorType({}, "float32"));
+    kxc::Call rank_zero(kxc::relay::Op::Get("nn_layer_norm"),
+                        {scalar, scalar_affine, scalar_affine},
+                        kxc::relay::LayerNormAttrs::Create());
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({scalar, scalar_affine}, rank_zero));
+               }),
+               "LayerNorm rank-zero data must fail type inference");
+
+    kxc::Var wrong_dtype("wrong_dtype", kxc::TensorType({3, 4}, "float64"));
+    kxc::Call dtype(kxc::relay::Op::Get("nn_layer_norm"), {data, wrong_dtype, bias},
+                    kxc::relay::LayerNormAttrs::Create());
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data, wrong_dtype, bias}, dtype));
+               }),
+               "LayerNorm requires float32 data, scale, and bias");
+
+    kxc::Var bad_scale("bad_scale", kxc::TensorType({4}, "float32"));
+    kxc::Call scale_suffix(kxc::relay::Op::Get("nn_layer_norm"), {data, bad_scale, bias},
+                           kxc::relay::LayerNormAttrs::Create(1));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({data, bad_scale, bias}, scale_suffix));
+               }),
+               "LayerNorm scale shape must exactly equal the normalized suffix");
+    kxc::Var bad_bias("bad_bias", kxc::TensorType({3, 1}, "float32"));
+    kxc::Call bias_suffix(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bad_bias},
+                          kxc::relay::LayerNormAttrs::Create(1));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({data, scale, bad_bias}, bias_suffix));
+               }),
+               "LayerNorm bias shape must exactly equal the normalized suffix");
+
+    kxc::Call invalid_axis(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
+                           kxc::relay::LayerNormAttrs::Create(3));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data, scale, bias}, invalid_axis));
+               }),
+               "LayerNorm axis outside data rank must fail type inference");
+    for (const float epsilon : {0.0f, -1e-5f,
+                                std::numeric_limits<float>::infinity(),
+                                std::numeric_limits<float>::quiet_NaN()}) {
+        kxc::Call invalid_epsilon(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
+                                  kxc::relay::LayerNormAttrs::Create(1, epsilon, "float32"));
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(
+                           kxc::Function({data, scale, bias}, invalid_epsilon));
+                   }),
+                   "LayerNorm epsilon must be finite and strictly positive");
+    }
+    kxc::Call invalid_accumulation(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
+                                   kxc::relay::LayerNormAttrs::Create(1, 1e-5f, "float64"));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({data, scale, bias}, invalid_accumulation));
+               }),
+               "LayerNorm accumulation dtype must be float32");
+
+    kxc::Var zero_data("zero_data", kxc::TensorType({2, 0, 4}, "float32"));
+    kxc::Var zero_scale("zero_scale", kxc::TensorType({0, 4}, "float32"));
+    kxc::Var zero_bias("zero_bias", kxc::TensorType({0, 4}, "float32"));
+    kxc::Call zero_suffix(kxc::relay::Op::Get("nn_layer_norm"),
+                          {zero_data, zero_scale, zero_bias},
+                          kxc::relay::LayerNormAttrs::Create(1));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({zero_data, zero_scale, zero_bias}, zero_suffix));
+               }),
+               "LayerNorm normalized suffix dimensions must be positive");
+
+    const int64_t maximum = std::numeric_limits<int64_t>::max();
+    kxc::Var huge_data("huge_data", kxc::TensorType({maximum, 2}, "float32"));
+    kxc::Var huge_scale("huge_scale", kxc::TensorType({maximum, 2}, "float32"));
+    kxc::Var huge_bias("huge_bias", kxc::TensorType({maximum, 2}, "float32"));
+    kxc::Call overflowing(kxc::relay::Op::Get("nn_layer_norm"),
+                          {huge_data, huge_scale, huge_bias},
+                          kxc::relay::LayerNormAttrs::Create(0));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::LowerToTIR(
+                       kxc::Function({huge_data, huge_scale, huge_bias}, overflowing));
+               }),
+               "LayerNorm lowering must reject normalized element-count overflow");
+    return true;
+}
+
 bool TestSoftmaxInferTypeContract() {
     kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
     kxc::Call scalar_softmax(kxc::relay::Op::Get("softmax"), {scalar},
@@ -467,6 +571,7 @@ int main() {
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
         {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},
         {"where_infer_and_lowering_contract", TestWhereInferAndLoweringContract},
+        {"layer_norm_infer_and_lowering_contract", TestLayerNormInferAndLoweringContract},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},
         {"negative_extent_lowering_gates", TestNegativeExtentLoweringGates},
         {"mvp_elementwise_lower_to_tir", TestMvpElementwiseLowerToTIR},

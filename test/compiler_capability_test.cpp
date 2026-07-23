@@ -356,6 +356,27 @@ bool TestCudaReductionScheduleRejectedBeforeBackend() {
     return true;
 }
 
+bool TestCudaLayerNormScheduleRejectedBeforeBackend() {
+    using namespace kxc;
+    using namespace kxc::api;
+    Var data("data", TensorType({2, 4}, "float32"));
+    Var scale("scale", TensorType({4}, "float32"));
+    Var bias("bias", TensorType({4}, "float32"));
+    Function layer_norm(
+        {data, scale, bias},
+        Call(relay::Op::Get("nn_layer_norm"), {data, scale, bias},
+             relay::LayerNormAttrs::Create(-1, 1e-5f, "float32")));
+    const CapabilityResult result = Verify(layer_norm, FakeCudaTarget(), 3);
+    TEST_CHECK(!result.supported &&
+                   result.status == CapabilityStatus::kEligibleButNotExecutable &&
+                   HasIssue(result, "target_schedule") &&
+                   !HasIssue(result, "per_unit_lowering") &&
+                   result.Diagnostic().find("BindCudaThreads") != std::string::npos,
+               "CUDA LayerNorm must reach and fail the generic nested-reduction schedule "
+               "without an op-name gate or CPU fallback: " + result.Diagnostic());
+    return true;
+}
+
 bool TestCudaGatherScheduleRejectedBeforeBackend() {
     using namespace kxc;
     using namespace kxc::api;
@@ -435,6 +456,7 @@ int main() {
         {"custom_binding_mismatch", TestCustomBindingMismatchRejectedBySharedLowering},
         {"backend_cuda_target", TestBackendAndCudaTargetFactsAreStructured},
         {"cuda_reduction_schedule", TestCudaReductionScheduleRejectedBeforeBackend},
+        {"cuda_layer_norm_schedule", TestCudaLayerNormScheduleRejectedBeforeBackend},
         {"cuda_gather_schedule", TestCudaGatherScheduleRejectedBeforeBackend},
         {"pre_partition_not_bypassed", TestPrePartitionBoundaryCannotBeBypassed},
         {"supported_implies_compile", TestSupportedImpliesProductionCompileSuccess},

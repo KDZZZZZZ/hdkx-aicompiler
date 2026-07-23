@@ -14,6 +14,7 @@ void RelayOpFfi();
 void RelayActivationOps();
 void RelayConvolutionOps();
 void RelayDenseOps();
+void RelayLayerNormOps();
 void RelayPoolingOps();
 void RelaySoftmaxOps();
 void RelayTensorMathOps();
@@ -37,6 +38,7 @@ void RegisterBuiltins() {
   builtin_anchor::RelayActivationOps();
   builtin_anchor::RelayConvolutionOps();
   builtin_anchor::RelayDenseOps();
+  builtin_anchor::RelayLayerNormOps();
   builtin_anchor::RelayPoolingOps();
   builtin_anchor::RelaySoftmaxOps();
   builtin_anchor::RelayTensorMathOps();

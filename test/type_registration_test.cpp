@@ -73,6 +73,7 @@ bool TestStableRegistrations() {
         "DenseAttrsNode",
         "MaxPool2DAttrsNode",
         "SoftmaxAttrsNode",
+        "LayerNormAttrsNode",
         "AddAttrsNode",
         "CastAttrsNode",
         "ReduceMeanAttrsNode",

@@ -51,6 +51,12 @@ IMPLEMENTED = {
     ("mask_select", "llvm"),
     ("mask_select", "runtime"),
     ("mask_select", "numeric"),
+    ("normalization", "frontend"),
+    ("normalization", "relay"),
+    ("normalization", "lowering"),
+    ("normalization", "llvm"),
+    ("normalization", "runtime"),
+    ("normalization", "numeric"),
     ("prefill_exact", "relay"),
     ("prefill_exact", "lowering"),
     ("prefill_exact", "llvm"),
@@ -214,8 +220,8 @@ def validate_matrix(root, matrix):
                 raise ValidationError("matrix.{}.cuda must remain closed".format(capability))
             if layer == "llvm" and record["status"] == "validated":
                 raise ValidationError("matrix.{}.llvm must not claim unrun local validation".format(capability))
-    for capability in ("stable_softmax", "batched_matmul", "prefill_exact",
-                       "decode_external_kv"):
+    for capability in ("stable_softmax", "batched_matmul", "normalization",
+                       "prefill_exact", "decode_external_kv"):
         cuda = matrix["capabilities"][capability]["cuda"]
         if cuda["gate"] != "cuda_reduction_unsupported":
             raise ValidationError("{} CUDA reduction gate is not closed".format(capability))

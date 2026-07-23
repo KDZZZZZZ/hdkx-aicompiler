@@ -476,6 +476,149 @@ def test_unsupported_op_error_includes_op_type_and_node_name():
         import_onnx_model(model, default_batch=1)
 
 
+def _layer_normalization_model(
+    data_shape=(2, 3, 4),
+    scale_shape=(3, 4),
+    bias_shape=(3, 4),
+    *,
+    data_dtype=TensorProto.FLOAT,
+    scale_dtype=TensorProto.FLOAT,
+    bias_dtype=TensorProto.FLOAT,
+    output_shape=None,
+    output_dtype=TensorProto.FLOAT,
+    axis=1,
+    epsilon=1e-5,
+    stash_type=None,
+    extra_attrs=None,
+    node_inputs=None,
+    node_outputs=None,
+    opset=17,
+):
+    node_inputs = ["data", "scale", "bias"] if node_inputs is None else node_inputs
+    node_outputs = ["out"] if node_outputs is None else node_outputs
+    attrs = {"axis": axis, "epsilon": epsilon}
+    if stash_type is not None:
+        attrs["stash_type"] = stash_type
+    if extra_attrs is not None:
+        attrs.update(extra_attrs)
+    graph = helper.make_graph(
+        [helper.make_node("LayerNormalization", node_inputs, node_outputs,
+                          name="layer_norm", **attrs)],
+        "layer_norm_test",
+        [helper.make_tensor_value_info("data", data_dtype, data_shape),
+         helper.make_tensor_value_info("scale", scale_dtype, scale_shape),
+         helper.make_tensor_value_info("bias", bias_dtype, bias_shape)],
+        [helper.make_tensor_value_info(
+            "out", output_dtype, data_shape if output_shape is None else output_shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6
+    )
+
+
+def test_layer_normalization_maps_exact_static_float32_contract():
+    imported = import_onnx_model(_layer_normalization_model(axis=-2, epsilon=0.125))
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("nn_layer_norm", {
+            "axis": -2,
+            "epsilon": pytest.approx(0.125),
+            "accumulation_dtype": "float32",
+        }),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3, 4]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+@pytest.mark.parametrize("opset", [1, 16])
+def test_layer_normalization_before_opset17_is_rejected(opset):
+    with pytest.raises(UnsupportedONNXOpError, match=rf"LayerNormalization opset {opset}.*>= 17"):
+        import_onnx_model(_layer_normalization_model(opset=opset))
+
+
+@pytest.mark.parametrize(
+    ("node_inputs", "message"),
+    [
+        (["data", "scale"], "exactly three non-empty inputs"),
+        (["data", "scale", "bias", "extra"], "exactly three non-empty inputs"),
+        (["data", "scale", ""], "exactly three non-empty inputs"),
+    ],
+)
+def test_layer_normalization_rejects_missing_or_extra_inputs(node_inputs, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_layer_normalization_model(node_inputs=node_inputs))
+
+
+@pytest.mark.parametrize(
+    ("node_outputs", "message"),
+    [
+        ([], "only single-output nodes are supported"),
+        ([""], "exactly one non-empty output"),
+        (["out", "mean"], "only single-output nodes are supported"),
+    ],
+)
+def test_layer_normalization_rejects_missing_or_extra_outputs(node_outputs, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_layer_normalization_model(node_outputs=node_outputs))
+
+
+@pytest.mark.parametrize("stash_type", [0, 2])
+def test_layer_normalization_rejects_non_float32_stash_type(stash_type):
+    with pytest.raises(ValueError, match="stash_type default/1"):
+        import_onnx_model(_layer_normalization_model(stash_type=stash_type))
+
+
+def test_layer_normalization_rejects_unsupported_attribute():
+    with pytest.raises(ValueError, match="unsupported attribute"):
+        import_onnx_model(_layer_normalization_model(extra_attrs={"unsupported": 1}))
+
+
+def test_layer_normalization_rejects_non_float32_input_dtype():
+    with pytest.raises(ValueError, match="requires float32 data, scale, and bias"):
+        import_onnx_model(_layer_normalization_model(scale_dtype=TensorProto.INT32))
+
+
+@pytest.mark.parametrize(
+    ("data_shape", "scale_shape", "bias_shape", "message"),
+    [
+        ([], (), (), "data rank >= 1"),
+        ((2, 3, 4), (4,), (3, 4), "scale and bias shapes must exactly equal"),
+        ((2, 0, 4), (0, 4), (0, 4), "normalized suffix dimensions must be > 0"),
+    ],
+)
+def test_layer_normalization_rejects_invalid_static_shapes(
+    data_shape, scale_shape, bias_shape, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_layer_normalization_model(data_shape, scale_shape, bias_shape))
+
+
+@pytest.mark.parametrize("axis", [3, -4])
+def test_layer_normalization_rejects_out_of_range_axis(axis):
+    with pytest.raises(ValueError, match="axis .* is out of range"):
+        import_onnx_model(_layer_normalization_model(axis=axis))
+
+
+@pytest.mark.parametrize("epsilon", [0.0, -1e-5, float("inf"), float("nan")])
+def test_layer_normalization_rejects_nonpositive_or_nonfinite_epsilon(epsilon):
+    with pytest.raises(ValueError, match="epsilon must be finite and > 0"):
+        import_onnx_model(_layer_normalization_model(epsilon=epsilon))
+
+
+@pytest.mark.parametrize(
+    ("output_shape", "output_dtype"),
+    [
+        ((2, 3, 5), TensorProto.FLOAT),
+        ((2, 3, 4), TensorProto.DOUBLE),
+    ],
+)
+def test_layer_normalization_rejects_declared_output_mismatch(output_shape, output_dtype):
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(
+            _layer_normalization_model(output_shape=output_shape, output_dtype=output_dtype)
+        )
+
+
 def onnx_import_metadata(path: Path) -> dict:
     import json
 
