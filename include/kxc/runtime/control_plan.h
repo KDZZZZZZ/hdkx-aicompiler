@@ -1,5 +1,5 @@
 /*! \file include/kxc/runtime/control_plan.h
- * \brief Static-exact, runtime-neutral structured control-flow plan v1.
+ * \brief Static-exact, runtime-neutral structured control-flow plan v2.
  */
 #pragma once
 
@@ -16,7 +16,7 @@ using ValueId = std::int64_t;
 using RegionId = std::int64_t;
 using TaskId = std::int64_t;
 
-/*! \brief Static-exact logical value contract for ControlPlan v1. */
+/*! \brief Static-exact logical value contract for ControlPlan v2. */
 struct ControlValueSpec {
     ValueId id{-1};
     std::string dtype;
@@ -74,9 +74,17 @@ struct LoopSpec {
 
 enum class ControlTaskKind { kKernel, kBranch, kLoop };
 
+/*! \brief Preparation-time kernel binding state; v2 has no executable artifact. */
+enum class KernelBindingState {
+    kNotApplicable,
+    kUnresolvedRelayKernel,
+};
+
 struct ControlTask {
     TaskId id{-1};
     ControlTaskKind kind{ControlTaskKind::kKernel};
+    /*! \brief Runtime must not execute kUnresolvedRelayKernel as an artifact. */
+    KernelBindingState binding_state{KernelBindingState::kNotApplicable};
     std::vector<ValueId> inputs;
     /*! \brief Ordered logical kernel operands; duplicates are significant. */
     std::vector<ValueId> argument_values;
@@ -102,9 +110,9 @@ struct ControlRegion {
     std::string source_locator;
 };
 
-/*! \brief Frozen v1 vocabulary. IDs and locators identify plan locations only. */
+/*! \brief Frozen v2 vocabulary. IDs and locators identify plan locations only. */
 struct ControlPlan {
-    static constexpr std::int64_t kSchemaVersion = 1;
+    static constexpr std::int64_t kSchemaVersion = 2;
 
     std::int64_t schema_version{kSchemaVersion};
     std::vector<ControlValueSpec> values;
@@ -115,7 +123,7 @@ struct ControlPlan {
     std::vector<ValueId> constant_values;
     std::vector<ValueId> graph_outputs;
 
-    /*! \throws std::invalid_argument if this is not a static-exact v1 plan. */
+    /*! \throws std::invalid_argument if this is not a static-exact v2 plan. */
     void ValidateStaticExact() const;
     /*! \brief Compatibility shorthand for ValidateStaticExact. */
     void Validate() const { ValidateStaticExact(); }

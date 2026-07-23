@@ -26,7 +26,7 @@ ControlValueSpec Bool(ValueId id) {
                             "value" + std::to_string(id)};
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {
-    ControlTask task; task.id = id; task.kind = ControlTaskKind::kKernel; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out); task.kernel_ref = ref; task.source_locator = ref; task.effect = Reads(task.inputs); return task;
+    ControlTask task; task.id = id; task.kind = ControlTaskKind::kKernel; task.binding_state = KernelBindingState::kUnresolvedRelayKernel; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out); task.kernel_ref = ref; task.source_locator = ref; task.effect = Reads(task.inputs); return task;
 }
 
 ControlPlan BranchPlan() {

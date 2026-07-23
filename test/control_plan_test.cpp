@@ -32,7 +32,7 @@ ControlValueSpec Bool(ValueId id) {
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {
     ControlTask task;
-    task.id = id; task.kind = ControlTaskKind::kKernel; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out);
+    task.id = id; task.kind = ControlTaskKind::kKernel; task.binding_state = KernelBindingState::kUnresolvedRelayKernel; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out);
     task.kernel_ref = ref; task.source_locator = ref;
     task.effect = Reads(task.inputs); return task;
 }
@@ -90,7 +90,7 @@ bool TestValidAndCanonical() {
     plan.Validate();
     const std::string first = plan.CanonicalText();
     const std::string second = plan.CanonicalText();
-    CHECK(first == second && first.find("ControlPlan/v1") == 0, "canonical text must be stable");
+    CHECK(first == second && first.find("ControlPlan/v2") == 0, "canonical text must be stable");
     CHECK(first.find("loc=\"entry\"") != std::string::npos, "locators are diagnostic text");
     ControlPlan reordered = BranchPlan();
     std::reverse(reordered.values.begin(), reordered.values.end());
@@ -119,8 +119,8 @@ bool TestValidAndCanonical() {
 
 bool TestSchemaAndValueContracts() {
     ControlPlan plan = BranchPlan();
-    plan.schema_version = 2;
-    CHECK(Throws([&] { plan.Validate(); }), "wrong schema must fail");
+    plan.schema_version = 1;
+    CHECK(Throws([&] { plan.Validate(); }), "legacy v1 schema must fail closed");
     plan = BranchPlan(); plan.values[2].shape = {-1};
     CHECK(Throws([&] { plan.Validate(); }), "dynamic dimensions must fail");
     plan = BranchPlan(); plan.values[2].dtype = "unknown";
@@ -144,6 +144,15 @@ bool TestTaskAndRegionClosureFailures() {
     CHECK(Throws([&] { plan.Validate(); }), "forward/outside dependency must fail");
     plan = BranchPlan(); plan.regions[0].tasks[0].source_locator.clear();
     CHECK(Throws([&] { plan.Validate(); }), "missing task locator must fail");
+    plan = LinearPlan();
+    plan.regions[0].tasks[0].binding_state = KernelBindingState::kNotApplicable;
+    CHECK(Throws([&] { plan.Validate(); }),
+          "kernel tasks must remain explicitly unresolved");
+    plan = BranchPlan();
+    plan.regions[0].tasks[0].binding_state =
+        KernelBindingState::kUnresolvedRelayKernel;
+    CHECK(Throws([&] { plan.Validate(); }),
+          "branch tasks must not carry a kernel binding");
     plan = LinearPlan(); plan.regions[0].tasks[1].dependencies.clear();
     CHECK(Throws([&] { plan.Validate(); }),
           "data consumer must depend on its local producer");

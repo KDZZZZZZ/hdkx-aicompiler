@@ -99,14 +99,28 @@ void ValidateOperatorBindings(const relay::OpNode* op, const CallNode* call,
         Fail(path, "OperatorSpec implementation binding is missing");
     }
     const auto* infer = std::any_cast<relay::FInferType>(&relation->second);
-    if (!infer) Fail(path, "OperatorSpec type relation binding has the wrong type");
-    if (op->spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE &&
-        !std::any_cast<relay::FRelayToTE>(&lowering->second)) {
-        Fail(path, "OperatorSpec single-output lowering binding has the wrong type");
+    if (!infer || !*infer) {
+        Fail(path, "OperatorSpec type relation binding has the wrong type or is empty");
     }
-    if (op->spec.lowering_kind == relay::OperatorLoweringKind::kMultiTE &&
-        !std::any_cast<relay::FRelayToTEMulti>(&lowering->second)) {
-        Fail(path, "OperatorSpec multi-output lowering binding has the wrong type");
+    if (op->spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE) {
+        if (op->spec.lowering_key != "FRelayToTE") {
+            Fail(path, "OperatorSpec single-output lowering must use FRelayToTE");
+        }
+        const auto* lower =
+            std::any_cast<relay::FRelayToTE>(&lowering->second);
+        if (!lower || !*lower) {
+            Fail(path, "OperatorSpec single-output lowering binding has the wrong type or is empty");
+        }
+    }
+    if (op->spec.lowering_kind == relay::OperatorLoweringKind::kMultiTE) {
+        if (op->spec.lowering_key != "FRelayToTEMulti") {
+            Fail(path, "OperatorSpec multi-output lowering must use FRelayToTEMulti");
+        }
+        const auto* lower =
+            std::any_cast<relay::FRelayToTEMulti>(&lowering->second);
+        if (!lower || !*lower) {
+            Fail(path, "OperatorSpec multi-output lowering binding has the wrong type or is empty");
+        }
     }
     Array<Type> input_types;
     for (const Expr& argument : call->args) input_types.push_back(argument.checked_type());
@@ -161,7 +175,7 @@ public:
         std::unordered_set<runtime::ValueId> output_set;
         for (const runtime::ValueId output : outputs) {
             if (!output_set.insert(output).second) {
-                Fail("function.body", "duplicate graph output value is not representable in ControlPlan v1");
+                Fail("function.body", "duplicate graph output value is not representable in ControlPlan v2");
             }
         }
         plan_.graph_outputs = outputs;
@@ -346,6 +360,8 @@ private:
         }
         runtime::ControlTask task;
         task.kind = runtime::ControlTaskKind::kKernel;
+        task.binding_state =
+            runtime::KernelBindingState::kUnresolvedRelayKernel;
         task.inputs = UniqueBoundaryInputs(arguments);
         task.argument_values = arguments;
         task.outputs = outputs;
@@ -360,7 +376,7 @@ private:
                 Fail(path, "kernel outputs require one explicit device");
             }
         }
-        task.kernel_ref = "relay.kernel.v1;" + relay::SerializeOperatorSpec(op->spec) +
+        task.kernel_ref = "relay.kernel.v2;" + relay::SerializeOperatorSpec(op->spec) +
                           ";attrs=" + relay::SerializeAttrs(relay::Attrs(call->attrs));
         task.source_locator = path;
         AddTask(region, std::move(task));

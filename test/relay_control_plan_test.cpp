@@ -2,6 +2,7 @@
  * \brief Standalone Relay-to-ControlPlan preparation checks.
  */
 
+#include <any>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -12,6 +13,7 @@
 #include "../src/compiler/internal/value_graph.h"
 #include "kxc/compiler/control_flow.h"
 #include "kxc/relay/op.h"
+#include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "support/control_plan_reference_executor.h"
 
@@ -44,6 +46,36 @@ Call Mul(const Expr& lhs, const Expr& rhs) {
     return Call(kxc::relay::Op::Get("mul"), {lhs, rhs});
 }
 
+const kxc::relay::Op& UnresolvedNestedOutputOp() {
+    using namespace kxc;
+    using namespace kxc::relay;
+    static bool registered = false;
+    if (!registered) {
+        OperatorSpec spec;
+        spec.name = "test_control_unresolved_nested_output";
+        spec.category = "test";
+        spec.input_arity.num_inputs = 1;
+        spec.output_arity = 3;
+        spec.type_relation_key = "FInferType";
+        spec.lowering_kind = OperatorLoweringKind::kMultiTE;
+        spec.lowering_key = "FRelayToTEMulti";
+        Op op = Op::Register(spec);
+        auto* node = const_cast<OpNode*>(op.operator->());
+        node->attrs.emplace(
+            "FInferType",
+            FInferType([](const Attrs&, const Array<Type>& inputs) {
+                return TupleType(
+                    {inputs[0], TupleType({inputs[0], inputs[0]})});
+            }));
+        node->attrs.emplace(
+            "FRelayToTEMulti",
+            FRelayToTEMulti([](const Attrs&, const Array<te::Tensor>&,
+                               const Type&) { return Array<te::Tensor>{}; }));
+        registered = true;
+    }
+    return kxc::relay::Op::Get("test_control_unresolved_nested_output");
+}
+
 std::string ErrorText(const std::function<void()>& fn) {
     try { fn(); } catch (const std::exception& error) { return error.what(); }
     return "";
@@ -69,8 +101,10 @@ bool TestCanonicalAndRepeatedArguments() {
                "Let must not create a task and a shared Call must be produced once");
     const ControlTask& repeated = plan.regions[0].tasks[1];
     TEST_CHECK(repeated.inputs.size() == 1 && repeated.argument_values.size() == 2 &&
-                   repeated.argument_values[0] == repeated.argument_values[1],
-               "kernel boundary inputs must be unique while logical arguments preserve duplicates");
+                   repeated.argument_values[0] == repeated.argument_values[1] &&
+                   repeated.binding_state ==
+                       kxc::runtime::KernelBindingState::kUnresolvedRelayKernel,
+               "kernel boundary inputs must be unique and Relay kernels must remain unresolved");
 
     Var x2("x", kI64), y2("y", kI64), shared2("shared", kI64);
     Function equivalent({x2, y2}, Let(shared2, Add(x2, y2), Add(shared2, shared2)));
@@ -96,6 +130,16 @@ bool TestCanonicalAndRepeatedArguments() {
         projection_result.values.at(projection_plan.graph_outputs[0]).integer == 5 &&
             projection_result.values.at(projection_plan.graph_outputs[1]).integer == 4,
         "nested tuple projection must execute the complete selected field");
+
+    Var nested_input("nested_input", kI64);
+    ControlPlan nested_output_plan = kxc::api::LowerRelayToControlPlan(
+        Function({nested_input}, Call(UnresolvedNestedOutputOp(), {nested_input})));
+    TEST_CHECK(
+        nested_output_plan.graph_outputs.size() == 3 &&
+            nested_output_plan.regions[0].tasks.size() == 1 &&
+            nested_output_plan.regions[0].tasks[0].binding_state ==
+                kxc::runtime::KernelBindingState::kUnresolvedRelayKernel,
+        "nested Call leaves may be prepared only as an unresolved Relay kernel");
     return true;
 }
 
@@ -237,12 +281,24 @@ bool TestStaticAndControlGates() {
     TEST_CHECK(effect_error.find("pure deterministic non-aliasing kernel") != std::string::npos,
                "stateful OperatorSpecs must not become kernel tasks");
 
+    const std::string lowering_key = saved_spec.lowering_key;
+    const std::any saved_lowering = add_node->attrs.at(lowering_key);
+    add_node->attrs[lowering_key] = kxc::relay::FRelayToTE{};
+    const std::string empty_hook_error = ErrorText([&] {
+        (void)kxc::api::LowerRelayToControlPlan(
+            Function({gate_x, gate_y}, Add(gate_x, gate_y)));
+    });
+    add_node->attrs[lowering_key] = saved_lowering;
+    TEST_CHECK(empty_hook_error.find("wrong type or is empty") !=
+                   std::string::npos,
+               "empty TE hooks must fail before an unresolved task is prepared");
+
     Var duplicate("duplicate", kI64);
     const std::string duplicate_error = ErrorText([&] {
         (void)kxc::api::LowerRelayToControlPlan(Function({duplicate}, Tuple({duplicate, duplicate})));
     });
     TEST_CHECK(duplicate_error.find("duplicate graph output") != std::string::npos,
-               "ControlPlan v1 graph outputs must be unique");
+               "ControlPlan v2 graph outputs must be unique");
 
     Var ordinary_predicate("ordinary_predicate", TensorType({}, "bool"));
     Var a("a", kI64), b("b", kI64);

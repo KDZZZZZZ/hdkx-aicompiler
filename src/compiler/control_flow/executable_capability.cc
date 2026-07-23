@@ -231,21 +231,35 @@ private:
         }
         const auto* infer =
             std::any_cast<relay::FInferType>(&relation->second);
-        if (!infer) {
+        if (!infer || !*infer) {
             Fail(path, "Call", "operator_implementation_binding",
-                 "type relation binding has the wrong type");
+                 "type relation binding has the wrong type or is empty");
         }
         if (op->spec.lowering_kind ==
-                relay::OperatorLoweringKind::kSingleTE &&
-            !std::any_cast<relay::FRelayToTE>(&lowering->second)) {
-            Fail(path, "Call", "operator_implementation_binding",
-                 "single-output lowering binding has the wrong type");
+                relay::OperatorLoweringKind::kSingleTE) {
+            if (op->spec.lowering_key != "FRelayToTE") {
+                Fail(path, "Call", "operator_implementation_binding",
+                     "single-output lowering must use FRelayToTE");
+            }
+            const auto* lower =
+                std::any_cast<relay::FRelayToTE>(&lowering->second);
+            if (!lower || !*lower) {
+                Fail(path, "Call", "operator_implementation_binding",
+                     "single-output lowering binding has the wrong type or is empty");
+            }
         }
         if (op->spec.lowering_kind ==
-                relay::OperatorLoweringKind::kMultiTE &&
-            !std::any_cast<relay::FRelayToTEMulti>(&lowering->second)) {
-            Fail(path, "Call", "operator_implementation_binding",
-                 "multi-output lowering binding has the wrong type");
+                relay::OperatorLoweringKind::kMultiTE) {
+            if (op->spec.lowering_key != "FRelayToTEMulti") {
+                Fail(path, "Call", "operator_implementation_binding",
+                     "multi-output lowering must use FRelayToTEMulti");
+            }
+            const auto* lower =
+                std::any_cast<relay::FRelayToTEMulti>(&lowering->second);
+            if (!lower || !*lower) {
+                Fail(path, "Call", "operator_implementation_binding",
+                     "multi-output lowering binding has the wrong type or is empty");
+            }
         }
         Array<Type> input_types;
         for (const Expr& argument : call->args) {

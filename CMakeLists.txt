@@ -734,6 +734,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/kxc")
 
 if(KXC_BUILD_PASS_TESTS)
+  enable_testing()
   kxc_add_runtime_exe(object_test test/object_test.cpp)
   kxc_add_runtime_exe(packed_func_test test/packed_func_test.cpp)
   kxc_add_runtime_exe(registry_test test/registry_test.cpp)
@@ -757,6 +758,28 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
   kxc_add_runtime_exe(runtime_session_test test/runtime_session_test.cpp)
   kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
+
+  set(KXC_CONTROL_FLOW_TESTS
+    relay_anf_test
+    executable_capability_test
+    control_plan_test
+    control_plan_reference_executor_test
+    relay_control_plan_test)
+  foreach(_kxc_control_flow_test IN LISTS KXC_CONTROL_FLOW_TESTS)
+    add_test(NAME ${_kxc_control_flow_test}
+      COMMAND "$<TARGET_FILE:${_kxc_control_flow_test}>")
+    set_tests_properties(${_kxc_control_flow_test} PROPERTIES
+      LABELS "control-flow"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+  endforeach()
+  add_custom_target(run_control_flow_tests
+    COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
+            -L control-flow
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    DEPENDS ${KXC_CONTROL_FLOW_TESTS}
+    USES_TERMINAL
+    COMMENT "Run control-flow CTest suite")
+
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
     set(KXC_ONNX_IMPORT_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.params.bin")

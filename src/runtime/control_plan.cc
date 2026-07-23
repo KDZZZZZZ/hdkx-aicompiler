@@ -85,13 +85,13 @@ void ValidateEffects(const EffectSummary& effect, const std::vector<ValueId>& ex
     RequireUnique(effect.allocates, "effect allocates");
     if (!SameIds(effect.reads, expected_reads)) Fail(std::string(where) + " effect reads do not match inputs");
     if (!effect.writes.empty() || !effect.allocates.empty() || effect.host_callback || effect.device_sync) {
-        Fail(std::string(where) + " has an illegal v1 effect");
+        Fail(std::string(where) + " has an illegal v2 effect");
     }
 }
 
 void ValidateAlias(const AliasSummary& alias, const State& state, const char* where) {
     if (!alias.must_alias.empty() || !alias.may_alias.empty()) {
-        Fail(std::string(where) + " permits aliasing in v1");
+        Fail(std::string(where) + " permits aliasing in v2");
     }
     std::set<std::pair<ValueId, ValueId>> seen;
     for (const AliasPair pair : alias.no_alias) {
@@ -261,7 +261,7 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
             }
         }
         if (!IsDevice(task.device) || task.stream != "default") {
-            Fail("task device/stream is unsupported by ControlPlan v1");
+            Fail("task device/stream is unsupported by ControlPlan v2");
         }
         ValidateEffects(task.effect, task.inputs, "task");
         ValidateAlias(task.alias, state, "task");
@@ -271,10 +271,12 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
             unique_arguments.erase(
                 std::unique(unique_arguments.begin(), unique_arguments.end()),
                 unique_arguments.end());
-            if (task.kernel_ref.empty() || task.outputs.empty() ||
+            if (task.binding_state !=
+                    KernelBindingState::kUnresolvedRelayKernel ||
+                task.kernel_ref.empty() || task.outputs.empty() ||
                 !IsEmpty(task.branch) || !IsEmpty(task.loop) ||
                 !SameIds(task.inputs, unique_arguments)) {
-                Fail("kernel task has an invalid kind-specific contract");
+                Fail("kernel task must be an unresolved Relay kernel with a valid kind-specific contract");
             }
             for (ValueId input : task.inputs) {
                 if (Value(state, input, "kernel input").device != task.device) {
@@ -287,13 +289,15 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
                 }
             }
         } else if (task.kind == ControlTaskKind::kBranch) {
-            if (!task.kernel_ref.empty() || !task.argument_values.empty() ||
+            if (task.binding_state != KernelBindingState::kNotApplicable ||
+                !task.kernel_ref.empty() || !task.argument_values.empty() ||
                 !IsEmpty(task.loop) || task.device != Device::CPU()) {
                 Fail("branch task has an invalid kind-specific contract");
             }
             ValidateBranch(state, task, available);
         } else if (task.kind == ControlTaskKind::kLoop) {
-            if (!task.kernel_ref.empty() || !task.argument_values.empty() ||
+            if (task.binding_state != KernelBindingState::kNotApplicable ||
+                !task.kernel_ref.empty() || !task.argument_values.empty() ||
                 !IsEmpty(task.branch) || task.device != Device::CPU()) {
                 Fail("loop task has an invalid kind-specific contract");
             }
@@ -353,7 +357,7 @@ void PrintAlias(std::ostringstream& out, const AliasSummary& alias) {
 
 void VerifyControlPlan(const ControlPlan& plan) {
     if (plan.schema_version != ControlPlan::kSchemaVersion) {
-        Fail("schema_version must be 1");
+        Fail("schema_version must be 2");
     }
     if (plan.values.empty() || plan.regions.empty()) Fail("values and regions are required");
     State state(plan);
@@ -444,7 +448,7 @@ void ControlPlan::ValidateStaticExact() const { VerifyControlPlan(*this); }
 std::string ControlPlan::CanonicalText() const {
     Validate();
     std::ostringstream out;
-    out << "ControlPlan/v1\nvalues\n";
+    out << "ControlPlan/v2\nvalues\n";
     std::vector<const ControlValueSpec*> values_by_id;
     values_by_id.reserve(values.size());
     for (const ControlValueSpec& value : values) values_by_id.push_back(&value);
@@ -474,7 +478,8 @@ std::string ControlPlan::CanonicalText() const {
         out << "region " << region.id << " in="; PrintIds(out, region.live_ins); out << " out="; PrintIds(out, region.live_outs);
         out << " loc=" << Quote(region.source_locator) << " "; PrintEffect(out, region.effect); out << " "; PrintAlias(out, region.alias); out << "\n";
         for (const ControlTask& task : region.tasks) {
-            out << "  task " << task.id << " kind=" << static_cast<int>(task.kind) << " in="; PrintIds(out, task.inputs); out << " args="; PrintIds(out, task.argument_values); out << " out="; PrintIds(out, task.outputs); out << " dep="; PrintIds(out, task.dependencies);
+            out << "  task " << task.id << " kind=" << static_cast<int>(task.kind)
+                << " binding=" << static_cast<int>(task.binding_state) << " in="; PrintIds(out, task.inputs); out << " args="; PrintIds(out, task.argument_values); out << " out="; PrintIds(out, task.outputs); out << " dep="; PrintIds(out, task.dependencies);
             out << " ref=" << Quote(task.kernel_ref) << " loc=" << Quote(task.source_locator)
                 << " device=" << Quote(task.device.ToString())
                 << " stream=" << Quote(task.stream) << " "; PrintEffect(out, task.effect); out << " "; PrintAlias(out, task.alias);

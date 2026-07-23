@@ -62,6 +62,9 @@ jobs:
       - name: Build CPU targets
         run: cmake --build out/build/ci-cpu --parallel 2
 
+      - name: Run control-flow CTest suite
+        run: cmake --build out/build/ci-cpu --target run_control_flow_tests
+
       - name: Run type inference test
         run: cmake --build out/build/ci-cpu --target run_infer_type_test
 
