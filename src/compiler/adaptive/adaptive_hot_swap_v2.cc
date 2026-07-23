@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <deque>
 #include <limits>
+#include <list>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -220,11 +221,13 @@ public:
         std::shared_ptr<const GenerationLease> current;
         std::deque<std::shared_ptr<const GenerationLease>> history;
         std::unordered_set<std::string> quarantined_artifacts;
+        bool compile_blocked{false};
     };
 
     struct Negative final {
         Failure failure;
         std::chrono::steady_clock::time_point expires;
+        std::list<std::string>::iterator order;
     };
 
     State(std::shared_ptr<ProductionPathCompilerAdapter> compiler_value,
@@ -235,6 +238,9 @@ public:
             options.max_waiters_per_flight == 0 ||
             options.max_discoverable_generations == 0 ||
             options.max_producer_reported_bytes == 0 ||
+            options.max_negative_cache_entries == 0 ||
+            options.max_negative_diagnostic_bytes == 0 ||
+            options.max_quarantine_tombstones_per_route == 0 ||
             options.max_queued_flights >
                 std::numeric_limits<size_t>::max() - options.max_in_flight) {
             throw std::invalid_argument("adaptive v2 bounds are invalid");
@@ -314,6 +320,88 @@ public:
         }
     }
 
+    static bool IsPermanentNegative(const Failure& failure) noexcept {
+        return failure.category == FailureCategory::kPermanent ||
+               failure.category == FailureCategory::kUnsupported;
+    }
+
+    void EraseNegativeLocked(const std::string& key) {
+        const auto found = negative.find(key);
+        if (found == negative.end()) return;
+        negative_diagnostic_bytes -= found->second.failure.diagnostic.size();
+        negative_order.erase(found->second.order);
+        negative.erase(found);
+    }
+
+    bool EvictOldestRetryableNegativeLocked(std::vector<Event>* events) {
+        for (auto it = negative_order.begin(); it != negative_order.end(); ++it) {
+            const auto found = negative.find(*it);
+            if (found == negative.end()) continue;
+            if (IsPermanentNegative(found->second.failure)) continue;
+            Event event;
+            event.kind = EventKind::kNegativeEvicted;
+            event.diagnostic = "bounded negative-cache eviction";
+            events->push_back(std::move(event));
+            EraseNegativeLocked(*it);
+            ++negative_cache_evictions;
+            return true;
+        }
+        return false;
+    }
+
+    void RemoveExpiredNegativesLocked(
+        const std::chrono::steady_clock::time_point now, std::vector<Event>* events) {
+        for (auto it = negative_order.begin(); it != negative_order.end();) {
+            const std::string key = *it++;
+            const auto found = negative.find(key);
+            if (found != negative.end() && found->second.expires <= now) {
+                Event event;
+                event.kind = EventKind::kNegativeEvicted;
+                event.diagnostic = "expired negative-cache entry";
+                events->push_back(std::move(event));
+                EraseNegativeLocked(key);
+                ++negative_cache_evictions;
+            }
+        }
+    }
+
+    void CacheFailureLocked(const std::string& key, const Failure& failure,
+                            std::vector<Event>* events) {
+        if (failure.category == FailureCategory::kCancelled ||
+            failure.category == FailureCategory::kBackpressure ||
+            (failure.retry_after != std::chrono::milliseconds::max() &&
+             failure.retry_after <= std::chrono::milliseconds::zero())) {
+            return;
+        }
+        RemoveExpiredNegativesLocked(std::chrono::steady_clock::now(), events);
+        const bool permanent = IsPermanentNegative(failure);
+        while (negative.size() >= options.max_negative_cache_entries &&
+               EvictOldestRetryableNegativeLocked(events)) {
+        }
+        if (negative.size() >= options.max_negative_cache_entries) {
+            ++negative_cache_drops;
+            if (permanent) {
+                negative_cache_compile_blocked = true;
+                Event event;
+                event.kind = EventKind::kNegativeCacheSaturated;
+                event.diagnostic = "permanent negative-cache capacity exhausted; compilation blocked";
+                events->push_back(std::move(event));
+            }
+            return;
+        }
+        Failure cached = failure;
+        const size_t available = options.max_negative_diagnostic_bytes -
+            negative_diagnostic_bytes;
+        if (cached.diagnostic.size() > available) cached.diagnostic.resize(available);
+        const auto expires = failure.retry_after == std::chrono::milliseconds::max()
+            ? std::chrono::steady_clock::time_point::max()
+            : std::chrono::steady_clock::now() + failure.retry_after;
+        negative_order.push_back(key);
+        auto order = std::prev(negative_order.end());
+        negative.emplace(key, Negative{std::move(cached), expires, order});
+        negative_diagnostic_bytes += negative.find(key)->second.failure.diagnostic.size();
+    }
+
     void Finish(const std::shared_ptr<Flight>& flight, CompileResult result,
                 bool cache_failure) {
         Event event;
@@ -327,23 +415,19 @@ public:
             event.diagnostic = result.failure.diagnostic;
             event.retry_after = result.failure.retry_after;
         }
+        std::vector<Event> cache_events;
         {
             std::lock_guard<std::mutex> lock(mutex);
             flights.erase(flight->key);
-            if (cache_failure && result.failure.category != FailureCategory::kCancelled &&
-                result.failure.category != FailureCategory::kBackpressure) {
-                const auto ttl = result.failure.retry_after;
-                if (ttl == std::chrono::milliseconds::max()) {
-                    negative[flight->key] = Negative{result.failure,
-                        std::chrono::steady_clock::time_point::max()};
-                } else if (ttl.count() > 0) {
-                    negative[flight->key] = Negative{result.failure,
-                        std::chrono::steady_clock::now() + ttl};
-                }
-            }
+            if (cache_failure) CacheFailureLocked(flight->key, result.failure, &cache_events);
         }
         flight->promise.set_value(std::move(result));
         Emit(std::move(event));
+        for (auto& cache_event : cache_events) {
+            cache_event.dispatch_key_digest = flight->request.dispatch_key().digest();
+            cache_event.plan_abi_digest = flight->request.plan_abi().digest();
+            Emit(std::move(cache_event));
+        }
     }
 
     void Compile(const std::shared_ptr<Flight>& flight) {
@@ -368,6 +452,10 @@ public:
                 if (next_generation == std::numeric_limits<Generation>::max()) {
                     throw std::overflow_error("adaptive v2 generation space is exhausted");
                 }
+                if (negative_cache_compile_blocked) {
+                    throw CompileError(FailureCategory::kPermanent,
+                        "adaptive v2 permanent negative-cache capacity is fail-closed");
+                }
                 // Stage every allocation and eviction before replacing routing authority.
                 auto staged_routes = routes;
                 auto staged_discoverable = discoverable;
@@ -375,6 +463,10 @@ public:
                 auto route = staged_routes.find(flight->route_key);
                 if (route == staged_routes.end()) {
                     route = staged_routes.emplace(flight->route_key, Route{}).first;
+                }
+                if (route->second.compile_blocked) {
+                    throw CompileError(FailureCategory::kPermanent,
+                        "route compilation is fail-closed after quarantine tombstone saturation");
                 }
                 if (route->second.quarantined_artifacts.count(
                         flight->request.artifact_key().canonical_bytes()) != 0) {
@@ -458,6 +550,7 @@ public:
     std::unordered_map<std::string, std::shared_ptr<Flight>> flights;
     std::unordered_map<std::string, Route> routes;
     std::unordered_map<std::string, Negative> negative;
+    std::list<std::string> negative_order;
     std::deque<std::shared_ptr<const GenerationLease>> discoverable;
     std::vector<std::thread> workers;
     mutable std::atomic<size_t> callbacks{0};
@@ -467,6 +560,11 @@ public:
     uint64_t evictions{0};
     uint64_t merged_waiters{0};
     uint64_t retry_cached{0};
+    size_t negative_diagnostic_bytes{0};
+    uint64_t negative_cache_evictions{0};
+    uint64_t negative_cache_drops{0};
+    bool negative_cache_compile_blocked{false};
+    uint64_t quarantine_saturations{0};
     bool stopping{false};
 };
 
@@ -520,9 +618,16 @@ CompileTicket AdaptiveHotSwapController::Submit(CompileRequest request) {
             event.retry_after = cached->second.failure.retry_after;
             emit = true;
         } else {
-            state_->negative.erase(key);
-            const auto existing = state_->flights.find(key);
-            if (existing != state_->flights.end()) {
+            state_->EraseNegativeLocked(key);
+            if (state_->negative_cache_compile_blocked) {
+                std::promise<CompileResult> promise;
+                result = promise.get_future().share();
+                promise.set_value(Failed(MakeFailure(FailureCategory::kPermanent,
+                    "adaptive v2 permanent negative-cache capacity is fail-closed", {}, false)));
+                event.kind = EventKind::kRejected;
+                emit = true;
+            } else if (const auto existing = state_->flights.find(key);
+                       existing != state_->flights.end()) {
                 if (existing->second->waiters >= state_->options.max_waiters_per_flight) {
                     std::promise<CompileResult> promise;
                     result = promise.get_future().share();
@@ -621,6 +726,7 @@ bool AdaptiveHotSwapController::EvaluateHealth(
     }
 
     std::shared_ptr<const GenerationLease> predecessor;
+    bool tombstone_saturated = false;
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
         const auto found = state_->routes.find(RouteKey(lease->dispatch_key(), lease->plan_abi()));
@@ -633,17 +739,32 @@ bool AdaptiveHotSwapController::EvaluateHealth(
                 break;
             }
         }
+        const std::string artifact =
+            lease->variant()->artifact_lease().artifact_key().canonical_bytes();
+        if (found->second.quarantined_artifacts.count(artifact) == 0 &&
+            found->second.quarantined_artifacts.size() >=
+                state_->options.max_quarantine_tombstones_per_route) {
+            // Never evict a tombstone: blocking the route preserves fail-closed
+            // publication while a healthy predecessor remains acquirable.
+            found->second.compile_blocked = true;
+            ++state_->quarantine_saturations;
+            tombstone_saturated = true;
+        } else {
+            found->second.quarantined_artifacts.insert(artifact);
+        }
         // Quarantine is durable even when no rollback target exists: never leave
         // a verified-bad generation routable merely because it was the first one.
-        found->second.quarantined_artifacts.insert(
-            lease->variant()->artifact_lease().artifact_key().canonical_bytes());
         found->second.current = predecessor;
     }
     Event quarantined;
-    quarantined.kind = EventKind::kQuarantined;
+    quarantined.kind = tombstone_saturated ? EventKind::kQuarantineSaturated
+                                           : EventKind::kQuarantined;
     quarantined.generation = lease->generation();
     quarantined.predecessor_generation = predecessor ? predecessor->generation() : 0;
-    quarantined.diagnostic = decision.evidence_id;
+    quarantined.diagnostic = tombstone_saturated
+        ? "quarantine tombstone capacity exhausted; route publication blocked: " +
+            decision.evidence_id
+        : decision.evidence_id;
     state_->Emit(std::move(quarantined));
     if (predecessor) {
         Event rollback;
@@ -659,16 +780,43 @@ bool AdaptiveHotSwapController::EvaluateHealth(
 Snapshot AdaptiveHotSwapController::SnapshotForTesting() const {
     state_->RejectReentry();
     std::lock_guard<std::mutex> lock(state_->mutex);
+    size_t tombstones = 0;
+    size_t blocked_routes = 0;
+    for (const auto& [key, route] : state_->routes) {
+        static_cast<void>(key);
+        tombstones += route.quarantined_artifacts.size();
+        if (route.compile_blocked) ++blocked_routes;
+    }
     return Snapshot{state_->next_generation, state_->queue.size(), state_->active,
                     state_->discoverable.size(), state_->discoverable_bytes,
                     state_->evictions, state_->merged_waiters, state_->retry_cached,
-                    false, false};
+                    state_->negative.size(), state_->negative_diagnostic_bytes,
+                    state_->negative_cache_evictions, state_->negative_cache_drops,
+                    state_->negative_cache_compile_blocked, tombstones, blocked_routes,
+                    state_->quarantine_saturations, false, false};
 }
 
 void AdaptiveHotSwapController::ClearNegativeCacheForTesting() {
     state_->RejectReentry();
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->negative.clear();
+    state_->negative_order.clear();
+    state_->negative_diagnostic_bytes = 0;
+    state_->negative_cache_compile_blocked = false;
+}
+
+void AdaptiveHotSwapController::ClearQuarantinesForTesting() {
+    state_->RejectReentry();
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    for (auto it = state_->routes.begin(); it != state_->routes.end();) {
+        it->second.quarantined_artifacts.clear();
+        it->second.compile_blocked = false;
+        if (!it->second.current && it->second.history.empty()) {
+            it = state_->routes.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 }  // namespace kxc::api::adaptive::hot_swap::v2
