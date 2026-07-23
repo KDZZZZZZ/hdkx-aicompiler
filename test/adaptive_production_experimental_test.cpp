@@ -203,7 +203,8 @@ kxc::api::internal::PrimitiveArtifactPin PinPrimitive(
     const kxc::api::ArtifactKey& key,
     const kxc::codegen::KernelSignature& signature,
     const kxc::codegen::KernelLaunchMetadata& metadata,
-    std::shared_ptr<const kxc::codegen::KernelLauncher> launcher) {
+    std::shared_ptr<const kxc::codegen::KernelLauncher> launcher,
+    uint64_t byte_size = 1) {
     using namespace kxc;
     api::internal::PrimitiveCacheLease lease =
         api::internal::AcquirePrimitiveCache(key);
@@ -214,7 +215,7 @@ kxc::api::internal::PrimitiveArtifactPin PinPrimitive(
                            signature, metadata,
                            codegen::CompiledKernel(signature, metadata,
                                                    std::move(launcher)),
-                           1, "adaptive-production-path-fixture",
+                           byte_size, "adaptive-production-path-fixture",
                            "typed-launcher-validated"});
         case api::internal::PrimitiveCacheAccess::kHit:
             return lease.pin();
@@ -232,6 +233,7 @@ struct GraphOptions final {
     int64_t input_extent{2};
     uint64_t output_alignment{16};
     bool foreign_launch_metadata{false};
+    uint64_t primitive_byte_size{1};
     std::vector<std::shared_ptr<const kxc::codegen::KernelLauncher>> launchers;
 };
 
@@ -268,7 +270,8 @@ kxc::api::CompiledGraph MakeGraph(
                 ? options.launchers[index]
                 : std::make_shared<FixtureLauncher>();
         const api::internal::PrimitiveArtifactPin primitive = PinPrimitive(
-            primitive_keys[index], signature, metadata, std::move(launcher));
+            primitive_keys[index], signature, metadata, std::move(launcher),
+            options.primitive_byte_size);
         const api::ArtifactPin pin = api::internal::ToArtifactPin(primitive);
         const CompiledKernel module_kernel(
             signature, metadata, primitive.artifact().kernel->launcher);
@@ -393,6 +396,7 @@ public:
                 attack == Attack::kWrongSignature ? 32
                                                   : candidate_output_alignment;
             options.foreign_launch_metadata = attack == Attack::kWrongMetadata;
+            options.primitive_byte_size = candidate_primitive_byte_size;
             options.launchers = launchers;
             kxc::api::CompiledGraph graph =
                 MakeGraph(request.artifact_key(), keys, std::move(options));
@@ -437,6 +441,7 @@ public:
 
     int64_t candidate_input_extent{2};
     uint64_t candidate_output_alignment{16};
+    uint64_t candidate_primitive_byte_size{1};
     Attack attack{Attack::kNone};
     std::shared_ptr<Gate> compile_gate;
     std::atomic<int> failures_remaining{0};
@@ -1297,6 +1302,96 @@ bool TestV2WaitersCacheEvictionAndOverflow() {
     return true;
 }
 
+bool TestV2CriticalAuditFixes() {
+    using namespace production_path;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest request = MakeRequest();
+
+    // Cancellation must be observed after Wait has entered, not just before it.
+    auto blocked_compiler = std::make_shared<FixtureCompiler>();
+    blocked_compiler->compile_gate = std::make_shared<Gate>();
+    v2::Options blocked_options;
+    blocked_options.worker_count = 1;
+    v2::AdaptiveHotSwapController blocked(blocked_compiler, blocked_options);
+    const auto owner = blocked.Submit({request});
+    TEST_CHECK(blocked_compiler->compile_gate->WaitUntilEntered(),
+               "v2 cancellation fixture worker must block");
+    v2::CancellationSource cancellation;
+    const auto waiting = blocked.Submit(
+        {request, std::chrono::steady_clock::time_point::max(), cancellation.token()});
+    std::atomic<bool> wait_started{false};
+    std::promise<v2::CompileResult> cancelled_result;
+    auto cancelled_future = cancelled_result.get_future();
+    std::thread waiter([&] {
+        wait_started.store(true, std::memory_order_release);
+        cancelled_result.set_value(waiting.Wait());
+    });
+    TEST_CHECK(WaitFor([&] { return wait_started.load(std::memory_order_acquire); }),
+               "v2 cancellation waiter must start");
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    cancellation.Cancel();
+    TEST_CHECK(cancelled_future.wait_for(std::chrono::milliseconds(100)) ==
+                   std::future_status::ready &&
+                   cancelled_future.get().failure.category == v2::FailureCategory::kCancelled,
+               "v2 waiter cancellation must be promptly polled after Wait begins");
+    waiter.join();
+    blocked_compiler->compile_gate->Release();
+    TEST_CHECK(owner.Wait().ready(), "cancelled waiter must not cancel its shared flight");
+
+    // A rejected oversized successor must leave the predecessor routed.
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest predecessor_request = MakeRequest(1);
+    const ProductionRequest oversized_request =
+        MakeRequest(2, 2, 16, 1, SelectedKeys(predecessor_request));
+    auto budget_compiler = std::make_shared<FixtureCompiler>();
+    v2::Options budget_options;
+    budget_options.max_producer_reported_bytes = 1;
+    v2::AdaptiveHotSwapController budget(budget_compiler, budget_options);
+    const auto predecessor = budget.CompileAndPublish({predecessor_request});
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    budget_compiler->candidate_primitive_byte_size = 2;
+    const auto oversized = budget.Submit({oversized_request}).Wait();
+    TEST_CHECK(!oversized.ready() &&
+                   oversized.failure.category == v2::FailureCategory::kPermanent &&
+                   budget.Acquire(Execute(predecessor_request)) == predecessor,
+               "over-budget candidate must be rejected before replacing its predecessor");
+
+    // A first generation has no predecessor, but a verified quarantine still unroutes it.
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    v2::Options quarantine_options;
+    quarantine_options.health_authority = std::make_shared<OneShotHealth>(1);
+    auto quarantine_compiler = std::make_shared<FixtureCompiler>();
+    v2::AdaptiveHotSwapController quarantine(quarantine_compiler, quarantine_options);
+    const auto only = quarantine.CompileAndPublish({request});
+    TEST_CHECK(quarantine.EvaluateHealth(only) &&
+                   Throws([&] { (void)quarantine.Acquire(Execute(request)); }) &&
+                   !quarantine.Submit({request}).Wait().ready(),
+               "quarantining the first generation must durably unroute and reject it");
+
+    // Destroying the final controller from its worker observer must not self-join or UAF.
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    std::shared_ptr<v2::AdaptiveHotSwapController> released;
+    std::weak_ptr<v2::AdaptiveHotSwapController> released_weak;
+    std::atomic<bool> observer_released{false};
+    v2::Options release_options;
+    release_options.worker_count = 1;
+    release_options.observer = [&](const v2::Event& event) {
+        if (event.kind == v2::EventKind::kPublished &&
+            !observer_released.exchange(true, std::memory_order_acq_rel)) {
+            released.reset();
+        }
+    };
+    released = std::make_shared<v2::AdaptiveHotSwapController>(
+        std::make_shared<FixtureCompiler>(), release_options);
+    released_weak = released;
+    const auto release_ticket = released->Submit({request});
+    TEST_CHECK(release_ticket.Wait().ready() &&
+                   WaitFor([&] { return observer_released.load(std::memory_order_acquire); }) &&
+                   released_weak.expired(),
+               "worker observer may release the final controller safely");
+    return true;
+}
+
 bool TestV2HealthRollbackObserverAndAbi() {
     using namespace production_path;
     kxc::api::internal::ClearPrimitiveCacheForTesting();
@@ -1400,6 +1495,7 @@ int main() {
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
     tests.push_back({"v2_waiters_cache_eviction_overflow",
                      TestV2WaitersCacheEvictionAndOverflow});
+    tests.push_back({"v2_critical_audit_fixes", TestV2CriticalAuditFixes});
     tests.push_back({"v2_health_rollback_observer_abi",
                      TestV2HealthRollbackObserverAndAbi});
 #endif

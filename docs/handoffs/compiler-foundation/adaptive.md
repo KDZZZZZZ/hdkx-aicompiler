@@ -158,7 +158,9 @@ injection seam，`VerifyAndConsume` 是 one-shot authority；接受的 quarantin
 routing 回退到一个仍可发现的 predecessor。health evidence、resident bytes 和 numeric truth
 均非 W3 自行认证；external authentication/attestation 和 CUDA pending completion 仍不支持。
 Observer 和 health callbacks 均在锁外、异常隔离，并在 callback 窗口拒绝本 controller 的
-reentry。
+reentry。当前 negative cache 与 per-route quarantine artifact tombstones 尚无 entry cap；因此
+v2 不能称为在这些 metadata 维度上 fully bounded。取消和 backpressure 结果不进入 negative
+cache，且 queue/in-flight legacy slot 加法在构造时检查 overflow。
 
 W3 focused gate：
 

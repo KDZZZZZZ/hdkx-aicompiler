@@ -162,30 +162,42 @@ CompileResult CompileTicket::Wait() const {
     if (!result_.valid()) {
         return Failed(MakeFailure(FailureCategory::kPermanent, "invalid compile ticket", {}, false));
     }
-    if (cancellation_.cancelled()) {
-        return Failed(MakeFailure(FailureCategory::kCancelled, "waiter cancelled", {}, false));
+    constexpr auto kCancellationPoll = std::chrono::milliseconds(1);
+    for (;;) {
+        if (cancellation_.cancelled()) {
+            return Failed(MakeFailure(FailureCategory::kCancelled, "waiter cancelled", {}, false));
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline_) {
+            return Failed(MakeFailure(FailureCategory::kTimeout, "waiter deadline expired", {}, true));
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline_ - now);
+        if (remaining <= std::chrono::milliseconds::zero()) continue;
+        if (result_.wait_for(std::min(kCancellationPoll, remaining)) ==
+            std::future_status::ready) {
+            return cancellation_.cancelled()
+                ? Failed(MakeFailure(FailureCategory::kCancelled, "waiter cancelled", {}, false))
+                : result_.get();
+        }
     }
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline_) {
-        return Failed(MakeFailure(FailureCategory::kTimeout, "waiter deadline expired", {}, true));
-    }
-    if (result_.wait_until(deadline_) != std::future_status::ready) {
-        return Failed(MakeFailure(FailureCategory::kTimeout, "waiter deadline expired", {}, true));
-    }
-    if (cancellation_.cancelled()) {
-        return Failed(MakeFailure(FailureCategory::kCancelled, "waiter cancelled", {}, false));
-    }
-    return result_.get();
 }
 
 std::future_status CompileTicket::WaitFor(std::chrono::milliseconds timeout) const {
-    if (!result_.valid() || cancellation_.cancelled() ||
-        std::chrono::steady_clock::now() >= deadline_) {
-        return std::future_status::timeout;
+    if (!result_.valid()) return std::future_status::timeout;
+    constexpr auto kCancellationPoll = std::chrono::milliseconds(1);
+    const auto finish = std::min(deadline_, std::chrono::steady_clock::now() + timeout);
+    for (;;) {
+        if (cancellation_.cancelled() || std::chrono::steady_clock::now() >= finish) {
+            return std::future_status::timeout;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            finish - std::chrono::steady_clock::now());
+        if (remaining <= std::chrono::milliseconds::zero()) continue;
+        if (result_.wait_for(std::min(kCancellationPoll, remaining)) ==
+            std::future_status::ready) {
+            return std::future_status::ready;
+        }
     }
-    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadline_ - std::chrono::steady_clock::now());
-    return result_.wait_for(std::min(timeout, remaining));
 }
 
 class AdaptiveHotSwapController::State final
@@ -222,7 +234,9 @@ public:
             options.max_queued_flights == 0 || options.max_in_flight == 0 ||
             options.max_waiters_per_flight == 0 ||
             options.max_discoverable_generations == 0 ||
-            options.max_producer_reported_bytes == 0) {
+            options.max_producer_reported_bytes == 0 ||
+            options.max_queued_flights >
+                std::numeric_limits<size_t>::max() - options.max_in_flight) {
             throw std::invalid_argument("adaptive v2 bounds are invalid");
         }
         legacy::AdaptiveControllerOptions legacy_options;
@@ -233,20 +247,31 @@ public:
         compiler = std::make_unique<legacy::AdaptiveController>(
             std::move(compiler_value), std::move(legacy_options));
         next_generation = options.initial_generation;
+    }
+
+    void StartWorkers() {
         workers.reserve(options.worker_count);
         for (size_t index = 0; index < options.worker_count; ++index) {
             workers.emplace_back([this] { Worker(); });
         }
     }
 
-    ~State() {
+    ~State() { Stop(); }
+
+    void Stop() {
         {
             std::lock_guard<std::mutex> lock(mutex);
             stopping = true;
         }
         wake.notify_all();
+        const std::thread::id self = std::this_thread::get_id();
         for (auto& worker : workers) {
-            if (worker.joinable()) worker.join();
+            if (!worker.joinable()) continue;
+            if (worker.get_id() == self) {
+                worker.detach();
+            } else {
+                worker.join();
+            }
         }
     }
 
@@ -267,6 +292,9 @@ public:
     }
 
     void Worker() {
+        // An observer may release the final controller reference on this thread.
+        // Keep State alive until the worker has observed shutdown and returned.
+        const std::shared_ptr<State> keep_alive = shared_from_this();
         for (;;) {
             std::shared_ptr<Flight> flight;
             {
@@ -302,7 +330,8 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex);
             flights.erase(flight->key);
-            if (cache_failure) {
+            if (cache_failure && result.failure.category != FailureCategory::kCancelled &&
+                result.failure.category != FailureCategory::kBackpressure) {
                 const auto ttl = result.failure.retry_after;
                 if (ttl == std::chrono::milliseconds::max()) {
                     negative[flight->key] = Negative{result.failure,
@@ -326,47 +355,61 @@ public:
                     "candidate exact dispatch or PlanAbi compatibility mismatch");
             }
             const uint64_t bytes = ProducerBytes(*candidate);
+            if (bytes > options.max_producer_reported_bytes) {
+                throw CompileError(FailureCategory::kPermanent,
+                    "candidate exceeds adaptive v2 producer byte budget");
+            }
+
             std::shared_ptr<const GenerationLease> lease;
-            Generation predecessor = 0;
+            Event published;
             std::vector<Event> evictions;
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                Route& route = routes[flight->route_key];
-                if (route.quarantined_artifacts.count(
+                if (next_generation == std::numeric_limits<Generation>::max()) {
+                    throw std::overflow_error("adaptive v2 generation space is exhausted");
+                }
+                // Stage every allocation and eviction before replacing routing authority.
+                auto staged_routes = routes;
+                auto staged_discoverable = discoverable;
+                uint64_t staged_bytes = discoverable_bytes;
+                auto route = staged_routes.find(flight->route_key);
+                if (route == staged_routes.end()) {
+                    route = staged_routes.emplace(flight->route_key, Route{}).first;
+                }
+                if (route->second.quarantined_artifacts.count(
                         flight->request.artifact_key().canonical_bytes()) != 0) {
                     throw CompileError(FailureCategory::kPermanent,
                         "candidate whole-plan identity is quarantined");
                 }
-                if (next_generation == std::numeric_limits<Generation>::max()) {
-                    throw std::overflow_error("adaptive v2 generation space is exhausted");
-                }
-                predecessor = route.current ? route.current->generation() : 0;
-                if (bytes > std::numeric_limits<uint64_t>::max() -
-                                discoverable_bytes) {
+                if (bytes > std::numeric_limits<uint64_t>::max() - staged_bytes) {
                     throw std::overflow_error(
                         "adaptive v2 discoverable byte accounting overflow");
                 }
                 lease = std::shared_ptr<const GenerationLease>(
                     new GenerationLease(next_generation, candidate, bytes));
-                ++next_generation;
-                route.current = lease;
-                route.history.push_back(lease);
-                discoverable.push_back(lease);
-                discoverable_bytes += bytes;
-                EvictLocked(&evictions);
-            }
-            Event published;
-            published.kind = EventKind::kPublished;
-            published.generation = lease->generation();
-            published.predecessor_generation = predecessor;
-            published.producer_reported_bytes = bytes;
-            published.dispatch_key_digest = lease->dispatch_key().digest();
-            published.plan_abi_digest = lease->plan_abi().digest();
-            flight->promise.set_value(CompileResult{lease, {}});
-            {
-                std::lock_guard<std::mutex> lock(mutex);
+                const Generation predecessor =
+                    route->second.current ? route->second.current->generation() : 0;
+                route->second.current = lease;
+                route->second.history.push_back(lease);
+                staged_discoverable.push_back(lease);
+                staged_bytes += bytes;
+                EvictStaged(&staged_routes, &staged_discoverable, &staged_bytes, &evictions);
+
+                published.kind = EventKind::kPublished;
+                published.generation = lease->generation();
+                published.predecessor_generation = predecessor;
+                published.producer_reported_bytes = bytes;
+                published.dispatch_key_digest = lease->dispatch_key().digest();
+                published.plan_abi_digest = lease->plan_abi().digest();
+
+                routes.swap(staged_routes);
+                discoverable.swap(staged_discoverable);
+                discoverable_bytes = staged_bytes;
+                next_generation = lease->generation() + 1;
+                this->evictions += evictions.size();
                 flights.erase(flight->key);
             }
+            flight->promise.set_value(CompileResult{lease, {}});
             Emit(std::move(published));
             for (auto& event : evictions) Emit(std::move(event));
         } catch (const std::exception& error) {
@@ -377,27 +420,26 @@ public:
         }
     }
 
-    void EvictLocked(std::vector<Event>* events) {
-        while (!discoverable.empty() &&
-               (discoverable.size() > options.max_discoverable_generations ||
-                discoverable_bytes > options.max_producer_reported_bytes)) {
-            const auto lease = discoverable.front();
-            discoverable.pop_front();
-            discoverable_bytes -= lease->producer_reported_bytes();
+    void EvictStaged(std::unordered_map<std::string, Route>* staged_routes,
+                     std::deque<std::shared_ptr<const GenerationLease>>* staged_discoverable,
+                     uint64_t* staged_bytes, std::vector<Event>* events) const {
+        while (!staged_discoverable->empty() &&
+               (staged_discoverable->size() > options.max_discoverable_generations ||
+                *staged_bytes > options.max_producer_reported_bytes)) {
+            const auto lease = staged_discoverable->front();
+            staged_discoverable->pop_front();
+            *staged_bytes -= lease->producer_reported_bytes();
             const std::string key = RouteKey(lease->dispatch_key(), lease->plan_abi());
-            const auto route = routes.find(key);
-            if (route != routes.end()) {
+            const auto route = staged_routes->find(key);
+            if (route != staged_routes->end()) {
                 auto& history = route->second.history;
                 history.erase(std::remove(history.begin(), history.end(), lease), history.end());
-                if (route->second.current == lease) {
-                    route->second.current.reset();
-                }
+                if (route->second.current == lease) route->second.current.reset();
                 if (!route->second.current && history.empty() &&
                     route->second.quarantined_artifacts.empty()) {
-                    routes.erase(route);
+                    staged_routes->erase(route);
                 }
             }
-            ++evictions;
             Event event;
             event.kind = EventKind::kEvicted;
             event.generation = lease->generation();
@@ -430,9 +472,13 @@ public:
 
 AdaptiveHotSwapController::AdaptiveHotSwapController(
     std::shared_ptr<ProductionPathCompilerAdapter> compiler, Options options)
-    : state_(std::make_shared<State>(std::move(compiler), std::move(options))) {}
+    : state_(std::make_shared<State>(std::move(compiler), std::move(options))) {
+    state_->StartWorkers();
+}
 
-AdaptiveHotSwapController::~AdaptiveHotSwapController() = default;
+AdaptiveHotSwapController::~AdaptiveHotSwapController() {
+    if (state_) state_->Stop();
+}
 
 CompileTicket AdaptiveHotSwapController::Submit(CompileRequest request) {
     state_->RejectReentry();
@@ -587,7 +633,8 @@ bool AdaptiveHotSwapController::EvaluateHealth(
                 break;
             }
         }
-        if (!predecessor) return false;
+        // Quarantine is durable even when no rollback target exists: never leave
+        // a verified-bad generation routable merely because it was the first one.
         found->second.quarantined_artifacts.insert(
             lease->variant()->artifact_lease().artifact_key().canonical_bytes());
         found->second.current = predecessor;
@@ -595,15 +642,17 @@ bool AdaptiveHotSwapController::EvaluateHealth(
     Event quarantined;
     quarantined.kind = EventKind::kQuarantined;
     quarantined.generation = lease->generation();
-    quarantined.predecessor_generation = predecessor->generation();
+    quarantined.predecessor_generation = predecessor ? predecessor->generation() : 0;
     quarantined.diagnostic = decision.evidence_id;
     state_->Emit(std::move(quarantined));
-    Event rollback;
-    rollback.kind = EventKind::kRolledBack;
-    rollback.generation = predecessor->generation();
-    rollback.predecessor_generation = lease->generation();
-    rollback.diagnostic = decision.evidence_id;
-    state_->Emit(std::move(rollback));
+    if (predecessor) {
+        Event rollback;
+        rollback.kind = EventKind::kRolledBack;
+        rollback.generation = predecessor->generation();
+        rollback.predecessor_generation = lease->generation();
+        rollback.diagnostic = decision.evidence_id;
+        state_->Emit(std::move(rollback));
+    }
     return true;
 }
 
