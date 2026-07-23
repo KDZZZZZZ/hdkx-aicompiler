@@ -204,7 +204,8 @@ kxc::api::internal::PrimitiveArtifactPin PinPrimitive(
     const kxc::codegen::KernelSignature& signature,
     const kxc::codegen::KernelLaunchMetadata& metadata,
     std::shared_ptr<const kxc::codegen::KernelLauncher> launcher,
-    uint64_t byte_size = 1) {
+    uint64_t byte_size = 1,
+    std::string provenance = "adaptive-production-path-fixture") {
     using namespace kxc;
     api::internal::PrimitiveCacheLease lease =
         api::internal::AcquirePrimitiveCache(key);
@@ -215,7 +216,7 @@ kxc::api::internal::PrimitiveArtifactPin PinPrimitive(
                            signature, metadata,
                            codegen::CompiledKernel(signature, metadata,
                                                    std::move(launcher)),
-                           byte_size, "adaptive-production-path-fixture",
+                           byte_size, std::move(provenance),
                            "typed-launcher-validated"});
         case api::internal::PrimitiveCacheAccess::kHit:
             return lease.pin();
@@ -234,6 +235,7 @@ struct GraphOptions final {
     uint64_t output_alignment{16};
     bool foreign_launch_metadata{false};
     uint64_t primitive_byte_size{1};
+    std::string primitive_provenance{"adaptive-production-path-fixture"};
     std::vector<std::shared_ptr<const kxc::codegen::KernelLauncher>> launchers;
 };
 
@@ -271,7 +273,7 @@ kxc::api::CompiledGraph MakeGraph(
                 : std::make_shared<FixtureLauncher>();
         const api::internal::PrimitiveArtifactPin primitive = PinPrimitive(
             primitive_keys[index], signature, metadata, std::move(launcher),
-            options.primitive_byte_size);
+            options.primitive_byte_size, options.primitive_provenance);
         const api::ArtifactPin pin = api::internal::ToArtifactPin(primitive);
         const CompiledKernel module_kernel(
             signature, metadata, primitive.artifact().kernel->launcher);
@@ -350,7 +352,7 @@ std::vector<kxc::api::ArtifactKey> SelectedKeys(
 
 enum class Attack {
     kNone,
-    kWrongKeySameLauncher,
+    kDistinctSelection,
     kWrongSignature,
     kWrongMetadata,
     kWrongOrder,
@@ -385,9 +387,9 @@ public:
                     kxc::api::internal::ProductionArtifactAccess::Pin(pin)
                         .artifact().kernel->launcher);
             }
-            if (attack == Attack::kWrongKeySameLauncher) {
-                keys[0] = MakePrimitiveKey(request.config(), 0, "wrong-key");
-                same_launcher_attack.store(true, std::memory_order_relaxed);
+            if (attack == Attack::kDistinctSelection) {
+                keys[0] = MakePrimitiveKey(request.config(), 0, "distinct-selection");
+                launchers[0] = std::make_shared<FixtureLauncher>();
             }
 
             GraphOptions options;
@@ -397,6 +399,7 @@ public:
                                                   : candidate_output_alignment;
             options.foreign_launch_metadata = attack == Attack::kWrongMetadata;
             options.primitive_byte_size = candidate_primitive_byte_size;
+            options.primitive_provenance = candidate_primitive_provenance;
             options.launchers = launchers;
             kxc::api::CompiledGraph graph =
                 MakeGraph(request.artifact_key(), keys, std::move(options));
@@ -449,7 +452,7 @@ public:
     std::atomic<int> active{0};
     std::atomic<int> peak_active{0};
     std::atomic<int> observed_opt_level{-1};
-    std::atomic<bool> same_launcher_attack{false};
+    std::string candidate_primitive_provenance{"adaptive-production-path-fixture"};
 
 private:
     mutable std::mutex launcher_mutex;
@@ -527,7 +530,6 @@ bool TestSameKeySingleflightAndGraphIdentity() {
 bool TestArtifactAuthorityRejectsAttacks() {
     using namespace production_path;
     const std::vector<std::pair<Attack, const char*>> attacks = {
-        {Attack::kWrongKeySameLauncher, "same launcher with wrong primitive key"},
         {Attack::kWrongSignature, "same launcher with wrong signature"},
         {Attack::kWrongMetadata, "same launcher with wrong launch metadata"},
         {Attack::kCorruptBinding, "forged binding digest"},
@@ -544,11 +546,18 @@ bool TestArtifactAuthorityRejectsAttacks() {
                    description);
         TEST_CHECK(controller.Snapshot().published == 0,
                    "an artifact authority failure must never publish");
-        if (attack == Attack::kWrongKeySameLauncher) {
-            TEST_CHECK(compiler->same_launcher_attack.load(),
-                       "wrong-key attack must intentionally reuse the launcher");
-        }
     }
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest baseline = MakeRequest();
+    auto changed_contract = std::make_shared<FixtureCompiler>();
+    changed_contract->attack = Attack::kDistinctSelection;
+    changed_contract->candidate_primitive_byte_size = 2;
+    changed_contract->candidate_primitive_provenance = "distinct-producer";
+    AdaptiveController changed_contract_controller(changed_contract);
+    TEST_CHECK(changed_contract_controller.CompileAndPublish(baseline) != nullptr &&
+                   changed_contract_controller.Snapshot().published == 1,
+               "a distinct selection may replace an ABI-compatible callable");
 
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest ordered = MakeRequest(1, 2, 16, 2);
@@ -1239,6 +1248,165 @@ public:
     }
 };
 
+class ReentrantHealth final : public v2::HealthAuthority {
+public:
+    void SetController(v2::AdaptiveHotSwapController* controller) {
+        controller_ = controller;
+    }
+    v2::HealthDecision Evaluate(const v2::GenerationLease& lease) override {
+        return {lease.generation(), v2::HealthDisposition::kHealthy,
+                "fixture-health", "reentry"};
+    }
+    bool VerifyAndConsume(const v2::HealthDecision&,
+                          const v2::GenerationLease&) noexcept override {
+        reentry_rejected_ = Throws([&] { (void)controller_->SnapshotForTesting(); });
+        return reentry_rejected_;
+    }
+    bool reentry_rejected() const noexcept { return reentry_rejected_; }
+private:
+    v2::AdaptiveHotSwapController* controller_{nullptr};
+    bool reentry_rejected_{false};
+};
+
+class UniqueReceiptValidation final : public v2::CandidateValidationAuthority {
+public:
+    v2::ValidationReceipt Validate(const ProductionRequest&, const kxc::api::CompiledGraph&) override {
+        return IssueReceipt("fixture-receipt-" + std::to_string(next_++));
+    }
+private:
+    uint64_t next_{1};
+};
+
+class ReplayGenerationAuthority final : public v2::GenerationAuthority {
+public:
+    std::shared_ptr<const v2::GenerationLease> Issue(
+        const v2::GenerationAuthorityRequest& request) override {
+        if (first_) return first_;
+        first_ = MakeLease(9, request);
+        return first_;
+    }
+    v2::Generation NextGenerationForTesting() const noexcept override { return 10; }
+private:
+    std::shared_ptr<const v2::GenerationLease> first_;
+};
+
+class ScriptedGenerationAuthority final : public v2::GenerationAuthority {
+public:
+    explicit ScriptedGenerationAuthority(std::vector<v2::Generation> generations)
+        : generations_(std::move(generations)) {}
+    std::shared_ptr<const v2::GenerationLease> Issue(
+        const v2::GenerationAuthorityRequest& request) override {
+        return MakeLease(generations_.at(index_++), request);
+    }
+    v2::Generation NextGenerationForTesting() const noexcept override { return 99; }
+private:
+    std::vector<v2::Generation> generations_;
+    size_t index_{0};
+};
+
+class BlockingGenerationAuthority final : public v2::GenerationAuthority {
+public:
+    explicit BlockingGenerationAuthority(std::shared_ptr<Gate> gate) : gate_(std::move(gate)) {}
+    void SetController(v2::AdaptiveHotSwapController* controller) {
+        controller_ = controller;
+    }
+    bool reentry_rejected() const noexcept { return reentry_rejected_; }
+    std::shared_ptr<const v2::GenerationLease> Issue(
+        const v2::GenerationAuthorityRequest& request) override {
+        if (controller_) {
+            reentry_rejected_ = Throws([&] { (void)controller_->SnapshotForTesting(); });
+        }
+        gate_->EnterAndWait();
+        return MakeLease(1, request);
+    }
+    v2::Generation NextGenerationForTesting() const noexcept override { return 2; }
+private:
+    std::shared_ptr<Gate> gate_;
+    v2::AdaptiveHotSwapController* controller_{nullptr};
+    bool reentry_rejected_{false};
+};
+
+class RecordingGenerationAuthority final : public v2::GenerationAuthority {
+public:
+    std::shared_ptr<const v2::GenerationLease> Issue(
+        const v2::GenerationAuthorityRequest& request) override {
+        ++issues_;
+        last_selection_ = request.selection_artifact;
+        last_candidate_ = request.candidate;
+        return MakeLease(next_++, request);
+    }
+
+    v2::Generation NextGenerationForTesting() const noexcept override {
+        return next_;
+    }
+
+    size_t issues() const noexcept { return issues_; }
+    const kxc::api::ArtifactKey& last_selection() const noexcept {
+        return last_selection_;
+    }
+    const std::shared_ptr<const production_path::PreparedCandidate>&
+    last_candidate() const noexcept {
+        return last_candidate_;
+    }
+
+private:
+    v2::Generation next_{41};
+    size_t issues_{0};
+    kxc::api::ArtifactKey last_selection_;
+    std::shared_ptr<const production_path::PreparedCandidate> last_candidate_;
+};
+
+bool TestV2AuthorityBindingMonotonicityAndCancellationRace() {
+    using namespace production_path;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest request = MakeRequest();
+
+    auto replay_authority = std::make_shared<ReplayGenerationAuthority>();
+    v2::Options replay_options;
+    replay_options.validation_authority = std::make_shared<UniqueReceiptValidation>();
+    replay_options.generation_authority = replay_authority;
+    v2::AdaptiveHotSwapController replay(std::make_shared<FixtureCompiler>(), replay_options);
+    const auto first = replay.CompileAndPublish({request});
+    const auto replayed = replay.Submit({request}).Wait();
+    TEST_CHECK(!replayed.ready() && replayed.failure.category == v2::FailureCategory::kPermanent &&
+                   replay.Acquire(Execute(request)) == first,
+               "a returned lease must bind this candidate validation receipt");
+
+    auto scripted_authority = std::make_shared<ScriptedGenerationAuthority>(
+        std::vector<v2::Generation>{7, 6, 7, 8});
+    v2::Options monotonic_options;
+    monotonic_options.generation_authority = scripted_authority;
+    v2::AdaptiveHotSwapController monotonic(std::make_shared<FixtureCompiler>(), monotonic_options);
+    const auto seven = monotonic.CompileAndPublish({request});
+    const auto lower = monotonic.Submit({request}).Wait();
+    monotonic.ClearNegativeCacheForTesting();
+    const auto duplicate = monotonic.Submit({request}).Wait();
+    monotonic.ClearNegativeCacheForTesting();
+    const auto eight = monotonic.CompileAndPublish({request});
+    TEST_CHECK(seven->generation() == 7 && !lower.ready() && !duplicate.ready() &&
+                   eight->generation() == 8 && monotonic.Acquire(Execute(request)) == eight,
+               "injected authorities cannot publish decreasing or duplicate generations");
+
+    auto gate = std::make_shared<Gate>();
+    auto race_authority = std::make_shared<BlockingGenerationAuthority>(gate);
+    v2::Options race_options;
+    race_options.generation_authority = race_authority;
+    v2::AdaptiveHotSwapController race(std::make_shared<FixtureCompiler>(), race_options);
+    race_authority->SetController(&race);
+    v2::CancellationSource source;
+    const auto ticket = race.Submit({request, std::chrono::steady_clock::time_point::max(), source.token()});
+    TEST_CHECK(gate->WaitUntilEntered(), "authority must reach the publication linearization race");
+    std::thread cancelling([&] { source.Cancel(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    gate->Release();
+    cancelling.join();
+    TEST_CHECK(ticket.Wait().failure.category == v2::FailureCategory::kCancelled &&
+                   race.Acquire(Execute(request))->generation() == 1 &&
+                   race_authority->reentry_rejected(),
+               "commit may win only when its publication-mutex linearization precedes Cancel, and Issue reentry must fail fast");
+    return true;
+}
+
 bool TestV2WaitersCacheEvictionAndOverflow() {
     using namespace production_path;
     kxc::api::internal::ClearPrimitiveCacheForTesting();
@@ -1540,8 +1708,14 @@ bool TestV2BoundedFailureAndQuarantineMetadata() {
                    invalid.max_negative_cache_entries = 0;
                    v2::AdaptiveHotSwapController rejected(
                        std::make_shared<FixtureCompiler>(), invalid);
-               }),
-               "metadata bounds must be validated");
+               }) &&
+                   Throws([&] {
+                       v2::Options invalid;
+                       invalid.initial_generation = 0;
+                       v2::AdaptiveHotSwapController rejected(
+                           std::make_shared<FixtureCompiler>(), invalid);
+                   }),
+               "metadata bounds and the initial generation must be validated");
     return true;
 }
 
@@ -1589,6 +1763,174 @@ bool TestV2HealthRollbackObserverAndAbi() {
     observed = &observed_controller;
     TEST_CHECK(observed_controller.Submit({request}).Wait().ready() && reentry_rejected,
                "observer reentry must fail fast and remain isolated");
+    return true;
+}
+
+bool TestV2DistinctSelectionAndOpaqueLeaseBinding() {
+    using namespace production_path;
+    using namespace kxc;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    auto baseline_launcher = std::make_shared<FixtureLauncher>();
+    const ProductionRequest request = MakeRequest(1, 2, 16, 1, {}, baseline_launcher);
+    auto compiler = std::make_shared<FixtureCompiler>();
+    auto authority = std::make_shared<RecordingGenerationAuthority>();
+    v2::Options options;
+    options.generation_authority = authority;
+    v2::AdaptiveHotSwapController controller(compiler, options);
+
+    const auto baseline = controller.CompileAndPublish({request});
+    controller.RunAsync(Execute(request), {runtime::NDArray::Zeros({2}, Float32(), Device::CPU())},
+                        DeviceStream::Default(Device::CPU())).completion.Wait();
+    compiler->attack = Attack::kDistinctSelection;
+    compiler->candidate_primitive_byte_size = 2;
+    compiler->candidate_primitive_provenance = "distinct-producer";
+    const auto selected = controller.CompileAndPublish({request});
+    const auto selected_launcher = compiler->LastLauncher();
+    controller.RunAsync(Execute(request), {runtime::NDArray::Zeros({2}, Float32(), Device::CPU())},
+                        DeviceStream::Default(Device::CPU())).completion.Wait();
+    baseline->variant()->session()->RunAsync(
+        {runtime::NDArray::Zeros({2}, Float32(), Device::CPU())},
+        DeviceStream::Default(Device::CPU())).completion.Wait();
+
+    TEST_CHECK(request.dispatch_key() == baseline->dispatch_key() &&
+                   request.dispatch_key() == selected->dispatch_key() &&
+                   request.plan_abi() == baseline->plan_abi() &&
+                   request.plan_abi() == selected->plan_abi() &&
+                   baseline->generation() < selected->generation(),
+               "same callable ABI may publish distinct selected generations");
+    TEST_CHECK(baseline->selection_artifact_key() != selected->selection_artifact_key() &&
+                   selected_launcher && selected_launcher != baseline_launcher &&
+                   baseline_launcher->launches.load() == 2 &&
+                   selected_launcher->launches.load() == 1,
+               "N and N+1 must retain and independently execute distinct launchers");
+    TEST_CHECK(authority->issues() == 2 && authority->last_candidate() &&
+                   authority->last_selection() == selected->selection_artifact_key() &&
+                   selected->variant()->artifact_lease().artifact_key() ==
+                       selected->selection_artifact_key(),
+               "only the authority may bind the opaque generation lease to its prepared selection");
+    return true;
+}
+
+bool TestV2TransactionalCancellationAndGlobalBounds() {
+    using namespace production_path;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest base = MakeRequest();
+    const ProductionRequest successor =
+        MakeRequest(2, 2, 16, 1, SelectedKeys(base));
+    std::atomic<int> injected{-1};
+    v2::Options transactional_options;
+    transactional_options.worker_count = 1;
+    transactional_options.max_producer_reported_bytes = 1024;
+    transactional_options.fail_publication_stage = [&](v2::PublicationStage stage) {
+        return injected.load(std::memory_order_relaxed) == static_cast<int>(stage);
+    };
+    auto transactional_compiler = std::make_shared<FixtureCompiler>();
+    v2::AdaptiveHotSwapController transactional(transactional_compiler,
+                                                 transactional_options);
+    const auto predecessor = transactional.CompileAndPublish({base});
+    const auto before = transactional.SnapshotForTesting();
+    for (int stage = static_cast<int>(v2::PublicationStage::kByteBudget);
+         stage <= static_cast<int>(v2::PublicationStage::kFinalCommit); ++stage) {
+        injected.store(stage, std::memory_order_relaxed);
+        const auto rejected = transactional.Submit({successor}).Wait();
+        TEST_CHECK(!rejected.ready() &&
+                       transactional.Acquire(Execute(base)) == predecessor &&
+                       transactional.SnapshotForTesting().next_generation == before.next_generation,
+                   "every injected pre-commit failure must preserve route head and authority generation");
+        transactional.ClearNegativeCacheForTesting();
+    }
+    injected.store(-1, std::memory_order_relaxed);
+    TEST_CHECK(transactional.CompileAndPublish({successor})->generation() ==
+                   predecessor->generation() + 1,
+               "a transaction may publish only after all injected stages pass");
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    auto gated = std::make_shared<FixtureCompiler>();
+    gated->compile_gate = std::make_shared<Gate>();
+    v2::Options cancellation_options;
+    cancellation_options.worker_count = 1;
+    v2::AdaptiveHotSwapController cancellation(gated, cancellation_options);
+    const auto owner = cancellation.Submit({base});
+    TEST_CHECK(gated->compile_gate->WaitUntilEntered(), "owner must occupy the only worker");
+    v2::CancellationSource queued_cancel;
+    const auto queued = cancellation.Submit(
+        {successor, std::chrono::steady_clock::time_point::max(), queued_cancel.token()});
+    queued_cancel.Cancel();  // No Wait: controller owns/rechecks this demand.
+    gated->compile_gate->Release();
+    TEST_CHECK(owner.Wait().ready() &&
+                   queued.Wait().failure.category == v2::FailureCategory::kCancelled &&
+                   gated->calls.load() == 1,
+               "all-cancelled queued flight must not enter the backend");
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    auto inflight_compiler = std::make_shared<FixtureCompiler>();
+    inflight_compiler->compile_gate = std::make_shared<Gate>();
+    v2::AdaptiveHotSwapController inflight(inflight_compiler, cancellation_options);
+    v2::CancellationSource inflight_cancel;
+    const auto inflight_ticket = inflight.Submit(
+        {base, std::chrono::steady_clock::time_point::max(), inflight_cancel.token()});
+    TEST_CHECK(inflight_compiler->compile_gate->WaitUntilEntered(), "in-flight backend must enter");
+    inflight_cancel.Cancel();  // Backend hard cancel is intentionally unsupported.
+    inflight_compiler->compile_gate->Release();
+    TEST_CHECK(inflight_ticket.Wait().failure.category == v2::FailureCategory::kCancelled &&
+                   Throws([&] { (void)inflight.Acquire(Execute(base)); }),
+               "all-cancelled in-flight work may finish but must not publish");
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    std::atomic<int> route_events{0};
+    v2::Options global_options;
+    global_options.worker_count = 1;
+    global_options.max_routes = 1;
+    global_options.max_route_metadata_bytes = 4096;
+    global_options.observer = [&](const v2::Event& event) {
+        if (event.kind == v2::EventKind::kRouteSaturated) ++route_events;
+    };
+    auto global_compiler = std::make_shared<FixtureCompiler>();
+    v2::AdaptiveHotSwapController global(global_compiler, global_options);
+    (void)global.CompileAndPublish({base});
+    global_compiler->candidate_output_alignment = 32;
+    const kxc::api::CompileConfig other_abi_config =
+        kxc::api::CompileConfig::Create(kxc::BuildTarget(kxc::Device::CPU()), 1);
+    const ProductionRequest other_abi = MakeRequestFromConfig(
+        MakeFunction(), other_abi_config, 2, 32, 1,
+        {MakePrimitiveKey(other_abi_config, 0, "global-other-abi")});
+    TEST_CHECK(other_abi.plan_abi() != base.plan_abi(),
+               "global saturation fixture must identify a distinct exact route");
+    const auto route_rejection = global.Submit({other_abi}).Wait();
+    TEST_CHECK(!route_rejection.ready() &&
+                   global.SnapshotForTesting().routes == 1 &&
+                   WaitFor([&] { return route_events.load() == 1; }),
+               "global route count saturation must fail closed and emit an event");
+    return true;
+}
+
+bool TestV2ConcurrentHealthConsumption() {
+    using namespace production_path;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest base = MakeRequest();
+    const ProductionRequest successor = MakeRequest(2, 2, 16, 1, SelectedKeys(base));
+    v2::Options options;
+    options.health_authority = std::make_shared<OneShotHealth>(2);
+    options.max_producer_reported_bytes = 1024;
+    v2::AdaptiveHotSwapController controller(std::make_shared<FixtureCompiler>(), options);
+    const auto old = controller.CompileAndPublish({base});
+    const auto current = controller.CompileAndPublish({successor});
+    std::atomic<int> consumed{0};
+    std::thread first([&] { if (controller.EvaluateHealth(current)) ++consumed; });
+    std::thread second([&] { if (controller.EvaluateHealth(current)) ++consumed; });
+    first.join(); second.join();
+    TEST_CHECK(consumed.load() == 1 && controller.Acquire(Execute(base)) == old,
+               "serialized health consumption must consume a current lease once without stale burn");
+
+    auto reentrant_health = std::make_shared<ReentrantHealth>();
+    v2::Options reentrant_options;
+    reentrant_options.health_authority = reentrant_health;
+    v2::AdaptiveHotSwapController reentrant(std::make_shared<FixtureCompiler>(),
+                                             reentrant_options);
+    reentrant_health->SetController(&reentrant);
+    TEST_CHECK(reentrant.EvaluateHealth(reentrant.CompileAndPublish({base})) &&
+                   reentrant_health->reentry_rejected(),
+               "health verification reentry must fail fast rather than deadlock");
     return true;
 }
 #endif
@@ -1646,6 +1988,8 @@ int main() {
          TestStaticExactRuntimeAndSlotBoundaries},
     };
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+    tests.push_back({"v2_authority_binding_monotonicity_cancellation_race",
+                     TestV2AuthorityBindingMonotonicityAndCancellationRace});
     tests.push_back({"v2_waiters_cache_eviction_overflow",
                      TestV2WaitersCacheEvictionAndOverflow});
     tests.push_back({"v2_critical_audit_fixes", TestV2CriticalAuditFixes});
@@ -1653,6 +1997,12 @@ int main() {
                      TestV2BoundedFailureAndQuarantineMetadata});
     tests.push_back({"v2_health_rollback_observer_abi",
                      TestV2HealthRollbackObserverAndAbi});
+    tests.push_back({"v2_distinct_selection_opaque_lease",
+                     TestV2DistinctSelectionAndOpaqueLeaseBinding});
+    tests.push_back({"v2_transactional_cancellation_global_bounds",
+                     TestV2TransactionalCancellationAndGlobalBounds});
+    tests.push_back({"v2_concurrent_health_consumption",
+                     TestV2ConcurrentHealthConsumption});
 #endif
 #if KXC_USE_LLVM
     tests.push_back(

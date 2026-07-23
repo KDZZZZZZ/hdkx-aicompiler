@@ -57,8 +57,7 @@ void AppendShape(std::string* out, const Array<int64_t>& shape,
 
 void AppendValueContract(std::string* out,
                          const runtime::ValueSpec& value) {
-    AppendInteger(out, "value_id", value->value_id);
-    AppendInteger(out, "storage_id", value->storage_id);
+    // Graph-local value/storage ids are locators, not reusable ABI identity.
     AppendInteger(out, "dtype_code", value->dtype.code);
     AppendInteger(out, "dtype_bits", value->dtype.bits);
     AppendInteger(out, "dtype_lanes", value->dtype.lanes);
@@ -355,7 +354,10 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     plan.Validate();
     std::string canonical;
-    AppendField(&canonical, "kind", "static-exact-plan-abi-v3");
+    // v4 is intentionally a new byte contract.  It covers callable/runtime
+    // ABI only; selected artifacts and their generations/receipts are PlanVariant
+    // selection identity and must never affect compatibility.
+    AppendField(&canonical, "kind", "static-exact-plan-abi-v4-callable-runtime");
     AppendTargetContract(&canonical, ModuleTarget(module));
     const Array<runtime::KernelCall> calls = plan.calls();
     if (ordered_artifacts.size() != calls.size()) {
@@ -369,23 +371,29 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
             throw std::invalid_argument(
                 "plan ABI ordered artifact mapping differs from its call");
         }
-        AppendField(&canonical, "ordered_artifact",
-                    artifact.CanonicalBytes());
     }
     for (const auto& value : plan.values()) {
         AppendField(&canonical, "value_begin", "v1");
         AppendValueContract(&canonical, value);
     }
+    std::unordered_map<int64_t, size_t> value_ordinals;
+    for (size_t ordinal = 0; ordinal < plan.values().size(); ++ordinal) {
+        value_ordinals.emplace(plan.values()[ordinal]->value_id, ordinal);
+    }
     for (const auto& call : calls) {
         AppendField(&canonical, "call_symbol", std::string(call->symbol));
         for (int64_t id : call.input_value_ids()) {
-            AppendInteger(&canonical, "call_input", id);
+            const auto found = value_ordinals.find(id);
+            if (found == value_ordinals.end()) throw std::invalid_argument("plan ABI call input is absent");
+            AppendInteger(&canonical, "call_input_ordinal", found->second);
         }
-        AppendField(&canonical, "call_inputs_end", "v1");
+        AppendField(&canonical, "call_inputs_end", "v2");
         for (int64_t id : call.output_value_ids()) {
-            AppendInteger(&canonical, "call_output", id);
+            const auto found = value_ordinals.find(id);
+            if (found == value_ordinals.end()) throw std::invalid_argument("plan ABI call output is absent");
+            AppendInteger(&canonical, "call_output_ordinal", found->second);
         }
-        AppendField(&canonical, "call_outputs_end", "v1");
+        AppendField(&canonical, "call_outputs_end", "v2");
         const codegen::KernelSignature signature =
             module.signature(call->symbol);
         const codegen::KernelLaunchMetadata metadata =
@@ -396,18 +404,17 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
         AppendField(&canonical, "launch_metadata", metadata.ToString());
     }
     for (int64_t id : plan.input_value_ids()) {
-        AppendInteger(&canonical, "graph_input", id);
+        AppendInteger(&canonical, "graph_input_ordinal", value_ordinals.at(id));
     }
-    AppendField(&canonical, "graph_inputs_end", "v1");
+    AppendField(&canonical, "graph_inputs_end", "v2");
     for (int64_t id : plan.constant_value_ids()) {
-        AppendInteger(&canonical, "graph_constant", id);
+        AppendInteger(&canonical, "graph_constant_ordinal", value_ordinals.at(id));
     }
-    AppendField(&canonical, "graph_constants_end", "v1");
+    AppendField(&canonical, "graph_constants_end", "v2");
     for (int64_t id : plan.output_value_ids()) {
-        AppendInteger(&canonical, "graph_output", id);
+        AppendInteger(&canonical, "graph_output_ordinal", value_ordinals.at(id));
     }
-    AppendField(&canonical, "graph_outputs_end", "v1");
-
+    AppendField(&canonical, "graph_outputs_end", "v2");
     std::vector<std::pair<std::string, runtime::NDArray>> constants;
     for (const auto& item : module.constants()) {
         constants.emplace_back(std::string(item.first), item.second);
