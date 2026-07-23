@@ -169,13 +169,104 @@ bool TestExactFirstGuardAndBucketContract() {
   auto forged_abi_version = r97;
   forged_abi_version[0].exact_oracle_key = shape::ShapeProfileKey(
       graph.key(), graph.content_key(), BindingSet({Binding{"s", 97}}), "exact", 2);
+  auto forged_call_index = r97;
+  forged_call_index[0].ordered_call_index = 1;
+  auto forged_locator = r97;
+  forged_locator[0].call_locator = GraphLocalCallLocator("forged.call");
+  auto forged_input_order = r97;
+  forged_input_order[0].ordered_inputs.push_back(r97[0].ordered_inputs[0]);
+  auto forged_output_order = r97;
+  forged_output_order[0].ordered_outputs.clear();
+  auto forged_rank = r97;
+  forged_rank[0].ordered_inputs[0].logical.push_back(1);
+  auto forged_stride = r97;
+  forged_stride[0].ordered_inputs[0].strides = {2};
+  auto forged_byte_overflow = r97;
+  forged_byte_overflow[0].ordered_outputs[0].physical = {
+      std::numeric_limits<int64_t>::max() / 4 + 1};
+  forged_byte_overflow[0].ordered_outputs[0].strides = {1};
+  auto forged_dtype = r97;
+  forged_dtype[0].ordered_inputs[0].abi = TensorAbiDescriptor(
+      DataType::kFloat16, DeviceDescriptor(DeviceKind::kCpu, 0),
+      graph.key().target_backend_abi());
+  auto forged_device_kind = r97;
+  forged_device_kind[0].ordered_inputs[0].abi = TensorAbiDescriptor(
+      DataType::kFloat32, DeviceDescriptor(DeviceKind::kCuda, 0),
+      graph.key().target_backend_abi());
+  auto forged_device_id = r97;
+  forged_device_id[0].ordered_inputs[0].abi = TensorAbiDescriptor(
+      DataType::kFloat32, DeviceDescriptor(DeviceKind::kCpu, 1),
+      graph.key().target_backend_abi());
+  auto forged_target = r97;
+  forged_target[0].ordered_inputs[0].abi = TensorAbiDescriptor(
+      DataType::kFloat32, DeviceDescriptor(DeviceKind::kCpu, 0),
+      TargetBackendAbiDescriptor(TargetKind::kAArch64, BackendKind::kLlvm, 1));
+  auto forged_backend = r97;
+  forged_backend[0].ordered_inputs[0].abi = TensorAbiDescriptor(
+      DataType::kFloat32, DeviceDescriptor(DeviceKind::kCpu, 0),
+      TargetBackendAbiDescriptor(TargetKind::kX86_64, BackendKind::kNative, 1));
+  auto forged_backend_abi = r97;
+  forged_backend_abi[0].ordered_inputs[0].abi = TensorAbiDescriptor(
+      DataType::kFloat32, DeviceDescriptor(DeviceKind::kCpu, 0),
+      TargetBackendAbiDescriptor(TargetKind::kX86_64, BackendKind::kLlvm, 2));
+  auto forged_guard = r97;
+  forged_guard[0].guard_canonical = "ApplicabilityGuard(forged)";
+  const auto alternate_profile = BuildBucketProfile(
+      graph, s97, Bucket(graph, Guard(1, 128), 256));
+  const auto alternate_requests = MakeGuardedSpecializationRequests(
+      graph, alternate_profile);
+  CHECK(alternate_requests[0].artifact_key.kind() == r97[0].artifact_key.kind() &&
+            alternate_requests[0].artifact_key.unit_semantic_key() ==
+                r97[0].artifact_key.unit_semantic_key() &&
+            alternate_requests[0].artifact_key.CanonicalBytes() !=
+                r97[0].artifact_key.CanonicalBytes(),
+        "artifact-payload negative must differ only in canonical policy payload");
+  auto forged_artifact_payload = r97;
+  forged_artifact_payload[0].artifact_key = alternate_requests[0].artifact_key;
+  auto missing_request = r97;
+  missing_request.pop_back();
+
   fake::GuardedDeterministicMockCoordinator coordinator;
-  CHECK(Throws([&] { (void)coordinator.Resolve(forged_content); }),
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_content); }),
         "guarded resolver must reject same key/different full template binding");
-  CHECK(Throws([&] { (void)coordinator.Resolve(forged_abi_version); }),
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_abi_version); }),
         "guarded resolver must reject an unsupported exact-oracle shape ABI");
-  const auto selected97 = coordinator.Resolve(r97);
-  const auto selected128 = coordinator.Resolve(r128);
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_call_index); }),
+        "guarded resolver must reject a forged ordered call index");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_locator); }),
+        "guarded resolver must reject a forged call locator");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_input_order); }),
+        "guarded resolver must reject forged ordered input contracts");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_output_order); }),
+        "guarded resolver must reject forged ordered output contracts");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_rank); }),
+        "guarded resolver must reject a forged concrete rank");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_stride); }),
+        "guarded resolver must reject a forged noncanonical stride");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_byte_overflow); }),
+        "guarded resolver must reject a forged physical byte overflow");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_dtype); }),
+        "guarded resolver must reject a forged dtype");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_device_kind); }),
+        "guarded resolver must reject a forged device kind");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_device_id); }),
+        "guarded resolver must reject a forged device id");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_target); }),
+        "guarded resolver must reject a forged target");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_backend); }),
+        "guarded resolver must reject a forged backend");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_backend_abi); }),
+        "guarded resolver must reject a forged backend ABI version");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_guard); }),
+        "guarded resolver must reject a forged canonical guard");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, forged_artifact_payload); }),
+        "guarded resolver must reject a forged guarded artifact payload");
+  CHECK(Throws([&] { (void)coordinator.Resolve(graph, p97, missing_request); }),
+        "guarded resolver must reject a missing ordered request");
+  CHECK(coordinator.unique_resolve_count() == 0,
+        "rejected guarded requests must not mutate coordinator state");
+  const auto selected97 = coordinator.Resolve(graph, p97, r97);
+  const auto selected128 = coordinator.Resolve(graph, p128, r128);
   CHECK(coordinator.unique_resolve_count() == 1, "full guarded artifact keys must deterministically reuse the bucket");
   CHECK(Throws([&] { (void)BuildBucketProfile(graph, s129, policy); }),
         "S=129 must reject at the guard before fake resolution");
@@ -287,8 +378,8 @@ bool TestPolymorphicGuardedContract() {
         }), "missing allowlist/proof must reject");
 
   fake::GuardedDeterministicMockCoordinator coordinator;
-  const auto selected = coordinator.Resolve(r64);
-  (void)coordinator.Resolve(r96);
+  const auto selected = coordinator.Resolve(graph, p64, r64);
+  (void)coordinator.Resolve(graph, p96, r96);
   CHECK(coordinator.unique_resolve_count() == 1,
         "in-domain polymorphic requests must share one full guarded artifact");
   fake::GuardedDeterministicMockPlanAssembler assembler;

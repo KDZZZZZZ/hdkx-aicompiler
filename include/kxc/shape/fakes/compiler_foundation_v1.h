@@ -6,6 +6,9 @@
 
 #include "kxc/shape/guarded_specialization.h"
 
+// This installed header exposes only an experimental-v1 deterministic test
+// contract. It is not a Compiler/Runtime/cache API and promises neither source
+// compatibility nor binary ABI compatibility across versions.
 namespace kxc::shape::experimental::v1::fakes::compiler_foundation_v1 {
 
 inline constexpr uint32_t kContractVersion = 1;
@@ -116,6 +119,7 @@ class GuardedFakeSelectedArtifact {
 class GuardedDeterministicMockCoordinator {
  public:
   [[nodiscard]] std::vector<GuardedFakeSelectedArtifact> Resolve(
+      const GraphTemplate& graph_template, const GuardedShapeProfile& profile,
       const std::vector<GuardedUnitSpecializationRequest>& requests);
   [[nodiscard]] size_t unique_resolve_count() const noexcept;
 

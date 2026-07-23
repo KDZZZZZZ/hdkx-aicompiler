@@ -682,18 +682,30 @@ std::string EntrySymbol(const GuardedArtifactKey& key) {
   return "guarded_fake_v1_entry_" + hex;
 }
 
-void VerifyRequest(const GuardedUnitSpecializationRequest& request) {
-  if (request.guard_canonical.empty() ||
-      request.shape_profile_key.shape_abi_version() != kShapeAbiVersion ||
-      request.exact_oracle_key.shape_abi_version() != kShapeAbiVersion ||
-      request.exact_oracle_key.policy_id() != "exact" ||
-      !(request.shape_profile_key.graph_template() == request.exact_oracle_key.graph_template()) ||
-      !(request.shape_profile_key.graph_template_content() ==
-        request.exact_oracle_key.graph_template_content()) ||
-      !(request.shape_profile_key.bindings() == request.exact_oracle_key.bindings()) ||
-      request.kind != request.artifact_key.kind() ||
-      (request.ordered_inputs.empty() && request.ordered_outputs.empty())) {
-    Invalid("request has incompatible guarded profile, kind, guard, or artifact");
+void VerifyRequest(const GuardedUnitSpecializationRequest& request,
+                   const GuardedUnitSpecializationRequest& expected) {
+  if (request.ordered_call_index != expected.ordered_call_index) {
+    Invalid("request ordered call index does not match the guarded profile");
+  }
+  if (!(request.call_locator == expected.call_locator)) {
+    Invalid("request call locator does not match the graph template");
+  }
+  if (!(request.shape_profile_key == expected.shape_profile_key) ||
+      !(request.exact_oracle_key == expected.exact_oracle_key) ||
+      request.kind != expected.kind) {
+    Invalid("request profile identity does not match the guarded profile");
+  }
+  if (request.guard_canonical != expected.guard_canonical) {
+    Invalid("request guard does not match the canonical profile guard");
+  }
+  if (request.ordered_inputs != expected.ordered_inputs) {
+    Invalid("request ordered input concrete contracts do not match the guarded profile");
+  }
+  if (request.ordered_outputs != expected.ordered_outputs) {
+    Invalid("request ordered output concrete contracts do not match the guarded profile");
+  }
+  if (!(request.artifact_key == expected.artifact_key)) {
+    Invalid("request guarded artifact key payload does not match the template and policy");
   }
 }
 
@@ -712,11 +724,19 @@ const std::string& GuardedFakeSelectedArtifact::entry_symbol() const noexcept { 
 uint64_t GuardedFakeSelectedArtifact::generation() const noexcept { return 0; }
 
 std::vector<GuardedFakeSelectedArtifact> GuardedDeterministicMockCoordinator::Resolve(
+    const GraphTemplate& graph_template, const GuardedShapeProfile& profile,
     const std::vector<GuardedUnitSpecializationRequest>& requests) {
+  const auto expected = MakeGuardedSpecializationRequests(graph_template, profile);
+  if (requests.size() != expected.size()) {
+    Invalid("request count does not match the graph template");
+  }
+  for (size_t index = 0; index < requests.size(); ++index) {
+    VerifyRequest(requests[index], expected[index]);
+  }
+
   std::vector<GuardedFakeSelectedArtifact> result;
-  result.reserve(requests.size());
-  for (const auto& request : requests) {
-    VerifyRequest(request);
+  result.reserve(expected.size());
+  for (const auto& request : expected) {
     if (std::find(unique_artifacts_.begin(), unique_artifacts_.end(), request.artifact_key) == unique_artifacts_.end()) {
       unique_artifacts_.push_back(request.artifact_key);
     }

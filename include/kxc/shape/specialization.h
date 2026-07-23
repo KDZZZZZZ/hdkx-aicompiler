@@ -7,6 +7,9 @@
 
 #include "kxc/shape/shape.h"
 
+// This installed header exposes only experimental-v1 specialization
+// contracts. It is not a stable kxc::shape API and promises neither source
+// compatibility nor binary ABI compatibility across versions.
 namespace kxc::shape::experimental::v1 {
 
 class ExactOracle;

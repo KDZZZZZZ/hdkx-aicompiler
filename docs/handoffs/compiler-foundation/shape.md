@@ -4,7 +4,7 @@
 >
 > **基线：** `e295a73`（compiler-foundation roadmap）
 >
-> **状态：** 第二轮修复后的隔离 Shape contract 是 **experimental review candidate**；没有稳定 public v1，也不代表 production Shape 完成。生产 Relay/Frontend/Runtime/Codegen 接入仍受下文 Core/Adaptive/Runtime/Region contract 阻塞。
+> **状态：** guarded resolver 基线 blocker 已关闭；隔离 Shape contract 仍只是 **experimental review candidate**，没有稳定 public v1，也不代表 production Shape 完成。生产 Relay/Frontend/Runtime/Codegen 接入仍受下文 Core/Adaptive/Runtime/Region contract 阻塞。
 >
 > **重要边界：** 本页不宣称生产主链已经支持 dynamic shape、bucket kernel、polymorphic launch、dynamic output allocation 或稳定 Shape ABI。bucket/polymorphic 仍只有 guarded deterministic fake。
 
@@ -17,9 +17,10 @@
 实验头：`include/kxc/shape/shape.h`
 
 - ABI 暴露边界：
-  - 全部隔离 API 位于 `kxc::shape::experimental::v1`；稳定的 `kxc::shape` public v1 尚不存在。
-  - `kShapeContractVersion = 1`、`kShapeAbiVersion = 1` 只描述 experimental canonical format，不承诺跨版本 C++ ABI。
-  - guarded fake 类型只从 `include/kxc/shape/fakes/compiler_foundation_v1.h` 暴露。
+  - 四个 Shape 头由 `kxc_shape_api` 的 public header file set 安装/export；“experimental”表示可供隔离 contract 消费和测试，不表示未安装。
+  - 每个 installed header 都显式标记 experimental v1；全部隔离 API 位于 `kxc::shape::experimental::v1`，稳定的 `kxc::shape` public v1 尚不存在。
+  - `kShapeContractVersion = 1`、`kShapeAbiVersion = 1` 只描述 experimental canonical format；不承诺跨版本 source compatibility、binary C++ ABI 或稳定 public API。
+  - guarded fake 类型只从 `include/kxc/shape/fakes/compiler_foundation_v1.h` 暴露；该头另行声明它不是 Compiler/Runtime/cache API。
 - `DimExpr`
   - `Const(n >= 0)`、`Symbol(name)`、`Add`、`Mul`、`FloorDiv(positive_const)`、`Min`、`Max`。
   - `Add`/`Mul`/`Min`/`Max` 做确定性的 flatten、排序、常量折叠和去重。
@@ -119,7 +120,9 @@ namespace：`kxc::shape::experimental::v1::fakes::compiler_foundation_v1`
   - 因此多个请求只能在同一显式 guard 和完整证明相同时共享；不存在 `cached_dims >= query_dims` 路由。
 - guarded deterministic fake
   - bucket/polymorphic 没有 production resolver、compiler 或 runtime 路径；相关 fake 类型仅在 `kxc::shape::experimental::v1::fakes::compiler_foundation_v1`。
-  - `GuardedDeterministicMockCoordinator` 和 `GuardedDeterministicMockPlanAssembler` 保持 generation `0`、完整 key 比较和有序 assembly。
+  - `GuardedDeterministicMockCoordinator::Resolve` 在边界接收可信 `const GraphTemplate` 和由 private policy 状态 mint 的 `const GuardedShapeProfile`，调用 `MakeGuardedSpecializationRequests` 重建完整 expected sequence；调用者提供的 mutable request 只作为待验证输入。
+  - resolver 在改变去重状态前逐 ordinal 比较 call index/locator、profile/exact identity、kind、guard canonical、有序 input/output concrete contract（rank、logical/physical/valid、canonical stride、axis/layout/alignment/scope、dtype/device/target/backend ABI）和完整 `GuardedArtifactKey` kind/semantic/payload；数量或任一字段不符即拒绝。
+  - 去重、entry symbol 和 selected artifact 一律使用重建的 expected request，不保存调用者对象；`GuardedDeterministicMockPlanAssembler` 继续保持 generation `0`、完整 key 比较和有序 assembly。
   - fake frozen plan 同时保留 concrete logical/valid、guarded physical、tail/runtime-extent metadata；不执行任何数据面操作。
 
 ## 2. 文件与依赖边界
@@ -145,6 +148,7 @@ namespace：`kxc::shape::experimental::v1::fakes::compiler_foundation_v1`
 - `CMakeLists.txt` 新增独立 `kxc_shape_api`、`kxc_shape_obj` 和三个 focused test target。
 - `tools/architecture/check_include_layers.py` 将 Shape 设为只允许依赖自身的底层模块。
 - Shape experimental 头只 include Shape/stdlib；没有 include `kxc/compiler/*`、`kxc/relay/*`、`kxc/runtime/*`、frontend 或 private header。
+- 安装 smoke 已确认四个头落在 `${prefix}/include/kxc/shape[/fakes]`，且安装副本均保留 experimental-v1/no-source-or-binary-ABI-compatibility 标记。
 - `.github/workflows/ci.yml` 的 CPU job 明确执行三个 `run_shape_*` target，而不再只编译 test executable。
 - 未修改生产 Relay、type inference、lowering、`KernelSignature`、`ValueSpec`、memory planner、`RuntimeSession`、cache 或 frontend。
 
@@ -177,7 +181,7 @@ cmake --build out/shape-phase1 --target \
 - Pass contract：19/19 passed。
 - `git diff --check` passed。
 
-覆盖的关键负例包括：`-1`/负维、常量和 binding-time overflow、derived stride/physical byte overflow、未知 layout、zero/overlap/noncanonical stride、未绑定/矛盾 constraint、显式 gated SameRank/LayoutCompatible、非法 broadcast/range/divisibility、logical/physical/valid 越界、same key/different full template oracle、f32/f16、device kind/id、target/backend/ABI miss、非 exact profile、larger exact artifact 误复用、consumer-before-producer、bucket 无 guard/tail/pad/crop、capacity 过小、错误 physical stride、polymorphic 域外/整除失败/缺 proof/runtime scalar/错误 ordinal。
+覆盖的关键负例包括：`-1`/负维、常量和 binding-time overflow、derived stride/physical byte overflow、未知 layout、zero/overlap/noncanonical stride、未绑定/矛盾 constraint、显式 gated SameRank/LayoutCompatible、非法 broadcast/range/divisibility、logical/physical/valid 越界、same key/different full template oracle、f32/f16、device kind/id、target/backend/ABI miss、非 exact profile、larger exact artifact 误复用、consumer-before-producer、bucket 无 guard/tail/pad/crop、capacity 过小、错误 physical stride、polymorphic 域外/整除失败/缺 proof/runtime scalar/错误 ordinal。guarded resolver 边界另覆盖 forged call order/locator、input/output sequence、rank、noncanonical stride、physical byte overflow、dtype、device kind/id、target、backend、backend ABI、guard canonical、完整 artifact payload 和缺失 request；全部拒绝且不污染 coordinator 状态。
 
 ### 3.2 ASan + UBSan
 
@@ -225,7 +229,8 @@ cmake --build out/shape-sanitize --target \
 3. `0911f1b feat(shape): add guarded optimized profiles`
 4. `0cc1f1a fix(shape): disambiguate guarded request check`
 5. `2755501 docs(shape): add compiler foundation handoff`
-6. 第二轮 supervisor fix：当前原子提交（strong ABI identity、full-template oracle、strict layout、CI 与本 handoff 更新）
+6. `fb96107 fix(shape): harden experimental exact contracts`
+7. 当前原子提交（guarded resolver trusted reconstruction、forged-request negatives、installed-header ABI 标记与本 handoff 更新）
 
 未 push、未 merge，也未修改其他 worktree。
 
@@ -303,6 +308,6 @@ ShapeEvalTask -> AllocateTask -> KernelTask
 
 ## 7. 交接判定
 
-本工作树当前只提供可复审的 **isolated experimental contract**：Shape IR、exact solver、强类型 tensor/environment identity、full-template-bound exact oracle、严格 contiguous layout，以及 guarded bucket/polymorphic fake 与正反例。它不是稳定 public v1，也不是 production Shape 完成声明。
+本工作树当前只提供可复审的 **isolated experimental contract**：Shape IR、exact solver、强类型 tensor/environment identity、full-template-bound exact oracle、严格 contiguous layout，以及从可信 template/profile/policy 重建并验证 request 的 guarded bucket/polymorphic fake 与正反例。installed experimental headers 不承诺 source/binary ABI compatibility；它们不是稳定 public v1，也不是 production Shape 完成声明。
 
 未完成项仍需要其他轨道的生产 contract 或数据面：Core identity/capability/cache、Relay/frontend symbolic representation、Adaptive lifecycle、Runtime physical plan、Codegen extent ABI、Region task vocabulary。故状态为 **experimental review candidate / stable public ABI and production integration not done**；不通过侵入现有 Relay/Runtime、`-1` 或 `cached_dims >= query_dims` 绕过依赖。

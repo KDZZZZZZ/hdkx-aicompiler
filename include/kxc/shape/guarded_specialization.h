@@ -8,6 +8,9 @@
 
 #include "kxc/shape/specialization.h"
 
+// This installed header exposes only experimental-v1 guarded specialization
+// contracts. It is not a stable kxc::shape API and promises neither source
+// compatibility nor binary ABI compatibility across versions.
 namespace kxc::shape::experimental::v1 {
 
 // Versioned contract DTOs only.  They do not allocate, compile, launch, or

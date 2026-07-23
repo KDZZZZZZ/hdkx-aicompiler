@@ -6,9 +6,11 @@
 #include <string>
 #include <vector>
 
+// This installed header exposes only an experimental-v1 contract/canonical
+// format. It is not a stable kxc::shape API and promises neither source
+// compatibility nor binary ABI compatibility across versions.
 namespace kxc::shape::experimental::v1 {
 
-// This isolated contract is intentionally not a stable kxc::shape public ABI.
 inline constexpr uint32_t kShapeContractVersion = 1;
 inline constexpr uint32_t kShapeAbiVersion = 1;
 
