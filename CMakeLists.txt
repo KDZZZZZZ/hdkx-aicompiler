@@ -37,6 +37,7 @@ set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/inclu
 set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
+  include/kxc/compiler/control_flow.h
   include/kxc/compiler/lowering/relay_to_tir.h
   include/kxc/distributed/ccl_backend.h
   include/kxc/distributed/dref.h
@@ -424,6 +425,7 @@ set(KXC_COMPILER_SOURCES
     src/compiler/cache/primitive_cache.cc
     src/compiler/compile_config.cc
   src/compiler/control_flow/executable_capability.cc
+  src/compiler/control_flow/relay_control_plan.cc
   src/compiler/compile_state.cc
   src/compiler/compiler.cc
   src/compiler/graph/partition.cc
@@ -745,6 +747,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
+  kxc_add_runtime_exe(relay_control_plan_test test/relay_control_plan_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
