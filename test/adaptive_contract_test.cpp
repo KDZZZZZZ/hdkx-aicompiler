@@ -2,6 +2,7 @@
  * \brief Validates strong exact keys and immutable adaptive artifacts.
  */
 
+#include <chrono>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -33,7 +34,7 @@ bool Throws(const std::function<void()>& function) {
 }
 
 class FakeExecutable final
-    : public kxc::api::adaptive::ArtifactExecutable {
+    : public kxc::api::experimental::adaptive::v1::ArtifactExecutable {
 public:
     FakeExecutable(std::string name, bool ready = true)
         : name_(std::move(name)), ready_(ready) {}
@@ -46,13 +47,20 @@ private:
     bool ready_{true};
 };
 
-using kxc::api::adaptive::CompileRequest;
-using kxc::api::adaptive::DispatchKey;
-using kxc::api::adaptive::KernelArtifact;
-using kxc::api::adaptive::KernelArtifactKey;
-using kxc::api::adaptive::KernelSlotKey;
-using kxc::api::adaptive::PlanAbiFingerprint;
-using kxc::api::adaptive::RequestKind;
+namespace adaptive = kxc::api::experimental::adaptive::v1;
+
+using adaptive::ArtifactValidationRecord;
+using adaptive::ArtifactValidationToken;
+using adaptive::CompileRequest;
+using adaptive::DispatchKey;
+using adaptive::GenerationHealthDisposition;
+using adaptive::GenerationHealthRecord;
+using adaptive::GenerationHealthToken;
+using adaptive::KernelArtifact;
+using adaptive::KernelArtifactKey;
+using adaptive::KernelSlotKey;
+using adaptive::PlanAbiFingerprint;
+using adaptive::RequestKind;
 
 KernelArtifactKey ArtifactKey(std::string slot = "unit:add|target:cpu",
                               std::string artifact = "pipeline:p0|backend:fake-v1") {
@@ -61,6 +69,8 @@ KernelArtifactKey ArtifactKey(std::string slot = "unit:add|target:cpu",
 }
 
 bool TestStrongCanonicalKeys() {
+    static_assert(adaptive::kExperimentalApiVersion == 1);
+    static_assert(!adaptive::kProductionReady);
     static_assert(!std::is_convertible_v<std::string, KernelSlotKey>);
     static_assert(!std::is_same_v<KernelSlotKey, PlanAbiFingerprint>);
     static_assert(!std::is_same_v<DispatchKey, PlanAbiFingerprint>);
@@ -105,21 +115,63 @@ bool TestCompileRequestValidationAndSchedulingSeparation() {
     const KernelArtifactKey key = ArtifactKey();
     const DispatchKey dispatch = DispatchKey::Exact("f32[2,3]|contiguous");
     const PlanAbiFingerprint abi("args:input-f32[2,3],output-f32[2,3]");
+    const auto demand_deadline =
+        std::chrono::steady_clock::time_point(std::chrono::seconds(10));
+    const auto prewarm_deadline =
+        std::chrono::steady_clock::time_point(std::chrono::seconds(20));
     const CompileRequest demand(key, dispatch, abi, "model@1",
-                                RequestKind::kDemand, 100);
+                                RequestKind::kDemand, 100,
+                                demand_deadline);
     const CompileRequest prewarm(key, dispatch, abi, "model@1",
-                                 RequestKind::kPrewarm, -10);
+                                 RequestKind::kPrewarm, -10,
+                                 prewarm_deadline);
     TEST_CHECK(demand.artifact_key() == prewarm.artifact_key() &&
                    demand.dispatch_key() == prewarm.dispatch_key() &&
                    demand.required_abi() == prewarm.required_abi() &&
                    demand.kind() != prewarm.kind() &&
-                   demand.priority() != prewarm.priority(),
+                   demand.priority() != prewarm.priority() &&
+                   demand.deadline() != prewarm.deadline() &&
+                   demand.expired(demand_deadline),
                "scheduling fields must stay separate from compile identity");
     TEST_CHECK(Throws([&] {
                    CompileRequest invalid(key, dispatch, abi, "",
                                           RequestKind::kDemand);
                }),
                "empty model revision should fail");
+    return true;
+}
+
+bool TestImmutableAuthorityRecords() {
+    const KernelArtifactKey key = ArtifactKey();
+    const DispatchKey dispatch = DispatchKey::Exact("exact:f32[2,3]");
+    const PlanAbiFingerprint abi("abi:v1");
+    const ArtifactValidationRecord validation(
+        "validation:1", key, dispatch, abi, 4096,
+        ArtifactValidationToken("opaque-validation-token"));
+    const GenerationHealthRecord health(
+        "health:1", key.slot_key(), key, dispatch, abi, 7,
+        GenerationHealthDisposition::kQuarantined, "runtime-check:1",
+        GenerationHealthToken("opaque-health-token"));
+
+    static_assert(std::is_same_v<
+                  decltype(validation.artifact_key()),
+                  const KernelArtifactKey&>);
+    static_assert(!std::is_copy_assignable_v<ArtifactValidationRecord>);
+    static_assert(!std::is_move_assignable_v<GenerationHealthRecord>);
+    static_assert(std::is_same_v<decltype(health.disposition()),
+                                 GenerationHealthDisposition>);
+    TEST_CHECK(validation.artifact_key() == key &&
+                   validation.dispatch_key() == dispatch &&
+                   validation.compatible_abi() == abi &&
+                   validation.artifact_bytes() == 4096 &&
+                   health.artifact_key() == key &&
+                   health.compatible_abi() == abi && health.generation() == 7 &&
+                   health.disposition() ==
+                       GenerationHealthDisposition::kQuarantined,
+               "authority records must remain exactly bound immutable values");
+    TEST_CHECK(Throws([] { ArtifactValidationToken invalid(""); }) &&
+                   Throws([] { GenerationHealthToken invalid(""); }),
+               "opaque tokens must reject empty values");
     return true;
 }
 
@@ -180,6 +232,7 @@ int main() {
          TestFullStructuredArtifactEquality},
         {"compile_request_validation_and_scheduling_separation",
          TestCompileRequestValidationAndSchedulingSeparation},
+        {"immutable_authority_records", TestImmutableAuthorityRecords},
         {"immutable_artifact_owns_typed_executable",
          TestImmutableArtifactOwnsTypedExecutable},
     };

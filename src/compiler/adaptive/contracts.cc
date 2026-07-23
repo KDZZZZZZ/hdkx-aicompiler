@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace kxc::api::adaptive {
+namespace kxc::api::experimental::adaptive::v1 {
 
 DispatchKey DispatchKey::Exact(std::string canonical) {
     return DispatchKey(std::move(canonical));
@@ -30,17 +30,18 @@ KernelArtifactKey::KernelArtifactKey(KernelSlotKey slot_key,
     }
 }
 
-CompileRequest::CompileRequest(KernelArtifactKey artifact_key,
-                               DispatchKey dispatch_key,
-                               PlanAbiFingerprint required_abi,
-                               std::string model_revision, RequestKind kind,
-                               int priority)
+CompileRequest::CompileRequest(
+    KernelArtifactKey artifact_key, DispatchKey dispatch_key,
+    PlanAbiFingerprint required_abi, std::string model_revision,
+    RequestKind kind, int priority,
+    std::chrono::steady_clock::time_point deadline)
     : artifact_key_(std::move(artifact_key)),
       dispatch_key_(std::move(dispatch_key)),
       required_abi_(std::move(required_abi)),
       model_revision_(std::move(model_revision)),
       kind_(kind),
-      priority_(priority) {
+      priority_(priority),
+      deadline_(deadline) {
     if (model_revision_.empty()) {
         throw std::invalid_argument(
             "compile request model revision must not be empty");
@@ -79,6 +80,66 @@ KernelArtifact::KernelArtifact(
     }
 }
 
+ArtifactValidationToken::ArtifactValidationToken(std::string opaque)
+    : opaque_(std::move(opaque)) {
+    if (opaque_.empty()) {
+        throw std::invalid_argument(
+            "artifact validation token must not be empty");
+    }
+}
+
+ArtifactValidationRecord::ArtifactValidationRecord(
+    std::string record_id, KernelArtifactKey artifact_key,
+    DispatchKey dispatch_key, PlanAbiFingerprint compatible_abi,
+    std::size_t artifact_bytes, ArtifactValidationToken token)
+    : record_id_(std::move(record_id)),
+      artifact_key_(std::move(artifact_key)),
+      dispatch_key_(std::move(dispatch_key)),
+      compatible_abi_(std::move(compatible_abi)),
+      artifact_bytes_(artifact_bytes),
+      token_(std::move(token)) {
+    if (record_id_.empty() || artifact_bytes_ == 0) {
+        throw std::invalid_argument(
+            "artifact validation record requires an id and byte size");
+    }
+}
+
+GenerationHealthToken::GenerationHealthToken(std::string opaque)
+    : opaque_(std::move(opaque)) {
+    if (opaque_.empty()) {
+        throw std::invalid_argument(
+            "generation health token must not be empty");
+    }
+}
+
+GenerationHealthRecord::GenerationHealthRecord(
+    std::string record_id, KernelSlotKey slot_key,
+    KernelArtifactKey artifact_key, DispatchKey dispatch_key,
+    PlanAbiFingerprint compatible_abi, Generation generation,
+    GenerationHealthDisposition disposition, std::string evidence_id,
+    GenerationHealthToken token)
+    : record_id_(std::move(record_id)),
+      slot_key_(std::move(slot_key)),
+      artifact_key_(std::move(artifact_key)),
+      dispatch_key_(std::move(dispatch_key)),
+      compatible_abi_(std::move(compatible_abi)),
+      generation_(generation),
+      disposition_(disposition),
+      evidence_id_(std::move(evidence_id)),
+      token_(std::move(token)) {
+    if (record_id_.empty() || generation_ == 0 || evidence_id_.empty()) {
+        throw std::invalid_argument(
+            "generation health record requires ids and a generation");
+    }
+    switch (disposition_) {
+        case GenerationHealthDisposition::kHealthy:
+        case GenerationHealthDisposition::kQuarantined:
+            return;
+    }
+    throw std::invalid_argument(
+        "generation health record disposition is invalid");
+}
+
 CompileAttempt CompileAttempt::Ready(
     std::shared_ptr<const KernelArtifact> artifact) {
     if (!artifact) {
@@ -106,12 +167,15 @@ CompileAttempt::CompileAttempt(
       diagnostic_(std::move(diagnostic)) {}
 
 CompileResult CompileResult::Ready(
-    std::shared_ptr<const KernelArtifact> artifact, std::uint32_t attempt) {
-    if (!artifact || attempt == 0) {
+    std::shared_ptr<const KernelArtifact> artifact,
+    std::shared_ptr<const ArtifactValidationRecord> validation,
+    std::uint32_t attempt) {
+    if (!artifact || !validation || attempt == 0) {
         throw std::invalid_argument(
-            "ready compile result requires an artifact and attempt");
+            "ready compile result requires an artifact, validation, and attempt");
     }
     return CompileResult(CompileStatus::kReady, std::move(artifact),
+                         std::move(validation),
                          CompileFailureCategory::kDeterministic, "", attempt,
                          false, {});
 }
@@ -124,21 +188,24 @@ CompileResult CompileResult::Failure(
         throw std::invalid_argument(
             "failure result requires non-ready status and diagnostic");
     }
-    return CompileResult(status, nullptr, category, std::move(diagnostic),
-                         attempt, retryable, retry_after);
+    return CompileResult(status, nullptr, nullptr, category,
+                         std::move(diagnostic), attempt, retryable,
+                         retry_after);
 }
 
 CompileResult::CompileResult(
     CompileStatus status, std::shared_ptr<const KernelArtifact> artifact,
+    std::shared_ptr<const ArtifactValidationRecord> validation,
     CompileFailureCategory failure_category, std::string diagnostic,
     std::uint32_t attempt, bool retryable,
     std::chrono::steady_clock::time_point retry_after)
     : status_(status),
       artifact_(std::move(artifact)),
+      validation_(std::move(validation)),
       failure_category_(failure_category),
       diagnostic_(std::move(diagnostic)),
       attempt_(attempt),
       retryable_(retryable),
       retry_after_(retry_after) {}
 
-}  // namespace kxc::api::adaptive
+}  // namespace kxc::api::experimental::adaptive::v1

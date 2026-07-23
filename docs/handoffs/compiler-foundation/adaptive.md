@@ -2,245 +2,179 @@
 
 > 分支：`feature/compiler-foundation-adaptive`
 >
-> 范围：当前 static exact Plan ABI 下的独立控制面
+> 范围：隔离的 static-exact 控制面实验；不是生产编译或运行时集成。
 >
-> 状态：**轨道内 fake/static-exact 合同已闭环；生产 Compiler/Plan 接入等待 01，shape-aware routing 等待 02**
+> API：`kxc::api::experimental::adaptive::v1`
+>
+> 状态：**experimental、fake、static-exact、nonproduction**。控制面已实现为隔离实验；生产 Core/runtime 集成仍被阻塞。
 
-## 1. 本轨交付
+## 1. 已交付的隔离控制面
 
-新增公共控制面合同 `include/kxc/compiler/adaptive.h`，实现位于
-`src/compiler/adaptive/`。该层属于 compiler/control-plane，不在
-`RuntimeSession` 内部：
+公共合同在 `include/kxc/compiler/adaptive.h`，实现位于
+`src/compiler/adaptive/`。它定义了强类型 key、`CompileCoordinator`、
+`KernelSlot`、generation-bound `ArtifactLease`、冻结的
+`FrozenPlanVariant`，以及 `ArtifactCompiler`、
+`AdaptiveValidationAuthority`、`ExactPlanAssembler` 三个注入 seam。
+
+当前链路仅是测试/控制面链路：
 
 ```text
-CompileRequest(full exact key)
-  -> bounded CompileCoordinator
+caller-supplied visible strings
+  -> CompileCoordinator
+  -> fake ArtifactCompiler / fake validation authority
   -> immutable KernelArtifact
-  -> KernelSlot generation publication
-  -> ArtifactLease (shared ownership / RCU read snapshot)
-  -> ExactPlanAssembler
-  -> FrozenPlanVariant
-  -> future runtime adapter -> RuntimeSession(module, plan)
+  -> KernelSlot generation + ArtifactLease
+  -> fake ExactPlanAssembler / FrozenPlanVariant
 ```
 
-本轨没有修改 `include/kxc/runtime/session.h`、`src/runtime/session.cc`、
-primitive cache、Relay/TIR lowering 或现有 plan 执行语义。
+这不是 `RuntimeSession` 链路。此轨没有生产 `ArtifactCompiler`、
+assembler、controller 或 runtime adapter，也没有 `RuntimeSession` 集成或修改。
 
-### 1.1 强类型 identity 与 artifact
+### 1.1 API 与 identity 的实际含义
 
+- 该 API 的唯一名称空间是
+  `kxc::api::experimental::adaptive::v1`；它不承诺 source 或 ABI 稳定性。
 - `KernelSlotKey`、`KernelArtifactKey`、`DispatchKey`、
-  `PlanAbiFingerprint`、`PlanVariantKey` 是不同 C++ 类型，不能互换。
-- `KernelArtifactKey` 显式包含 slot identity；singleflight 使用完整
-  `(artifact key, dispatch key, required ABI)` 比较。
-- 内部协调表使用完整值排序/相等，不以 hash 判等；canary 的 FNV 仅用于流量
-  分流，不参与 key equality。
-- `DispatchKey` 当前只能通过 `DispatchKey::Exact(...)` 创建；不存在维度偏序、
-  “更大 shape”命中或 fuzzy reuse。
-- `KernelArtifact` 构造后不可变，强持有
-  `std::shared_ptr<const ArtifactExecutable>`；没有 `void*`、裸函数指针或裸 map
-  元素指针。
-- canonical bytes 当前由 fake/未来 01 canonicalizer 提供。本轨只验证非空和完整
-  bytes equality，不擅自复制 01 的 canonicalization policy。
+  `PlanAbiFingerprint` 与 `PlanVariantKey` 是不同类型。协调器以完整
+  `(artifact key, dispatch key, required ABI)` 比较 singleflight identity；
+  hash（若用于 canary 分流）不定义相等性。
+- 当前 `CanonicalKey` 与 `DispatchKey::Exact` 接受的是调用者提供、可见的
+  `std::string`。它们只做非空检查和完整字符串比较；**它们不是 opaque bytes，
+  不是 Core canonical bytes，也不验证 canonicalization**。
+- Core 必须以后提供真正 opaque、版本化的 canonical identity 和 ABI
+  canonicalizer；届时才可将 semantic key、artifact key 和 ABI fingerprint
+  作为生产身份合同。当前字符串不得跨图、跨版本或跨进程声称语义等价。
+- `DispatchKey` 只有 exact 构造路径。没有 shape 偏序、`cached_dim >= query_dim`
+  或 fuzzy fallback。
 
-### 1.2 CompileCoordinator
+### 1.2 生产信任边界尚不存在
 
-实现状态流：
+`ArtifactExecutable::IsReady()` 和 `KernelArtifact::byte_size()` 都是 producer
+reported 值。当前控制面可检查它们与请求/记录的一致性及配置预算，但不能独立证明
+backend readiness、链接、launch、数值正确性、实际分配大小或运行时健康。
 
-```text
-Absent -> Queued -> Compiling -> Validating -> Ready
-                    |              |
-                    +-> Cancelled  +-> Failed(retry_after)
-Failed(retryable, retry_after elapsed) -> Queued
-```
+`AdaptiveValidationAuthority`、`ArtifactValidationToken` 与
+`GenerationHealthToken` 是**注入的、确定性的 fake trust seam**。token 的消费和
+记录绑定是实验 API 约束，不是生产 attestation，也不是 cryptographic validation。
+真实 Core/runtime adapter 必须提供 one-shot、线程安全、不可伪造的验证/健康证据，
+并把它们绑定到真实 artifact、backend、ABI 和运行结果。
 
-行为：
+## 2. 控制面语义与限制
 
-- same-full-key singleflight；不同 dispatch/ABI 永不合并；
-- 有界 worker、queue、单 flight waiter、单 artifact bytes、terminal record 和
-  aggregate cached artifact bytes；
-- demand/canary 优先于 prewarm，队列饱和时 demand 可先逐出 queued prewarm；
-- caller-specific cancellation：取消一个 waiter 不影响其他 waiter；最后一个 waiter
-  取消后，废弃 flight 不再接受新请求；
-- unsupported/deterministic/validation failure 负缓存；transient failure 按有界指数
-  backoff 和最大 attempt，由后续 request 在 `retry_after` 后触发重试；
-- compiler exception 被结构化为 deterministic failure；candidate 必须再次通过
-  artifact key、exact dispatch、Plan ABI、ready 状态和 byte budget 验证；
-- shutdown 先停止 admission、完成 queued/active tickets、发送 cooperative
-  cancellation，再由非 worker 管理线程 join 全部 worker；没有 detached thread；
-- compiler/observer 在 worker 上请求 shutdown 不会 self-join，observer shutdown
-  re-entry 不会锁递归；
-- snapshot/event 暴露 queue、waiter、attempt、failure、bytes、request identity、
-  queue/compile/validation 时间和生命周期计数。
+### 2.1 CompileCoordinator
 
-### 1.3 KernelSlot / generation / canary / rollback
+- 相同完整 key 合并；不同 dispatch 或 ABI 不合并。ready/failure terminal record
+  有数量和 producer-reported artifact-byte 上限。
+- worker queue 有界，排序为 demand、canary、prewarm，再按 priority、deadline 与
+  FIFO。**同 key demand 到达时会提升已排队 prewarm 的调度请求**；队列满时 demand
+  可逐出 queued prewarm。
+- deadline 是 **queue-start expiry**：仍在队列中且到 deadline 的 waiter 会过期；
+  它不是编译器或 backend 的硬超时，也不抢占已经开始的工作。
+- cancellation 是 cooperative：token 只要求注入 compiler 观察取消；它不是硬 backend
+  timeout。无法协作取消或永久阻塞的生产 backend 仍需进程隔离/有界生命周期方案。
+- coordinator 用 owned operational state 与独立 `ThreadGroup` 管理 worker。worker
+  可安全地只请求 stop；management caller 负责同步 join。若 worker callback 析构最后一个
+  coordinator owner，owned deferred join service 会在非 worker 上接管 thread handles 并
+  完成 join；不 detach worker，也不承诺中断 backend。
 
-- slot 绑定一个 `KernelSlotKey + static exact PlanAbiFingerprint`；
-- publish 产生严格单调 generation，不原地修改 artifact；
-- `Acquire` 在 mutex 下选定完整 exact dispatch head，并返回 generation-bound
-  `ArtifactLease`；lease 以共享所有权保活旧 artifact；
-- 新 publish 只影响未来 acquire，已有 lease/FrozenPlanVariant 继续使用旧 generation；
-- generation history 和 exact dispatch 数量均有界；回收只删除 slot 可发现记录，
-  已发出的 lease 不失效；
-- canary 必须已有 stable predecessor，且只有显式 routing context 才可进入；同一
-  stable request key 的分流确定；
-- promote 必须提供显式 health evidence；withdraw 只影响未来路由；
-- withdrawn canary 不进入 rollback eligible 集合，不能被回滚为 stable；
-- rollback 只能选择仍保留、曾为 healthy stable 的同 exact dispatch generation；
-- `ExactPlanBinding` 将每个 plan selection 的 slot、dispatch、ABI 与 lease 再比较；
-  `FrozenPlanVariant` 强持有全部 lease 和 typed `PlanExecutable`。
+### 2.2 KernelSlot、记录和 lease
 
-## 2. Static exact ABI 约束
+- publish 只创建不可变 generation；`Acquire` 返回持有 artifact 的
+  generation-bound `ArtifactLease`。新 publish 只影响未来 acquire。
+- slot 的 generation 与 dispatch 上限以及 `retained_artifact_bytes` 是**可发现的
+  retained-record bytes**。它不是 lease、frozen variant 或异步操作仍持有的全部
+  resident bytes，也不能作为进程总内存/设备内存账本。
+- record eviction 只移除 slot 的发现记录；已经发出的 lease 继续强持有 artifact，
+  因而可在 record eviction 和 slot 析构后存活。
+- canary 需要 stable predecessor，并仅在显式 `RoutingContext` 允许时按稳定请求 key
+  分流。promote 需要 authority 接受的 healthy record。
+- rollback 写入 quarantine record。quarantine 对 slot 的生命周期 durable：坏 stable
+  之后不能 acquire、不能成为 rollback target、也不能再次 publish；它不会因 record
+  eviction 而解除。withdrawn canary 也不具备 rollback eligibility。
 
-本轨允许同一 slot hot-swap 的前提是 `PlanAbiFingerprint` **完整、规范且逐 byte
-相等**。01/真实 assembler 接入时 fingerprint 至少必须覆盖：
+## 3. static-exact ABI 边界
 
-1. 参数数量、顺序、`[input][constant][output]` role 和 mutability；
-2. dtype、device、rank、每个 exact logical/physical dimension；
-3. layout/stride/padding、alignment、valid extent（exact 阶段等于 logical extent）；
-4. constant key/绑定合同、alias/effect/error model；
-5. workspace、dynamic shared memory、launch metadata；
-6. target/backend capability、ABI version、pipeline/schedule/backend version；
-7. entry symbol/rebinding 规则，以及不会改变 static plan topology/storage contract 的证明。
+同 slot 热替换只在完整 `PlanAbiFingerprint` 精确相等时才可讨论。生产 canonicalizer
+至少必须覆盖参数 role/顺序、dtype、device、rank、logical/physical layout、stride、
+alignment、valid extent、constant/alias/effect/error contract、workspace、launch metadata、
+target/backend capability、ABI/pipeline/schedule/backend version、entry/link/rebinding，以及
+不改变 plan topology/storage contract 的证明。
 
-任一 layout、capacity、workspace、topology 或 physical memory plan 变化都必须产生新
-`PlanVariantKey`/plan variant，不能发布到现有 exact slot。`kDynamicDimension = -1`
-不得进入新 `DispatchKey` 或作为 shape compatibility 证明。
+layout、capacity、workspace、topology 或 physical memory plan 变化必须产生独立
+`PlanVariantKey`/plan variant；不能发布到现有 exact slot。Shape 轨道接入前，不存在
+bucket 或 polymorphic reuse。
 
-## 3. 测试证据
+## 4. CMake/CTest 与验证证据
 
-### 3.1 构建配置
+`CMakeLists.txt` 现在 `include(CTest)`，并在 `BUILD_TESTING` 下注册：
 
-```bash
-cmake -S . -B out/build/adaptive-control-plane -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DKXC_ENABLE_CUDA=OFF \
-  -DKXC_ENABLE_LLVM=OFF \
-  -DKXC_BUILD_CODEGEN_TESTS=OFF
-```
-
-### 3.2 本轨测试
-
-下列测试全部通过：
-
-```bash
-./out/build/adaptive-control-plane/adaptive_contract_test
-./out/build/adaptive-control-plane/adaptive_coordinator_test
-./out/build/adaptive-control-plane/adaptive_kernel_slot_test
-```
-
-覆盖：
-
-- strong key/full equality、exact dispatch、immutable typed artifact；
-- 64 个并发 same-key waiter 只编译一次；
-- full-key 分离、ready reuse、aggregate terminal byte budget；
-- queue/backpressure、prewarm displacement、priority；
-- 单 waiter/queued/last-active cancellation 和 replacement flight；
-- waiter budget、negative cache、transient retry、unsupported stable failure；
-- invalid/oversized artifact validation；
-- worker/observer shutdown re-entry 和 deterministic shutdown；
-- generation/ABI gate、旧 lease 与 frozen plan 保活；
-- incompatible plan binding 拒绝；
-- canary withdraw/promote/rollback、orphan canary 拒绝；
-- 16 reader + 500 publish 并发 slot 压力；
-- fake compiler -> coordinator -> slot -> fake assembler 完整闭环。
-
-并发测试重复运行 30 轮，30/30 通过。
-
-### 3.3 Sanitizer / warnings
-
-ASan + UBSan + LeakSanitizer 构建下三个 adaptive 测试全部通过，无诊断：
-
-```bash
-for test in adaptive_contract_test adaptive_coordinator_test adaptive_kernel_slot_test; do
-  ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
-  UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
-    ./out/build/adaptive-check-asan-ubsan/$test || exit 1
-done
-```
-
-`-Wall -Wextra -Wpedantic` 构建没有来自 adaptive header/source/tests 的 warning。
-
-TSan binary 可成功编译链接，但当前执行环境在进入测试前报：
-
-```text
-FATAL: ThreadSanitizer: unexpected memory mapping ...
-```
-
-因此本机没有有效 TSan 运行结果；这不是 TSan race report。集成 CI/受支持环境仍应补跑。
-
-### 3.4 架构与静态回归
-
-通过：
-
-- `check_include_layers`
-- `check_public_headers`
-- `check_relay_op_contract`（19/19）
-- `check_pass_contract`（19/19）
-- `graph_partition_test`
-- `executable_plan_test`
-- `kernel_signature_test`
-- `compiled_module_test`
-- `runtime_session_test`
-- `compiler_contract_test`
-- `compiler_extension_contract_test`
-- `operator_compilation_test`
-
-## 4. 原子提交
-
-| Commit | 内容 |
+| CTest name | labels |
 |---|---|
-| `863ffb7` | `feat(compiler): add exact adaptive artifact contracts` |
-| `eb748cb` | `feat(compiler): coordinate bounded exact compilation` |
-| `eee18dd` | `feat(compiler): publish adaptive kernel generations` |
-| `9930a50` | `fix(compiler): harden adaptive lifecycle bounds` |
-| 本交接提交 | `docs(compiler): hand off adaptive control plane` |
+| `adaptive_contract_test` | `adaptive;cpu` |
+| `adaptive_coordinator_test` | `adaptive;cpu` |
+| `adaptive_kernel_slot_test` | `adaptive;cpu` |
 
-## 5. 明确未做与跨轨集成项
+`run_adaptive_tests` 是实际 aggregate target，执行：
 
-### 5.1 依赖 01 Core Contracts
+```bash
+ctest --output-on-failure -L adaptive -L cpu
+```
 
-生产接入前需要 01 提供/冻结：
+CPU preset 为 `dev-ninja-cpu-adaptive`，复用 `dev-ninja-cpu` 的 configure preset 和
+`out/build/dev-ninja-cpu` 路径：
 
-1. 不含 graph-local value id、symbol、storage id、object address 的
-   `UnitSemanticKey`/`KernelArtifactKey` canonicalizer；
-2. 完整 `PlanAbiFingerprint` canonicalizer 和 versioning；
-3. ready artifact store/pin 与真实 byte accounting；
-4. backend-ready、symbol/link、signature、launch、target、ABI、数值 health 的
-   不可伪造 validation record；
-5. 真实 `ArtifactCompiler` adapter；它把当前 per-unit compile 产物包装为
-   `ArtifactExecutable`，并遵守 cooperative cancellation；
-6. 真实 `ExactPlanAssembler` adapter；它用 exact bindings 生成 runtime-only
-   module + plan，并让 `PlanExecutable` 保活 selected artifacts。
+```bash
+cmake --preset dev-ninja-cpu
+cmake --build --preset dev-ninja-cpu --target run_adaptive_tests
+# 或：ctest --preset dev-ninja-cpu-adaptive
+```
 
-当前 fake 合同故意不读取 private Compiler/Relay/TIR header，也没有修复 01 所属的
-primitive cache 二次 `Peek`、structural hash value-id 污染或 artifact symbol/graph
-call identity 分离。
+CPU smoke CI 也执行同一 CTest label 交集。
 
-### 5.2 依赖 02 Shape
+本轮实际验证结果：
 
-shape-aware routing 只允许通过版本化接口扩展：
+- Debug CPU `run_adaptive_tests`：3/3 通过；
+- focused concurrency：`adaptive_coordinator_test` 与
+  `adaptive_kernel_slot_test` 各重复 100 次，全部通过；
+- ASan + UBSan + LeakSanitizer：3/3 通过，无诊断；
+- `-Wall -Wextra -Wpedantic -Werror`：adaptive header/source/tests 语法检查通过；
+- `check_public_headers`（82 headers）与 `check_include_layers`（213 files）通过；
+- TSan binary 编译/链接成功。一次可启动的 coordinator 运行发现并修复了 test
+  `EventLog` notify/destruction 同步竞态；修复后重跑以及多数尝试都在进入测试前报告
+  `FATAL: ThreadSanitizer: unexpected memory mapping ...`，slot 亦如此。因此没有最终有效的
+  TSan pass，需在受支持 host 重跑。
 
-- 02 提供 `ShapeProfile`、logical/physical/valid extent 和 applicability proof；
-- 这些字段进入新版本 `DispatchKey`/`ExactPlanBinding`；
-- coordinator state/singleflight/negative cache 和 slot generation/lease 协议保持不变；
-- 未有 proof 时只能 exact compile/wait/reject；禁止 `cached_dim >= query_dim`、
-  `-1` 推断或 fuzzy fallback。
+可复现的普通 CPU 命令：
 
-### 5.3 生产策略上限
+```bash
+cmake --preset dev-ninja-cpu
+cmake --build --preset dev-ninja-cpu --target run_adaptive_tests
+ctest --preset dev-ninja-cpu-adaptive
+```
 
-当前实现为单进程全局 worker/queue budget。真实服务策略仍需在控制面扩展
-per-model/per-target quota、deadline/aging、收益/成本估计和稳定 failure 持久化；这些
-字段不得进入 artifact equality，也不得下沉到 `RuntimeSession`。
+## 5. 生产集成阻塞项
 
-shutdown 的确定性依赖真实 compiler 遵守 cooperative cancellation。无法中断且可能永久
-阻塞的 backend compiler 需要进程隔离或上层有界 worker 生命周期；不能靠 detached thread
-规避。`CompileCoordinator` 必须由非 worker lifecycle owner 最终析构/join。
+1. Core 提供 opaque、版本化 canonical identities 与完整 static-exact ABI
+   canonicalizer，不能复用 caller-visible strings。
+2. Core/backend 提供真实 `ArtifactCompiler` 和 artifact ownership/byte accounting。
+3. runtime 提供真实 validation/health authority、不可伪造证据和真实 token lifecycle；
+   fake authority 不能升级为生产安全边界。
+4. runtime 提供真实 `ExactPlanAssembler`/controller/runtime adapter，并定义 module、plan、
+   artifact lease 与 completion 的所有权交接。
+5. 集成设计必须保持 `RuntimeSession` 为数据面 executor；本轨没有、也不声称有
+   `RuntimeSession` 改动。
+6. Shape 轨道提供版本化 applicability proof 后才可扩展 `DispatchKey`；无 proof 时
+   只能 exact compile/wait/reject。
 
-## 6. 不变量检查
+## 6. 必守不变量
 
-- `RuntimeSession` 无 Compiler/Relay/ShapePredictor/cache/background-thread 依赖。
-- runtime Run 内不查 cache、不选 generation、不触发 compile。
-- 无 raw `void*` artifact ABI、raw map pointer、hash-only equality。
-- 无 fuzzy shape reuse；static exact equality fail closed。
-- publish/rollback 不修改 in-flight artifact；lease/frozen variant 共享所有权保活。
-- cancellation/shutdown 不 detach worker，失败 candidate 不覆盖 healthy generation。
+- immutable artifact、validation record、generation record 与 frozen variant 不原地修改；
+  generation 单调。
+- full-key equality fail-closed；无 hash-only identity、无 raw `void*` artifact ABI、无
+  map element 裸指针生命周期。
+- producer-reported readiness/bytes 和 fake tokens 不得被宣传为 production validation。
+- failed candidate 不覆盖 healthy generation；quarantined identity 不得 acquire、rollback
+  或 republish。
+- lease survives discoverability eviction；slot byte budget 不得被宣传为 lease 持有的总
+  resident bytes。
+- cooperative cancellation/deadline 不得被宣传为 backend 硬超时。

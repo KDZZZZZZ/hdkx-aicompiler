@@ -62,6 +62,11 @@ jobs:
       - name: Build CPU targets
         run: cmake --build out/build/ci-cpu --parallel 2
 
+      - name: Run adaptive CPU CTest suite
+        run: >
+          ctest --test-dir out/build/ci-cpu --output-on-failure
+          --no-tests=error -L adaptive -L cpu
+
       - name: Run type inference test
         run: cmake --build out/build/ci-cpu --target run_infer_type_test
 

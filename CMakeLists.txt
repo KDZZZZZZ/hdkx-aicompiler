@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.23)
 
 project(hdkx_aicompiler LANGUAGES C CXX)
 
+include(CTest)
 find_package(Threads REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -737,6 +738,25 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
   kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
   kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
+  if(BUILD_TESTING)
+    foreach(_kxc_adaptive_test IN ITEMS
+        adaptive_contract_test
+        adaptive_coordinator_test
+        adaptive_kernel_slot_test)
+      add_test(NAME ${_kxc_adaptive_test} COMMAND ${_kxc_adaptive_test})
+      set_tests_properties(${_kxc_adaptive_test} PROPERTIES
+        LABELS "adaptive;cpu")
+    endforeach()
+
+    add_custom_target(run_adaptive_tests
+      COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
+              -L adaptive -L cpu
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+      DEPENDS adaptive_contract_test adaptive_coordinator_test
+              adaptive_kernel_slot_test
+      USES_TERMINAL
+      COMMENT "Run adaptive CPU CTest suite")
+  endif()
   kxc_add_runtime_exe(object_test test/object_test.cpp)
   kxc_add_runtime_exe(packed_func_test test/packed_func_test.cpp)
   kxc_add_runtime_exe(registry_test test/registry_test.cpp)

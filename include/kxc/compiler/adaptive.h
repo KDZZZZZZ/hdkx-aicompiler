@@ -1,5 +1,9 @@
 /*! \file include/kxc/compiler/adaptive.h
- * \brief Static-exact adaptive compilation control-plane contracts.
+ * \brief Experimental v1 static-exact adaptive control-plane contracts.
+ *
+ * \warning This installed API is an experimental fake integration seam. It is
+ * not a production Compiler or RuntimeSession adapter, and source/ABI
+ * compatibility is not promised before the real Core contracts are integrated.
  */
 
 #pragma once
@@ -15,9 +19,18 @@
 #include <utility>
 #include <vector>
 
-namespace kxc::api::adaptive {
+namespace kxc::api::experimental::adaptive::v1 {
 
-/*! \brief Non-empty canonical bytes from Core Track, compared by full value. */
+inline constexpr std::uint32_t kExperimentalApiVersion = 1;
+inline constexpr bool kProductionReady = false;
+
+/*!
+ * \brief Non-empty caller-supplied bytes compared by complete value.
+ *
+ * Experimental v1 does not define, hide, or verify a Core canonical format.
+ * Real opaque canonical bytes and their versioned canonicalizer remain a hard
+ * integration dependency.
+ */
 template <typename Tag>
 class CanonicalKey final {
 public:
@@ -123,10 +136,12 @@ enum class RequestKind : std::uint8_t {
 /*! \brief Strong, complete compile request for one exact artifact. */
 class CompileRequest final {
 public:
-    CompileRequest(KernelArtifactKey artifact_key, DispatchKey dispatch_key,
-                   PlanAbiFingerprint required_abi,
-                   std::string model_revision, RequestKind kind,
-                   int priority = 0);
+    CompileRequest(
+        KernelArtifactKey artifact_key, DispatchKey dispatch_key,
+        PlanAbiFingerprint required_abi, std::string model_revision,
+        RequestKind kind, int priority = 0,
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max());
 
     const KernelArtifactKey& artifact_key() const noexcept {
         return artifact_key_;
@@ -140,6 +155,12 @@ public:
     }
     RequestKind kind() const noexcept { return kind_; }
     int priority() const noexcept { return priority_; }
+    std::chrono::steady_clock::time_point deadline() const noexcept {
+        return deadline_;
+    }
+    bool expired(std::chrono::steady_clock::time_point now) const noexcept {
+        return now >= deadline_;
+    }
 
 private:
     KernelArtifactKey artifact_key_;
@@ -148,9 +169,16 @@ private:
     std::string model_revision_;
     RequestKind kind_{RequestKind::kDemand};
     int priority_{0};
+    std::chrono::steady_clock::time_point deadline_{
+        std::chrono::steady_clock::time_point::max()};
 };
 
-/*! \brief Typed immutable executable payload; no raw void/function pointer ABI. */
+/*!
+ * \brief Typed executable test seam.
+ *
+ * IsReady is producer-reported readiness, not independently verified backend,
+ * launch, numeric, or runtime health.
+ */
 class ArtifactExecutable {
 public:
     virtual ~ArtifactExecutable() = default;
@@ -158,7 +186,7 @@ public:
     virtual std::string DebugName() const = 0;
 };
 
-/*! \brief Immutable validated result of compiling one static-exact request. */
+/*! \brief Immutable producer-reported candidate for one static-exact request. */
 class KernelArtifact final {
 public:
     KernelArtifact(KernelArtifactKey key, DispatchKey applicability,
@@ -188,6 +216,53 @@ private:
     std::string provenance_;
 };
 
+/*! \brief Opaque, authority-verified one-shot publication token. */
+class ArtifactValidationToken final {
+public:
+    explicit ArtifactValidationToken(std::string opaque);
+    const std::string& opaque() const noexcept { return opaque_; }
+
+private:
+    std::string opaque_;
+};
+
+/*!
+ * \brief Immutable validation receipt bound to one exact candidate.
+ *
+ * Construction does not make a receipt trusted. KernelSlot accepts it only if
+ * its injected authority verifies and atomically consumes the opaque token.
+ */
+class ArtifactValidationRecord final {
+public:
+    ArtifactValidationRecord(
+        std::string record_id, KernelArtifactKey artifact_key,
+        DispatchKey dispatch_key, PlanAbiFingerprint compatible_abi,
+        std::size_t artifact_bytes, ArtifactValidationToken token);
+    ArtifactValidationRecord(const ArtifactValidationRecord&) = default;
+    ArtifactValidationRecord(ArtifactValidationRecord&&) noexcept = default;
+    ArtifactValidationRecord& operator=(const ArtifactValidationRecord&) = delete;
+    ArtifactValidationRecord& operator=(ArtifactValidationRecord&&) = delete;
+
+    const std::string& record_id() const noexcept { return record_id_; }
+    const KernelArtifactKey& artifact_key() const noexcept {
+        return artifact_key_;
+    }
+    const DispatchKey& dispatch_key() const noexcept { return dispatch_key_; }
+    const PlanAbiFingerprint& compatible_abi() const noexcept {
+        return compatible_abi_;
+    }
+    std::size_t artifact_bytes() const noexcept { return artifact_bytes_; }
+    const ArtifactValidationToken& token() const noexcept { return token_; }
+
+private:
+    std::string record_id_;
+    KernelArtifactKey artifact_key_;
+    DispatchKey dispatch_key_;
+    PlanAbiFingerprint compatible_abi_;
+    std::size_t artifact_bytes_{0};
+    ArtifactValidationToken token_;
+};
+
 /*! \brief Cooperative cancellation visible to an injected compiler. */
 class CancellationToken final {
 public:
@@ -210,6 +285,7 @@ enum class CompileFailureCategory : std::uint8_t {
     kBackpressure = 4,
     kCancelled = 5,
     kShutdown = 6,
+    kDeadlineExceeded = 7,
 };
 
 /*! \brief Exactly one compiler attempt result. */
@@ -246,12 +322,35 @@ public:
                                    const CancellationToken& cancellation) = 0;
 };
 
+class GenerationHealthRecord;
+
+/*!
+ * \brief Injected trust boundary for experimental validation/health tokens.
+ *
+ * Fake test implementations are not production attestation. A real adapter
+ * must be supplied by Core/runtime integration and must make both consume
+ * operations one-shot and thread-safe.
+ */
+class AdaptiveValidationAuthority {
+public:
+    virtual ~AdaptiveValidationAuthority() = default;
+    virtual std::shared_ptr<const ArtifactValidationRecord> ValidateArtifact(
+        const CompileRequest& request,
+        const std::shared_ptr<const KernelArtifact>& artifact) = 0;
+    virtual bool VerifyAndConsumeArtifactValidation(
+        const KernelArtifact& artifact,
+        const ArtifactValidationRecord& record) noexcept = 0;
+    virtual bool VerifyAndConsumeHealth(
+        const GenerationHealthRecord& record) noexcept = 0;
+};
+
 /*! \brief Terminal ticket state, separate from in-flight request state. */
 enum class CompileStatus : std::uint8_t {
     kReady = 0,
     kFailed = 1,
     kCancelled = 2,
     kRejected = 3,
+    kExpired = 4,
 };
 
 /*! \brief Immutable terminal result shared with request waiters. */
@@ -259,6 +358,7 @@ class CompileResult final {
 public:
     static CompileResult Ready(
         std::shared_ptr<const KernelArtifact> artifact,
+        std::shared_ptr<const ArtifactValidationRecord> validation,
         std::uint32_t attempt);
     static CompileResult Failure(
         CompileStatus status, CompileFailureCategory category,
@@ -269,6 +369,9 @@ public:
     bool ready() const noexcept { return status_ == CompileStatus::kReady; }
     const std::shared_ptr<const KernelArtifact>& artifact() const noexcept {
         return artifact_;
+    }
+    const std::shared_ptr<const ArtifactValidationRecord>& validation() const noexcept {
+        return validation_;
     }
     CompileFailureCategory failure_category() const noexcept {
         return failure_category_;
@@ -281,15 +384,16 @@ public:
     }
 
 private:
-    CompileResult(CompileStatus status,
-                  std::shared_ptr<const KernelArtifact> artifact,
-                  CompileFailureCategory failure_category,
-                  std::string diagnostic, std::uint32_t attempt,
-                  bool retryable,
-                  std::chrono::steady_clock::time_point retry_after);
+    CompileResult(
+        CompileStatus status, std::shared_ptr<const KernelArtifact> artifact,
+        std::shared_ptr<const ArtifactValidationRecord> validation,
+        CompileFailureCategory failure_category, std::string diagnostic,
+        std::uint32_t attempt, bool retryable,
+        std::chrono::steady_clock::time_point retry_after);
 
     CompileStatus status_{CompileStatus::kFailed};
     std::shared_ptr<const KernelArtifact> artifact_;
+    std::shared_ptr<const ArtifactValidationRecord> validation_;
     CompileFailureCategory failure_category_{
         CompileFailureCategory::kDeterministic};
     std::string diagnostic_;
@@ -337,6 +441,9 @@ enum class AdaptiveEventKind : std::uint8_t {
     kPromoted = 12,
     kWithdrawn = 13,
     kRolledBack = 14,
+    kExpired = 15,
+    kQuarantined = 16,
+    kAuthorizationRejected = 17,
 };
 
 /*! \brief Stable event fields for coordinator and slot observability. */
@@ -398,13 +505,16 @@ struct CoordinatorSnapshot final {
     std::uint64_t failed{0};
     std::uint64_t cancelled{0};
     std::uint64_t rejected{0};
+    std::uint64_t expired{0};
 };
 
 /*! \brief Bounded asynchronous exact compiler coordinator. */
 class CompileCoordinator final {
 public:
-    CompileCoordinator(std::shared_ptr<ArtifactCompiler> compiler,
-                       CoordinatorOptions options = {});
+    CompileCoordinator(
+        std::shared_ptr<ArtifactCompiler> compiler,
+        std::shared_ptr<AdaptiveValidationAuthority> validation_authority,
+        CoordinatorOptions options = {});
     ~CompileCoordinator();
 
     CompileCoordinator(const CompileCoordinator&) = delete;
@@ -417,7 +527,9 @@ public:
 
 private:
     class State;
-    std::unique_ptr<State> state_;
+    class ThreadGroup;
+    std::shared_ptr<State> state_;
+    std::shared_ptr<ThreadGroup> threads_;
 };
 
 using Generation = std::uint64_t;
@@ -468,9 +580,74 @@ struct SlotActionResult final {
     std::string diagnostic;
 };
 
+/*! \brief Opaque, authority-verified one-shot generation-health token. */
+class GenerationHealthToken final {
+public:
+    explicit GenerationHealthToken(std::string opaque);
+    const std::string& opaque() const noexcept { return opaque_; }
+
+private:
+    std::string opaque_;
+};
+
+enum class GenerationHealthDisposition : std::uint8_t {
+    kHealthy = 0,
+    kQuarantined = 1,
+};
+
+/*!
+ * \brief Immutable health/quarantine receipt for one exact generation.
+ *
+ * Construction alone grants no authority. Promote/Rollback accept a record
+ * only when the slot's injected authority verifies and consumes its token.
+ */
+class GenerationHealthRecord final {
+public:
+    GenerationHealthRecord(
+        std::string record_id, KernelSlotKey slot_key,
+        KernelArtifactKey artifact_key, DispatchKey dispatch_key,
+        PlanAbiFingerprint compatible_abi, Generation generation,
+        GenerationHealthDisposition disposition, std::string evidence_id,
+        GenerationHealthToken token);
+    GenerationHealthRecord(const GenerationHealthRecord&) = default;
+    GenerationHealthRecord(GenerationHealthRecord&&) noexcept = default;
+    GenerationHealthRecord& operator=(const GenerationHealthRecord&) = delete;
+    GenerationHealthRecord& operator=(GenerationHealthRecord&&) = delete;
+
+    const std::string& record_id() const noexcept { return record_id_; }
+    const KernelSlotKey& slot_key() const noexcept { return slot_key_; }
+    const KernelArtifactKey& artifact_key() const noexcept {
+        return artifact_key_;
+    }
+    const DispatchKey& dispatch_key() const noexcept { return dispatch_key_; }
+    const PlanAbiFingerprint& compatible_abi() const noexcept {
+        return compatible_abi_;
+    }
+    Generation generation() const noexcept { return generation_; }
+    GenerationHealthDisposition disposition() const noexcept {
+        return disposition_;
+    }
+    const std::string& evidence_id() const noexcept { return evidence_id_; }
+    const GenerationHealthToken& token() const noexcept { return token_; }
+
+private:
+    std::string record_id_;
+    KernelSlotKey slot_key_;
+    KernelArtifactKey artifact_key_;
+    DispatchKey dispatch_key_;
+    PlanAbiFingerprint compatible_abi_;
+    Generation generation_{0};
+    GenerationHealthDisposition disposition_{
+        GenerationHealthDisposition::kQuarantined};
+    std::string evidence_id_;
+    GenerationHealthToken token_;
+};
+
 struct KernelSlotOptions final {
     std::size_t max_dispatches{64};
     std::size_t max_retained_generations{64};
+    std::size_t max_artifact_bytes{256U * 1024U * 1024U};
+    std::size_t max_retained_artifact_bytes{512U * 1024U * 1024U};
     AdaptiveObserver observer;
 };
 
@@ -484,36 +661,40 @@ struct KernelSlotSnapshot final {
     PlanAbiFingerprint required_abi;
     Generation last_generation{0};
     std::size_t record_count{0};
+    std::size_t retained_artifact_bytes{0};
     std::size_t stable_dispatches{0};
     std::size_t canary_dispatches{0};
+    std::size_t quarantined_artifacts{0};
 };
 
 /*! \brief Exact dispatch publication point with immutable generations. */
 class KernelSlot final {
 public:
-    KernelSlot(KernelSlotKey slot_key,
-               PlanAbiFingerprint required_abi,
-               KernelSlotOptions options = {});
+    KernelSlot(
+        KernelSlotKey slot_key, PlanAbiFingerprint required_abi,
+        std::shared_ptr<AdaptiveValidationAuthority> validation_authority,
+        KernelSlotOptions options = {});
     ~KernelSlot();
 
     KernelSlot(const KernelSlot&) = delete;
     KernelSlot& operator=(const KernelSlot&) = delete;
 
-    PublishResult Publish(std::shared_ptr<const KernelArtifact> candidate,
-                          PublicationMode mode = PublicationMode::kStable,
-                          CanaryPolicy canary = {});
+    PublishResult Publish(
+        std::shared_ptr<const KernelArtifact> candidate,
+        std::shared_ptr<const ArtifactValidationRecord> validation,
+        PublicationMode mode = PublicationMode::kStable,
+        CanaryPolicy canary = {});
     ArtifactLease Acquire(const DispatchKey& dispatch_key,
                           const PlanAbiFingerprint& required_abi,
                           RoutingContext routing = {}) const;
-    SlotActionResult PromoteCanary(const DispatchKey& dispatch_key,
-                                   Generation generation,
-                                   std::string health_evidence);
+    SlotActionResult PromoteCanary(
+        std::shared_ptr<const GenerationHealthRecord> health);
     SlotActionResult WithdrawCanary(const DispatchKey& dispatch_key,
                                     Generation generation,
                                     std::string reason);
-    SlotActionResult Rollback(const DispatchKey& dispatch_key,
-                              Generation generation,
-                              std::string reason);
+    SlotActionResult Rollback(
+        Generation target_generation,
+        std::shared_ptr<const GenerationHealthRecord> regression);
     KernelSlotSnapshot Snapshot() const;
 
 private:
@@ -521,7 +702,11 @@ private:
     std::unique_ptr<State> state_;
 };
 
-/*! \brief Typed frozen plan payload; a real adapter may wrap module + plan. */
+/*!
+ * \brief Typed frozen-plan test seam.
+ *
+ * A production adapter must own the real runtime module and plan lifetime.
+ */
 class PlanExecutable {
 public:
     virtual ~PlanExecutable() = default;
@@ -573,7 +758,11 @@ private:
     std::shared_ptr<const PlanExecutable> executable_;
 };
 
-/*! \brief Integration seam validated first with a deterministic fake assembler. */
+/*!
+ * \brief Experimental assembly seam.
+ *
+ * Only deterministic fake implementations exist in this repository.
+ */
 class ExactPlanAssembler {
 public:
     virtual ~ExactPlanAssembler() = default;
@@ -582,4 +771,4 @@ public:
         std::vector<ArtifactLease> leases) = 0;
 };
 
-}  // namespace kxc::api::adaptive
+}  // namespace kxc::api::experimental::adaptive::v1
