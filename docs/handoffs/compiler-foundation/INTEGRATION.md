@@ -154,6 +154,7 @@ ASan/UBSan 配置构建了 `task_plan_test`、`task_executor_test`、
 |---|---|---|
 | CPU exact-static production path | `validated` | 本地 OFF/ON 两套完整 CPU CTest |
 | Shape exact production adapter | `implemented/local-evidence` | CPU exact profile；无 symbolic/bucket claim |
+| Restricted symbolic Shape W3 control plane | `implemented/local-evidence` | default-OFF; deep-frozen exact representative with explicit input-axis overlay; mints exact/bucket/polymorphic requests only, never guarded execution or artifact compilation/cache authority |
 | Adaptive production experiment | `implemented/local-evidence` | default-OFF；无 cancellation/health/rollback authority |
 | Resolved control runtime | `implemented/local-evidence` | fixture-backed CPU:0；production Compiler 仍拒绝 `If` |
 | Runtime manifest/observability | `implemented/local-evidence` | 结构一致性与事件验证；声明不是 provenance |
@@ -189,7 +190,16 @@ CI 注册不等于验证完成；只有远端 workflow 绿色后才能把对应 
 - 未运行 CUDA numeric、pending-retention、Compute Sanitizer 或 CUPTI；
 - 未下载、安装或修改任何系统依赖。
 
-W2 checkpoint 不完成总 W0–W4 计划。W3/W4 仍包括：restricted symbolic Shape、runtime
+W3 restricted symbolic Shape control-plane slice is limited to fixed-rank `relu`/`sqrt` and
+same-shape `add`/`mul` graphs, a deep-frozen static exact representative, and explicit
+symbol bindings. Bucket/polymorphic decisions validate logical/physical/valid extents,
+guards, tails, and complete request identities, but are deliberately non-executable: they
+neither compile/cache artifacts nor create a dynamic `RuntimeSession` plan. It requires both
+`KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON` and the exact representative gate. Dynamic Shape
+propagation, dynamic outputs/allocation, authoritative adaptive generation leases, and all
+production guarded execution remain unsupported.
+
+W2 checkpoint does not complete the overall W0–W4 plan. W3/W4 still include runtime
 Shape propagation、dynamic outputs/allocation、authoritative adaptive generation leases、
 cancellation/negative cache/health/rollback、真实 Relay control lowering、KV cache/decode/
 sampling，以及广 rank CUDA production evidence。
