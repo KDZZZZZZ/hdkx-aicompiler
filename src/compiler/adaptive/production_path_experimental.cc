@@ -287,23 +287,27 @@ public:
                          const CompiledGraph& graph) {
         const VerifiedGraphArtifacts candidate = VerifyGraphArtifacts(
             graph, request.config(), request.artifact_key());
-        if (candidate.identities != request.ordered_artifacts() ||
-            candidate.pins.size() != request.verified_artifact_pins().size()) {
+        if (candidate.pins.size() != request.verified_artifact_pins().size() ||
+            candidate.identities.size() != request.ordered_artifacts().size()) {
             throw std::invalid_argument(
-                "adaptive candidate ordered primitive ArtifactKeys differ from "
-                "the verified baseline");
+                "adaptive candidate primitive mapping differs from the verified baseline");
         }
+        // Selection identity is deliberately independent from Plan ABI. A
+        // candidate may choose a different immutable ArtifactKey, but every
+        // selected pin must retain the baseline's complete typed contract.
         for (size_t index = 0; index < candidate.pins.size(); ++index) {
+            const OrderedArtifactIdentity& expected = request.ordered_artifacts()[index];
+            const OrderedArtifactIdentity& actual = candidate.identities[index];
             const internal::PrimitiveArtifactPin expected_pin =
                 internal::ProductionArtifactAccess::Pin(
                     request.verified_artifact_pins()[index]);
-            const internal::PrimitiveArtifactPin candidate_pin =
+            const internal::PrimitiveArtifactPin actual_pin =
                 internal::ProductionArtifactAccess::Pin(candidate.pins[index]);
-            if (candidate_pin.key() != expected_pin.key() ||
-                !SameCachedPrimitive(candidate_pin.artifact(),
-                                     expected_pin.artifact())) {
+            if (actual.call_index != expected.call_index ||
+                actual.link_symbol != expected.link_symbol ||
+                !SameCachedPrimitive(actual_pin.artifact(), expected_pin.artifact())) {
                 throw std::invalid_argument(
-                    "adaptive candidate changed a verified pinned primitive artifact");
+                    "adaptive candidate changed a verified primitive typed contract");
             }
         }
         if (BuildStaticExactDispatchKey(request.artifact_key(), graph.plan) !=
@@ -320,18 +324,21 @@ public:
     }
 };
 
-PlanVariantKey BuildVariantKey(const ProductionCompileRequest& request,
-                               uint64_t generation) {
-    std::vector<std::pair<std::string, uint64_t>> artifacts;
-    artifacts.reserve(request.ordered_artifacts().size());
-    for (const OrderedArtifactIdentity& artifact :
-         request.ordered_artifacts()) {
-        artifacts.emplace_back(artifact.CanonicalBytes(), generation);
+ArtifactKey BuildSelectionArtifactKey(
+    const ProductionCompileRequest& request,
+    const std::vector<OrderedArtifactIdentity>& selected_artifacts) {
+    std::string canonical;
+    AppendField(&canonical, "kind", "adaptive-selected-whole-plan-v1");
+    AppendField(&canonical, "request_artifact",
+                request.artifact_key().canonical_bytes());
+    for (const auto& artifact : selected_artifacts) {
+        AppendField(&canonical, "selected_artifact", artifact.CanonicalBytes());
     }
-    return PlanVariantKey(
-        request.artifact_key().unit_semantic_key().canonical_bytes(),
-        std::move(artifacts), request.dispatch_key().canonical_bytes(),
-        "executable-plan-v2:" + request.plan_abi().canonical_bytes());
+    return ArtifactKey(
+        UnitSemanticKey(std::move(canonical)),
+        internal::BuildTargetCapabilityFingerprint(request.config()->target),
+        "adaptive-selected-whole-plan-v1", 1, "static-exact-v1",
+        "production-path-v1");
 }
 
 AdaptiveControllerEvent EventFor(
@@ -412,6 +419,47 @@ ProductionCompileRequest::ordered_artifacts() const noexcept {
 const std::vector<ArtifactPin>&
 ProductionCompileRequest::verified_artifact_pins() const noexcept {
     return verified_artifact_pins_;
+}
+
+PreparedCandidate::PreparedCandidate(
+    CompiledGraph graph, std::shared_ptr<const runtime::RuntimeSession> session,
+    ArtifactKey selection_artifact_key,
+    std::vector<OrderedArtifactIdentity> selected_artifacts,
+    std::string validation_receipt)
+    : graph_(std::move(graph)), session_(std::move(session)),
+      selection_artifact_key_(std::move(selection_artifact_key)),
+      selected_artifacts_(std::move(selected_artifacts)),
+      validation_receipt_(std::move(validation_receipt)) {
+    if (!session_ || !session_->defined() ||
+        !selection_artifact_key_.defined() || selected_artifacts_.empty() ||
+        validation_receipt_.empty()) {
+        throw std::invalid_argument("prepared adaptive candidate requires session, selection, and receipt");
+    }
+}
+
+const CompiledGraph& PreparedCandidate::compiled_graph() const noexcept { return graph_; }
+const std::shared_ptr<const runtime::RuntimeSession>& PreparedCandidate::session() const noexcept { return session_; }
+const ArtifactKey& PreparedCandidate::selection_artifact_key() const noexcept { return selection_artifact_key_; }
+const std::vector<OrderedArtifactIdentity>& PreparedCandidate::selected_artifacts() const noexcept { return selected_artifacts_; }
+const std::string& PreparedCandidate::validation_receipt() const noexcept { return validation_receipt_; }
+
+std::shared_ptr<const PreparedCandidate> PrepareCandidate(
+    const ProductionCompileRequest& request, CompiledGraph graph,
+    std::string validation_receipt) {
+    request.Validate();
+    if (validation_receipt.empty()) {
+        throw std::invalid_argument("adaptive candidate requires injected validation receipt");
+    }
+    const VerifiedGraphArtifacts verified = VerifyGraphArtifacts(
+        graph, request.config(), request.artifact_key());
+    ProductionValidationAuthority::Validate(request, graph);
+    auto session = std::make_shared<const runtime::RuntimeSession>(
+        graph.module, graph.plan);
+    const ArtifactKey selection_artifact_key = BuildSelectionArtifactKey(
+        request, verified.identities);
+    return std::shared_ptr<const PreparedCandidate>(new PreparedCandidate(
+        std::move(graph), std::move(session), selection_artifact_key,
+        verified.identities, std::move(validation_receipt)));
 }
 
 void ProductionCompileRequest::Validate() const {
@@ -539,6 +587,27 @@ const CompiledGraph& FrozenPlanVariant::compiled_graph() const noexcept {
 const std::shared_ptr<const runtime::RuntimeSession>&
 FrozenPlanVariant::session() const noexcept {
     return session_;
+}
+
+std::shared_ptr<const FrozenPlanVariant> FreezePreparedCandidate(
+    uint64_t generation, DispatchKey dispatch_key, PlanAbiFingerprint plan_abi,
+    std::shared_ptr<const PreparedCandidate> candidate) {
+    if (generation == 0 || !candidate || candidate->validation_receipt().empty() ||
+        !dispatch_key.defined() || !plan_abi.defined()) {
+        throw std::invalid_argument("freeze requires generation, route, ABI, and prepared receipt");
+    }
+    std::vector<std::pair<std::string, uint64_t>> artifacts;
+    for (const auto& identity : candidate->selected_artifacts()) {
+        artifacts.emplace_back(identity.CanonicalBytes(), generation);
+    }
+    PlanVariantKey key(candidate->selection_artifact_key().unit_semantic_key().canonical_bytes(),
+                       std::move(artifacts), dispatch_key.canonical_bytes(),
+                       "executable-plan-v3:" + plan_abi.canonical_bytes());
+    ArtifactLease pins(generation, candidate->selection_artifact_key(),
+                       candidate->compiled_graph().artifact_pins);
+    return std::shared_ptr<const FrozenPlanVariant>(new FrozenPlanVariant(
+        generation, std::move(key), std::move(dispatch_key), std::move(plan_abi),
+        std::move(pins), candidate->compiled_graph(), candidate->session()));
 }
 
 AdministrativeQuarantineRequest::AdministrativeQuarantineRequest(
@@ -746,22 +815,21 @@ AdaptiveController::CompileAndPublish(
                                   ? state_->compiler->Compile(request)
                                   : Compiler::Compile(request.graph(),
                                                       request.config());
-        ProductionValidationAuthority::Validate(request, graph);
+        const auto prepared = PrepareCandidate(
+            request, std::move(graph), "legacy-controller-local-validation");
         state_->EmitBestEffort([&request] {
             return EventFor(AdaptiveControllerEventKind::kValidated, request);
         });
 
-        auto session = std::make_shared<const runtime::RuntimeSession>(
-            graph.module, graph.plan);
         std::shared_ptr<const FrozenPlanVariant> variant;
         uint64_t predecessor = 0;
         size_t remaining_flights = 0;
         {
             std::lock_guard<std::mutex> lock(state_->mutex);
             if (slot->quarantined_artifacts.count(
-                    request.artifact_key().canonical_bytes()) != 0) {
+                    prepared->selection_artifact_key().canonical_bytes()) != 0) {
                 throw std::runtime_error(
-                    "whole-plan artifact was quarantined during compilation");
+                    "whole-plan selection was quarantined during compilation");
             }
             if (state_->next_generation ==
                 std::numeric_limits<uint64_t>::max()) {
@@ -770,15 +838,8 @@ AdaptiveController::CompileAndPublish(
             }
             const uint64_t generation = state_->next_generation;
             predecessor = slot->current ? slot->current->generation() : 0;
-            ArtifactLease lease(generation, request.artifact_key(),
-                                graph.artifact_pins);
-            PlanVariantKey variant_key =
-                BuildVariantKey(request, generation);
-            variant = std::shared_ptr<const FrozenPlanVariant>(
-                new FrozenPlanVariant(
-                    generation, std::move(variant_key),
-                    request.dispatch_key(), request.plan_abi(),
-                    std::move(lease), std::move(graph), std::move(session)));
+            variant = FreezePreparedCandidate(
+                generation, request.dispatch_key(), request.plan_abi(), prepared);
             // All potentially allocating authoritative work precedes the head
             // handoff. Observer payloads are built only after publication.
             slot->history.push_back(variant);

@@ -88,6 +88,46 @@ public:
 };
 
 /*! \brief Generation-bound strong ownership of every production artifact pin. */
+/*! \brief Prepare-only result: structurally validated and immutable, never routed.
+ *
+ * The receipt is supplied by the caller's validation authority.  It is selection
+ * evidence, not Plan ABI compatibility.  `PrepareCandidate` deliberately has no
+ * generation, route-head, history, or publication side effect.
+ */
+class FrozenPlanVariant;
+class PreparedCandidate final {
+public:
+    const CompiledGraph& compiled_graph() const noexcept;
+    const std::shared_ptr<const runtime::RuntimeSession>& session() const noexcept;
+    const ArtifactKey& selection_artifact_key() const noexcept;
+    const std::vector<OrderedArtifactIdentity>& selected_artifacts() const noexcept;
+    const std::string& validation_receipt() const noexcept;
+
+private:
+    PreparedCandidate(CompiledGraph graph,
+                      std::shared_ptr<const runtime::RuntimeSession> session,
+                      ArtifactKey selection_artifact_key,
+                      std::vector<OrderedArtifactIdentity> selected_artifacts,
+                      std::string validation_receipt);
+    CompiledGraph graph_;
+    std::shared_ptr<const runtime::RuntimeSession> session_;
+    ArtifactKey selection_artifact_key_;
+    std::vector<OrderedArtifactIdentity> selected_artifacts_;
+    std::string validation_receipt_;
+    friend std::shared_ptr<const PreparedCandidate> PrepareCandidate(
+        const ProductionCompileRequest&, CompiledGraph, std::string);
+};
+
+/*! \brief Structural/full typed preparation only; never publishes or mints a generation. */
+std::shared_ptr<const PreparedCandidate> PrepareCandidate(
+    const ProductionCompileRequest& request, CompiledGraph graph,
+    std::string validation_receipt);
+
+/*! \brief Materializes an immutable selected PlanVariant; no route mutation. */
+std::shared_ptr<const FrozenPlanVariant> FreezePreparedCandidate(
+    uint64_t generation, DispatchKey dispatch_key, PlanAbiFingerprint plan_abi,
+    std::shared_ptr<const PreparedCandidate> candidate);
+
 class ArtifactLease final {
 public:
     ArtifactLease() = default;
@@ -105,6 +145,9 @@ private:
     ArtifactKey artifact_key_;
     std::vector<ArtifactPin> pins_;
     friend class AdaptiveController;
+    friend std::shared_ptr<const FrozenPlanVariant> FreezePreparedCandidate(
+        uint64_t, DispatchKey, PlanAbiFingerprint,
+        std::shared_ptr<const PreparedCandidate>);
 };
 
 /*! \brief Immutable whole CompiledModule+ExecutablePlan+session generation. */
@@ -134,6 +177,9 @@ private:
     CompiledGraph compiled_graph_;
     std::shared_ptr<const runtime::RuntimeSession> session_;
     friend class AdaptiveController;
+    friend std::shared_ptr<const FrozenPlanVariant> FreezePreparedCandidate(
+        uint64_t, DispatchKey, PlanAbiFingerprint,
+        std::shared_ptr<const PreparedCandidate>);
 };
 
 /*! \brief Trusted control-plane administrative quarantine request.

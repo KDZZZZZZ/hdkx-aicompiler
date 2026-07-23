@@ -30,11 +30,14 @@ KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=OFF
   独立 deep copy；
 - whole-graph identity 只接受 exact Relay Expr node whitelist；undefined/unknown/derived node
   在 key、adapter 与 publish 前 fail closed；
-- verified baseline 冻结 ordered `(call index, link symbol, primitive ArtifactKey)`；
-- candidate 每个 production pin 与 baseline 完整 key 相等，并核对内部
-  `CachedPrimitive` signature、launch metadata、target/backend、launcher、provenance、bytes、
-  validation record 及 module entry；
-- ordered selected artifact mapping 进入 Plan ABI 和 PlanVariant identity；
+- verified baseline 冻结 ordered `(call index, link symbol, primitive ArtifactKey)`，作为
+  request 的 structural/typed baseline；
+- candidate 的每个 production pin 都核对内部 `CachedPrimitive` signature、launch
+  metadata、target/backend、launcher、provenance、bytes、validation record 及 module entry；
+  candidate 可在完整 typed contract 仍成立时选择不同的 immutable primitive ArtifactKey；
+- callable/runtime `PlanAbiFingerprint v4` 不含 selected artifact、generation 或 receipt；
+  ordered selected artifact mapping 派生单独的 whole-plan selection identity，并进入
+  `PlanVariantKey`、lease、quarantine 和 observability。
 - whole-graph key 不能作为 primitive fixture key；
 - same-key singleflight、different-key 并行和 active-flight/slot backpressure；
 - frozen whole-plan generation、exact acquire、completion-held variant/artifact lease；
@@ -47,16 +50,15 @@ KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=OFF
 
 ## 2. 必须保持的 authority 边界
 
-当前 executable payload 没有统一可序列化格式。现有 artifact proof 是：
+当前 executable payload 没有统一可序列化格式。candidate selection 的现有 proof 是：
 
 ```text
-immutable process-local cache ArtifactKey
-+ exact ordered call mapping
-+ full typed CachedPrimitive/module equality
-+ launcher shared-object identity
+immutable process-local primitive ArtifactKeys + exact ordered call mapping
++ full typed CachedPrimitive/module equality + module-entry launcher identity
 ```
 
-它可以阻止同 launcher/不同 artifact 换壳、signature/metadata 换壳和错序，但**不是**
+不同的 selected primitive identities 可以共享同一 callable/runtime ABI；derived whole-plan
+selection identity 因而不是 launcher identity，也不是 graph request identity。它仍**不是**
 cryptographic code provenance、remote attestation 或数值健康证明。不得升级措辞。
 
 `AdministrativeQuarantineRequest::ForTrustedControlPlane` 是部署层已经授权后的行政入口；API
@@ -135,9 +137,9 @@ CUDA 通过。
 Gate：`KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=OFF`；打开它会显式打开其唯一依赖
 `KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION`。公共 API 是
 `kxc::api::adaptive::hot_swap::v2`（`adaptive_hot_swap_v2.h`），实现为
-`src/compiler/adaptive/adaptive_hot_swap_v2.cc`。W3 保留 W2 的
-`ProductionPathCompilerAdapter`/`AdaptiveController` 来调用真实候选 compile、其完整
-static-exact validation，以及 Core primitive-cache pin transaction；W3 不复制这些 proof。
+`src/compiler/adaptive/adaptive_hot_swap_v2.cc`。W3 直接使用 W2 的 `ProductionPathCompilerAdapter`、`PrepareCandidate` 完整
+static-exact validation，以及 Core primitive-cache pin transaction；它不调用会自行发布路由的
+W2 `AdaptiveController`，也不复制这些 proof。
 
 W3 独占 whole-plan queue/retry/generation/routing authority：有界 worker、queue、flight 和
 waiter；same-key singleflight；每个 ticket 自己的 cooperative cancellation/deadline；分类
@@ -170,6 +172,16 @@ compile/publish fail-closed（已存在的 healthy predecessor 仍可 Acquire）
 发出 quarantine-saturation event。取消和 backpressure 结果不进入 negative cache，且
 queue/in-flight legacy slot 加法在构造时检查 overflow。
 
+W3 的 `PreparedCandidate` 是 prepare-only：validation receipt、selected artifacts 和
+`RuntimeSession` 在 authority issuance 前冻结，不能直接路由或构造 generation。opaque
+`GenerationLease` 只能由 `GenerationAuthority::MakeLease` 创建；它绑定 immutable prepared
+candidate、derived selection identity、exact route/ABI、receipt 和 producer byte declaration。
+`EvaluateHealth` 允许不同 callers concurrent `Evaluate`，但仅在 lease 仍为 route head 时、在
+serialized `VerifyAndConsume` 中消耗 evidence；过时 health 不会消耗 token。observer callback
+仍在所有 controller APIs 上维持跨线程 fail-fast window；health authority evaluation/verification
+不占用该窗口，因此并发 health consumers 不会互相被误拒绝。health authority 不得从
+`VerifyAndConsume` re-enter the same controller（它在 route lock 下执行）。
+
 W3 focused gate：
 
 ```bash
@@ -182,10 +194,22 @@ ctest --test-dir out/adaptive-v2-on --output-on-failure \
   -L adaptive-hot-swap-v2 -L cpu
 ```
 
-The deterministic v2 additions cover cancellation/deadline isolation, same-key bounded stress,
-negative-cache clear/retry, producer-byte generation eviction with an external lease, generation
-exhaustion, one-shot quarantine rollback, observer reentry, and exact ABI non-routing. The v2 test
-reuses the existing W2 fixture so every candidate continues through real production-path validation.
+The deterministic v2 additions cover cancellation/deadline isolation (including no-`Wait`
+all-cancelled suppression), repeated same-key bounded stress, negative-cache clear/retry,
+producer-byte/history eviction with an external lease, non-wrapping generation exhaustion,
+transactional injected pre-commit stages, route/tombstone bounds, one-shot concurrent health
+consumption, observer isolation, and exact ABI non-routing. It also proves a candidate with a
+real different selected primitive key and the same ABI gets a different selection identity while
+a recording authority binds the opaque lease. The v2 test reuses the W2 fixture so every candidate
+continues through real production-path validation.
+
+### Public C++ interface compatibility
+
+No cross-version C++ ABI guarantee is made. This branch changes public headers (including the
+prepare/authority interfaces and the `PlanAbiFingerprint v4` canonical byte contract). Consumers
+must rebuild source against matching headers and library; previously compiled objects/binaries
+must not be mixed with this library, and old source that relied on selected artifacts being part of
+Plan ABI must be updated. Schema/contract version constants version data formats, not the C++ ABI.
 
 ## 6. 外部门禁/未完成项
 
