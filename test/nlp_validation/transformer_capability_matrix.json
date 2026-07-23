@@ -275,6 +275,74 @@
         ]
       }
     },
+    "mask_select": {
+      "frontend": {
+        "status": "unsupported",
+        "gate": "onnx_mask_ops_unsupported",
+        "reason": "ONNX Where and dedicated attention-mask import are not implemented; the exact fixture supplies a finite additive mask tensor explicitly.",
+        "evidence": [
+          "python/kxc_onnx/importer.py",
+          "docs/ONNX_IMPORTER.md"
+        ]
+      },
+      "relay": {
+        "status": "unsupported",
+        "gate": "no_mask_select_operator",
+        "reason": "No dedicated mask/select Relay operator or all-masked-row semantic contract exists.",
+        "evidence": [
+          "test/relay_op_contract.json"
+        ]
+      },
+      "lowering": {
+        "status": "unsupported",
+        "gate": "no_mask_select_lowering",
+        "reason": "No dedicated mask/select lowering exists; finite additive masking in the exact slice only reuses add.",
+        "evidence": [
+          "test/op_numeric_llvm_test.cpp"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "mask_select_not_implemented",
+        "reason": "No dedicated mask/select LLVM numeric test exists.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "mask_select_not_implemented",
+        "reason": "No dedicated mask/select CUDA implementation or device numeric test exists.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "unsupported",
+        "gate": "no_valid_extent_mask_contract",
+        "reason": "Runtime values do not yet carry the valid-extent mask contract needed for padded attention.",
+        "evidence": [
+          "docs/plans/compiler-foundation/06-nlp-gpu-validation.md"
+        ]
+      },
+      "numeric": {
+        "status": "contracted",
+        "gate": "finite_additive_reference_only",
+        "reason": "The CPU prefill reference covers a finite causal additive mask only; this is not general mask/select or all-masked validation.",
+        "evidence": [
+          "test/nlp_validation/deterministic_fixtures.json",
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
     "normalization": {
       "frontend": {
         "status": "contracted",

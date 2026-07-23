@@ -10,7 +10,7 @@ from pathlib import Path
 
 CAPABILITIES = (
     "stable_softmax", "masked_softmax_all_masked", "batched_matmul",
-    "embedding_gather", "normalization", "slice_concat", "prefill_exact",
+    "embedding_gather", "mask_select", "normalization", "slice_concat", "prefill_exact",
     "decode_external_kv", "kv_cache", "dynamic_batching", "copy_event",
 )
 LAYERS = ("frontend", "relay", "lowering", "llvm", "cuda", "runtime", "numeric", "profile")
