@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "../internal/te_to_tir.h"
+#include "kxc/compiler/capability.h"
 #include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/transforms/infer_type.h"
 
@@ -266,12 +267,16 @@ relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
             unit.structural_hash});
 }
 
-LoweredGraph LowerGraph(Function function, Device device) {
+LoweredGraph LowerGraph(Function function, Device device, Target target) {
     if (!function.defined() || !device.defined()) {
         throw std::invalid_argument(
             "LowerGraph requires a defined Function and Device");
     }
     function = relay::InferTypePass(function);
+    if (!target.defined()) target = BuildTarget(device);
+    CapabilityVerifier::Require(CapabilityRequest{
+        function, target, "graph", "", CapabilityBoundary::kPrePartition,
+        CapabilityMode::kStaticExact, true});
     LoweredGraph result;
     result.partitioned =
         PartitionValueGraph(BuildValueGraph(function));

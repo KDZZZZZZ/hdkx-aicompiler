@@ -35,6 +35,7 @@ set(KXC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/include")
 
 set(KXC_PUBLIC_HEADERS
+  include/kxc/compiler/capability.h
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
   include/kxc/compiler/lowering/relay_to_tir.h
@@ -417,8 +418,9 @@ set(KXC_RUNTIME_EXECUTABLE_SOURCES
 )
 
 set(KXC_COMPILER_SOURCES
-    src/compiler/cache/primitive_cache.cc
-    src/compiler/compile_config.cc
+  src/compiler/cache/primitive_cache.cc
+  src/compiler/capability.cc
+  src/compiler/compile_config.cc
   src/compiler/compile_state.cc
   src/compiler/compiler.cc
   src/compiler/graph/partition.cc
@@ -739,6 +741,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
+  kxc_add_runtime_exe(compiler_capability_test test/compiler_capability_test.cpp)
   kxc_add_runtime_exe(operator_compilation_test test/operator_compilation_test.cpp)
   kxc_add_runtime_exe(compiler_extension_contract_test test/compiler_extension_contract_test.cpp)
   kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)

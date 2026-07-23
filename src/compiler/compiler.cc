@@ -22,6 +22,7 @@
 #include "internal/lowered_graph.h"
 #include "internal/primitive_cache.h"
 #include "../runtime/internal/compiled_module_node.h"
+#include "kxc/compiler/capability.h"
 #include "../runtime/internal/memory_plan.h"
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
@@ -275,6 +276,10 @@ Map<String, runtime::NDArray> PlaceConstants(
 
 CompileResult ValidateInput(Function function, const CompileConfig& config) {
     config.Validate();
+    CapabilityVerifier::Require(CapabilityRequest{
+        function, config->target, "graph", "",
+        CapabilityBoundary::kCompilerEntry, CapabilityMode::kStaticExact,
+        false});
     return CompileResult::Validate(config->target, std::move(function));
 }
 
@@ -284,13 +289,17 @@ CompileResult OptimizeRelay(const CompileResult& input,
     Function optimized = relay::RunRelayPassPipeline(
         typed, Compiler::RelayPassPolicy(config->opt_level));
     optimized = relay::InferTypePass(optimized);
+    CapabilityVerifier::Require(CapabilityRequest{
+        optimized, input.target(), "graph", "",
+        CapabilityBoundary::kPostGraphPass, CapabilityMode::kStaticExact,
+        true});
     return input.AfterRelayOptimization(std::move(optimized));
 }
 
 CompileResult LowerOperators(const CompileResult& input) {
     const Device device(input.target()->device_type, input.target()->device_id);
     internal::LoweredGraph lowered =
-        internal::LowerGraph(input.optimized_relay(), device);
+        internal::LowerGraph(input.optimized_relay(), device, input.target());
     std::vector<PrimitiveCompileState> primitives;
     primitives.reserve(lowered.primitives.size());
     for (const internal::LoweredPrimitive& source : lowered.primitives) {
