@@ -408,13 +408,14 @@ void SelectedArtifactBinding::Validate() const {
     if (node->kind != ArtifactBindingKind::kCall &&
         node->kind != ArtifactBindingKind::kTask) {
         throw std::invalid_argument(
-            "selected artifact binding kind is invalid");
+            "artifact observability declaration binding kind is invalid");
     }
     if (node->invocation_id < 0 || Text(node->artifact_identity).empty() ||
         Text(node->exact_abi_fingerprint).empty() ||
         Text(node->entry_symbol).empty() || Text(node->entry_binding).empty()) {
         throw std::invalid_argument(
-            "selected artifact binding requires complete identity, ABI, and entry fields");
+            "artifact observability declaration requires complete caller "
+            "identity, ABI, and entry fields");
     }
 }
 
@@ -429,11 +430,11 @@ const SelectedArtifactBindingNode* SelectedArtifactBinding::operator->() const {
 
 SelectedArtifactManifest::SelectedArtifactManifest(
     String plan_fingerprint, Array<SelectedArtifactBinding> bindings,
-    std::shared_ptr<const void> retention_token) {
+    std::shared_ptr<const void> retention_lease) {
     auto* node = new SelectedArtifactManifestNode();
     node->plan_fingerprint = std::move(plan_fingerprint);
     node->bindings_ = CopyArray(bindings);
-    node->retention_token_ = std::move(retention_token);
+    node->retention_lease_ = std::move(retention_lease);
     SetData(node);
     Validate();
 }
@@ -452,8 +453,8 @@ Array<SelectedArtifactBinding> SelectedArtifactManifest::bindings() const {
     return CopyArray(operator->()->bindings_);
 }
 
-std::shared_ptr<const void> SelectedArtifactManifest::retention_token() const {
-    return operator->()->retention_token_;
+std::shared_ptr<const void> SelectedArtifactManifest::retention_lease() const {
+    return operator->()->retention_lease_;
 }
 
 void SelectedArtifactManifest::Validate() const {
@@ -461,7 +462,8 @@ void SelectedArtifactManifest::Validate() const {
     if (node->version != kSelectedArtifactManifestVersion ||
         Text(node->plan_fingerprint).empty() || node->bindings_.empty()) {
         throw std::invalid_argument(
-            "selected artifact manifest version, plan fingerprint, or bindings are invalid");
+            "artifact observability declaration version, plan fingerprint, "
+            "or bindings are invalid");
     }
     std::set<std::pair<int32_t, int64_t>> locators;
     for (const auto& binding : node->bindings_) {
@@ -471,7 +473,7 @@ void SelectedArtifactManifest::Validate() const {
                           binding->invocation_id)
                  .second) {
             throw std::invalid_argument(
-                "selected artifact manifest binding locators must be unique");
+                "artifact observability declaration locators must be unique");
         }
     }
 }
@@ -512,7 +514,7 @@ void PlanVariant::Validate() const {
     const auto* node = operator->();
     if (!node->plan_.defined() || !node->manifest_.defined()) {
         throw std::invalid_argument(
-            "PlanVariant requires an executable plan and selected-artifact manifest");
+            "PlanVariant requires an executable plan and artifact observability declaration");
     }
     node->plan_.Validate();
     node->manifest_.Validate();
@@ -521,14 +523,14 @@ void PlanVariant::Validate() const {
         node->manifest_.bindings();
     if (bindings.size() != calls.size()) {
         throw std::invalid_argument(
-            "PlanVariant requires one selected artifact per ordered call");
+            "PlanVariant requires one declared artifact per ordered call");
     }
     std::unordered_map<int64_t, SelectedArtifactBinding> by_call;
     for (const auto& binding : bindings) {
         if (binding->kind != ArtifactBindingKind::kCall ||
             !by_call.emplace(binding->invocation_id, binding).second) {
             throw std::invalid_argument(
-                "PlanVariant manifest must contain unique call bindings");
+                "PlanVariant artifact declaration must contain unique call bindings");
         }
     }
     for (size_t index = 0; index < calls.size(); ++index) {
@@ -735,7 +737,7 @@ String ComputeFrozenTaskPlanFingerprint(
 PlanVariant MakePlanVariant(
     const api::CompiledModule& module, const ExecutablePlan& plan,
     const Array<ArtifactSelection>& selections,
-    std::shared_ptr<const void> retention_token) {
+    std::shared_ptr<const void> retention_lease) {
     if (!plan.defined()) {
         throw std::invalid_argument("MakePlanVariant requires a plan");
     }
@@ -743,7 +745,7 @@ PlanVariant MakePlanVariant(
     const Array<KernelCall> calls = plan.calls();
     if (selections.size() != calls.size()) {
         throw std::invalid_argument(
-            "MakePlanVariant requires one selection per call");
+            "MakePlanVariant requires one caller declaration per call");
     }
     std::unordered_map<int64_t, ArtifactSelection> by_call;
     for (const auto& selection : selections) {
@@ -751,7 +753,7 @@ PlanVariant MakePlanVariant(
             Text(selection.artifact_identity).empty() ||
             !by_call.emplace(selection.invocation_id, selection).second) {
             throw std::invalid_argument(
-                "MakePlanVariant selections require unique complete call identities");
+                "MakePlanVariant caller declarations require unique complete call identities");
         }
     }
     Array<SelectedArtifactBinding> bindings;
@@ -760,7 +762,7 @@ PlanVariant MakePlanVariant(
         const auto selected = by_call.find(call_id);
         if (selected == by_call.end()) {
             throw std::invalid_argument(
-                "MakePlanVariant selection omits an ordered call");
+                "MakePlanVariant caller declaration omits an ordered call");
         }
         const String abi =
             ComputeCallExactAbiFingerprint(module, plan, call_id);
@@ -778,7 +780,7 @@ PlanVariant MakePlanVariant(
         ComputePlanVariantFingerprint(plan, bindings);
     return PlanVariant(
         plan, SelectedArtifactManifest(fingerprint, std::move(bindings),
-                                       std::move(retention_token)));
+                                       std::move(retention_lease)));
 }
 
 RegionSpec::RegionSpec(int64_t region_id, RegionKind kind, String semantic_key,
@@ -1310,7 +1312,7 @@ void FrozenTaskPlan::Validate() const {
             if (binding->kind != ArtifactBindingKind::kTask ||
                 !by_task.emplace(binding->invocation_id, binding).second) {
                 throw std::invalid_argument(
-                    "FrozenTaskPlan manifest must contain unique task bindings");
+                    "FrozenTaskPlan artifact declaration must contain unique task bindings");
             }
         }
         for (const auto& task : node->tasks_) {
@@ -1327,7 +1329,7 @@ void FrozenTaskPlan::Validate() const {
         }
         if (kernel_count != bindings.size()) {
             throw std::invalid_argument(
-                "FrozenTaskPlan requires one selected artifact per kernel task");
+                "FrozenTaskPlan requires one declared artifact per kernel task");
         }
         if (Text(node->manifest_->plan_fingerprint) !=
             Text(ComputeFrozenTaskPlanFingerprint(*this, bindings))) {
@@ -1346,7 +1348,7 @@ const FrozenTaskPlanNode* FrozenTaskPlan::operator->() const {
 FrozenTaskPlan AttachSelectedArtifacts(
     const api::CompiledModule& module, const FrozenTaskPlan& plan,
     const Array<ArtifactSelection>& selections,
-    std::shared_ptr<const void> retention_token) {
+    std::shared_ptr<const void> retention_lease) {
     if (!plan.defined()) {
         throw std::invalid_argument(
             "AttachSelectedArtifacts requires a frozen task plan");
@@ -1360,7 +1362,7 @@ FrozenTaskPlan AttachSelectedArtifacts(
     }
     if (selections.size() != kernels.size()) {
         throw std::invalid_argument(
-            "AttachSelectedArtifacts requires one selection per kernel task");
+            "AttachSelectedArtifacts requires one caller declaration per kernel task");
     }
     std::unordered_map<int64_t, ArtifactSelection> by_task;
     for (const auto& selection : selections) {
@@ -1368,7 +1370,7 @@ FrozenTaskPlan AttachSelectedArtifacts(
             Text(selection.artifact_identity).empty() ||
             !by_task.emplace(selection.invocation_id, selection).second) {
             throw std::invalid_argument(
-                "task artifact selections require unique complete identities");
+                "task artifact declarations require unique complete caller identities");
         }
     }
     Array<SelectedArtifactBinding> bindings;
@@ -1380,13 +1382,13 @@ FrozenTaskPlan AttachSelectedArtifacts(
         const auto selection = by_task.find(task_id);
         if (selection == by_task.end()) {
             throw std::invalid_argument(
-                "task artifact selection omits a kernel task");
+                "task artifact declaration omits a kernel task");
         }
         const TaskSpec& task = kernels.at(task_id);
         if (selection->second.generation !=
             static_cast<uint64_t>(task->artifact_generation)) {
             throw std::invalid_argument(
-                "task artifact selection generation does not match the task");
+                "task artifact declaration generation does not match the task");
         }
         const String abi =
             ComputeTaskExactAbiFingerprint(module, plan, task_id);
@@ -1402,7 +1404,7 @@ FrozenTaskPlan AttachSelectedArtifacts(
     const String fingerprint =
         ComputeFrozenTaskPlanFingerprint(plan, bindings);
     return plan.WithManifest(SelectedArtifactManifest(
-        fingerprint, std::move(bindings), std::move(retention_token)));
+        fingerprint, std::move(bindings), std::move(retention_lease)));
 }
 
 }  // namespace kxc::runtime

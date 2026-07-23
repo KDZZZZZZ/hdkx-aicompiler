@@ -34,7 +34,13 @@ public:
     KXC_OBJECT_DECLARE
 };
 
-/*! \brief Complete runtime-only identity and ABI binding for one invocation. */
+/*!
+ * \brief Caller-supplied artifact observability and ABI/entry binding fields.
+ *
+ * Builder helpers derive ABI/entry fields; direct construction can supply them.
+ * RuntimeSession recomputes structural consistency with its module and plan but
+ * does not authenticate artifact_identity, generation, or their provenance.
+ */
 class SelectedArtifactBinding : public ObjectRef {
 public:
     SelectedArtifactBinding(ArtifactBindingKind kind, int64_t invocation_id,
@@ -57,25 +63,30 @@ public:
 private:
     friend class SelectedArtifactManifest;
     Array<SelectedArtifactBinding> bindings_;
-    std::shared_ptr<const void> retention_token_;
+    std::shared_ptr<const void> retention_lease_;
 };
 
-/*! \brief Immutable selected-artifact manifest with an opaque owner token. */
+/*!
+ * \brief Trusted upper-control-plane declaration with an opaque retention lease.
+ *
+ * The lease provides type-erased lifetime retention only. Runtime neither
+ * authenticates it nor proves that it owns the artifacts named by bindings.
+ */
 class SelectedArtifactManifest : public ObjectRef {
 public:
     SelectedArtifactManifest() = default;
     SelectedArtifactManifest(
         String plan_fingerprint, Array<SelectedArtifactBinding> bindings,
-        std::shared_ptr<const void> retention_token = nullptr);
+        std::shared_ptr<const void> retention_lease = nullptr);
     explicit SelectedArtifactManifest(const ObjectRef& ref);
 
     Array<SelectedArtifactBinding> bindings() const;
-    std::shared_ptr<const void> retention_token() const;
+    std::shared_ptr<const void> retention_lease() const;
     void Validate() const;
     const SelectedArtifactManifestNode* operator->() const;
 };
 
-/*! \brief Runtime-only frozen ordered plan and selected-artifact manifest. */
+/*! \brief Runtime-only ordered plan with a trusted observability declaration. */
 class PlanVariantNode final : public Object {
 public:
     KXC_OBJECT_DECLARE
@@ -98,7 +109,12 @@ public:
     const PlanVariantNode* operator->() const;
 };
 
-/*! \brief Upper-layer canonical identity assigned to one call/task locator. */
+/*!
+ * \brief Trusted upper-layer declaration assigned to one call/task locator.
+ *
+ * This data is for observability and lease propagation. Runtime does not use it
+ * to select an executable or prove that it came from an ArtifactPin.
+ */
 struct ArtifactSelection final {
     int64_t invocation_id{-1};
     String artifact_identity;
@@ -115,7 +131,7 @@ String ComputeTaskExactAbiFingerprint(const api::CompiledModule& module,
                                       const class FrozenTaskPlan& plan,
                                       int64_t task_id);
 
-/*! \brief Binds canonical artifact identity and ABI to an entry and locator. */
+/*! \brief Canonicalizes a declared identity with runtime ABI and locator data. */
 String ComputeEntryBindingFingerprint(ArtifactBindingKind kind,
                                       int64_t invocation_id,
                                       const String& artifact_identity,
@@ -130,11 +146,16 @@ String ComputeFrozenTaskPlanFingerprint(
     const class FrozenTaskPlan& plan,
     const Array<SelectedArtifactBinding>& bindings);
 
-/*! \brief Freezes complete generation/ABI bindings for every ordered call. */
+/*!
+ * \brief Builds a structurally checked declaration for every ordered call.
+ *
+ * selections and retention_lease come from a trusted upper control plane; this
+ * function does not authenticate their origin or their association.
+ */
 PlanVariant MakePlanVariant(
     const api::CompiledModule& module, const ExecutablePlan& plan,
     const Array<ArtifactSelection>& selections,
-    std::shared_ptr<const void> retention_token = nullptr);
+    std::shared_ptr<const void> retention_lease = nullptr);
 
 /*! \brief Runtime-neutral region category; PerCall remains the fallback policy. */
 enum class RegionKind : int32_t {
@@ -282,10 +303,15 @@ public:
     const FrozenTaskPlanNode* operator->() const;
 };
 
-/*! \brief Attaches complete generation/ABI bindings to every kernel task. */
+/*!
+ * \brief Attaches a trusted observability declaration to every kernel task.
+ *
+ * Runtime derives the ABI fields but does not authenticate the caller identity
+ * or prove that retention_lease owns the declared artifacts.
+ */
 FrozenTaskPlan AttachSelectedArtifacts(
     const api::CompiledModule& module, const FrozenTaskPlan& plan,
     const Array<ArtifactSelection>& selections,
-    std::shared_ptr<const void> retention_token = nullptr);
+    std::shared_ptr<const void> retention_lease = nullptr);
 
 }  // namespace kxc::runtime

@@ -106,7 +106,8 @@ layout、target、ABI、pipeline 变化必须 miss。重复 operand、常量、�
 1. 先允许无 effect、无冲突 alias、兼容 target/layout 的 elementwise producer-consumer fusion。
 2. 对无法证明合法的边界稳定回退 `PerCall`，而非猜测 fusion 或改变数值顺序。
 3. library region 持有显式 descriptor、workspace、stream 与 error ABI；它不是伪装的 kernel。
-4. 记录 fusion 前后 unit locator、semantic key、artifact provenance 和 profile 对照。
+4. 记录 fusion 前后 unit locator、semantic key、compiler-side artifact selection evidence、
+   upper-plane observability declaration 和 profile 对照；Runtime 不认证其 provenance。
 **测试：** fused/unfused 数值、ABI、effect trace、共享常量和多输出一致；跨 alias/effect、
 不兼容 layout、未知 workspace 和跨 device fusion 必须拒绝或回退。mock library 的失败与资源
 保活必须可观察。

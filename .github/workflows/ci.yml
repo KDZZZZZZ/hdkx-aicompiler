@@ -156,10 +156,16 @@ jobs:
           operator_compilation_test codegen_llvm_test op_numeric_llvm_test
           onnx_importer_test runtime_session_test
 
-      - name: Run LLVM operator, relocation/cache, codegen, and numeric checks
+      - name: Run production compiler-to-task-DAG E2E
         run: >
           ctest --test-dir out/build/ci-llvm --output-on-failure
-          --tests-regex '^(operator_compilation_test|codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test|runtime_session_test)$'
+          --no-tests=error --tests-regex '^operator_compilation_test$'
+
+      - name: Run remaining LLVM codegen, numeric, importer, and runtime checks
+        run: >
+          ctest --test-dir out/build/ci-llvm --output-on-failure
+          --no-tests=error
+          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test|runtime_session_test)$'
 
   python-onnx-importer:
     name: Python ONNX importer tests

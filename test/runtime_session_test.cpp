@@ -321,6 +321,8 @@ kxc::runtime::ExecutablePlan MakeAliasFallbackPlan() {
         {KernelCall("session_fixture", {0, 1}, {2})}, {0}, {1}, {2});
 }
 
+// Test-only trusted upper-plane declaration; arbitrary fixture identity is
+// intentionally accepted and is not Runtime-authenticated provenance.
 kxc::runtime::PlanVariant MakeVariant(
     const kxc::api::CompiledModule& module,
     const kxc::runtime::ExecutablePlan& plan, uint64_t generation = 0,
@@ -669,7 +671,7 @@ bool TestFrozenTaskDagExecutionAndRetention() {
                                               runtime::RegionKind::kFusion)));
                }) &&
                    fusion_fixture.launcher->calls == 0,
-               "fusion regions without verified provenance must fail before launch");
+               "fusion regions without an execution contract must fail before launch");
     TEST_CHECK(Throws([&] {
                    runtime::RuntimeSession invalid(
                        fixture.module,
@@ -1098,7 +1100,6 @@ bool TestMultiEntryPlanExecution() {
                    outputs[0].storage()->alignment >= 64,
                "stable intermediate/output values or alignments were not preserved");
 
-#if KXC_ENABLE_REGION_TASK_DAG
     runtime::RuntimeSession task_session(
         module, MakeVariant(module, plan),
         runtime::RuntimeExecutionMode::kTaskDAG);
@@ -1107,10 +1108,22 @@ bool TestMultiEntryPlanExecution() {
     std::vector<float> task_actual(4);
     task_outputs[0].CopyToBytes(task_actual.data(),
                                 task_actual.size() * sizeof(float));
-    TEST_CHECK(task_session.UsesTaskDAG() && task_actual == actual &&
-                   add_launcher->calls == 2 && mul_launcher->calls == 2,
-               "task DAG execution must equal ordered multi-entry execution");
+#if KXC_ENABLE_REGION_TASK_DAG
+    const bool selection_ok =
+        task_session.UsesTaskDAG() &&
+        task_session.TaskDAGSelection().fallback_reason ==
+            runtime::FallbackReason::kNone;
+#else
+    const bool selection_ok =
+        !task_session.UsesTaskDAG() &&
+        task_session.TaskDAGSelection().fallback_reason ==
+            runtime::FallbackReason::kFeatureDisabled;
 #endif
+    TEST_CHECK(selection_ok &&
+                   task_session.artifact_manifest().defined() &&
+                   task_actual == actual && add_launcher->calls == 2 &&
+                   mul_launcher->calls == 2,
+               "manifested task request must preserve multi-entry numerics for gate OFF/ON");
 
     runtime::ExecutablePlan bad_plan(
         values,

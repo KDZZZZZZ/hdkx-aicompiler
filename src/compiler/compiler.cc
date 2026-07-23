@@ -686,9 +686,12 @@ runtime::PlanVariant AssemblePlanVariant(
                        .artifact_key.canonical_bytes()),
             0});
     }
-    const auto retained_pins =
+    // Compiler is the authority that associates this declaration with pins;
+    // Runtime only observes it and keeps the type-erased lease alive.
+    const auto retention_lease =
         std::make_shared<const std::vector<ArtifactPin>>(pins);
-    return runtime::MakePlanVariant(module, plan, selections, retained_pins);
+    return runtime::MakePlanVariant(module, plan, selections,
+                                    retention_lease);
 }
 
 CompiledGraph CompilePipeline(

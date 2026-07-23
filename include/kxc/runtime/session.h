@@ -51,6 +51,7 @@ public:
                             const DeviceStream& stream) const;
     bool UsesTaskDAG() const;
     TaskDAGSelectionResult TaskDAGSelection() const;
+    /*! \brief Returns the accepted declaration; it is not provenance proof. */
     SelectedArtifactManifest artifact_manifest() const;
 
 private:

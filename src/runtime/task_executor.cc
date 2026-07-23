@@ -151,7 +151,7 @@ FrozenTaskPlan PlanTaskMemory(const FrozenTaskPlan& plan) {
     plan.Validate();
     if (plan.manifest().defined()) {
         throw std::invalid_argument(
-            "Task memory planning must precede selected-artifact freezing");
+            "Task memory planning must precede artifact declaration attachment");
     }
     const PlanIndex index = IndexPlan(plan);
     std::unordered_map<int64_t, int64_t> storage_by_value;

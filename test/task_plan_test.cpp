@@ -71,7 +71,7 @@ kxc::runtime::FrozenTaskPlan MakeValidPlan() {
                           std::move(tasks), std::move(regions), {0}, {1}, {4});
 }
 
-kxc::runtime::FrozenTaskPlan WithFakeManifest(
+kxc::runtime::FrozenTaskPlan WithDeclaredManifest(
     const kxc::runtime::FrozenTaskPlan& plan, uint64_t generation = 7) {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -114,17 +114,17 @@ bool TestFrozenDtoAndDeterministicTopology() {
     return true;
 }
 
-bool TestSelectedArtifactManifestContracts() {
+bool TestArtifactDeclarationContracts() {
     using namespace kxc;
     using namespace kxc::runtime;
     const FrozenTaskPlan raw = MakeValidPlan();
-    const FrozenTaskPlan frozen = WithFakeManifest(raw);
+    const FrozenTaskPlan frozen = WithDeclaredManifest(raw);
     TEST_CHECK(frozen.manifest().defined() &&
                    frozen.manifest().bindings().size() == 1 &&
                    frozen.manifest().bindings()[0]->generation == 7 &&
                    frozen.manifest().bindings()[0]->artifact_identity ==
                        "artifact-key-canonical-v1",
-               "frozen plan must carry complete per-task artifact identity");
+               "frozen plan must carry the trusted caller's per-task artifact declaration");
 
     const String identity("artifact-key-canonical-v1");
     const String abi("exact-abi-v1");
@@ -166,7 +166,7 @@ bool TestSelectedArtifactManifestContracts() {
                      call_bindings));
     TEST_CHECK(variant.manifest().bindings()[0]->entry_symbol == "entry" &&
                    !std::string(variant.manifest()->plan_fingerprint).empty(),
-               "PlanVariant must carry one complete binding per call");
+               "PlanVariant must carry one structurally complete caller declaration per call");
     return true;
 }
 
@@ -408,8 +408,8 @@ int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"frozen_dto_and_deterministic_topology",
          TestFrozenDtoAndDeterministicTopology},
-        {"selected_artifact_manifest_contracts",
-         TestSelectedArtifactManifestContracts},
+        {"artifact_declaration_contracts",
+         TestArtifactDeclarationContracts},
         {"task_kind_contracts", TestTaskKindContracts},
         {"static_exact_rejects_dynamic_dimensions",
          TestStaticExactRejectsDynamicDimensions},

@@ -22,7 +22,8 @@ struct CompiledGraph final {
     runtime::ExecutablePlan plan;
     // Compiler::Compile populates this with production-backed cache pins.
     std::vector<ArtifactPin> artifact_pins;
-    // Runtime-only per-call manifest; RuntimeSession never includes Compiler.
+    // Compiler declares pin identities and retains those pins in the lease.
+    // Runtime observes the declaration but cannot authenticate its provenance.
     runtime::PlanVariant variant;
 };
 

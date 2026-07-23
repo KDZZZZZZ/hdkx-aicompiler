@@ -101,7 +101,7 @@ kxc::runtime::FrozenTaskPlan MakeAllKindsPlan() {
         {0}, {}, {3});
 }
 
-kxc::runtime::FrozenTaskPlan WithFakeManifest(
+kxc::runtime::FrozenTaskPlan WithDeclaredManifest(
     const kxc::runtime::FrozenTaskPlan& plan) {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -174,7 +174,7 @@ bool TestDeterministicExecutorCoversTaskKinds() {
     using namespace kxc;
     using namespace kxc::runtime;
     const FrozenTaskPlan plan =
-        WithFakeManifest(PlanTaskMemory(MakeAllKindsPlan()));
+        WithDeclaredManifest(PlanTaskMemory(MakeAllKindsPlan()));
     std::unordered_map<int64_t, int> values{{0, 3}};
     std::vector<int64_t> action_order;
     std::vector<RuntimeEvent> observed;
@@ -245,7 +245,7 @@ bool TestDeterministicExecutorCoversTaskKinds() {
     }
     TEST_CHECK(saw_wait && saw_launch && saw_generation && saw_allocation &&
                    saw_release,
-               "observer schema must cover wait/launch/generation/allocation/release");
+               "observer schema must expose the declared generation plus task lifecycle");
     TEST_CHECK(allocations == std::vector<int64_t>({1, 2, 3}) &&
                    releases == std::vector<int64_t>({1, 2}),
                "allocation/release trace must follow consumer completion");

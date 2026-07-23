@@ -271,7 +271,7 @@ void ValidatePlanManifest(const api::CompiledModule& module,
     const Array<KernelCall> calls = plan.calls();
     for (const auto& binding : variant.manifest().bindings()) {
         const std::string context =
-            "RuntimeSession call artifact[" +
+            "RuntimeSession call artifact declaration[" +
             std::to_string(binding->invocation_id) + "]";
         if (binding->generation != 0) {
             throw std::invalid_argument(
@@ -307,11 +307,11 @@ void ValidateTaskManifest(const api::CompiledModule& module,
                           const FrozenTaskPlan& plan) {
     if (!plan.manifest().defined()) {
         throw std::invalid_argument(
-            "RuntimeSession task DAG requires a selected-artifact manifest");
+            "RuntimeSession task DAG requires a trusted upper-plane artifact declaration");
     }
     for (const auto& binding : plan.manifest().bindings()) {
         const std::string context =
-            "RuntimeSession task artifact[" +
+            "RuntimeSession task artifact declaration[" +
             std::to_string(binding->invocation_id) + "]";
         if (binding->generation != 0) {
             throw std::invalid_argument(
@@ -353,7 +353,8 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
                 break;
             case RegionKind::kFusion:
                 throw std::invalid_argument(
-                    "RuntimeSession task DAG requires verified fusion provenance");
+                    "RuntimeSession task DAG does not execute fusion regions "
+                    "without a fusion execution contract");
             case RegionKind::kLibrary:
                 throw std::invalid_argument(
                     "RuntimeSession task DAG requires a library descriptor, "
@@ -768,8 +769,10 @@ FallbackDecision InspectFrozenPlanForRuntime(const FrozenTaskPlan& plan) {
             case RegionKind::kPerCall:
                 break;
             case RegionKind::kFusion:
-                return {FallbackReason::kUnsupportedFusion,
-                        "task DAG runtime requires verified fusion provenance"};
+                return {
+                    FallbackReason::kUnsupportedFusion,
+                    "task DAG runtime does not execute fusion regions without "
+                    "a fusion execution contract"};
             case RegionKind::kLibrary:
                 return {FallbackReason::kUnsupportedLibrary,
                         "task DAG runtime requires a library execution contract"};
@@ -823,7 +826,7 @@ FrozenTaskPlan AdaptPlanVariantToTaskDAG(
         const auto selected = calls.find(static_cast<int64_t>(call_index++));
         if (selected == calls.end()) {
             throw std::logic_error(
-                "task DAG adapter lost an ordered call artifact binding");
+                "task DAG adapter lost an ordered call artifact declaration");
         }
         selections.push_back(ArtifactSelection{
             task->task_id, selected->second->artifact_identity,
@@ -831,11 +834,11 @@ FrozenTaskPlan AdaptPlanVariantToTaskDAG(
     }
     if (call_index != calls.size()) {
         throw std::logic_error(
-            "task DAG adapter did not bind every ordered call artifact");
+            "task DAG adapter did not preserve every ordered call artifact declaration");
     }
     return AttachSelectedArtifacts(
         module, task_plan, selections,
-        variant.manifest().retention_token());
+        variant.manifest().retention_lease());
 }
 
 Array<NDArray> PrepareTaskArguments(
@@ -936,8 +939,10 @@ RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan,
 #if KXC_ENABLE_REGION_TASK_DAG
         FallbackDecision fallback = InspectOrderedPlanForTaskDAG(plan);
         if (fallback.reason == FallbackReason::kNone) {
-            fallback = {FallbackReason::kMissingArtifactManifest,
-                        "task DAG adapter requires a selected-artifact PlanVariant"};
+            fallback = {
+                FallbackReason::kMissingArtifactManifest,
+                "task DAG adapter requires a trusted upper-plane artifact "
+                "declaration in PlanVariant"};
         }
 #else
         const FallbackDecision fallback{
