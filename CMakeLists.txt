@@ -86,6 +86,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/ndarray.h
   include/kxc/runtime/session.h
   include/kxc/runtime/storage.h
+  include/kxc/runtime/task_executor.h
   include/kxc/runtime/task_plan.h
   include/kxc/support/arena.h
   include/kxc/support/container.h
@@ -307,6 +308,7 @@ set(KXC_RUNTIME_CORE_SOURCES
   src/runtime/device_stream.cc
   src/runtime/executable_plan.cc
   src/runtime/memory_plan.cc
+  src/runtime/task_executor.cc
   src/runtime/task_plan.cc
   src/runtime/storage.cc
   src/runtime/ndarray.cc
@@ -742,6 +744,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
   kxc_add_runtime_exe(task_plan_test test/task_plan_test.cpp)
+  kxc_add_runtime_exe(task_executor_test test/task_executor_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
@@ -830,6 +833,14 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS task_plan_test
     USES_TERMINAL
     COMMENT "Run task_plan_test"
+  )
+
+  add_custom_target(run_task_executor_test
+    COMMAND "$<TARGET_FILE:task_executor_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS task_executor_test
+    USES_TERMINAL
+    COMMENT "Run task_executor_test"
   )
 
   add_custom_target(run_profile_bundle_test
