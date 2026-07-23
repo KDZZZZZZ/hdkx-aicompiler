@@ -203,7 +203,7 @@ Manifest did not mark CUPTI as available
 
 ## 4. 提交
 
-相对基线 `e295a73` 的原子 Conventional Commits：
+相对基线 `e295a73` 的主要实现/证据 Conventional Commits 如下。handoff 文档自身的 docs-only 修订不做不稳定的自引用；完整列表使用 `git log --oneline e295a73..HEAD` 查询。
 
 | Commit | 内容 |
 |---|---|
@@ -212,9 +212,7 @@ Manifest did not mark CUPTI as available
 | `81499e4` | `fix(relay): stabilize softmax with max subtraction` |
 | `cb0b75f` | `feat(nlp): add exact attention validation slice` |
 | `386cf9d` | `test(nlp): gate unsupported mask semantics` |
-| `dbf8b0e` | `docs(nlp): record validation track handoff` |
 | `0b68754` | `fix(nlp): enforce static execution capability gates` |
-| `8cad311` | `docs(nlp): clarify final capability evidence` |
 | `c95da8c` | `fix(onnx): validate static MatMul contracts` |
 
 本次更新本文件的提交仅同步最终证据，不改变实现能力。
