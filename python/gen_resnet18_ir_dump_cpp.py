@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 import onnx
-from onnx import AttributeProto, TensorProto
+from onnx import AttributeProto
 
 from kxc_onnx import import_onnx
 
@@ -39,26 +39,6 @@ def fmt_int_list(v):
     return "{" + ", ".join(str(int(x)) for x in v) + "}"
 
 
-def onnx_dtype_to_kxc(dtype: int) -> str:
-    """将 ONNX TensorProto 类型映射为 KXC dtype 名称。"""
-    if dtype == TensorProto.FLOAT:
-        return "float32"
-    if dtype == TensorProto.DOUBLE:
-        return "float64"
-    if dtype == TensorProto.INT64:
-        return "int64"
-    if dtype == TensorProto.INT32:
-        return "int32"
-    if dtype == TensorProto.INT8:
-        return "int8"
-    if dtype == TensorProto.UINT8:
-        return "uint8"
-    if dtype == TensorProto.BOOL:
-        return "bool"
-    # 编译器当前只支持最小 dtype 集合，未知类型按 float32 生成诊断代码。
-    return "float32"
-
-
 def get_attr(node, name, default):
     """读取生成器支持的 ONNX 属性类型，缺失时返回默认值。"""
     for a in node.attribute:
@@ -73,20 +53,7 @@ def get_attr(node, name, default):
     return default
 
 
-def value_info_shape_and_dtype(value_info, default_batch):
-    """解析输入元数据，并用 default_batch 补全动态批维。"""
-    t = value_info.type.tensor_type
-    dtype = onnx_dtype_to_kxc(t.elem_type)
-    shape = []
-    for i, d in enumerate(t.shape.dim):
-        if d.HasField("dim_value"):
-            shape.append(int(d.dim_value))
-        else:
-            shape.append(default_batch if i == 0 else 1)
-    return shape, dtype
-
-
-def emit_cpp(model_path: Path, out_path: Path, default_batch: int):
+def emit_cpp(model_path: Path, out_path: Path, default_batch: int | None):
     """导入 ResNet18 并生成可输出 Relay/TIR 的 C++ 诊断程序。"""
     imported = import_onnx(model_path, default_batch=default_batch)
 
@@ -551,7 +518,12 @@ def main():
     )
     parser.add_argument("--model", type=Path, default=Path("resnet18.onnx"))
     parser.add_argument("--out", type=Path, default=Path("test/resnet18_ir_dump.cpp"))
-    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=None,
+        help="Explicit positive binding for an unresolved axis-0 batch dimension.",
+    )
     args = parser.parse_args()
 
     emit_cpp(args.model, args.out, args.batch)

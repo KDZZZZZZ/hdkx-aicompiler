@@ -17,13 +17,13 @@ save_imported_model(
 )
 ```
 
-`import_onnx(model_path, default_batch=1)` 返回 `ImportedONNXModel`：
+`import_onnx(model_path, default_batch=None)` 返回 `ImportedONNXModel`：
 
 - `function`：结构化的 Relay function spec，包含 inputs、outputs 和 nodes。
 - `params`：`dict[str, ParamTensor]`，保存每个 ONNX initializer 的 shape、dtype 和真实 tensor bytes。
 - `param_order`：ONNX initializer 原始顺序，用于稳定序列化和 runtime 参数绑定。
 
-如果需要对内存中的 ONNX `ModelProto` 做测试，可使用 `import_onnx_model(model, default_batch=1, base_dir=None)`。
+如果需要对内存中的 ONNX `ModelProto` 做测试，可使用 `import_onnx_model(model, default_batch=None, base_dir=None)`。
 
 ## 支持的 MVP 算子
 
@@ -43,11 +43,12 @@ save_imported_model(
 
 ## Shape 与 dtype 行为
 
-该 importer 按静态 shape MVP 处理 ONNX value info：
+该 importer 按静态 shape MVP fail-closed 地处理 ONNX value info：
 
-- 已知 `dim_value` 会按整数保留。
-- 第 0 维如果是 symbolic 或 unknown，使用 `default_batch`。
-- 其他 unknown 维度暂按 `1` 处理。
+- 已知 `dim_value` 会按整数保留，包括 `0`。
+- symbolic 或 unknown 维度默认会拒绝导入，并在错误中给出 tensor/value 名称、axis 和（适用时）`dim_param`。
+- 仅当调用方显式传入正数 `default_batch`（CLI 为 `--batch N`）时，未解析的 axis 0 才会绑定为该 batch 值；所有非 batch 未解析维度仍会拒绝。
+- C++ JSON reifier 同样只接受非负整数静态 shape，拒绝负数或非整数维度；它不支持 symbol runtime 语义。
 
 当前支持的 tensor dtype：
 

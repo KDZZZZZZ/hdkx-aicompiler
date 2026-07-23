@@ -330,7 +330,7 @@ bool ReadBool(const Json& value, const std::string& ctx) {
     return RequireKind(value, Json::Bool, ctx).b;
 }
 
-// 读取有序整数数组，用于 shape 和算子维度属性。
+// 读取有序整数数组，用于算子维度属性。
 std::vector<int64_t> ReadInt64Vector(const Json& value, const std::string& ctx) {
     RequireKind(value, Json::Array, ctx);
     std::vector<int64_t> out;
@@ -339,6 +339,19 @@ std::vector<int64_t> ReadInt64Vector(const Json& value, const std::string& ctx) 
         out.push_back(ReadInt64(value.a[i], ctx + "[" + std::to_string(i) + "]"));
     }
     return out;
+}
+
+// 读取 JSON 静态 shape；零维合法，负数和非整数维度一律拒绝。
+std::vector<int64_t> ReadStaticShape(const Json& value, const std::string& ctx) {
+    std::vector<int64_t> shape = ReadInt64Vector(value, ctx);
+    for (size_t axis = 0; axis < shape.size(); ++axis) {
+        if (shape[axis] < 0) {
+            throw std::runtime_error(
+                "Expected non-negative static dimension in " + ctx + "[" +
+                std::to_string(axis) + "]");
+        }
+    }
+    return shape;
 }
 
 // 读取有序字符串数组，用于值名称列表。
@@ -472,7 +485,7 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         const Json& input = inputs_json.a[i];
         std::string ctx = "function.inputs[" + std::to_string(i) + "]";
         std::string name = ReadString(Field(input, "name", ctx), ctx + ".name");
-        std::vector<int64_t> shape = ReadInt64Vector(Field(input, "shape", ctx), ctx + ".shape");
+        std::vector<int64_t> shape = ReadStaticShape(Field(input, "shape", ctx), ctx + ".shape");
         std::string dtype = ReadString(Field(input, "dtype", ctx), ctx + ".dtype");
         Var var(name, TensorType(ToArray(shape), dtype));
         function_params.push_back(var);
@@ -485,7 +498,7 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         const Json& param = params_json.a[i];
         std::string ctx = "root.params[" + std::to_string(i) + "]";
         std::string name = ReadString(Field(param, "name", ctx), ctx + ".name");
-        std::vector<int64_t> shape = ReadInt64Vector(Field(param, "shape", ctx), ctx + ".shape");
+        std::vector<int64_t> shape = ReadStaticShape(Field(param, "shape", ctx), ctx + ".shape");
         std::string dtype = ReadString(Field(param, "dtype", ctx), ctx + ".dtype");
         int64_t offset = ReadInt64(Field(param, "offset", ctx), ctx + ".offset");
         int64_t nbytes = ReadInt64(Field(param, "nbytes", ctx), ctx + ".nbytes");
@@ -544,6 +557,7 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         const Json& output = outputs_json.a[i];
         std::string ctx = "function.outputs[" + std::to_string(i) + "]";
         std::string name = ReadString(Field(output, "name", ctx), ctx + ".name");
+        ReadStaticShape(Field(output, "shape", ctx), ctx + ".shape");
         auto it = values.find(name);
         if (it == values.end()) {
             throw std::runtime_error("Missing graph output value in ONNX import spec: " + name);

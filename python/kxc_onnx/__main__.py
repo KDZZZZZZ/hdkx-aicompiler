@@ -12,7 +12,12 @@ def main() -> None:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--json", type=Path, required=True)
     parser.add_argument("--params", type=Path, required=True)
-    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=None,
+        help="Explicit positive binding for an unresolved axis-0 batch dimension.",
+    )
     args = parser.parse_args()
 
     imported = import_onnx(args.model, default_batch=args.batch)

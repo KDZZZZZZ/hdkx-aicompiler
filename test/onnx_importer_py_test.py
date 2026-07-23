@@ -74,6 +74,61 @@ def test_resnet18_serialization_records_param_offsets(tmp_path):
     assert as_dict["function"]["nodes"][-1]["op_name"] == "nn_gemm"
 
 
+def _model_with_io_shapes(input_shape, output_shape=None):
+    output_shape = input_shape if output_shape is None else output_shape
+    graph = helper.make_graph(
+        [],
+        "shape_test",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, input_shape)],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, output_shape)],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 11)], ir_version=6)
+
+
+def test_known_zero_dimension_is_preserved():
+    imported = import_onnx_model(_model_with_io_shapes([0, 3]))
+
+    assert imported.function.inputs[0].shape == [0, 3]
+    assert imported.function.outputs[0].shape == [0, 3]
+
+
+def test_symbolic_batch_requires_explicit_binding():
+    model = _model_with_io_shapes(["batch", 3])
+
+    with pytest.raises(
+        ValueError, match=r"tensor 'input'.*axis 0.*dim_param='batch'"
+    ):
+        import_onnx_model(model)
+
+
+def test_explicit_symbolic_batch_binding_is_applied_to_inputs_and_outputs():
+    imported = import_onnx_model(_model_with_io_shapes(["batch", 3]), default_batch=4)
+
+    assert imported.function.inputs[0].shape == [4, 3]
+    assert imported.function.outputs[0].shape == [4, 3]
+
+
+@pytest.mark.parametrize("shape", [[1, "channels"], [1, None]])
+def test_non_batch_unresolved_dimensions_are_rejected_even_with_batch_binding(shape):
+    with pytest.raises(ValueError, match=r"tensor 'input'.*axis 1"):
+        import_onnx_model(_model_with_io_shapes(shape), default_batch=4)
+
+
+def test_output_unresolved_dimension_error_includes_value_name_and_dim_param():
+    model = _model_with_io_shapes([1, 3], [1, "classes"])
+
+    with pytest.raises(
+        ValueError, match=r"tensor 'output'.*axis 1.*dim_param='classes'"
+    ):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize("default_batch", [0, -1])
+def test_explicit_default_batch_must_be_positive(default_batch):
+    with pytest.raises(ValueError, match="default_batch must be positive"):
+        import_onnx_model(_model_with_io_shapes(["batch", 3]), default_batch=default_batch)
+
+
 def test_unsupported_op_error_includes_op_type_and_node_name():
     graph = helper.make_graph(
         [

@@ -46,7 +46,9 @@ def onnx_dtype_to_kxc(dtype: int) -> str:
     return mapping[dtype]
 
 
-def import_onnx(model_path: str | Path, default_batch: int = 1) -> ImportedONNXModel:
+def import_onnx(
+    model_path: str | Path, default_batch: int | None = None
+) -> ImportedONNXModel:
     model_path = Path(model_path)
     model = onnx.load(str(model_path))
     return import_onnx_model(model, default_batch=default_batch, base_dir=model_path.parent)
@@ -54,9 +56,16 @@ def import_onnx(model_path: str | Path, default_batch: int = 1) -> ImportedONNXM
 
 def import_onnx_model(
     model: ModelProto,
-    default_batch: int = 1,
+    default_batch: int | None = None,
     base_dir: str | Path | None = None,
 ) -> ImportedONNXModel:
+    if default_batch is not None and (
+        not isinstance(default_batch, int)
+        or isinstance(default_batch, bool)
+        or default_batch <= 0
+    ):
+        raise ValueError("default_batch must be a positive integer when explicitly supplied")
+
     graph = model.graph
     base_dir_path = Path(base_dir) if base_dir is not None else None
 
@@ -126,14 +135,23 @@ def import_onnx_model(
     )
 
 
-def _tensor_spec_from_value_info(value_info: onnx.ValueInfoProto, default_batch: int) -> TensorSpec:
+def _tensor_spec_from_value_info(
+    value_info: onnx.ValueInfoProto, default_batch: int | None
+) -> TensorSpec:
     tensor_type = value_info.type.tensor_type
     shape: list[int] = []
-    for index, dim in enumerate(tensor_type.shape.dim):
+    for axis, dim in enumerate(tensor_type.shape.dim):
         if dim.HasField("dim_value"):
             shape.append(int(dim.dim_value))
+        elif axis == 0 and default_batch is not None:
+            shape.append(default_batch)
         else:
-            shape.append(int(default_batch) if index == 0 else 1)
+            message = (
+                f"Unresolved ONNX dimension for tensor '{value_info.name}' at axis {axis}"
+            )
+            if dim.dim_param:
+                message += f" (dim_param='{dim.dim_param}')"
+            raise ValueError(message)
     return TensorSpec(
         name=value_info.name,
         shape=shape,
