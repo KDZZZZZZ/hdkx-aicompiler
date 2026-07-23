@@ -55,8 +55,8 @@
 
 核心结构：
 
-- `ControlValueSpec`：stable value id、static logical shape、dtype、device、source locator；v1 中 logical/physical/valid extent 视为完全相同，尚未引入 capacity/padding。
-- `ControlTask`：全局唯一 task id、`kKernel`/`kBranch`/`kLoop`、unique boundary inputs、duplicate-preserving `argument_values`、outputs、dependencies、device、single `default` stream、effect/alias、source locator。
+- `ControlValueSpec`：stable value id、static logical shape、dtype、完整 `Device(type,id)`、source locator；v1 中 logical/physical/valid extent 视为完全相同，尚未引入 capacity/padding。
+- `ControlTask`：全局唯一 task id、`kKernel`/`kBranch`/`kLoop`、unique boundary inputs、duplicate-preserving `argument_values`、outputs、dependencies、完整 `Device(type,id)`、single `default` stream、effect/alias、source locator。
 - `ControlRegion`：全局唯一 region id、live-ins/live-outs、ordered tasks、effect/alias summary 和 source locator。
 - `BranchSpec` / `PhiBinding`：CPU scalar bool predicate、两个不同 child regions、每个 result 对应 then/else source。
 - `LoopSpec` / `LoopCarriedBinding`：独立 condition/body regions，显式 `{result, initial, body_argument, backedge}`，CPU scalar bool condition，mandatory `max_trip_count`。
@@ -72,9 +72,9 @@ ID、source locator、`kernel_ref` 只用于 plan routing、诊断和 mock artif
 - region 必须形成从 entry 可达的 structured tree，不允许递归 region/unstructured jump；
 - task dependency 只能指向同 region 的前序 task；读取本 region producer 的 task 必须声明 producer dependency；
 - 每个非 source value 只有一个 producer，source/body argument 不得被 task 重定义；
-- region live-in/live-out 与 producer/consumer closure 完整；entry boundary 精确匹配 graph inputs、constants 和 outputs；
+- region live-in/live-out、已消费 value 的 producer 和 task dependency closure 完整；entry boundary 精确匹配 graph inputs、constants 和 outputs；纯 task 的未选 tuple leaf/dead output 可保留为有 producer但无 consumer 的值；
 - kernel 的 boundary inputs 唯一，但 `argument_values` 保留逻辑顺序与重复实参；其 unique set 必须等于 inputs；
-- kernel inputs/outputs 与 task device 一致；v1 只允许显式 CPU/CUDA data placement 和单 `default` stream；
+- kernel inputs/outputs 与 task 的完整物理 device identity 一致；v1 只允许显式 CPU/CUDA data placement 和单 `default` stream；CUDA ordinal 不得被合并；
 - branch predicate 必须是 CPU scalar bool，不做隐式 device-to-host copy；
 - Phi result、then source、else source exact-contract 相等，且 source 必须是对应 child live-out；
 - loop 在 body 前执行 condition，允许 zero trip；true condition 超过 `max_trip_count` 明确失败，不静默展开；
@@ -104,9 +104,9 @@ InferType -> NormalizeToANF -> VerifyANF
 
 - 参数先分配 deterministic graph-input ids；常量进入 `constant_values`；tuple 递归 flatten 为 tensor leaves；
 - Let 只建立词法别名，不创建 task；
-- ordinary Call 只有在 OperatorSpec 为 pure、deterministic、`alias_contract == "none"`，且类型关系和 single/multi TE lowering binding 都有效时，才成为 kernel task；
+- ordinary Call 只有在 OperatorSpec 为 pure、deterministic、`alias_contract == "none"`，输入/输出 arity、attrs、类型关系、single/multi 输出结构及 TE lowering binding 都有效时，才成为 kernel task；static ValueGraph 使用同一 fail-closed capability gate；
 - kernel task 保存 unique inputs 和 duplicate-preserving logical arguments，并按同 region producer 生成依赖；
-- Call 的所有 inputs/outputs 必须位于同一显式 device，禁止隐式 copy；
+- Call 的所有 inputs/outputs 必须位于同一完整 `Device(type,id)`，structural Tuple/TupleGetItem/Let/Function alias 的显式 placement 也必须与 leaf 一致，禁止隐式 copy 或丢失 CUDA ordinal；
 - If 生成父 branch task、两个 child regions 和每个 flattened result 对应的 Phi；nested If 保持 structured；
 - branch capture（包括 constant）成为 child live-in 和 branch task input；
 - equivalent Relay objects 生成相同 canonical plan text；canonical values 按 id、regions 按显式 `region_order` 输出；
@@ -135,10 +135,10 @@ InferType -> NormalizeToANF -> VerifyANF
 | 测试 | 主要覆盖 |
 |---|---|
 | `relay_anf_test` | nested/shared/tuple ANF、分支局部性、determinism、idempotence、Span 保留、ANF 负诊断 |
-| `executable_capability_test` | static-exact gate、If gate、free Var、function value、Let ValueGraph 等价性、tuple Let |
-| `control_plan_test` | schema/value/region/task/dependency closure、placement/stream、Branch/Phi、loop-carried、effect/alias、dynamic dim 和 shape-changing loop 负例、canonical determinism |
+| `executable_capability_test` | static-exact/If/free Var/function value gate、Let ValueGraph 等价性、effect/alias/placement/operator binding/output arity 早期拒绝、nested TupleGetItem leaf routing、tuple parameter 不过度声明 |
+| `control_plan_test` | schema/value/region/task/dependency closure、完整 Device identity/stream、Branch/Phi、loop-carried、effect/alias、dynamic dim 和 shape-changing loop 负例、canonical determinism |
 | `control_plan_reference_executor_test` | constants、重复逻辑实参、true/false、未选分支不执行、nested If、多 Phi、zero/one/multi-trip、多 carried、max exhaustion、deterministic trace |
-| `relay_control_plan_test` | Relay Let/shared Call、Relay true/false If reference execution、nested If、tuple/multi-Phi、constant capture、OperatorSpec effect/alias gate、device/dynamic shape/duplicate output 负例、ValueGraph 仍拒绝 If |
+| `relay_control_plan_test` | Relay Let/shared Call、Relay true/false If reference execution、nested If、tuple/multi-Phi、nested tuple projection/dead pure leaf、constant capture、OperatorSpec effect/alias gate、CPU/CUDA ordinal/structural placement/dynamic shape/duplicate output 负例、ValueGraph 仍拒绝 If |
 
 ### 3.2 分阶段验证
 
@@ -184,8 +184,13 @@ cmake --build /tmp/kxc-control-flow-phase1 -j2
 | `5b1ec7b` | `fix(runtime): complete control plan value contracts` |
 | `a4630a2` | `fix(runtime): freeze control task placement` |
 | `8288acf` | `feat(compiler): lower static Relay If to control plans` |
+| `237385a` | `docs(compiler): hand off control flow foundation` |
+| `24fae17` | `fix(compiler): close executable capability gaps` |
+| `0ff3690` | `fix(compiler): harden control placement and output gates` |
+| `efd42e4` | `fix(compiler): preserve structural control contracts` |
+| `726abbc` | `fix(compiler): validate Let result placement` |
 
-本文档将由独立 `docs(...)` Conventional Commit 提交。
+本表不自引用当前文档更新提交；以本文件所在 HEAD 为准。
 
 ## 5. 保留的 fallback 与明确未接线能力
 
