@@ -64,7 +64,8 @@ bool Throws(const std::function<void()>& action) {
 }
 
 void WriteFixture(const TemporaryDirectory& directory, const std::string& input_shape,
-                  const std::string& output_shape) {
+                  const std::string& output_shape,
+                  const std::string& output_dtype = "float32") {
     const std::string json = R"json({
   "format": "kxc.onnx_import.v1",
   "function": {
@@ -73,7 +74,8 @@ void WriteFixture(const TemporaryDirectory& directory, const std::string& input_
       {"name": "b", "shape": [1, 3, 4], "dtype": "float32"}
     ],
     "outputs": [
-      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": ")json" +
+      output_dtype + R"json("}
     ],
     "nodes": [
       {"name": "matmul", "op_name": "matmul", "inputs": ["a", "b"], "outputs": ["scores"], "attrs": {}},
@@ -90,15 +92,15 @@ void WriteFixture(const TemporaryDirectory& directory, const std::string& input_
 
 bool TestValidStaticMatMulSoftmaxTranspose() {
     TemporaryDirectory directory;
-    WriteFixture(directory, "[1, 2, 3]", "[1, 4, 2]");
+    WriteFixture(directory, "[2, 2, 3]", "[2, 4, 2]");
 
     const auto imported = kxc::frontend::LoadONNXImportSpec(
         (directory.path() / "model.json").string(),
         (directory.path() / "params.bin").string());
     TEST_CHECK(imported.function.defined(), "valid static ONNX import spec should reify");
     TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
-                           {1, 4, 2}, "float32"),
-               "reified output should preserve its inferred static shape and dtype");
+                           {2, 4, 2}, "float32"),
+               "reified output should preserve broadcast shape and inferred dtype");
     return true;
 }
 
@@ -128,6 +130,19 @@ bool TestDeclaredOutputShapeMismatchIsRejected() {
     return true;
 }
 
+bool TestDeclaredOutputDTypeMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteFixture(directory, "[1, 2, 3]", "[1, 4, 2]", "float64");
+
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "declared output dtype must match the inferred output");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -135,6 +150,7 @@ int main() {
         {"valid_static_matmul_softmax_transpose", TestValidStaticMatMulSoftmaxTranspose},
         {"negative_input_dimension", TestNegativeInputDimensionIsRejected},
         {"declared_output_shape_mismatch", TestDeclaredOutputShapeMismatchIsRejected},
+        {"declared_output_dtype_mismatch", TestDeclaredOutputDTypeMismatchIsRejected},
     };
 
     for (const auto& test : tests) {

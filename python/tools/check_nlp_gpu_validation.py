@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic, dependency-free Phase A NLP/GPU validation gate."""
+"""Deterministic, dependency-free NLP reference and capability gate."""
 
 import argparse
 import hashlib
@@ -459,12 +459,12 @@ def main():
     validate_manifests(fixture_document["fixtures"], manifests)
     print("PASS schemas, fingerprints, and evidence")
     run_references(fixture_document["fixtures"], matrix, manifests)
-    print("PASS NLP GPU Phase A validation")
+    print("PASS NLP reference and capability gate; no GPU execution validated")
 
 
 if __name__ == "__main__":
     try:
         main()
     except ValidationError as error:
-        print("FAIL NLP GPU Phase A validation: {}".format(error))
+        print("FAIL NLP reference and capability gate: {}".format(error))
         raise SystemExit(1)

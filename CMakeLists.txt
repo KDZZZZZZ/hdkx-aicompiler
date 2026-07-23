@@ -666,7 +666,7 @@ if(Python3_Interpreter_FOUND)
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     USES_TERMINAL
-    COMMENT "Check deterministic NLP/GPU Phase A validation"
+    COMMENT "Check deterministic NLP reference and capability gates"
   )
   add_custom_target(check_relay_op_contract
     COMMAND "${Python3_EXECUTABLE}"

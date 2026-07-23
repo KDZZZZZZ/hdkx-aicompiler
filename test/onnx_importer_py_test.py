@@ -212,6 +212,19 @@ def test_matmul_rejects_invalid_static_input_contract(
         import_onnx_model(_matmul_model(a_shape, b_shape, a_dtype=a_dtype, b_dtype=b_dtype))
 
 
+def test_matmul_accepts_static_batch_broadcast():
+    imported = import_onnx_model(
+        _matmul_model(
+            [2, 1, 3, 4],
+            [1, 7, 4, 5],
+            output_name="scores",
+            output_shape=[2, 7, 3, 5],
+        )
+    )
+
+    assert imported.function.outputs[0].shape == [2, 7, 3, 5]
+
+
 def test_matmul_infers_prior_matmul_output_for_chains():
     graph = helper.make_graph(
         [
@@ -274,19 +287,48 @@ def test_matmul_softmax_transpose_mapping_and_attrs():
     ]
 
 
-def test_softmax_default_axis_honors_opset_and_transpose_empty_perm():
-    for opset, expected_axis in [(12, 1), (13, -1)]:
-        model = _static_operator_model(
-            [
-                helper.make_node("MatMul", ["a", "b"], ["scores"], name="matmul"),
-                helper.make_node("Softmax", ["scores"], ["weights"], name="softmax"),
-                helper.make_node("Transpose", ["weights"], ["out"], name="transpose"),
-            ],
-            opset=opset,
-        )
-        imported = import_onnx_model(model)
-        assert imported.function.nodes[1].attrs == {"axis": expected_axis}
-        assert imported.function.nodes[2].attrs == {"perm": []}
+def _softmax_model(shape, opset):
+    graph = helper.make_graph(
+        [helper.make_node("Softmax", ["input"], ["output"], name="softmax")],
+        "softmax_test",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6
+    )
+
+
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("opset", [1, 11, 12])
+def test_softmax_before_opset13_is_rejected(shape, opset):
+    with pytest.raises(
+        UnsupportedONNXOpError,
+        match=rf"Softmax opset {opset}.*flattened-axis.*single-axis",
+    ):
+        import_onnx_model(_softmax_model(shape, opset))
+
+
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+def test_softmax_opset13_default_axis_is_relay_last_axis(shape):
+    imported = import_onnx_model(_softmax_model(shape, 13))
+
+    assert imported.function.nodes[0].attrs == {"axis": -1}
+
+
+def test_transpose_empty_perm_uses_relay_default():
+    model = _static_operator_model(
+        [
+            helper.make_node("MatMul", ["a", "b"], ["scores"], name="matmul"),
+            helper.make_node("Softmax", ["scores"], ["weights"], name="softmax"),
+            helper.make_node("Transpose", ["weights"], ["out"], name="transpose"),
+        ],
+        opset=13,
+    )
+    imported = import_onnx_model(model)
+
+    assert imported.function.nodes[1].attrs == {"axis": -1}
+    assert imported.function.nodes[2].attrs == {"perm": []}
 
 
 def test_unsupported_op_error_includes_op_type_and_node_name():

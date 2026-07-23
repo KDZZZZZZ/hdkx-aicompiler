@@ -39,14 +39,14 @@ save_imported_model(
 | `Flatten` | `nn_flatten` |
 | `Gemm` | `nn_gemm` |
 | `MatMul` | `matmul` |
-| `Softmax` | `softmax` |
+| `Softmax`（opset >= 13） | `softmax` |
 | `Transpose` | `transpose` |
 
-`Conv`、`MaxPool`、`Flatten`、`Gemm` 会转换必要 attrs；`Softmax` 转换 `axis`（未显式指定时 opset < 13 为 `1`，否则为 `-1`）；`Transpose` 转换 `perm`（缺失时写为空数组，由 Relay 使用逆序默认）；`Relu`、`Add`、`GlobalAveragePool` 使用简单 attrs。`MatMul` 除简单 attrs 外还执行下述静态 contract gate。
+`Conv`、`MaxPool`、`Flatten`、`Gemm` 会转换必要 attrs；opset >= 13 的 `Softmax` 转换单个 `axis`（缺省为 `-1`）。opset < 13 的 `Softmax` 会 fail closed：其从 `axis` 开始 flatten 后归一化的语义不能映射为 Relay 单 axis softmax，不能只改默认 axis 做半实现。`Transpose` 转换 `perm`（缺失时写为空数组，由 Relay 使用逆序默认）；`Relu`、`Add`、`GlobalAveragePool` 使用简单 attrs。`MatMul` 除简单 attrs 外还执行下述静态 contract gate。
 
 ## Shape 与 dtype 行为
 
-该 importer 按静态 shape MVP fail-closed 地处理 ONNX value info：
+Python protobuf importer 按静态 shape MVP fail-closed 地处理 ONNX value info：
 
 - 已知 `dim_value` 会按整数保留，包括 `0`；显式但零维的 shape field 表示合法 scalar。
 - 缺少 `tensor_type.shape` 的 unknown rank 会拒绝导入，并给出 tensor/value 名称和 rank context。
@@ -54,7 +54,7 @@ save_imported_model(
 - 仅当调用方显式传入正数 `default_batch`（CLI 为 `--batch N`）时，未解析的 axis 0 才会绑定为该 batch 值；所有非 batch 未解析维度仍会拒绝。
 - 每个 `MatMul` 在导入前必须能从 graph input/value_info、initializer 或此前推导的 `MatMul` output 解析两个静态 TensorSpec；缺失或未解析的 metadata 立即拒绝，且不会推导无关算子。
 - `MatMul` 要求恰有两个 rank >= 2、同 dtype 的输入，K 相等且 leading batch dims 可按 NumPy 广播；frontend 推导 `[..., M, N]`，并要求任何 value_info/graph output 声明的 output shape/dtype 完全一致。
-- C++ JSON reifier 同样只接受非负整数静态 shape，拒绝负数或非整数维度；它不支持 symbol runtime 语义。
+- C++ `kxc.onnx_import.v1` reifier 消费已静态化的 JSON spec，每个 input/output 都必须包含由非负整数组成的 `shape` 数组。该格式不能表示或观察 ONNX unknown rank；缺失 `shape` 属于 malformed spec，而不是动态 rank 语义。
 
 当前支持的 tensor dtype：
 
@@ -139,6 +139,7 @@ CMake 会在 build 目录自动生成 C++ 测试使用的 `resnet18.import.json`
 ## 当前限制
 
 - 只覆盖静态 shape MVP，不承诺完整 ONNX opset；`MatMul` 仅接受 frontend 已验证的 rank >= 2 静态 K/batch/output contract，缺失 metadata 或动态维度仍不支持。
+- `Softmax` 只接受 opset >= 13；opset < 13 的 flatten-from-axis 语义明确拒绝，不映射为 Relay 单 axis softmax。
 - 不引入 C++ ONNX/protobuf 依赖；ONNX protobuf 解析留在 Python 侧。
 - 不提供动态 shape runtime 语义。
 - 不做 ResNet18 数值执行验收；本阶段验收重点是导入 Relay Function、保留 params 数据、序列化 runtime binding 信息，以及清晰的 unsupported op 错误。

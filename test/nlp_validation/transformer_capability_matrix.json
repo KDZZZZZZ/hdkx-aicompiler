@@ -5,7 +5,7 @@
       "frontend": {
         "status": "implemented",
         "gate": "static_onnx_axis_import",
-        "reason": "ONNX Softmax imports static axis semantics, including the opset-dependent default.",
+        "reason": "ONNX Softmax opset >= 13 imports single-axis semantics with default -1; pre-13 flattened-axis semantics fail closed.",
         "evidence": [
           "python/kxc_onnx/importer.py",
           "test/onnx_importer_py_test.py"
@@ -529,7 +529,7 @@
       "numeric": {
         "status": "validated",
         "gate": "cpu_reference",
-        "reason": "Deterministic causal attention reference passes.",
+        "reason": "Deterministic finite-logit exact-static causal-attention reference fixture passes; no compiler/runtime or full-Transformer execution is claimed.",
         "evidence": [
           "test/nlp_validation/deterministic_fixtures.json",
           "python/tools/check_nlp_gpu_validation.py"
@@ -598,7 +598,7 @@
       "numeric": {
         "status": "validated",
         "gate": "external_kv_reference",
-        "reason": "Deterministic external-KV reference passes.",
+        "reason": "Deterministic finite-logit external-KV reference fixture passes; no KV-cache, compiler/runtime, or full-Transformer execution is claimed.",
         "evidence": [
           "test/nlp_validation/deterministic_fixtures.json",
           "python/tools/check_nlp_gpu_validation.py"
@@ -665,7 +665,7 @@
       "numeric": {
         "status": "validated",
         "gate": "valid_extent_only",
-        "reason": "Deterministic append/page/capacity trace passes.",
+        "reason": "Deterministic reference/mock append-page-capacity trace passes; no compiler/runtime KV-cache capability is claimed.",
         "evidence": [
           "test/nlp_validation/deterministic_fixtures.json",
           "python/tools/check_nlp_gpu_validation.py"

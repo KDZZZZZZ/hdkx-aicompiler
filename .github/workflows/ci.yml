@@ -62,6 +62,12 @@ jobs:
       - name: Build CPU targets
         run: cmake --build out/build/ci-cpu --parallel 2
 
+      - name: Check dependency-free NLP reference and capability gate
+        run: cmake --build out/build/ci-cpu --target check_nlp_gpu_validation
+
+      - name: Run dependency-free ONNX import-spec contract test
+        run: cmake --build out/build/ci-cpu --target run_onnx_import_spec_contract_test
+
       - name: Run type inference test
         run: cmake --build out/build/ci-cpu --target run_infer_type_test
 

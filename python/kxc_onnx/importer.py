@@ -340,7 +340,13 @@ def _convert_attrs(
             "transB": _int_attr(attrs, "transB", 0),
         }
     if node.op_type == "Softmax":
-        return {"axis": _int_attr(attrs, "axis", 1 if opset_version < 13 else -1)}
+        if opset_version < 13:
+            raise UnsupportedONNXOpError(
+                f"Unsupported ONNX Softmax opset {opset_version} in node "
+                f"'{node.name or '<unnamed>'}': pre-opset-13 flattened-axis semantics "
+                "cannot be represented by Relay single-axis softmax"
+            )
+        return {"axis": _int_attr(attrs, "axis", -1)}
     if node.op_type == "Transpose":
         return {"perm": _list_attr(attrs, "perm", [])}
     if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
