@@ -22,6 +22,10 @@ struct TrustedSynchronousLauncherDescriptor final {
     std::string entry_symbol;
     runtime::RuntimeShapeBoundLauncher launcher;
     std::shared_ptr<void> module_lease;
+    /*! \brief Exact selected final-unit artifact identity. */
+    std::string artifact_identity;
+    /*! \brief Exact canonical bucket tail-policy identity; empty for non-buckets. */
+    std::string tail_policy_identity;
 };
 
 class RestrictedShapeRuntimeBridge final {

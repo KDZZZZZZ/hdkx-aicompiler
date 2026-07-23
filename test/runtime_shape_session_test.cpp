@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -185,6 +186,57 @@ bool TestPlanContractsAndExactAbiMismatch() {
     return true;
 }
 
+bool TestScalarAbiAndRequiredInputData() {
+    RuntimeShapeInputContract input;
+    input.dtype = "float32";
+    input.rank = 1;
+    input.requires_data = true;
+    input.axis_guards = {{0, 0, 8, 2, std::nullopt, std::nullopt}};
+    RuntimeShapeTensorContract output;
+    output.dtype = "float32";
+    output.logical = {RuntimeShapeExpr::Const(1)};
+    output.physical = output.logical;
+    output.valid = output.logical;
+    output.max_bytes = 4;
+    RuntimeShapePlanSpec spec;
+    spec.inputs = {input};
+    spec.outputs = {output};
+    spec.runtime_extent_abi = {{0, "extent", "n", 0, 0, 0, 8, 2}};
+    spec.entry.module_label = "local-fake";
+    spec.entry.entry_symbol = "scalar";
+    spec.entry.ready = true;
+    spec.entry.launcher = [](const RuntimeShapeLaunchArgs& args) {
+        return args.runtime_extent_values == std::vector<RuntimeShapeExtent>{4}
+            ? RuntimeShapeLaunchResult{} : RuntimeShapeLaunchResult{false, "wrong scalar", {}};
+    };
+    spec.entry.exact_abi_fingerprint = RuntimeShapePlan::ExactAbiFingerprint(
+        spec.inputs, spec.outputs, spec.runtime_extent_abi);
+    spec.run_byte_budget = 4;
+    float values[4]{};
+    RuntimeShapeInput valid = Input(4);
+    valid.data = values;
+    valid.bytes = sizeof(values);
+    CHECK(RuntimeShapeSession(RuntimeShapePlan(spec)).Run({valid}).ok(),
+          "evaluated scalar and exact required input bytes reach launcher");
+    RuntimeShapeInput wrong_bytes = valid;
+    wrong_bytes.bytes -= sizeof(float);
+    CHECK(!RuntimeShapeSession(RuntimeShapePlan(spec)).Run({wrong_bytes}).ok(),
+          "required input byte size fails before ShapeEval");
+    RuntimeShapePlanSpec gap = spec;
+    gap.runtime_extent_abi[0].ordinal = 1;
+    gap.entry.exact_abi_fingerprint = RuntimeShapePlan::ExactAbiFingerprint(
+        gap.inputs, gap.outputs, gap.runtime_extent_abi);
+    CHECK(Throws([&] { (void)RuntimeShapePlan(gap); }),
+          "scalar ABI ordinal gaps are rejected");
+    RuntimeShapePlanSpec duplicate = spec;
+    duplicate.runtime_extent_abi.push_back({1, "extent2", "n2", 0, 0, 0, 8, 2});
+    duplicate.entry.exact_abi_fingerprint = RuntimeShapePlan::ExactAbiFingerprint(
+        duplicate.inputs, duplicate.outputs, duplicate.runtime_extent_abi);
+    CHECK(Throws([&] { (void)RuntimeShapePlan(duplicate); }),
+          "scalar ABI duplicate input-axis mappings are rejected");
+    return true;
+}
+
 bool TestCallbackFailureAndOwnerTransfer() {
     RuntimeShapeSession rejected(MakePlan([](const RuntimeShapeLaunchArgs&) {
         return RuntimeShapeLaunchResult{false, "injected launch failure", {}};
@@ -289,6 +341,7 @@ int main() {
         {"two_s", TestTwoSContractsExactAbiAndEvents},
         {"zero_validation", TestZeroExtentsAndValidation},
         {"plan_contracts", TestPlanContractsAndExactAbiMismatch},
+        {"scalar_data", TestScalarAbiAndRequiredInputData},
         {"callback_raii", TestCallbackFailureAndOwnerTransfer},
         {"leases", TestSynchronousFakeRetentionAndLeases},
         {"concurrency", TestConcurrentLaunchesAreSerialized},

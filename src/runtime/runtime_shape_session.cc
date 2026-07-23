@@ -2,8 +2,10 @@
 
 #include "kxc/runtime/runtime_shape_session.h"
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
+#include <set>
 #include <new>
 #include <stdexcept>
 #include <unordered_map>
@@ -390,7 +392,10 @@ RuntimeShapePlan::RuntimeShapePlan(RuntimeShapePlanSpec spec)
 
 std::string RuntimeShapePlan::ExactAbiFingerprint(
     const std::vector<RuntimeShapeInputContract>& inputs,
-    const std::vector<RuntimeShapeTensorContract>& outputs) {
+    const std::vector<RuntimeShapeTensorContract>& outputs,
+    const std::vector<RuntimeShapeExtentScalar>& runtime_extent_abi,
+    const std::string& artifact_identity,
+    const std::string& tail_policy_identity) {
     std::string bytes;
     AppendString(bytes, "kxc.runtime_shape.trusted_sync_abi.v1");
     AppendU64(bytes, inputs.size());
@@ -399,6 +404,7 @@ std::string RuntimeShapePlan::ExactAbiFingerprint(
         AppendU64(bytes, input.rank);
         AppendString(bytes, input.device);
         AppendU64(bytes, input.abi_version);
+        AppendU64(bytes, input.requires_data ? 1 : 0);
         AppendU64(bytes, input.axis_guards.size());
         for (const auto& guard : input.axis_guards) {
             AppendU64(bytes, guard.axis);
@@ -431,6 +437,19 @@ std::string RuntimeShapePlan::ExactAbiFingerprint(
         AppendString(bytes, output.device);
         AppendU64(bytes, output.abi_version);
     }
+    AppendU64(bytes, runtime_extent_abi.size());
+    for (const auto& scalar : runtime_extent_abi) {
+        AppendU64(bytes, scalar.ordinal);
+        AppendString(bytes, scalar.name);
+        AppendString(bytes, scalar.symbol);
+        AppendU64(bytes, scalar.input_index);
+        AppendU64(bytes, scalar.axis);
+        AppendU64(bytes, scalar.lower);
+        AppendU64(bytes, scalar.upper);
+        AppendU64(bytes, scalar.divisible_by);
+    }
+    AppendString(bytes, artifact_identity);
+    AppendString(bytes, tail_policy_identity);
     return bytes;
 }
 
@@ -449,13 +468,41 @@ void RuntimeShapePlan::Validate() const {
         }
     }
     for (const auto& output : spec.outputs) ValidateContract(output);
-    (void)ExactAbiFingerprint(spec.inputs, spec.outputs);
+    std::unordered_set<std::string> scalar_names;
+    std::unordered_set<std::string> scalar_symbols;
+    std::set<std::pair<std::size_t, std::size_t>> scalar_axes;
+    for (std::size_t index = 0; index < spec.runtime_extent_abi.size(); ++index) {
+        const auto& scalar = spec.runtime_extent_abi[index];
+        if (scalar.ordinal != index || scalar.name.empty() || scalar.symbol.empty() ||
+            scalar.upper < scalar.lower || scalar.divisible_by == 0 ||
+            scalar.input_index >= spec.inputs.size() ||
+            scalar.axis >= spec.inputs[scalar.input_index].rank ||
+            !scalar_names.insert(scalar.name).second || !scalar_symbols.insert(scalar.symbol).second ||
+            !scalar_axes.insert({scalar.input_index, scalar.axis}).second) {
+            Fail("runtime extent ABI has duplicate, gap, or invalid scalar mapping");
+        }
+        const auto& guards = spec.inputs[scalar.input_index].axis_guards;
+        const auto guard = std::find_if(guards.begin(), guards.end(), [&scalar](const auto& value) {
+            return value.axis == scalar.axis;
+        });
+        if (guard == guards.end() || guard->lower != scalar.lower || guard->upper != scalar.upper ||
+            guard->divisible_by != scalar.divisible_by || guard->exact) {
+            Fail("runtime extent scalar does not exactly match its input-axis guard");
+        }
+    }
+    if (!spec.entry.tail_policy_identity.empty() && spec.entry.artifact_identity.empty()) {
+        Fail("tail policy identity requires an artifact identity");
+    }
+    (void)ExactAbiFingerprint(spec.inputs, spec.outputs, spec.runtime_extent_abi,
+                              spec.entry.artifact_identity, spec.entry.tail_policy_identity);
     if (!spec.entry.ready || !spec.entry.launcher || spec.entry.module_label.empty() ||
         spec.entry.entry_symbol.empty()) {
         Fail("plan requires a selected ready bound launcher entry");
     }
     if (spec.entry.abi_version != kAbiVersion) Fail("entry ABI version does not match");
-    if (spec.entry.exact_abi_fingerprint != ExactAbiFingerprint(spec.inputs, spec.outputs)) {
+    if (spec.entry.exact_abi_fingerprint !=
+        ExactAbiFingerprint(spec.inputs, spec.outputs, spec.runtime_extent_abi,
+                            spec.entry.artifact_identity, spec.entry.tail_policy_identity)) {
         Fail("entry exact ABI fingerprint does not match plan contracts");
     }
 }
@@ -473,6 +520,7 @@ std::mutex& RuntimeShapePlan::launcher_mutex() const {
 struct RuntimeShapeAsyncResult::State {
     RuntimeShapePlan plan;
     std::shared_ptr<void> caller_lease;
+    std::vector<std::shared_ptr<void>> input_owners;
     bool ok{false};
     std::string failure_reason;
     std::vector<RuntimeShapeOutput> outputs;
@@ -539,6 +587,13 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
             if (input.dtype != contract.dtype) Fail("input dtype does not match");
             if (input.device != contract.device) Fail("input device does not match");
             if (input.abi_version != contract.abi_version) Fail("input ABI version does not match");
+            const std::size_t expected_bytes = CheckedBytes(input.shape, DTypeBytes(input.dtype));
+            if (contract.requires_data || input.data || input.bytes != 0 || input.owner) {
+                if (input.bytes != expected_bytes || (expected_bytes != 0 && input.data == nullptr)) {
+                    Fail("input data pointer or byte size does not match shape contract");
+                }
+                state->input_owners.push_back(input.owner);
+            }
             for (const auto& guard : contract.axis_guards) {
                 const RuntimeShapeExtent extent = input.shape[guard.axis];
                 if (extent < guard.lower || extent > guard.upper ||
@@ -557,6 +612,15 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
                     Fail("input axis equality guard mismatch");
                 }
             }
+        }
+        std::vector<RuntimeShapeExtent> runtime_extent_values;
+        runtime_extent_values.reserve(spec.runtime_extent_abi.size());
+        for (const auto& scalar : spec.runtime_extent_abi) {
+            const auto value = inputs[scalar.input_index].shape[scalar.axis];
+            if (value < scalar.lower || value > scalar.upper || value % scalar.divisible_by != 0) {
+                Fail("runtime extent scalar value is outside its ABI domain");
+            }
+            runtime_extent_values.push_back(value);
         }
         state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kShapeEval,
                                                    static_cast<std::size_t>(-1), 0,
@@ -602,8 +666,8 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
         RuntimeShapeLaunchResult launch;
         try {
             std::lock_guard<std::mutex> lock(plan_.launcher_mutex());
-            launch = spec.entry.launcher(
-                RuntimeShapeLaunchArgs{inputs, state->outputs, spec.entry.exact_abi_fingerprint});
+            launch = spec.entry.launcher(RuntimeShapeLaunchArgs{
+                inputs, state->outputs, runtime_extent_values, spec.entry.exact_abi_fingerprint});
         } catch (const std::exception& error) {
             return fail(std::string("bound launcher threw: ") + error.what());
         } catch (...) {

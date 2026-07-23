@@ -217,7 +217,8 @@ runtime::RuntimeShapePlan RestrictedShapeRuntimeBridge::Bind(
     const restricted::RestrictedDispatchDecision& decision,
     TrustedSynchronousLauncherDescriptor launcher) {
     RequireEnabled();
-    if (launcher.module_label.empty() || launcher.entry_symbol.empty() || !launcher.launcher) {
+    if (launcher.module_label.empty() || launcher.entry_symbol.empty() ||
+        launcher.artifact_identity.empty() || !launcher.launcher) {
         Reject("trusted synchronous launcher descriptor is incomplete");
     }
     const auto& graph = decision.graph_template();
@@ -230,6 +231,18 @@ runtime::RuntimeShapePlan RestrictedShapeRuntimeBridge::Bind(
     }
     const std::string& final_name = units.back().output_value_names.front();
     const auto& final_template = NamedOutput(graph, final_name);
+    const std::string artifact_identity = decision.kind() == restricted::DispatchKind::kExact
+        ? decision.exact_requests().back().artifact_key.CanonicalBytes()
+        : decision.guarded_requests().back().artifact_key.CanonicalBytes();
+    const auto* bucket_policy = decision.bucket_policy();
+    if (decision.kind() == restricted::DispatchKind::kBucket && !bucket_policy) {
+        Reject("bucket decision lacks its validated policy");
+    }
+    const std::string tail_policy_identity = bucket_policy ? bucket_policy->CanonicalString() : std::string{};
+    if (launcher.artifact_identity != artifact_identity ||
+        launcher.tail_policy_identity != tail_policy_identity) {
+        Reject("trusted launcher artifact or tail-policy binding does not match decision");
+    }
     RequireCpuAbi(final_template.contract.abi());
     const auto& exact = decision.exact_oracle().profile();
     const auto& exact_final = exact.Value(final_name).contract;
@@ -258,6 +271,7 @@ runtime::RuntimeShapePlan RestrictedShapeRuntimeBridge::Bind(
         input.rank = concrete.logical.size();
         input.device = "CPU:0";
         input.abi_version = runtime::RuntimeShapePlan::kAbiVersion;
+        input.requires_data = true;
         maximum_inputs[input_index].resize(input.rank);
         for (std::size_t axis = 0; axis < input.rank; ++axis) {
             runtime::RuntimeShapeInputAxisGuard guard;
@@ -293,6 +307,29 @@ runtime::RuntimeShapePlan RestrictedShapeRuntimeBridge::Bind(
         spec.inputs.push_back(std::move(input));
     }
 
+    if (decision.kind() == restricted::DispatchKind::kPolymorphic) {
+        const auto* policy = decision.polymorphic_policy();
+        if (!policy) Reject("polymorphic decision lacks its validated policy");
+        if (policy->runtime_extent_abi().size() != domains.size()) {
+            Reject("polymorphic runtime extent ABI does not cover input-axis guards");
+        }
+        for (std::size_t index = 0; index < policy->runtime_extent_abi().size(); ++index) {
+            const auto& scalar = policy->runtime_extent_abi()[index];
+            const auto domain = domains.find(scalar.symbol);
+            const auto reference = references.find(scalar.symbol);
+            if (scalar.ordinal != index || domain == domains.end() || reference == references.end() ||
+                scalar.lower != static_cast<int64_t>(domain->second.lower) ||
+                scalar.upper != static_cast<int64_t>(domain->second.upper) ||
+                scalar.divisible_by != static_cast<int64_t>(domain->second.divisible_by)) {
+                Reject("polymorphic runtime extent ABI disagrees with input-axis guards");
+            }
+            spec.runtime_extent_abi.push_back(runtime::RuntimeShapeExtentScalar{
+                scalar.ordinal, scalar.name, scalar.symbol, reference->second.input_index,
+                reference->second.axis, domain->second.lower, domain->second.upper,
+                domain->second.divisible_by});
+        }
+    }
+
     runtime::RuntimeShapeTensorContract output;
     output.dtype = DType(final_template.contract.abi());
     output.alignment = static_cast<std::size_t>(final_template.contract.physical().alignment());
@@ -323,17 +360,6 @@ runtime::RuntimeShapePlan RestrictedShapeRuntimeBridge::Bind(
         const auto* policy = decision.polymorphic_policy();
         if (!policy) Reject("polymorphic decision lacks its validated policy");
         (void)SymbolicBoundary(*policy, final_name);
-        if (policy->runtime_extent_abi().size() != domains.size()) {
-            Reject("polymorphic runtime extent ABI does not cover input-axis guards");
-        }
-        for (const auto& scalar : policy->runtime_extent_abi()) {
-            const auto it = domains.find(scalar.symbol);
-            if (it == domains.end() || scalar.lower != static_cast<int64_t>(it->second.lower) ||
-                scalar.upper != static_cast<int64_t>(it->second.upper) ||
-                scalar.divisible_by != static_cast<int64_t>(it->second.divisible_by)) {
-                Reject("polymorphic runtime extent ABI disagrees with input-axis guards");
-            }
-        }
         output.logical = Expressions(final_template.contract.logical().dimensions(), exact_final.logical, references);
         output.physical = Expressions(final_template.contract.physical().capacity(), exact_final.physical, references);
         output.valid = Expressions(final_template.contract.valid().dimensions(), exact_final.valid, references);
@@ -345,9 +371,13 @@ runtime::RuntimeShapePlan RestrictedShapeRuntimeBridge::Bind(
     spec.entry.entry_symbol = std::move(launcher.entry_symbol);
     spec.entry.abi_version = runtime::RuntimeShapePlan::kAbiVersion;
     spec.entry.ready = true;
+    spec.entry.artifact_identity = std::move(launcher.artifact_identity);
+    spec.entry.tail_policy_identity = std::move(launcher.tail_policy_identity);
     spec.entry.launcher = std::move(launcher.launcher);
     spec.entry.module_lease = std::move(launcher.module_lease);
-    spec.entry.exact_abi_fingerprint = runtime::RuntimeShapePlan::ExactAbiFingerprint(spec.inputs, spec.outputs);
+    spec.entry.exact_abi_fingerprint = runtime::RuntimeShapePlan::ExactAbiFingerprint(
+        spec.inputs, spec.outputs, spec.runtime_extent_abi, spec.entry.artifact_identity,
+        spec.entry.tail_policy_identity);
     return runtime::RuntimeShapePlan(std::move(spec));
 }
 
