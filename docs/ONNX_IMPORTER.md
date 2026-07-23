@@ -35,6 +35,7 @@ save_imported_model(
 | `Relu` | `nn_relu` |
 | `MaxPool` | `nn_max_pool2d` |
 | `Add` | `add` |
+| `Concat` | `concatenate` |
 | `GlobalAveragePool` | `nn_global_avg_pool2d` |
 | `Flatten` | `nn_flatten` |
 | `Gemm` | `nn_gemm` |
@@ -45,7 +46,7 @@ save_imported_model(
 | `Where` | `where` |
 | `LayerNormalization`（opset >= 17） | `nn_layer_norm` |
 
-`Conv`、`MaxPool`、`Flatten`、`Gemm` 会转换必要 attrs；opset >= 13 的 `Softmax` 转换单个 `axis`（缺省为 `-1`）。opset < 13 的 `Softmax` 会 fail closed：其从 `axis` 开始 flatten 后归一化的语义不能映射为 Relay 单 axis softmax，不能只改默认 axis 做半实现。`Transpose` 转换 `perm`（缺失时写为空数组，由 Relay 使用逆序默认）；`Gather` 转换 `axis`（缺省为 `0`）；`Relu`、`Add`、`GlobalAveragePool`、`Where` 使用简单 attrs。`LayerNormalization` 只接受 opset >= 17、三个非空输入和一个非空输出，写入强类型 `{axis, epsilon, accumulation_dtype:"float32"}` attrs；仅默认/`1` 的 `stash_type` 可导入。`MatMul`、`Gather`、`Where` 和 `LayerNormalization` 除 attrs 外还执行下述静态 contract gate。
+`Conv`、`MaxPool`、`Flatten`、`Gemm` 会转换必要 attrs；opset >= 13 的 `Softmax` 转换单个 `axis`（缺省为 `-1`）。opset < 13 的 `Softmax` 会 fail closed：其从 `axis` 开始 flatten 后归一化的语义不能映射为 Relay 单 axis softmax，不能只改默认 axis 做半实现。`Concat` 是 exact-static binary subset：必须显式给出唯一的 `axis`，并转换为 `concatenate`；它不把 ONNX 可变输入数静默降为二元。`Transpose` 转换 `perm`（缺失时写为空数组，由 Relay 使用逆序默认）；`Gather` 转换 `axis`（缺省为 `0`）；`Relu`、`Add`、`GlobalAveragePool`、`Where` 使用简单 attrs。`LayerNormalization` 只接受 opset >= 17、三个非空输入和一个非空输出，写入强类型 `{axis, epsilon, accumulation_dtype:"float32"}` attrs；仅默认/`1` 的 `stash_type` 可导入。`Concat`、`MatMul`、`Gather`、`Where` 和 `LayerNormalization` 除 attrs 外还执行下述静态 contract gate。
 
 ## Shape 与 dtype 行为
 
@@ -58,6 +59,7 @@ Python protobuf importer 按静态 shape MVP fail-closed 地处理 ONNX value in
 - 每个 `MatMul` 在导入前必须能从 graph input/value_info、initializer 或此前推导的 `MatMul` output 解析两个静态 TensorSpec；缺失或未解析的 metadata 立即拒绝，且不会推导无关算子。
 - `MatMul` 要求恰有两个 rank >= 2、同 dtype 的输入，K 相等且 leading batch dims 可按 NumPy 广播；frontend 推导 `[..., M, N]`，并要求任何 value_info/graph output 声明的 output shape/dtype 完全一致。
 - `Gather` 要求恰有 data 和 int32/int64 indices 两个已解析静态输入，data rank >= 1，且 axis（允许负值）落在 data rank 内；frontend 推导 `data[:axis] + indices + data[axis + 1:]` 并验证所有声明 output 的 shape/dtype。ONNX 有效索引域为 `[-extent, extent - 1]`；KXC lowering 将域外运行时索引作为确定性的 typed zero-fill 扩展，而不是把该扩展误称为 ONNX 有效索引。
+- `Concat` 只接受恰好两个非空、已解析静态输入和一个非空 output，且 attrs 必须恰为显式 `axis`。输入须 rank >= 1、同 rank、同 dtype，dtype 限于 `{float32,float64,int32,int64,int8,uint8,bool}`；axis 可为负但必须归一化到范围内，非 axis 维严格相等，axis extent 相加不得溢出 int64。零 extent side 和零 extent output 合法；frontend 推导相加后的 axis extent，并要求所有声明 output shape/dtype 完全一致。
 - `Where` 要求恰有 condition、x、y 三个已解析静态输入；condition 必须为 `bool`，x/y 必须同 dtype，且 branch dtype 严格限于 `{float32,float64,int32,int64,int8,uint8,bool}`。frontend 按 NumPy trailing-axis 规则对三个输入联合广播，并验证所有声明 output 的 shape/dtype。该逐元素选择映射**不定义 masked-softmax 或 all-masked-row 行为**。
 - `LayerNormalization` 要求全部三个输入能从 graph input、initializer 或此前已推导输出解析为静态 `float32`；data rank >= 1、全部维度非负，axis 规范化后 suffix 全为正，且 scale/bias shape 必须严格等于 `data.shape[axis:]`。epsilon 必须有限且严格大于零，声明 output 必须与 data shape/dtype 完全一致。可选输入省略、mean/inv_std 附加输出、`stash_type != 1`、未解析前序值及任一 dtype/shape/axis/epsilon 不匹配均 fail closed。
 - C++ `kxc.onnx_import.v1` reifier 消费已静态化的 JSON spec，每个 input/output 都必须包含由非负整数组成的 `shape` 数组。该格式不能表示或观察 ONNX unknown rank；缺失 `shape` 属于 malformed spec，而不是动态 rank 语义。
@@ -144,7 +146,7 @@ CMake 会在 build 目录自动生成 C++ 测试使用的 `resnet18.import.json`
 
 ## 当前限制
 
-- 只覆盖静态 shape MVP，不承诺完整 ONNX opset；`MatMul` 仅接受 frontend 已验证的 rank >= 2 静态 K/batch/output contract，`Gather` 仅接受已验证的静态 data/indices/axis/output contract，`Where` 仅接受已验证的静态 bool condition、受限同 dtype branch 与联合广播/output contract，`LayerNormalization` 仅接受 opset >= 17 exact-static float32 affine subset；缺失 metadata 或动态维度仍不支持。
+- 只覆盖静态 shape MVP，不承诺完整 ONNX opset；`Concat` 仅接受带显式 axis 的 exact-static binary subset，`MatMul` 仅接受 frontend 已验证的 rank >= 2 静态 K/batch/output contract，`Gather` 仅接受已验证的静态 data/indices/axis/output contract，`Where` 仅接受已验证的静态 bool condition、受限同 dtype branch 与联合广播/output contract，`LayerNormalization` 仅接受 opset >= 17 exact-static float32 affine subset；缺失 metadata、动态维度或 `Concat` 的第三个及后续输入仍不支持。
 - `Softmax` 只接受 opset >= 13；opset < 13 的 flatten-from-axis 语义明确拒绝，不映射为 Relay 单 axis softmax。
 - 不引入 C++ ONNX/protobuf 依赖；ONNX protobuf 解析留在 Python 侧。
 - 不提供动态 shape runtime 语义。

@@ -377,6 +377,46 @@ void TestTranspose() {
     ExpectNear(out, {1, 4, 2, 5, 3, 6});
 }
 
+// 验证 binary concatenate 的元素顺序，以及空侧仍产生独立的 copy output。
+void TestConcatenate() {
+    kxc::Var lhs("lhs", kxc::TensorType({2, 2}, "float32"));
+    kxc::Var rhs("rhs", kxc::TensorType({2, 1}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("concatenate"), {lhs, rhs},
+                   kxc::relay::ConcatenateAttrs::Create(-1));
+    kxc::Function function({lhs, rhs}, call);
+    std::vector<float> lhs_data = {1, 2, 3, 4};
+    std::vector<float> rhs_data = {10, 20};
+    std::vector<float> output(6, 0.0f);
+    CompileAndRun("concatenate", function,
+                  {Input(lhs_data), Input(rhs_data), Output(output)});
+    ExpectNear(output, {1, 2, 10, 3, 4, 20});
+
+    kxc::Var empty("empty", kxc::TensorType({2, 0}, "float32"));
+    kxc::Var source("source", kxc::TensorType({2, 2}, "float32"));
+    kxc::Call empty_side(kxc::relay::Op::Get("concatenate"), {empty, source},
+                         kxc::relay::ConcatenateAttrs::Create(1));
+    kxc::Function empty_function({empty, source}, empty_side);
+    std::vector<float> empty_data;
+    std::vector<float> source_data = {7, 8, 9, 10};
+    std::vector<float> copied(4, 0.0f);
+    CompileAndRun("concatenate_empty_side_fresh_copy", empty_function,
+                  {Input(empty_data), Input(source_data), Output(copied)});
+    ExpectNear(copied, source_data);
+
+    kxc::Var bool_lhs("bool_lhs", kxc::TensorType({1, 2}, "bool"));
+    kxc::Var bool_rhs("bool_rhs", kxc::TensorType({1, 1}, "bool"));
+    kxc::Call bool_call(kxc::relay::Op::Get("concatenate"), {bool_lhs, bool_rhs},
+                        kxc::relay::ConcatenateAttrs::Create(1));
+    kxc::Function bool_function({bool_lhs, bool_rhs}, bool_call);
+    const std::vector<uint8_t> bool_lhs_data = {1, 0};
+    const std::vector<uint8_t> bool_rhs_data = {1};
+    std::vector<uint8_t> bool_output(3, 0);
+    CompileAndRun("concatenate_bool", bool_function,
+                  {Input(bool_lhs_data), Input(bool_rhs_data), Output(bool_output)});
+    Check(bool_output == std::vector<uint8_t>({1, 0, 1}),
+          "bool concatenate must preserve byte-backed boolean values");
+}
+
 // 验证 ReduceMean 的轴和 keepdims 语义。
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
@@ -656,6 +696,7 @@ int main() {
         {"nn_flatten", TestFlatten},
         {"reshape", TestReshape},
         {"transpose", TestTranspose},
+        {"concatenate", TestConcatenate},
         {"reduce_mean", TestReduceMean},
         {"softmax", TestSoftmax},
         {"gather", TestGather},

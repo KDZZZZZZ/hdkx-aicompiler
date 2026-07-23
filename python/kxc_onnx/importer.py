@@ -18,9 +18,12 @@ from .spec import (
 
 
 WHERE_BRANCH_DTYPES = {"float32", "float64", "int32", "int64", "int8", "uint8", "bool"}
+CONCATENATE_DTYPES = WHERE_BRANCH_DTYPES
+INT64_MAX = (1 << 63) - 1
 
 
 ONNX_TO_RELAY = {
+    "Concat": "concatenate",
     "Conv": "nn_conv2d",
     "Relu": "nn_relu",
     "MaxPool": "nn_max_pool2d",
@@ -128,6 +131,21 @@ def import_onnx_model(
                 "only single-output nodes are supported in the static-shape MVP"
             )
 
+        if node.op_type == "Concat":
+            node_name = node.name or "<unnamed>"
+            if len(node.input) != 2 or not all(node.input):
+                raise ValueError(f"Concat node '{node_name}' requires exactly two non-empty inputs")
+            if not node.output[0]:
+                raise ValueError(f"Concat node '{node_name}' requires exactly one non-empty output")
+            missing = [name for name in node.input if name not in available_values]
+            if missing:
+                raise ValueError(
+                    f"Concat node '{node_name}' has unresolved prior input(s): {missing}"
+                )
+            inferred_static_specs[node.output[0]] = _infer_concatenate_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
         if node.op_type == "LayerNormalization":
             node_name = node.name or "<unnamed>"
             if opset_version < 17:
@@ -338,6 +356,62 @@ def _infer_gather_spec(
     return result
 
 
+def _infer_concatenate_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(f"Concat node '{node_name}' requires exactly two non-empty inputs")
+    attrs = _attrs_by_name(node)
+    if set(attrs) != {"axis"}:
+        raise ValueError(f"Concat node '{node_name}' requires exactly the axis attribute")
+    axis = _int_attr(attrs, "axis", 0)
+    lhs, rhs = (
+        _resolve_static_input("Concat", node_name, name, input_specs, params,
+                              inferred_specs, value_info_by_name, default_batch)
+        for name in node.input
+    )
+    if lhs.dtype not in CONCATENATE_DTYPES or rhs.dtype not in CONCATENATE_DTYPES:
+        raise ValueError(
+            f"Concat node '{node_name}' requires dtypes in "
+            "{float32,float64,int32,int64,int8,uint8,bool}; "
+            f"got {lhs.dtype} and {rhs.dtype}"
+        )
+    if lhs.dtype != rhs.dtype:
+        raise ValueError(
+            f"Concat node '{node_name}' requires matching input dtypes; "
+            f"got {lhs.dtype} and {rhs.dtype}"
+        )
+    if not lhs.shape or not rhs.shape:
+        raise ValueError(f"Concat node '{node_name}' requires rank >= 1 inputs")
+    if len(lhs.shape) != len(rhs.shape):
+        raise ValueError(f"Concat node '{node_name}' input ranks must match")
+    if axis < 0:
+        axis += len(lhs.shape)
+    if axis < 0 or axis >= len(lhs.shape):
+        raise ValueError(f"Concat node '{node_name}' axis {axis} is out of range")
+    for index, (left_dim, right_dim) in enumerate(zip(lhs.shape, rhs.shape)):
+        if left_dim < 0 or right_dim < 0:
+            raise ValueError(f"Concat node '{node_name}' requires non-negative static dimensions")
+        if index != axis and left_dim != right_dim:
+            raise ValueError(
+                f"Concat node '{node_name}' non-axis dimensions must exactly match"
+            )
+    if lhs.shape[axis] > INT64_MAX - rhs.shape[axis]:
+        raise ValueError(f"Concat node '{node_name}' axis extent sum overflows int64")
+    output_shape = list(lhs.shape)
+    output_shape[axis] = lhs.shape[axis] + rhs.shape[axis]
+    result = TensorSpec(name=node.output[0], shape=output_shape, dtype=lhs.dtype)
+    _validate_declared_output("Concat", node_name, result, output_declarations, default_batch)
+    return result
+
+
 def _infer_layer_normalization_spec(
     node: onnx.NodeProto,
     input_specs: dict[str, TensorSpec],
@@ -527,6 +601,13 @@ def _convert_attrs(
     opset_version: int,
 ) -> dict[str, Any]:
     attrs = _attrs_by_name(node)
+    if node.op_type == "Concat":
+        attrs = _attrs_by_name(node)
+        if set(attrs) != {"axis"}:
+            raise ValueError(
+                f"Concat node '{node.name or '<unnamed>'}' requires exactly the axis attribute"
+            )
+        return {"axis": _int_attr(attrs, "axis", 0)}
     if node.op_type == "Conv":
         if len(node.input) < 2 or node.input[1] not in params:
             raise ValueError(f"Conv node '{node.name or '<unnamed>'}' is missing weight initializer")

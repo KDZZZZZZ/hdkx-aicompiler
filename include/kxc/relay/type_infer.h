@@ -26,6 +26,7 @@ Type FlattenInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type LayerNormInferType(const Attrs& attrs, const Array<Type>& input_types);

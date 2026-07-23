@@ -27,6 +27,7 @@ KXC_OBJECT_DEFINE(ReduceMeanAttrsNode)
 KXC_OBJECT_DEFINE(ReshapeAttrsNode)
 KXC_OBJECT_DEFINE(TransposeAttrsNode)
 KXC_OBJECT_DEFINE(GatherAttrsNode)
+KXC_OBJECT_DEFINE(ConcatenateAttrsNode)
 KXC_OBJECT_DEFINE(ReluAttrsNode)
 KXC_OBJECT_DEFINE(GlobalAvgPool2DAttrsNode)
 KXC_OBJECT_DEFINE(FlattenAttrsNode)
@@ -243,6 +244,10 @@ void GatherAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("axis", axis);
 }
 
+void ConcatenateAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axis", axis);
+}
+
 void FlattenAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("axis", axis);
 }
@@ -368,6 +373,12 @@ TransposeAttrs TransposeAttrs::Create(Array<int64_t> perm) {
 
 GatherAttrs GatherAttrs::Create(int axis) {
     auto* node = new GatherAttrsNode();
+    node->axis = axis;
+    return InternalCreate(node);
+}
+
+ConcatenateAttrs ConcatenateAttrs::Create(int axis) {
+    auto* node = new ConcatenateAttrsNode();
     node->axis = axis;
     return InternalCreate(node);
 }

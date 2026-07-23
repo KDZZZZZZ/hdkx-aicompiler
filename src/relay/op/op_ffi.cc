@@ -85,6 +85,11 @@ Call MakeGather(Expr data, Expr indices, int axis) {
     return Call(GetOp("gather"), {data, indices}, GatherAttrs::Create(axis));
 }
 
+// 构造 exact-static binary concatenate 调用。
+Call MakeConcatenate(Expr lhs, Expr rhs, int axis) {
+    return Call(GetOp("concatenate"), {lhs, rhs}, ConcatenateAttrs::Create(axis));
+}
+
 // 构造二维卷积调用及完整布局属性。
 Call MakeNNConv2D(Expr data, Expr weight, Array<int64_t> strides,
                   Array<int64_t> padding, Array<int64_t> dilation, int groups,
@@ -166,6 +171,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape").set_body(ToPackedFunc(MakeResh
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.softmax").set_body(ToPackedFunc(MakeSoftmax));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.transpose").set_body(ToPackedFunc(MakeTranspose));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.gather").set_body(ToPackedFunc(MakeGather));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.concatenate").set_body(ToPackedFunc(MakeConcatenate));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_conv2d").set_body(ToPackedFunc(MakeNNConv2D));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_dense").set_body(ToPackedFunc(MakeNNDense));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_layer_norm")

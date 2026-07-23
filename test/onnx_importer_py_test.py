@@ -316,6 +316,124 @@ def test_gather_rejects_invalid_static_contract(data_shape, indices_dtype, axis,
         )
 
 
+def _concat_model(
+    lhs_shape,
+    rhs_shape,
+    output_shape,
+    *,
+    axis=0,
+    lhs_dtype=TensorProto.FLOAT,
+    rhs_dtype=None,
+    output_dtype=None,
+    node_inputs=("lhs", "rhs"),
+    include_axis=True,
+):
+    rhs_dtype = lhs_dtype if rhs_dtype is None else rhs_dtype
+    output_dtype = lhs_dtype if output_dtype is None else output_dtype
+    attrs = {"axis": axis} if include_axis else {}
+    graph = helper.make_graph(
+        [helper.make_node("Concat", node_inputs, ["out"], name="concat", **attrs)],
+        "concat_test",
+        [
+            helper.make_tensor_value_info("lhs", lhs_dtype, lhs_shape),
+            helper.make_tensor_value_info("rhs", rhs_dtype, rhs_shape),
+            helper.make_tensor_value_info("extra", lhs_dtype, lhs_shape),
+        ],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6
+    )
+
+
+@pytest.mark.parametrize(
+    ("lhs_shape", "rhs_shape", "axis", "output_shape"),
+    [
+        ([2, 2], [2, 3], 1, [2, 5]),
+        ([2, 2], [2, 3], -1, [2, 5]),
+    ],
+)
+def test_concat_maps_positive_and_negative_axis(
+    lhs_shape, rhs_shape, axis, output_shape
+):
+    imported = import_onnx_model(_concat_model(lhs_shape, rhs_shape, output_shape, axis=axis))
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("concatenate", {"axis": axis}),
+    ]
+    assert imported.function.outputs[0].shape == output_shape
+
+
+@pytest.mark.parametrize(
+    ("lhs_shape", "rhs_shape", "output_shape"),
+    [
+        ([2, 0], [2, 3], [2, 3]),
+        ([2, 0], [2, 0], [2, 0]),
+    ],
+)
+def test_concat_preserves_empty_side_and_empty_output(lhs_shape, rhs_shape, output_shape):
+    imported = import_onnx_model(_concat_model(lhs_shape, rhs_shape, output_shape, axis=1))
+
+    assert imported.function.outputs[0].shape == output_shape
+
+
+def test_concat_bool_dtype_maps_and_infers_output():
+    imported = import_onnx_model(
+        _concat_model([1, 2], [1, 1], [1, 3], axis=1, lhs_dtype=TensorProto.BOOL)
+    )
+
+    assert imported.function.outputs[0].dtype == "bool"
+
+
+def test_concat_requires_explicit_axis():
+    with pytest.raises(ValueError, match="exactly the axis attribute"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], include_axis=False))
+
+
+def test_concat_rejects_rank_zero_and_out_of_range_axis():
+    with pytest.raises(ValueError, match="rank >= 1"):
+        import_onnx_model(_concat_model([], [], [], axis=0))
+    with pytest.raises(ValueError, match="axis 2 is out of range"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], axis=2))
+
+
+@pytest.mark.parametrize("node_inputs", [("lhs",), ("lhs", "rhs", "extra"), ("lhs", "")])
+def test_concat_requires_exactly_two_nonempty_inputs(node_inputs):
+    with pytest.raises(ValueError, match="exactly two non-empty inputs"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], node_inputs=node_inputs))
+
+
+@pytest.mark.parametrize(
+    ("lhs_shape", "rhs_shape", "rhs_dtype", "message"),
+    [
+        ([2, 2], [2, 3], TensorProto.INT32, "matching input dtypes"),
+        ([2, 2], [2, 3, 1], TensorProto.FLOAT, "input ranks must match"),
+        ([2, 2], [3, 3], TensorProto.FLOAT, "non-axis dimensions must exactly match"),
+    ],
+)
+def test_concat_rejects_dtype_rank_and_nonaxis_mismatches(
+    lhs_shape, rhs_shape, rhs_dtype, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(
+            _concat_model(lhs_shape, rhs_shape, [2, 5], axis=1, rhs_dtype=rhs_dtype)
+        )
+
+
+def test_concat_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 4], axis=1))
+
+
+def test_concat_rejects_unsupported_dtype():
+    with pytest.raises(ValueError, match="Unsupported ONNX tensor dtype"):
+        import_onnx_model(
+            _concat_model(
+                [2, 2], [2, 3], [2, 5], axis=1, lhs_dtype=TensorProto.FLOAT16
+            )
+        )
+
+
 def _where_model(condition_shape, x_shape, y_shape, *, condition_dtype=TensorProto.BOOL,
                  x_dtype=TensorProto.FLOAT, y_dtype=TensorProto.FLOAT,
                  output_shape=(1,), output_dtype=TensorProto.FLOAT):

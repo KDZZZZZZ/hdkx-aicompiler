@@ -271,6 +271,10 @@ bool IsWhereBranchDType(const std::string& dtype) {
            dtype == "int64" || dtype == "int8" || dtype == "uint8" || dtype == "bool";
 }
 
+bool IsConcatenateDType(const std::string& dtype) {
+    return IsWhereBranchDType(dtype);
+}
+
 // 推导 ONNX Where 的三元 trailing-axis 广播结果。
 Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
@@ -616,6 +620,48 @@ Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types) {
         out.push_back(data->shape[i]);
     }
     return MakeTensorType(out, data->dtype);
+}
+
+// 推导 exact-static binary concatenate 的输出 shape 与 dtype。
+Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("concatenate", input_types, 2);
+    const auto* lhs = RequireTensor("concatenate", input_types[0], "lhs");
+    const auto* rhs = RequireTensor("concatenate", input_types[1], "rhs");
+    const auto* concatenate_attrs = attrs.As<ConcatenateAttrsNode>();
+    if (!concatenate_attrs) {
+        throw std::runtime_error("concatenate requires ConcatenateAttrs");
+    }
+    if (!IsConcatenateDType(lhs->dtype) || !IsConcatenateDType(rhs->dtype)) {
+        throw std::runtime_error(
+            "concatenate dtype must be float32, float64, int32, int64, int8, uint8, or bool");
+    }
+    RequireSameDType("concatenate", lhs, rhs);
+    if (lhs->shape.empty() || rhs->shape.empty()) {
+        throw std::runtime_error("concatenate requires rank >= 1 inputs");
+    }
+    if (lhs->shape.size() != rhs->shape.size()) {
+        throw std::runtime_error("concatenate input rank mismatch");
+    }
+    const int rank = static_cast<int>(lhs->shape.size());
+    const int axis = NormalizeAxis("concatenate", concatenate_attrs->axis, rank);
+    std::vector<int64_t> out = ShapeVector(lhs);
+    for (int index = 0; index < rank; ++index) {
+        const int64_t lhs_dim = lhs->shape[static_cast<size_t>(index)];
+        const int64_t rhs_dim = rhs->shape[static_cast<size_t>(index)];
+        if (lhs_dim < 0 || rhs_dim < 0) {
+            throw std::runtime_error("concatenate requires non-negative static input dimensions");
+        }
+        if (index != axis && lhs_dim != rhs_dim) {
+            throw std::runtime_error("concatenate non-axis dimensions must exactly match");
+        }
+    }
+    const int64_t lhs_axis = lhs->shape[static_cast<size_t>(axis)];
+    const int64_t rhs_axis = rhs->shape[static_cast<size_t>(axis)];
+    if (lhs_axis > std::numeric_limits<int64_t>::max() - rhs_axis) {
+        throw std::runtime_error("concatenate axis extent sum overflows int64");
+    }
+    out[static_cast<size_t>(axis)] = lhs_axis + rhs_axis;
+    return MakeTensorType(out, lhs->dtype);
 }
 
 // 按 axes 与 keepdims 推导 reduce_mean 结果 shape。

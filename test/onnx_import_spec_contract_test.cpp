@@ -113,6 +113,30 @@ void WriteGatherFixture(const TemporaryDirectory& directory,
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+void WriteConcatenateFixture(const TemporaryDirectory& directory,
+                             const std::string& output_shape,
+                             const std::string& attrs = R"json({"axis": -1})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "lhs", "shape": [2, 2], "dtype": "float32"},
+      {"name": "rhs", "shape": [2, 3], "dtype": "float32"}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "concatenate", "op_name": "concatenate", "inputs": ["lhs", "rhs"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
 void WriteWhereFixture(const TemporaryDirectory& directory,
                        const std::string& output_shape,
                        const std::string& branch_dtype = "float32") {
@@ -202,6 +226,42 @@ bool TestGatherDeclaredOutputMismatchIsRejected() {
                        (directory.path() / "params.bin").string());
                }),
                "declared Gather output shape must match inferred output");
+    return true;
+}
+
+bool TestValidStaticConcatenate() {
+    TemporaryDirectory directory;
+    WriteConcatenateFixture(directory, "[2, 5]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Concatenate import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 5}, "float32"),
+               "reified Concatenate output should normalize axis and sum extents");
+    return true;
+}
+
+bool TestConcatenateDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteConcatenateFixture(directory, "[2, 4]");
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }), "declared Concatenate output shape must match inferred output");
+    return true;
+}
+
+bool TestConcatenateAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WriteConcatenateFixture(directory, "[2, 5]", R"json({})json");
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }), "Concatenate reifier must construct and require strong axis attrs");
     return true;
 }
 
@@ -333,6 +393,9 @@ int main() {
         {"valid_static_matmul_softmax_transpose", TestValidStaticMatMulSoftmaxTranspose},
         {"valid_static_gather", TestValidStaticGather},
         {"gather_declared_output_mismatch", TestGatherDeclaredOutputMismatchIsRejected},
+        {"valid_static_concatenate", TestValidStaticConcatenate},
+        {"concatenate_declared_output_mismatch", TestConcatenateDeclaredOutputMismatchIsRejected},
+        {"concatenate_strict_attrs", TestConcatenateAttrsAreStrict},
         {"valid_static_where", TestValidStaticWhere},
         {"where_declared_output_mismatch", TestWhereDeclaredOutputMismatchIsRejected},
         {"where_unsupported_branch_dtype", TestWhereUnsupportedBranchDTypeIsRejected},

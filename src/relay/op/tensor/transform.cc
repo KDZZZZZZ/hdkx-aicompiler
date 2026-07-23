@@ -9,6 +9,7 @@
 #include "kxc/te/topi/elemwise.h"
 #include "kxc/te/topi/transform.h"
 
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -100,6 +101,33 @@ kxc::tir::DataType DTypeFromCastCode(int code) {
     default:
         throw std::runtime_error("cast has unsupported dtype code: " + std::to_string(code));
     }
+}
+
+bool IsConcatenateDType(const kxc::tir::DataType& dtype) {
+    return (dtype.code == 2 && (dtype.bits == 32 || dtype.bits == 64) && dtype.lanes == 1) ||
+           (dtype.code == 0 && (dtype.bits == 8 || dtype.bits == 32 || dtype.bits == 64) &&
+            dtype.lanes == 1) ||
+           (dtype.code == 1 && dtype.bits == 8 && dtype.lanes == 1) ||
+           dtype == kxc::tir::DataType::Bool();
+}
+
+bool MatchesRelayDType(const kxc::tir::DataType& dtype, const std::string& relay_dtype) {
+    return (relay_dtype == "float32" && dtype == kxc::tir::DataType::Float(32)) ||
+           (relay_dtype == "float64" && dtype == kxc::tir::DataType::Float(64)) ||
+           (relay_dtype == "int32" && dtype == kxc::tir::DataType::Int(32)) ||
+           (relay_dtype == "int64" && dtype == kxc::tir::DataType::Int(64)) ||
+           (relay_dtype == "int8" && dtype == kxc::tir::DataType::Int(8)) ||
+           (relay_dtype == "uint8" && dtype == kxc::tir::DataType::UInt(8)) ||
+           (relay_dtype == "bool" && dtype == kxc::tir::DataType::Bool());
+}
+
+int64_t StaticExtent(const kxc::tir::PrimExpr& extent, const char* op_name) {
+    const auto* immediate = extent.As<kxc::tir::IntImmNode>();
+    if (!immediate || immediate->value < 0) {
+        throw std::runtime_error(std::string(op_name) +
+                                 " lowering requires static non-negative input shape");
+    }
+    return immediate->value;
 }
 
 Array<int> NormalizeTransposeAxes(const te::Tensor& input, const Attrs& attrs) {
@@ -223,6 +251,54 @@ te::Tensor CastCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         "cast", te::topi::cast(inputs[0], DTypeFromCastCode(cast_attrs->to), "T_cast"));
 }
 
+te::Tensor ConcatenateCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                               const kxc::Type& out_type) {
+    RequireInputCount("concatenate", inputs, 2);
+    const auto* output_type = RequireTensorOutput("concatenate", out_type);
+    const auto* concatenate_attrs = attrs.As<ConcatenateAttrsNode>();
+    if (!concatenate_attrs) {
+        throw std::runtime_error("concatenate expects ConcatenateAttrs");
+    }
+    if (!inputs[0].defined() || !inputs[1].defined()) {
+        throw std::runtime_error("concatenate lowering received undefined input tensor");
+    }
+    const size_t rank = inputs[0]->shape.size();
+    if (rank == 0 || inputs[1]->shape.size() != rank) {
+        throw std::runtime_error("concatenate lowering requires equal rank >= 1 inputs");
+    }
+    int axis = concatenate_attrs->axis;
+    if (axis < 0) axis += static_cast<int>(rank);
+    if (axis < 0 || axis >= static_cast<int>(rank)) {
+        throw std::runtime_error("concatenate lowering axis out of range");
+    }
+    if (!IsConcatenateDType(inputs[0]->dtype) || inputs[0]->dtype != inputs[1]->dtype) {
+        throw std::runtime_error("concatenate lowering requires equal supported input dtypes");
+    }
+    if (output_type->shape.size() != rank ||
+        !MatchesRelayDType(inputs[0]->dtype, output_type->dtype)) {
+        throw std::runtime_error("concatenate lowering output type mismatch");
+    }
+    int64_t axis_sum = 0;
+    for (size_t index = 0; index < rank; ++index) {
+        const int64_t lhs_extent = StaticExtent(inputs[0]->shape[index], "concatenate");
+        const int64_t rhs_extent = StaticExtent(inputs[1]->shape[index], "concatenate");
+        if (static_cast<int>(index) != axis && lhs_extent != rhs_extent) {
+            throw std::runtime_error("concatenate lowering non-axis dimensions must exactly match");
+        }
+        if (static_cast<int>(index) == axis) {
+            if (lhs_extent > std::numeric_limits<int64_t>::max() - rhs_extent) {
+                throw std::runtime_error("concatenate lowering axis extent sum overflows int64");
+            }
+            axis_sum = lhs_extent + rhs_extent;
+        }
+        const int64_t expected = static_cast<int>(index) == axis ? axis_sum : lhs_extent;
+        if (output_type->shape[index] != expected) {
+            throw std::runtime_error("concatenate lowering output shape disagrees with inputs");
+        }
+    }
+    return RequireDefined("concatenate", te::topi::concatenate(inputs, axis, "T_concatenate"));
+}
+
 kxc::tir::PrimExpr TypedZero(kxc::tir::DataType dtype) {
     if (dtype.code == 2) {
         return kxc::tir::FloatImm(0.0, dtype);
@@ -317,6 +393,15 @@ KXC_REGISTER_OP(cast)
     .set_attr<std::string>("TAttrs", "CastAttrs")
     .set_attr<FInferType>("FInferType", CastInferType)
     .set_attr<FRelayToTE>("FRelayToTE", CastCompute);
+
+KXC_REGISTER_OP(concatenate)
+    .describe(R"doc(Concatenate exactly two static tensors along an axis into a fresh output.)doc")
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The left input tensor.")
+    .add_argument("rhs", "Tensor", "The right input tensor.")
+    .set_attr<std::string>("TAttrs", "ConcatenateAttrs")
+    .set_attr<FInferType>("FInferType", ConcatenateInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", ConcatenateCompute);
 
 KXC_REGISTER_OP(gather)
     .describe(R"doc(Gather slices along an axis; invalid runtime indices produce typed zero.)doc")

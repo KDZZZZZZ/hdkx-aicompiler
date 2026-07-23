@@ -85,6 +85,19 @@ bool TestRelayOperatorRegistryLookupAndSpecs() {
                    Contains(gather_attrs, "axis"),
                "gather attrs serialization should include the canonical axis");
 
+    const kxc::relay::Op& concatenate = kxc::relay::Op::Get("concatenate");
+    TEST_CHECK(concatenate->name == "concatenate" &&
+                   concatenate.spec().attrs_type_key == "ConcatenateAttrs" &&
+                   concatenate.spec().input_arity.num_inputs == 2,
+               "concatenate should expose its binary canonical attrs contract");
+    TEST_CHECK(kxc::Registry::Global().Get("kxc.relay.op._make.concatenate").defined(),
+               "concatenate canonical FFI helper should be registered");
+    const std::string concatenate_attrs = kxc::relay::SerializeAttrs(
+        kxc::relay::ConcatenateAttrs::Create(-1));
+    TEST_CHECK(Contains(concatenate_attrs, "ConcatenateAttrsNode") &&
+                   Contains(concatenate_attrs, "axis"),
+               "concatenate attrs serialization should include the canonical axis");
+
     const kxc::relay::Op& layer_norm = kxc::relay::Op::Get("nn_layer_norm");
     TEST_CHECK(layer_norm->name == "nn_layer_norm" &&
                    layer_norm.spec().attrs_type_key == "LayerNormAttrs" &&

@@ -2,6 +2,7 @@
  * \brief 测试 Relay 类型和 shape 推导。
  */
 
+#include "kxc/ffi/registry.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/compiler/lowering/relay_to_tir.h"
@@ -237,6 +238,102 @@ bool TestGatherInferAndLoweringContract() {
                    kxc::relay::InferTypePass(kxc::Function({huge, i32}, overflow));
                }),
                "gather int32 indices must reject axis extent above INT32_MAX");
+    return true;
+}
+
+bool TestConcatenateInferAndLoweringContract() {
+    kxc::Var lhs("lhs", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var rhs("rhs", kxc::TensorType({2, 4}, "float32"));
+    kxc::Call concatenate(kxc::relay::Op::Get("concatenate"), {lhs, rhs},
+                          kxc::relay::ConcatenateAttrs::Create(-1));
+    kxc::Function function({lhs, rhs}, concatenate);
+    kxc::relay::InferTypePass(function);
+    TEST_CHECK(CheckTensor(concatenate.checked_type(), {2, 7}, "float32"),
+               "concatenate must normalize a negative axis and sum its extent");
+    TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined(),
+               "static concatenate should lower to TIR");
+    TEST_CHECK(kxc::relay::LowerOperatorCallsToTIR(function).size() == 1,
+               "one concatenate call must produce one lowering unit");
+    TEST_CHECK(kxc::relay::SerializeAttrs(kxc::relay::ConcatenateAttrs::Create(-1)) ==
+                   kxc::relay::SerializeAttrs(kxc::relay::ConcatenateAttrs::Create(-1)) &&
+                   kxc::relay::SerializeAttrs(kxc::relay::ConcatenateAttrs::Create(-1)) !=
+                   kxc::relay::SerializeAttrs(kxc::relay::ConcatenateAttrs::Create(1)),
+               "concatenate attrs must canonically preserve axis");
+    TEST_CHECK(kxc::Registry::Global().Get("kxc.relay.op._make.concatenate").defined(),
+               "canonical concatenate FFI entry must be registered");
+
+    kxc::Var empty_lhs("empty_lhs", kxc::TensorType({2, 0}, "int32"));
+    kxc::Var nonempty_rhs("nonempty_rhs", kxc::TensorType({2, 3}, "int32"));
+    kxc::Call empty_axis(kxc::relay::Op::Get("concatenate"), {empty_lhs, nonempty_rhs},
+                         kxc::relay::ConcatenateAttrs::Create(1));
+    kxc::Function empty_function({empty_lhs, nonempty_rhs}, empty_axis);
+    kxc::relay::InferTypePass(empty_function);
+    TEST_CHECK(CheckTensor(empty_axis.checked_type(), {2, 3}, "int32"),
+               "concatenate must accept an empty axis side");
+    TEST_CHECK(kxc::relay::LowerToTIR(empty_function)->prim_func.defined(),
+               "empty-axis concatenate should lower to a fresh compute");
+
+    kxc::Var bool_lhs("bool_lhs", kxc::TensorType({1, 2}, "bool"));
+    kxc::Var bool_rhs("bool_rhs", kxc::TensorType({1, 1}, "bool"));
+    kxc::Call bool_concatenate(kxc::relay::Op::Get("concatenate"), {bool_lhs, bool_rhs},
+                               kxc::relay::ConcatenateAttrs::Create(1));
+    kxc::Function bool_function({bool_lhs, bool_rhs}, bool_concatenate);
+    kxc::relay::InferTypePass(bool_function);
+    TEST_CHECK(CheckTensor(bool_concatenate.checked_type(), {1, 3}, "bool"),
+               "concatenate must preserve bool output type");
+    TEST_CHECK(kxc::relay::LowerToTIR(bool_function)->prim_func.defined(),
+               "bool concatenate should lower through DataType::Bool");
+
+    kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
+    kxc::Call rank_zero(kxc::relay::Op::Get("concatenate"), {scalar, scalar},
+                        kxc::relay::ConcatenateAttrs::Create(0));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({scalar}, rank_zero));
+               }), "concatenate rank-zero inputs must fail");
+    kxc::Var wrong_dtype("wrong_dtype", kxc::TensorType({2, 4}, "float64"));
+    kxc::Call dtype(kxc::relay::Op::Get("concatenate"), {lhs, wrong_dtype},
+                    kxc::relay::ConcatenateAttrs::Create(1));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({lhs, wrong_dtype}, dtype));
+               }), "concatenate dtype mismatch must fail");
+    kxc::Var unsupported("unsupported", kxc::TensorType({2, 4}, "float16"));
+    kxc::Call unsupported_dtype(kxc::relay::Op::Get("concatenate"), {unsupported, unsupported},
+                                kxc::relay::ConcatenateAttrs::Create(1));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({unsupported}, unsupported_dtype));
+               }), "concatenate unsupported dtype must fail");
+    kxc::Var rank_three("rank_three", kxc::TensorType({2, 3, 4}, "float32"));
+    kxc::Call rank_mismatch(kxc::relay::Op::Get("concatenate"), {lhs, rank_three},
+                            kxc::relay::ConcatenateAttrs::Create(1));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({lhs, rank_three}, rank_mismatch));
+               }), "concatenate rank mismatch must fail");
+    kxc::Var nonaxis_rhs("nonaxis_rhs", kxc::TensorType({3, 4}, "float32"));
+    kxc::Call nonaxis(kxc::relay::Op::Get("concatenate"), {lhs, nonaxis_rhs},
+                      kxc::relay::ConcatenateAttrs::Create(1));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({lhs, nonaxis_rhs}, nonaxis));
+               }), "concatenate non-axis mismatch must fail");
+    kxc::Call bad_axis(kxc::relay::Op::Get("concatenate"), {lhs, rhs},
+                       kxc::relay::ConcatenateAttrs::Create(2));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({lhs, rhs}, bad_axis));
+               }), "concatenate out-of-range axis must fail");
+    kxc::Var dynamic("dynamic", kxc::TensorType({2, -1}, "float32"));
+    kxc::Call dynamic_extent(kxc::relay::Op::Get("concatenate"), {dynamic, dynamic},
+                             kxc::relay::ConcatenateAttrs::Create(1));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::LowerToTIR(kxc::Function({dynamic}, dynamic_extent));
+               }), "concatenate dynamic or negative extents must fail lowering");
+    const int64_t maximum = std::numeric_limits<int64_t>::max();
+    kxc::Var huge_lhs("huge_lhs", kxc::TensorType({maximum}, "int64"));
+    kxc::Var huge_rhs("huge_rhs", kxc::TensorType({1}, "int64"));
+    kxc::Call overflow(kxc::relay::Op::Get("concatenate"), {huge_lhs, huge_rhs},
+                       kxc::relay::ConcatenateAttrs::Create(0));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::LowerToTIR(kxc::Function({huge_lhs, huge_rhs}, overflow));
+               }), "concatenate axis sum overflow must fail lowering");
     return true;
 }
 
@@ -570,6 +667,7 @@ int main() {
         {"conv_and_pool_ops", TestConvAndPoolOps},
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
         {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},
+        {"concatenate_infer_and_lowering_contract", TestConcatenateInferAndLoweringContract},
         {"where_infer_and_lowering_contract", TestWhereInferAndLoweringContract},
         {"layer_norm_infer_and_lowering_contract", TestLayerNormInferAndLoweringContract},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},

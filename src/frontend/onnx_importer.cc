@@ -464,6 +464,14 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
         return ObjectRef(relay::GatherAttrs::Create(
             ReadInt(Field(attrs, "axis", "gather attrs"), "gather attrs.axis")));
     }
+    if (op_name == "concatenate") {
+        const std::string ctx = "concatenate attrs";
+        if (attrs.o.size() != 1 || !OptionalField(attrs, "axis")) {
+            throw std::runtime_error("Concatenate import attrs must contain exactly axis");
+        }
+        return ObjectRef(relay::ConcatenateAttrs::Create(
+            ReadInt(Field(attrs, "axis", ctx), ctx + ".axis")));
+    }
     if (op_name == "nn_global_avg_pool2d") {
         return ObjectRef(relay::GlobalAvgPool2DAttrs::Create());
     }

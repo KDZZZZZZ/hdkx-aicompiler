@@ -424,64 +424,72 @@
     "slice_concat": {
       "frontend": {
         "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "gate": "slice_pending",
+        "reason": "Exact-static binary Concat imports with an explicit axis, but the aggregated Slice+Concat capability remains closed until Slice is implemented.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py"
         ]
       },
       "relay": {
         "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "gate": "slice_pending",
+        "reason": "Concatenate has canonical Relay attrs and binary type inference, but no Slice Relay implementation completes the aggregate.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "include/kxc/relay/op.h",
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "lowering": {
         "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "gate": "slice_pending",
+        "reason": "Concatenate lowers exact-static tensors, including bool and zero extents, but Slice lowering is still pending so the aggregate remains closed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/op/tensor/transform.cc",
+          "src/te/topi/transform.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "llvm": {
         "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "gate": "slice_pending_llvm_not_validated",
+        "reason": "Concat LLVM numeric coverage exists but is not locally validated; Slice is pending, so no aggregate LLVM support is claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "cuda": {
         "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
+        "gate": "slice_pending_cuda_not_validated",
+        "reason": "Neither Slice nor the aggregated Slice+Concat CUDA path is implemented or validated.",
         "evidence": [
+          "test/compiler_capability_test.cpp",
           "test/nlp_validation/transformer_capability_matrix.json"
         ]
       },
       "runtime": {
         "status": "contracted",
-        "gate": "reference_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "gate": "slice_pending",
+        "reason": "Concat is wired through the LLVM RuntimeSession test path, but Slice is pending and the aggregate runtime capability remains closed.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp",
+          "test/infer_type_test.cpp"
         ]
       },
       "numeric": {
         "status": "unsupported",
-        "gate": "no_numeric_gate",
-        "reason": "No numeric fixture in Phase A.",
+        "gate": "slice_pending_no_aggregate_numeric_validation",
+        "reason": "Concat numeric source coverage does not validate the aggregate while Slice has no implementation or numeric evidence.",
         "evidence": [
+          "test/op_numeric_llvm_test.cpp",
           "test/nlp_validation/transformer_capability_matrix.json"
         ]
       },
       "profile": {
         "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
+        "gate": "slice_pending_not_profiled",
+        "reason": "The aggregate remains closed because Slice is pending; no Slice+Concat profiling was run.",
         "evidence": [
           "test/nlp_validation/transformer_capability_matrix.json"
         ]

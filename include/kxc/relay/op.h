@@ -355,6 +355,20 @@ public:
     static GatherAttrs Create(int axis = 0);
 };
 
+/*! \brief concatenate 的拼接轴属性。 */
+class ConcatenateAttrsNode : public BaseAttrsNode {
+public:
+    int axis = 0;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ConcatenateAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ConcatenateAttrs, ConcatenateAttrsNode)
+
+public:
+    static ConcatenateAttrs Create(int axis = 0);
+};
+
 KXC_DEFINE_SIMPLE_ATTRS(ReluAttrs)
 KXC_DEFINE_SIMPLE_ATTRS(GlobalAvgPool2DAttrs)
 
