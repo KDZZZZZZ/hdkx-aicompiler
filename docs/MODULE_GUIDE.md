@@ -1,6 +1,12 @@
-# hdkx-aicompiler 模块介绍
+# hdkx-aicompiler 模块介绍（历史文档）
 
-本文档从宏观视角介绍仓库中每个模块的职责、入口文件、依赖关系和典型扩展方式。适合新读者快速定位目标模块，也适合开发者判断修改影响范围。
+> **状态：已归档。** 本文包含已删除的 Adaptive Runtime、fuzzy
+> `KernelCache`、旧目录与单 PrimFunc 主链，只用于历史取证，不能作为当前
+> API/capability 指南。当前事实入口为
+> [`COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)、
+> [`COMPILER_EXTENSION_CONTRACT.md`](COMPILER_EXTENSION_CONTRACT.md) 和当前源码/测试。
+
+本文档从宏观视角介绍历史仓库模块。
 
 ## 总体架构
 

@@ -1,6 +1,6 @@
 # 01：共同基础——契约、identity 与 artifact cache
 
-> **状态：** 规划中（尚未开始实现）  
+> **状态：** 阻塞（本轨可实现项完成；仅待 02–06 分支消费 CoreContract v1）
 > **所属路线：** [编译器基础路线图](README.md)  
 > **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **前置：** 无；本轨的最小冻结接口应允许 02–06 使用 mock/fake 并行开发。
@@ -155,7 +155,7 @@ M1 的冻结原则是“窄而可替换”：每个 mock/fake 只实现表中的
 8. **收敛 legacy lowering 和文档。** whole-graph `LowerToTIR` 标记 compatibility/testing；能力矩阵、扩展指南、runtime/profiling 文档标 current/target/archived，并链接 production `Compiler::Compile` 证据。
 9. **完成跨轨 M1 review。** 02–06 使用相同 fake contracts 编译其测试；确认无私有 header、object address、value id、symbol 或 sentinel 泄漏进入新公共合同。
 
-## 8. 测试计划（实现后执行；本次不运行）
+## 8. 测试与实现证据（2026-07-23）
 
 | 类别 | 正例 | 反例/并发例 | 断言 |
 |---|---|---|---|
@@ -174,16 +174,16 @@ M1 的冻结原则是“窄而可替换”：每个 mock/fake 只实现表中的
 
 ## 9. Done 条件
 
-- [ ] capability verifier 在三个规定边界 fail closed，并有可定位的正反例。
-- [ ] operator/pass 的关键 metadata、binding、default pipeline 与文档锚点有一个权威 source 或严格可执行的单向生成/校验链。
-- [ ] `PipelineResolver` 成为生产 pipeline 顺序与 fingerprint 的唯一解析点；重复 policy 不再是事实源。
-- [ ] `GraphValueLocator`、`UnitSemanticKey`、`ArtifactKey`、`DispatchKey`、`PlanVariantKey`、symbol、storage id 有独立 canonical 定义和测试。
-- [ ] 无关 graph-local 重编号或 symbol 变化不影响 unit semantic/artifact identity；所有语义/ABI/target 变化安全 miss。
-- [ ] ready cache lookup 返回 immutable pin/handle；淘汰不使已命中编译、plan 或 in-flight launch 失效。
-- [ ] compile request 的 singleflight、failure/retry、取消、预算和背压合同及 observer 字段冻结，并可由 deterministic fake 验证。
-- [ ] whole-graph lowering 明确降为 compatibility/testing，生产能力声明以 per-unit `Compiler::Compile` 为准。
-- [ ] 02–06 已用 mock/fake 消费 M1 合同，且没有绕过 runtime/compiler 单向依赖的私有耦合。
-- [ ] 文档状态、feature gate、测试证据一致；没有把 `-1`、fuzzy cache 或历史 adaptive runtime 宣称为当前 dynamic shape/hot swap 能力。
+- [x] capability verifier 在三个规定边界 fail closed，并有可定位的正反例。
+- [x] operator/pass 的关键 metadata、binding、default pipeline 与文档锚点由 JSON -> generated C++ -> checker 单向链管理。
+- [x] `PipelineResolver` 成为生产 pipeline 顺序与 fingerprint 的唯一解析点；兼容 policy 只委托 resolver。
+- [x] `GraphValueLocator`、`UnitSemanticKey`、`ArtifactKey`、`DispatchKey`、`PlanVariantKey`、symbol、storage id 有独立 canonical 定义和测试。
+- [x] 无关 graph-local 重编号或 symbol 变化不影响 unit semantic/artifact identity；所有语义/ABI/target 变化安全 miss。
+- [x] ready cache lookup 返回 immutable pin/handle；淘汰只移除可发现性，已发 pin 和 executable 强引用继续有效。
+- [x] production same-key singleflight、failure/retry、bounded bytes/in-flight/backpressure，以及取消/预算/observer 的 CoreContract v1 fake 均有确定性并发/合同测试。
+- [x] whole-graph lowering 明确降为 compatibility/testing，生产能力声明以 per-unit `Compiler::Compile` 为准。
+- [ ] 02–06 各自分支已实际消费 CoreContract v1 mock/fake，且没有绕过 runtime/compiler 单向依赖的私有耦合（跨 worktree 硬阻塞；本轨已提供 conformance fake）。
+- [x] 文档状态、feature gate、测试证据一致；没有把 `-1`、fuzzy cache 或历史 adaptive runtime 宣称为当前 dynamic shape/hot swap 能力。
 
 ## 10. 风险、决策门与状态
 
@@ -196,4 +196,4 @@ M1 的冻结原则是“窄而可替换”：每个 mock/fake 只实现表中的
 | legacy 路径继续被新增功能使用 | production/compatibility 标签与 capability test | 新特性不得只接 legacy lowering |
 | 其他轨道等待实现而失去并行性 | fake resolver/store/coordinator/assembler 合同 | M1 review 验证各轨 mock 已可运行 |
 
-本轨状态保持“规划中”，直到 M1 的接口、测试与文档收敛全部满足。本文仅定义计划和草案；未创建实现代码，未运行构建或测试。
+本轨源码、单元/并发测试、generated contract 和文档收敛已完成。状态保持“阻塞”仅因为独立的 02–06 worktree 尚未逐轨提交 CoreContract v1 消费证据；本轨不修改其他 worktree。完整提交、测试和后续集成要求见 `docs/handoffs/compiler-foundation/core.md`。

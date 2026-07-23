@@ -71,20 +71,21 @@ public:
 };
 
 /*!
- * \brief 将 Relay Function 转为 TIR，并保留 codegen 绑定常量所需的 payload。
+ * \brief Compatibility/testing whole-graph lowering entry.
  *
- * 流程包括类型推导、Relay-to-TE、确定性拓扑遍历和 TIR 组装。返回值中的
- * constants 与 PrimFunc 常量参数段严格一一对应，调用方不得再次扫描 Relay
- * 猜测常量顺序。
+ * This API preserves historical direct lowering and focused TE/TIR tests. It is
+ * not the production capability gate: new executable capabilities must use
+ * api::Compiler::Compile, whose per-unit path emits CompiledModule plus
+ * ExecutablePlan. Callers must not infer production support from this function.
  */
 LoweredFunction LowerToTIR(Function func);
 
 /*!
  * \brief Independently lower each ordinary compute Call to one PrimFunc.
  *
- * This migration entry preserves the legacy LowerToTIR whole-graph API while
- * exposing per-operator cardinality. Compiler state consumes the richer private
- * LoweredGraph contract in the next migration stage.
+ * This compatibility helper exposes production per-operator cardinality for
+ * tests. api::Compiler::Compile directly consumes the richer private
+ * LoweredGraph contract and remains the only production capability path.
  */
 Array<LoweredFunction> LowerOperatorCallsToTIR(Function func);
 

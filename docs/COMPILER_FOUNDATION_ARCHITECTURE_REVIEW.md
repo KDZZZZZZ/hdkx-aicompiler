@@ -6,6 +6,10 @@
 > **验证证据：** 同一 HEAD 已通过 19/19 Relay operator contract、19/19 Pass contract，以及 `graph_partition_test`、`operator_compilation_test`、`runtime_session_test`、`kernel_signature_test`、`infer_type_test`、`pass_pipeline_test`、`compiler_extension_contract_test`。  
 > **本次文档变更：** 只新增并静态检查本文，未重新构建二进制；历史自适应实现只作设计取证。  
 > **文档定位：** 目标架构审查与迁移准则，不是“当前已经实现”的能力声明。
+> **Core 轨进展（2026-07-23）：** 01 的 capability、generated contract、
+> `PipelineResolver`、identity、pinned artifact cache/singleflight/backpressure 与
+> CoreContract v1 已在 `feature/compiler-foundation-core` 实现；证据和剩余跨轨
+> 阻塞见 [`handoffs/compiler-foundation/core.md`](handoffs/compiler-foundation/core.md)。
 
 ## 1. 执行摘要
 

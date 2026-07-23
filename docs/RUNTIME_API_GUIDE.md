@@ -1,6 +1,12 @@
-# KXC Runtime 抽象层架构指南
+# KXC Runtime 抽象层架构指南（历史/专题材料）
 
-本文档详细介绍了 `kxc_runtime` 的核心抽象层设计、C++ 实现细节以及 Python 端的使用方法。该架构深受 TVM 和 PyTorch 的设计启发，旨在提供高性能、可扩展且跨语言的深度学习编译器运行时支持。
+> **状态：已归档。** 对象系统等背景仍可参考，但路径、FFI 与
+> ExecutionPlan 示例不代表当前公共 API。当前 `RuntimeSession` 只消费 ready
+> `CompiledModule + ExecutablePlan`，不负责编译、缓存、shape prediction 或
+> fallback；以 `include/kxc/runtime/session.h`、`src/runtime/session.cc` 和
+> `test/runtime_session_test.cpp` 为事实源。
+
+本文档保留历史运行时抽象背景。
 
 ## 1. 核心对象系统 (Object System)
 

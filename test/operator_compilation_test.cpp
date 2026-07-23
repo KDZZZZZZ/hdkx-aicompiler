@@ -159,7 +159,7 @@ std::vector<GraphFixture> MakeFixtures() {
     };
 }
 
-bool TestWholeGraphSinglePrimFuncBaseline() {
+bool TestWholeGraphCompatibilityBaseline() {
     for (const auto& fixture : MakeFixtures()) {
         const kxc::relay::LoweredFunction lowered =
             kxc::relay::LowerToTIR(fixture.function);
@@ -460,13 +460,49 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
     return true;
 }
 
+bool TestPrimitiveCacheReusesRenumberedUnit() {
+    using namespace kxc;
+    api::internal::ClearPrimitiveCacheForTesting();
+    TensorType type({4}, "float32");
+    Var lhs("lhs", type);
+    Var rhs("rhs", type);
+    const api::CompileConfig config =
+        api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+    const auto direct = api::Compiler::Compile(
+        Function({lhs, rhs}, Add(lhs, rhs)), config);
+    const api::internal::PrimitiveCacheStats after_direct =
+        api::internal::GetPrimitiveCacheStats();
+
+    Var shifted_lhs("lhs", type);
+    Var shifted_rhs("rhs", type);
+    Var unrelated("unrelated", type);
+    Function shifted(
+        {shifted_lhs, shifted_rhs, unrelated},
+        Tuple({Multiply(shifted_lhs, unrelated),
+               Add(shifted_lhs, shifted_rhs)}));
+    const auto reused = api::Compiler::Compile(shifted, config);
+    const api::internal::PrimitiveCacheStats after_reused =
+        api::internal::GetPrimitiveCacheStats();
+    runtime::RuntimeSession session(reused.module, reused.plan);
+    const Array<runtime::NDArray> outputs = session.Run(
+        {FilledTensor(2.0f), FilledTensor(3.0f), FilledTensor(4.0f)});
+    TEST_CHECK(direct.module.entry_count() == 1 &&
+                   reused.module.entry_count() == 2 && outputs.size() == 2 &&
+                   TensorEquals(outputs[0], 8.0f) &&
+                   TensorEquals(outputs[1], 5.0f) &&
+                   after_direct.misses == 1 && after_direct.hits == 0 &&
+                   after_reused.misses == 2 && after_reused.hits == 1,
+               "renumbered add must reuse a validated symbol alias numerically");
+    return true;
+}
+
 #endif
 
 }  // namespace
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
-        {"whole_graph_single_primfunc_baseline", TestWholeGraphSinglePrimFuncBaseline},
+        {"whole_graph_compatibility_baseline", TestWholeGraphCompatibilityBaseline},
         {"per_operator_target_cardinality", TestPerOperatorTargetCardinality},
         {"producer_calls_remain_outside_consumer",
          TestProducerCallsRemainOutsideConsumerPrimFunc},
@@ -481,6 +517,8 @@ int main() {
          TestMultiOutputExecutesNumerically},
         {"primitive_cache_uses_full_stable_identity",
          TestPrimitiveCacheUsesFullStableIdentity},
+        {"primitive_cache_reuses_renumbered_unit",
+         TestPrimitiveCacheReusesRenumberedUnit},
 #endif
     };
     bool ok = true;

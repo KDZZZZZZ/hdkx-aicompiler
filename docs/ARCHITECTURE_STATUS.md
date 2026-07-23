@@ -1,5 +1,10 @@
-# hdkx-aicompiler 架构与实现状态
+# hdkx-aicompiler 架构与实现状态（历史快照）
 
+> **状态：已归档。** 本文固定描述 `cdb4c6f`，不得作为当前 capability
+> 声明。当前 per-unit 编译、CoreContract v1、capability/pipeline/identity/cache
+> 事实见 [`COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
+> 与 [`handoffs/compiler-foundation/core.md`](handoffs/compiler-foundation/core.md)，最终仍以当前源码/测试为准。
+>
 > 最后核对日期：2026-07-21
 >
 > 核对分支：**feature/compiler-codegen-runtime-contract**

@@ -8,10 +8,14 @@ metadata, implementation binding, validation, tests, and documentation agree.
 
 - Operator identity is its canonical registered name plus schema version.
 - Pass identity is `(IR dialect, canonical name)` plus schema version.
-- Compilation-unit identity is derived from stable graph value identities and
-  structural content, never an object address or registration order.
-- PrimFunc `global_symbol`, KernelSignature symbol, CompiledModule entry, and
-  ExecutablePlan call symbol must be identical for one compilation unit.
+- Compilation-unit semantic identity is derived from normalized operator/attrs,
+  unit-local logical-to-boundary mapping, boundary tensor contracts, effect and
+  alias semantics. Graph-local value/unit/storage ids, object addresses and link
+  symbols are excluded.
+- Graph value ids remain plan-routing locators. For one frozen static plan call,
+  PrimFunc `global_symbol`, KernelSignature symbol, CompiledModule entry and
+  ExecutablePlan call symbol agree. A ready cached artifact may be rebound through
+  a validated signature/link alias; that symbol never decides cache equivalence.
 
 Registries must reject conflicting duplicate identities. Registry enumeration
 and serialization must be deterministic.
@@ -26,8 +30,9 @@ An operator must be added in this order:
    implement `SerializeCanonical(CanonicalAttrWriter&)` and emit every field
    exactly once in schema order; compilation-unit identity includes this
    type-and-value serialization.
-3. Register a complete `OperatorSpec`, type-relation binding, and lowering
-   binding.
+3. Regenerate `src/relay/generated/relay_op_contract.inc`; the generated
+   `OperatorSpec` is authoritative for critical metadata, while the registration
+   block binds type/lowering implementations and argument documentation.
 4. Implement type validation and output-type inference.
 5. Implement lowering using only the current Call's explicit inputs, attrs,
    checked type, and target capabilities.
@@ -48,8 +53,10 @@ branch on an operator name.
 
 A pass must be added in this order:
 
-1. Declare its machine-readable contract in `test/pass_contract.json`.
-2. Register one `PassSpec` and one implementation key.
+1. Declare its machine-readable contract and named/default membership in
+   `test/pass_contract.json`.
+2. Regenerate `src/pass/generated/pass_contract.inc`; C++ binding tables map only
+   the generated implementation key to a function.
 3. Validate dialect, scope, phase, required invariants, analyses, and target
    capabilities before execution.
 4. Transform only the declared IR and scope.
@@ -92,9 +99,9 @@ Unit lowering
 PrimFunc pass pipeline
   -> one validated PrimFunc with stable symbol
 Kernel ABI + Codegen
-  -> one signature and executable entry per symbol
+  -> immutable signature and executable entry per link symbol
 CompiledModule + ExecutablePlan
-  -> symbol/value-id graph
+  -> frozen link symbols plus graph-local value routing
 RuntimeSession
   -> NDArray allocation, launch, and completion only
 ```
@@ -103,10 +110,11 @@ Backend batching does not weaken unit identity: multiple PrimFuncs for one
 target may share one LLVM JIT or CUDA module, but each unit keeps its own
 symbol, signature, launch metadata, module entry, and `KernelCall`.
 
-Primitive cache keys must contain the optimized PrimFunc structural hash, the
-complete compile-relevant target identity, optimization level, kernel ABI
-version, and backend implementation version. Operator name, shape, registry
-order, or symbol alone is never a valid cache key.
+Primitive artifact keys contain the full `UnitSemanticKey`, compile-relevant
+Target capability identity, normalized `PipelineResolver` fingerprint, kernel
+ABI version, schedule version and backend implementation version. Digests are
+indexes only; complete canonical bytes decide equality. Graph value/unit/storage
+ids, object addresses, request heat and link symbols are never artifact identity.
 
 Executable-plan storage reuse is a physical allocation decision, not a value
 identity or aliasing mechanism. Only equal-contract intermediates with strictly
@@ -135,7 +143,8 @@ When a Relay pass creates or replaces a Call:
 
 When a PrimFunc pass changes a function:
 
-- the unit identity and symbol remain stable;
+- the unit semantic identity remains stable; any link-symbol alias remains an
+  independently validated module/plan contract;
 - declared parameter roles and constant keys remain consistent;
 - any ABI-changing transformation runs before ABI freeze and declares that
   phase explicitly.
@@ -143,6 +152,11 @@ When a PrimFunc pass changes a function:
 No pass may mutate the operator or pass registry while a pipeline is running.
 
 ## 7. Required checks
+
+`CapabilityVerifier` runs at compiler entry, after graph passes and immediately
+before partition. `PipelineResolver` is the production source of pass order,
+invariant transitions and artifact fingerprint; direct named pipelines remain
+compatibility/testing entry points.
 
 The minimum local verification for extension-contract changes is:
 

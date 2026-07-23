@@ -1,6 +1,12 @@
-# hdkx-aicompiler 实现导览
+# hdkx-aicompiler 实现导览（历史快照）
 
-本文档从实现角度介绍当前 repo 的主要模块、核心数据结构和编译执行链路。它不是用户手册，而是给读代码、改编译器、加 pass、接新算子或排查 runtime 行为的人用的入口地图。
+> **状态：已归档。** 本文混有旧目录、whole-graph lowering 和单-entry
+> RuntimeSession 描述，不再是当前实现入口。当前生产路径以
+> `Compiler::Compile -> per-unit LowerGraph -> CompiledModule + ExecutablePlan -> RuntimeSession`
+> 为准；详见 [`COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
+> 与当前源码/测试。
+
+本文档保留历史实现导览。
 
 > 想沿着真实代码系统学习现代高级 C++，请打开 [`docs/cpp-tutorial/index.html`](cpp-tutorial/index.html)。教程以本仓库 C++17 实现为基线，并包含明确标注的 C++20/23 对照实验。
 

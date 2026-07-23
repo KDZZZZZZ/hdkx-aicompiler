@@ -1,6 +1,6 @@
 # 编译器基础路线图
 
-> **状态：** 规划中（尚未开始实现）  
+> **状态：** 进行中（01 本轨实现已完成，等待 02–06 按 CoreContract v1 集成）
 > **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **范围：** 为现有 per-unit 编译、multi-entry module、`ExecutablePlan` 与静态 `RuntimeSession` 建立可演进的契约；本文不是当前能力声明。
 
@@ -32,7 +32,7 @@ dynamic shape 可以在静态图模板上发生；hot swap 可以优化一个静
 
 | # | 能力轨道 | 文档 | 当前状态 | 首要交付 |
 |---|---|---|---|---|
-| 01 | 共同基础：契约、identity、cache | [01 core](01-core-contracts-identity-cache.md) | 规划中 | capability verifier、单源 schema、key 分离、安全 artifact cache |
+| 01 | 共同基础：契约、identity、cache | [01 core](01-core-contracts-identity-cache.md) | 阻塞（仅剩跨轨消费） | capability verifier、generated schema、normalized pipeline、key 分离、pinned singleflight cache |
 | 02 | shape profile 与 dynamic shape | [02 shape](02-shape-system-and-specialization.md) | 规划中 | `GraphTemplate`、Shape IR、exact profile |
 | 03 | 自适应编译与安全 hot swap | [03 adaptive hot swap](03-adaptive-compilation-hot-swap.md) | 规划中 | coordinator、singleflight、slot generation |
 | 04 | dynamic graph | [04 dynamic graph](04-dynamic-graph-control-flow.md) | 规划中 | 受限控制流/结构化 region/CFG 契约 |
@@ -123,8 +123,8 @@ flowchart LR
 
 | 里程碑 | 进入条件 | 集成产物 | 状态 |
 |---|---|---|---|
-| M0：事实收敛 | 本路线图与现有架构审查一致 | capability matrix、legacy/current/target 文档标记 | 规划中 |
-| M1：核心冻结 | 01 的最小接口和 key/cache 语义审查通过 | 可供 fake 使用的 core contract | 未开始 |
+| M0：事实收敛 | 本路线图与现有架构审查一致 | capability matrix、legacy/current/target 文档标记 | 已完成（Core handoff） |
+| M1：核心冻结 | 01 的最小接口和 key/cache 语义审查通过 | CoreContract v1、deterministic fakes、artifact pin/singleflight | 阻塞（待 02–06 分支消费确认） |
 | M2：exact shape | 02 能从模板绑定静态 exact profile | `GraphTemplate` + exact `PlanVariant` | 未开始 |
 | M3：受控自适应 | 03 可合并同 key 请求并安全发布 generation | coordinator + slot + failure/backpressure | 未开始 |
 | M4：可扩展执行 | 04/05 的 task/region 计划可验证且保留回退 | dynamic task vocabulary、region plan | 未开始 |
