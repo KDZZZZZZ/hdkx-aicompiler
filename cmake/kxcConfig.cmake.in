@@ -1,6 +1,7 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+find_dependency(Threads)
 if(@KXC_USE_CUDA@)
   find_dependency(CUDAToolkit)
 endif()

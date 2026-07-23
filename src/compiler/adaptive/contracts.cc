@@ -79,4 +79,66 @@ KernelArtifact::KernelArtifact(
     }
 }
 
+CompileAttempt CompileAttempt::Ready(
+    std::shared_ptr<const KernelArtifact> artifact) {
+    if (!artifact) {
+        throw std::invalid_argument(
+            "ready compile attempt requires an artifact");
+    }
+    return CompileAttempt(std::move(artifact),
+                          CompileFailureCategory::kDeterministic, "");
+}
+
+CompileAttempt CompileAttempt::Failed(CompileFailureCategory category,
+                                      std::string diagnostic) {
+    if (diagnostic.empty()) {
+        throw std::invalid_argument(
+            "failed compile attempt requires a diagnostic");
+    }
+    return CompileAttempt(nullptr, category, std::move(diagnostic));
+}
+
+CompileAttempt::CompileAttempt(
+    std::shared_ptr<const KernelArtifact> artifact,
+    CompileFailureCategory category, std::string diagnostic)
+    : artifact_(std::move(artifact)),
+      failure_category_(category),
+      diagnostic_(std::move(diagnostic)) {}
+
+CompileResult CompileResult::Ready(
+    std::shared_ptr<const KernelArtifact> artifact, std::uint32_t attempt) {
+    if (!artifact || attempt == 0) {
+        throw std::invalid_argument(
+            "ready compile result requires an artifact and attempt");
+    }
+    return CompileResult(CompileStatus::kReady, std::move(artifact),
+                         CompileFailureCategory::kDeterministic, "", attempt,
+                         false, {});
+}
+
+CompileResult CompileResult::Failure(
+    CompileStatus status, CompileFailureCategory category,
+    std::string diagnostic, std::uint32_t attempt, bool retryable,
+    std::chrono::steady_clock::time_point retry_after) {
+    if (status == CompileStatus::kReady || diagnostic.empty()) {
+        throw std::invalid_argument(
+            "failure result requires non-ready status and diagnostic");
+    }
+    return CompileResult(status, nullptr, category, std::move(diagnostic),
+                         attempt, retryable, retry_after);
+}
+
+CompileResult::CompileResult(
+    CompileStatus status, std::shared_ptr<const KernelArtifact> artifact,
+    CompileFailureCategory failure_category, std::string diagnostic,
+    std::uint32_t attempt, bool retryable,
+    std::chrono::steady_clock::time_point retry_after)
+    : status_(status),
+      artifact_(std::move(artifact)),
+      failure_category_(failure_category),
+      diagnostic_(std::move(diagnostic)),
+      attempt_(attempt),
+      retryable_(retryable),
+      retry_after_(retry_after) {}
+
 }  // namespace kxc::api::adaptive

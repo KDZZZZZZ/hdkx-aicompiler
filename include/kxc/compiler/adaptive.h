@@ -4,8 +4,11 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -182,6 +185,226 @@ private:
     std::shared_ptr<const ArtifactExecutable> executable_;
     std::size_t byte_size_{0};
     std::string provenance_;
+};
+
+/*! \brief Cooperative cancellation visible to an injected compiler. */
+class CancellationToken final {
+public:
+    struct State;
+
+    CancellationToken() = default;
+    explicit CancellationToken(std::shared_ptr<State> state);
+    bool IsCancellationRequested() const noexcept;
+
+private:
+    std::shared_ptr<State> state_;
+};
+
+/*! \brief Structured compiler failure before coordinator retry policy. */
+enum class CompileFailureCategory : std::uint8_t {
+    kUnsupported = 0,
+    kDeterministic = 1,
+    kTransient = 2,
+    kValidation = 3,
+    kBackpressure = 4,
+    kCancelled = 5,
+    kShutdown = 6,
+};
+
+/*! \brief Exactly one compiler attempt result. */
+class CompileAttempt final {
+public:
+    static CompileAttempt Ready(
+        std::shared_ptr<const KernelArtifact> artifact);
+    static CompileAttempt Failed(CompileFailureCategory category,
+                                 std::string diagnostic);
+
+    bool ready() const noexcept { return artifact_ != nullptr; }
+    const std::shared_ptr<const KernelArtifact>& artifact() const noexcept {
+        return artifact_;
+    }
+    CompileFailureCategory failure_category() const noexcept {
+        return failure_category_;
+    }
+    const std::string& diagnostic() const noexcept { return diagnostic_; }
+
+private:
+    CompileAttempt(std::shared_ptr<const KernelArtifact> artifact,
+                   CompileFailureCategory category, std::string diagnostic);
+    std::shared_ptr<const KernelArtifact> artifact_;
+    CompileFailureCategory failure_category_{
+        CompileFailureCategory::kDeterministic};
+    std::string diagnostic_;
+};
+
+/*! \brief Testable compiler seam; implementations must observe cancellation. */
+class ArtifactCompiler {
+public:
+    virtual ~ArtifactCompiler() = default;
+    virtual CompileAttempt Compile(const CompileRequest& request,
+                                   const CancellationToken& cancellation) = 0;
+};
+
+/*! \brief Terminal ticket state, separate from in-flight request state. */
+enum class CompileStatus : std::uint8_t {
+    kReady = 0,
+    kFailed = 1,
+    kCancelled = 2,
+    kRejected = 3,
+};
+
+/*! \brief Immutable terminal result shared with request waiters. */
+class CompileResult final {
+public:
+    static CompileResult Ready(
+        std::shared_ptr<const KernelArtifact> artifact,
+        std::uint32_t attempt);
+    static CompileResult Failure(
+        CompileStatus status, CompileFailureCategory category,
+        std::string diagnostic, std::uint32_t attempt, bool retryable,
+        std::chrono::steady_clock::time_point retry_after = {});
+
+    CompileStatus status() const noexcept { return status_; }
+    bool ready() const noexcept { return status_ == CompileStatus::kReady; }
+    const std::shared_ptr<const KernelArtifact>& artifact() const noexcept {
+        return artifact_;
+    }
+    CompileFailureCategory failure_category() const noexcept {
+        return failure_category_;
+    }
+    const std::string& diagnostic() const noexcept { return diagnostic_; }
+    std::uint32_t attempt() const noexcept { return attempt_; }
+    bool retryable() const noexcept { return retryable_; }
+    std::chrono::steady_clock::time_point retry_after() const noexcept {
+        return retry_after_;
+    }
+
+private:
+    CompileResult(CompileStatus status,
+                  std::shared_ptr<const KernelArtifact> artifact,
+                  CompileFailureCategory failure_category,
+                  std::string diagnostic, std::uint32_t attempt,
+                  bool retryable,
+                  std::chrono::steady_clock::time_point retry_after);
+
+    CompileStatus status_{CompileStatus::kFailed};
+    std::shared_ptr<const KernelArtifact> artifact_;
+    CompileFailureCategory failure_category_{
+        CompileFailureCategory::kDeterministic};
+    std::string diagnostic_;
+    std::uint32_t attempt_{0};
+    bool retryable_{false};
+    std::chrono::steady_clock::time_point retry_after_{};
+};
+
+/*! \brief Per-caller handle for one shared singleflight compilation. */
+class CompileTicket final {
+public:
+    CompileTicket() = default;
+    std::uint64_t request_id() const noexcept { return request_id_; }
+    bool valid() const noexcept { return future_.valid(); }
+    CompileResult Get() const;
+    std::future_status WaitFor(std::chrono::milliseconds timeout) const;
+
+private:
+    CompileTicket(std::uint64_t request_id,
+                  std::shared_future<CompileResult> future);
+    std::uint64_t request_id_{0};
+    std::shared_future<CompileResult> future_;
+    friend class CompileCoordinator;
+};
+
+enum class CancelResult : std::uint8_t {
+    kCancelled = 0,
+    kAlreadyCompleted = 1,
+    kNotFound = 2,
+};
+
+enum class AdaptiveEventKind : std::uint8_t {
+    kQueued = 0,
+    kRequestMerged = 1,
+    kCompileStarted = 2,
+    kValidating = 3,
+    kReady = 4,
+    kFailed = 5,
+    kCancelled = 6,
+    kBudgetRejected = 7,
+    kShutdownStarted = 8,
+    kShutdownCompleted = 9,
+    kPublished = 10,
+    kAcquired = 11,
+    kPromoted = 12,
+    kWithdrawn = 13,
+    kRolledBack = 14,
+};
+
+/*! \brief Stable event fields for coordinator and slot observability. */
+struct AdaptiveEvent final {
+    AdaptiveEventKind kind{AdaptiveEventKind::kQueued};
+    std::uint64_t request_id{0};
+    std::uint64_t generation{0};
+    std::uint64_t predecessor_generation{0};
+    std::size_t waiter_count{0};
+    std::size_t queue_depth{0};
+    std::string slot_key;
+    std::string artifact_key;
+    std::string dispatch_key;
+    std::string abi_fingerprint;
+    std::string model_revision;
+    std::string diagnostic;
+};
+
+using AdaptiveObserver = std::function<void(const AdaptiveEvent&)>;
+
+struct RetryPolicy final {
+    std::uint32_t max_transient_attempts{3};
+    std::chrono::milliseconds initial_backoff{10};
+    std::chrono::milliseconds max_backoff{1000};
+};
+
+struct CoordinatorOptions final {
+    std::size_t worker_count{1};
+    std::size_t max_queue_size{64};
+    std::size_t max_terminal_records{256};
+    std::size_t max_artifact_bytes{256U * 1024U * 1024U};
+    RetryPolicy retry_policy;
+    std::function<std::chrono::steady_clock::time_point()> now;
+    AdaptiveObserver observer;
+};
+
+struct CoordinatorSnapshot final {
+    bool accepting{false};
+    std::size_t queued{0};
+    std::size_t active{0};
+    std::size_t in_flight_keys{0};
+    std::size_t terminal_records{0};
+    std::uint64_t requests{0};
+    std::uint64_t merged{0};
+    std::uint64_t compile_attempts{0};
+    std::uint64_t ready{0};
+    std::uint64_t failed{0};
+    std::uint64_t cancelled{0};
+    std::uint64_t rejected{0};
+};
+
+/*! \brief Bounded asynchronous exact compiler coordinator. */
+class CompileCoordinator final {
+public:
+    CompileCoordinator(std::shared_ptr<ArtifactCompiler> compiler,
+                       CoordinatorOptions options = {});
+    ~CompileCoordinator();
+
+    CompileCoordinator(const CompileCoordinator&) = delete;
+    CompileCoordinator& operator=(const CompileCoordinator&) = delete;
+
+    CompileTicket Request(CompileRequest request);
+    CancelResult Cancel(std::uint64_t request_id);
+    CoordinatorSnapshot Snapshot() const;
+    void Shutdown();
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
 };
 
 }  // namespace kxc::api::adaptive
