@@ -13,6 +13,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,16 @@ bool ExpectThrow(const std::function<void()>& fn) {
         fn();
     } catch (const std::exception&) {
         return true;
+    }
+    return false;
+}
+
+bool ExpectOverflow(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const std::overflow_error&) {
+        return true;
+    } catch (const std::exception&) {
     }
     return false;
 }
@@ -189,6 +200,103 @@ bool TestTransformAndReduceOps() {
                "reduce_mean output shape mismatch");
     TEST_CHECK(CheckTensor(cast.checked_type(), {12}, "int32"),
                "cast output dtype mismatch");
+    return true;
+}
+
+bool TestFlattenAndReshapeProductArithmetic() {
+    constexpr int64_t maximum = std::numeric_limits<int64_t>::max();
+
+    kxc::Var flatten_overflow_data(
+        "flatten_overflow_data", kxc::TensorType({maximum, 2}, "float32"));
+    kxc::Call flatten_overflow(
+        kxc::relay::Op::Get("nn_flatten"), {flatten_overflow_data},
+        kxc::relay::FlattenAttrs::Create(0));
+    TEST_CHECK(ExpectOverflow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({flatten_overflow_data}, flatten_overflow));
+               }),
+               "flatten must reject an int64 shape-product overflow during InferTypePass");
+
+    kxc::Var flatten_zero_prefix_data(
+        "flatten_zero_prefix_data", kxc::TensorType({0, maximum, 2}, "float32"));
+    kxc::Var flatten_zero_suffix_data(
+        "flatten_zero_suffix_data", kxc::TensorType({maximum, 2, 0}, "float32"));
+    kxc::Var flatten_one_data(
+        "flatten_one_data", kxc::TensorType({maximum, 1}, "float32"));
+    kxc::Call flatten_zero_prefix(
+        kxc::relay::Op::Get("nn_flatten"), {flatten_zero_prefix_data},
+        kxc::relay::FlattenAttrs::Create(0));
+    kxc::Call flatten_zero_suffix(
+        kxc::relay::Op::Get("nn_flatten"), {flatten_zero_suffix_data},
+        kxc::relay::FlattenAttrs::Create(0));
+    kxc::Call flatten_one(kxc::relay::Op::Get("nn_flatten"), {flatten_one_data},
+                          kxc::relay::FlattenAttrs::Create(0));
+    kxc::relay::InferTypePass(kxc::Function(
+        {flatten_zero_prefix_data, flatten_zero_suffix_data, flatten_one_data},
+        kxc::Tuple({flatten_zero_prefix, flatten_zero_suffix, flatten_one})));
+    TEST_CHECK(CheckTensor(flatten_zero_prefix.checked_type(), {1, 0}, "float32") &&
+                   CheckTensor(flatten_zero_suffix.checked_type(), {1, 0}, "float32") &&
+                   CheckTensor(flatten_one.checked_type(), {1, maximum}, "float32"),
+               "flatten zero products must be order-independent and INT64_MAX * 1 legal");
+
+    kxc::Var reshape_input_overflow_data(
+        "reshape_input_overflow_data", kxc::TensorType({maximum, 2}, "float32"));
+    kxc::Call reshape_input_overflow(
+        kxc::relay::Op::Get("reshape"), {reshape_input_overflow_data},
+        kxc::relay::ReshapeAttrs::Create({-1}));
+    TEST_CHECK(ExpectOverflow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({reshape_input_overflow_data}, reshape_input_overflow));
+               }),
+               "reshape must reject input shape-product overflow during InferTypePass");
+
+    kxc::Var reshape_target_overflow_data(
+        "reshape_target_overflow_data", kxc::TensorType({1}, "float32"));
+    kxc::Call reshape_target_overflow(
+        kxc::relay::Op::Get("reshape"), {reshape_target_overflow_data},
+        kxc::relay::ReshapeAttrs::Create({maximum, 2}));
+    TEST_CHECK(ExpectOverflow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({reshape_target_overflow_data}, reshape_target_overflow));
+               }),
+               "reshape must reject target shape-product overflow during InferTypePass");
+
+    kxc::Var reshape_zero_data("reshape_zero_data", kxc::TensorType({0}, "float32"));
+    kxc::Call reshape_zero_prefix(
+        kxc::relay::Op::Get("reshape"), {reshape_zero_data},
+        kxc::relay::ReshapeAttrs::Create({0, maximum, 2}, 1));
+    kxc::Var reshape_copy_zero_data(
+        "reshape_copy_zero_data", kxc::TensorType({maximum, 2, 0}, "float32"));
+    kxc::Call reshape_zero_suffix(
+        kxc::relay::Op::Get("reshape"), {reshape_copy_zero_data},
+        kxc::relay::ReshapeAttrs::Create({0, 0, 0}));
+    kxc::Var reshape_one_data(
+        "reshape_one_data", kxc::TensorType({maximum}, "float32"));
+    kxc::Call reshape_one(kxc::relay::Op::Get("reshape"), {reshape_one_data},
+                          kxc::relay::ReshapeAttrs::Create({maximum, 1}));
+    kxc::relay::InferTypePass(kxc::Function(
+        {reshape_zero_data, reshape_copy_zero_data, reshape_one_data},
+        kxc::Tuple({reshape_zero_prefix, reshape_zero_suffix, reshape_one})));
+    TEST_CHECK(CheckTensor(reshape_zero_prefix.checked_type(), {0, maximum, 2}, "float32") &&
+                   CheckTensor(reshape_zero_suffix.checked_type(), {maximum, 2, 0}, "float32") &&
+                   CheckTensor(reshape_one.checked_type(), {maximum, 1}, "float32"),
+               "reshape zero products must be order-independent and INT64_MAX * 1 legal");
+
+    kxc::Call invalid_negative(
+        kxc::relay::Op::Get("reshape"), {reshape_zero_data},
+        kxc::relay::ReshapeAttrs::Create({0, -2}, 1));
+    kxc::Call duplicate_inferred(
+        kxc::relay::Op::Get("reshape"), {reshape_zero_data},
+        kxc::relay::ReshapeAttrs::Create({0, -1, -1}, 1));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({reshape_zero_data}, invalid_negative));
+               }) &&
+                   ExpectThrow([&] {
+                       kxc::relay::InferTypePass(
+                           kxc::Function({reshape_zero_data}, duplicate_inferred));
+                   }),
+               "reshape zero dimensions must not bypass negative or inferred-dimension rules");
     return true;
 }
 
@@ -851,6 +959,7 @@ int main() {
         {"matrix_and_dense_ops", TestMatrixAndDenseOps},
         {"conv_and_pool_ops", TestConvAndPoolOps},
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
+        {"flatten_and_reshape_product_arithmetic", TestFlattenAndReshapeProductArithmetic},
         {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},
         {"concatenate_infer_and_lowering_contract", TestConcatenateInferAndLoweringContract},
         {"slice_infer_and_lowering_contract", TestSliceInferAndLoweringContract},

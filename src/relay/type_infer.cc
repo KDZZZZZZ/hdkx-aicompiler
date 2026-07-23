@@ -77,12 +77,25 @@ bool SameOrUnknown(int64_t lhs, int64_t rhs) {
     return !IsKnown(lhs) || !IsKnown(rhs) || lhs == rhs;
 }
 
-// 计算已知 shape 区间乘积，含未知维度时返回 -1。
+// 计算 shape 区间乘积；零维使结果为 0，否则含未知维度时返回 -1。
 int64_t KnownProduct(const std::vector<int64_t>& shape, size_t begin, size_t end) {
+    bool has_zero = false;
+    bool has_unknown = false;
+    for (size_t i = begin; i < end; ++i) {
+        has_zero = has_zero || shape[i] == 0;
+        has_unknown = has_unknown || !IsKnown(shape[i]);
+    }
+    if (has_zero) {
+        return 0;
+    }
+    if (has_unknown) {
+        return -1;
+    }
+
     int64_t product = 1;
     for (size_t i = begin; i < end; ++i) {
-        if (!IsKnown(shape[i])) {
-            return -1;
+        if (product > std::numeric_limits<int64_t>::max() / shape[i]) {
+            throw std::overflow_error("shape product overflows int64");
         }
         product *= shape[i];
     }
@@ -519,29 +532,26 @@ Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     const std::vector<int64_t> input_shape = ShapeVector(data);
     const int64_t input_product = KnownProduct(input_shape, 0, input_shape.size());
     std::vector<int64_t> out;
+    std::vector<int64_t> known_shape;
     out.reserve(reshape_attrs->newshape.size());
+    known_shape.reserve(reshape_attrs->newshape.size());
 
     int infer_index = -1;
-    int64_t known_product = 1;
     for (size_t i = 0; i < reshape_attrs->newshape.size(); ++i) {
         int64_t dim = reshape_attrs->newshape[i];
         if (dim > 0) {
             out.push_back(dim);
-            known_product *= dim;
+            known_shape.push_back(dim);
         } else if (dim == 0) {
             if (reshape_attrs->allowzero) {
                 out.push_back(0);
-                known_product = 0;
+                known_shape.push_back(0);
             } else {
                 if (i >= input_shape.size()) {
                     throw std::runtime_error("reshape 0-dim copy index exceeds input rank");
                 }
                 out.push_back(input_shape[i]);
-                if (IsKnown(input_shape[i])) {
-                    known_product *= input_shape[i];
-                } else {
-                    known_product = -1;
-                }
+                known_shape.push_back(input_shape[i]);
             }
         } else if (dim == -1) {
             if (infer_index >= 0) {
@@ -553,6 +563,7 @@ Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
             throw std::runtime_error("reshape only supports positive, 0, and -1 dimensions");
         }
     }
+    const int64_t known_product = KnownProduct(known_shape, 0, known_shape.size());
 
     if (infer_index >= 0 && input_product >= 0 && known_product > 0) {
         if (input_product % known_product != 0) {
