@@ -28,7 +28,8 @@ KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=OFF
 
 - request 深冻结 `CompileConfig`、`Target`、opt/profile 全字段；返回 adapter 的 config 也是
   独立 deep copy；
-- whole-graph identity 遇未知 Relay node fail closed；
+- whole-graph identity 只接受 exact Relay Expr node whitelist；undefined/unknown/derived node
+  在 key、adapter 与 publish 前 fail closed；
 - verified baseline 冻结 ordered `(call index, link symbol, primitive ArtifactKey)`；
 - candidate 每个 production pin 与 baseline 完整 key 相等，并核对内部
   `CachedPrimitive` signature、launch metadata、target/backend、launcher、provenance、bytes、
@@ -38,7 +39,8 @@ KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=OFF
 - same-key singleflight、different-key 并行和 active-flight/slot backpressure；
 - frozen whole-plan generation、exact acquire、completion-held variant/artifact lease；
 - trusted control-plane `RollbackAdministrative`，只影响未来 routing；
-- 同步 observer 在 lock 外执行，throw 被隔离；同 controller API reentry 全部 fail-fast；
+- 同步 observer 在 lock 外执行，throw 被隔离；callback 窗口内任何线程进入同 controller
+  API 都 fail-fast（包括无关外部调用），不同 controller 不受影响；
 - generation 与 primitive cache ticket/stamp overflow fail closed。
 
 `RuntimeSession` 没有 compiler/cache/controller/generation 选择职责，仍是静态数据面。
@@ -105,9 +107,11 @@ ctest --test-dir out/adaptive-production-on --output-on-failure \
 
 - same launcher wrong primitive key/signature/launch metadata、corrupt binding、wrong order；
 - request config/Target/profile mutation 与并发读取；
-- unknown Relay semantic identity fail-closed；
+- undefined/unknown/derived Relay semantic identity 在生成 key、调用 adapter 或 publish 前
+  fail-closed；
 - `CompileAndPublish`、`Acquire`、`RunAsync`、`RollbackAdministrative` observer reentry fail-fast，
-  observer throw 不改变 routing；
+  observer throw 不改变 routing；有界 timeout 覆盖 callback spawn+join same-key compile 与
+  跨线程 `Snapshot`，并验证不同 controller 互不干扰；
 - same-flight adapter throw fanout 与受控 retry；
 - different-key parallel 和 global active-flight backpressure；
 - trusted administrative rollback/quarantine；

@@ -858,7 +858,8 @@ if(KXC_BUILD_PASS_TESTS)
       add_test(NAME adaptive_production_experimental_test
         COMMAND "$<TARGET_FILE:adaptive_production_experimental_test>")
       set_tests_properties(adaptive_production_experimental_test PROPERTIES
-        LABELS "adaptive;adaptive-production-experimental;cpu")
+        LABELS "adaptive;adaptive-production-experimental;cpu"
+        TIMEOUT 60)
       add_custom_target(run_adaptive_production_experimental_tests
         COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
                 -L adaptive-production-experimental -L cpu

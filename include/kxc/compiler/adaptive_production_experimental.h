@@ -187,8 +187,10 @@ struct AdaptiveControllerEvent final {
 
 /*! \brief Synchronous best-effort observer.
  *
- * It runs outside controller locks. Exceptions are ignored. Re-entry into any
- * API of the same controller fails fast; enqueue work elsewhere if needed.
+ * It runs outside controller locks and exceptions are ignored. While a callback
+ * is active, every API entry on that controller fails fast from every thread,
+ * including unrelated callers; defer work until the callback returns. Other
+ * controller instances are unaffected.
  */
 using AdaptiveControllerObserver =
     std::function<void(const AdaptiveControllerEvent&)>;

@@ -59,15 +59,17 @@ int main() {
     }
 #endif
 
-    // 无效 Function 必须在 validate 阶段失败，并把阶段名、状态和原因写入同一 bundle。
+    // 语义可 canonicalize 但不可执行的 Function 必须在 validate 阶段失败，
+    // 并把阶段名、状态和原因写入同一 bundle。undefined Expr 会更早被 identity 拒绝。
     bool compile_failure_observed = false;
     try {
-        (void)api::Compiler::Compile(Function({}, Expr()), config);
+        Var free("free", TensorType({4}, "float32"));
+        (void)api::Compiler::Compile(Function({}, free), config);
     } catch (const std::exception& error) {
         const std::string message = error.what();
         compile_failure_observed =
             message.find("Compiler stage 'validate' failed") != std::string::npos &&
-            message.find("must have a body") != std::string::npos;
+            message.find("free or unbound variables") != std::string::npos;
     }
     if (!compile_failure_observed) {
         std::cerr << "Compiler validate failure did not preserve stage context\n";
@@ -124,7 +126,7 @@ int main() {
             (line.find("\"component\":\"compiler\"") != std::string::npos &&
              line.find("\"pass_name\":\"validate\"") != std::string::npos &&
              line.find("\"status\":\"error\"") != std::string::npos &&
-             line.find("must have a body") != std::string::npos);
+             line.find("free or unbound variables") != std::string::npos);
 #if KXC_USE_LLVM
         // 事件按阶段 span 关闭顺序写入，顺序检查同时证明管线没有跳步。
         if (next_compiler_stage < compiler_stages.size() &&

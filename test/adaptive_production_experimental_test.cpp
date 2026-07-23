@@ -6,8 +6,10 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <exception>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -47,6 +49,19 @@ bool Throws(const std::function<void()>& fn) {
         return true;
     }
     return false;
+}
+
+class UnregisteredDerivedCallNode final : public kxc::CallNode {
+public:
+    std::string hidden_semantics;
+};
+
+kxc::Expr MakeDerivedCall(const kxc::Expr& argument) {
+    auto* call = new UnregisteredDerivedCallNode();
+    call->op = kxc::relay::Op::Get("nn_relu");
+    call->args = {argument};
+    call->hidden_semantics = "must-not-be-omitted";
+    return kxc::Expr(kxc::ObjectRef(call));
 }
 
 std::string ExceptionMessage(const std::exception_ptr& error) {
@@ -613,6 +628,156 @@ bool TestConfigSnapshotAndUnknownRelayFailClosed() {
     return true;
 }
 
+enum class ObserverChildResult {
+    kSucceeded,
+    kLogicError,
+    kUnexpectedError,
+};
+
+template <typename Callback>
+ObserverChildResult InvokeObserverChild(Callback&& callback) noexcept {
+    try {
+        callback();
+        return ObserverChildResult::kSucceeded;
+    } catch (const std::logic_error&) {
+        return ObserverChildResult::kLogicError;
+    } catch (...) {
+        return ObserverChildResult::kUnexpectedError;
+    }
+}
+
+bool TestCrossThreadObserverWindowFailsFast() {
+    using namespace production_path;
+    constexpr auto callback_timeout = std::chrono::seconds(2);
+    constexpr auto cleanup_timeout = std::chrono::seconds(5);
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest request = MakeRequest();
+    auto compiler = std::make_shared<FixtureCompiler>();
+    AdaptiveController* controller_ptr = nullptr;
+    std::atomic<bool> child_started{false};
+    std::promise<ObserverChildResult> child_promise;
+    std::future<ObserverChildResult> child_result = child_promise.get_future();
+    std::thread child;
+    bool joined_in_callback = false;
+    bool callback_timed_out = false;
+
+    AdaptiveControllerOptions options;
+    options.observer = [&](const AdaptiveControllerEvent& event) {
+        if (event.kind != AdaptiveControllerEventKind::kCompileStarted ||
+            child_started.exchange(true)) {
+            return;
+        }
+        child = std::thread([&] {
+            child_promise.set_value(InvokeObserverChild([&] {
+                (void)controller_ptr->CompileAndPublish(request);
+            }));
+        });
+        if (child_result.wait_for(callback_timeout) ==
+            std::future_status::ready) {
+            child.join();
+            joined_in_callback = true;
+        } else {
+            // Let the owner settle its flight so the pre-fix implementation
+            // also terminates and reports a bounded regression instead of hanging.
+            callback_timed_out = true;
+        }
+    };
+    AdaptiveController controller(compiler, std::move(options));
+    controller_ptr = &controller;
+    std::exception_ptr owner_error;
+    std::shared_ptr<const FrozenPlanVariant> variant;
+    try {
+        variant = controller.CompileAndPublish(request);
+    } catch (...) {
+        owner_error = std::current_exception();
+    }
+    const bool child_completed =
+        child_result.wait_for(cleanup_timeout) == std::future_status::ready;
+    if (!child_completed) {
+        std::cerr << "[FAIL] " << __FUNCTION__
+                  << ": observer child did not terminate within cleanup bound\n";
+        std::abort();
+    }
+    if (child.joinable()) child.join();
+    const ObserverChildResult same_key_result = child_result.get();
+    if (owner_error) std::rethrow_exception(owner_error);
+
+    TEST_CHECK(child_started && joined_in_callback && !callback_timed_out &&
+                   same_key_result == ObserverChildResult::kLogicError,
+               "callback-spawned same-key compile must fail fast before join");
+    TEST_CHECK(variant && compiler->calls.load() == 1 &&
+                   controller.Snapshot().compile_requests == 1 &&
+                   controller.Snapshot().published == 1,
+               "rejected callback child must not merge, compile, or publish");
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest snapshot_request = MakeRequest();
+    auto snapshot_compiler = std::make_shared<FixtureCompiler>();
+    AdaptiveController other_controller;
+    AdaptiveController* observed_ptr = nullptr;
+    std::atomic<bool> snapshot_child_started{false};
+    struct ApiResults final {
+        ObserverChildResult observed{ObserverChildResult::kUnexpectedError};
+        ObserverChildResult other{ObserverChildResult::kUnexpectedError};
+    };
+    std::promise<ApiResults> api_promise;
+    std::future<ApiResults> api_result = api_promise.get_future();
+    std::thread api_child;
+    bool api_joined_in_callback = false;
+    bool api_callback_timed_out = false;
+
+    AdaptiveControllerOptions snapshot_options;
+    snapshot_options.observer = [&](const AdaptiveControllerEvent& event) {
+        if (event.kind != AdaptiveControllerEventKind::kCompileStarted ||
+            snapshot_child_started.exchange(true)) {
+            return;
+        }
+        api_child = std::thread([&] {
+            ApiResults results;
+            results.observed = InvokeObserverChild(
+                [&] { (void)observed_ptr->Snapshot(); });
+            results.other = InvokeObserverChild(
+                [&] { (void)other_controller.Snapshot(); });
+            api_promise.set_value(results);
+        });
+        if (api_result.wait_for(callback_timeout) ==
+            std::future_status::ready) {
+            api_child.join();
+            api_joined_in_callback = true;
+        } else {
+            api_callback_timed_out = true;
+        }
+    };
+    AdaptiveController observed(snapshot_compiler,
+                                std::move(snapshot_options));
+    observed_ptr = &observed;
+    std::exception_ptr snapshot_owner_error;
+    try {
+        (void)observed.CompileAndPublish(snapshot_request);
+    } catch (...) {
+        snapshot_owner_error = std::current_exception();
+    }
+    const bool api_child_completed =
+        api_result.wait_for(cleanup_timeout) == std::future_status::ready;
+    if (!api_child_completed) {
+        std::cerr << "[FAIL] " << __FUNCTION__
+                  << ": observer API child did not terminate within cleanup bound\n";
+        std::abort();
+    }
+    if (api_child.joinable()) api_child.join();
+    const ApiResults api_results = api_result.get();
+    if (snapshot_owner_error) std::rethrow_exception(snapshot_owner_error);
+
+    TEST_CHECK(snapshot_child_started && api_joined_in_callback &&
+                   !api_callback_timed_out &&
+                   api_results.observed == ObserverChildResult::kLogicError,
+               "callback-spawned different API must fail fast before join");
+    TEST_CHECK(api_results.other == ObserverChildResult::kSucceeded,
+               "one controller callback window must not block another controller");
+    return true;
+}
+
 bool TestObserverReentryFailsFastAndThrowsAreIsolated() {
     using namespace kxc;
     using namespace production_path;
@@ -700,6 +865,51 @@ bool TestObserverReentryFailsFastAndThrowsAreIsolated() {
                    run_checked && rollback_checked &&
                    fail_fast_count.load() == 5,
                "all same-controller observer API reentry must fail fast");
+    return true;
+}
+
+bool TestMalformedGraphNeverPublishes() {
+    using namespace kxc;
+    using namespace production_path;
+
+    api::internal::ClearPrimitiveCacheForTesting();
+    ProductionRequest undefined_request = MakeRequest();
+    auto* undefined_function =
+        const_cast<FunctionNode*>(undefined_request.graph().operator->());
+    undefined_function->body = Expr();
+    auto undefined_compiler = std::make_shared<FixtureCompiler>();
+    AdaptiveController undefined_controller(undefined_compiler);
+    TEST_CHECK(Throws([&] {
+                   (void)api::Compiler::BuildGraphArtifactKey(
+                       undefined_request.graph(), undefined_request.config());
+               }),
+               "an undefined Expr must not produce a graph artifact key");
+    TEST_CHECK(Throws([&] {
+                   (void)undefined_controller.CompileAndPublish(
+                       undefined_request);
+               }) &&
+                   undefined_compiler->calls.load() == 0 &&
+                   undefined_controller.Snapshot().published == 0,
+               "an undefined Expr must be rejected before adapter invocation or publish");
+
+    api::internal::ClearPrimitiveCacheForTesting();
+    ProductionRequest derived_request = MakeRequest();
+    auto* derived_function =
+        const_cast<FunctionNode*>(derived_request.graph().operator->());
+    derived_function->body = MakeDerivedCall(derived_function->params[0]);
+    auto derived_compiler = std::make_shared<FixtureCompiler>();
+    AdaptiveController derived_controller(derived_compiler);
+    TEST_CHECK(Throws([&] {
+                   (void)api::Compiler::BuildGraphArtifactKey(
+                       derived_request.graph(), derived_request.config());
+               }),
+               "a derived Call must not produce a graph artifact key");
+    TEST_CHECK(Throws([&] {
+                   (void)derived_controller.CompileAndPublish(derived_request);
+               }) &&
+                   derived_compiler->calls.load() == 0 &&
+                   derived_controller.Snapshot().published == 0,
+               "a derived Call must be rejected before adapter invocation or publish");
     return true;
 }
 
@@ -1023,8 +1233,12 @@ int main() {
         {"artifact_authority_attacks", TestArtifactAuthorityRejectsAttacks},
         {"config_snapshot_unknown_relay",
          TestConfigSnapshotAndUnknownRelayFailClosed},
+        {"cross_thread_observer_window_fail_fast",
+         TestCrossThreadObserverWindowFailsFast},
         {"observer_reentry_exception_isolation",
          TestObserverReentryFailsFastAndThrowsAreIsolated},
+        {"malformed_graph_never_publishes",
+         TestMalformedGraphNeverPublishes},
         {"same_flight_failure_retry", TestSameFlightFailureFansOutAndRetry},
         {"different_key_parallel_backpressure",
          TestDifferentKeyParallelismAndBackpressure},

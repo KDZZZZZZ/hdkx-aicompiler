@@ -7,6 +7,7 @@
 #if KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
 
 #include <algorithm>
+#include <atomic>
 #include <future>
 #include <limits>
 #include <mutex>
@@ -569,32 +570,22 @@ AdministrativeQuarantineRequest::reason() const noexcept {
 
 namespace {
 
-struct ObserverFrame final {
-    const void* controller_state{nullptr};
-    ObserverFrame* previous{nullptr};
-};
-
-thread_local ObserverFrame* current_observer_frame = nullptr;
-
-bool IsObserverReentry(const void* state) noexcept {
-    for (ObserverFrame* frame = current_observer_frame; frame != nullptr;
-         frame = frame->previous) {
-        if (frame->controller_state == state) return true;
-    }
-    return false;
-}
-
 class ObserverScope final {
 public:
-    explicit ObserverScope(const void* state) noexcept
-        : frame_{state, current_observer_frame} {
-        current_observer_frame = &frame_;
+    explicit ObserverScope(std::atomic<size_t>& active_callbacks) noexcept
+        : active_callbacks_(active_callbacks) {
+        active_callbacks_.fetch_add(1, std::memory_order_acq_rel);
     }
 
-    ~ObserverScope() { current_observer_frame = frame_.previous; }
+    ~ObserverScope() {
+        active_callbacks_.fetch_sub(1, std::memory_order_release);
+    }
+
+    ObserverScope(const ObserverScope&) = delete;
+    ObserverScope& operator=(const ObserverScope&) = delete;
 
 private:
-    ObserverFrame frame_;
+    std::atomic<size_t>& active_callbacks_;
 };
 
 }  // namespace
@@ -620,16 +611,16 @@ public:
     }
 
     void RejectObserverReentry() const {
-        if (IsObserverReentry(this)) {
+        if (active_observer_callbacks.load(std::memory_order_acquire) != 0) {
             throw std::logic_error(
-                "adaptive observer cannot re-enter the same controller");
+                "adaptive controller API called while an observer callback is active");
         }
     }
 
     void Emit(const AdaptiveControllerEvent& event) const noexcept {
         if (!options.observer) return;
         try {
-            ObserverScope observer_scope(this);
+            ObserverScope observer_scope(active_observer_callbacks);
             options.observer(event);
         } catch (...) {
             // Observability cannot alter validation, publication, or routing.
@@ -653,6 +644,7 @@ public:
         std::string,
         std::shared_future<std::shared_ptr<const FrozenPlanVariant>>>
         flights;
+    mutable std::atomic<size_t> active_observer_callbacks{0};
     uint64_t next_generation{1};
     uint64_t compile_requests{0};
     uint64_t merged_compiles{0};

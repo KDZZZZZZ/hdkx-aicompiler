@@ -49,8 +49,10 @@ caller-immutable Function + deep-frozen CompileConfig + verified typed baseline
 停止修改，并在 request 生命周期内保持 immutable/synchronized。该限制是 experimental API
 边界，不能把 Function 描述为 request-owned frozen graph。
 
-未知 Relay node 的 graph semantic canonicalization 直接拒绝；不得把所有未知节点写成同一
-`unsupported` identity 后继续。
+graph semantic canonicalization 只接受 exact runtime type whitelist 中的 Relay Expr 节点；
+任何 undefined Expr（包括 Function body、Call op/arg、Let/If/Tuple 子表达式）以及从受支持
+节点派生但可能携带额外字段的未知类型都直接拒绝。不得生成 `undefined`/`unsupported`
+identity 后继续，也不得进入 compiler adapter 或 publish。
 
 ### 2.2 ordered selected primitive artifacts
 
@@ -88,9 +90,11 @@ mapping。未建模的 physical layout/stride/workspace/effect/error contract �
 - publish 后才对未来 `Acquire` 可见；运行中的强引用始终使用入口取得的 frozen variant。
 - observer 同步、controller lock 外、best-effort 执行。callback 异常和 event payload 构造
   异常不改变 validation/publication/routing。
-- 同一 observer 线程重入同一 controller 的 `CompileAndPublish`、`Acquire`、`RunAsync`、
-  `RollbackAdministrative` 或 `Snapshot` 都 fail-fast；需要重入工作时必须交给外部队列。
-  这避免 same-flight future 自等待和递归 observer 链。
+- callback 活跃窗口内，任何线程进入同一 controller 的 `CompileAndPublish`、`Acquire`、
+  `RunAsync`、`RollbackAdministrative` 或 `Snapshot` 都立即 fail-fast，不能等待 flight。
+  callback 创建线程后执行 same-key compile 并 join 也不会形成 future 自等待。该保守契约也会
+  拒绝窗口内与 callback 无关的外部调用；工作必须延后到 callback 返回之后。不同 controller
+  实例互不影响。
 
 `RollbackAdministrative` 只接受显式命名的 `AdministrativeQuarantineRequest`。它是
 **trusted control-plane administrative action**，不是自动 runtime health proof。调用者必须
@@ -136,11 +140,13 @@ cmake --build out/adaptive-production-on \
 ```
 
 测试覆盖 ordered artifact 攻击、same launcher wrong key/signature/metadata、wrong order、
-config/Target mutation 与并发读取、unknown Relay fail-closed、observer 五个 API reentry 和
-throw isolation、same-flight failure fanout/retry、different-key parallel/backpressure、
-trusted administrative rollback、cache clear 后 launch、completion retention、static-exact
-runtime/slot 边界。public-header checker 在 Gate ON 时显式定义 feature macro，确保 enabled
-API 分支也可独立编译。
+config/Target mutation 与并发读取、undefined/unknown/derived Relay fail-closed 且不 publish、
+observer 五个 API 同线程 reentry/throw isolation，以及有界等待下 callback spawn+join 的
+same-key compile 与跨线程 `Snapshot` fail-fast（并验证不同 controller 不受影响）、same-flight
+failure fanout/retry、different-key parallel/backpressure、trusted administrative rollback、
+cache clear 后 launch、completion retention、static-exact runtime/slot 边界。CTest 另有 60 秒
+进程级 timeout；public-header checker 在 Gate ON 时显式定义 feature macro，确保 enabled API
+分支也可独立编译。
 
 LLVM integration test 仅在 `KXC_USE_LLVM` 时编译执行；CUDA/pending-event/TSan/真实 resident
 bytes/部署层 health authority 必须在具备对应工具和硬件的外部 gate 验证。本机不可用时不得
