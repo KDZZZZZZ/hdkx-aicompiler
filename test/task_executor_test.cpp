@@ -34,7 +34,8 @@ bool Throws(const std::function<void()>& function) {
 
 DLDataType Float32() { return DLDataType{kDLFloat, 32, 1}; }
 
-kxc::runtime::FrozenTaskPlan MakeChainPlan(bool async_first = false) {
+kxc::runtime::FrozenTaskPlan MakeChainPlan(
+    bool async_first = false, bool conservative_first = false) {
     using namespace kxc;
     using namespace kxc::runtime;
     const Device cpu = Device::CPU();
@@ -61,7 +62,10 @@ kxc::runtime::FrozenTaskPlan MakeChainPlan(bool async_first = false) {
         TaskSpec(41, TaskKind::kKernel, cpu, {3}, {4}, {40, 31}, "k4"),
     };
     Array<RegionSpec> regions{
-        RegionSpec(0, RegionKind::kPerCall, "", {10, 11}, {0}, {1}, {}),
+        RegionSpec(0, RegionKind::kPerCall, "", {10, 11}, {0}, {1}, {},
+                   RegionEffect::kPure,
+                   conservative_first ? RegionAlias::kConservative
+                                      : RegionAlias::kNoAlias),
         RegionSpec(1, RegionKind::kPerCall, "", {20, 21}, {1}, {2}, {}),
         RegionSpec(2, RegionKind::kPerCall, "", {30, 31}, {2}, {3}, {}),
         RegionSpec(3, RegionKind::kPerCall, "", {40, 41}, {3}, {4}, {}),
@@ -116,6 +120,11 @@ bool TestDependencyAwareMemoryReuse() {
     TEST_CHECK(guarded.values()[1]->storage_id !=
                    guarded.values()[3]->storage_id,
                "async-live values must never enter reusable storage slots");
+    const FrozenTaskPlan conservative =
+        PlanTaskMemory(MakeChainPlan(false, true));
+    TEST_CHECK(conservative.values()[1]->storage_id !=
+                   conservative.values()[3]->storage_id,
+               "conservative alias regions must keep boundary storage dedicated");
     return true;
 }
 

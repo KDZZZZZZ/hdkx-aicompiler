@@ -116,6 +116,11 @@ bool TestTaskKindContracts() {
                }),
                "allocate task requires a positive alignment");
     TEST_CHECK(Throws([&] {
+                   TaskSpec task(0, TaskKind::kAllocate, cpu, {}, {1}, {},
+                                 String(), 0, 0, 3);
+               }),
+               "allocate alignment must be a power of two");
+    TEST_CHECK(Throws([&] {
                    TaskSpec task(0, TaskKind::kEvent, cpu, {0}, {}, {});
                }),
                "event task cannot hide value dependencies");
@@ -257,6 +262,27 @@ bool TestDependencyAwareStorageSharingGuard() {
     return true;
 }
 
+bool TestOrderedEffectRequiresDependencies() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const Device cpu = Device::CPU();
+    TEST_CHECK(Throws([&] {
+                   FrozenTaskPlan plan(
+                       kFrozenTaskPlanVersion,
+                       {ValueSpec(0, 0, {1}, Float32(), cpu, true, false,
+                                  true)},
+                       {TaskSpec(10, TaskKind::kEvent, cpu, {}, {}, {}),
+                        TaskSpec(20, TaskKind::kEvent, cpu, {}, {}, {})},
+                       {RegionSpec(0, RegionKind::kPerCall, "", {10}, {}, {},
+                                   {}, RegionEffect::kOrdered),
+                        RegionSpec(1, RegionKind::kPerCall, "", {20}, {}, {},
+                                   {}, RegionEffect::kOrdered)},
+                       {0}, {}, {0});
+               }),
+               "effectful regions require explicit total dependency order");
+    return true;
+}
+
 bool TestObjectTypeChecks() {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -284,6 +310,8 @@ int main() {
          TestDataOrderAndSingleStreamGuards},
         {"dependency_aware_storage_sharing_guard",
          TestDependencyAwareStorageSharingGuard},
+        {"ordered_effect_requires_dependencies",
+         TestOrderedEffectRequiresDependencies},
         {"object_type_checks", TestObjectTypeChecks},
     };
     int failures = 0;

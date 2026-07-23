@@ -362,9 +362,10 @@ void TaskSpec::Validate() const {
         case TaskKind::kAllocate:
             if (has_symbol || !node->input_value_ids_.empty() ||
                 node->output_value_ids_.size() != 1 || node->alignment == 0 ||
+                (node->alignment & (node->alignment - 1)) != 0 ||
                 node->artifact_generation != 0) {
                 throw std::invalid_argument(
-                    "Allocate task requires one output and positive alignment");
+                    "Allocate task requires one output and power-of-two alignment");
             }
             break;
         case TaskKind::kEvent:
@@ -567,8 +568,13 @@ void FrozenTaskPlan::Validate() const {
 
     std::unordered_set<int64_t> region_ids;
     std::unordered_map<int64_t, int64_t> region_by_task;
+    std::unordered_set<int64_t> conservative_alias_values;
+    std::vector<RegionSpec> ordered_regions;
     for (const auto& region : node->regions_) {
         region.Validate();
+        if (region->effect == RegionEffect::kOrdered) {
+            ordered_regions.push_back(region);
+        }
         if (!region_ids.insert(region->region_id).second) {
             throw std::invalid_argument(
                 "FrozenTaskPlan region ids must be unique");
@@ -578,6 +584,15 @@ void FrozenTaskPlan::Validate() const {
                 !region_by_task.emplace(task_id, region->region_id).second) {
                 throw std::invalid_argument(
                     "Every task must belong to exactly one known region");
+            }
+            if (region->alias == RegionAlias::kConservative) {
+                const TaskSpec& task = tasks_by_id.at(task_id);
+                for (int64_t input : task.input_value_ids()) {
+                    conservative_alias_values.insert(input);
+                }
+                for (int64_t output : task.output_value_ids()) {
+                    conservative_alias_values.insert(output);
+                }
             }
         }
 
@@ -618,6 +633,24 @@ void FrozenTaskPlan::Validate() const {
         throw std::invalid_argument(
             "Every FrozenTaskPlan task requires one region");
     }
+    const auto region_before = [&](const RegionSpec& lhs,
+                                   const RegionSpec& rhs) {
+        for (int64_t lhs_task : lhs.task_ids()) {
+            for (int64_t rhs_task : rhs.task_ids()) {
+                if (!HappensBefore(graph, lhs_task, rhs_task)) return false;
+            }
+        }
+        return true;
+    };
+    for (size_t i = 0; i < ordered_regions.size(); ++i) {
+        for (size_t j = i + 1; j < ordered_regions.size(); ++j) {
+            if (!region_before(ordered_regions[i], ordered_regions[j]) &&
+                !region_before(ordered_regions[j], ordered_regions[i])) {
+                throw std::invalid_argument(
+                    "Ordered regions require an explicit total dependency order");
+            }
+        }
+    }
 
     std::unordered_map<int64_t, std::vector<ValueSpec>> values_by_storage;
     for (const auto& value : node->values_) {
@@ -641,6 +674,8 @@ void FrozenTaskPlan::Validate() const {
             for (size_t j = i + 1; j < shared.size(); ++j) {
                 if (!CanShareStorage(shared[i]) ||
                     !CanShareStorage(shared[j]) ||
+                    conservative_alias_values.count(shared[i]->value_id) ||
+                    conservative_alias_values.count(shared[j]->value_id) ||
                     !SameStorageContract(shared[i], shared[j]) ||
                     !(lifetime_before(shared[i]->value_id,
                                       shared[j]->value_id) ||

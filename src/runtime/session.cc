@@ -298,7 +298,13 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
     ValidatedPlanContract result;
     result.device = device;
     std::unordered_map<std::string, int64_t> value_by_constant_key;
-    std::unordered_set<std::string> task_symbols;
+    std::unordered_map<int64_t, uint64_t> allocation_alignment;
+    for (const auto& task : plan.tasks()) {
+        if (task->kind == TaskKind::kAllocate) {
+            allocation_alignment.emplace(task.output_value_ids()[0],
+                                         task->alignment);
+        }
+    }
     size_t kernel_count = 0;
     for (const auto& task : plan.tasks()) {
         if (task->kind == TaskKind::kShapeEval) {
@@ -316,10 +322,9 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
                 context + " requires an unsupported artifact generation");
         }
         if (!module.HasFunction(task->symbol) ||
-            expected_symbols.count(symbol) == 0 ||
-            !task_symbols.insert(symbol).second) {
+            expected_symbols.count(symbol) == 0) {
             throw std::invalid_argument(
-                context + " does not match a unique module entry");
+                context + " does not match a module entry");
         }
         const codegen::KernelSignature signature = module.signature(task->symbol);
         const codegen::KernelLaunchMetadata metadata =
@@ -371,6 +376,11 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
             ValidateValueContract(
                 value, argument,
                 context + " value " + std::to_string(value_id));
+            if (argument->role == codegen::KernelArgRole::kOutput &&
+                allocation_alignment.at(value_id) < argument->alignment) {
+                throw std::invalid_argument(
+                    context + " output allocation alignment is insufficient");
+            }
             if (argument->role == codegen::KernelArgRole::kConstant) {
                 const std::string key = std::string(argument->constant_key);
                 const auto existing =
@@ -395,16 +405,14 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
                 context + " arity does not match its signature");
         }
     }
-    if (kernel_count != module_symbols.size() ||
-        task_symbols != expected_symbols) {
+    if (kernel_count == 0) {
         throw std::invalid_argument(
-            "RuntimeSession task DAG and module symbols are not identical");
+            "RuntimeSession task DAG requires at least one kernel task");
     }
 
     const Map<String, NDArray> module_constants = module.constants();
     const Array<int64_t> constant_ids = plan.constant_value_ids();
-    if (result.constant_keys_by_value.size() != constant_ids.size() ||
-        module_constants.size() != constant_ids.size()) {
+    if (result.constant_keys_by_value.size() != constant_ids.size()) {
         throw std::invalid_argument(
             "RuntimeSession task constants do not match the module constant pool");
     }

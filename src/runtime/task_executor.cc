@@ -80,6 +80,7 @@ struct PlanIndex final {
     std::unordered_map<int64_t, int64_t> allocation_by_value;
     std::unordered_map<int64_t, std::unordered_set<int64_t>> consumers_by_value;
     std::unordered_map<int64_t, std::unordered_set<int64_t>> ancestors_by_task;
+    std::unordered_set<int64_t> conservative_alias_values;
 };
 
 PlanIndex IndexPlan(const FrozenTaskPlan& plan) {
@@ -97,6 +98,18 @@ PlanIndex IndexPlan(const FrozenTaskPlan& plan) {
                 result.allocation_by_value.emplace(output, task->task_id);
             } else if (IsDataProducer(task->kind)) {
                 result.producer_by_value.emplace(output, task->task_id);
+            }
+        }
+    }
+    for (const auto& region : plan.regions()) {
+        if (region->alias != RegionAlias::kConservative) continue;
+        for (int64_t task_id : region.task_ids()) {
+            const TaskSpec& task = result.tasks.at(task_id);
+            for (int64_t input : task.input_value_ids()) {
+                result.conservative_alias_values.insert(input);
+            }
+            for (int64_t output : task.output_value_ids()) {
+                result.conservative_alias_values.insert(output);
             }
         }
     }
@@ -139,7 +152,8 @@ FrozenTaskPlan PlanTaskMemory(const FrozenTaskPlan& plan) {
     const PlanIndex index = IndexPlan(plan);
     std::unordered_map<int64_t, int64_t> storage_by_value;
     for (const auto& value : plan.values()) {
-        if (!Reusable(value)) {
+        if (!Reusable(value) ||
+            index.conservative_alias_values.count(value->value_id)) {
             storage_by_value.emplace(value->value_id, value->value_id);
         }
     }
@@ -150,7 +164,10 @@ FrozenTaskPlan PlanTaskMemory(const FrozenTaskPlan& plan) {
         if (allocation->kind != TaskKind::kAllocate) continue;
         const int64_t value_id = allocation.output_value_ids()[0];
         const ValueSpec& value = index.values.at(value_id);
-        if (!Reusable(value)) continue;
+        if (!Reusable(value) ||
+            index.conservative_alias_values.count(value_id)) {
+            continue;
+        }
 
         Slot* selected = nullptr;
         for (auto& slot : slots) {

@@ -241,7 +241,8 @@ SessionFixture MakeStaticFixture() {
             std::move(launcher)};
 }
 
-kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(bool with_shape_eval = false) {
+kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(
+    bool with_shape_eval = false, uint64_t kernel_alignment = 64) {
     using namespace kxc;
     using namespace kxc::runtime;
     const Device cpu = Device::CPU();
@@ -253,7 +254,7 @@ kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(bool with_shape_eval = false) {
     };
     Array<TaskSpec> tasks{
         TaskSpec(10, TaskKind::kAllocate, cpu, {}, {2}, {}, String(), 0, 0,
-                 64),
+                 kernel_alignment),
         TaskSpec(11, TaskKind::kKernel, cpu, {0, 1}, {2}, {10},
                  "session_fixture"),
         TaskSpec(12, TaskKind::kEvent, cpu, {}, {}, {11}),
@@ -276,6 +277,31 @@ kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(bool with_shape_eval = false) {
     };
     return FrozenTaskPlan(kFrozenTaskPlanVersion, std::move(values),
                           std::move(tasks), std::move(regions), {0}, {1}, {3});
+}
+
+kxc::runtime::FrozenTaskPlan MakeRepeatedKernelTaskPlan() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const Device cpu = Device::CPU();
+    return FrozenTaskPlan(
+        kFrozenTaskPlanVersion,
+        {ValueSpec(0, 0, {2, 3}, Float32(), cpu, true),
+         ValueSpec(1, 1, {3}, Float32(), cpu, false, true),
+         ValueSpec(2, 2, {2, 3}, Float32(), cpu),
+         ValueSpec(3, 3, {2, 3}, Float32(), cpu, false, false, true)},
+        {TaskSpec(10, TaskKind::kAllocate, cpu, {}, {2}, {}, String(), 0, 0,
+                  64),
+         TaskSpec(11, TaskKind::kKernel, cpu, {0, 1}, {2}, {10},
+                  "session_fixture"),
+         TaskSpec(20, TaskKind::kAllocate, cpu, {}, {3}, {11}, String(), 0, 0,
+                  64),
+         TaskSpec(21, TaskKind::kKernel, cpu, {2, 1}, {3}, {20, 11},
+                  "session_fixture")},
+        {RegionSpec(0, RegionKind::kPerCall, "", {10, 11}, {0, 1}, {2}, {1},
+                    RegionEffect::kOrdered),
+         RegionSpec(1, RegionKind::kPerCall, "", {20, 21}, {2, 1}, {3}, {1},
+                    RegionEffect::kOrdered)},
+        {0}, {1}, {3});
 }
 
 kxc::runtime::ExecutablePlan MakeAliasFallbackPlan() {
@@ -421,6 +447,20 @@ bool TestFrozenTaskDagExecutionAndRetention() {
                                                    MakeStaticTaskPlan(true));
                }),
                "shape-eval must fail closed until the shape contract is integrated");
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(
+                       fixture.module, MakeStaticTaskPlan(false, 1));
+               }),
+               "kernel output alignment must fail at session construction");
+
+    SessionFixture repeated_fixture = MakeStaticFixture();
+    runtime::RuntimeSession repeated_session(
+        repeated_fixture.module, MakeRepeatedKernelTaskPlan());
+    runtime::NDArray repeated_input =
+        runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
+    TEST_CHECK(repeated_session.Run({repeated_input}).size() == 1 &&
+                   repeated_fixture.launcher->calls == 2,
+               "multiple task invocations must be able to share one module entry");
 #else
     TEST_CHECK(Throws([&] {
                    runtime::RuntimeSession invalid(fixture.module,
