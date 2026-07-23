@@ -658,7 +658,8 @@ void VerifyRequest(const GuardedUnitSpecializationRequest& request) {
       request.exact_oracle_key.policy_id() != "exact" ||
       !(request.shape_profile_key.graph_template() == request.exact_oracle_key.graph_template()) ||
       !(request.shape_profile_key.bindings() == request.exact_oracle_key.bindings()) ||
-      request.kind != request.artifact_key.kind() || request.ordered_inputs.empty() && request.ordered_outputs.empty()) {
+      request.kind != request.artifact_key.kind() ||
+      (request.ordered_inputs.empty() && request.ordered_outputs.empty())) {
     Invalid("request has incompatible guarded profile, kind, guard, or artifact");
   }
 }
