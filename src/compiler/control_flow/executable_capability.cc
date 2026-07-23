@@ -35,6 +35,25 @@ bool IsOrdinaryOperator(relay::OperatorLoweringKind kind) {
            kind == relay::OperatorLoweringKind::kMultiTE;
 }
 
+size_t TensorLeafCount(const Type& type) {
+    if (type.As<TensorTypeNode>()) return 1;
+    if (const auto* tuple = type.As<TupleTypeNode>()) {
+        size_t count = 0;
+        for (const Type& field : tuple->fields) count += TensorLeafCount(field);
+        return count;
+    }
+    return 0;
+}
+
+bool IsFlatTensorTuple(const Type& type) {
+    const auto* tuple = type.As<TupleTypeNode>();
+    if (!tuple) return false;
+    for (const Type& field : tuple->fields) {
+        if (!field.As<TensorTypeNode>()) return false;
+    }
+    return true;
+}
+
 class CapabilityVerifier {
 public:
     explicit CapabilityVerifier(const ExecutableCapabilityOptions& options)
@@ -157,6 +176,28 @@ private:
             !op->spec.deterministic || op->spec.alias_contract != "none") {
             Fail(path, "Call", "pure_deterministic_no_alias",
                  "operator is not a pure deterministic non-aliasing kernel");
+        }
+        const Type output_type = expr.checked_type();
+        const size_t output_leaves = TensorLeafCount(output_type);
+        if (op->spec.lowering_kind ==
+                relay::OperatorLoweringKind::kSingleTE &&
+            !output_type.As<TensorTypeNode>()) {
+            Fail(path, "Call", "single_tensor_output",
+                 "single-output lowering requires TensorType");
+        }
+        if (op->spec.lowering_kind ==
+                relay::OperatorLoweringKind::kMultiTE &&
+            (!output_type.As<TupleTypeNode>() ||
+             (!options_.allow_nested_tuple_call_outputs &&
+              !IsFlatTensorTuple(output_type)))) {
+            Fail(path, "Call", "flat_multi_tensor_output",
+                 "static ValueGraph multi-output Calls require a flat tensor tuple");
+        }
+        if (output_leaves == 0 ||
+            (op->spec.output_arity >= 0 &&
+             static_cast<size_t>(op->spec.output_arity) != output_leaves)) {
+            Fail(path, "Call", "operator_output_arity",
+                 "Call output leaves differ from OperatorSpec");
         }
         const size_t actual_arity = call->args.size();
         if ((op->spec.input_arity.num_inputs >= 0 &&

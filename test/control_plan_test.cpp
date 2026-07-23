@@ -11,6 +11,7 @@
 #include "kxc/runtime/control_plan.h"
 
 namespace {
+using kxc::Device;
 using namespace kxc::runtime;
 
 #define CHECK(condition, message) do { if (!(condition)) { std::cerr << "[FAIL] " << __FUNCTION__ << ": " << message << "\n"; return false; } } while (0)
@@ -22,11 +23,11 @@ bool Throws(const std::function<void()>& fn) {
 
 EffectSummary Reads(std::vector<ValueId> ids) { return EffectSummary{std::move(ids), {}, {}, false, false}; }
 ControlValueSpec I64(ValueId id) {
-    return ControlValueSpec{id, "int64", {}, "cpu",
+    return ControlValueSpec{id, "int64", {}, Device::CPU(),
                             "value" + std::to_string(id)};
 }
 ControlValueSpec Bool(ValueId id) {
-    return ControlValueSpec{id, "bool", {}, "cpu",
+    return ControlValueSpec{id, "bool", {}, Device::CPU(),
                             "value" + std::to_string(id)};
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {
@@ -108,10 +109,10 @@ bool TestValidAndCanonical() {
 
     ControlPlan cuda_data = BranchPlan();
     for (std::size_t i = 1; i < cuda_data.values.size(); ++i) {
-        cuda_data.values[i].device = "cuda";
+        cuda_data.values[i].device = Device::CUDA(1);
     }
-    cuda_data.regions[1].tasks[0].device = "cuda";
-    cuda_data.regions[2].tasks[0].device = "cuda";
+    cuda_data.regions[1].tasks[0].device = Device::CUDA(1);
+    cuda_data.regions[2].tasks[0].device = Device::CUDA(1);
     cuda_data.Validate();
     return true;
 }
@@ -124,13 +125,13 @@ bool TestSchemaAndValueContracts() {
     CHECK(Throws([&] { plan.Validate(); }), "dynamic dimensions must fail");
     plan = BranchPlan(); plan.values[2].dtype = "unknown";
     CHECK(Throws([&] { plan.Validate(); }), "malformed dtype must fail");
-    plan = BranchPlan(); plan.values[2].device = "remote";
-    CHECK(Throws([&] { plan.Validate(); }), "unknown device must fail");
+    plan = BranchPlan(); plan.values[2].device = Device();
+    CHECK(Throws([&] { plan.Validate(); }), "undefined device must fail");
     plan = BranchPlan(); plan.values.push_back(plan.values[0]);
     CHECK(Throws([&] { plan.Validate(); }), "duplicate value must fail");
     plan = BranchPlan(); plan.values[0].source_locator.clear();
     CHECK(Throws([&] { plan.Validate(); }), "missing value locator must fail");
-    plan = LinearPlan(); plan.values[1].device = "cuda";
+    plan = LinearPlan(); plan.values[1].device = Device::CUDA();
     CHECK(Throws([&] { plan.Validate(); }), "kernel device mismatch must fail");
     plan = LinearPlan(); plan.regions[0].tasks[0].stream = "async";
     CHECK(Throws([&] { plan.Validate(); }), "undeclared stream semantics must fail");
@@ -171,7 +172,7 @@ bool TestStructuredWiringFailures() {
     CHECK(Throws([&] { plan.Validate(); }), "phi contract mismatch must fail");
     plan = BranchPlan(); plan.values[0].dtype = "int64";
     CHECK(Throws([&] { plan.Validate(); }), "non-bool predicate must fail");
-    plan = BranchPlan(); plan.values[0].device = "cuda";
+    plan = BranchPlan(); plan.values[0].device = Device::CUDA();
     CHECK(Throws([&] { plan.Validate(); }), "device predicate without copy must fail");
     plan = BranchPlan(); plan.regions[1].live_outs = {1};
     CHECK(Throws([&] { plan.Validate(); }), "phi source must be a branch live-out");

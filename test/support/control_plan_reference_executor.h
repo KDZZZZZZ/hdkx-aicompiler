@@ -18,13 +18,15 @@ namespace kxc::runtime::test_support {
 struct FakeValue {
     std::string dtype;
     std::vector<std::int64_t> shape;
-    std::string device{"cpu"};
+    Device device{Device::CPU()};
     bool boolean{false};
     std::int64_t integer{0};
 
-    static FakeValue Bool(bool value) { return FakeValue{"bool", {}, "cpu", value, value ? 1 : 0}; }
+    static FakeValue Bool(bool value) {
+        return FakeValue{"bool", {}, Device::CPU(), value, value ? 1 : 0};
+    }
     static FakeValue I64(std::int64_t value) {
-        return FakeValue{"int64", {}, "cpu", false, value};
+        return FakeValue{"int64", {}, Device::CPU(), false, value};
     }
 };
 

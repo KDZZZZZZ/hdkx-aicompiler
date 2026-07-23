@@ -26,8 +26,9 @@ bool IsDType(const std::string& dtype) {
     return kTypes.count(dtype) != 0;
 }
 
-bool IsDevice(const std::string& device) {
-    return device == "cpu" || device == "cuda";
+bool IsDevice(const Device& device) {
+    return device.defined() &&
+           (device.device_type() == kCPU || device.device_type() == kCUDA);
 }
 
 bool SameIds(std::vector<ValueId> left, std::vector<ValueId> right) {
@@ -123,7 +124,8 @@ void ValidateBranch(State& state, const ControlTask& task,
     const BranchSpec& spec = task.branch;
     Value(state, spec.predicate, "branch predicate");
     const ControlValueSpec& predicate = Value(state, spec.predicate, "branch predicate");
-    if (predicate.dtype != "bool" || !predicate.shape.empty() || predicate.device != "cpu") {
+    if (predicate.dtype != "bool" || !predicate.shape.empty() ||
+        predicate.device != Device::CPU()) {
         Fail("branch predicate must be a CPU scalar bool");
     }
     if (spec.then_region == spec.else_region || spec.then_region < 0 || spec.else_region < 0) {
@@ -170,7 +172,8 @@ void ValidateLoop(State& state, const ControlTask& task,
     const ControlRegion& condition = Region(state, spec.condition_region, "loop");
     const ControlRegion& body = Region(state, spec.body_region, "loop");
     const ControlValueSpec& condition_value = Value(state, spec.condition_value, "loop condition");
-    if (condition_value.dtype != "bool" || !condition_value.shape.empty() || condition_value.device != "cpu") {
+    if (condition_value.dtype != "bool" || !condition_value.shape.empty() ||
+        condition_value.device != Device::CPU()) {
         Fail("loop condition must be a CPU scalar bool");
     }
     if (std::find(condition.live_outs.begin(), condition.live_outs.end(), spec.condition_value) == condition.live_outs.end()) {
@@ -286,13 +289,13 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
             }
         } else if (task.kind == ControlTaskKind::kBranch) {
             if (!task.kernel_ref.empty() || !task.argument_values.empty() ||
-                !IsEmpty(task.loop) || task.device != "cpu") {
+                !IsEmpty(task.loop) || task.device != Device::CPU()) {
                 Fail("branch task has an invalid kind-specific contract");
             }
             ValidateBranch(state, task, available);
         } else if (task.kind == ControlTaskKind::kLoop) {
             if (!task.kernel_ref.empty() || !task.argument_values.empty() ||
-                !IsEmpty(task.branch) || task.device != "cpu") {
+                !IsEmpty(task.branch) || task.device != Device::CPU()) {
                 Fail("loop task has an invalid kind-specific contract");
             }
             ValidateLoop(state, task, available);
@@ -463,7 +466,7 @@ std::string ControlPlan::CanonicalText() const {
     for (const ControlValueSpec* value : values_by_id) {
         out << "  v" << value->id << " " << value->dtype << " ";
         PrintIds(out, value->shape);
-        out << " " << Quote(value->device) << " loc="
+        out << " " << Quote(value->device.ToString()) << " loc="
             << Quote(value->source_locator) << "\n";
     }
     out << "entry=" << entry_region << " regions=";
@@ -484,7 +487,8 @@ std::string ControlPlan::CanonicalText() const {
         for (const ControlTask& task : region.tasks) {
             out << "  task " << task.id << " kind=" << static_cast<int>(task.kind) << " in="; PrintIds(out, task.inputs); out << " args="; PrintIds(out, task.argument_values); out << " out="; PrintIds(out, task.outputs); out << " dep="; PrintIds(out, task.dependencies);
             out << " ref=" << Quote(task.kernel_ref) << " loc=" << Quote(task.source_locator)
-                << " device=" << Quote(task.device) << " stream=" << Quote(task.stream) << " "; PrintEffect(out, task.effect); out << " "; PrintAlias(out, task.alias);
+                << " device=" << Quote(task.device.ToString())
+                << " stream=" << Quote(task.stream) << " "; PrintEffect(out, task.effect); out << " "; PrintAlias(out, task.alias);
             if (task.kind == ControlTaskKind::kBranch) {
                 out << " branch=" << task.branch.predicate << ':' << task.branch.then_region << ':' << task.branch.else_region;
                 for (const PhiBinding& phi : task.branch.phis) out << " phi=" << phi.result << ':' << phi.then_value << ':' << phi.else_value;

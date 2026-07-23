@@ -10,6 +10,7 @@
 #include "support/control_plan_reference_executor.h"
 
 namespace {
+using kxc::Device;
 using namespace kxc::runtime;
 using namespace kxc::runtime::test_support;
 
@@ -17,11 +18,11 @@ using namespace kxc::runtime::test_support;
 
 EffectSummary Reads(std::vector<ValueId> ids) { return EffectSummary{std::move(ids), {}, {}, false, false}; }
 ControlValueSpec I64(ValueId id) {
-    return ControlValueSpec{id, "int64", {}, "cpu",
+    return ControlValueSpec{id, "int64", {}, Device::CPU(),
                             "value" + std::to_string(id)};
 }
 ControlValueSpec Bool(ValueId id) {
-    return ControlValueSpec{id, "bool", {}, "cpu",
+    return ControlValueSpec{id, "bool", {}, Device::CPU(),
                             "value" + std::to_string(id)};
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {

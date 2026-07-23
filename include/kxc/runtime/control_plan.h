@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "kxc/runtime/device.h"
+
 namespace kxc::runtime {
 
 using ValueId = std::int64_t;
@@ -19,7 +21,7 @@ struct ControlValueSpec {
     ValueId id{-1};
     std::string dtype;
     std::vector<std::int64_t> shape;
-    std::string device{"cpu"};
+    Device device{Device::CPU()};
     std::string source_locator;
 };
 
@@ -82,7 +84,7 @@ struct ControlTask {
     std::vector<TaskId> dependencies;
     std::string kernel_ref;
     std::string source_locator;
-    std::string device{"cpu"};
+    Device device{Device::CPU()};
     std::string stream{"default"};
     EffectSummary effect;
     AliasSummary alias;

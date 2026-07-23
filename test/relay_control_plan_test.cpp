@@ -156,6 +156,21 @@ bool TestStaticAndControlGates() {
     TEST_CHECK(mismatch_error.find("phi sources/results") != std::string::npos,
                "If results and both Phi sources must have exact device contracts");
 
+    Var cuda_x("cuda_x", kI64), cuda_y("cuda_y", kI64);
+    cuda_x.set_virtual_device(
+        kxc::VirtualDevice::ForDevice(kxc::Device::CUDA(0)));
+    cuda_y.set_virtual_device(
+        kxc::VirtualDevice::ForDevice(kxc::Device::CUDA(0)));
+    Call cross_ordinal = Add(cuda_x, cuda_y);
+    cross_ordinal.set_virtual_device(
+        kxc::VirtualDevice::ForDevice(kxc::Device::CUDA(1)));
+    const std::string ordinal_error = ErrorText([&] {
+        (void)kxc::api::LowerRelayToControlPlan(
+            Function({cuda_x, cuda_y}, cross_ordinal));
+    });
+    TEST_CHECK(ordinal_error.find("one explicit device") != std::string::npos,
+               "ControlPlan must preserve and compare CUDA device ordinals");
+
     const kxc::relay::Op& add = kxc::relay::Op::Get("add");
     auto* add_node = const_cast<kxc::relay::OpNode*>(add.operator->());
     const kxc::relay::OperatorSpec saved_spec = add_node->spec;

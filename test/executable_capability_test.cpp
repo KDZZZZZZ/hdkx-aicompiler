@@ -13,6 +13,7 @@
 #include "../src/compiler/internal/executable_capability.h"
 #include "../src/compiler/internal/value_graph.h"
 #include "kxc/relay/op.h"
+#include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/transforms/infer_type.h"
 
 namespace {
@@ -36,6 +37,36 @@ std::string ErrorText(const std::function<void()>& fn) {
 
 kxc::Call Add(const kxc::Expr& lhs, const kxc::Expr& rhs) {
     return kxc::Call(kxc::relay::Op::Get("add"), {lhs, rhs});
+}
+
+const kxc::relay::Op& NestedMultiOutputOp() {
+    using namespace kxc;
+    using namespace kxc::relay;
+    static bool registered = false;
+    if (!registered) {
+        OperatorSpec spec;
+        spec.name = "test_nested_multi_output";
+        spec.category = "test";
+        spec.input_arity.num_inputs = 1;
+        spec.output_arity = 3;
+        spec.type_relation_key = "FInferType";
+        spec.lowering_kind = OperatorLoweringKind::kMultiTE;
+        spec.lowering_key = "FRelayToTEMulti";
+        Op op = Op::Register(spec);
+        auto* node = const_cast<OpNode*>(op.operator->());
+        node->attrs.emplace(
+            "FInferType",
+            FInferType([](const Attrs&, const Array<Type>& inputs) {
+                return TupleType(
+                    {inputs[0], TupleType({inputs[0], inputs[0]})});
+            }));
+        node->attrs.emplace(
+            "FRelayToTEMulti",
+            FRelayToTEMulti([](const Attrs&, const Array<te::Tensor>&,
+                               const Type&) { return Array<te::Tensor>{}; }));
+        registered = true;
+    }
+    return Op::Get("test_nested_multi_output");
 }
 
 bool SameIds(const kxc::Array<int64_t>& lhs, const kxc::Array<int64_t>& rhs) {
@@ -207,6 +238,14 @@ bool TestPlacementAndOperatorContractsFailClosed() {
                    std::string::npos,
                "aliasing ordinary operators must not enter static ValueGraph");
 
+    add_node->spec.output_arity = 2;
+    const std::string output_error = ErrorText(
+        [&] { (void)BuildValueGraph(add_function, Device::CPU()); });
+    add_node->spec = saved_spec;
+    TEST_CHECK(output_error.find("operator_output_arity") !=
+                   std::string::npos,
+               "output arity must fail in the capability gate");
+
     const std::string lowering_key = saved_spec.lowering_key;
     const std::any saved_lowering = add_node->attrs.at(lowering_key);
     add_node->attrs.erase(lowering_key);
@@ -233,6 +272,15 @@ bool TestNestedTupleGetItemKeepsAllLeaves() {
     TEST_CHECK(graph.calls.size() == 3 &&
                    SameIds(graph.output_value_ids, {4, 5}),
                "TupleGetItem of a nested field must return every flattened leaf");
+
+    Var input("input", type);
+    Function nested_call({input}, Call(NestedMultiOutputOp(), {input}));
+    nested_call = relay::InferTypePass(nested_call);
+    const std::string nested_call_error = ErrorText(
+        [&] { (void)BuildValueGraph(nested_call, Device::CPU()); });
+    TEST_CHECK(nested_call_error.find("flat_multi_tensor_output") !=
+                   std::string::npos,
+               "nested tuple Call outputs must fail in the static capability gate");
     return true;
 }
 

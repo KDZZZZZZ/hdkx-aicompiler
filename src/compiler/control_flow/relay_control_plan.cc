@@ -45,17 +45,16 @@ void FlattenTensorTypes(const Type& type, std::vector<Type>* leaves,
     Fail(path, "requires a static TensorType or TupleType");
 }
 
-std::string DeviceFor(const Expr& expr, const std::string& path) {
+Device DeviceFor(const Expr& expr, const std::string& path) {
     const VirtualDevice device = Relay(expr).virtual_device();
-    if (!device.defined()) return "cpu";
+    if (!device.defined()) return Device::CPU();
     if (!device->device.defined()) {
         Fail(path, "explicit Relay VirtualDevice must define a CPU or CUDA device");
     }
     switch (device->device.device_type()) {
     case kCPU:
-        return "cpu";
     case kCUDA:
-        return "cuda";
+        return device->device;
     default:
         Fail(path, "Relay VirtualDevice must be CPU or CUDA");
     }
@@ -139,6 +138,7 @@ public:
         options.version = internal::ExecutableCapabilityOptions::kVersion;
         options.allow_if = true;
         options.allow_tuple_parameters = true;
+        options.allow_nested_tuple_call_outputs = true;
         options.allow_device_regions = true;
         internal::VerifyExecutableCapability(function_, options);
 
@@ -216,7 +216,7 @@ private:
                      const std::string& path) {
         std::vector<Type> leaf_types;
         FlattenTensorTypes(type, &leaf_types, path + ".checked_type");
-        const std::string device = DeviceFor(source, path);
+        const Device device = DeviceFor(source, path);
         Leaves ids;
         ids.reserve(leaf_types.size());
         for (std::size_t i = 0; i < leaf_types.size(); ++i) {
