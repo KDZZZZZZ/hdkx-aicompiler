@@ -13,8 +13,12 @@ int main() {
     RuntimeShapePlanSpec spec;
     spec.inputs = {{"float32", 1, "CPU:0", 1}};
     spec.outputs = {output};
-    spec.entry = {"fake", "entry", 1, true,
-                  [](const RuntimeShapeLaunchArgs&) { return RuntimeShapeLaunchResult{}; }, {}};
+    spec.entry.module_label = "fake";
+    spec.entry.entry_symbol = "entry";
+    spec.entry.ready = true;
+    spec.entry.exact_abi_fingerprint =
+        RuntimeShapePlan::ExactAbiFingerprint(spec.inputs, spec.outputs);
+    spec.entry.launcher = [](const RuntimeShapeLaunchArgs&) { return RuntimeShapeLaunchResult{}; };
     spec.run_byte_budget = 4;
     const RuntimeShapeAsyncResult result =
         RuntimeShapeSession(RuntimeShapePlan(std::move(spec))).Run({{{1}, "float32", "CPU:0", 1}});

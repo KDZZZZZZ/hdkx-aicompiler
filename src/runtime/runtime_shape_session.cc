@@ -6,6 +6,8 @@
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace kxc::runtime {
@@ -14,6 +16,10 @@ namespace {
 #ifndef KXC_ENABLE_RUNTIME_SHAPE_TASKS
 #define KXC_ENABLE_RUNTIME_SHAPE_TASKS 0
 #endif
+
+constexpr std::size_t kMaxExpressionDepth = 64;
+constexpr std::size_t kMaxExpressionNodes = 4096;
+std::atomic<bool> fail_next_owner_transfer{false};
 
 [[noreturn]] void Fail(const std::string& detail) {
     throw std::invalid_argument("RuntimeShape: " + detail);
@@ -49,10 +55,7 @@ RuntimeShapeExtent CheckedMul(RuntimeShapeExtent lhs, RuntimeShapeExtent rhs) {
 std::size_t CheckedBytes(const std::vector<RuntimeShapeExtent>& shape,
                          std::size_t dtype_bytes) {
     RuntimeShapeExtent elements = 1;
-    for (const auto extent : shape) {
-        if (extent == 0) Fail("zero extent is not supported");
-        elements = CheckedMul(elements, extent);
-    }
+    for (const auto extent : shape) elements = CheckedMul(elements, extent);
     if (elements > std::numeric_limits<std::size_t>::max() / dtype_bytes) {
         Fail("output byte size overflow");
     }
@@ -61,15 +64,10 @@ std::size_t CheckedBytes(const std::vector<RuntimeShapeExtent>& shape,
 
 std::vector<RuntimeShapeExtent> EvaluateShape(
     const std::vector<RuntimeShapeExpr>& expressions,
-    const std::vector<std::vector<RuntimeShapeExtent>>& input_shapes,
-    const char* name) {
+    const std::vector<std::vector<RuntimeShapeExtent>>& input_shapes) {
     std::vector<RuntimeShapeExtent> result;
     result.reserve(expressions.size());
-    for (const auto& expression : expressions) {
-        const auto extent = expression.Evaluate(input_shapes);
-        if (extent == 0) Fail(std::string(name) + " has a zero extent");
-        result.push_back(extent);
-    }
+    for (const auto& expression : expressions) result.push_back(expression.Evaluate(input_shapes));
     return result;
 }
 
@@ -90,10 +88,10 @@ void ValidateContract(const RuntimeShapeTensorContract& contract) {
         if (!expression.defined()) Fail("valid shape contains undefined expression");
     }
     if (!IsPowerOfTwo(contract.alignment)) Fail("alignment must be a power of two");
-    if (contract.layout.empty() || contract.scope.empty()) {
-        Fail("layout and scope must be nonempty");
+    if (contract.layout != "contiguous.row_major") {
+        Fail("v1 requires layout contiguous.row_major");
     }
-    if (contract.max_bytes == 0) Fail("output max_bytes must be nonzero");
+    if (contract.scope != "global") Fail("v1 requires global scope");
     if (contract.device != "CPU:0") Fail("v1 requires output device CPU:0");
     if (contract.abi_version != RuntimeShapePlan::kAbiVersion) {
         Fail("output ABI version does not match");
@@ -104,9 +102,44 @@ struct OutputEvaluation {
     RuntimeShapeOutput output;
 };
 
+struct AllocationDeleter {
+    std::size_t alignment{0};
+
+    void operator()(void* ptr) const noexcept {
+        if (!ptr) return;
+        if (alignment > alignof(std::max_align_t)) {
+            ::operator delete(ptr, std::align_val_t(alignment));
+        } else {
+            ::operator delete(ptr);
+        }
+    }
+};
+
+using AllocationOwner = std::unique_ptr<void, AllocationDeleter>;
+
+AllocationOwner AllocateOutput(std::size_t bytes, std::size_t alignment) {
+    if (bytes == 0) return AllocationOwner(nullptr, AllocationDeleter{alignment});
+    if (alignment > alignof(std::max_align_t)) {
+        return AllocationOwner(::operator new(bytes, std::align_val_t(alignment)),
+                               AllocationDeleter{alignment});
+    }
+    return AllocationOwner(::operator new(bytes), AllocationDeleter{alignment});
+}
+
 RuntimeShapeEvent FailureEvent(const std::string& detail) {
     return RuntimeShapeEvent{RuntimeShapeEventKind::kFailure,
                              static_cast<std::size_t>(-1), 0, detail};
+}
+
+void AppendU64(std::string& bytes, std::uint64_t value) {
+    for (unsigned shift = 0; shift != 64; shift += 8) {
+        bytes.push_back(static_cast<char>((value >> shift) & 0xff));
+    }
+}
+
+void AppendString(std::string& bytes, const std::string& value) {
+    AppendU64(bytes, value.size());
+    bytes.append(value);
 }
 
 }  // namespace
@@ -123,6 +156,43 @@ struct RuntimeShapeExpr::Node {
 RuntimeShapeExpr::RuntimeShapeExpr(std::shared_ptr<const Node> node)
     : node_(std::move(node)) {}
 
+std::size_t RuntimeShapeExpr::Depth(const std::shared_ptr<const Node>& node) {
+    if (!node) Fail("undefined shape expression");
+    std::size_t maximum = 0;
+    std::vector<std::pair<std::shared_ptr<const Node>, std::size_t>> pending;
+    std::unordered_set<const Node*> visited;
+    pending.emplace_back(node, 1);
+    while (!pending.empty()) {
+        const auto current = std::move(pending.back());
+        pending.pop_back();
+        if (current.second > kMaxExpressionDepth) {
+            Fail("shape expression exceeds maximum depth");
+        }
+        maximum = current.second > maximum ? current.second : maximum;
+        if (!visited.insert(current.first.get()).second) continue;
+        if (visited.size() > kMaxExpressionNodes) {
+            Fail("shape expression exceeds maximum node count");
+        }
+        switch (current.first->kind) {
+            case Kind::kConst:
+            case Kind::kInputAxis:
+                break;
+            case Kind::kAdd:
+            case Kind::kMul:
+            case Kind::kFloorDiv:
+            case Kind::kMin:
+            case Kind::kMax:
+                if (!current.first->lhs || !current.first->rhs) {
+                    Fail("binary shape expression contains undefined operand");
+                }
+                pending.emplace_back(current.first->lhs, current.second + 1);
+                pending.emplace_back(current.first->rhs, current.second + 1);
+                break;
+        }
+    }
+    return maximum;
+}
+
 RuntimeShapeExpr RuntimeShapeExpr::Const(RuntimeShapeExtent value) {
     auto node = std::make_shared<Node>();
     node->value = value;
@@ -137,85 +207,111 @@ RuntimeShapeExpr RuntimeShapeExpr::InputAxis(std::size_t input_index, std::size_
     return RuntimeShapeExpr(std::move(node));
 }
 
-RuntimeShapeExpr RuntimeShapeExpr::Add(RuntimeShapeExpr lhs, RuntimeShapeExpr rhs) {
+RuntimeShapeExpr RuntimeShapeExpr::Binary(Kind kind, RuntimeShapeExpr lhs,
+                                          RuntimeShapeExpr rhs) {
+    if (!lhs.node_ || !rhs.node_) Fail("binary shape expression requires defined operands");
     auto node = std::make_shared<Node>();
-    node->kind = Kind::kAdd;
+    node->kind = kind;
     node->lhs = std::move(lhs.node_);
     node->rhs = std::move(rhs.node_);
-    if (!node->lhs || !node->rhs) Fail("Add requires defined expressions");
+    (void)Depth(node);
     return RuntimeShapeExpr(std::move(node));
+}
+
+RuntimeShapeExpr RuntimeShapeExpr::Add(RuntimeShapeExpr lhs, RuntimeShapeExpr rhs) {
+    return Binary(Kind::kAdd, std::move(lhs), std::move(rhs));
 }
 
 RuntimeShapeExpr RuntimeShapeExpr::Mul(RuntimeShapeExpr lhs, RuntimeShapeExpr rhs) {
-    auto node = std::make_shared<Node>();
-    node->kind = Kind::kMul;
-    node->lhs = std::move(lhs.node_);
-    node->rhs = std::move(rhs.node_);
-    if (!node->lhs || !node->rhs) Fail("Mul requires defined expressions");
-    return RuntimeShapeExpr(std::move(node));
+    return Binary(Kind::kMul, std::move(lhs), std::move(rhs));
 }
 
 RuntimeShapeExpr RuntimeShapeExpr::FloorDiv(RuntimeShapeExpr lhs, RuntimeShapeExpr rhs) {
-    auto node = std::make_shared<Node>();
-    node->kind = Kind::kFloorDiv;
-    node->lhs = std::move(lhs.node_);
-    node->rhs = std::move(rhs.node_);
-    if (!node->lhs || !node->rhs) Fail("FloorDiv requires defined expressions");
-    return RuntimeShapeExpr(std::move(node));
+    return Binary(Kind::kFloorDiv, std::move(lhs), std::move(rhs));
 }
 
 RuntimeShapeExpr RuntimeShapeExpr::Min(RuntimeShapeExpr lhs, RuntimeShapeExpr rhs) {
-    auto node = std::make_shared<Node>();
-    node->kind = Kind::kMin;
-    node->lhs = std::move(lhs.node_);
-    node->rhs = std::move(rhs.node_);
-    if (!node->lhs || !node->rhs) Fail("Min requires defined expressions");
-    return RuntimeShapeExpr(std::move(node));
+    return Binary(Kind::kMin, std::move(lhs), std::move(rhs));
 }
 
 RuntimeShapeExpr RuntimeShapeExpr::Max(RuntimeShapeExpr lhs, RuntimeShapeExpr rhs) {
-    auto node = std::make_shared<Node>();
-    node->kind = Kind::kMax;
-    node->lhs = std::move(lhs.node_);
-    node->rhs = std::move(rhs.node_);
-    if (!node->lhs || !node->rhs) Fail("Max requires defined expressions");
-    return RuntimeShapeExpr(std::move(node));
+    return Binary(Kind::kMax, std::move(lhs), std::move(rhs));
 }
 
 RuntimeShapeExtent RuntimeShapeExpr::Evaluate(
     const std::vector<std::vector<RuntimeShapeExtent>>& input_shapes) const {
-    if (!node_) Fail("undefined shape expression");
+    (void)Depth(node_);
+    std::unordered_map<const Node*, RuntimeShapeExtent> values;
     const auto evaluate = [&](const auto& self, const std::shared_ptr<const Node>& node)
         -> RuntimeShapeExtent {
+        const auto existing = values.find(node.get());
+        if (existing != values.end()) return existing->second;
+        RuntimeShapeExtent value = 0;
         switch (node->kind) {
-            case Kind::kConst: return node->value;
+            case Kind::kConst:
+                value = node->value;
+                break;
             case Kind::kInputAxis:
                 if (node->input_index >= input_shapes.size() ||
                     node->axis >= input_shapes[node->input_index].size()) {
                     Fail("input-axis expression is out of range");
                 }
-                return input_shapes[node->input_index][node->axis];
-            case Kind::kAdd: return CheckedAdd(self(self, node->lhs), self(self, node->rhs));
-            case Kind::kMul: return CheckedMul(self(self, node->lhs), self(self, node->rhs));
+                value = input_shapes[node->input_index][node->axis];
+                break;
+            case Kind::kAdd:
+                value = CheckedAdd(self(self, node->lhs), self(self, node->rhs));
+                break;
+            case Kind::kMul:
+                value = CheckedMul(self(self, node->lhs), self(self, node->rhs));
+                break;
             case Kind::kFloorDiv: {
                 const auto divisor = self(self, node->rhs);
                 if (divisor == 0) Fail("floor division by zero");
-                return self(self, node->lhs) / divisor;
+                value = self(self, node->lhs) / divisor;
+                break;
             }
             case Kind::kMin: {
                 const auto lhs = self(self, node->lhs);
                 const auto rhs = self(self, node->rhs);
-                return lhs < rhs ? lhs : rhs;
+                value = lhs < rhs ? lhs : rhs;
+                break;
             }
             case Kind::kMax: {
                 const auto lhs = self(self, node->lhs);
                 const auto rhs = self(self, node->rhs);
-                return lhs > rhs ? lhs : rhs;
+                value = lhs > rhs ? lhs : rhs;
+                break;
             }
         }
-        Fail("unknown shape expression kind");
+        values.emplace(node.get(), value);
+        return value;
     };
     return evaluate(evaluate, node_);
+}
+
+void RuntimeShapeExpr::AppendCanonical(std::string& bytes) const {
+    (void)Depth(node_);
+    const auto append = [&](const auto& self, const std::shared_ptr<const Node>& node) -> void {
+        bytes.push_back(static_cast<char>(node->kind));
+        switch (node->kind) {
+            case Kind::kConst:
+                AppendU64(bytes, node->value);
+                break;
+            case Kind::kInputAxis:
+                AppendU64(bytes, node->input_index);
+                AppendU64(bytes, node->axis);
+                break;
+            case Kind::kAdd:
+            case Kind::kMul:
+            case Kind::kFloorDiv:
+            case Kind::kMin:
+            case Kind::kMax:
+                self(self, node->lhs);
+                self(self, node->rhs);
+                break;
+        }
+    };
+    append(append, node_);
 }
 
 RuntimeShapeExpr::Kind RuntimeShapeExpr::kind() const {
@@ -250,14 +346,55 @@ bool FakeRuntimeShapeCompletion::IsReady() const noexcept {
     return state_->ready.load(std::memory_order_acquire);
 }
 
+namespace detail {
+
+void FailNextRuntimeShapeOwnerTransferForTest() noexcept {
+    fail_next_owner_transfer.store(true, std::memory_order_release);
+}
+
+}  // namespace detail
+
 struct RuntimeShapePlan::Impl {
     explicit Impl(RuntimeShapePlanSpec value) : spec(std::move(value)) {}
     const RuntimeShapePlanSpec spec;
+    mutable std::mutex launcher_mutex;
 };
 
 RuntimeShapePlan::RuntimeShapePlan(RuntimeShapePlanSpec spec)
     : impl_(std::make_shared<Impl>(std::move(spec))) {
     Validate();
+}
+
+std::string RuntimeShapePlan::ExactAbiFingerprint(
+    const std::vector<RuntimeShapeInputContract>& inputs,
+    const std::vector<RuntimeShapeTensorContract>& outputs) {
+    std::string bytes;
+    AppendString(bytes, "kxc.runtime_shape.trusted_sync_abi.v1");
+    AppendU64(bytes, inputs.size());
+    for (const auto& input : inputs) {
+        AppendString(bytes, input.dtype);
+        AppendU64(bytes, input.rank);
+        AppendString(bytes, input.device);
+        AppendU64(bytes, input.abi_version);
+    }
+    AppendU64(bytes, outputs.size());
+    const auto append_expressions = [&bytes](const std::vector<RuntimeShapeExpr>& expressions) {
+        AppendU64(bytes, expressions.size());
+        for (const auto& expression : expressions) expression.AppendCanonical(bytes);
+    };
+    for (const auto& output : outputs) {
+        AppendString(bytes, output.dtype);
+        append_expressions(output.logical);
+        append_expressions(output.physical);
+        append_expressions(output.valid);
+        AppendU64(bytes, output.alignment);
+        AppendString(bytes, output.layout);
+        AppendString(bytes, output.scope);
+        AppendU64(bytes, output.max_bytes);
+        AppendString(bytes, output.device);
+        AppendU64(bytes, output.abi_version);
+    }
+    return bytes;
 }
 
 bool RuntimeShapePlan::defined() const noexcept { return static_cast<bool>(impl_); }
@@ -267,7 +404,6 @@ void RuntimeShapePlan::Validate() const {
     const auto& spec = impl_->spec;
     if (spec.abi_version != kAbiVersion) Fail("plan ABI version does not match");
     if (spec.inputs.empty() || spec.outputs.empty()) Fail("plan requires inputs and outputs");
-    if (spec.run_byte_budget == 0) Fail("run byte budget must be nonzero");
     for (const auto& input : spec.inputs) {
         if (input.dtype.empty()) Fail("input dtype is empty");
         (void)DTypeBytes(input.dtype);
@@ -275,16 +411,25 @@ void RuntimeShapePlan::Validate() const {
         if (input.abi_version != kAbiVersion) Fail("input ABI version does not match");
     }
     for (const auto& output : spec.outputs) ValidateContract(output);
+    (void)ExactAbiFingerprint(spec.inputs, spec.outputs);
     if (!spec.entry.ready || !spec.entry.launcher || spec.entry.module_label.empty() ||
         spec.entry.entry_symbol.empty()) {
         Fail("plan requires a selected ready bound launcher entry");
     }
     if (spec.entry.abi_version != kAbiVersion) Fail("entry ABI version does not match");
+    if (spec.entry.exact_abi_fingerprint != ExactAbiFingerprint(spec.inputs, spec.outputs)) {
+        Fail("entry exact ABI fingerprint does not match plan contracts");
+    }
 }
 
 const RuntimeShapePlanSpec& RuntimeShapePlan::spec() const {
     if (!impl_) Fail("plan is undefined");
     return impl_->spec;
+}
+
+std::mutex& RuntimeShapePlan::launcher_mutex() const {
+    if (!impl_) Fail("plan is undefined");
+    return impl_->launcher_mutex;
 }
 
 struct RuntimeShapeAsyncResult::State {
@@ -330,12 +475,12 @@ RuntimeShapeSession::RuntimeShapeSession(RuntimeShapePlan plan) : plan_(std::mov
 RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
     const std::vector<RuntimeShapeInput>& inputs, std::shared_ptr<void> caller_lease) const {
     auto state = std::make_shared<RuntimeShapeAsyncResult::State>();
-    state->plan = plan_;  // Each result owns its frozen plan snapshot and module lease.
+    state->plan = plan_;  // Retains the trusted-entry module lease with this result.
     state->caller_lease = std::move(caller_lease);
     const auto fail = [&](const std::string& reason) {
         state->ok = false;
         state->failure_reason = reason;
-        state->outputs.clear();  // Launch failures never publish or reuse allocations.
+        state->outputs.clear();  // Failed launches never publish or reuse allocations.
         state->events.push_back(FailureEvent(reason));
         return RuntimeShapeAsyncResult(state);
     };
@@ -356,23 +501,20 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
             if (input.dtype != contract.dtype) Fail("input dtype does not match");
             if (input.device != contract.device) Fail("input device does not match");
             if (input.abi_version != contract.abi_version) Fail("input ABI version does not match");
-            for (const auto extent : input.shape) {
-                if (extent == 0) Fail("input has a zero extent");
-            }
             input_shapes.push_back(input.shape);
         }
-        state->events.push_back(
-            RuntimeShapeEvent{RuntimeShapeEventKind::kShapeEval,
-                              static_cast<std::size_t>(-1), 0, "CPU:0/default"});
+        state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kShapeEval,
+                                                   static_cast<std::size_t>(-1), 0,
+                                                   "CPU:0/default"});
         std::vector<OutputEvaluation> evaluated;
         evaluated.reserve(spec.outputs.size());
         std::size_t total_bytes = 0;
         for (const auto& contract : spec.outputs) {
             RuntimeShapeOutput output;
             output.contract = contract;
-            output.logical = EvaluateShape(contract.logical, input_shapes, "logical shape");
-            output.physical = EvaluateShape(contract.physical, input_shapes, "physical shape");
-            output.valid = EvaluateShape(contract.valid, input_shapes, "valid shape");
+            output.logical = EvaluateShape(contract.logical, input_shapes);
+            output.physical = EvaluateShape(contract.physical, input_shapes);
+            output.valid = EvaluateShape(contract.valid, input_shapes);
             for (std::size_t axis = 0; axis < output.logical.size(); ++axis) {
                 if (output.valid[axis] > output.logical[axis] ||
                     output.logical[axis] > output.physical[axis]) {
@@ -391,37 +533,43 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
 
         for (std::size_t index = 0; index < evaluated.size(); ++index) {
             auto& output = evaluated[index].output;
-            void* data = nullptr;
-            if (output.contract.alignment > alignof(std::max_align_t)) {
-                data = ::operator new(output.bytes, std::align_val_t(output.contract.alignment));
-                output.owner_ = std::shared_ptr<void>(data, [alignment = output.contract.alignment](void* ptr) {
-                    ::operator delete(ptr, std::align_val_t(alignment));
-                });
-            } else {
-                data = ::operator new(output.bytes);
-                output.owner_ = std::shared_ptr<void>(data, [](void* ptr) { ::operator delete(ptr); });
+            AllocationOwner allocation = AllocateOutput(output.bytes, output.contract.alignment);
+            if (fail_next_owner_transfer.exchange(false, std::memory_order_acq_rel)) {
+                throw std::bad_alloc();  // Tests RAII cleanup; not a shared_ptr control-block injector.
             }
-            output.data = data;
+            output.owner_ = std::shared_ptr<void>(std::move(allocation));
+            output.data = output.owner_.get();
             state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kAllocate, index,
                                                        output.bytes, "CPU:0/default"});
             state->outputs.push_back(std::move(output));
         }
-        state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kKernel,
-                                                   static_cast<std::size_t>(-1), 0,
-                                                   spec.entry.entry_symbol});
-        RuntimeShapeLaunchResult launch = spec.entry.launcher(
-            RuntimeShapeLaunchArgs{inputs, state->outputs});
+
+        RuntimeShapeLaunchResult launch;
+        try {
+            std::lock_guard<std::mutex> lock(plan_.launcher_mutex());
+            launch = spec.entry.launcher(
+                RuntimeShapeLaunchArgs{inputs, state->outputs, spec.entry.exact_abi_fingerprint});
+        } catch (const std::exception& error) {
+            return fail(std::string("bound launcher threw: ") + error.what());
+        } catch (...) {
+            return fail("bound launcher threw a non-standard exception");
+        }
         if (!launch.accepted) {
             return fail(launch.failure_reason.empty() ? "bound launcher rejected launch"
                                                        : launch.failure_reason);
         }
         state->fake_completion = std::move(launch.fake_completion);
+        state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kKernel,
+                                                   static_cast<std::size_t>(-1), 0,
+                                                   spec.entry.entry_symbol});
         state->ok = true;
         return RuntimeShapeAsyncResult(std::move(state));
     } catch (const std::bad_alloc&) {
         return fail("output allocation failed: out of memory");
     } catch (const std::exception& error) {
         return fail(error.what());
+    } catch (...) {
+        return fail("runtime shape execution threw a non-standard exception");
     }
 #endif
 }

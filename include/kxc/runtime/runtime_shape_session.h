@@ -28,7 +28,7 @@ public:
     const std::vector<RuntimeShapeOutput>& outputs() const noexcept;
     const std::vector<RuntimeShapeEvent>& events() const noexcept;
     bool IsReady() const noexcept;
-    /*! \brief Completes only the documented fake deterministic test seam. */
+    /*! \brief Completes only the fake lifetime-simulation seam. */
     void Wait() const noexcept;
 
 private:
@@ -38,11 +38,18 @@ private:
     friend class RuntimeShapeSession;
 };
 
-/*! \brief Separate default-off dynamic output session; no allocation reuse. */
+/*! \brief Separate default-off synchronous dynamic-output session; no allocation reuse.
+ *
+ * RunAsync is named for API compatibility only: it executes shape evaluation,
+ * allocation, and the trusted launcher synchronously before returning. It
+ * cannot claim real device async safety. A pending FakeRuntimeShapeCompletion
+ * only simulates result lifetime after that synchronous launch.
+ */
 class RuntimeShapeSession final {
 public:
     explicit RuntimeShapeSession(RuntimeShapePlan plan);
 
+    /*! \brief Synchronous launch; never a real device-async submission. */
     RuntimeShapeAsyncResult RunAsync(
         const std::vector<RuntimeShapeInput>& inputs,
         std::shared_ptr<void> caller_lease = {}) const;
