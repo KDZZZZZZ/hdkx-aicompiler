@@ -42,7 +42,7 @@ save_imported_model(
 | `Softmax` | `softmax` |
 | `Transpose` | `transpose` |
 
-`Conv`、`MaxPool`、`Flatten`、`Gemm` 会转换必要 attrs；`Softmax` 转换 `axis`（未显式指定时 opset < 13 为 `1`，否则为 `-1`）；`Transpose` 转换 `perm`（缺失时写为空数组，由 Relay 使用逆序默认）；`Relu`、`Add`、`GlobalAveragePool`、`MatMul` 使用简单 attrs。
+`Conv`、`MaxPool`、`Flatten`、`Gemm` 会转换必要 attrs；`Softmax` 转换 `axis`（未显式指定时 opset < 13 为 `1`，否则为 `-1`）；`Transpose` 转换 `perm`（缺失时写为空数组，由 Relay 使用逆序默认）；`Relu`、`Add`、`GlobalAveragePool` 使用简单 attrs。`MatMul` 除简单 attrs 外还执行下述静态 contract gate。
 
 ## Shape 与 dtype 行为
 
@@ -52,6 +52,8 @@ save_imported_model(
 - 缺少 `tensor_type.shape` 的 unknown rank 会拒绝导入，并给出 tensor/value 名称和 rank context。
 - symbolic 或 unknown 维度默认会拒绝导入，并在错误中给出 tensor/value 名称、axis 和（适用时）`dim_param`。
 - 仅当调用方显式传入正数 `default_batch`（CLI 为 `--batch N`）时，未解析的 axis 0 才会绑定为该 batch 值；所有非 batch 未解析维度仍会拒绝。
+- 每个 `MatMul` 在导入前必须能从 graph input/value_info、initializer 或此前推导的 `MatMul` output 解析两个静态 TensorSpec；缺失或未解析的 metadata 立即拒绝，且不会推导无关算子。
+- `MatMul` 要求恰有两个 rank >= 2、同 dtype 的输入，K 相等且 leading batch dims 可按 NumPy 广播；frontend 推导 `[..., M, N]`，并要求任何 value_info/graph output 声明的 output shape/dtype 完全一致。
 - C++ JSON reifier 同样只接受非负整数静态 shape，拒绝负数或非整数维度；它不支持 symbol runtime 语义。
 
 当前支持的 tensor dtype：
@@ -136,7 +138,7 @@ CMake 会在 build 目录自动生成 C++ 测试使用的 `resnet18.import.json`
 
 ## 当前限制
 
-- 只覆盖静态 shape MVP，不承诺完整 ONNX opset；`MatMul` 支持 rank >= 2 的静态 batch broadcasting，动态维度仍不支持。
+- 只覆盖静态 shape MVP，不承诺完整 ONNX opset；`MatMul` 仅接受 frontend 已验证的 rank >= 2 静态 K/batch/output contract，缺失 metadata 或动态维度仍不支持。
 - 不引入 C++ ONNX/protobuf 依赖；ONNX protobuf 解析留在 Python 侧。
 - 不提供动态 shape runtime 语义。
 - 不做 ResNet18 数值执行验收；本阶段验收重点是导入 Relay Function、保留 params 数据、序列化 runtime binding 信息，以及清晰的 unsupported op 错误。

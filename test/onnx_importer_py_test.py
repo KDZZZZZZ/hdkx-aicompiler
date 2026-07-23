@@ -184,6 +184,77 @@ def _static_operator_model(nodes, opset):
     )
 
 
+def _matmul_model(a_shape, b_shape, *, a_dtype=TensorProto.FLOAT, b_dtype=TensorProto.FLOAT,
+                  output_name="unused", output_shape=(1,)):
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["a", "b"], ["scores"], name="matmul")],
+        "matmul_test",
+        [helper.make_tensor_value_info("a", a_dtype, a_shape),
+         helper.make_tensor_value_info("b", b_dtype, b_shape)],
+        [helper.make_tensor_value_info(output_name, TensorProto.FLOAT, output_shape)],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6)
+
+
+@pytest.mark.parametrize(
+    ("a_shape", "b_shape", "a_dtype", "b_dtype", "message"),
+    [
+        ([3], [3, 2], TensorProto.FLOAT, TensorProto.FLOAT, "rank >= 2"),
+        ([1, 2, 3], [1, 4, 2], TensorProto.FLOAT, TensorProto.FLOAT, "K dimensions differ"),
+        ([2, 2, 3], [3, 3, 2], TensorProto.FLOAT, TensorProto.FLOAT, "leading batch dimensions"),
+        ([1, 2, 3], [1, 3, 2], TensorProto.FLOAT, TensorProto.INT32, "matching input dtypes"),
+    ],
+)
+def test_matmul_rejects_invalid_static_input_contract(
+    a_shape, b_shape, a_dtype, b_dtype, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_matmul_model(a_shape, b_shape, a_dtype=a_dtype, b_dtype=b_dtype))
+
+
+def test_matmul_infers_prior_matmul_output_for_chains():
+    graph = helper.make_graph(
+        [
+            helper.make_node("MatMul", ["a", "b"], ["scores"], name="first"),
+            helper.make_node("MatMul", ["scores", "c"], ["out"], name="second"),
+        ],
+        "matmul_chain",
+        [
+            helper.make_tensor_value_info("a", TensorProto.FLOAT, [1, 2, 3]),
+            helper.make_tensor_value_info("b", TensorProto.FLOAT, [1, 3, 4]),
+            helper.make_tensor_value_info("c", TensorProto.FLOAT, [1, 4, 5]),
+        ],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 5])],
+    )
+    assert len(import_onnx_model(helper.make_model(graph)).function.nodes) == 2
+
+
+def test_matmul_rejects_missing_non_matmul_intermediate_metadata():
+    graph = helper.make_graph(
+        [
+            helper.make_node("MatMul", ["a", "b"], ["scores"], name="first"),
+            helper.make_node("Softmax", ["scores"], ["weights"], name="softmax"),
+            helper.make_node("MatMul", ["weights", "c"], ["out"], name="second"),
+        ],
+        "matmul_missing_metadata",
+        [
+            helper.make_tensor_value_info("a", TensorProto.FLOAT, [1, 2, 3]),
+            helper.make_tensor_value_info("b", TensorProto.FLOAT, [1, 3, 4]),
+            helper.make_tensor_value_info("c", TensorProto.FLOAT, [1, 4, 5]),
+        ],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 5])],
+    )
+    with pytest.raises(ValueError, match=r"input 'weights' metadata is absent or unresolved"):
+        import_onnx_model(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)]))
+
+
+def test_matmul_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'scores' declaration.*does not match inferred"):
+        import_onnx_model(
+            _matmul_model([1, 2, 3], [1, 3, 4], output_name="scores", output_shape=[1, 2, 5])
+        )
+
+
 def test_matmul_softmax_transpose_mapping_and_attrs():
     model = _static_operator_model(
         [

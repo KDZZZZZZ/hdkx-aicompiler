@@ -142,8 +142,8 @@
     "batched_matmul": {
       "frontend": {
         "status": "implemented",
-        "gate": "structural_matmul_mapping_requires_relay_type_check",
-        "reason": "ONNX MatMul maps structurally to Relay matmul; Relay type checking, not the frontend, validates rank and static compatibility.",
+        "gate": "static_matmul_rank_k_batch_output_contract",
+        "reason": "ONNX MatMul fail-closed frontend validates two resolved static inputs, rank >= 2, dtype/K equality, NumPy batch broadcasting, and declared output shape/dtype; missing metadata rejects.",
         "evidence": [
           "python/kxc_onnx/importer.py",
           "test/onnx_importer_py_test.py"

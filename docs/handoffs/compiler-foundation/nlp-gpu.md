@@ -15,7 +15,7 @@
 3. C++ import-spec reifier 校验非负静态 shape，并在构图后用 Relay 类型推导核对每个声明 output 的 shape/dtype。
 4. Relay softmax 改为 `max -> subtract -> exp -> sum -> divide`，LLVM 数值测试加入极大正负 logits 和非有限值检查。
 5. `matmul` 扩展为 rank >= 2，并按 ONNX/NumPy 规则广播 leading batch dimensions；不兼容 K、batch 或 rank < 2 明确失败。
-6. ONNX importer 增加静态 `MatMul`、`Softmax`、`Transpose` 映射；Softmax 默认 axis 按 opset `<13: 1`、`>=13: -1` 处理。
+6. ONNX importer 增加静态 `MatMul`、`Softmax`、`Transpose` 映射；每个 `MatMul` 在 frontend fail-closed 校验两个可解析静态输入、rank >= 2、dtype/K、NumPy leading-batch broadcast 和声明 output contract，缺失 metadata 拒绝；Softmax 默认 axis 按 opset `<13: 1`、`>=13: -1` 处理。
 7. 两条 lowering 路径在生成 TIR 前拒绝负 extent；Relay 仍可表示 unknown extent，但不能冒充 executable dynamic shape。
 8. 增加 exact-static causal prefill 和 token=1 external-K/V decode 的 LLVM/`RuntimeSession` 数值测试代码。
 9. 在真实 CUDA 设备上验证现有 add/relu 路径，同时验证 softmax/batched-matmul 必须在 `BindCudaThreads` reduction gate 失败，未伪造 CUDA attention 支持。
@@ -36,7 +36,7 @@
 |---|---|---|---|---|
 | stable softmax | ONNX static axis、Relay 和 max-subtraction lowering 已实现 | finite-logit CPU reference validated；LLVM 极值测试已实现但本机未运行 | unsupported | 仅 unmasked static softmax；非有限/all-masked 表示没有执行语义，验收 gate 保持关闭 |
 | masked/all-masked softmax | 无正式 mask/select 或 all-masked contract | checker 验证该 fixture 不得开放，不是 Relay 执行结果 | reduction 与 mask 均 unsupported | 不定义“全零”等临时替代语义，也不声称现有 Relay 会运行时拒绝 `-inf` 行 |
-| batched matmul | ONNX 只做结构映射；Relay type check 和 lowering 实现 rank >= 2 及 batch broadcast | LLVM batch-broadcast 数值测试已实现但本机未运行 | reduction/nested-loop unsupported | rank < 2、K 不匹配、batch 不可广播在 Relay type 阶段 fail closed |
+| batched matmul | ONNX frontend fail-closed 校验静态 rank/K/dtype/batch/output contract；Relay type check 和 lowering 也实现 rank >= 2 及 batch broadcast | LLVM batch-broadcast 数值测试已实现但本机未运行 | reduction/nested-loop unsupported | rank < 2、K/dtype 不匹配、batch 不可广播、缺失 metadata 或声明 output 不一致在 frontend/Relay gate fail closed |
 | embedding/gather | contracted，未实现 | 未实现 | 未实现 | ONNX `Gather` 仍拒绝；OOB policy 未冻结 |
 | mask/select | 未实现；exact slice 只把有限 additive mask 作为输入并复用 `add` | 仅 CPU causal finite-mask reference | 未实现 | 不等同于 `Where`、padding valid extent 或 all-masked 支持 |
 | normalization | contracted，未实现正式 norm op | 未实现 | 未实现 | epsilon、axis、accumulation dtype 尚无完整证据 |
@@ -58,7 +58,7 @@
 | `GlobalAveragePool` | `nn_global_avg_pool2d` | 既有静态 MVP |
 | `Flatten` | `nn_flatten` | 既有静态 MVP |
 | `Gemm` | `nn_gemm` | 既有静态 MVP |
-| `MatMul` | `matmul` | rank >= 2；leading batch 静态广播 |
+| `MatMul` | `matmul` | frontend 要求两个可解析静态输入、rank >= 2、同 dtype/K、leading batch 静态广播及声明 output 一致；缺失 metadata 拒绝 |
 | `Softmax` | `softmax` | static axis；opset 默认 axis 已区分 |
 | `Transpose` | `transpose` | 缺省 `perm` 使用 Relay 逆序规则 |
 
@@ -68,6 +68,7 @@
 
 - `import_onnx(..., default_batch=None)` 是默认行为：缺失 shape field 的 unknown rank 以及 symbolic/unknown dim 立即报错；合法显式零维 shape 仍表示 scalar。
 - 显式正数 `default_batch` 只允许绑定 unresolved axis 0；非 batch unresolved dim 即使提供 batch binding 仍拒绝。
+- 每个 ONNX `MatMul` 在映射前解析两个输入的静态 TensorSpec（graph input/value_info、initializer 或此前推导的 MatMul output）；metadata 缺失/未解析、rank < 2、dtype/K/batch 不兼容以及声明 output 不一致都拒绝，且不推导无关算子。
 - C++ JSON reifier 只接受非负整数静态 shape；负数/非整数维度拒绝，合法零维保留；推导出的 output shape/dtype 必须与 JSON 声明一致。
 - C++ API 中 `TensorType` 仍可表示负 extent，但 legacy whole-graph 与 production per-unit lowering 都在生成 TIR 前拒绝；这不是 dynamic shape 实现。
 - all-masked fixture 只在独立 reference checker 中抛 unsupported，作用是阻止验收误开 gate；现有 unmasked Relay softmax 没有 mask 输入，也不宣称会拒绝全 `-inf` 数据。
@@ -171,7 +172,7 @@ c++ -std=c++17 -Iinclude -Ithird_party/dlpack/include \
 - importer、CLI、测试文件执行 `python3 -m py_compile`：**PASS**；
 - `kxc_frontend_obj` 编译：**PASS**。
 
-新增 Python 测试代码覆盖 unknown input/output rank、symbolic batch 显式绑定、非 batch unresolved 拒绝、合法 scalar/零 extent、MatMul/Softmax/Transpose 映射和 Softmax opset 默认 axis；需要具备本地依赖的环境复验后才能升级为 `validated`。
+新增 Python 测试代码覆盖 unknown input/output rank、symbolic batch 显式绑定、非 batch unresolved 拒绝、合法 scalar/零 extent、MatMul/Softmax/Transpose 映射、MatMul rank-1/K/batch/dtype/metadata/output 负例和 Softmax opset 默认 axis；这些 Python tests 在本机仍未运行，需要具备本地依赖的环境复验后才能升级为 `validated`。
 
 ### 3.6 CUDA
 
