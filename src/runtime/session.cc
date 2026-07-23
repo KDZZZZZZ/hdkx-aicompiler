@@ -32,6 +32,7 @@ struct RuntimeExecutionState final {
     api::CompiledModule module;
     ExecutablePlan plan;
     FrozenTaskPlan task_plan;
+    SelectedArtifactManifest manifest;
     std::shared_ptr<internal::ValueTable> values;
     Array<AsyncOperation> prior_operations;
 };
@@ -114,6 +115,7 @@ ValidatedPlanContract ValidateModuleAndPlan(
             "RuntimeSession requires a defined ExecutablePlan");
     }
     plan.Validate();
+    const Map<String, NDArray> module_constants = module.constants();
 
     const Array<String> module_symbols = module.symbols();
     const Array<KernelCall> calls = plan.calls();
@@ -173,7 +175,10 @@ ValidatedPlanContract ValidateModuleAndPlan(
         size_t regular_index = 0;
         size_t constant_index = 0;
         size_t output_index = 0;
-        for (const auto& argument : signature.arguments()) {
+        const Array<codegen::KernelArgSpec> arguments = signature.arguments();
+        for (size_t argument_index = 0; argument_index < arguments.size();
+             ++argument_index) {
+            const auto& argument = arguments[argument_index];
             int64_t value_id = -1;
             switch (argument->role) {
                 case codegen::KernelArgRole::kInput:
@@ -204,6 +209,14 @@ ValidatedPlanContract ValidateModuleAndPlan(
                                       std::to_string(value_id));
             if (argument->role == codegen::KernelArgRole::kConstant) {
                 const std::string key = std::string(argument->constant_key);
+                if (!module_constants.count(argument->constant_key)) {
+                    throw std::invalid_argument(
+                        context + " has no module constant binding");
+                }
+                api::ValidateKernelArgument(
+                    signature, argument_index, argument,
+                    module_constants.at(argument->constant_key),
+                    module_constants);
                 const auto existing = result.constant_keys_by_value.find(value_id);
                 if (existing != result.constant_keys_by_value.end() &&
                     std::string(existing->second) != key) {
@@ -230,7 +243,6 @@ ValidatedPlanContract ValidateModuleAndPlan(
             "RuntimeSession plan and module symbols are not identical");
     }
 
-    const Map<String, NDArray> module_constants = module.constants();
     const Array<int64_t> constant_ids = plan.constant_value_ids();
     if (result.constant_keys_by_value.size() != constant_ids.size() ||
         module_constants.size() != constant_ids.size()) {
@@ -252,6 +264,77 @@ ValidatedPlanContract ValidateModuleAndPlan(
     return result;
 }
 
+void ValidatePlanManifest(const api::CompiledModule& module,
+                          const PlanVariant& variant) {
+    variant.Validate();
+    const ExecutablePlan plan = variant.plan();
+    const Array<KernelCall> calls = plan.calls();
+    for (const auto& binding : variant.manifest().bindings()) {
+        const std::string context =
+            "RuntimeSession call artifact[" +
+            std::to_string(binding->invocation_id) + "]";
+        if (binding->generation != 0) {
+            throw std::invalid_argument(
+                context + " requires unsupported non-zero generation");
+        }
+        const size_t call_index =
+            static_cast<size_t>(binding->invocation_id);
+        if (call_index >= calls.size() ||
+            std::string(binding->entry_symbol) !=
+                std::string(calls[call_index]->symbol)) {
+            throw std::invalid_argument(
+                context + " entry binding does not match the ordered call");
+        }
+        const String abi = ComputeCallExactAbiFingerprint(
+            module, plan, binding->invocation_id);
+        if (std::string(binding->exact_abi_fingerprint) != std::string(abi)) {
+            throw std::invalid_argument(
+                context + " exact ABI fingerprint does not match the module");
+        }
+        const String entry_binding = ComputeEntryBindingFingerprint(
+            ArtifactBindingKind::kCall, binding->invocation_id,
+            binding->artifact_identity, binding->generation, abi,
+            binding->entry_symbol);
+        if (std::string(binding->entry_binding) !=
+            std::string(entry_binding)) {
+            throw std::invalid_argument(
+                context + " canonical entry binding does not match");
+        }
+    }
+}
+
+void ValidateTaskManifest(const api::CompiledModule& module,
+                          const FrozenTaskPlan& plan) {
+    if (!plan.manifest().defined()) {
+        throw std::invalid_argument(
+            "RuntimeSession task DAG requires a selected-artifact manifest");
+    }
+    for (const auto& binding : plan.manifest().bindings()) {
+        const std::string context =
+            "RuntimeSession task artifact[" +
+            std::to_string(binding->invocation_id) + "]";
+        if (binding->generation != 0) {
+            throw std::invalid_argument(
+                context + " requires unsupported non-zero generation");
+        }
+        const String abi = ComputeTaskExactAbiFingerprint(
+            module, plan, binding->invocation_id);
+        if (std::string(binding->exact_abi_fingerprint) != std::string(abi)) {
+            throw std::invalid_argument(
+                context + " exact ABI fingerprint does not match the module");
+        }
+        const String entry_binding = ComputeEntryBindingFingerprint(
+            ArtifactBindingKind::kTask, binding->invocation_id,
+            binding->artifact_identity, binding->generation, abi,
+            binding->entry_symbol);
+        if (std::string(binding->entry_binding) !=
+            std::string(entry_binding)) {
+            throw std::invalid_argument(
+                context + " canonical entry binding does not match");
+        }
+    }
+}
+
 ValidatedPlanContract ValidateModuleAndTaskPlan(
     const api::CompiledModule& module, const FrozenTaskPlan& plan) {
     if (!module.defined() || !module.IsReady()) {
@@ -263,6 +346,7 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
             "RuntimeSession requires a defined FrozenTaskPlan");
     }
     plan.Validate();
+    const Map<String, NDArray> module_constants = module.constants();
     for (const auto& region : plan.regions()) {
         switch (region->kind) {
             case RegionKind::kPerCall:
@@ -357,7 +441,10 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
         size_t regular_index = 0;
         size_t constant_index = 0;
         size_t output_index = 0;
-        for (const auto& argument : signature.arguments()) {
+        const Array<codegen::KernelArgSpec> arguments = signature.arguments();
+        for (size_t argument_index = 0; argument_index < arguments.size();
+             ++argument_index) {
+            const auto& argument = arguments[argument_index];
             int64_t value_id = -1;
             switch (argument->role) {
                 case codegen::KernelArgRole::kInput:
@@ -393,6 +480,14 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
             }
             if (argument->role == codegen::KernelArgRole::kConstant) {
                 const std::string key = std::string(argument->constant_key);
+                if (!module_constants.count(argument->constant_key)) {
+                    throw std::invalid_argument(
+                        context + " has no module constant binding");
+                }
+                api::ValidateKernelArgument(
+                    signature, argument_index, argument,
+                    module_constants.at(argument->constant_key),
+                    module_constants);
                 const auto existing =
                     result.constant_keys_by_value.find(value_id);
                 if (existing != result.constant_keys_by_value.end() &&
@@ -420,7 +515,6 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
             "RuntimeSession task DAG requires at least one kernel task");
     }
 
-    const Map<String, NDArray> module_constants = module.constants();
     const Array<int64_t> constant_ids = plan.constant_value_ids();
     if (result.constant_keys_by_value.size() != constant_ids.size()) {
         throw std::invalid_argument(
@@ -438,20 +532,29 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
             module_constants.at(key->second),
             "RuntimeSession task constant value " + std::to_string(value_id));
     }
+    ValidateTaskManifest(module, plan);
     return result;
 }
 
 void ValidateStoredSession(const RuntimeSessionNode& node) {
-    const ValidatedPlanContract checked = node.task_plan.defined()
-                                              ? ValidateModuleAndTaskPlan(
-                                                    node.module, node.task_plan)
-                                              : ValidateModuleAndPlan(node.module,
-                                                                      node.plan);
-    if (checked.device != node.device ||
+    ValidatedPlanContract checked;
+    if (node.task_plan.defined()) {
+        checked = ValidateModuleAndTaskPlan(node.module, node.task_plan);
+    } else {
+        checked = ValidateModuleAndPlan(node.module, node.plan);
+        if (node.manifest.defined()) {
+            ValidatePlanManifest(
+                node.module, PlanVariant(node.plan, node.manifest));
+        }
+    }
+    const bool selected_task_dag =
+        node.selection.selected_mode == RuntimeExecutionMode::kTaskDAG;
+    if (selected_task_dag != node.task_plan.defined() ||
+        checked.device != node.device ||
         checked.constant_keys_by_value.size() !=
             node.constant_keys_by_value.size()) {
         throw std::invalid_argument(
-            "RuntimeSession stored plan metadata is inconsistent");
+            "RuntimeSession stored plan, selection, or metadata is inconsistent");
     }
     for (const auto& item : checked.constant_keys_by_value) {
         const auto stored = node.constant_keys_by_value.find(item.first);
@@ -630,6 +733,111 @@ FrozenTaskPlan BuildPerCallTaskPlan(const api::CompiledModule& module,
         plan.output_value_ids()));
 }
 
+struct FallbackDecision final {
+    FallbackReason reason{FallbackReason::kNone};
+    std::string diagnostic;
+};
+
+FallbackDecision InspectOrderedPlanForTaskDAG(const ExecutablePlan& plan) {
+    for (const auto& value : plan.values()) {
+        for (int64_t dimension : value.shape()) {
+            if (dimension < 0) {
+                return {FallbackReason::kUnsupportedDynamicInput,
+                        "task DAG adapter does not support dynamic input value " +
+                            std::to_string(value->value_id)};
+            }
+        }
+    }
+    for (const auto& value : plan.values()) {
+        if (value->is_alias) {
+            return {FallbackReason::kUnsupportedAlias,
+                    "task DAG adapter does not support alias value " +
+                        std::to_string(value->value_id)};
+        }
+    }
+    return {};
+}
+
+FallbackDecision InspectFrozenPlanForRuntime(const FrozenTaskPlan& plan) {
+    for (const auto& region : plan.regions()) {
+        if (region->alias != RegionAlias::kNoAlias) {
+            return {FallbackReason::kUnsupportedAlias,
+                    "task DAG runtime does not support conservative alias regions"};
+        }
+        switch (region->kind) {
+            case RegionKind::kPerCall:
+                break;
+            case RegionKind::kFusion:
+                return {FallbackReason::kUnsupportedFusion,
+                        "task DAG runtime requires verified fusion provenance"};
+            case RegionKind::kLibrary:
+                return {FallbackReason::kUnsupportedLibrary,
+                        "task DAG runtime requires a library execution contract"};
+            case RegionKind::kControlFlow:
+                return {FallbackReason::kUnsupportedControlFlow,
+                        "task DAG runtime does not execute control-flow regions"};
+        }
+    }
+    for (const auto& task : plan.tasks()) {
+        if (task->kind == TaskKind::kShapeEval) {
+            return {FallbackReason::kUnsupportedShapeEvaluation,
+                    "task DAG runtime requires shape-evaluation integration"};
+        }
+    }
+    return {};
+}
+
+void EmitFallback(const RuntimeObserver& observer, FallbackReason reason,
+                  const std::string& diagnostic) {
+    if (!observer) return;
+    RuntimeEvent event;
+    event.kind = RuntimeEventKind::kFallback;
+    event.fallback_reason = reason;
+    event.diagnostic = String(diagnostic);
+    try {
+        observer(event);
+    } catch (...) {
+        // Audit hooks are synchronous but never control plan selection.
+    }
+}
+
+TaskDAGSelectionResult SelectionResult(
+    RuntimeExecutionMode requested, RuntimeExecutionMode selected,
+    FallbackReason reason = FallbackReason::kNone,
+    std::string diagnostic = {}) {
+    return TaskDAGSelectionResult{requested, selected, reason,
+                                  String(std::move(diagnostic))};
+}
+
+FrozenTaskPlan AdaptPlanVariantToTaskDAG(
+    const api::CompiledModule& module, const PlanVariant& variant) {
+    FrozenTaskPlan task_plan = BuildPerCallTaskPlan(module, variant.plan());
+    std::unordered_map<int64_t, SelectedArtifactBinding> calls;
+    for (const auto& binding : variant.manifest().bindings()) {
+        calls.emplace(binding->invocation_id, binding);
+    }
+    Array<ArtifactSelection> selections;
+    size_t call_index = 0;
+    for (const auto& task : task_plan.tasks()) {
+        if (task->kind != TaskKind::kKernel) continue;
+        const auto selected = calls.find(static_cast<int64_t>(call_index++));
+        if (selected == calls.end()) {
+            throw std::logic_error(
+                "task DAG adapter lost an ordered call artifact binding");
+        }
+        selections.push_back(ArtifactSelection{
+            task->task_id, selected->second->artifact_identity,
+            selected->second->generation});
+    }
+    if (call_index != calls.size()) {
+        throw std::logic_error(
+            "task DAG adapter did not bind every ordered call artifact");
+    }
+    return AttachSelectedArtifacts(
+        module, task_plan, selections,
+        variant.manifest().retention_token());
+}
+
 Array<NDArray> PrepareTaskArguments(
     const api::CompiledModule& module, const TaskSpec& task,
     const std::unordered_map<int64_t, ValueSpec>& values,
@@ -708,50 +916,138 @@ void ValidateBoundTaskSources(
 
 RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan)
     : RuntimeSession(std::move(module), std::move(plan),
-                     RuntimeExecutionMode::kPerCall) {}
+                     RuntimeExecutionMode::kPerCall, {}) {}
 
 RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan,
-                               RuntimeExecutionMode mode) {
+                               RuntimeExecutionMode mode)
+    : RuntimeSession(std::move(module), std::move(plan), mode, {}) {}
+
+RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan,
+                               RuntimeExecutionMode mode,
+                               RuntimeObserver observer) {
     if (mode != RuntimeExecutionMode::kPerCall &&
         mode != RuntimeExecutionMode::kTaskDAG) {
         throw std::invalid_argument("RuntimeSession execution mode is invalid");
     }
     ValidatedPlanContract contract = ValidateModuleAndPlan(module, plan);
-#if KXC_ENABLE_REGION_TASK_DAG
+    TaskDAGSelectionResult selection =
+        SelectionResult(mode, RuntimeExecutionMode::kPerCall);
     if (mode == RuntimeExecutionMode::kTaskDAG) {
-        try {
-            FrozenTaskPlan task_plan = BuildPerCallTaskPlan(module, plan);
-            ValidatedPlanContract task_contract =
-                ValidateModuleAndTaskPlan(module, task_plan);
-            SetData(new RuntimeSessionNode(
-                std::move(module), std::move(task_plan),
-                std::move(task_contract.device),
-                std::move(task_contract.constant_keys_by_value)));
-            return;
-        } catch (const std::invalid_argument&) {
-            // The validated ordered plan is the conservative per-Call fallback.
+#if KXC_ENABLE_REGION_TASK_DAG
+        FallbackDecision fallback = InspectOrderedPlanForTaskDAG(plan);
+        if (fallback.reason == FallbackReason::kNone) {
+            fallback = {FallbackReason::kMissingArtifactManifest,
+                        "task DAG adapter requires a selected-artifact PlanVariant"};
         }
-    }
 #else
-    (void)mode;
+        const FallbackDecision fallback{
+            FallbackReason::kFeatureDisabled,
+            "task DAG support is disabled by KXC_ENABLE_REGION_TASK_DAG"};
 #endif
+        selection = SelectionResult(mode, RuntimeExecutionMode::kPerCall,
+                                    fallback.reason, fallback.diagnostic);
+        EmitFallback(observer, fallback.reason, fallback.diagnostic);
+    }
     SetData(new RuntimeSessionNode(
-        std::move(module), std::move(plan), std::move(contract.device),
-        std::move(contract.constant_keys_by_value)));
+        std::move(module), std::move(plan), SelectedArtifactManifest(),
+        std::move(contract.device),
+        std::move(contract.constant_keys_by_value), std::move(selection),
+        std::move(observer)));
+}
+
+RuntimeSession::RuntimeSession(api::CompiledModule module, PlanVariant variant)
+    : RuntimeSession(std::move(module), std::move(variant),
+                     RuntimeExecutionMode::kPerCall, {}) {}
+
+RuntimeSession::RuntimeSession(api::CompiledModule module, PlanVariant variant,
+                               RuntimeExecutionMode mode,
+                               RuntimeObserver observer) {
+    if (mode != RuntimeExecutionMode::kPerCall &&
+        mode != RuntimeExecutionMode::kTaskDAG) {
+        throw std::invalid_argument("RuntimeSession execution mode is invalid");
+    }
+    variant.Validate();
+    const ExecutablePlan plan = variant.plan();
+    ValidatedPlanContract contract = ValidateModuleAndPlan(module, plan);
+    ValidatePlanManifest(module, variant);
+    TaskDAGSelectionResult selection =
+        SelectionResult(mode, RuntimeExecutionMode::kPerCall);
+    if (mode == RuntimeExecutionMode::kTaskDAG) {
+#if KXC_ENABLE_REGION_TASK_DAG
+        const FallbackDecision fallback = InspectOrderedPlanForTaskDAG(plan);
+        if (fallback.reason != FallbackReason::kNone) {
+            selection = SelectionResult(mode, RuntimeExecutionMode::kPerCall,
+                                        fallback.reason,
+                                        fallback.diagnostic);
+            EmitFallback(observer, fallback.reason, fallback.diagnostic);
+        } else {
+            try {
+                FrozenTaskPlan task_plan =
+                    AdaptPlanVariantToTaskDAG(module, variant);
+                ValidatedPlanContract task_contract =
+                    ValidateModuleAndTaskPlan(module, task_plan);
+                SetData(new RuntimeSessionNode(
+                    std::move(module), std::move(task_plan),
+                    std::move(task_contract.device),
+                    std::move(task_contract.constant_keys_by_value),
+                    SelectionResult(mode, RuntimeExecutionMode::kTaskDAG),
+                    std::move(observer)));
+                return;
+            } catch (const std::bad_alloc&) {
+                throw;
+            } catch (const std::exception& error) {
+                const std::string diagnostic =
+                    "task DAG adapter invariant failed: " +
+                    std::string(error.what());
+                EmitFallback(observer, FallbackReason::kAdapterBug,
+                             diagnostic);
+                throw std::logic_error(diagnostic);
+            }
+        }
+#else
+        const FallbackDecision fallback{
+            FallbackReason::kFeatureDisabled,
+            "task DAG support is disabled by KXC_ENABLE_REGION_TASK_DAG"};
+        selection = SelectionResult(mode, RuntimeExecutionMode::kPerCall,
+                                    fallback.reason, fallback.diagnostic);
+        EmitFallback(observer, fallback.reason, fallback.diagnostic);
+#endif
+    }
+    SetData(new RuntimeSessionNode(
+        std::move(module), plan, variant.manifest(),
+        std::move(contract.device),
+        std::move(contract.constant_keys_by_value), std::move(selection),
+        std::move(observer)));
 }
 
 RuntimeSession::RuntimeSession(api::CompiledModule module,
-                               FrozenTaskPlan plan) {
+                               FrozenTaskPlan plan)
+    : RuntimeSession(std::move(module), std::move(plan), {}) {}
+
+RuntimeSession::RuntimeSession(api::CompiledModule module,
+                               FrozenTaskPlan plan,
+                               RuntimeObserver observer) {
 #if KXC_ENABLE_REGION_TASK_DAG
+    plan.Validate();
+    const FallbackDecision unsupported = InspectFrozenPlanForRuntime(plan);
+    if (unsupported.reason != FallbackReason::kNone) {
+        EmitFallback(observer, unsupported.reason, unsupported.diagnostic);
+        throw std::invalid_argument(unsupported.diagnostic);
+    }
     ValidatedPlanContract contract = ValidateModuleAndTaskPlan(module, plan);
     SetData(new RuntimeSessionNode(
         std::move(module), std::move(plan), std::move(contract.device),
-        std::move(contract.constant_keys_by_value)));
+        std::move(contract.constant_keys_by_value),
+        SelectionResult(RuntimeExecutionMode::kTaskDAG,
+                        RuntimeExecutionMode::kTaskDAG),
+        std::move(observer)));
 #else
+    const std::string diagnostic =
+        "task DAG support is disabled by KXC_ENABLE_REGION_TASK_DAG";
+    EmitFallback(observer, FallbackReason::kFeatureDisabled, diagnostic);
     (void)module;
     (void)plan;
-    throw std::invalid_argument(
-        "RuntimeSession task DAG support is disabled by KXC_ENABLE_REGION_TASK_DAG");
+    throw std::invalid_argument(diagnostic);
 #endif
 }
 
@@ -820,48 +1116,46 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
         }
         ValidateBoundTaskSources(node->module, node->task_plan, values, table);
 
-        std::unordered_map<int64_t, TaskSpec> tasks;
-        for (const auto& task : node->task_plan.tasks()) {
-            tasks.emplace(task->task_id, task);
-        }
         Array<AsyncOperation> operations;
-        for (int64_t task_id : node->task_plan.topological_task_ids()) {
-            const TaskSpec& task = tasks.at(task_id);
-            switch (task->kind) {
-                case TaskKind::kAllocate: {
-                    const int64_t value_id = task.output_value_ids()[0];
-                    table->Allocate(
-                        FindValue(values, value_id,
-                                  "RuntimeSession task allocation"),
-                        task->alignment);
-                    break;
+        (void)ExecuteTasksDeterministically(
+            node->task_plan,
+            [&](const TaskSpec& task) {
+                switch (task->kind) {
+                    case TaskKind::kAllocate: {
+                        const int64_t value_id = task.output_value_ids()[0];
+                        table->Allocate(
+                            FindValue(values, value_id,
+                                      "RuntimeSession task allocation"),
+                            task->alignment);
+                        break;
+                    }
+                    case TaskKind::kKernel: {
+                        const Array<NDArray> arguments = PrepareTaskArguments(
+                            node->module, task, values, table);
+                        operations.push_back(node->module.Launch(
+                            task->symbol, arguments, stream));
+                        break;
+                    }
+                    case TaskKind::kCopy: {
+                        const NDArray source =
+                            table->Get(task.input_value_ids()[0]);
+                        const NDArray destination =
+                            table->Get(task.output_value_ids()[0]);
+                        operations.push_back(
+                            destination.CopyFromAsync(source, stream));
+                        break;
+                    }
+                    case TaskKind::kEvent:
+                        break;
+                    case TaskKind::kSync:
+                        stream.Sync();
+                        break;
+                    case TaskKind::kShapeEval:
+                        throw std::logic_error(
+                            "validated RuntimeSession task plan contains ShapeEval");
                 }
-                case TaskKind::kKernel: {
-                    const Array<NDArray> arguments = PrepareTaskArguments(
-                        node->module, task, values, table);
-                    operations.push_back(
-                        node->module.Launch(task->symbol, arguments, stream));
-                    break;
-                }
-                case TaskKind::kCopy: {
-                    const NDArray source =
-                        table->Get(task.input_value_ids()[0]);
-                    const NDArray destination =
-                        table->Get(task.output_value_ids()[0]);
-                    operations.push_back(
-                        destination.CopyFromAsync(source, stream));
-                    break;
-                }
-                case TaskKind::kEvent:
-                    break;
-                case TaskKind::kSync:
-                    stream.Sync();
-                    break;
-                case TaskKind::kShapeEval:
-                    throw std::logic_error(
-                        "validated RuntimeSession task plan contains ShapeEval");
-            }
-        }
+            },
+            node->observer);
 
         Array<NDArray> outputs;
         for (int64_t value_id : node->task_plan.output_value_ids()) {
@@ -876,7 +1170,7 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
         }
         auto state = std::make_shared<RuntimeExecutionState>(
             RuntimeExecutionState{node->module, ExecutablePlan(),
-                                  node->task_plan, table,
+                                  node->task_plan, node->manifest, table,
                                   std::move(prior_operations)});
         completion.RetainDependencies(table->RetainedStorage(),
                                       std::move(state));
@@ -937,7 +1231,7 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
         prior_operations.push_back(operations[i]);
     }
     auto state = std::make_shared<RuntimeExecutionState>(RuntimeExecutionState{
-        node->module, node->plan, FrozenTaskPlan(), table,
+        node->module, node->plan, FrozenTaskPlan(), node->manifest, table,
         std::move(prior_operations)});
     completion.RetainDependencies(table->RetainedStorage(), std::move(state));
     return RunAsyncResult{std::move(outputs), std::move(completion)};
@@ -945,6 +1239,14 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
 
 bool RuntimeSession::UsesTaskDAG() const {
     return operator->()->task_plan.defined();
+}
+
+TaskDAGSelectionResult RuntimeSession::TaskDAGSelection() const {
+    return operator->()->selection;
+}
+
+SelectedArtifactManifest RuntimeSession::artifact_manifest() const {
+    return operator->()->manifest;
 }
 
 const RuntimeSessionNode* RuntimeSession::operator->() const {

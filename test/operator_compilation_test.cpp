@@ -464,9 +464,27 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
             adapter.Lookup(pin.handle().record().artifact_key).kind ==
                 api::ArtifactLookupKind::kHit;
     }
+    bool manifest_matches_pins = second.variant.defined() &&
+        second.variant.manifest().retention_token() != nullptr &&
+        second.variant.manifest().bindings().size() ==
+            second.artifact_pins.size();
+    if (manifest_matches_pins) {
+        const auto bindings = second.variant.manifest().bindings();
+        for (size_t index = 0; index < bindings.size(); ++index) {
+            manifest_matches_pins =
+                manifest_matches_pins && bindings[index]->generation == 0 &&
+                bindings[index]->invocation_id ==
+                    static_cast<int64_t>(index) &&
+                bindings[index]->artifact_identity ==
+                    second.artifact_pins[index]
+                        .handle()
+                        .record()
+                        .artifact_key.canonical_bytes();
+        }
+    }
     TEST_CHECK(first.module.entry_count() == 2 &&
                    second.module.entry_count() == 2 &&
-                   public_pins_are_production_backed &&
+                   public_pins_are_production_backed && manifest_matches_pins &&
                    after_first.misses == 2 && after_first.hits == 0 &&
                    after_first.entries == 2 && after_second.misses == 2 &&
                    after_second.hits == 2,

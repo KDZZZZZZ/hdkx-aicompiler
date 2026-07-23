@@ -82,6 +82,41 @@ jobs:
           run_shape_specialization_test
           run_shape_guarded_specialization_test
 
+  cpu-asan:
+    name: CPU runtime-plan ASan/UBSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure sanitizer build
+        run: >
+          cmake -S . -B out/build/ci-runtime-asan
+          -DCMAKE_BUILD_TYPE=Debug
+          -DKXC_ENABLE_CUDA=OFF
+          -DKXC_ENABLE_LLVM=OFF
+          -DKXC_ENABLE_REGION_TASK_DAG=ON
+          -DKXC_BUILD_RESNET18_IR_DUMP=OFF
+          -DKXC_BUILD_PASS_TESTS=ON
+          -DKXC_BUILD_CODEGEN_TESTS=OFF
+          -DCMAKE_CXX_FLAGS_DEBUG="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build runtime-plan sanitizer targets
+        run: >
+          cmake --build out/build/ci-runtime-asan --parallel 2 --target
+          task_plan_test task_executor_test runtime_session_test
+
+      - name: Run runtime-plan sanitizer suite
+        env:
+          ASAN_OPTIONS: abort_on_error=1:detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: >
+          ctest --test-dir out/build/ci-runtime-asan
+          --output-on-failure --no-tests=error
+          --label-regex '(^|;)runtime-plan(;|$)'
+
   llvm-resnet18:
     name: ResNet18 LLVM compile
     runs-on: ubuntu-latest
@@ -109,6 +144,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=ON
+          -DKXC_ENABLE_REGION_TASK_DAG=ON
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_DEBUG_EXAMPLES=OFF
           -DKXC_BUILD_PASS_TESTS=ON
@@ -118,12 +154,12 @@ jobs:
         run: >
           cmake --build out/build/ci-llvm --parallel 2 --target
           operator_compilation_test codegen_llvm_test op_numeric_llvm_test
-          onnx_importer_test
+          onnx_importer_test runtime_session_test
 
       - name: Run LLVM operator, relocation/cache, codegen, and numeric checks
         run: >
           ctest --test-dir out/build/ci-llvm --output-on-failure
-          --tests-regex '^(operator_compilation_test|codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test)$'
+          --tests-regex '^(operator_compilation_test|codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test|runtime_session_test)$'
 
   python-onnx-importer:
     name: Python ONNX importer tests

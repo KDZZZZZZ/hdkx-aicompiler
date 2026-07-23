@@ -73,6 +73,9 @@ public:
         const kxc::DeviceStream& stream,
         const kxc::ObjectRef& executable_owner) const override {
         ++calls;
+        if (fail_on_call > 0 && calls == fail_on_call) {
+            throw std::runtime_error("recording launcher injected failure");
+        }
         last_arguments = arguments;
         saw_compiled_kernel_owner =
             executable_owner.As<kxc::codegen::CompiledKernelNode>() != nullptr;
@@ -87,6 +90,7 @@ public:
     bool ready{true};
     /*! \brief 后端实际收到的 launch 次数。 */
     mutable int calls{0};
+    int fail_on_call{0};
     /*! \brief 记录 launcher 是否收到当前 CompiledKernel owner。 */
     mutable bool saw_compiled_kernel_owner{false};
     /*! \brief 最近一次调用按 KernelSignature 顺序保存的参数。 */
@@ -244,7 +248,8 @@ SessionFixture MakeStaticFixture() {
 kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(
     bool with_shape_eval = false, uint64_t kernel_alignment = 64,
     kxc::runtime::RegionKind kernel_region_kind =
-        kxc::runtime::RegionKind::kPerCall) {
+        kxc::runtime::RegionKind::kPerCall,
+    int64_t artifact_generation = 0) {
     using namespace kxc;
     using namespace kxc::runtime;
     const Device cpu = Device::CPU();
@@ -258,7 +263,7 @@ kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(
         TaskSpec(10, TaskKind::kAllocate, cpu, {}, {2}, {}, String(), 0, 0,
                  kernel_alignment),
         TaskSpec(11, TaskKind::kKernel, cpu, {0, 1}, {2}, {10},
-                 "session_fixture"),
+                 "session_fixture", artifact_generation),
         TaskSpec(12, TaskKind::kEvent, cpu, {}, {}, {11}),
         TaskSpec(20, TaskKind::kAllocate, cpu, {}, {3}, {12}, String(), 0, 0,
                  64),
@@ -316,6 +321,41 @@ kxc::runtime::ExecutablePlan MakeAliasFallbackPlan() {
         {KernelCall("session_fixture", {0, 1}, {2})}, {0}, {1}, {2});
 }
 
+kxc::runtime::PlanVariant MakeVariant(
+    const kxc::api::CompiledModule& module,
+    const kxc::runtime::ExecutablePlan& plan, uint64_t generation = 0,
+    std::shared_ptr<const void> retention = nullptr) {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    Array<ArtifactSelection> selections;
+    for (size_t index = 0; index < plan.calls().size(); ++index) {
+        selections.push_back(ArtifactSelection{
+            static_cast<int64_t>(index),
+            String("artifact:canonical:" + std::to_string(index)),
+            generation});
+    }
+    return MakePlanVariant(module, plan, selections, std::move(retention));
+}
+
+kxc::runtime::FrozenTaskPlan FreezeTaskPlan(
+    const kxc::api::CompiledModule& module,
+    const kxc::runtime::FrozenTaskPlan& plan,
+    std::shared_ptr<const void> retention = nullptr) {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    Array<ArtifactSelection> selections;
+    for (const auto& task : plan.tasks()) {
+        if (task->kind != TaskKind::kKernel) continue;
+        selections.push_back(ArtifactSelection{
+            task->task_id,
+            String("artifact:task:canonical:" +
+                   std::to_string(task->task_id)),
+            static_cast<uint64_t>(task->artifact_generation)});
+    }
+    return AttachSelectedArtifacts(module, plan, selections,
+                                   std::move(retention));
+}
+
 /*! \brief 构造器必须拒绝 undefined module 和错误 ObjectRef 节点类型。 */
 bool TestConstructionAndTypeChecks() {
     using namespace kxc;
@@ -338,6 +378,33 @@ bool TestConstructionAndTypeChecks() {
                                                    fixture.plan);
                }),
                "defined but no longer ready module should fail");
+    return true;
+}
+
+bool TestConstantContractAtConstruction() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    KernelSignature signature(
+        "misaligned_constant",
+        {KernelArgSpec("weight", KernelArgRole::kConstant, Float32(), {3},
+                       cpu, 64, false, "weight"),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3}, cpu,
+                       1, true)});
+    runtime::NDArray backing =
+        runtime::NDArray::Zeros({4}, Float32(), cpu, 64);
+    runtime::NDArray misaligned = backing.CreateView({3}, {1}, sizeof(float));
+    Map<String, runtime::NDArray> constants;
+    constants.Set("weight", misaligned);
+    auto launcher = std::make_shared<RecordingLauncher>();
+    const api::CompiledModule module =
+        MakeModule(signature, constants, launcher);
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(module,
+                                                   MakePlan(signature));
+               }) &&
+                   launcher->calls == 0,
+               "constant alignment must be revalidated at session construction");
     return true;
 }
 
@@ -391,102 +458,314 @@ bool TestAsyncResultLifetime() {
     return true;
 }
 
-/*! \brief feature gate 必须保留显式 per-Call 路径和安全回退。 */
+/*! \brief feature gate and unsupported plans must expose audited fallback. */
 bool TestTaskDagFeatureGateAndFallback() {
     using namespace kxc;
     SessionFixture fixture = MakeStaticFixture();
     runtime::RuntimeSession per_call(fixture.module, fixture.plan);
-    TEST_CHECK(!per_call.UsesTaskDAG(),
+    TEST_CHECK(!per_call.UsesTaskDAG() &&
+                   per_call.TaskDAGSelection().fallback_reason ==
+                       runtime::FallbackReason::kNone,
                "the existing constructor must remain the per-Call path");
 
+    std::vector<runtime::RuntimeEvent> bare_events;
     runtime::RuntimeSession requested(
-        fixture.module, fixture.plan, runtime::RuntimeExecutionMode::kTaskDAG);
+        fixture.module, fixture.plan, runtime::RuntimeExecutionMode::kTaskDAG,
+        [&](const runtime::RuntimeEvent& event) {
+            bare_events.push_back(event);
+        });
+    const runtime::FallbackReason expected_bare =
 #if KXC_ENABLE_REGION_TASK_DAG
-    TEST_CHECK(requested.UsesTaskDAG(),
-               "enabled task mode should adapt the ordered per-Call plan");
+        runtime::FallbackReason::kMissingArtifactManifest;
 #else
-    TEST_CHECK(!requested.UsesTaskDAG(),
-               "disabled task mode must fall back to the per-Call plan");
+        runtime::FallbackReason::kFeatureDisabled;
+#endif
+    TEST_CHECK(!requested.UsesTaskDAG() &&
+                   requested.TaskDAGSelection().fallback_reason ==
+                       expected_bare &&
+                   !std::string(requested.TaskDAGSelection().diagnostic).empty() &&
+                   bare_events.size() == 1 &&
+                   bare_events[0].kind ==
+                       runtime::RuntimeEventKind::kFallback &&
+                   bare_events[0].fallback_reason == expected_bare,
+               "bare ordered-plan fallback must be queryable and observable");
+    runtime::RuntimeSession throwing_fallback_observer(
+        fixture.module, fixture.plan, runtime::RuntimeExecutionMode::kTaskDAG,
+        [](const runtime::RuntimeEvent&) {
+            throw std::runtime_error("observer failure");
+        });
+    TEST_CHECK(throwing_fallback_observer.TaskDAGSelection().fallback_reason ==
+                   expected_bare,
+               "observer exceptions must not change fallback selection");
+
+    const runtime::PlanVariant variant =
+        MakeVariant(fixture.module, fixture.plan);
+    runtime::RuntimeSession manifested(
+        fixture.module, variant, runtime::RuntimeExecutionMode::kTaskDAG);
+#if KXC_ENABLE_REGION_TASK_DAG
+    TEST_CHECK(manifested.UsesTaskDAG() &&
+                   manifested.TaskDAGSelection().fallback_reason ==
+                       runtime::FallbackReason::kNone &&
+                   manifested.artifact_manifest().defined(),
+               "enabled task mode should adapt a manifested PlanVariant");
+#else
+    TEST_CHECK(!manifested.UsesTaskDAG() &&
+                   manifested.TaskDAGSelection().fallback_reason ==
+                       runtime::FallbackReason::kFeatureDisabled,
+               "disabled task mode must report its feature-gate fallback");
 #endif
     runtime::NDArray input =
         runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
-    TEST_CHECK(requested.Run({input}).size() == 1,
+    TEST_CHECK(requested.Run({input}).size() == 1 &&
+                   manifested.Run({input}).size() == 1,
                "feature-gated execution must preserve outputs");
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(
+                       fixture.module,
+                       MakeVariant(fixture.module, fixture.plan, 1),
+                       runtime::RuntimeExecutionMode::kTaskDAG);
+               }),
+               "PlanVariant generation non-zero must remain rejected");
+
+    SessionFixture observer_fixture = MakeStaticFixture();
+    runtime::RuntimeSession observer_session(
+        observer_fixture.module,
+        MakeVariant(observer_fixture.module, observer_fixture.plan),
+        runtime::RuntimeExecutionMode::kTaskDAG,
+        [](const runtime::RuntimeEvent&) {
+            throw std::runtime_error("observer failure");
+        });
+    TEST_CHECK(observer_session.Run({input}).size() == 1 &&
+                   observer_fixture.launcher->calls == 1,
+               "task observer exceptions must not change execution");
 
     SessionFixture alias_fixture = MakeStaticFixture();
+    const runtime::ExecutablePlan alias_plan = MakeAliasFallbackPlan();
+    std::vector<runtime::RuntimeEvent> alias_events;
     runtime::RuntimeSession alias_fallback(
-        alias_fixture.module, MakeAliasFallbackPlan(),
-        runtime::RuntimeExecutionMode::kTaskDAG);
+        alias_fixture.module,
+        MakeVariant(alias_fixture.module, alias_plan),
+        runtime::RuntimeExecutionMode::kTaskDAG,
+        [&](const runtime::RuntimeEvent& event) {
+            alias_events.push_back(event);
+        });
+#if KXC_ENABLE_REGION_TASK_DAG
+    const runtime::FallbackReason expected_alias =
+        runtime::FallbackReason::kUnsupportedAlias;
+#else
+    const runtime::FallbackReason expected_alias =
+        runtime::FallbackReason::kFeatureDisabled;
+#endif
     TEST_CHECK(!alias_fallback.UsesTaskDAG() &&
-                   alias_fallback.Run({input}).size() == 1,
-               "unsupported alias contracts must use the per-Call fallback");
+                   alias_fallback.TaskDAGSelection().fallback_reason ==
+                       expected_alias &&
+                   alias_fallback.Run({input}).size() == 1 &&
+                   alias_events.size() == 1 &&
+                   alias_events[0].fallback_reason == expected_alias,
+               "unsupported alias fallback must be classified and observable");
     return true;
 }
 
-/*! \brief frozen task execution must retain module, operations, and all storage. */
+/*! \brief frozen task execution retains manifest and emits deterministic events. */
 bool TestFrozenTaskDagExecutionAndRetention() {
     using namespace kxc;
     SessionFixture fixture = MakeStaticFixture();
 #if KXC_ENABLE_REGION_TASK_DAG
     runtime::RunAsyncResult result;
+    std::vector<runtime::RuntimeEvent> events;
+    auto retention = std::make_shared<int>(7);
+    std::weak_ptr<int> retained_manifest_owner = retention;
     {
-        runtime::RuntimeSession session(fixture.module, MakeStaticTaskPlan());
-        TEST_CHECK(session.UsesTaskDAG(),
-                   "frozen task constructor must select task execution");
+        const runtime::FrozenTaskPlan frozen = FreezeTaskPlan(
+            fixture.module, MakeStaticTaskPlan(), retention);
+        runtime::RuntimeSession session(
+            fixture.module, frozen,
+            [&](const runtime::RuntimeEvent& event) {
+                events.push_back(event);
+            });
+        TEST_CHECK(session.UsesTaskDAG() &&
+                       session.artifact_manifest().defined(),
+                   "frozen task constructor must retain its manifest");
         runtime::NDArray input =
             runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
         result = session.RunAsync({input}, DeviceStream::Default(Device::CPU()));
     }
+    retention.reset();
+    bool saw_wait = false;
+    bool saw_launch = false;
+    bool saw_allocation = false;
+    bool saw_release = false;
+    bool saw_generation = false;
+    for (const auto& event : events) {
+        saw_wait = saw_wait || event.kind == runtime::RuntimeEventKind::kTaskWait;
+        saw_launch =
+            saw_launch || event.kind == runtime::RuntimeEventKind::kTaskLaunch;
+        saw_allocation = saw_allocation ||
+                         event.kind == runtime::RuntimeEventKind::kAllocation;
+        saw_release =
+            saw_release || event.kind == runtime::RuntimeEventKind::kRelease;
+        if (event.kind == runtime::RuntimeEventKind::kGeneration) {
+            saw_generation =
+                event.generation == 0 &&
+                event.artifact_identity == "artifact:task:canonical:11";
+        }
+    }
     TEST_CHECK(result.outputs.size() == 1 && result.completion.IsReady() &&
-                   fixture.launcher->calls == 1,
-               "kernel/event/copy/sync task execution did not complete");
-    TEST_CHECK(result.completion->retained_storage.size() == 4,
-               "task completion must retain input, constant, intermediate, and output");
+                   fixture.launcher->calls == 1 && saw_wait && saw_launch &&
+                   saw_allocation && saw_release && saw_generation,
+               "task execution or observer event schema is incomplete");
+    TEST_CHECK(result.completion->retained_storage.size() == 4 &&
+                   !retained_manifest_owner.expired(),
+               "completion must retain storage and selected-artifact manifest");
     result.completion.Wait();
+    result.completion = AsyncOperation();
+    TEST_CHECK(retained_manifest_owner.expired(),
+               "manifest owner must release with the completion handle");
 
     SessionFixture library_fixture = MakeStaticFixture();
+    std::vector<runtime::RuntimeEvent> library_events;
     TEST_CHECK(Throws([&] {
                    runtime::RuntimeSession invalid(
                        library_fixture.module,
-                       MakeStaticTaskPlan(false, 64,
-                                          runtime::RegionKind::kLibrary));
+                       FreezeTaskPlan(
+                           library_fixture.module,
+                           MakeStaticTaskPlan(false, 64,
+                                              runtime::RegionKind::kLibrary)),
+                       [&](const runtime::RuntimeEvent& event) {
+                           library_events.push_back(event);
+                       });
                }) &&
-                   library_fixture.launcher->calls == 0,
-               "library regions without their dedicated ABI must fail before launch");
+                   library_fixture.launcher->calls == 0 &&
+                   library_events.size() == 1 &&
+                   library_events[0].fallback_reason ==
+                       runtime::FallbackReason::kUnsupportedLibrary,
+               "library rejection must be classified before launch");
+    SessionFixture control_fixture = MakeStaticFixture();
+    std::vector<runtime::RuntimeEvent> control_events;
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(
+                       control_fixture.module,
+                       FreezeTaskPlan(
+                           control_fixture.module,
+                           MakeStaticTaskPlan(
+                               false, 64,
+                               runtime::RegionKind::kControlFlow)),
+                       [&](const runtime::RuntimeEvent& event) {
+                           control_events.push_back(event);
+                       });
+               }) &&
+                   control_fixture.launcher->calls == 0 &&
+                   control_events.size() == 1 &&
+                   control_events[0].fallback_reason ==
+                       runtime::FallbackReason::kUnsupportedControlFlow,
+               "control-flow rejection must be separately classified");
     SessionFixture fusion_fixture = MakeStaticFixture();
     TEST_CHECK(Throws([&] {
                    runtime::RuntimeSession invalid(
                        fusion_fixture.module,
-                       MakeStaticTaskPlan(false, 64,
-                                          runtime::RegionKind::kFusion));
+                       FreezeTaskPlan(
+                           fusion_fixture.module,
+                           MakeStaticTaskPlan(false, 64,
+                                              runtime::RegionKind::kFusion)));
                }) &&
                    fusion_fixture.launcher->calls == 0,
                "fusion regions without verified provenance must fail before launch");
     TEST_CHECK(Throws([&] {
-                   runtime::RuntimeSession invalid(fixture.module,
-                                                   MakeStaticTaskPlan(true));
+                   runtime::RuntimeSession invalid(
+                       fixture.module,
+                       FreezeTaskPlan(fixture.module,
+                                      MakeStaticTaskPlan(true)));
                }),
-               "shape-eval must fail closed until the shape contract is integrated");
+               "shape-eval must fail closed until its contract is integrated");
     TEST_CHECK(Throws([&] {
                    runtime::RuntimeSession invalid(
-                       fixture.module, MakeStaticTaskPlan(false, 1));
+                       fixture.module,
+                       FreezeTaskPlan(fixture.module,
+                                      MakeStaticTaskPlan(false, 1)));
                }),
                "kernel output alignment must fail at session construction");
 
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(
+                       fixture.module,
+                       FreezeTaskPlan(
+                           fixture.module,
+                           MakeStaticTaskPlan(false, 64,
+                                              runtime::RegionKind::kPerCall,
+                                              1)));
+               }),
+               "non-zero selected artifact generation must remain rejected");
+
+    const runtime::FrozenTaskPlan raw = MakeStaticTaskPlan();
+    const runtime::FrozenTaskPlan valid = FreezeTaskPlan(fixture.module, raw);
+    const runtime::SelectedArtifactBinding binding =
+        valid.manifest().bindings()[0];
+    const String bad_abi("tampered-exact-abi");
+    const runtime::SelectedArtifactBinding tampered(
+        runtime::ArtifactBindingKind::kTask, binding->invocation_id,
+        binding->artifact_identity, 0, bad_abi, binding->entry_symbol,
+        runtime::ComputeEntryBindingFingerprint(
+            runtime::ArtifactBindingKind::kTask, binding->invocation_id,
+            binding->artifact_identity, 0, bad_abi,
+            binding->entry_symbol));
+    const Array<runtime::SelectedArtifactBinding> tampered_bindings{tampered};
+    const runtime::FrozenTaskPlan tampered_plan = raw.WithManifest(
+        runtime::SelectedArtifactManifest(
+            runtime::ComputeFrozenTaskPlanFingerprint(raw,
+                                                      tampered_bindings),
+            tampered_bindings));
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(fixture.module,
+                                                   tampered_plan);
+               }),
+               "session must revalidate manifest ABI against CompiledModule");
+
     SessionFixture repeated_fixture = MakeStaticFixture();
-    runtime::RuntimeSession repeated_session(
+    const runtime::FrozenTaskPlan repeated_plan = FreezeTaskPlan(
         repeated_fixture.module, MakeRepeatedKernelTaskPlan());
+    runtime::RuntimeSession repeated_session(repeated_fixture.module,
+                                             repeated_plan);
     runtime::NDArray repeated_input =
         runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
     TEST_CHECK(repeated_session.Run({repeated_input}).size() == 1 &&
                    repeated_fixture.launcher->calls == 2,
-               "multiple task invocations must be able to share one module entry");
+               "multiple task invocations must retain distinct bindings");
+
+    SessionFixture failing_fixture = MakeStaticFixture();
+    failing_fixture.launcher->fail_on_call = 2;
+    std::vector<runtime::RuntimeEvent> failing_events;
+    runtime::RuntimeSession failing_session(
+        failing_fixture.module,
+        FreezeTaskPlan(failing_fixture.module,
+                       MakeRepeatedKernelTaskPlan()),
+        [&](const runtime::RuntimeEvent& event) {
+            failing_events.push_back(event);
+        });
+    TEST_CHECK(Throws([&] { failing_session.Run({repeated_input}); }) &&
+                   failing_fixture.launcher->calls == 2,
+               "post-start task failure must not replay the per-Call oracle");
+    size_t successful_kernel_launches = 0;
+    for (const auto& event : failing_events) {
+        if (event.kind == runtime::RuntimeEventKind::kTaskLaunch &&
+            event.task_kind == runtime::TaskKind::kKernel) {
+            ++successful_kernel_launches;
+        }
+    }
+    TEST_CHECK(successful_kernel_launches == 1,
+               "failed backend submission must not emit a successful launch");
 #else
+    std::vector<runtime::RuntimeEvent> events;
     TEST_CHECK(Throws([&] {
-                   runtime::RuntimeSession invalid(fixture.module,
-                                                   MakeStaticTaskPlan());
-               }),
-               "direct frozen task execution must be unavailable behind the gate");
+                   runtime::RuntimeSession invalid(
+                       fixture.module, MakeStaticTaskPlan(),
+                       [&](const runtime::RuntimeEvent& event) {
+                           events.push_back(event);
+                       });
+               }) &&
+                   events.size() == 1 &&
+                   events[0].fallback_reason ==
+                       runtime::FallbackReason::kFeatureDisabled,
+               "direct frozen task execution must expose disabled gate");
 #endif
     return true;
 }
@@ -624,7 +903,15 @@ bool TestDynamicInput() {
         module, plan, runtime::RuntimeExecutionMode::kTaskDAG);
     const Array<runtime::NDArray> fallback_outputs =
         requested_task_dag.Run({input});
+    const runtime::FallbackReason expected_dynamic =
+#if KXC_ENABLE_REGION_TASK_DAG
+        runtime::FallbackReason::kUnsupportedDynamicInput;
+#else
+        runtime::FallbackReason::kFeatureDisabled;
+#endif
     TEST_CHECK(!requested_task_dag.UsesTaskDAG() &&
+                   requested_task_dag.TaskDAGSelection().fallback_reason ==
+                       expected_dynamic &&
                    fallback_outputs.size() == 1 &&
                    SameShape(fallback_outputs[0].shape(), {3, 4}) &&
                    launcher->calls == 2,
@@ -813,7 +1100,8 @@ bool TestMultiEntryPlanExecution() {
 
 #if KXC_ENABLE_REGION_TASK_DAG
     runtime::RuntimeSession task_session(
-        module, plan, runtime::RuntimeExecutionMode::kTaskDAG);
+        module, MakeVariant(module, plan),
+        runtime::RuntimeExecutionMode::kTaskDAG);
     const Array<runtime::NDArray> task_outputs =
         task_session.Run({filled(1.0f), filled(2.0f), filled(3.0f)});
     std::vector<float> task_actual(4);
@@ -889,6 +1177,8 @@ bool TestPlannedIntermediateStorageReuse() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"construction_and_type_checks", TestConstructionAndTypeChecks},
+        {"constant_contract_at_construction",
+         TestConstantContractAtConstruction},
         {"synchronous_assembly", TestSynchronousAssembly},
         {"async_result_lifetime", TestAsyncResultLifetime},
         {"task_dag_feature_gate_and_fallback",

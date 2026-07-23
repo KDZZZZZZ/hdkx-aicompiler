@@ -1,381 +1,224 @@
-# Compiler Foundation：Region / ExecutionPlan / Runtime 交接
+# Compiler Foundation：Runtime manifest / observability 交接
 
-> **分支：** `feature/compiler-foundation-runtime-plan`
-> **状态：** W1 静态 exact 基线已完成；生产 feature gate 默认关闭
-> **范围：** frozen Region/task-DAG DTO、validator、dependency-aware memory planner、deterministic fake executor，以及单设备/单 stream 的 feature-gated `RuntimeSession` 执行
-> **非能力声明：** 本交接不声明 dynamic shape、control flow、fusion/library ABI、多 stream 或多 device 已完成
-
-## 0. Supervisor fix 后的预留/证据状态
-
-| 项目 | 当前准确状态 |
-|---|---|
-| `semantic_key` | **仅为 DTO 预留字段。** 本分支不生成、不规范化、不验证生产 semantic key，也没有 artifact cache 消费它；测试中的非空字符串只是 fixture 标签。 |
-| `artifact_generation` | **仅为 DTO 预留字段。** Kernel task 在 DTO 层允许非负值，非 Kernel task 必须为 `0`；`RuntimeSession` 进一步只接受 Kernel generation `0`。尚无 selected-generation manifest、artifact binding 或 pin。 |
-| pending GPU retention | **未验证。** 当前 retention 证据来自同步 CPU fake；本分支没有真实 pending CUDA task-DAG、提前释放 handle 或 Compute Sanitizer 证据。 |
+> **分支：** `feature/compiler-foundation-runtime-observability`
+>
+> **基线：** `525950a`（default-OFF Region Task DAG）
+>
+> **状态：** W2 Track05 generation-0 static-exact manifest、可审计 fallback 与同步 observer 已实现；feature gate 仍默认关闭
+>
+> **非能力声明：** 本交接不声明 non-zero generation、dynamic shape、Fusion/Library/ControlFlow 执行、多 stream/device、后台调度或真实 pending CUDA retention 已完成。
 
 ## 1. 架构边界
 
-本轨保持了原有单向依赖：
+依赖方向保持为：
 
 ```text
-Compiler / Relay / partition
-        -> CompiledModule + ExecutablePlan / FrozenTaskPlan
-        -> RuntimeSession + NDArray + DeviceStream + AsyncOperation
+Core / Compiler / upper control plane
+        -> runtime::PlanVariant / FrozenTaskPlan manifest
+        -> RuntimeSession + CompiledModule + AsyncOperation
 ```
 
-`RuntimeSession` 仍是静态、强类型数据面执行器：
+`RuntimeSession` 仍是静态数据面：
 
-- 不 include 或调用 Compiler、Relay、ShapePredictor、primitive cache；
-- 不做 variant 选择、compile miss、缓存策略或后台编译；
-- 不创建后台线程；
-- 只执行构造期已验证的 `CompiledModule + ExecutablePlan/FrozenTaskPlan`；
-- 原 `RuntimeSession(module, ExecutablePlan)` 始终保留为 per-Call 路径；
-- task-DAG 失败只允许在执行前回退，任务开始后不重放 per-Call 执行。
+- Runtime 不 include Compiler、Relay、primitive cache 或 adaptive coordinator；
+- session 构造后不 lookup、compile、选择 generation 或原地替换 executable；
+- fallback 只在构造期选择；task 执行开始后任一失败直接传播，不 replay per-Call oracle；
+- task executor 与 observer 不创建后台线程；
+- `KXC_ENABLE_REGION_TASK_DAG` 默认仍为 `OFF`。
 
-## 2. Feature gate 与公共 API
+Compiler 可以向下依赖纯 Runtime DTO。生产 `Compiler::Compile` 现在生成
+`CompiledGraph::variant`，其 manifest identity 直接来自完整 Core
+`ArtifactKey::canonical_bytes()`，同时以 opaque retention token 持有全部
+production `ArtifactPin`。Runtime 不解释该 canonical identity，也不反向依赖 Core。
 
-### 2.1 构建开关
-
-```cmake
--DKXC_ENABLE_REGION_TASK_DAG=ON
-```
-
-`KXC_ENABLE_REGION_TASK_DAG` 默认 `OFF`。DTO、validator、memory planner 和 deterministic fake executor 始终构建并可独立测试；只有 `RuntimeSession` 的 frozen task 执行由该开关启用。
-
-### 2.2 RuntimeSession API
-
-文件：`include/kxc/runtime/session.h`
-
-```cpp
-enum class RuntimeExecutionMode : int32_t {
-    kPerCall = 0,
-    kTaskDAG = 1,
-};
-
-RuntimeSession(api::CompiledModule module, ExecutablePlan plan);
-RuntimeSession(api::CompiledModule module, ExecutablePlan plan,
-               RuntimeExecutionMode mode);
-RuntimeSession(api::CompiledModule module, FrozenTaskPlan plan);
-
-bool UsesTaskDAG() const;
-```
-
-行为：
-
-| 调用 | gate OFF | gate ON |
-|---|---|---|
-| 两参数 `module + ExecutablePlan` | per-Call | per-Call |
-| `mode = kPerCall` | per-Call | per-Call |
-| `mode = kTaskDAG` | 安全回退 per-Call | 将 static-exact ordered calls 转成 PerCall regions/task DAG；`-1` 或不支持的 alias contract 回退 per-Call |
-| 直接 `module + FrozenTaskPlan` | 构造失败并指出 gate | 构造期完整校验后仅执行 static-exact `PerCall` region |
-
-`UsesTaskDAG()` 可用于测试和发布审计，避免把静默回退误报为 task-DAG 命中。
-
-## 3. Frozen contract v1
+## 2. Runtime-only selected-artifact manifest
 
 文件：
 
 - `include/kxc/runtime/task_plan.h`
 - `src/runtime/task_plan.cc`
 
-版本：`kFrozenTaskPlanVersion = 1`。
+### 2.1 DTO
 
-### 3.1 RegionSpec
+`SelectedArtifactBinding` 为每个 ordered call 或 kernel task 保存：
 
-`RegionSpec` 分离 runtime locator 与 semantic identity：
+- `ArtifactBindingKind::{kCall,kTask}` 与 plan-local `invocation_id`；
+- 完整、不为空的 opaque `artifact_identity` canonical bytes；
+- selected `generation`；
+- Runtime 规范化的 `exact_abi_fingerprint`；
+- `entry_symbol`；
+- 将 identity、generation、ABI、entry 与 invocation locator 一起规范化的
+  `entry_binding`。
 
-- `region_id`：plan-local locator，只用于 routing/诊断；
-- `semantic_key`：仅预留未来由 01 轨提供规范 key 的承载位置；当前不生成或验证 key，也没有 cache 接线；空字符串表示 unkeyed，测试非空值也不构成生产 identity 证据；
-- `RegionKind`：`PerCall / Fusion / Library / ControlFlow`；
-- `RegionEffect`：`Pure / Ordered`；
-- `RegionAlias`：`NoAlias / Conservative`；
-- `task_ids / live_in_value_ids / live_out_value_ids / constant_value_ids`。
+`SelectedArtifactManifest` 保存：
 
-validator 从 task/value producer-consumer 关系反推 region boundary，拒绝遗漏或多报的 live-in/live-out/constants。多个 `Ordered` region 必须由显式依赖形成全序；`Conservative` alias region 涉及的值不得参与 storage reuse。
+- schema version `kSelectedArtifactManifestVersion == 1`；
+- 每 call/task 恰好一个且 locator 唯一的 binding；
+- `plan_fingerprint`；
+- 可选 opaque retention token。生产 Compiler 总是提供 token；runtime fake/contract
+  fixture 可不提供。
 
-`Fusion`/`Library` 在 v1 仅为 frozen schema/fake 分类，不代表已有 fusion policy 或 library descriptor/调用 ABI。真实 `RuntimeSession` 当前只接受 `PerCall`，明确拒绝 `Fusion`、`Library` 与 `ControlFlow` region。
+`PlanVariant` 冻结 `ExecutablePlan + per-call manifest`；`FrozenTaskPlan` 可通过
+`AttachSelectedArtifacts` 冻结 per-kernel-task manifest。`PlanTaskMemory` 必须先于
+selected-artifact freezing；已冻结 manifest 的 plan 不再允许重做 memory planning。
 
-### 3.2 TaskSpec
+### 2.2 Canonical fingerprints
 
-`TaskKind`：
+Runtime canonicalizer 使用 length-delimited fields，再以完整 canonical bytes 的 hex
+编码形成可打印 fingerprint；它不是依赖 Compiler 的摘要，也不把 graph-local symbol
+当作 artifact identity。
 
-- `Kernel`：module symbol、artifact generation、inputs/outputs；
-- `Copy`：一个 exact-contract input 到一个 output；
-- `Event`：v1 单 stream dependency marker，不是跨 stream record/wait event；
-- `ShapeEval`：contract/fake 支持，真实 `RuntimeSession` 在构造期 fail closed；
-- `Allocate`：一个 output 与 power-of-two alignment；
-- `Sync`：v1 同步当前提交 stream。
+- call/task exact ABI 覆盖实际 `CompiledModule` 的 ordered `KernelSignature`、launch
+  metadata、constant key/NDArray contract、ordered invocation value contract、storage id，
+  以及 task output allocation alignment；
+- entry binding 覆盖 binding kind/id、完整 artifact identity、generation、exact ABI 与
+  entry symbol；
+- plan fingerprint 覆盖 values、storage/memory contract、calls 或 tasks/dependencies、
+  regions/effect/alias、graph inputs/constants/outputs 和全部 selected bindings；
+- task/value/region 等集合按稳定 id canonicalize；ABI-sensitive input/output 顺序保持不变。
 
-公共字段还包括 `task_id`、显式 `dependency_task_ids`、`device`、`stream_id` 和预留的 `artifact_generation`。v1 强制所有 value/task 位于同一物理 device 且 `stream_id == 0`。Kernel task 在 DTO 层允许非负 generation，其他 task kind 必须为 `0`；真实 `RuntimeSession` 进一步只接受 Kernel generation `0`，不表示 generation 选择或保活已经接通。
+上层可以提供 Core canonical artifact bytes，但 session 始终用实际 module/plan 重新计算
+Runtime ABI、entry binding 与 plan fingerprint，不信任调用方提供的文本摘要。
 
-### 3.3 FrozenTaskPlan
+### 2.3 generation 边界
 
-`FrozenTaskPlan` 保存：
+DTO/fake 仍可表达非负 generation，以保留跨轨 schema；当前真实
+`RuntimeSession` 对 `PlanVariant` 和 `FrozenTaskPlan` 都只接受 generation `0`，并要求
+`TaskSpec::artifact_generation` 与 manifest 一致。任何 non-zero generation 在 launch 前
+拒绝。这是本任务明确保留的门禁，不表示 Track03 hot-swap 已接通。
 
-- version；
-- exact `ValueSpec` 列表；
-- tasks、regions；
-- ordered graph inputs/constants/outputs。
+## 3. RuntimeSession 构造期复验与生命周期
 
-当前 `ValueSpec(shape, dtype, device, storage_id)` 是 static exact 特例，不把 `-1` 升格为完整 dynamic shape，也不将 allocation capacity 当作 logical shape。
+新增/扩展 API：
 
-### 3.4 Validator 门禁
+```cpp
+RuntimeSession(CompiledModule, ExecutablePlan,
+               RuntimeExecutionMode, RuntimeObserver = {});
+RuntimeSession(CompiledModule, PlanVariant,
+               RuntimeExecutionMode, RuntimeObserver = {});
+RuntimeSession(CompiledModule, FrozenTaskPlan, RuntimeObserver = {});
 
-构造与 `Validate()` 检查：
+TaskDAGSelectionResult TaskDAGSelection() const;
+SelectedArtifactManifest artifact_manifest() const;
+```
 
-1. version、task/value/region id 唯一且非负，并拒绝任一 value shape 中的 `-1`，保持 W1 static-exact；
-2. task kind 的 payload、arity、symbol、预留 generation/alignment 局部合法；
-3. dependency 全部存在、无 self-edge、无环；
-4. deterministic topological order 以 `task_id` 作稳定 tie-breaker；
-5. source value 不可被 produce/allocate；
-6. 每个非 source value 恰有一个 data producer 和一个 `Allocate` task；
-7. producer 必须直接依赖其 allocation，consumer 必须在 producer 之后；
-8. repeated logical operand 保持原顺序，不在 kernel ABI 中去重；
-9. `Copy` 两端 exact shape/dtype/device contract 一致；
-10. graph output 可达；
-11. region boundary、effect order 和 conservative alias 完整；
-12. storage sharing 只在 tensor contract 相同且全部先前 consumers happens-before 后续 allocation 时成立；
-13. input/output/constant、alias、async-live 和 conservative-alias 值不得被不安全复用。
+构造期依次验证：
 
-## 4. Dependency-aware memory planning
+1. module ready、plan/schema 完整、单 device/stream 边界；
+2. module entry 与 call/task entry symbol 精确绑定；
+3. ordered signature role/arity/shape/dtype/device/alignment；
+4. launch backend/device/grid/block/shared-memory contract；
+5. constant key、constant NDArray 与 plan constant value 映射；
+6. task Allocate alignment、storage id、dependency-aware memory plan；
+7. manifest 每 invocation 完整、generation 为 0；
+8. Runtime 重算 exact ABI、entry binding 和 plan fingerprint 与 manifest 完全相等。
+
+成功的 `RunAsync` completion 强持有：
+
+- `CompiledModule`；
+- ordered plan 或 `FrozenTaskPlan`；
+- `SelectedArtifactManifest` 及 opaque pin/lease token；
+- per-run `ValueTable`；
+- 最终操作之前的全部 `AsyncOperation`；
+- current 与 retired/reused storage。
+
+因此 session、输入 handle、局部 manifest 或 Compiler 返回对象可在 completion 前释放。
+当前确定性 retention 证据为 CPU fake；真实 pending CUDA 仍是默认开启前的硬门禁。
+
+## 4. 可审计 Task-DAG selection / fallback
+
+`TaskDAGSelectionResult` 记录 requested/selected mode、`FallbackReason` 和稳定 diagnostic。
+observer 同时收到一个 `RuntimeEventKind::kFallback` 事件。已分类原因：
+
+| 原因 | 行为 |
+|---|---|
+| `kFeatureDisabled` | gate OFF，选择已验证 per-Call oracle |
+| `kMissingArtifactManifest` | bare `ExecutablePlan` 不能伪造 artifact identity，选择 per-Call |
+| `kUnsupportedDynamicInput` | 任一 `-1`/dynamic value 不进入 static-exact DAG |
+| `kUnsupportedAlias` | alias value 或 conservative alias region 不进入当前 executor |
+| `kUnsupportedFusion` | 缺 verified fusion provenance，直接 frozen construction 拒绝 |
+| `kUnsupportedLibrary` | 缺 library descriptor/workspace/stream/error ABI，拒绝 |
+| `kUnsupportedControlFlow` | 当前 RuntimeSession 不执行 control-flow region，拒绝 |
+| `kUnsupportedShapeEvaluation` | 缺 ShapeProgram/runtime output contract，拒绝 |
+| `kAdapterBug` | 已通过显式 preflight 后 adapter/validator invariant 失败；发 diagnostic 后 fail closed，不降级执行 |
+
+原来的 `catch (const std::invalid_argument&) { /* silent fallback */ }` 已删除。已知
+unsupported 条件在 adapter 前显式检查；adapter 内异常统一视为 bug 并抛出
+`logic_error`。直接 frozen plan 没有 ordered oracle 可选，因此 library/control/fusion 等
+事件表示带结构化原因的构造拒绝，而不是执行了另一路径。
+
+Gate ON 时，只有带完整 manifest 的 `PlanVariant` 可以适配为 task DAG。旧
+`RuntimeSession(module, ExecutablePlan, kTaskDAG)` 保持 API 兼容，但不会从 symbol 猜造
+artifact identity；它以 `kMissingArtifactManifest` 回到 per-Call。
+
+## 5. 同步 observer event schema
 
 文件：
 
 - `include/kxc/runtime/task_executor.h`
 - `src/runtime/task_executor.cc`
-
-API：
-
-```cpp
-FrozenTaskPlan PlanTaskMemory(const FrozenTaskPlan& plan);
-size_t EstimateTaskPeakLiveBytes(const FrozenTaskPlan& plan);
-```
-
-复用判定不使用 call index。对候选旧值 `A` 与新值 `B`，只有 `A` 的所有 consumer（无 consumer 时为 producer）均 happens-before `B` 的 `Allocate` task，且 exact shape/dtype/device、alignment、alias/async/output contract 兼容时，`B` 才可复用 `A` 的 storage slot。
-
-这保证 diamond/independent branches 不会因某个任意拓扑序而误复用；graph output、async-live 和 conservative alias 始终保留独立 storage。`EstimateTaskPeakLiveBytes` 按 deterministic single-stream trace 计算 produced-value 峰值，执行溢出检查；它不是多 stream completion 模型。
-
-## 5. Deterministic fake executor
-
-API：
-
-```cpp
-using DeterministicTaskAction = std::function<void(const TaskSpec&)>;
-
-Array<TaskTraceEvent> ExecuteTasksDeterministically(
-    const FrozenTaskPlan& plan,
-    const DeterministicTaskAction& action);
-```
-
-行为：
-
-- validate 后按稳定拓扑序同步执行；
-- 不创建线程，不访问 Compiler、cache、设备或 RuntimeSession；
-- action 可为手写 kernel/copy/shape-eval fake；
-- trace 记录 `TaskStart / Allocate / TaskComplete / Release`；
-- release 发生在所有 consumer 完成后；
-- action 抛错后立即停止，不 replay 已执行任务。
-
-这使 02/03/04/06 可在不 include 本轨私有 header、不等待真实 backend 的情况下消费 v1 contract。
-
-## 6. RuntimeSession task executor
-
-文件：`src/runtime/session.cc`。
-
-### 6.1 构造期验证
-
-除 `FrozenTaskPlan::Validate()` 外，session 还检查：
-
-- module ready，所有引用 symbol 存在；
-- 同一 module entry 可由多个 task invocation 复用，task id 不与 symbol 混作 identity；
-- kernel signature 与 value role/shape/dtype/device/arity 完全一致；
-- kernel output 的 `Allocate.alignment >= KernelArgSpec.alignment`；
-- constants 与 module constant key/NDArray 匹配；
-- 当前只接受 `artifact_generation == 0`；这只是拒绝未接线 generation，不是 selected-artifact 校验；
-- 真实 executor 只接受 `PerCall` region；拒绝缺 provenance 的 `Fusion`、缺 descriptor/workspace/stream/error ABI 的 `Library`、`ControlFlow` 和 `ShapeEval`；
-- module 可包含 frozen variant 未选择的 entry；session 不把 module symbol 集合当作 task identity 集合。
-
-### 6.2 执行语义
-
-- `Allocate`：通过 per-run `ValueTable` 分配或实现已验证的 storage reuse；
-- `Kernel`：按 `[input][constant][output]` signature 顺序组装 NDArray 并 launch；
-- `Copy`：在同一 v1 stream 上调用 `NDArray::CopyFromAsync`；
-- `Event`：单 stream ordering marker，无额外 backend event；
-- `Sync`：同步当前 stream；
-- `ShapeEval`：构造期已拒绝。
-
-当前 ordered `ExecutablePlan` 的 adapter 为每个 Call 生成一个 `PerCall` region、每个 output 一个 `Allocate` task 和一个 `Kernel` task，并显式串行化 regions，因此 task 模式与旧顺序执行保持等价。任一 `-1` dynamic dimension 或其他 adapter/validator 构造期不支持项均回退原 per-Call plan；gate ON 也不会误标为 task-DAG 命中，执行开始后不做 replay fallback。
-
-### 6.3 AsyncOperation retention
-
-原 retention 语义未削弱。task completion 强持有：
-
-- selected `CompiledModule`；
-- frozen task plan；
-- per-run `ValueTable`；
-- 最终操作之前的全部 `AsyncOperation`；
-- current 与 retired/reused Storage；
-- 最终 backend operation 自身保留的 executable/storage。
-
-因此销毁 `RuntimeSession`、输入 handle 或局部 task binding 后，completion 仍拥有执行所需状态。这里的已验证证据仅是同步 CPU fake：它覆盖 session 销毁后的 completion 与 input/constant/intermediate/output retention。真实 pending CUDA task-DAG retention **未验证**，仍是开放生产门禁，不能由同步 CPU fake 代替。
-
-## 7. 测试证据
-
-### 7.1 Supervisor fix 聚焦回归
-
-本次修复后，CPU-only gate `OFF` 与 `ON` 分别通过 `run_runtime_plan_tests`：
-
-```text
-task_plan_test       passed
-task_executor_test   passed
-runtime_session_test passed
-```
-
-两套构建均为 3/3 CTest 通过；gate ON 的同一 3/3 suite 还在 ASan+UBSan 配置下通过。
-
-### 7.2 Gate ON 全量 CPU 回归
-
-配置：
-
-```bash
-cmake -S . -B out/build/runtime-plan-dag -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DKXC_ENABLE_CUDA=OFF \
-  -DKXC_ENABLE_LLVM=OFF \
-  -DKXC_ENABLE_REGION_TASK_DAG=ON \
-  -DKXC_BUILD_CODEGEN_TESTS=OFF
-cmake --build out/build/runtime-plan-dag -j2
-```
-
-通过的 20 个本机构建测试：
-
-```text
-object_test
-packed_func_test
-registry_test
-type_registration_test
-pass_pipeline_test
-device_info_test
-device_runtime_test
-executable_plan_test
-task_plan_test
-task_executor_test
-graph_partition_test
-infer_type_test
-profile_bundle_test
-compiler_contract_test
-operator_compilation_test
-compiler_extension_contract_test
-kernel_signature_test
-compiled_module_test
-runtime_session_test
-cuda_schedule_test
-```
-
-契约/架构检查：
-
-- Relay op contract：19/19；
-- Pass contract：19/19；
-- include-layer check：213 files；
-- public-header self-compile：83 headers。
-
-### 7.3 Gate OFF 回退
-
-`out/build/runtime-plan-cpu` 以 `KXC_ENABLE_REGION_TASK_DAG=OFF` 构建；`task_plan_test`、`task_executor_test`、`runtime_session_test`、`executable_plan_test` 和 type registration 均通过。测试确认请求 `kTaskDAG` 时仍执行 per-Call，直接 frozen plan constructor 明确失败。
-
-### 7.4 ASan + UBSan
-
-配置：GCC 13.3，`-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer`，gate ON、CPU-only。
-
-以下测试在 `ASAN_OPTIONS=abort_on_error=1:detect_leaks=1`、`UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1` 下通过：
-
-- `task_plan_test`；
-- `task_executor_test`；
-- `runtime_session_test`。
-
-### 7.5 可重复测试与未运行矩阵
-
-`task_plan_test`、`task_executor_test`、`runtime_session_test` 已注册为 CTest label `runtime-plan`，并可用 `run_runtime_plan_tests` 一次构建/执行。CI 的 CPU job 以 gate `OFF/ON` matrix 实际运行该 suite，不安装额外测试框架或软件包。
-
-本 worktree 未启用 LLVM/CUDA，因此未运行 LLVM numeric、CUDA numeric、Compute Sanitizer 或真实 pending CUDA task-DAG retention。没有下载、安装、联网、push 或 merge。
-
-## 8. 提交
-
-| Commit | 内容 |
-|---|---|
-| `3508db7` | `feat(runtime): add frozen region task DAG contract` |
-| `c18c880` | `feat(runtime): plan and execute task DAGs deterministically` |
-| `c73442e` | `feat(runtime): execute frozen task plans behind gate` |
-| `4092f5c` | `fix(runtime): harden task DAG execution contracts` |
-| `57d83d8` | `docs(runtime): hand off region task DAG baseline` |
-| 本次原子修复 | `fix(runtime): close task DAG merge blockers` |
-
-## 9. 正确性与性能门禁
-
-### 9.1 已满足的 W1 正确性门禁
-
-- frozen DTO/validator 可脱离 Compiler 独立构造和反例测试；
-- cycle、missing producer/dependency、错误 boundary、错误 stream/device、copy contract、region 内外 effect order、alias reuse 和 alignment fail closed；
-- FrozenTaskPlan 拒绝任一 `-1`；adapter 在 gate ON/OFF 都保留 per-Call fallback 且不误报 task DAG；
-- RuntimeSession 对 Fusion/Library/ControlFlow/ShapeEval 和非零预留 generation fail closed；
-- deterministic fake 覆盖 kernel/copy/event/shape-eval/allocate/sync schema；
-- dependency-aware memory 覆盖 linear、diamond、independent branches、async-live、conservative alias；
-- per-Call 与 task-DAG multi-entry CPU fake 结果等价；
-- gate OFF 行为不变；
-- AsyncOperation 保留 module/plan/prior operations/current+retired storage；
-- ASan/UBSan focused suite 通过。
-
-### 9.2 打开默认 gate 前仍需满足
-
-1. LLVM 与 CUDA 数值等价，包括 multi-entry、copy 和 storage reuse；
-2. 真实 pending CUDA：session/module/input handle 提前释放、多个 pending kernel/copy、失败清理与 completion retention；
-3. Compute Sanitizer 0 error；如引入并发 scheduler，再增加 TSan；
-4. 生产 plan fingerprint、selected artifact generation manifest 与 profile 字段完整；
-5. unsupported/fallback 原因可观测，不把 adapter bug 静默计为正常回退；
-6. static per-Call correctness oracle 永久保留。
-
-### 9.3 性能门禁
-
-当前没有性能提升声明，gate 默认关闭。开启前至少记录并比较：
-
-- per-Call 与 task-DAG 的 p50/p95 end-to-end latency；
-- task validation/adapter/topological scheduling 开销；
-- kernel/copy launch 数及 sync 数；
-- unique-allocation reference 与 dependency planner 的 peak bytes；
-- storage reuse 次数、retired storage bytes；
-- CPU/LLVM/CUDA 分别报告，禁止只用 fake trace 宣称加速。
-
-建议首个 release gate：task-DAG p95 不得比同一 static exact per-Call oracle 回退超过 5%，且任何 memory reduction 必须同时通过数值、ASan/UBSan/Compute Sanitizer 与 pending-retention 门禁。未达到时保持 gate OFF，不通过加入 RuntimeSession 策略绕过。
-
-## 10. 跨轨接线
-
-| 轨道 | 本轨提供 | 对方接入要求 |
-|---|---|---|
-| 01 Core | `RegionSpec/TaskSpec/FrozenTaskPlan v1`、unkeyed 与 `semantic_key` 预留字段 | 提供并接线规范 `UnitSemanticKey`、plan fingerprint、effect/alias contract 和 selected artifact manifest；当前测试 key 不得入 cache |
-| 02 Shape | `ShapeEval` task schema与 deterministic fake hook | 提供 logical/physical/valid-extent、ShapeProgram 与 runtime output contract；完成前 RuntimeSession 继续拒绝 ShapeEval |
-| 03 Hot swap | module/task plan由 completion 强持有；generation 仅为预留字段 | 提供 immutable generation -> artifact binding/pin；当前 RuntimeSession 只接受 generation 0，不自行查 slot/cache，也没有 generation retention 证据 |
-| 04 Control flow | region kind 与通用 dependency vocabulary | 提供 Control task/CFG、Phi、branch/loop effect 与 liveness；当前 RuntimeSession 拒绝 ControlFlow |
-| 06 NLP/GPU | stable DTO、fake trace、peak-live estimate、feature gate | 只按 gate/能力矩阵消费；不得通过 NLP op 名或 fixture 特判修改 executor |
-| Compiler partition | private per-Call adapter 作为回退 oracle | region partition 产物必须先通过 boundary/effect/alias verifier；不可把 graph-local id/symbol 当 artifact semantic key |
-
-跨轨只应 include `include/kxc/runtime/task_plan.h` 和 `task_executor.h`，不要 include `src/runtime/internal/*`。
-
-## 11. 明确硬阻塞 / 后续工作
-
-以下能力在当前依赖未冻结前有意不接入真实 RuntimeSession：
-
-1. **dynamic shape / ShapeEval：** 缺 logical/physical/valid-extent 与 ShapeProgram；
-2. **control flow：** 缺 Control task、Phi、backedge 和 branch/loop lifetime；
-3. **fusion policy：** 缺 01 的生产 semantic key、完整 effect/alias、provenance 与 compiler region verifier；`semantic_key` 当前仅预留，RuntimeSession 拒绝 Fusion；
-4. **library region：** 缺 descriptor、workspace、stream/error ABI；RuntimeSession 拒绝 Library，不以普通 kernel/copy 冒充；
-5. **artifact generation：** 字段仅预留，缺 03 的 immutable selected-artifact manifest/binding/pin；
-6. **multi stream：** 缺 event record/wait identity与真实 completion-aware retire；当前 Event 仅单 stream marker；
-7. **multi device：** 缺显式跨 device copy/communication contract；physical device、VirtualDevice、worker id 尚未接线；
-8. **生产 profiling：** 缺 region/task wait、launch、allocation、retire、generation 与 fallback reason 的稳定事件 schema；
-9. **GPU 生命周期证据：** 缺本分支真实 pending CUDA task-DAG retention 与 Compute Sanitizer 结果。
-
-这些是打开后续 gate 的硬门禁，不应通过在 `RuntimeSession` 中加入编译、预测、cache policy、后台线程，或通过 fuzzy/bigger-buffer fallback 绕过。
-
-## 12. 交接结论
-
-本轨已完成可独立测试的 frozen DTO/verifier/memory planner/deterministic fake executor，并以默认关闭的 feature gate 仅将 static-exact `PerCall` kernel/copy/event-marker/allocate/sync task 接入 `RuntimeSession`；旧 per-Call 路径和 AsyncOperation retention 保留。`semantic_key` 与 generation 仍仅为未接线的 DTO 预留字段，真实 pending GPU retention 未验证。其余工作均已收敛为上节的明确跨轨硬依赖，因此当前分支可作为 W1 contract baseline 交接，但不能标记为多 stream、多 device、dynamic shape、control flow、library ABI 或 production region fusion 完成。
+- `src/runtime/session.cc`
+
+`RuntimeEvent` 的稳定 kind：
+
+- `kTaskWait`：消费一个已完成 scheduler dependency；带 dependency task id；
+- `kGeneration`：kernel submission 前记录 selected generation、artifact identity 和 entry；
+- `kTaskLaunch`：task host action/backend submission 成功返回后记录；失败 submission 不发
+  successful launch；
+- `kAllocation`：allocation 成功后记录 value/storage、bytes、alignment；
+- `kRelease`：所有 consumer host actions 完成后的 **logical retire/reuse eligibility**；不声称
+  async backend physical free，storage 仍由 completion 保活；
+- `kTaskComplete`：当前同步 host action 完成，不表示 GPU event 已完成；
+- `kFallback`：构造期 selection/rejection reason 与 diagnostic。
+
+observer 在调用 `RuntimeSession`/`RunAsync` 的线程同步调用，不使用 dispatcher、queue 或
+后台线程。observer 异常被隔离，不能改变 selection、task submission 或 no-replay 语义。
+`ExecuteTasksDeterministically` 返回同一事件序列并可同时注入 observer；topological tie-break
+仍为 task id，测试不依赖时钟或 sleep。
+
+## 6. 测试与 CI
+
+聚焦测试：
+
+- `task_plan_test`
+  - per-task/per-call manifest completeness、generation/task matching、entry binding、plan
+    fingerprint drift、immutable DTO；
+- `task_executor_test`
+  - wait/generation/launch/allocation/release exact deterministic trace、manifest identity、
+    dependency-aware release、failure stop/no replay；
+- `runtime_session_test`
+  - gate OFF/ON selection query与 fallback observer；
+  - missing manifest、dynamic、alias、library、control 分类；
+  - module ABI tamper 与 non-zero generation 拒绝；
+  - task events、observer exception isolation、failed submission 无 false launch；
+  - manifest token 经 `AsyncOperation` 保活；
+  - multi-entry/repeated-entry task bindings 与执行开始后不 replay；
+- `operator_compilation_test`（LLVM build）
+  - production `CompiledGraph::variant` binding 与 production artifact pins 一一对应。
+
+`.github/workflows/ci.yml` 保留 CPU gate `OFF/ON` matrix，并新增 gate-ON
+ASan+UBSan runtime-plan job；LLVM job以 gate ON 构建并运行
+`operator_compilation_test` 与 `runtime_session_test`。CUDA/Compute Sanitizer 不在无设备 CI
+中伪报通过。
+
+本地 CPU-only（GCC 13.3，LLVM/CUDA disabled）结果：
+
+- gate OFF：`cpu` label **38/38 passed**；
+- gate ON：`cpu` label **38/38 passed**；
+- gate ON ASan+UBSan：`runtime-plan` label **3/3 passed**，使用
+  `abort_on_error=1` / `halt_on_error=1`；
+- 两套 CPU suite 均包含 include-layer 与 public-header self-compile。
+
+没有联网、安装依赖、push 或 merge。
+
+## 7. 默认开启前仍未完成
+
+1. authoritative non-zero generation lease 与 Track03 immutable slot handoff；
+2. LLVM/CUDA task-DAG 数值矩阵和真实 pending CUDA manifest/pin retention；
+3. Compute Sanitizer 0 error；
+4. Fusion legality/provenance、Library ABI、ControlFlow executor、ShapeEval contract；
+5. multi-stream event completion 与 physical retirement；
+6. 性能门禁（p50/p95、launch/sync count、peak bytes）与设备 profile evidence。
+
+在这些门禁完成前，`KXC_ENABLE_REGION_TASK_DAG` 保持默认 `OFF`，static per-Call oracle
+永久保留。

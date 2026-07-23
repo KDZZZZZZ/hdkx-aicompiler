@@ -149,6 +149,10 @@ struct Slot final {
 
 FrozenTaskPlan PlanTaskMemory(const FrozenTaskPlan& plan) {
     plan.Validate();
+    if (plan.manifest().defined()) {
+        throw std::invalid_argument(
+            "Task memory planning must precede selected-artifact freezing");
+    }
     const PlanIndex index = IndexPlan(plan);
     std::unordered_map<int64_t, int64_t> storage_by_value;
     for (const auto& value : plan.values()) {
@@ -207,14 +211,21 @@ FrozenTaskPlan PlanTaskMemory(const FrozenTaskPlan& plan) {
         plan.output_value_ids());
 }
 
-Array<TaskTraceEvent> ExecuteTasksDeterministically(
-    const FrozenTaskPlan& plan, const DeterministicTaskAction& action) {
+Array<RuntimeEvent> ExecuteTasksDeterministically(
+    const FrozenTaskPlan& plan, const DeterministicTaskAction& action,
+    const RuntimeObserver& observer) {
     plan.Validate();
     if (!action) {
         throw std::invalid_argument(
             "Deterministic task execution requires an action");
     }
     const PlanIndex index = IndexPlan(plan);
+    std::unordered_map<int64_t, SelectedArtifactBinding> artifacts;
+    if (plan.manifest().defined()) {
+        for (const auto& binding : plan.manifest().bindings()) {
+            artifacts.emplace(binding->invocation_id, binding);
+        }
+    }
     std::unordered_map<int64_t, size_t> remaining_consumers;
     for (const auto& value : index.values) {
         const auto consumers = index.consumers_by_value.find(value.first);
@@ -226,7 +237,16 @@ Array<TaskTraceEvent> ExecuteTasksDeterministically(
     std::unordered_set<int64_t> active_storage;
     std::unordered_set<int64_t> completed_tasks;
     std::unordered_set<int64_t> released_values;
-    Array<TaskTraceEvent> trace;
+    Array<RuntimeEvent> trace;
+    const auto emit = [&](RuntimeEvent event) {
+        trace.push_back(event);
+        if (!observer) return;
+        try {
+            observer(event);
+        } catch (...) {
+            // Observability is synchronous but must never change execution.
+        }
+    };
 
     const auto release = [&](int64_t task_id, TaskKind task_kind,
                              int64_t value_id) {
@@ -239,9 +259,14 @@ Array<TaskTraceEvent> ExecuteTasksDeterministically(
             throw std::logic_error(
                 "Task executor released storage that was not active");
         }
-        trace.push_back(TaskTraceEvent{TaskTraceEventKind::kRelease, task_id,
-                                       task_kind, value_id,
-                                       value->storage_id});
+        RuntimeEvent event;
+        event.kind = RuntimeEventKind::kRelease;
+        event.task_id = task_id;
+        event.task_kind = task_kind;
+        event.value_id = value_id;
+        event.storage_id = value->storage_id;
+        event.bytes = ValueBytes(value);
+        emit(std::move(event));
     };
 
     for (int64_t task_id : plan.topological_task_ids()) {
@@ -251,25 +276,70 @@ Array<TaskTraceEvent> ExecuteTasksDeterministically(
                 throw std::logic_error(
                     "Deterministic task scheduler observed an unmet dependency");
             }
+            RuntimeEvent wait;
+            wait.kind = RuntimeEventKind::kTaskWait;
+            wait.task_id = task_id;
+            wait.task_kind = task->kind;
+            wait.dependency_task_id = dependency;
+            emit(std::move(wait));
         }
-        trace.push_back(TaskTraceEvent{TaskTraceEventKind::kTaskStart, task_id,
-                                       task->kind, -1, -1});
+        if (task->kind == TaskKind::kKernel) {
+            RuntimeEvent generation;
+            generation.kind = RuntimeEventKind::kGeneration;
+            generation.task_id = task_id;
+            generation.task_kind = task->kind;
+            generation.generation =
+                static_cast<uint64_t>(task->artifact_generation);
+            generation.entry_symbol = task->symbol;
+            const auto artifact = artifacts.find(task_id);
+            if (artifact != artifacts.end()) {
+                generation.artifact_identity =
+                    artifact->second->artifact_identity;
+            }
+            emit(std::move(generation));
+        }
+        int64_t allocated_value_id = -1;
+        int64_t allocated_storage_id = -1;
         if (task->kind == TaskKind::kAllocate) {
-            const int64_t value_id = task.output_value_ids()[0];
-            const int64_t storage_id = index.values.at(value_id)->storage_id;
-            if (!active_storage.insert(storage_id).second) {
+            allocated_value_id = task.output_value_ids()[0];
+            allocated_storage_id =
+                index.values.at(allocated_value_id)->storage_id;
+            if (!active_storage.insert(allocated_storage_id).second) {
                 throw std::logic_error(
                     "Task executor allocated a storage slot before retirement");
             }
-            trace.push_back(TaskTraceEvent{TaskTraceEventKind::kAllocate,
-                                           task_id, task->kind, value_id,
-                                           storage_id});
         }
 
         action(task);
+        RuntimeEvent launch;
+        launch.kind = RuntimeEventKind::kTaskLaunch;
+        launch.task_id = task_id;
+        launch.task_kind = task->kind;
+        launch.entry_symbol = task->symbol;
+        const auto artifact = artifacts.find(task_id);
+        if (artifact != artifacts.end()) {
+            launch.generation = artifact->second->generation;
+            launch.artifact_identity = artifact->second->artifact_identity;
+        }
+        emit(std::move(launch));
+        if (task->kind == TaskKind::kAllocate) {
+            RuntimeEvent allocation;
+            allocation.kind = RuntimeEventKind::kAllocation;
+            allocation.task_id = task_id;
+            allocation.task_kind = task->kind;
+            allocation.value_id = allocated_value_id;
+            allocation.storage_id = allocated_storage_id;
+            allocation.bytes =
+                ValueBytes(index.values.at(allocated_value_id));
+            allocation.alignment = task->alignment;
+            emit(std::move(allocation));
+        }
         completed_tasks.insert(task_id);
-        trace.push_back(TaskTraceEvent{TaskTraceEventKind::kTaskComplete,
-                                       task_id, task->kind, -1, -1});
+        RuntimeEvent complete;
+        complete.kind = RuntimeEventKind::kTaskComplete;
+        complete.task_id = task_id;
+        complete.task_kind = task->kind;
+        emit(std::move(complete));
 
         std::unordered_set<int64_t> unique_inputs;
         for (int64_t input : task.input_value_ids()) {

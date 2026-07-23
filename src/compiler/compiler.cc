@@ -664,6 +664,33 @@ CompiledModule AssembleModule(
         std::move(profile_context));
 }
 
+runtime::PlanVariant AssemblePlanVariant(
+    const CompiledModule& module, const runtime::ExecutablePlan& plan,
+    const std::vector<ArtifactPin>& pins) {
+    const Array<runtime::KernelCall> calls = plan.calls();
+    if (pins.size() != calls.size()) {
+        throw std::logic_error(
+            "selected artifact pins do not match ordered plan calls");
+    }
+    Array<runtime::ArtifactSelection> selections;
+    for (size_t index = 0; index < pins.size(); ++index) {
+        if (!pins[index].defined()) {
+            throw std::logic_error(
+                "selected artifact manifest cannot retain an undefined pin");
+        }
+        selections.push_back(runtime::ArtifactSelection{
+            static_cast<int64_t>(index),
+            String(pins[index]
+                       .handle()
+                       .record()
+                       .artifact_key.canonical_bytes()),
+            0});
+    }
+    const auto retained_pins =
+        std::make_shared<const std::vector<ArtifactPin>>(pins);
+    return runtime::MakePlanVariant(module, plan, selections, retained_pins);
+}
+
 CompiledGraph CompilePipeline(
     Function function, CompileConfig config,
     const internal::CompilerExecutionContract& contract) {
@@ -698,10 +725,14 @@ CompiledGraph CompilePipeline(
     profiling::ScopedSpan assemble_span(
         profile_context, MakeStageEvent("assemble", config), run_id);
     CompiledModule module = AssembleModule(result, profile_context);
+    runtime::ExecutablePlan plan = result.plan();
+    std::vector<ArtifactPin> artifact_pins = result.artifact_pins();
+    runtime::PlanVariant variant =
+        AssemblePlanVariant(module, plan, artifact_pins);
     AddResultFields(&assemble_span, result);
     if (profile_context) profile_context->Flush();
-    return CompiledGraph{std::move(module), result.plan(),
-                         result.artifact_pins()};
+    return CompiledGraph{std::move(module), std::move(plan),
+                         std::move(artifact_pins), std::move(variant)};
 }
 
 }  // namespace

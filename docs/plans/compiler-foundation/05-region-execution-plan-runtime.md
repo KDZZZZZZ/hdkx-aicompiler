@@ -1,6 +1,6 @@
 # 05：Region 执行计划与运行时
 
-> **状态：** 规划中；不表示当前已实现  
+> **状态：** 分阶段实施中；W1 default-OFF task DAG 与 W2 generation-0 runtime manifest/observability 已实现，详见 [runtime handoff](../../handoffs/compiler-foundation/runtime-plan.md)；本文其余阶段仍是规划，不得视为能力声明
 > **所属路线：** [编译器基础路线图](README.md)  
 > **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **范围：** 从 per-Call partition policy 演进为 region、task DAG 与 dependency-aware runtime；不实现代码。
