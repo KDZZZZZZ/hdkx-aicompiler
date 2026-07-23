@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../../codegen/internal/compiled_kernel.h"
+#include "kxc/compiler/identity.h"
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/executable_plan.h"
 #include "kxc/runtime/kernel_abi.h"
@@ -32,7 +33,7 @@ struct PrimitiveCompileState {
     int64_t unit_id{-1};
     String symbol;
     String operator_identity;
-    String structural_hash;
+    UnitSemanticKey semantic_key;
     tir::PrimFunc tir;
     std::optional<codegen::KernelSignature> signature;
     std::optional<codegen::KernelLaunchMetadata> launch_metadata;

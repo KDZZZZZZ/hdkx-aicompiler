@@ -237,20 +237,17 @@ String ReadKernelSymbol(const tir::PrimFunc& function) {
     return String(symbol);
 }
 
-tir::PrimFunc RefreshStructuralHash(const tir::PrimFunc& function) {
-    const String structural_hash_key("kxc.structural_hash");
+tir::PrimFunc AttachTIRDiagnosticHash(const tir::PrimFunc& function) {
+    const String tir_hash_key("kxc.tir_hash");
     Map<String, ObjectRef> attrs;
     for (const auto& item : function->attrs) {
-        if (!(item.first == structural_hash_key)) {
-            attrs.Set(item.first, item.second);
-        }
+        if (!(item.first == tir_hash_key)) attrs.Set(item.first, item.second);
     }
-    tir::PrimFunc canonical(function->params, function->body,
-                            function->buffer_map, attrs);
+    tir::PrimFunc diagnostic(function->params, function->body,
+                             function->buffer_map, attrs);
     std::ostringstream stream;
-    tir::pass::DumpPrimFunc(canonical, stream);
-    attrs.Set(structural_hash_key,
-              String(profiling::HashText(stream.str())));
+    tir::pass::DumpPrimFunc(diagnostic, stream);
+    attrs.Set(tir_hash_key, String(profiling::HashText(stream.str())));
     return tir::PrimFunc(function->params, function->body,
                          function->buffer_map, std::move(attrs));
 }
@@ -307,7 +304,7 @@ CompileResult LowerOperators(const CompileResult& input) {
         primitive.unit_id = source.unit_id;
         primitive.symbol = source.symbol;
         primitive.operator_identity = source.operator_identity;
-        primitive.structural_hash = source.structural_hash;
+        primitive.semantic_key = source.semantic_key;
         primitive.tir = source.lowered->prim_func;
         primitives.push_back(std::move(primitive));
     }
@@ -335,7 +332,7 @@ CompileResult OptimizeTIR(const CompileResult& input,
                     result = tir::BindCudaThreads(result, input.target()).prim_func();
                 }
 #endif
-                return RefreshStructuralHash(result);
+                return AttachTIRDiagnosticHash(result);
             }));
     }
     return input.AfterTIROptimization(std::move(optimized));
@@ -357,7 +354,7 @@ CompileResult BuildSignatures(const CompileResult& input,
     std::vector<bool> cache_hits;
     for (const PrimitiveCompileState& primitive : input.primitives()) {
         const std::string cache_key = internal::BuildPrimitiveCacheKey(
-            primitive.structural_hash, input.target(), config->opt_level,
+            String(primitive.semantic_key.digest()), input.target(), config->opt_level,
             BackendVersion(input.target()));
         const auto cached = internal::LookupPrimitiveCache(cache_key);
         if (cached) {
@@ -405,7 +402,7 @@ CompileResult BuildBackends(const CompileResult& input,
                 PrimitiveContext(primitive) + " has no signature");
         }
         cache_keys.push_back(internal::BuildPrimitiveCacheKey(
-            primitive.structural_hash, target, config->opt_level,
+            String(primitive.semantic_key.digest()), target, config->opt_level,
             BackendVersion(target)));
         if (!primitive.cache_hit) {
             misses.push_back(i);

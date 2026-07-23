@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "kxc/compiler/identity.h"
 #include "kxc/runtime/executable_plan.h"
 #include "value_graph.h"
 
@@ -18,7 +19,7 @@ struct CompilationUnit {
     Expr call;
     Array<int64_t> input_value_ids;
     Array<int64_t> output_value_ids;
-    String structural_hash;
+    UnitSemanticKey semantic_key;
 };
 
 struct PartitionedGraph {

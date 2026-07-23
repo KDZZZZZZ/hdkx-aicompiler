@@ -264,7 +264,7 @@ relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
         abi_inputs, constants, outputs,
         relay::internal::PrimFuncIdentity{
             unit.symbol, unit.unit_id, String(spec.name), spec.schema_version,
-            unit.structural_hash});
+            String(unit.semantic_key.digest())});
 }
 
 LoweredGraph LowerGraph(Function function, Device device, Target target) {
@@ -291,7 +291,7 @@ LoweredGraph LowerGraph(Function function, Device device, Target target) {
                              unit.symbol,
                              String(op->name + "@v" +
                                     std::to_string(op->spec.schema_version)),
-                             unit.structural_hash,
+                             unit.semantic_key,
                              lowered});
         for (const auto& binding : lowered.constants()) {
             if (result.constants.count(binding->key) &&
@@ -336,7 +336,7 @@ void ValidateLoweredGraph(const LoweredGraph& graph) {
         int64_t unit_id = -1;
         if (primitive.unit_id != unit.unit_id ||
             !(primitive.symbol == unit.symbol) ||
-            !(primitive.structural_hash == unit.structural_hash)) {
+            primitive.semantic_key != unit.semantic_key) {
             throw std::invalid_argument(
                 "Lowered primitive record drifted from its CompilationUnit");
         }
@@ -356,7 +356,7 @@ void ValidateLoweredGraph(const LoweredGraph& graph) {
                 std::string(actual_operator_identity));
         }
         if (!(ReadStringAttr(function, "kxc.structural_hash") ==
-              unit.structural_hash)) {
+              String(unit.semantic_key.digest()))) {
             throw std::invalid_argument("PrimFunc structural hash metadata mismatch");
         }
     }

@@ -15,7 +15,7 @@ struct LoweredPrimitive {
     int64_t unit_id{-1};
     String symbol;
     String operator_identity;
-    String structural_hash;
+    UnitSemanticKey semantic_key;
     relay::LoweredFunction lowered;
 };
 

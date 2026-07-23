@@ -126,7 +126,7 @@ void ValidatePrimitiveIdentity(const PrimitiveCompileState& primitive,
     if (primitive.unit_id != static_cast<int64_t>(index) ||
         std::string(primitive.symbol).empty() ||
         std::string(primitive.operator_identity).empty() ||
-        std::string(primitive.structural_hash).empty()) {
+        !primitive.semantic_key.defined()) {
         throw std::invalid_argument(
             "CompileResult primitive identities must be dense and non-empty");
     }
@@ -138,7 +138,7 @@ void ValidatePrimitiveIdentity(const PrimitiveCompileState& primitive,
         !(ReadStringAttr(primitive.tir, "kxc.operator_identity", context) ==
           primitive.operator_identity) ||
         !(ReadStringAttr(primitive.tir, "kxc.structural_hash", context) ==
-          primitive.structural_hash)) {
+          String(primitive.semantic_key.digest()))) {
         throw std::invalid_argument(context +
                                     " identity drifted from PrimFunc metadata");
     }
@@ -219,9 +219,6 @@ CompileResult CompileResult::AfterTIROptimization(
     next->primitives_ = current->primitives_;
     for (size_t i = 0; i < optimized_tir.size(); ++i) {
         next->primitives_[i].tir = std::move(optimized_tir[i]);
-        next->primitives_[i].structural_hash = ReadStringAttr(
-            next->primitives_[i].tir, "kxc.structural_hash",
-            PrimitiveContext(next->primitives_[i]));
     }
     next->plan_ = current->plan_;
     next->constants_ = CopyConstants(current->constants_);
