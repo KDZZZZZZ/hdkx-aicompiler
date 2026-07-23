@@ -160,7 +160,7 @@ struct RuntimeShapeLaunchResult {
 using RuntimeShapeBoundLauncher =
     std::function<RuntimeShapeLaunchResult(const RuntimeShapeLaunchArgs&)>;
 
-/*! \brief CUDA-only launcher: submission is accepted only with real completion. */
+/*! \brief CUDA-only launcher arguments. */
 struct RuntimeShapeCudaLaunchArgs {
     const std::vector<RuntimeShapeInput>& inputs;
     const std::vector<RuntimeShapeOutput>& outputs;
@@ -168,8 +168,15 @@ struct RuntimeShapeCudaLaunchArgs {
     const std::string& exact_abi_fingerprint;
     ::kxc::DeviceStream stream;
 };
+/*! \brief CUDA launcher outcome; accepted=false explicitly proves no work was submitted. */
+struct RuntimeShapeCudaLaunchResult {
+    bool accepted{true};
+    std::string failure_reason;
+    ::kxc::AsyncOperation completion;
+};
+
 using RuntimeShapeCudaBoundLauncher =
-    std::function<::kxc::AsyncOperation(const RuntimeShapeCudaLaunchArgs&)>;
+    std::function<RuntimeShapeCudaLaunchResult(const RuntimeShapeCudaLaunchArgs&)>;
 
 struct RuntimeShapeReadyEntry {
     std::string module_label;
@@ -179,7 +186,7 @@ struct RuntimeShapeReadyEntry {
     std::string exact_abi_fingerprint;
     /*! \brief CPU-only synchronous callback; never used for CUDA async entries. */
     RuntimeShapeBoundLauncher launcher;
-    /*! \brief CUDA async callback; must return a defined same-device completion. */
+    /*! \brief CUDA async callback; accepted work needs a pending completion on this exact stream. */
     RuntimeShapeCudaBoundLauncher cuda_launcher;
     RuntimeShapeExecutionKind execution_kind{RuntimeShapeExecutionKind::kSynchronousCpu};
     /*! \brief Required CUDA:N identity for kCudaAsync; empty for legacy CPU entries. */

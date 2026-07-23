@@ -913,10 +913,11 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunImpl(
             state->ok = true;
             return RuntimeShapeAsyncResult(std::move(state));
         }
-        ::kxc::AsyncOperation completion;
-        const auto fail_closed = [&](const char* reason) noexcept {
-            // No completion proves the callback did not submit.  Quarantine the
-            // entire run before reporting failure so no CUDA Storage can be freed.
+        RuntimeShapeCudaLaunchResult launch;
+        const auto quarantine = [&](const char* reason) noexcept {
+            // An exception or an invalid accepted completion cannot establish that
+            // expected-stream work has finished. Keep every dependency forever.
+            state->completion = std::move(launch.completion);
             state->quarantined = true;
             state->retained_device_bytes = total_bytes;
             QuarantineRunState(state);
@@ -929,37 +930,37 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunImpl(
             }
             return RuntimeShapeAsyncResult(state);
         };
-        const auto fail_after_submission = [&](const char* reason) noexcept {
-            if (!completion.defined()) return fail_closed(reason);
-            try {
-                completion.Wait();
-                MarkCompletion(state);
-            } catch (...) {
-                // The returned operation is the only possible completion proof;
-                // retain it and the run forever rather than clearing outputs.
-                state->completion = std::move(completion);
-                return fail_closed(reason);
-            }
-            return fail(RuntimeShapeFailureKind::kSubmissionFailed, reason);
-        };
         try {
             std::lock_guard<std::mutex> lock(plan_.launcher_mutex());
-            completion = spec.entry.cuda_launcher(RuntimeShapeCudaLaunchArgs{inputs, state->outputs,
+            launch = spec.entry.cuda_launcher(RuntimeShapeCudaLaunchArgs{inputs, state->outputs,
                 runtime_extent_values, spec.entry.exact_abi_fingerprint, stream});
         } catch (...) {
-            return fail_closed("CUDA launcher threw after possible submission; run state quarantined");
+            return quarantine("CUDA launcher threw after possible submission; run state quarantined");
         }
-        if (!completion.defined()) {
-            return fail_closed("CUDA launcher returned no completion; run state quarantined");
+        if (!launch.accepted) {
+            if (launch.completion.defined()) {
+                return quarantine("CUDA launcher rejected submission with a completion; run state quarantined");
+            }
+            return fail(RuntimeShapeFailureKind::kLaunchRejected,
+                        launch.failure_reason.empty() ? "CUDA launcher rejected submission"
+                                                      : launch.failure_reason);
+        }
+        if (!launch.completion.defined()) {
+            return quarantine("CUDA launcher accepted submission without completion; run state quarantined");
+        }
+        bool fences_expected_stream = false;
+        try {
+            fences_expected_stream =
+                launch.completion.device() == execution_device &&
+                launch.completion->stream.defined() && launch.completion->stream == stream &&
+                launch.completion->backend_event != nullptr && !launch.completion->completed;
+        } catch (...) {
+            return quarantine("CUDA launcher returned an invalid completion; run state quarantined");
+        }
+        if (!fences_expected_stream) {
+            return quarantine("CUDA launcher returned completion that does not fence the expected stream");
         }
         try {
-            if (completion.device() != execution_device) {
-                return fail_after_submission("CUDA launcher returned completion on wrong device");
-            }
-            if (completion->backend_event == nullptr || completion->completed) {
-                return fail_after_submission(
-                    "CUDA launcher must return a pending backend-event completion");
-            }
             auto retention = std::make_shared<RuntimeShapeAsyncRetention>();
             retention->plan = plan_;
             retention->caller_lease = state->caller_lease;
@@ -970,11 +971,20 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunImpl(
             if (fail_next_cuda_retention.exchange(false, std::memory_order_acq_rel)) {
                 throw std::bad_alloc();
             }
-            completion.RetainDependencies(std::move(output_storage), retention);
+            launch.completion.RetainDependencies(std::move(output_storage), retention);
         } catch (...) {
-            return fail_after_submission("CUDA completion retention failed");
+            // This is the sole error path where the returned event is valid proof
+            // for this stream, so waiting permits safe cleanup.
+            try {
+                launch.completion.Wait();
+                MarkCompletion(state);
+            } catch (...) {
+                return quarantine("CUDA completion retention failed; run state quarantined");
+            }
+            return fail(RuntimeShapeFailureKind::kSubmissionFailed,
+                        "CUDA completion retention failed");
         }
-        state->completion = std::move(completion);
+        state->completion = std::move(launch.completion);
         state->retained_device_bytes = total_bytes;
         state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kSubmission,
             static_cast<std::size_t>(-1), total_bytes, spec.entry.entry_symbol});

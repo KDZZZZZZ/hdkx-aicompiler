@@ -9,8 +9,13 @@ remain the defaults. The established CPU:0 path remains `ShapeEval -> Allocate
 - `RuntimeShapeExecutionKind::kSynchronousCpu` uses only
   `RuntimeShapeBoundLauncher`; it cannot silently become asynchronous.
 - `RuntimeShapeExecutionKind::kCudaAsync` uses the sibling
-  `RuntimeShapeCudaBoundLauncher`, which returns a defined same-device
-  `kxc::AsyncOperation`. It is available only when all three conditions hold:
+  `RuntimeShapeCudaBoundLauncher`, which returns
+  `RuntimeShapeCudaLaunchResult {accepted, failure_reason, completion}`.
+  `accepted=false` with an undefined completion is the trusted explicit proof
+  that no work was submitted; it reports `kLaunchRejected` and releases the
+  unsubmitted outputs. Accepted work requires a pending CUDA event completion
+  on the exact supplied stream and device. It is available only when all three
+  conditions hold:
   runtime-shape tasks are enabled, `KXC_ENABLE_RUNTIME_SHAPE_CUDA=ON`, and a
   CUDA backend was actually compiled (`KXC_USE_CUDA=1`). CMake rejects an
   enabled CUDA runtime-shape gate without those prerequisites.
@@ -45,17 +50,19 @@ its storage until final completion/result ownership drops. `kRetire` is emitted
 only with an observed CUDA completion as logical retirement eligibility; it
 never claims a physical free and is never synthesized by result destruction.
 
-After invoking a CUDA launcher, every rejected wrong-device/pending completion
-or retention-attachment error first waits the returned completion before output
-storage is cleared. A callback that throws or returns no completion after
-possible submission has no proof point, so the complete run state (outputs,
-input/module/caller leases, the submitting stream, and any returned operation) is permanently
-quarantined and the failed result reports retained bytes instead of assuming
-that no work was submitted. This is intentionally process-lifetime retention:
-safety takes precedence over reclamation. The same no-early-release rule is
-consistent with `CudaModuleLauncher`, whose own post-launch error path syncs
-before release and permanently retains its operation when synchronization
-cannot establish completion.
+After invoking a CUDA launcher, only retention-attachment failure with a valid
+pending event on the exact expected CUDA stream/device waits that event before
+output storage is cleared. A callback exception, an accepted missing
+completion, a wrong-device/wrong-stream completion, or a completed/no-event
+(fake) completion cannot prove expected work completion, so the complete run
+state (outputs, input/module/caller leases, the submitting stream, and any
+returned operation) is permanently quarantined and the failed result reports
+retained bytes instead of assuming that no work was submitted. This is
+intentionally process-lifetime retention: safety takes precedence over
+reclamation. The same no-early-release rule is consistent with
+`CudaModuleLauncher`, whose own post-launch error path syncs before release and
+permanently retains its operation when synchronization cannot establish
+completion.
 
 `RuntimeShapeFailureKind` lets an upper control plane distinguish disabled,
 applicability/guard miss, shape/ABI rejection, resource exhaustion/OOM, launch
@@ -73,8 +80,9 @@ serialized trusted callbacks. The conditional CUDA test uses real CUDA events
 and host callbacks to check pending retention across session/owner destruction,
 that post-submit retention failure waits before clearing output, that a
 post-submit callback exception without a completion quarantines its complete
-run state, and that rejected/wrong-device completion paths do not clear output
-before completion is observed. CTest uses skip code 77 when no CUDA hardware
+run state, that explicit rejection clears unsubmitted outputs, and that
+accepted missing, wrong-device, and completed/no-event completions quarantine
+rather than clear outputs. CTest uses skip code 77 when no CUDA hardware
 exists.
 
 Local CUDA validation ran the conditional `runtime_shape_cuda_async_test` with
