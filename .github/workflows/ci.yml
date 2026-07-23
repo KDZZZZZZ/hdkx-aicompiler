@@ -49,6 +49,7 @@ jobs:
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=OFF
           -DKXC_ENABLE_REGION_TASK_DAG=${{ matrix.region_task_dag }}
+          -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_PASS_TESTS=ON
           -DKXC_BUILD_CODEGEN_TESTS=OFF
@@ -81,6 +82,7 @@ jobs:
           run_shape_system_test
           run_shape_specialization_test
           run_shape_guarded_specialization_test
+          run_shape_production_exact_test
 
   llvm-resnet18:
     name: ResNet18 LLVM compile
@@ -109,6 +111,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=ON
+          -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_DEBUG_EXAMPLES=OFF
           -DKXC_BUILD_PASS_TESTS=ON
@@ -118,12 +121,12 @@ jobs:
         run: >
           cmake --build out/build/ci-llvm --parallel 2 --target
           operator_compilation_test codegen_llvm_test op_numeric_llvm_test
-          onnx_importer_test
+          onnx_importer_test shape_production_exact_test
 
       - name: Run LLVM operator, relocation/cache, codegen, and numeric checks
         run: >
           ctest --test-dir out/build/ci-llvm --output-on-failure
-          --tests-regex '^(operator_compilation_test|codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test)$'
+          --tests-regex '^(operator_compilation_test|codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test|shape_production_exact_test)$'
 
   python-onnx-importer:
     name: Python ONNX importer tests

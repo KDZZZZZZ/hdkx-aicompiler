@@ -56,5 +56,9 @@ CompiledModule BuildCompiledModule(
     Map<String, runtime::NDArray> constants,
     std::shared_ptr<profiling::ProfileContext> profile_context = nullptr);
 
+/*! \brief Internal immutable borrow; public constants() returns deep copies. */
+const Map<String, runtime::NDArray>& BorrowCompiledModuleConstants(
+    const CompiledModule& module);
+
 }  // namespace internal
 }  // namespace kxc::api

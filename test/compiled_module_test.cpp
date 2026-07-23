@@ -161,9 +161,18 @@ bool TestValidLaunchAndAccessors() {
 
     // 修改返回 Map 不得删除或替换模块内部常量绑定。
     kxc::Map<kxc::String, kxc::runtime::NDArray> copied = fixture.module.constants();
+    const kxc::String constant_key("relay.constant.0");
+    const std::vector<float> overwritten{1, 2, 3};
+    copied.at(constant_key).CopyFromBytes(
+        overwritten.data(), overwritten.size() * sizeof(float));
     copied.Set(kxc::String("unexpected"), fixture.arguments[0]);
-    TEST_CHECK(fixture.module.constants().size() == 1,
-               "constants accessor must return an independent Map");
+    const auto fresh_constants = fixture.module.constants();
+    std::vector<float> retained(3, -1.0F);
+    fresh_constants.at(constant_key).CopyToBytes(
+        retained.data(), retained.size() * sizeof(float));
+    TEST_CHECK(fresh_constants.size() == 1 &&
+                   retained == std::vector<float>({0, 0, 0}),
+               "constants accessor must deep-copy its Map and NDArray payloads");
     return true;
 }
 
@@ -374,19 +383,32 @@ bool TestAlignedOffsetAndZeroSize() {
     return true;
 }
 
-// constant 角色只能接收模块绑定的同一 NDArray，不能被等形等类型值替换。
+// constant 角色比较完整 payload；launch 始终改用模块自有的 immutable binding。
 bool TestConstantIdentityCheck() {
     ModuleFixture fixture = MakeStaticFixture();
     auto arguments = fixture.arguments;
     arguments[1] = kxc::runtime::NDArray::Zeros({3}, Float32(), kxc::Device::CPU());
+    const std::vector<float> wrong_payload{1, 1, 1};
+    arguments[1].CopyFromBytes(
+        wrong_payload.data(), wrong_payload.size() * sizeof(float));
     TEST_CHECK(Throws([&] {
                    fixture.module.Launch(
                        "fixture_kernel", arguments,
                        kxc::DeviceStream::Default(kxc::Device::CPU()));
                }),
-               "replacement constant should fail");
+               "different constant payload should fail");
     TEST_CHECK(fixture.launcher->calls == 0,
-               "constant identity failure must not reach launcher");
+               "constant payload failure must not reach launcher");
+
+    arguments[1] = fixture.module.constants().at(
+        kxc::String("relay.constant.0"));
+    (void)fixture.module.Launch(
+        "fixture_kernel", arguments,
+        kxc::DeviceStream::Default(kxc::Device::CPU()));
+    TEST_CHECK(fixture.launcher->calls == 1 &&
+                   fixture.launcher->last_arguments[1].get() ==
+                       fixture.constant.get(),
+               "equal public snapshot must validate but launch the module-owned binding");
     return true;
 }
 

@@ -48,6 +48,12 @@
 namespace kxc::api {
 namespace {
 
+bool SameTargetSnapshot(const Target& left, const Target& right) {
+    if (!left.defined() || !right.defined()) return false;
+    return internal::CanonicalTargetSnapshot(left) ==
+           internal::CanonicalTargetSnapshot(right);
+}
+
 std::shared_ptr<profiling::ProfileContext> MaybeCreateProfileContext(
     const CompileConfig& config) {
     if (profiling::CurrentContext()) return profiling::CurrentContext();
@@ -298,13 +304,16 @@ CompileResult OptimizeRelay(
     return input.AfterRelayOptimization(std::move(optimized));
 }
 
-CompileResult LowerOperators(
-    const CompileResult& input,
-    const internal::CompilerExecutionContract& contract) {
+CompileResult LowerPreparedOperators(
+    const CompileResult& input, const internal::PreparedStaticGraph& prepared) {
     const Device device(input.target()->device_type, input.target()->device_id);
-    internal::LoweredGraph lowered = internal::LowerGraph(
-        input.optimized_relay(), device, input.target(),
-        String(contract.fingerprint));
+    if (prepared.device != device ||
+        !SameTargetSnapshot(prepared.target, input.target())) {
+        throw std::invalid_argument(
+            "LowerPreparedOperators requires prepared Device/Target identity unchanged");
+    }
+    internal::LoweredGraph lowered =
+        internal::LowerPreparedStaticGraph(prepared);
     std::vector<PrimitiveCompileState> primitives;
     primitives.reserve(lowered.primitives.size());
     for (const internal::LoweredPrimitive& source : lowered.primitives) {
@@ -319,6 +328,16 @@ CompileResult LowerOperators(
     return input.AfterLowering(
         std::move(primitives), runtime::internal::PlanMemory(lowered.plan),
         PlaceConstants(lowered.constants, input.target()));
+}
+
+CompileResult LowerOperators(
+    const CompileResult& input,
+    const internal::CompilerExecutionContract& contract) {
+    const Device device(input.target()->device_type, input.target()->device_id);
+    return LowerPreparedOperators(
+        input, internal::PrepareStaticGraph(input.optimized_relay(), device,
+                                             input.target(),
+                                             String(contract.fingerprint)));
 }
 
 CompileResult OptimizeTIR(
@@ -706,6 +725,67 @@ CompiledGraph CompilePipeline(
 
 }  // namespace
 
+Target internal::CloneTargetSnapshot(const Target& target) {
+    const auto* source = target.As<TargetNode>();
+    if (!source) {
+        throw std::invalid_argument(
+            "CloneTargetSnapshot requires a defined TargetNode");
+    }
+    auto* copy = new TargetNode();
+    copy->kind = source->kind;
+    copy->device_type = source->device_type;
+    copy->device_id = source->device_id;
+    copy->attrs = source->attrs;
+    return Target(ObjectRef(copy));
+}
+
+std::string internal::CanonicalTargetSnapshot(const Target& target) {
+    const auto* node = target.As<TargetNode>();
+    if (!node) {
+        throw std::invalid_argument(
+            "CanonicalTargetSnapshot requires a defined TargetNode");
+    }
+    std::string canonical;
+    AppendPipelineIdentityField(&canonical, "kind", "target-snapshot-v1");
+    AppendPipelineIdentityField(&canonical, "target_kind", node->kind);
+    AppendPipelineIdentityField(
+        &canonical, "device_type",
+        std::to_string(static_cast<int>(node->device_type)));
+    AppendPipelineIdentityField(&canonical, "device_id",
+                                std::to_string(node->device_id));
+    const DeviceAttributes& attrs = node->attrs;
+    const auto append_integer = [&canonical](const char* name, int64_t value) {
+        AppendPipelineIdentityField(&canonical, name, std::to_string(value));
+    };
+    append_integer("exists", attrs.exists);
+    append_integer("max_threads_per_block", attrs.max_threads_per_block);
+    append_integer("warp_size", attrs.warp_size);
+    append_integer("max_shared_memory_per_block",
+                   attrs.max_shared_memory_per_block);
+    AppendPipelineIdentityField(&canonical, "compute_version",
+                                attrs.compute_version);
+    AppendPipelineIdentityField(&canonical, "device_name", attrs.device_name);
+    append_integer("max_clock_rate_khz", attrs.max_clock_rate_khz);
+    append_integer("max_registers_per_block", attrs.max_registers_per_block);
+    append_integer("api_version", attrs.api_version);
+    append_integer("driver_version", attrs.driver_version);
+    append_integer("l2_cache_size_bytes", attrs.l2_cache_size_bytes);
+    append_integer("total_global_memory", attrs.total_global_memory);
+    // available_global_memory is a volatile observation, not a codegen
+    // capability. It is deliberately excluded from reusable identity.
+    append_integer("max_shared_memory_per_multiprocessor",
+                   attrs.max_shared_memory_per_multiprocessor);
+    append_integer("max_registers_per_multiprocessor",
+                   attrs.max_registers_per_multiprocessor);
+    append_integer("max_threads_per_multiprocessor",
+                   attrs.max_threads_per_multiprocessor);
+    append_integer("compute_version_major", attrs.compute_version_major);
+    append_integer("compute_version_minor", attrs.compute_version_minor);
+    append_integer("multi_processor_count", attrs.multi_processor_count);
+    AppendPipelineIdentityField(&canonical, "arch", attrs.arch);
+    return canonical;
+}
+
 internal::CompilerExecutionContract
 internal::ResolveCompilerExecutionContract(const CompileConfig& config) {
     config.Validate();
@@ -738,6 +818,87 @@ void internal::ProbeCompilerExecution(
     Function function, CompileConfig config,
     const CompilerExecutionContract& contract) {
     (void)CompilePipeline(std::move(function), std::move(config), contract);
+}
+
+internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
+    Function function, CompileConfig config,
+    const CompilerExecutionContract& contract) {
+    config.Validate();
+    const PassContext pass_context = PassContext::MergeTarget(
+        relay::PassContextFromRelay(function), config->target);
+    PassContext::Scope pass_scope(pass_context);
+    auto profile_context = MaybeCreateProfileContext(config);
+    const std::string run_id =
+        profile_context ? profile_context->NextRunId("shape_exact") : "";
+    profiling::ActivationScope activation(profile_context, run_id);
+    size_t capability_boundary_checks = 0;
+    size_t relay_graph_pipelines = 0;
+    CompileResult result = RunStage(
+        "validate", config,
+        [&] { return ValidateInput(std::move(function), config, contract); });
+    ++capability_boundary_checks;
+    result = RunStage("optimize_relay", config,
+                      [&] { return OptimizeRelay(result, config, contract); });
+    ++relay_graph_pipelines;
+    ++capability_boundary_checks;
+    const Device device(result.target()->device_type, result.target()->device_id);
+    profiling::ScopedSpan prepare_span(
+        profile_context, MakeStageEvent("prepare_graph", config), run_id);
+    PreparedStaticGraph graph;
+    try {
+        graph = PrepareStaticGraph(result.optimized_relay(), device,
+                                   result.target(),
+                                   String(contract.fingerprint));
+    } catch (const std::exception& error) {
+        prepare_span.SetStatus("error");
+        prepare_span.SetMessage(error.what());
+        throw std::runtime_error(
+            std::string("Compiler stage 'prepare_graph' failed: ") +
+            error.what());
+    }
+    capability_boundary_checks += graph.capability_boundary_checks;
+    const size_t value_graph_builds = graph.value_graph_builds;
+    const size_t partitions = graph.partitions;
+    return PreparedCompilerGraph{
+        result, std::move(graph), result.target(), contract.canonical_bytes,
+        std::move(profile_context), run_id, relay_graph_pipelines,
+        capability_boundary_checks, value_graph_builds, partitions};
+}
+
+CompiledGraph internal::FinishCompilerGraph(
+    const PreparedCompilerGraph& prepared, CompileConfig config,
+    const CompilerExecutionContract& contract) {
+    config.Validate();
+    if (prepared.execution_contract_canonical != contract.canonical_bytes ||
+        !SameTargetSnapshot(prepared.target, config->target) ||
+        !SameTargetSnapshot(prepared.optimized.target(), config->target) ||
+        !SameTargetSnapshot(prepared.graph.target, config->target) ||
+        prepared.graph.device !=
+            Device(config->target->device_type, config->target->device_id) ||
+        std::string(prepared.graph.pipeline_fingerprint) !=
+            contract.fingerprint) {
+        throw std::invalid_argument(
+            "FinishCompilerGraph requires the prepared target and execution contract unchanged");
+    }
+    const PassContext pass_context = PassContext::MergeTarget(
+        relay::PassContextFromRelay(prepared.optimized.optimized_relay()), config->target);
+    PassContext::Scope pass_scope(pass_context);
+    auto profile_context = prepared.profile_context;
+    const std::string& run_id = prepared.profile_run_id;
+    profiling::ActivationScope activation(profile_context, run_id);
+    CompileResult result = RunStage("lower", config,
+        [&] { return LowerPreparedOperators(prepared.optimized, prepared.graph); });
+    result = RunStage("optimize_tir", config,
+                      [&] { return OptimizeTIR(result, contract); });
+    result = RunStage("build_signature", config,
+                      [&] { return BuildSignatures(result); });
+    result = RunStage("build_backend", config,
+                      [&] { return BuildBackends(result, config, contract); });
+    profiling::ScopedSpan assemble_span(profile_context, MakeStageEvent("assemble", config), run_id);
+    CompiledModule module = AssembleModule(result, profile_context);
+    AddResultFields(&assemble_span, result);
+    if (profile_context) profile_context->Flush();
+    return CompiledGraph{std::move(module), result.plan(), result.artifact_pins()};
 }
 
 Array<String> Compiler::RelayPassPolicy(int opt_level) {

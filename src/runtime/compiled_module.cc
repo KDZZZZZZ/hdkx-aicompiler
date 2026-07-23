@@ -24,10 +24,19 @@ Device TargetDevice(const Target& target) {
     return Device(target->device_type, target->device_id);
 }
 
-Map<String, runtime::NDArray> CopyConstants(
+Map<String, runtime::NDArray> CopyConstantHandles(
     const Map<String, runtime::NDArray>& source) {
     Map<String, runtime::NDArray> result;
     for (const auto& item : source) result.Set(item.first, item.second);
+    return result;
+}
+
+Map<String, runtime::NDArray> CloneConstantPayloads(
+    const Map<String, runtime::NDArray>& source) {
+    Map<String, runtime::NDArray> result;
+    for (const auto& item : source) {
+        result.Set(item.first, item.second.CopyTo(item.second.device()));
+    }
     return result;
 }
 
@@ -177,11 +186,16 @@ AsyncOperation LaunchEntry(
             "' argument count expected " + std::to_string(specs.size()) +
             ", actual " + std::to_string(ordered_arguments.size()));
     }
+    Array<runtime::NDArray> launch_arguments;
     for (size_t i = 0; i < specs.size(); ++i) {
         ValidateKernelArgument(entry.signature, i, specs[i],
                                ordered_arguments[i], constants);
+        launch_arguments.push_back(
+            specs[i]->role == codegen::KernelArgRole::kConstant
+                ? constants.at(specs[i]->constant_key)
+                : ordered_arguments[i]);
     }
-    return entry.executable.Launch(ordered_arguments, stream);
+    return entry.executable.Launch(launch_arguments, stream);
 }
 
 }  // namespace
@@ -211,7 +225,7 @@ CompiledModule internal::BuildCompiledModule(
     ValidateConstants(entries, constants);
 
     return CompiledModule(ObjectRef(new CompiledModuleNode(
-        std::move(target), std::move(entries), CopyConstants(constants),
+        std::move(target), std::move(entries), CopyConstantHandles(constants),
         std::move(profile_context))));
 }
 
@@ -242,7 +256,12 @@ codegen::KernelLaunchMetadata CompiledModule::launch_metadata(
 }
 
 Map<String, runtime::NDArray> CompiledModule::constants() const {
-    return CopyConstants(CheckedNode(*this)->constants_);
+    return CloneConstantPayloads(CheckedNode(*this)->constants_);
+}
+
+const Map<String, runtime::NDArray>&
+internal::BorrowCompiledModuleConstants(const CompiledModule& module) {
+    return CheckedNode(module)->constants_;
 }
 
 bool CompiledModule::HasFunction(const String& symbol) const {
