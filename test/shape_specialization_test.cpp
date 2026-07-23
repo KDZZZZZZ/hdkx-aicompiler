@@ -26,44 +26,72 @@ bool Throws(const std::function<void()>& action) {
   return false;
 }
 
-using kxc::shape::Binding;
-using kxc::shape::BindingSet;
-using kxc::shape::ConcreteTensorShapeContract;
-using kxc::shape::DimExpr;
-using kxc::shape::ExactOracle;
-using kxc::shape::GraphLocalCallLocator;
-using kxc::shape::GraphTemplate;
-using kxc::shape::GraphTemplateKey;
-using kxc::shape::InstantiateExactProfile;
-using kxc::shape::LogicalShape;
-using kxc::shape::MakeExactSpecializationRequests;
-using kxc::shape::NamedTensorContract;
-using kxc::shape::PhysicalShape;
-using kxc::shape::ShapeProgram;
-using kxc::shape::TensorShapeContract;
-using kxc::shape::UnitSemanticKey;
-using kxc::shape::UnitSkeleton;
-using kxc::shape::ValidExtent;
-namespace fake = kxc::shape::fakes::compiler_foundation_v1;
+namespace shape = kxc::shape::experimental::v1;
+using shape::BackendKind;
+using shape::Binding;
+using shape::BindingSet;
+using shape::ConcreteTensorShapeContract;
+using shape::DataType;
+using shape::DeviceDescriptor;
+using shape::DeviceKind;
+using shape::DimExpr;
+using shape::ExactOracle;
+using shape::GraphLocalCallLocator;
+using shape::GraphTemplate;
+using shape::GraphTemplateKey;
+using shape::InstantiateExactProfile;
+using shape::LogicalShape;
+using shape::MakeExactSpecializationRequests;
+using shape::NamedTensorContract;
+using shape::PhysicalShape;
+using shape::ShapeProgram;
+using shape::TargetBackendAbiDescriptor;
+using shape::TargetKind;
+using shape::TensorAbiDescriptor;
+using shape::TensorShapeContract;
+using shape::UnitSemanticKey;
+using shape::UnitSkeleton;
+using shape::ValidExtent;
+namespace fake = shape::fakes::compiler_foundation_v1;
 
-TensorShapeContract ExactContract(const DimExpr& dimension) {
+TensorAbiDescriptor TensorAbi(
+    DataType dtype = DataType::kFloat32,
+    DeviceKind device_kind = DeviceKind::kCpu, uint32_t device_id = 0,
+    TargetKind target = TargetKind::kX86_64,
+    BackendKind backend = BackendKind::kLlvm, uint32_t backend_abi_version = 1) {
+  return TensorAbiDescriptor(dtype, DeviceDescriptor(device_kind, device_id),
+                             TargetBackendAbiDescriptor(target, backend,
+                                                        backend_abi_version));
+}
+
+TensorShapeContract ExactContract(const DimExpr& dimension,
+                                  TensorAbiDescriptor abi = TensorAbi()) {
   return TensorShapeContract(LogicalShape({dimension}), PhysicalShape({dimension}),
-                             ValidExtent({dimension}));
+                             ValidExtent({dimension}), std::move(abi));
 }
 
 GraphTemplate MakeTemplate(std::string input_name = "source", std::string middle_name = "middle",
                            std::string result_name = "result", std::string first_locator = "call.0",
                            std::string second_locator = "call.1",
-                           std::string graph_fingerprint = "graph.semantic.v1") {
+                           std::string graph_fingerprint = "graph.semantic.v1",
+                           DataType dtype = DataType::kFloat32,
+                           DeviceKind device_kind = DeviceKind::kCpu,
+                           uint32_t device_id = 0,
+                           TargetKind target = TargetKind::kX86_64,
+                           BackendKind backend = BackendKind::kLlvm,
+                           uint32_t backend_abi_version = 1) {
   const DimExpr n = DimExpr::Symbol("n");
-  const TensorShapeContract contract = ExactContract(n);
+  const TensorAbiDescriptor abi = TensorAbi(dtype, device_kind, device_id, target,
+                                            backend, backend_abi_version);
+  const TensorShapeContract contract = ExactContract(n, abi);
   const ShapeProgram program({"n"}, {NamedTensorContract{input_name, contract}},
                              {NamedTensorContract{middle_name, contract},
                               NamedTensorContract{result_name, contract}});
-  const GraphTemplateKey key(kxc::shape::kShapeContractVersion,
+  const GraphTemplateKey key(shape::kShapeContractVersion,
                              std::move(graph_fingerprint), "pipeline.v1",
-                             "cpu.avx2", "per-call.v1");
-  const UnitSemanticKey semantic(1, "elementwise.relu.f32.v1");
+                             "capability.v1", "per-call.v1",
+                             abi.target_backend_abi());
+  const UnitSemanticKey semantic(1, "elementwise.relu.v1");
   return GraphTemplate(key, program,
                        {{GraphLocalCallLocator(std::move(first_locator)), semantic, {input_name}, {middle_name}},
                         {GraphLocalCallLocator(std::move(second_locator)), semantic, {middle_name}, {result_name}}});
@@ -102,6 +130,81 @@ bool TestExactProfilesAndRequests() {
         "graph/template locators and value names must not enter artifact identity");
   CHECK(Throws([&] { (void)InstantiateExactProfile(graph_template, BindingSet()); }),
         "all symbols must bind through ShapeProgram");
+
+  const GraphTemplate same_key_different_routing = MakeTemplate(
+      "source", "middle", "result", "forged.call.0", "forged.call.1",
+      "graph.semantic.v1");
+  CHECK(same_key_different_routing.key() == graph_template.key() &&
+            !(same_key_different_routing.content_key() == graph_template.content_key()),
+        "full template identity must include ordered skeleton and routing");
+  CHECK(Throws([&] {
+          (void)MakeExactSpecializationRequests(same_key_different_routing, small);
+        }), "same caller key with different template content must reject the oracle");
+  const GraphTemplate same_key_different_unit(
+      graph_template.key(), graph_template.shape_program(),
+      {{GraphLocalCallLocator("call.0"), UnitSemanticKey(1, "different.unit.v1"),
+        {"source"}, {"middle"}},
+       {GraphLocalCallLocator("call.1"), UnitSemanticKey(1, "elementwise.relu.v1"),
+        {"middle"}, {"result"}}});
+  CHECK(Throws([&] {
+          (void)MakeExactSpecializationRequests(same_key_different_unit, small);
+        }), "same caller key with different ordered unit skeleton must reject the oracle");
+
+  const auto typed_requests = [](const GraphTemplate& graph) {
+    return MakeExactSpecializationRequests(
+        graph, InstantiateExactProfile(graph, BindingSet({Binding{"n", 2}})));
+  };
+  const GraphTemplate f16 = MakeTemplate("source", "middle", "result", "call.0", "call.1",
+                                         "graph.semantic.v1", DataType::kFloat16);
+  const GraphTemplate cpu1 = MakeTemplate("source", "middle", "result", "call.0", "call.1",
+                                          "graph.semantic.v1", DataType::kFloat32,
+                                          DeviceKind::kCpu, 1);
+  const GraphTemplate cuda0 = MakeTemplate("source", "middle", "result", "call.0", "call.1",
+                                           "graph.semantic.v1", DataType::kFloat32,
+                                           DeviceKind::kCuda, 0);
+  const GraphTemplate arm = MakeTemplate("source", "middle", "result", "call.0", "call.1",
+                                         "graph.semantic.v1", DataType::kFloat32,
+                                         DeviceKind::kCpu, 0, TargetKind::kAArch64);
+  const GraphTemplate native = MakeTemplate("source", "middle", "result", "call.0", "call.1",
+                                            "graph.semantic.v1", DataType::kFloat32,
+                                            DeviceKind::kCpu, 0, TargetKind::kX86_64,
+                                            BackendKind::kNative);
+  const GraphTemplate abi2 = MakeTemplate("source", "middle", "result", "call.0", "call.1",
+                                          "graph.semantic.v1", DataType::kFloat32,
+                                          DeviceKind::kCpu, 0, TargetKind::kX86_64,
+                                          BackendKind::kLlvm, 2);
+  const auto f16_requests = typed_requests(f16);
+  const auto cpu1_requests = typed_requests(cpu1);
+  const auto cuda_requests = typed_requests(cuda0);
+  const auto arm_requests = typed_requests(arm);
+  const auto native_requests = typed_requests(native);
+  const auto abi2_requests = typed_requests(abi2);
+  CHECK(Throws([&] { (void)MakeExactSpecializationRequests(f16, small); }),
+        "same caller key with different ShapeProgram ABI content must reject the oracle");
+  CHECK(!(small.profile().key() == InstantiateExactProfile(
+              f16, BindingSet({Binding{"n", 2}})).profile().key()) &&
+            !(small_requests[0].artifact_key == f16_requests[0].artifact_key),
+        "f32 and f16 must have distinct profile and artifact identity");
+  CHECK(!(small_requests[0].shape_profile_key == cpu1_requests[0].shape_profile_key) &&
+            !(small_requests[0].shape_profile_key == cuda_requests[0].shape_profile_key) &&
+            !(small_requests[0].artifact_key == cpu1_requests[0].artifact_key) &&
+            !(small_requests[0].artifact_key == cuda_requests[0].artifact_key),
+        "device kind and id must participate in exact profile/artifact identity");
+  CHECK(!(small_requests[0].shape_profile_key == arm_requests[0].shape_profile_key) &&
+            !(small_requests[0].shape_profile_key == native_requests[0].shape_profile_key) &&
+            !(small_requests[0].shape_profile_key == abi2_requests[0].shape_profile_key) &&
+            !(small_requests[0].artifact_key == arm_requests[0].artifact_key) &&
+            !(small_requests[0].artifact_key == native_requests[0].artifact_key) &&
+            !(small_requests[0].artifact_key == abi2_requests[0].artifact_key),
+        "target, backend, and backend ABI version must participate in exact profile/artifact identity");
+  fake::DeterministicMockCoordinator typed_coordinator;
+  for (const auto* requests : {&small_requests, &f16_requests, &cpu1_requests,
+                               &cuda_requests, &arm_requests, &native_requests,
+                               &abi2_requests}) {
+    (void)typed_coordinator.Resolve(*requests);
+  }
+  CHECK(typed_coordinator.unique_resolve_count() == 7,
+        "dtype/device/target/backend differences must be resolver misses");
   return true;
 }
 
@@ -154,7 +257,9 @@ bool TestFakeCoordinatorAndFrozenPlan() {
 bool TestMalformedTemplatesAndNonExactContracts() {
   const DimExpr n = DimExpr::Symbol("n");
   const TensorShapeContract exact = ExactContract(n);
-  const GraphTemplateKey key(1, "bad.graph", "pipeline", "capability", "partition");
+  const TensorAbiDescriptor abi = TensorAbi();
+  const GraphTemplateKey key(1, "bad.graph", "pipeline", "capability", "partition",
+                             abi.target_backend_abi());
   const UnitSemanticKey semantic(1, "unit");
   const ShapeProgram routing_program({"n"}, {NamedTensorContract{"input", exact}},
                                      {NamedTensorContract{"first", exact}, NamedTensorContract{"second", exact}});
@@ -174,7 +279,7 @@ bool TestMalformedTemplatesAndNonExactContracts() {
         }), "routing must reject a declared output without a producer");
 
   const TensorShapeContract padded(LogicalShape({n}), PhysicalShape({DimExpr::Add({n, DimExpr::Const(1)})}),
-                                   ValidExtent({n}));
+                                   ValidExtent({n}), abi);
   const ShapeProgram padded_program({"n"}, {NamedTensorContract{"input", padded}},
                                     {NamedTensorContract{"output", padded}});
   const GraphTemplate padded_template(key, padded_program,

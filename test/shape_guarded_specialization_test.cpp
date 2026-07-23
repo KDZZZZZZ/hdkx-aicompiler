@@ -1,11 +1,12 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "kxc/shape/guarded_specialization.h"
+#include "kxc/shape/fakes/compiler_foundation_v1.h"
 
 namespace {
 
@@ -26,39 +27,53 @@ bool Throws(const std::function<void()>& action) {
   return false;
 }
 
-using kxc::shape::ApplicabilityGuard;
-using kxc::shape::Binding;
-using kxc::shape::BindingSet;
-using kxc::shape::BucketPolicy;
-using kxc::shape::BucketValueBoundary;
-using kxc::shape::BuildBucketProfile;
-using kxc::shape::BuildPolymorphicProfile;
-using kxc::shape::Constraint;
-using kxc::shape::DimExpr;
-using kxc::shape::ExactOracle;
-using kxc::shape::GraphLocalCallLocator;
-using kxc::shape::GraphTemplate;
-using kxc::shape::GraphTemplateKey;
-using kxc::shape::InstantiateExactProfile;
-using kxc::shape::LogicalShape;
-using kxc::shape::MakeGuardedSpecializationRequests;
-using kxc::shape::NamedTensorContract;
-using kxc::shape::PhysicalShape;
-using kxc::shape::PolymorphicPolicy;
-using kxc::shape::PolymorphicUnitProof;
-using kxc::shape::RuntimeExtentScalar;
-using kxc::shape::ShapeProgram;
-using kxc::shape::SymbolicBoundaryContract;
-using kxc::shape::TailContract;
-using kxc::shape::TensorShapeContract;
-using kxc::shape::UnitSemanticKey;
-using kxc::shape::UnitSkeleton;
-using kxc::shape::ValidExtent;
-namespace fake = kxc::shape::fakes::compiler_foundation_v1;
+namespace shape = kxc::shape::experimental::v1;
+using shape::ApplicabilityGuard;
+using shape::BackendKind;
+using shape::Binding;
+using shape::BindingSet;
+using shape::BucketPolicy;
+using shape::BucketValueBoundary;
+using shape::BuildBucketProfile;
+using shape::BuildPolymorphicProfile;
+using shape::Constraint;
+using shape::DataType;
+using shape::DeviceDescriptor;
+using shape::DeviceKind;
+using shape::DimExpr;
+using shape::ExactOracle;
+using shape::GraphLocalCallLocator;
+using shape::GraphTemplate;
+using shape::GraphTemplateKey;
+using shape::InstantiateExactProfile;
+using shape::LogicalShape;
+using shape::MakeGuardedSpecializationRequests;
+using shape::NamedTensorContract;
+using shape::PhysicalShape;
+using shape::PolymorphicPolicy;
+using shape::PolymorphicUnitProof;
+using shape::RuntimeExtentScalar;
+using shape::ShapeProgram;
+using shape::SymbolicBoundaryContract;
+using shape::TailContract;
+using shape::TargetBackendAbiDescriptor;
+using shape::TargetKind;
+using shape::TensorAbiDescriptor;
+using shape::TensorShapeContract;
+using shape::UnitSemanticKey;
+using shape::UnitSkeleton;
+using shape::ValidExtent;
+namespace fake = shape::fakes::compiler_foundation_v1;
+
+TensorAbiDescriptor DefaultAbi() {
+  return TensorAbiDescriptor(
+      DataType::kFloat32, DeviceDescriptor(DeviceKind::kCpu, 0),
+      TargetBackendAbiDescriptor(TargetKind::kX86_64, BackendKind::kLlvm, 1));
+}
 
 TensorShapeContract ExactContract(const DimExpr& dimension) {
   return TensorShapeContract(LogicalShape({dimension}), PhysicalShape({dimension}),
-                             ValidExtent({dimension}));
+                             ValidExtent({dimension}), DefaultAbi());
 }
 
 GraphTemplate MakeTemplate() {
@@ -67,9 +82,10 @@ GraphTemplate MakeTemplate() {
   const ShapeProgram program({"s"}, {NamedTensorContract{"source", contract}},
                              {NamedTensorContract{"middle", contract},
                               NamedTensorContract{"result", contract}});
-  const GraphTemplateKey key(kxc::shape::kShapeContractVersion, "guarded.graph.v1", "pipeline.v1",
-                             "cpu.avx2", "per-call.v1");
-  const UnitSemanticKey semantic(1, "elementwise.tail-safe.f32.v1");
+  const GraphTemplateKey key(shape::kShapeContractVersion, "guarded.graph.v1", "pipeline.v1",
+                             "capability.v1", "per-call.v1",
+                             DefaultAbi().target_backend_abi());
+  const UnitSemanticKey semantic(1, "elementwise.tail-safe.v1");
   return GraphTemplate(key, program,
                        {{GraphLocalCallLocator("call.0"), semantic, {"source"}, {"middle"}},
                         {GraphLocalCallLocator("call.1"), semantic, {"middle"}, {"result"}}});
@@ -86,7 +102,7 @@ BucketPolicy Bucket(const GraphTemplate& graph, ApplicabilityGuard guard, int64_
   std::vector<BucketValueBoundary> boundaries;
   for (const char* name : {"source", "middle", "result"}) {
     boundaries.push_back(BucketValueBoundary{
-        name, {capacity}, {1}, "contiguous.row_major", 1, "default"});
+        name, {capacity}, {1}, "contiguous.row_major", 1, "default", DefaultAbi()});
   }
   std::vector<TailContract> tails;
   for (size_t i = 0; i < graph.ordered_units().size(); ++i) {
@@ -104,10 +120,11 @@ PolymorphicPolicy Polymorphic(const GraphTemplate& graph, ApplicabilityGuard gua
   }
   std::vector<SymbolicBoundaryContract> boundaries;
   for (const char* name : {"source", "middle", "result"}) {
-    boundaries.push_back(SymbolicBoundaryContract{name, {s}, "contiguous.row_major", 1, "default"});
+    boundaries.push_back(SymbolicBoundaryContract{
+        name, {s}, "contiguous.row_major", 1, "default", DefaultAbi()});
   }
   return PolymorphicPolicy(1, std::move(guard), std::move(proofs), {std::move(scalar)},
-                           std::move(boundaries), graph.key().capability_fingerprint(), 8192);
+                           std::move(boundaries), graph.key().target_backend_abi(), 8192);
 }
 
 bool TestExactFirstGuardAndBucketContract() {
@@ -134,7 +151,29 @@ bool TestExactFirstGuardAndBucketContract() {
   const auto r128 = MakeGuardedSpecializationRequests(graph, p128);
   CHECK(r97[0].artifact_key == r128[0].artifact_key,
         "S=97 and S=128 may share only the identical explicit bucket artifact");
+  const GraphTemplate same_key_different_template(
+      graph.key(), graph.shape_program(),
+      {{GraphLocalCallLocator("other.call.0"), graph.ordered_units()[0].semantic_key,
+        {"source"}, {"middle"}},
+       {GraphLocalCallLocator("other.call.1"), graph.ordered_units()[1].semantic_key,
+        {"middle"}, {"result"}}});
+  const ExactOracle other_oracle = InstantiateExactProfile(
+      same_key_different_template, BindingSet({Binding{"s", 97}}));
+  const auto other_profile = BuildBucketProfile(
+      same_key_different_template, other_oracle,
+      Bucket(same_key_different_template, Guard(1, 128), 128));
+  const auto other_requests = MakeGuardedSpecializationRequests(
+      same_key_different_template, other_profile);
+  auto forged_content = r97;
+  forged_content[0].exact_oracle_key = other_requests[0].exact_oracle_key;
+  auto forged_abi_version = r97;
+  forged_abi_version[0].exact_oracle_key = shape::ShapeProfileKey(
+      graph.key(), graph.content_key(), BindingSet({Binding{"s", 97}}), "exact", 2);
   fake::GuardedDeterministicMockCoordinator coordinator;
+  CHECK(Throws([&] { (void)coordinator.Resolve(forged_content); }),
+        "guarded resolver must reject same key/different full template binding");
+  CHECK(Throws([&] { (void)coordinator.Resolve(forged_abi_version); }),
+        "guarded resolver must reject an unsupported exact-oracle shape ABI");
   const auto selected97 = coordinator.Resolve(r97);
   const auto selected128 = coordinator.Resolve(r128);
   CHECK(coordinator.unique_resolve_count() == 1, "full guarded artifact keys must deterministically reuse the bucket");
@@ -150,9 +189,9 @@ bool TestExactFirstGuardAndBucketContract() {
         "a padded bucket missing tail predicate must reject");
   CHECK(Throws([&] {
           const BucketPolicy missing_tail("missing-tail", 1, Guard(1, 128),
-              {{"source", {128}, {1}, "contiguous.row_major", 1, "default"},
-               {"middle", {128}, {1}, "contiguous.row_major", 1, "default"},
-               {"result", {128}, {1}, "contiguous.row_major", 1, "default"}},
+              {{"source", {128}, {1}, "contiguous.row_major", 1, "default", DefaultAbi()},
+               {"middle", {128}, {1}, "contiguous.row_major", 1, "default", DefaultAbi()},
+               {"result", {128}, {1}, "contiguous.row_major", 1, "default", DefaultAbi()}},
               {{0, graph.ordered_units()[0].semantic_key, true, true, true, true}}, 0);
           (void)BuildBucketProfile(graph, s97, missing_tail);
         }), "a bucket policy missing an affected unit tail contract must reject");
@@ -166,6 +205,26 @@ bool TestExactFirstGuardAndBucketContract() {
               policy.tail_contracts(), policy.workspace_bytes());
           (void)BuildBucketProfile(graph, s97, bad_stride);
         }), "bucket physical strides must be explicit and layout-compatible");
+  CHECK(Throws([&] {
+          auto huge_boundaries = policy.boundaries();
+          huge_boundaries[0].physical = {
+              std::numeric_limits<int64_t>::max() / 4 + 1};
+          huge_boundaries[0].strides = {1};
+          const BucketPolicy huge(
+              "huge", 1, Guard(1, 128), std::move(huge_boundaries),
+              policy.tail_contracts(), policy.workspace_bytes());
+          (void)BuildBucketProfile(graph, s97, huge);
+        }), "bucket physical byte extent overflow must fail closed");
+  CHECK(Throws([&] {
+          auto wrong_abi_boundaries = policy.boundaries();
+          wrong_abi_boundaries[0].abi = TensorAbiDescriptor(
+              DataType::kFloat16, DeviceDescriptor(DeviceKind::kCpu, 0),
+              graph.key().target_backend_abi());
+          const BucketPolicy wrong_abi(
+              "wrong-abi", 1, Guard(1, 128), std::move(wrong_abi_boundaries),
+              policy.tail_contracts(), policy.workspace_bytes());
+          (void)BuildBucketProfile(graph, s97, wrong_abi);
+        }), "bucket boundary dtype/device/ABI must match the exact contract");
 
   fake::GuardedDeterministicMockPlanAssembler assembler;
   const auto plan = assembler.Assemble(graph, p97, selected97);
@@ -204,8 +263,16 @@ bool TestPolymorphicGuardedContract() {
         "range guard must reject before the fake resolver");
   CHECK(Throws([&] {
           (void)PolymorphicPolicy(1, Guard(1, 128, 32), policy.allowlist_proofs(), {}, policy.boundaries(),
-                                   graph.key().capability_fingerprint(), 8192);
+                                   graph.key().target_backend_abi(), 8192);
         }), "missing runtime scalar ABI must reject");
+  CHECK(Throws([&] {
+          const PolymorphicPolicy wrong_backend(
+              1, Guard(1, 128, 32), policy.allowlist_proofs(),
+              policy.runtime_extent_abi(), policy.boundaries(),
+              TargetBackendAbiDescriptor(TargetKind::kX86_64,
+                                         BackendKind::kNative, 1), 8192);
+          (void)BuildPolymorphicProfile(graph, s64, wrong_backend);
+        }), "polymorphic target/backend ABI mismatch must reject before fake resolution");
 
   CHECK(Throws([&] {
           (void)BuildPolymorphicProfile(graph, s64,
@@ -214,8 +281,9 @@ bool TestPolymorphicGuardedContract() {
   CHECK(Throws([&] {
           (void)PolymorphicPolicy(1, Guard(1, 128, 32), {},
                                    {RuntimeExtentScalar{0, "extent_s", "s", 1, 128, 32}},
-                                   {SymbolicBoundaryContract{"source", {DimExpr::Symbol("s")}, "contiguous.row_major", 1, "default"}},
-                                   graph.key().capability_fingerprint(), 1);
+                                   {SymbolicBoundaryContract{"source", {DimExpr::Symbol("s")},
+                                                              "contiguous.row_major", 1, "default", DefaultAbi()}},
+                                   graph.key().target_backend_abi(), 1);
         }), "missing allowlist/proof must reject");
 
   fake::GuardedDeterministicMockCoordinator coordinator;

@@ -7,7 +7,7 @@
 
 #include "kxc/shape/shape.h"
 
-namespace kxc::shape {
+namespace kxc::shape::experimental::v1 {
 
 class ExactOracle;
 struct UnitSpecializationRequest;
@@ -57,6 +57,8 @@ class GraphTemplate {
   [[nodiscard]] const GraphTemplateKey& key() const noexcept;
   [[nodiscard]] const ShapeProgram& shape_program() const noexcept;
   [[nodiscard]] const std::vector<UnitSkeleton>& ordered_units() const noexcept;
+  [[nodiscard]] GraphTemplateContentKey content_key() const;
+  [[nodiscard]] std::string CanonicalBytes() const;
   void Verify() const;
 
  private:
@@ -122,6 +124,7 @@ class KernelArtifactKey {
                     uint32_t shape_abi_version,
                     std::string pipeline_fingerprint,
                     std::string capability_fingerprint,
+                    TargetBackendAbiDescriptor target_backend_abi,
                     std::vector<ConcreteTensorShapeContract> ordered_inputs,
                     std::vector<ConcreteTensorShapeContract> ordered_outputs);
 
@@ -129,6 +132,7 @@ class KernelArtifactKey {
   [[nodiscard]] uint32_t shape_abi_version() const noexcept;
   [[nodiscard]] const std::string& pipeline_fingerprint() const noexcept;
   [[nodiscard]] const std::string& capability_fingerprint() const noexcept;
+  [[nodiscard]] const TargetBackendAbiDescriptor& target_backend_abi() const noexcept;
   [[nodiscard]] const std::vector<ConcreteTensorShapeContract>& ordered_inputs() const noexcept;
   [[nodiscard]] const std::vector<ConcreteTensorShapeContract>& ordered_outputs() const noexcept;
   [[nodiscard]] std::string CanonicalBytes() const;
@@ -140,6 +144,7 @@ class KernelArtifactKey {
   uint32_t shape_abi_version_;
   std::string pipeline_fingerprint_;
   std::string capability_fingerprint_;
+  TargetBackendAbiDescriptor target_backend_abi_;
   std::vector<ConcreteTensorShapeContract> ordered_inputs_;
   std::vector<ConcreteTensorShapeContract> ordered_outputs_;
 };
@@ -180,4 +185,4 @@ class PlanVariantKey {
   std::vector<std::string> ordered_call_identities_;
 };
 
-}  // namespace kxc::shape
+}  // namespace kxc::shape::experimental::v1

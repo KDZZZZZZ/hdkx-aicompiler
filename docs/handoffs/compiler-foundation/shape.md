@@ -4,9 +4,9 @@
 >
 > **基线：** `e295a73`（compiler-foundation roadmap）
 >
-> **状态：** 隔离 Shape contract、exact oracle、guarded bucket/polymorphic contract fake **已完成**；生产 Relay/Frontend/Runtime/Codegen 接入只剩下文列出的 Core/Adaptive/Runtime/Region 硬依赖。
+> **状态：** 第二轮修复后的隔离 Shape contract 是 **experimental review candidate**；没有稳定 public v1，也不代表 production Shape 完成。生产 Relay/Frontend/Runtime/Codegen 接入仍受下文 Core/Adaptive/Runtime/Region contract 阻塞。
 >
-> **重要边界：** 本页不宣称生产主链已经支持 dynamic shape、bucket kernel、polymorphic launch 或 dynamic output allocation。
+> **重要边界：** 本页不宣称生产主链已经支持 dynamic shape、bucket kernel、polymorphic launch、dynamic output allocation 或稳定 Shape ABI。bucket/polymorphic 仍只有 guarded deterministic fake。
 
 ## 1. 已交付范围
 
@@ -14,11 +14,12 @@
 
 ### 1.1 纯 Shape 基础
 
-公共头：`include/kxc/shape/shape.h`
+实验头：`include/kxc/shape/shape.h`
 
-- 版本：
-  - `kShapeContractVersion = 1`
-  - `kShapeAbiVersion = 1`
+- ABI 暴露边界：
+  - 全部隔离 API 位于 `kxc::shape::experimental::v1`；稳定的 `kxc::shape` public v1 尚不存在。
+  - `kShapeContractVersion = 1`、`kShapeAbiVersion = 1` 只描述 experimental canonical format，不承诺跨版本 C++ ABI。
+  - guarded fake 类型只从 `include/kxc/shape/fakes/compiler_foundation_v1.h` 暴露。
 - `DimExpr`
   - `Const(n >= 0)`、`Symbol(name)`、`Add`、`Mul`、`FloorDiv(positive_const)`、`Min`、`Max`。
   - `Add`/`Mul`/`Min`/`Max` 做确定性的 flatten、排序、常量折叠和去重。
@@ -29,6 +30,7 @@
 - `Constraint`
   - exact correctness subset：`Eq`、`Range`、`DivisibleBy`、`BroadcastCompatible`。
   - 对称约束按 canonical expression 排序。
+  - `SameRank`、`LayoutCompatible` 尚未实现；`SupportsConstraint` 明确返回 false，`RequireConstraintSupport` fail closed，不能被静默忽略。
 - `ExactConstraintSolver`
   - 只推导 `Symbol = 已完全可求值表达式`。
   - range/divisibility/broadcast 不用于猜值。
@@ -37,10 +39,12 @@
   - `LogicalShape`：数学维度和可选 axis name。
   - `PhysicalShape`：capacity、stride、layout、alignment、memory scope。
   - `ValidExtent`：本次调用的有效范围。
+  - symbolic 与 concrete contract 都按值携带强类型 `DataType`、`DeviceDescriptor(kind,id)` 和 `TargetBackendAbiDescriptor(target,backend,abi_version)`，不从 fingerprint 文本猜 `f32`/`cuda`。
+  - experimental exact v1 只接受 `contiguous.row_major`；显式 stride 必须等于 canonical row-major stride。未知 layout、zero/overlap/noncanonical writable stride、element/byte extent overflow 均 fail closed；只读 broadcast stride 尚未建模，因此不放行。
   - concrete evaluation 强制 `valid <= logical <= physical`；exact specialization 进一步强制三者相等。
 - identity DTO：
-  - `GraphTemplateKey`：graph semantic、pipeline、capability、partition fingerprint 和 contract version。
-  - `ShapeProfileKey`：template key、完整 concrete bindings、显式 policy id 和 shape-ABI version。
+  - `GraphTemplateKey`：graph semantic、pipeline、capability、partition fingerprint、contract version 和强类型 target/backend ABI descriptor。
+  - `ShapeProfileKey`：template key、不可由调用者直接构造的完整 `GraphTemplateContentKey`、完整 concrete bindings、显式 policy id 和 shape-ABI version。
   - canonical bytes 使用长度前缀字段；相等判断比较完整结构，不以 hash 单独决定等价。
 - `ShapeProgram`
   - 声明 symbols、named input/output tensor contracts 和 constraints。
@@ -49,21 +53,24 @@
 
 ### 1.2 GraphTemplate / exact profile 拆分
 
-公共头：`include/kxc/shape/specialization.h`
+实验头：`include/kxc/shape/specialization.h`
 
 - `GraphLocalCallLocator` 与 `UnitSemanticKey` 明确分离。
   - call locator 只服务 plan routing/诊断。
   - artifact identity 不包含 call locator、graph value name/id、storage id、entry symbol 或对象地址。
 - `GraphTemplate`
   - 持有 `GraphTemplateKey`、`ShapeProgram` 和有序 `UnitSkeleton`。
-  - verifier 检查 producer/consumer 顺序、重复 producer、缺失 producer 和显式 unit boundary。
+  - `GraphTemplateContentKey` 从 key、`ShapeProgram::CanonicalString()`、ordered unit semantic key、call locator 和完整 input/output routing 的 canonical bytes 内部 mint；同 key 不代表同 template。
+  - verifier 检查 producer/consumer 顺序、重复 producer、缺失 producer、显式 unit boundary，以及每个 tensor contract 的 target/backend ABI 与 template 一致。
   - 重复 `UnitSemanticKey` 合法，允许等价 unit 共享 artifact。
 - `InstantiateExactProfile`
-  - 返回只能由该函数 mint 的 `ExactOracle`。
+  - 返回只能由该函数 mint 的 `ExactOracle`；oracle/profile 绑定完整 `GraphTemplateContentKey`，所有消费点重新比较完整 template 内容。
+  - same caller-supplied key/different ShapeProgram 或 ordered routing 会在 artifact request 前拒绝。
   - exact profile 强制所有 value 的 logical/physical/valid 完全相等。
   - profile instantiation 不暴露 graph-pass/partition hook，因此不会在该层重跑 graph preparation。
 - `KernelArtifactKey`
-  - 包含 unit semantic key、shape ABI、pipeline/capability fingerprint 和有序 boundary contracts。
+  - 包含 unit semantic key、shape ABI、pipeline/capability fingerprint、强类型 target/backend ABI descriptor 和有序 boundary contracts。
+  - boundary canonical identity 结构化包含 dtype、device kind/id、target/backend/ABI；f32/f16、CPU/CUDA、device id、target、backend 或 ABI version 任一变化都 miss。
   - 不包含 `ShapeProfileKey` 整体，因此 graph-local/template identity 或与该 unit 无关的 binding 不会污染 artifact identity。
 - `MakeExactSpecializationRequests`
   - 生成有序 exact requests；request 保留 graph-local routing，artifact key 不保留。
@@ -72,9 +79,9 @@
 
 ### 1.3 版本化 deterministic fake
 
-公共头：`include/kxc/shape/fakes/compiler_foundation_v1.h`
+实验 fake 头：`include/kxc/shape/fakes/compiler_foundation_v1.h`
 
-namespace：`kxc::shape::fakes::compiler_foundation_v1`
+namespace：`kxc::shape::experimental::v1::fakes::compiler_foundation_v1`
 
 - `kContractVersion = 1`。
 - `DeterministicMockCoordinator`
@@ -89,7 +96,7 @@ namespace：`kxc::shape::fakes::compiler_foundation_v1`
 
 ### 1.4 exact 之后的显式 guarded profile
 
-公共头：`include/kxc/shape/guarded_specialization.h`
+实验 contract 头：`include/kxc/shape/guarded_specialization.h`
 
 - `ApplicabilityGuard`
   - bucket 和 polymorphic policy 均必须提供非空、规范化约束域。
@@ -103,7 +110,7 @@ namespace：`kxc::shape::fakes::compiler_foundation_v1`
   - `valid` 保持 exact request logical extent；physical 使用 bucket contract。
   - 大 capacity 本身不构成 applicability；guard miss、缺 tail/pad/crop、较小 capacity、错误 stride/layout 均拒绝。
 - `PolymorphicPolicy`
-  - 显式记录 guard、逐 unit allowlist/proof、target、workspace 上界、symbolic boundaries 和版本化 runtime-extent scalar ABI。
+  - 显式记录 guard、逐 unit allowlist/proof、强类型 target/backend ABI descriptor、workspace 上界、带 dtype/device/ABI 的 symbolic boundaries 和版本化 runtime-extent scalar ABI。
   - scalar ordinal/name/symbol/range/divisibility 必须完整且有序；所有声明 symbol 必须有 guard 和 runtime binding。
   - 当前仅冻结 contract/fake；没有把现有 `-1` input ABI 当作 runtime extent ABI。
 - `GuardedArtifactKey`
@@ -111,6 +118,7 @@ namespace：`kxc::shape::fakes::compiler_foundation_v1`
   - polymorphic identity 包含 symbolic boundary/guard/proof/runtime extent ABI/environment，但排除 concrete request binding。
   - 因此多个请求只能在同一显式 guard 和完整证明相同时共享；不存在 `cached_dims >= query_dims` 路由。
 - guarded deterministic fake
+  - bucket/polymorphic 没有 production resolver、compiler 或 runtime 路径；相关 fake 类型仅在 `kxc::shape::experimental::v1::fakes::compiler_foundation_v1`。
   - `GuardedDeterministicMockCoordinator` 和 `GuardedDeterministicMockPlanAssembler` 保持 generation `0`、完整 key 比较和有序 assembly。
   - fake frozen plan 同时保留 concrete logical/valid、guarded physical、tail/runtime-extent metadata；不执行任何数据面操作。
 
@@ -136,7 +144,8 @@ namespace：`kxc::shape::fakes::compiler_foundation_v1`
 
 - `CMakeLists.txt` 新增独立 `kxc_shape_api`、`kxc_shape_obj` 和三个 focused test target。
 - `tools/architecture/check_include_layers.py` 将 Shape 设为只允许依赖自身的底层模块。
-- Shape 公共头只 include Shape/stdlib；没有 include `kxc/compiler/*`、`kxc/relay/*`、`kxc/runtime/*`、frontend 或 private header。
+- Shape experimental 头只 include Shape/stdlib；没有 include `kxc/compiler/*`、`kxc/relay/*`、`kxc/runtime/*`、frontend 或 private header。
+- `.github/workflows/ci.yml` 的 CPU job 明确执行三个 `run_shape_*` target，而不再只编译 test executable。
 - 未修改生产 Relay、type inference、lowering、`KernelSignature`、`ValueSpec`、memory planner、`RuntimeSession`、cache 或 frontend。
 
 ## 3. 测试证据
@@ -168,7 +177,7 @@ cmake --build out/shape-phase1 --target \
 - Pass contract：19/19 passed。
 - `git diff --check` passed。
 
-覆盖的关键负例包括：`-1`/负维、overflow、未绑定/矛盾 constraint、非法 broadcast/range/divisibility、logical/physical/valid 越界、非 exact profile、larger exact artifact 误复用、consumer-before-producer、bucket 无 guard/tail/pad/crop、capacity 过小、错误 physical stride、polymorphic 域外/整除失败/缺 proof/runtime scalar/错误 ordinal。
+覆盖的关键负例包括：`-1`/负维、常量和 binding-time overflow、derived stride/physical byte overflow、未知 layout、zero/overlap/noncanonical stride、未绑定/矛盾 constraint、显式 gated SameRank/LayoutCompatible、非法 broadcast/range/divisibility、logical/physical/valid 越界、same key/different full template oracle、f32/f16、device kind/id、target/backend/ABI miss、非 exact profile、larger exact artifact 误复用、consumer-before-producer、bucket 无 guard/tail/pad/crop、capacity 过小、错误 physical stride、polymorphic 域外/整除失败/缺 proof/runtime scalar/错误 ordinal。
 
 ### 3.2 ASan + UBSan
 
@@ -215,7 +224,8 @@ cmake --build out/shape-sanitize --target \
 2. `079f7b9 feat(shape): add exact specialization contracts`
 3. `0911f1b feat(shape): add guarded optimized profiles`
 4. `0cc1f1a fix(shape): disambiguate guarded request check`
-5. handoff：当前 `docs(shape): add compiler foundation handoff` 提交（见本分支 HEAD/log）
+5. `2755501 docs(shape): add compiler foundation handoff`
+6. 第二轮 supervisor fix：当前原子提交（strong ABI identity、full-template oracle、strict layout、CI 与本 handoff 更新）
 
 未 push、未 merge，也未修改其他 worktree。
 
@@ -293,6 +303,6 @@ ShapeEvalTask -> AllocateTask -> KernelTask
 
 ## 7. 交接判定
 
-本工作树内可独立完成的 Shape 轨工作已闭环：Shape IR、exact solver、三层 tensor contract、ShapeProgram、template/profile split、exact oracle、versioned deterministic fake、显式 guarded bucket/polymorphic DTO 与正反例均已实现并验证。
+本工作树当前只提供可复审的 **isolated experimental contract**：Shape IR、exact solver、强类型 tensor/environment identity、full-template-bound exact oracle、严格 contiguous layout，以及 guarded bucket/polymorphic fake 与正反例。它不是稳定 public v1，也不是 production Shape 完成声明。
 
-未完成项均需要改变其他轨道拥有的生产 contract 或数据面：Core identity/capability/cache、Relay/frontend symbolic representation、Adaptive lifecycle、Runtime physical plan、Codegen extent ABI、Region task vocabulary。故本轨状态为 **isolated contract Done / production integration hard-blocked**，不通过侵入现有 Relay/Runtime 或恢复 fuzzy cache 来绕过依赖。
+未完成项仍需要其他轨道的生产 contract 或数据面：Core identity/capability/cache、Relay/frontend symbolic representation、Adaptive lifecycle、Runtime physical plan、Codegen extent ABI、Region task vocabulary。故状态为 **experimental review candidate / stable public ABI and production integration not done**；不通过侵入现有 Relay/Runtime、`-1` 或 `cached_dims >= query_dims` 绕过依赖。

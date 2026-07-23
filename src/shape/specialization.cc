@@ -1,12 +1,13 @@
 #include "kxc/shape/fakes/compiler_foundation_v1.h"
 
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
 
-namespace kxc::shape {
+namespace kxc::shape::experimental::v1 {
 namespace {
 
 [[noreturn]] void Invalid(const std::string& message) {
@@ -43,6 +44,20 @@ bool IsExactContract(const ConcreteTensorShapeContract& contract) {
   return contract.logical == contract.physical && contract.logical == contract.valid;
 }
 
+std::vector<int64_t> RowMajorStrides(const std::vector<int64_t>& physical) {
+  std::vector<int64_t> strides(physical.size(), 1);
+  int64_t stride = 1;
+  for (size_t index = physical.size(); index > 0; --index) {
+    strides[index - 1] = stride;
+    if (physical[index - 1] != 0 &&
+        stride > std::numeric_limits<int64_t>::max() / physical[index - 1]) {
+      Invalid("concrete row-major stride overflow");
+    }
+    stride *= physical[index - 1];
+  }
+  return strides;
+}
+
 void VerifyConcreteContract(const ConcreteTensorShapeContract& contract, bool require_exact) {
   if (contract.logical.size() != contract.physical.size() ||
       contract.logical.size() != contract.valid.size() ||
@@ -50,9 +65,9 @@ void VerifyConcreteContract(const ConcreteTensorShapeContract& contract, bool re
       (!contract.axis_names.empty() && contract.axis_names.size() != contract.logical.size())) {
     Invalid("concrete tensor contract rank mismatch");
   }
-  if (contract.layout.empty() || contract.memory_scope.empty() || contract.alignment <= 0 ||
-      (contract.alignment & (contract.alignment - 1)) != 0) {
-    Invalid("concrete tensor contract has invalid layout, scope, or alignment");
+  if (contract.layout != "contiguous.row_major" || contract.memory_scope.empty() ||
+      contract.alignment <= 0 || (contract.alignment & (contract.alignment - 1)) != 0) {
+    Invalid("experimental exact v1 requires contiguous.row_major layout, scope, and alignment");
   }
   for (size_t i = 0; i < contract.logical.size(); ++i) {
     if (contract.logical[i] < 0 || contract.physical[i] < 0 || contract.valid[i] < 0 ||
@@ -62,6 +77,21 @@ void VerifyConcreteContract(const ConcreteTensorShapeContract& contract, bool re
     if (contract.valid[i] > contract.logical[i] || contract.logical[i] > contract.physical[i]) {
       Invalid("concrete tensor contract violates valid <= logical <= physical");
     }
+  }
+  if (contract.strides != RowMajorStrides(contract.physical)) {
+    Invalid("contiguous.row_major requires canonical non-overlapping writable strides");
+  }
+  int64_t element_count = 1;
+  for (const int64_t extent : contract.physical) {
+    if (extent != 0 && element_count > std::numeric_limits<int64_t>::max() / extent) {
+      Invalid("concrete physical element count overflow");
+    }
+    element_count *= extent;
+  }
+  if (element_count != 0 &&
+      element_count > std::numeric_limits<int64_t>::max() /
+                          static_cast<int64_t>(contract.abi.element_bytes())) {
+    Invalid("concrete physical byte extent overflow");
   }
   if (require_exact && !IsExactContract(contract)) {
     Invalid("exact specialization requires logical == physical == valid");
@@ -87,6 +117,7 @@ std::string ContractBytes(const ConcreteTensorShapeContract& contract) {
   AppendField(&bytes, contract.layout);
   AppendU64(&bytes, static_cast<uint64_t>(contract.alignment));
   AppendField(&bytes, contract.memory_scope);
+  AppendField(&bytes, contract.abi.CanonicalBytes());
   return bytes;
 }
 
@@ -121,6 +152,7 @@ void VerifyExactProfileForTemplate(const GraphTemplate& graph_template, const Ex
   graph_template.Verify();
   const ExactShapeProfile& profile = oracle.profile();
   if (!(profile.key().graph_template() == graph_template.key()) ||
+      !(profile.key().graph_template_content() == graph_template.content_key()) ||
       profile.key().policy_id() != "exact" ||
       profile.key().shape_abi_version() != kShapeAbiVersion) {
     Invalid("exact oracle does not belong to this graph template");
@@ -170,8 +202,35 @@ GraphTemplate::GraphTemplate(GraphTemplateKey key, ShapeProgram shape_program,
 const GraphTemplateKey& GraphTemplate::key() const noexcept { return key_; }
 const ShapeProgram& GraphTemplate::shape_program() const noexcept { return shape_program_; }
 const std::vector<UnitSkeleton>& GraphTemplate::ordered_units() const noexcept { return ordered_units_; }
+GraphTemplateContentKey GraphTemplate::content_key() const {
+  return GraphTemplateContentKey(CanonicalBytes());
+}
+std::string GraphTemplate::CanonicalBytes() const {
+  std::string bytes("kxc.shape.graph-template-content.v1");
+  AppendField(&bytes, key_.CanonicalBytes());
+  AppendField(&bytes, shape_program_.CanonicalString());
+  AppendU64(&bytes, ordered_units_.size());
+  for (const UnitSkeleton& unit : ordered_units_) {
+    AppendField(&bytes, unit.call_locator.value());
+    AppendField(&bytes, unit.semantic_key.CanonicalBytes());
+    AppendU64(&bytes, unit.input_value_names.size());
+    for (const std::string& name : unit.input_value_names) AppendField(&bytes, name);
+    AppendU64(&bytes, unit.output_value_names.size());
+    for (const std::string& name : unit.output_value_names) AppendField(&bytes, name);
+  }
+  return bytes;
+}
 void GraphTemplate::Verify() const {
   shape_program_.Verify();
+  const auto verify_abi = [this](const std::vector<NamedTensorContract>& values) {
+    for (const NamedTensorContract& value : values) {
+      if (!(value.contract.abi().target_backend_abi() == key_.target_backend_abi())) {
+        Invalid("tensor target/backend ABI does not match graph template");
+      }
+    }
+  };
+  verify_abi(shape_program_.inputs());
+  verify_abi(shape_program_.outputs());
   std::set<std::string> declared_values;
   std::set<std::string> available_values;
   for (const NamedTensorContract& value : shape_program_.inputs()) {
@@ -243,7 +302,9 @@ ExactOracle InstantiateExactProfile(const GraphTemplate& graph_template, const B
   values.insert(values.end(), evaluated.outputs.begin(), evaluated.outputs.end());
   for (const NamedConcreteTensorContract& value : values) VerifyConcreteContract(value.contract, true);
   return ExactOracle(ExactShapeProfile(
-      ShapeProfileKey(graph_template.key(), evaluated.bindings, "exact", kShapeAbiVersion), std::move(values)));
+      ShapeProfileKey(graph_template.key(), graph_template.content_key(),
+                      evaluated.bindings, "exact", kShapeAbiVersion),
+      std::move(values)));
 }
 
 UnitSignatureDigest::UnitSignatureDigest(std::string value) : value_(std::move(value)) {}
@@ -266,12 +327,14 @@ bool MatchesExactSignatureDigest(
 KernelArtifactKey::KernelArtifactKey(
     UnitSemanticKey unit_semantic_key, uint32_t shape_abi_version,
     std::string pipeline_fingerprint, std::string capability_fingerprint,
+    TargetBackendAbiDescriptor target_backend_abi,
     std::vector<ConcreteTensorShapeContract> ordered_inputs,
     std::vector<ConcreteTensorShapeContract> ordered_outputs)
     : unit_semantic_key_(std::move(unit_semantic_key)),
       shape_abi_version_(shape_abi_version),
       pipeline_fingerprint_(std::move(pipeline_fingerprint)),
       capability_fingerprint_(std::move(capability_fingerprint)),
+      target_backend_abi_(std::move(target_backend_abi)),
       ordered_inputs_(std::move(ordered_inputs)),
       ordered_outputs_(std::move(ordered_outputs)) {
   if (shape_abi_version_ != kShapeAbiVersion) {
@@ -279,12 +342,14 @@ KernelArtifactKey::KernelArtifactKey(
   }
   CheckName(pipeline_fingerprint_, "artifact pipeline fingerprint");
   CheckName(capability_fingerprint_, "artifact capability fingerprint");
-  for (const ConcreteTensorShapeContract& contract : ordered_inputs_) {
+  const auto verify_contract = [this](const ConcreteTensorShapeContract& contract) {
     VerifyConcreteContract(contract, true);
-  }
-  for (const ConcreteTensorShapeContract& contract : ordered_outputs_) {
-    VerifyConcreteContract(contract, true);
-  }
+    if (!(contract.abi.target_backend_abi() == target_backend_abi_)) {
+      Invalid("artifact tensor ABI does not match target/backend ABI");
+    }
+  };
+  for (const ConcreteTensorShapeContract& contract : ordered_inputs_) verify_contract(contract);
+  for (const ConcreteTensorShapeContract& contract : ordered_outputs_) verify_contract(contract);
 }
 const UnitSemanticKey& KernelArtifactKey::unit_semantic_key() const noexcept {
   return unit_semantic_key_;
@@ -297,6 +362,9 @@ const std::string& KernelArtifactKey::pipeline_fingerprint() const noexcept {
 }
 const std::string& KernelArtifactKey::capability_fingerprint() const noexcept {
   return capability_fingerprint_;
+}
+const TargetBackendAbiDescriptor& KernelArtifactKey::target_backend_abi() const noexcept {
+  return target_backend_abi_;
 }
 const std::vector<ConcreteTensorShapeContract>& KernelArtifactKey::ordered_inputs() const noexcept {
   return ordered_inputs_;
@@ -311,6 +379,7 @@ std::string KernelArtifactKey::CanonicalBytes() const {
   AppendU64(&bytes, shape_abi_version_);
   AppendField(&bytes, pipeline_fingerprint_);
   AppendField(&bytes, capability_fingerprint_);
+  AppendField(&bytes, target_backend_abi_.CanonicalBytes());
   const std::string signature = SignatureBytes(ordered_inputs_, ordered_outputs_);
   AppendField(&bytes, signature);
   return bytes;
@@ -323,6 +392,7 @@ bool KernelArtifactKey::operator==(const KernelArtifactKey& other) const noexcep
          shape_abi_version_ == other.shape_abi_version_ &&
          pipeline_fingerprint_ == other.pipeline_fingerprint_ &&
          capability_fingerprint_ == other.capability_fingerprint_ &&
+         target_backend_abi_ == other.target_backend_abi_ &&
          ordered_inputs_ == other.ordered_inputs_ &&
          ordered_outputs_ == other.ordered_outputs_;
 }
@@ -347,7 +417,7 @@ std::vector<UnitSpecializationRequest> MakeExactSpecializationRequests(
         KernelArtifactKey(unit.semantic_key, kShapeAbiVersion,
                           graph_template.key().pipeline_fingerprint(),
                           graph_template.key().capability_fingerprint(),
-                          inputs, outputs),
+                          graph_template.key().target_backend_abi(), inputs, outputs),
         UnitSignatureDigest::ForExactContracts(inputs, outputs),
         std::move(inputs),
         std::move(outputs),
@@ -393,9 +463,9 @@ bool PlanVariantKey::operator==(const PlanVariantKey& other) const noexcept {
          ordered_call_identities_ == other.ordered_call_identities_;
 }
 
-}  // namespace kxc::shape
+}  // namespace kxc::shape::experimental::v1
 
-namespace kxc::shape::fakes::compiler_foundation_v1 {
+namespace kxc::shape::experimental::v1::fakes::compiler_foundation_v1 {
 namespace {
 
 [[noreturn]] void Invalid(const std::string& message) {
@@ -415,6 +485,8 @@ void VerifyRequest(const UnitSpecializationRequest& request) {
           graph_key.pipeline_fingerprint() ||
       request.artifact_key.capability_fingerprint() !=
           graph_key.capability_fingerprint() ||
+      !(request.artifact_key.target_backend_abi() ==
+        graph_key.target_backend_abi()) ||
       request.artifact_key.ordered_inputs() != request.ordered_inputs ||
       request.artifact_key.ordered_outputs() != request.ordered_outputs ||
       !MatchesExactSignatureDigest(request.signature_digest,
@@ -427,7 +499,8 @@ void VerifyRequest(const UnitSpecializationRequest& request) {
       request.artifact_key.unit_semantic_key(),
       request.artifact_key.shape_abi_version(),
       request.artifact_key.pipeline_fingerprint(),
-      request.artifact_key.capability_fingerprint(), request.ordered_inputs,
+      request.artifact_key.capability_fingerprint(),
+      request.artifact_key.target_backend_abi(), request.ordered_inputs,
       request.ordered_outputs);
   if (!(rebuilt == request.artifact_key)) {
     Invalid("request artifact key is not canonical");
@@ -533,4 +606,4 @@ FakeFrozenPlan DeterministicMockPlanAssembler::Assemble(
                         oracle.profile().key(), std::move(calls), selected_artifacts);
 }
 
-}  // namespace kxc::shape::fakes::compiler_foundation_v1
+}  // namespace kxc::shape::experimental::v1::fakes::compiler_foundation_v1

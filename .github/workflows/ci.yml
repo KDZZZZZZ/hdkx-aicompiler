@@ -74,6 +74,13 @@ jobs:
       - name: Run profiling bundle test
         run: cmake --build out/build/ci-cpu --target run_profile_bundle_test
 
+      - name: Run experimental shape contract tests
+        run: >
+          cmake --build out/build/ci-cpu --parallel 2 --target
+          run_shape_system_test
+          run_shape_specialization_test
+          run_shape_guarded_specialization_test
+
   llvm-resnet18:
     name: ResNet18 LLVM compile
     runs-on: ubuntu-latest
