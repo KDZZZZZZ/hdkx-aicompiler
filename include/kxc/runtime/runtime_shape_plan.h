@@ -140,7 +140,9 @@ private:
 
 namespace detail {
 void FailNextRuntimeShapeOwnerTransferForTest() noexcept;
-/*! \brief Deterministically fails CUDA retention after launcher return; test seam only. */
+/*! \brief Deterministically fails CUDA event recording after callback return; test seam only. */
+void FailNextRuntimeShapeCudaEventRecordForTest() noexcept;
+/*! \brief Deterministically fails CUDA retention after event recording; test seam only. */
 void FailNextRuntimeShapeCudaRetentionForTest() noexcept;
 }  // namespace detail
 
@@ -172,9 +174,14 @@ struct RuntimeShapeCudaLaunchArgs {
 struct RuntimeShapeCudaLaunchResult {
     bool accepted{true};
     std::string failure_reason;
-    ::kxc::AsyncOperation completion;
 };
 
+/*! \brief
+ * CUDA callback contract: synchronously enqueue only on args.stream, then return
+ * this declaration. It must not use another stream or thread, retain args or
+ * their references, or provide completion provenance; the runtime records and
+ * owns the completion event after this callback returns (or throws).
+ */
 using RuntimeShapeCudaBoundLauncher =
     std::function<RuntimeShapeCudaLaunchResult(const RuntimeShapeCudaLaunchArgs&)>;
 
@@ -186,7 +193,7 @@ struct RuntimeShapeReadyEntry {
     std::string exact_abi_fingerprint;
     /*! \brief CPU-only synchronous callback; never used for CUDA async entries. */
     RuntimeShapeBoundLauncher launcher;
-    /*! \brief CUDA async callback; accepted work needs a pending completion on this exact stream. */
+    /*! \brief CUDA callback only declares synchronous same-stream submission acceptance. */
     RuntimeShapeCudaBoundLauncher cuda_launcher;
     RuntimeShapeExecutionKind execution_kind{RuntimeShapeExecutionKind::kSynchronousCpu};
     /*! \brief Required CUDA:N identity for kCudaAsync; empty for legacy CPU entries. */

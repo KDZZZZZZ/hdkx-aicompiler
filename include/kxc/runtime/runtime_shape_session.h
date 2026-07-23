@@ -44,10 +44,13 @@ struct RuntimeShapeEvent {
 class RuntimeShapeAsyncResult final {
 public:
     bool ok() const noexcept;
+    /*! \brief Base failure text is immutable; completion failure returns static text. */
     const std::string& failure_reason() const noexcept;
     RuntimeShapeFailureKind failure_kind() const noexcept;
+    /*! \brief Immutable outputs published by RunAsync/Run. */
     const std::vector<RuntimeShapeOutput>& outputs() const noexcept;
-    const std::vector<RuntimeShapeEvent>& events() const noexcept;
+    /*! \brief Returns a thread-safe value snapshot, including observed completion telemetry. */
+    std::vector<RuntimeShapeEvent> events() const;
     /*! \brief Delegates CUDA completion polling; CPU fake completion remains test-only. */
     bool IsReady() const noexcept;
     /*! \brief Delegates CUDA completion waiting; CPU fake completion remains test-only. */

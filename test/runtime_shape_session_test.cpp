@@ -314,6 +314,41 @@ bool TestSynchronousFakeRetentionAndLeases() {
     return true;
 }
 
+bool TestConcurrentResultSnapshots() {
+    auto completion = FakeRuntimeShapeCompletion::Pending();
+    RuntimeShapeSession session(MakePlan([&completion](const RuntimeShapeLaunchArgs&) {
+        return RuntimeShapeLaunchResult{true, "", completion};
+    }));
+    const auto result = session.RunAsync({Input(2)});
+    std::atomic<bool> start{false};
+    std::vector<std::thread> readers;
+    for (int index = 0; index != 4; ++index) {
+        readers.emplace_back([&] {
+            while (!start.load(std::memory_order_acquire)) {
+            }
+            for (int iteration = 0; iteration != 2000; ++iteration) {
+                const auto events = result.events();
+                const auto& outputs = result.outputs();
+                const auto& reason = result.failure_reason();
+                (void)events;
+                (void)outputs;
+                (void)reason;
+                (void)result.ok();
+                (void)result.failure_kind();
+                (void)result.retained_device_bytes();
+                (void)result.IsReady();
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    std::thread waiter([&] { result.Wait(); });
+    for (auto& reader : readers) reader.join();
+    waiter.join();
+    CHECK(result.ok() && result.IsReady() && Has(result, RuntimeShapeEventKind::kCompletion),
+          "concurrent result polling/getters use immutable snapshots and atomic completion state");
+    return true;
+}
+
 bool TestConcurrentLaunchesAreSerialized() {
     std::atomic<int> launches{0};
     std::atomic<int> active{0};
@@ -356,6 +391,7 @@ int main() {
         {"scalar_data", TestScalarAbiAndRequiredInputData},
         {"callback_raii", TestCallbackFailureAndOwnerTransfer},
         {"leases", TestSynchronousFakeRetentionAndLeases},
+        {"result_snapshots", TestConcurrentResultSnapshots},
         {"concurrency", TestConcurrentLaunchesAreSerialized},
     };
     for (const auto& test : tests) if (!test.second()) return 1;

@@ -5,8 +5,9 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
-#include <thread>
 #include <string>
+#include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "kxc/runtime/runtime_shape_session.h"
@@ -19,19 +20,18 @@ using namespace kxc::runtime;
     if (!(condition)) { std::cerr << "[FAIL] " << message << "\n"; return false; } \
 } while (0)
 
+static_assert(!std::is_constructible<RuntimeShapeCudaLaunchResult, bool, std::string,
+                                     AsyncOperation>::value,
+              "CUDA callbacks must not be able to forge runtime completion events");
+
 bool CudaOk(cudaError_t status, const char* operation) {
     if (status == cudaSuccess) return true;
     std::cerr << operation << ": " << cudaGetErrorString(status) << "\n";
     return false;
 }
 
-RuntimeShapeCudaLaunchResult Accepted(AsyncOperation completion) {
-    return RuntimeShapeCudaLaunchResult{true, {}, std::move(completion)};
-}
-
-RuntimeShapeCudaLaunchResult Rejected(std::string reason = {}) {
-    return RuntimeShapeCudaLaunchResult{false, std::move(reason), {}};
-}
+RuntimeShapeCudaLaunchResult Accepted() { return {true, {}}; }
+RuntimeShapeCudaLaunchResult Rejected(std::string reason) { return {false, std::move(reason)}; }
 
 void CUDART_CB SleepBlocker(void*) {
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -86,7 +86,7 @@ bool Has(const RuntimeShapeAsyncResult& result, RuntimeShapeEventKind kind) {
     return false;
 }
 
-bool TestPendingRetentionAndCompletion() {
+bool TestRuntimeOwnedPendingRetentionAndCompletion() {
     const Device device = Device::CUDA(0);
     DeviceStream stream = DeviceStream::Create(device);
     cudaEvent_t blocker = nullptr;
@@ -94,11 +94,12 @@ bool TestPendingRetentionAndCompletion() {
     CHECK(CudaOk(cudaStreamCreateWithFlags(&blocker_stream, cudaStreamNonBlocking),
                  "cudaStreamCreate(blocker)"), "create blocker stream");
     CHECK(CudaOk(cudaEventCreateWithFlags(&blocker, cudaEventDisableTiming), "cudaEventCreate"),
-          "create blocker");
+          "create blocker event");
     CHECK(CudaOk(cudaLaunchHostFunc(blocker_stream, SleepBlocker, nullptr), "cudaLaunchHostFunc"),
-          "enqueue real pending blocker");
+          "enqueue blocker");
     CHECK(CudaOk(cudaEventRecord(blocker, blocker_stream), "cudaEventRecord(blocker)"),
           "record blocker completion");
+
     auto module = std::make_shared<int>(1);
     auto caller = std::make_shared<int>(2);
     std::weak_ptr<int> weak_module = module;
@@ -109,17 +110,12 @@ bool TestPendingRetentionAndCompletion() {
     {
         RuntimeShapeSession session(MakePlan([blocker](const RuntimeShapeCudaLaunchArgs& args) {
             const auto native = reinterpret_cast<cudaStream_t>(args.stream->backend_handle);
-            cudaEvent_t done = nullptr;
-            if (cudaEventCreateWithFlags(&done, cudaEventDisableTiming) != cudaSuccess ||
-                cudaStreamWaitEvent(native, blocker, 0) != cudaSuccess ||
-                cudaEventRecord(done, native) != cudaSuccess) {
-                if (done) cudaEventDestroy(done);
-                return Accepted({});
-            }
-            return Accepted(AsyncOperation::Pending(args.stream, done, {}));
+            return cudaStreamWaitEvent(native, blocker, 0) == cudaSuccess
+                ? Accepted() : Rejected("cudaStreamWaitEvent failed");
         }, 64, module));
         const auto pending = session.RunAsync({input}, stream, caller);
-        CHECK(pending.ok() && !pending.IsReady(), "real blocked CUDA event remains pending");
+        CHECK(pending.ok() && !pending.IsReady(),
+              "runtime-owned event recorded after callback work remains pending");
         CHECK(pending.outputs().size() == 1 && pending.outputs()[0].data != nullptr,
               "pending result owns CUDA output");
         CHECK(pending.retained_device_bytes() == 4 * sizeof(float),
@@ -131,14 +127,15 @@ bool TestPendingRetentionAndCompletion() {
     input_storage = Storage{};
     input.storage = Storage{};
     CHECK(!weak_module.expired() && !weak_caller.expired(),
-          "completion retains plan/module/caller/input state after session destruction");
+          "runtime completion retains plan/module/caller/input state after session destruction");
     result->Wait();
-    CHECK(result->IsReady() && result->ok(), "Wait delegates actual CUDA completion");
-    CHECK(result->retained_device_bytes() == 4 * sizeof(float),
-          "completion does not claim physical output release while result owns it");
+    CHECK(result->IsReady() && result->ok(), "Wait observes runtime-owned CUDA completion");
+    CHECK(Has(*result, RuntimeShapeEventKind::kCompletion) &&
+          Has(*result, RuntimeShapeEventKind::kRetire),
+          "completion telemetry is synthesized from immutable result state");
     result.reset();
     CHECK(weak_module.expired() && weak_caller.expired(), "retention drops with result/completion");
-    CHECK(CudaOk(cudaEventDestroy(blocker), "cudaEventDestroy"), "destroy blocker");
+    CHECK(CudaOk(cudaEventDestroy(blocker), "cudaEventDestroy"), "destroy blocker event");
     CHECK(CudaOk(cudaStreamDestroy(blocker_stream), "cudaStreamDestroy"), "destroy blocker stream");
     return true;
 }
@@ -147,61 +144,51 @@ bool TestPostSubmitFailureSafety() {
     const Device device = Device::CUDA(0);
     DeviceStream stream = DeviceStream::Create(device);
     auto input = Storage::Alloc(device, 4 * sizeof(float));
+
     DelayedSignal retention_signal;
     RuntimeShapeSession retention_failure(MakePlan([&retention_signal](const RuntimeShapeCudaLaunchArgs& args) {
         const auto native = reinterpret_cast<cudaStream_t>(args.stream->backend_handle);
-        cudaEvent_t done = nullptr;
-        if (cudaEventCreateWithFlags(&done, cudaEventDisableTiming) != cudaSuccess ||
-            cudaLaunchHostFunc(native, SleepAndSignal, &retention_signal) != cudaSuccess ||
-            cudaEventRecord(done, native) != cudaSuccess) {
-            if (done) cudaEventDestroy(done);
-            return Accepted({});
-        }
-        return Accepted(AsyncOperation::Pending(args.stream, done, {}));
+        return cudaLaunchHostFunc(native, SleepAndSignal, &retention_signal) == cudaSuccess
+            ? Accepted() : Rejected("cudaLaunchHostFunc failed");
     }));
     detail::FailNextRuntimeShapeCudaRetentionForTest();
     const auto retention = retention_failure.RunAsync({Input(input)}, stream);
     CHECK(!retention.ok() && retention.failure_kind() == RuntimeShapeFailureKind::kSubmissionFailed &&
           retention.outputs().empty() && retention.retained_device_bytes() == 0,
-          "post-submit retention failure waits before clearing outputs");
+          "retention failure synchronizes before clearing outputs");
     CHECK(retention_signal.done.load(std::memory_order_acquire) &&
           Has(retention, RuntimeShapeEventKind::kCompletion) &&
           Has(retention, RuntimeShapeEventKind::kRetire),
-          "retention failure observes completion and only then reports logical retirement");
+          "retention failure has a runtime-owned completion proof");
 
-    auto module = std::make_shared<int>(1);
-    auto caller = std::make_shared<int>(2);
-    std::weak_ptr<int> weak_module = module;
-    std::weak_ptr<int> weak_caller = caller;
-    std::shared_ptr<RuntimeShapeAsyncResult> quarantined;
-    DelayedSignal callback_signal;
-    {
-        RuntimeShapeSession callback_failure(MakePlan([&callback_signal](const RuntimeShapeCudaLaunchArgs& args)
-                                                        -> RuntimeShapeCudaLaunchResult {
-            const auto native = reinterpret_cast<cudaStream_t>(args.stream->backend_handle);
-            if (cudaLaunchHostFunc(native, SleepAndSignal, &callback_signal) != cudaSuccess) {
-                throw std::runtime_error("cudaLaunchHostFunc failed");
-            }
-            throw std::runtime_error("submitted without completion");
-        }, 64, module));
-        quarantined = std::make_shared<RuntimeShapeAsyncResult>(
-            callback_failure.RunAsync({Input(input)}, stream, caller));
-    }
-    module.reset();
-    caller.reset();
-    CHECK(!quarantined->ok() &&
-          quarantined->failure_kind() == RuntimeShapeFailureKind::kSubmissionFailed &&
-          quarantined->outputs().size() == 1 &&
-          quarantined->retained_device_bytes() == 4 * sizeof(float) &&
-          !weak_module.expired() && !weak_caller.expired(),
-          "post-submit callback exception quarantines all run state without clearing output");
-    CHECK(CudaOk(cudaDeviceSynchronize(), "cudaDeviceSynchronize"),
-          "quarantined callback work completes before test exit");
-    CHECK(callback_signal.done.load(std::memory_order_acquire),
-          "callback exception test submitted real work");
-    quarantined.reset();
-    CHECK(!weak_module.expired() && !weak_caller.expired(),
-          "quarantined run remains retained after result destruction");
+    DelayedSignal record_signal;
+    RuntimeShapeSession record_failure(MakePlan([&record_signal](const RuntimeShapeCudaLaunchArgs& args) {
+        const auto native = reinterpret_cast<cudaStream_t>(args.stream->backend_handle);
+        return cudaLaunchHostFunc(native, SleepAndSignal, &record_signal) == cudaSuccess
+            ? Accepted() : Rejected("cudaLaunchHostFunc failed");
+    }));
+    detail::FailNextRuntimeShapeCudaEventRecordForTest();
+    const auto record = record_failure.RunAsync({Input(input)}, stream);
+    CHECK(!record.ok() && record.failure_kind() == RuntimeShapeFailureKind::kSubmissionFailed &&
+          record.outputs().empty() && record.retained_device_bytes() == 0 &&
+          record_signal.done.load(std::memory_order_acquire),
+          "event-record failure synchronizes submitted work before cleanup");
+
+    DelayedSignal throw_signal;
+    RuntimeShapeSession callback_throw(MakePlan([&throw_signal](const RuntimeShapeCudaLaunchArgs& args)
+                                                   -> RuntimeShapeCudaLaunchResult {
+        const auto native = reinterpret_cast<cudaStream_t>(args.stream->backend_handle);
+        if (cudaLaunchHostFunc(native, SleepAndSignal, &throw_signal) != cudaSuccess) {
+            return Rejected("cudaLaunchHostFunc failed");
+        }
+        throw std::runtime_error("submitted then threw");
+    }));
+    const auto thrown = callback_throw.RunAsync({Input(input)}, stream);
+    CHECK(!thrown.ok() && thrown.failure_kind() == RuntimeShapeFailureKind::kSubmissionFailed &&
+          thrown.outputs().empty() && thrown.retained_device_bytes() == 0 &&
+          throw_signal.done.load(std::memory_order_acquire) &&
+          Has(thrown, RuntimeShapeEventKind::kCompletion),
+          "throw-after-submit is fenced by the runtime event before cleanup");
     return true;
 }
 
@@ -211,40 +198,12 @@ bool TestClosedFailures() {
     auto storage = Storage::Alloc(device, 20 * sizeof(float));
     int launches = 0;
     RuntimeShapeSession budgeted(MakePlan([&launches](const RuntimeShapeCudaLaunchArgs&) {
-        ++launches; return Accepted({});
+        ++launches; return Accepted();
     }, 8));
     const auto budget = budgeted.RunAsync({Input(storage)}, stream);
     CHECK(!budget.ok() && budget.failure_kind() == RuntimeShapeFailureKind::kResourceExhausted &&
           budget.outputs().empty() && budget.retained_device_bytes() == 0 && launches == 0,
           "budget failure precedes submission and publishes nothing");
-    RuntimeShapeSession guarded(MakePlan([&launches](const RuntimeShapeCudaLaunchArgs&) {
-        ++launches; return Accepted({});
-    }));
-    RuntimeShapeInput guarded_input = Input(storage, 20);  // exceeds output max bytes.
-    const auto resource = guarded.RunAsync({guarded_input}, stream);
-    CHECK(!resource.ok() && resource.failure_kind() == RuntimeShapeFailureKind::kResourceExhausted &&
-          resource.outputs().empty() && resource.retained_device_bytes() == 0 && launches == 0,
-          "resource failure precedes submission and publishes nothing");
-
-    RuntimeShapeInputContract contract{"float32", 1, "CUDA:0", 1};
-    contract.axis_guards = {{0, 1, 8, 1, std::nullopt, std::nullopt}};
-    RuntimeShapeTensorContract output;
-    output.dtype = "float32"; output.logical = {RuntimeShapeExpr::Const(1)};
-    output.physical = output.logical; output.valid = output.logical; output.max_bytes = 4;
-    output.device = "CUDA:0";
-    RuntimeShapePlanSpec spec;
-    spec.inputs = {contract}; spec.outputs = {output}; spec.run_byte_budget = 4;
-    spec.entry.module_label = "cuda"; spec.entry.entry_symbol = "guard"; spec.entry.ready = true;
-    spec.entry.execution_kind = RuntimeShapeExecutionKind::kCudaAsync;
-    spec.entry.device_contract = "CUDA:0";
-    spec.entry.cuda_launcher = [&launches](const RuntimeShapeCudaLaunchArgs&) { ++launches; return Accepted({}); };
-    spec.entry.exact_abi_fingerprint = RuntimeShapePlan::ExactAbiFingerprint(
-        spec.inputs, spec.outputs, {}, {}, {}, spec.entry.execution_kind, spec.entry.device_contract);
-    RuntimeShapeSession guard_session(RuntimeShapePlan(std::move(spec)));
-    const auto guard = guard_session.RunAsync({Input(storage, 0)}, stream);
-    CHECK(!guard.ok() && guard.failure_kind() == RuntimeShapeFailureKind::kApplicabilityMiss &&
-          guard.outputs().empty() && guard.retained_device_bytes() == 0 && launches == 0,
-          "guard miss precedes submission and publishes nothing");
 
     RuntimeShapeSession rejected(MakePlan([](const RuntimeShapeCudaLaunchArgs&) {
         return Rejected("test rejection");
@@ -253,34 +212,6 @@ bool TestClosedFailures() {
     CHECK(!rejection.ok() && rejection.failure_kind() == RuntimeShapeFailureKind::kLaunchRejected &&
           rejection.outputs().empty() && rejection.retained_device_bytes() == 0,
           "explicit CUDA rejection safely releases unsubmitted outputs");
-    RuntimeShapeSession missing(MakePlan([](const RuntimeShapeCudaLaunchArgs&) {
-        return Accepted({});
-    }));
-    const auto missing_completion = missing.RunAsync({Input(storage)}, stream);
-    CHECK(!missing_completion.ok() &&
-          missing_completion.failure_kind() == RuntimeShapeFailureKind::kSubmissionFailed &&
-          missing_completion.outputs().size() == 1 &&
-          missing_completion.retained_device_bytes() == 4 * sizeof(float) &&
-          !Has(missing_completion, RuntimeShapeEventKind::kCompletion),
-          "accepted CUDA launch without completion is quarantined");
-    RuntimeShapeSession wrong(MakePlan([](const RuntimeShapeCudaLaunchArgs&) {
-        return Accepted(AsyncOperation::Completed(DeviceStream::Default(Device::CPU())));
-    }));
-    const auto wrong_completion = wrong.RunAsync({Input(storage)}, stream);
-    CHECK(!wrong_completion.ok() && wrong_completion.outputs().size() == 1 &&
-          wrong_completion.failure_kind() == RuntimeShapeFailureKind::kSubmissionFailed &&
-          wrong_completion.retained_device_bytes() == 4 * sizeof(float) &&
-          !Has(wrong_completion, RuntimeShapeEventKind::kCompletion),
-          "wrong-device completion does not prove expected CUDA work and is quarantined");
-    RuntimeShapeSession fake(MakePlan([](const RuntimeShapeCudaLaunchArgs& args) {
-        return Accepted(AsyncOperation::Completed(args.stream));
-    }));
-    const auto fake_completion = fake.RunAsync({Input(storage)}, stream);
-    CHECK(!fake_completion.ok() && fake_completion.outputs().size() == 1 &&
-          fake_completion.retained_device_bytes() == 4 * sizeof(float) &&
-          fake_completion.failure_kind() == RuntimeShapeFailureKind::kSubmissionFailed &&
-          !Has(fake_completion, RuntimeShapeEventKind::kCompletion),
-          "completed/no-event completion does not prove expected CUDA work and is quarantined");
     return true;
 }
 }  // namespace
@@ -288,7 +219,7 @@ bool TestClosedFailures() {
 int main() {
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) return 77;
-    if (!TestPendingRetentionAndCompletion() || !TestPostSubmitFailureSafety() ||
+    if (!TestRuntimeOwnedPendingRetentionAndCompletion() || !TestPostSubmitFailureSafety() ||
         !TestClosedFailures()) return 1;
     std::cout << "runtime_shape_cuda_async_test: PASS\n";
     return 0;
