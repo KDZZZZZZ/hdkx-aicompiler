@@ -33,12 +33,23 @@ struct InputAxisSymbol final {
 
 enum class DispatchKind { kExact, kBucket, kPolymorphic };
 
-struct RestrictedDispatchDecision final {
-    DispatchKind kind{DispatchKind::kExact};
-    shape::experimental::v1::ExactOracle exact_oracle;
-    std::vector<shape::experimental::v1::UnitSpecializationRequest> exact_requests;
-    std::vector<shape::experimental::v1::GuardedUnitSpecializationRequest> guarded_requests;
-    std::string canonical_identity;
+class RestrictedDispatchDecision final {
+public:
+    [[nodiscard]] DispatchKind kind() const noexcept;
+    // These snapshots are rebuilt from the private, trusted template/profile
+    // state. Mutating a returned request cannot alter decision authority.
+    [[nodiscard]] const shape::experimental::v1::ExactOracle& exact_oracle() const;
+    [[nodiscard]] std::vector<shape::experimental::v1::UnitSpecializationRequest> exact_requests() const;
+    [[nodiscard]] std::vector<shape::experimental::v1::GuardedUnitSpecializationRequest> guarded_requests() const;
+
+    // Declared only to support the private pimpl; no state is public.
+    struct Impl;
+
+private:
+    explicit RestrictedDispatchDecision(std::shared_ptr<const Impl> impl);
+
+    std::shared_ptr<const Impl> impl_;
+    friend class RestrictedSymbolicShapeAdapter;
 };
 
 class PreparedRestrictedSymbolicTemplate final {
@@ -88,8 +99,10 @@ public:
         const shape::experimental::v1::BindingSet& bindings,
         const shape::experimental::v1::PolymorphicPolicy& policy);
 
-    // Returns precisely the units whose complete boundary artifact request
-    // changed. This is a comparison of canonical requests, never a cache.
+    // Returns precisely the units whose complete semantic artifact/boundary
+    // identity changed. Graph-local routing and profile/oracle identity are
+    // intentionally excluded; incomparable unit semantic contexts reject.
+    // This is never a cache comparison.
     static std::vector<size_t> ChangedUnitIndices(
         const RestrictedDispatchDecision& previous,
         const RestrictedDispatchDecision& next);

@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
-#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -16,8 +16,16 @@
 #endif
 
 namespace kxc::api::experimental::restricted_symbolic_shape::v1 {
-namespace {
 namespace shape = kxc::shape::experimental::v1;
+
+struct RestrictedDispatchDecision::Impl final {
+    DispatchKind kind;
+    shape::GraphTemplate graph;
+    shape::ExactOracle exact_oracle;
+    std::optional<shape::GuardedShapeProfile> guarded_profile;
+};
+
+namespace {
 
 [[noreturn]] void Reject(const std::string& message) {
     throw std::invalid_argument("RestrictedSymbolicShapeAdapter: " + message);
@@ -28,11 +36,6 @@ void RequireEnabled() {
     throw std::runtime_error("RestrictedSymbolicShapeAdapter is disabled; configure with "
                              "-DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON");
 #endif
-}
-
-void Append(std::string* out, std::string_view value) {
-    *out += std::to_string(value.size()) + ":";
-    out->append(value.data(), value.size());
 }
 
 std::vector<int64_t> RowMajor(const std::vector<int64_t>& shape) {
@@ -52,7 +55,9 @@ std::vector<int64_t> RowMajor(const std::vector<int64_t>& shape) {
 bool ValidContract(const shape::ConcreteTensorShapeContract& value) {
     if (value.logical.size() != value.physical.size() ||
         value.logical.size() != value.valid.size() ||
-        value.logical.size() != value.strides.size() || value.alignment <= 0 ||
+        value.logical.size() != value.strides.size() ||
+        (!value.axis_names.empty() && value.axis_names.size() != value.logical.size()) ||
+        value.alignment <= 0 ||
         value.layout != "contiguous.row_major" || value.memory_scope != "global") {
         return false;
     }
@@ -147,13 +152,14 @@ void CollectOperations(const Expr& expression, const std::set<const Object*>& pa
     const auto* call = expression.As<CallNode>();
     if (!call || !seen->insert(expression.get()).second) Reject("only a tree of restricted calls is supported");
     const auto* op = call->op.As<relay::OpNode>();
-    if (!op || (op->name != "relu" && op->name != "sqrt" && op->name != "add" && op->name != "mul")) {
+    if (!op || (op->name != "relu" && op->name != "nn_relu" && op->name != "sqrt" &&
+                op->name != "add" && op->name != "mul")) {
         Reject("unsupported Relay operation");
     }
     const size_t arity = (op->name == "add" || op->name == "mul") ? 2 : 1;
     if (call->args.size() != arity) Reject("unsupported Relay operation arity");
     for (const Expr& argument : call->args) CollectOperations(argument, parameters, seen, operations);
-    operations->push_back(op->name);
+    operations->push_back(op->name == "nn_relu" ? "relu" : op->name);
 }
 
 std::vector<std::string> ValidateSyntax(const Function& function) {
@@ -199,69 +205,75 @@ void VerifyBindings(const shape::GraphTemplate& graph, const shape::BindingSet& 
     for (const std::string& symbol : symbols) if (!bindings.Find(symbol).has_value()) Reject("unbound overlay symbol");
 }
 
-std::string ContractBytes(const shape::ConcreteTensorShapeContract& value) {
-    std::string result;
-    for (const auto* values : {&value.logical, &value.physical, &value.valid, &value.strides}) {
-        Append(&result, std::to_string(values->size()));
-        for (int64_t number : *values) Append(&result, std::to_string(number));
-    }
-    Append(&result, value.layout); Append(&result, std::to_string(value.alignment));
-    Append(&result, value.memory_scope); Append(&result, value.abi.CanonicalBytes());
-    return result;
-}
-
-std::string ExactRequestBytes(const shape::UnitSpecializationRequest& request) {
-    std::string result("exact-request.v1");
-    Append(&result, std::to_string(request.ordered_call_index)); Append(&result, request.call_locator.value());
-    Append(&result, request.shape_profile_key.CanonicalBytes()); Append(&result, request.artifact_key.CanonicalBytes());
-    Append(&result, request.signature_digest.value());
-    for (const auto& value : request.ordered_inputs) Append(&result, ContractBytes(value));
-    Append(&result, "outputs"); for (const auto& value : request.ordered_outputs) Append(&result, ContractBytes(value));
-    return result;
-}
-
-std::string GuardedRequestBytes(const shape::GuardedUnitSpecializationRequest& request) {
-    std::string result("guarded-request.v1");
-    Append(&result, std::to_string(request.ordered_call_index)); Append(&result, request.call_locator.value());
-    Append(&result, request.shape_profile_key.CanonicalBytes()); Append(&result, request.exact_oracle_key.CanonicalBytes());
-    Append(&result, std::to_string(static_cast<int>(request.kind))); Append(&result, request.guard_canonical);
-    Append(&result, request.artifact_key.CanonicalBytes());
-    for (const auto& value : request.ordered_inputs) Append(&result, ContractBytes(value));
-    Append(&result, "outputs"); for (const auto& value : request.ordered_outputs) Append(&result, ContractBytes(value));
-    return result;
-}
-
-std::string DecisionIdentity(const RestrictedDispatchDecision& decision) {
-    std::string result("restricted-symbolic-decision.v1");
-    Append(&result, std::to_string(static_cast<int>(decision.kind)));
-    Append(&result, decision.exact_oracle.profile().key().CanonicalBytes());
-    for (const auto& request : decision.exact_requests) Append(&result, ExactRequestBytes(request));
-    for (const auto& request : decision.guarded_requests) Append(&result, GuardedRequestBytes(request));
-    return result;
-}
-
-void VerifyDecision(const RestrictedDispatchDecision& decision) {
-    if (decision.exact_requests.empty()) Reject("decision has no exact requests");
-    VerifyContracts(decision.exact_requests);
+std::vector<shape::UnitSpecializationRequest> RebuildExact(
+    const RestrictedDispatchDecision::Impl& decision) {
+    const auto requests = shape::MakeExactSpecializationRequests(decision.graph, decision.exact_oracle);
+    if (requests.empty()) Reject("decision has no exact requests");
+    VerifyContracts(requests);
     const auto& exact_key = decision.exact_oracle.profile().key();
-    for (const auto& request : decision.exact_requests) {
+    for (const auto& request : requests) {
         if (!(request.shape_profile_key == exact_key)) Reject("exact request is detached from decision oracle");
     }
-    if (decision.kind == DispatchKind::kExact) {
-        if (!decision.guarded_requests.empty()) Reject("exact decision unexpectedly contains guard authority");
-    } else {
-        if (decision.guarded_requests.size() != decision.exact_requests.size()) Reject("guarded decision cardinality mismatch");
-        VerifyContracts(decision.guarded_requests);
-        const auto expected = decision.kind == DispatchKind::kBucket
-            ? shape::GuardedProfileKind::kBucket : shape::GuardedProfileKind::kPolymorphic;
-        for (const auto& request : decision.guarded_requests) {
-            if (request.kind != expected || request.artifact_key.kind() != expected ||
-                !(request.exact_oracle_key == exact_key)) {
-                Reject("guarded request is detached from decision authority");
-            }
+    return requests;
+}
+
+std::vector<shape::GuardedUnitSpecializationRequest> RebuildGuarded(
+    const RestrictedDispatchDecision::Impl& decision) {
+    if (!decision.guarded_profile) return {};
+    const auto requests = shape::MakeGuardedSpecializationRequests(decision.graph, *decision.guarded_profile);
+    const auto exact = RebuildExact(decision);
+    if (requests.size() != exact.size()) Reject("guarded decision cardinality mismatch");
+    VerifyContracts(requests);
+    const auto expected = decision.kind == DispatchKind::kBucket
+        ? shape::GuardedProfileKind::kBucket : shape::GuardedProfileKind::kPolymorphic;
+    for (const auto& request : requests) {
+        if (request.kind != expected || request.artifact_key.kind() != expected ||
+            !(request.exact_oracle_key == decision.exact_oracle.profile().key())) {
+            Reject("guarded request is detached from decision authority");
         }
     }
-    if (decision.canonical_identity != DecisionIdentity(decision)) Reject("decision canonical identity does not cover complete requests");
+    return requests;
+}
+
+void VerifyDecision(const RestrictedDispatchDecision::Impl& decision) {
+    (void)RebuildExact(decision);
+    const auto guarded = RebuildGuarded(decision);
+    if ((decision.kind == DispatchKind::kExact) != guarded.empty()) {
+        Reject("decision kind and guarded profile disagree");
+    }
+}
+
+std::string ExactUnitBoundaryIdentity(const shape::UnitSpecializationRequest& request) {
+    // KernelArtifactKey canonically covers the unit semantic key and complete
+    // ordered boundary contracts, but deliberately excludes routing/profile keys.
+    return "restricted.exact-unit-boundary.v1" + request.artifact_key.CanonicalBytes();
+}
+
+std::string GuardedUnitBoundaryIdentity(const shape::GuardedUnitSpecializationRequest& request) {
+    return "restricted.guarded-unit-boundary.v1" + request.artifact_key.CanonicalBytes();
+}
+
+std::string ProofToken(const std::string& operation) {
+    if (operation == "relu" || operation == "sqrt" || operation == "add" || operation == "mul") {
+        return "restricted." + operation + ".equal-shape.v1";
+    }
+    Reject("unsupported polymorphic unit operation");
+}
+
+void VerifyPolymorphicProofs(const std::vector<std::string>& operations,
+                             const shape::GraphTemplate& graph,
+                             const shape::PolymorphicPolicy& policy) {
+    const auto& proofs = policy.allowlist_proofs();
+    if (proofs.size() != operations.size() || proofs.size() != graph.ordered_units().size()) {
+        Reject("polymorphic proof cardinality does not match frozen operations");
+    }
+    for (size_t index = 0; index < proofs.size(); ++index) {
+        if (proofs[index].ordered_unit_index != index ||
+            !(proofs[index].unit_semantic_key == graph.ordered_units()[index].semantic_key) ||
+            proofs[index].proof != ProofToken(operations[index])) {
+            Reject("polymorphic proof is not an allowlisted restricted operation token");
+        }
+    }
 }
 
 void VerifyCounters(const shape_exact::v1::PreparedGraphTemplate& representative,
@@ -281,6 +293,7 @@ struct PreparedRestrictedSymbolicTemplate::Impl final {
     shape_exact::v1::PreparedGraphTemplate representative;
     shape::GraphTemplate graph;
     std::vector<InputAxisSymbol> symbols;
+    std::vector<std::string> operations;
     shape_exact::v1::ShapeExactPreparationCounters counters;
 };
 
@@ -368,7 +381,32 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
     const auto counters = frozen.counters();
     return PreparedRestrictedSymbolicTemplate(std::make_shared<PreparedRestrictedSymbolicTemplate::Impl>(
         PreparedRestrictedSymbolicTemplate::Impl{std::move(frozen), std::move(graph),
-            std::move(input_axis_symbols), counters}));
+            std::move(input_axis_symbols), operations, counters}));
+}
+
+RestrictedDispatchDecision::RestrictedDispatchDecision(std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+
+DispatchKind RestrictedDispatchDecision::kind() const noexcept {
+    return impl_ ? impl_->kind : DispatchKind::kExact;
+}
+
+const shape::ExactOracle& RestrictedDispatchDecision::exact_oracle() const {
+    if (!impl_) Reject("decision is undefined");
+    VerifyDecision(*impl_);
+    return impl_->exact_oracle;
+}
+
+std::vector<shape::UnitSpecializationRequest> RestrictedDispatchDecision::exact_requests() const {
+    if (!impl_) Reject("decision is undefined");
+    VerifyDecision(*impl_);
+    return RebuildExact(*impl_);
+}
+
+std::vector<shape::GuardedUnitSpecializationRequest> RestrictedDispatchDecision::guarded_requests() const {
+    if (!impl_) Reject("decision is undefined");
+    VerifyDecision(*impl_);
+    return RebuildGuarded(*impl_);
 }
 
 RestrictedDispatchDecision RestrictedSymbolicShapeAdapter::MintExact(
@@ -376,56 +414,69 @@ RestrictedDispatchDecision RestrictedSymbolicShapeAdapter::MintExact(
     RequireEnabled();
     if (!prepared.impl_) Reject("prepared template is undefined");
     VerifyBindings(prepared.impl_->graph, bindings);
-    const shape::ExactOracle oracle =
-        shape::InstantiateExactProfile(prepared.impl_->graph, bindings);
-    RestrictedDispatchDecision result{DispatchKind::kExact, oracle, {}, {}, {}};
-    result.exact_requests = shape::MakeExactSpecializationRequests(prepared.impl_->graph, result.exact_oracle);
-    VerifyContracts(result.exact_requests);
+    const shape::ExactOracle oracle = shape::InstantiateExactProfile(prepared.impl_->graph, bindings);
+    RestrictedDispatchDecision result(std::make_shared<RestrictedDispatchDecision::Impl>(
+        RestrictedDispatchDecision::Impl{DispatchKind::kExact, prepared.impl_->graph, oracle, std::nullopt}));
+    VerifyDecision(*result.impl_);
     VerifyCounters(prepared.impl_->representative, prepared.impl_->counters);
-    result.canonical_identity = DecisionIdentity(result);
     return result;
 }
 
 RestrictedDispatchDecision RestrictedSymbolicShapeAdapter::MintBucket(
     const PreparedRestrictedSymbolicTemplate& prepared, const shape::BindingSet& bindings,
     const shape::BucketPolicy& policy) {
-    RestrictedDispatchDecision result = MintExact(prepared, bindings);
-    result.kind = DispatchKind::kBucket;
+    RestrictedDispatchDecision exact = MintExact(prepared, bindings);
     const shape::GuardedShapeProfile profile = shape::BuildBucketProfile(
-        prepared.impl_->graph, result.exact_oracle, policy);
-    result.guarded_requests = shape::MakeGuardedSpecializationRequests(prepared.impl_->graph, profile);
-    VerifyContracts(result.guarded_requests);
+        prepared.impl_->graph, exact.impl_->exact_oracle, policy);
+    RestrictedDispatchDecision result(std::make_shared<RestrictedDispatchDecision::Impl>(
+        RestrictedDispatchDecision::Impl{DispatchKind::kBucket, prepared.impl_->graph,
+            exact.impl_->exact_oracle, profile}));
+    VerifyDecision(*result.impl_);
     VerifyCounters(prepared.impl_->representative, prepared.impl_->counters);
-    result.canonical_identity = DecisionIdentity(result);
     return result;
 }
 
 RestrictedDispatchDecision RestrictedSymbolicShapeAdapter::MintPolymorphic(
     const PreparedRestrictedSymbolicTemplate& prepared, const shape::BindingSet& bindings,
     const shape::PolymorphicPolicy& policy) {
-    RestrictedDispatchDecision result = MintExact(prepared, bindings);
-    result.kind = DispatchKind::kPolymorphic;
+    RestrictedDispatchDecision exact = MintExact(prepared, bindings);
+    VerifyPolymorphicProofs(prepared.impl_->operations, prepared.impl_->graph, policy);
     const shape::GuardedShapeProfile profile = shape::BuildPolymorphicProfile(
-        prepared.impl_->graph, result.exact_oracle, policy);
-    result.guarded_requests = shape::MakeGuardedSpecializationRequests(prepared.impl_->graph, profile);
-    VerifyContracts(result.guarded_requests);
+        prepared.impl_->graph, exact.impl_->exact_oracle, policy);
+    RestrictedDispatchDecision result(std::make_shared<RestrictedDispatchDecision::Impl>(
+        RestrictedDispatchDecision::Impl{DispatchKind::kPolymorphic, prepared.impl_->graph,
+            exact.impl_->exact_oracle, profile}));
+    VerifyDecision(*result.impl_);
     VerifyCounters(prepared.impl_->representative, prepared.impl_->counters);
-    result.canonical_identity = DecisionIdentity(result);
     return result;
 }
 
 std::vector<size_t> RestrictedSymbolicShapeAdapter::ChangedUnitIndices(
     const RestrictedDispatchDecision& previous, const RestrictedDispatchDecision& next) {
-    VerifyDecision(previous);
-    VerifyDecision(next);
-    if (previous.exact_requests.size() != next.exact_requests.size()) Reject("decision unit cardinality mismatch");
+    if (!previous.impl_ || !next.impl_) Reject("decision is undefined");
+    VerifyDecision(*previous.impl_);
+    VerifyDecision(*next.impl_);
+    const auto previous_exact = RebuildExact(*previous.impl_);
+    const auto next_exact = RebuildExact(*next.impl_);
+    if (previous_exact.size() != next_exact.size()) Reject("decision unit cardinality mismatch");
+    const auto previous_guarded = RebuildGuarded(*previous.impl_);
+    const auto next_guarded = RebuildGuarded(*next.impl_);
     std::vector<size_t> changed;
-    for (size_t i = 0; i < previous.exact_requests.size(); ++i) {
-        std::string left = ExactRequestBytes(previous.exact_requests[i]);
-        std::string right = ExactRequestBytes(next.exact_requests[i]);
-        if (previous.kind != DispatchKind::kExact) left += GuardedRequestBytes(previous.guarded_requests[i]);
-        if (next.kind != DispatchKind::kExact) right += GuardedRequestBytes(next.guarded_requests[i]);
-        if (left != right || previous.kind != next.kind) changed.push_back(i);
+    for (size_t i = 0; i < previous_exact.size(); ++i) {
+        const auto& previous_semantic = previous.kind() == DispatchKind::kExact
+            ? previous_exact[i].artifact_key.unit_semantic_key()
+            : previous_guarded[i].artifact_key.unit_semantic_key();
+        const auto& next_semantic = next.kind() == DispatchKind::kExact
+            ? next_exact[i].artifact_key.unit_semantic_key()
+            : next_guarded[i].artifact_key.unit_semantic_key();
+        if (!(previous_semantic == next_semantic)) Reject("decision unit semantic contexts are incomparable");
+        const std::string left = previous.kind() == DispatchKind::kExact
+            ? ExactUnitBoundaryIdentity(previous_exact[i])
+            : GuardedUnitBoundaryIdentity(previous_guarded[i]);
+        const std::string right = next.kind() == DispatchKind::kExact
+            ? ExactUnitBoundaryIdentity(next_exact[i])
+            : GuardedUnitBoundaryIdentity(next_guarded[i]);
+        if (left != right) changed.push_back(i);
     }
     return changed;
 }

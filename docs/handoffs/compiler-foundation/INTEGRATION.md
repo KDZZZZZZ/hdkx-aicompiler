@@ -94,6 +94,7 @@ KXC_ENABLE_LLVM=OFF
 KXC_ENABLE_REGION_TASK_DAG=OFF
 KXC_ENABLE_CONTROL_RUNTIME=OFF
 KXC_ENABLE_SHAPE_PRODUCTION_EXACT=OFF
+KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=OFF
 KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=OFF
 ```
 
@@ -190,14 +191,36 @@ CI 注册不等于验证完成；只有远端 workflow 绿色后才能把对应 
 - 未运行 CUDA numeric、pending-retention、Compute Sanitizer 或 CUPTI；
 - 未下载、安装或修改任何系统依赖。
 
-W3 restricted symbolic Shape control-plane slice is limited to fixed-rank `relu`/`sqrt` and
-same-shape `add`/`mul` graphs, a deep-frozen static exact representative, and explicit
-symbol bindings. Bucket/polymorphic decisions validate logical/physical/valid extents,
-guards, tails, and complete request identities, but are deliberately non-executable: they
-neither compile/cache artifacts nor create a dynamic `RuntimeSession` plan. It requires both
-`KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON` and the exact representative gate. Dynamic Shape
-propagation, dynamic outputs/allocation, authoritative adaptive generation leases, and all
-production guarded execution remain unsupported.
+### 7.1 W3 restricted symbolic Shape checkpoint
+
+The default-OFF W3 adapter is minting-only. Its enabled CPU configuration is exactly:
+
+```text
+KXC_ENABLE_CUDA=OFF
+KXC_ENABLE_LLVM=OFF
+KXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
+KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON
+KXC_BUILD_PASS_TESTS=ON
+KXC_BUILD_CODEGEN_TESTS=OFF
+```
+
+It first deep-freezes a W2 exact representative and then accepts only fixed-rank trees of
+`relu`/`nn_relu`, `sqrt`, and equal-shape `add`/`mul` with explicit input-axis bindings.
+`MintExact`, `MintBucket`, and `MintPolymorphic` return validated opaque decision/request
+snapshots; they do not compile or cache artifacts, allocate dynamic buffers, assemble an
+executable guarded plan, or create a dynamic `RuntimeSession` path. Bucket/polymorphic
+minting validates complete logical/physical/valid boundaries (including axis names), guards,
+tails, and versioned allowlisted proofs. Request accessors rebuild from trusted frozen state;
+`ChangedUnitIndices` compares only comparable per-unit semantic boundary identity, never a
+cache key or graph-local routing identity.
+
+Gate-OFF `restricted_symbolic_shape_test` passed **1/1**. Under the enabled configuration,
+all five existing Shape targets passed: foundation Shape groups **4 + 3 + 2**, production
+exact groups **4**, and registered Shape CTests **2/2**. `check_public_headers` compiled
+**100** headers and `check_include_layers` scanned **254** files. LLVM/CUDA were off; no
+LLVM/CUDA or guarded-execution claim follows from this checkpoint. Dynamic Shape propagation,
+dynamic outputs/allocation, authoritative adaptive generation leases, and all production
+guarded execution remain unsupported.
 
 W2 checkpoint does not complete the overall W0–W4 plan. W3/W4 still include runtime
 Shape propagation、dynamic outputs/allocation、authoritative adaptive generation leases、
