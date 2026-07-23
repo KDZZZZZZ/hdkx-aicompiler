@@ -251,6 +251,7 @@
         "gate": "cuda_indirect_load_schedule_unsupported",
         "reason": "The generic CUDA schedule rejects Gather's indirect Load index before backend execution; no device numeric support is claimed.",
         "evidence": [
+          "test/codegen_cuda_test.cpp",
           "test/compiler_capability_test.cpp",
           "test/cuda_schedule_test.cpp"
         ]
@@ -320,11 +321,12 @@
         ]
       },
       "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_where_not_validated",
-        "reason": "CUDA Where support and device numeric validation are not claimed.",
+        "status": "validated",
+        "gate": "cuda_where_injective_device_validated_sm75",
+        "reason": "Exact-static Where was executed through Compiler and RuntimeSession on an NVIDIA GTX 1650 (SM 7.5); this does not claim masked-softmax semantics.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "test/codegen_cuda_test.cpp"
         ]
       },
       "runtime": {
@@ -393,6 +395,7 @@
         "gate": "cuda_reduction_unsupported",
         "reason": "CUDA nested reductions are rejected by the normalized generic target schedule; no CPU fallback or device numeric support is claimed.",
         "evidence": [
+          "test/codegen_cuda_test.cpp",
           "test/compiler_capability_test.cpp"
         ]
       },
@@ -460,12 +463,12 @@
         ]
       },
       "cuda": {
-        "status": "unsupported",
-        "gate": "slice_pending_cuda_not_validated",
-        "reason": "Neither Slice nor the aggregated Slice+Concat CUDA path is implemented or validated.",
+        "status": "validated",
+        "gate": "cuda_slice_concat_injective_device_validated_sm75",
+        "reason": "Positive-step Slice and binary Concatenate were executed individually through Compiler and RuntimeSession on an NVIDIA GTX 1650 (SM 7.5), including fresh output allocation.",
         "evidence": [
-          "test/compiler_capability_test.cpp",
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "test/codegen_cuda_test.cpp"
         ]
       },
       "runtime": {

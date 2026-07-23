@@ -17,10 +17,13 @@ LAYERS = ("frontend", "relay", "lowering", "llvm", "cuda", "runtime", "numeric",
 STATUSES = {"unsupported", "contracted", "implemented", "validated"}
 VALIDATED = {
     ("stable_softmax", "numeric"),
+    ("mask_select", "cuda"),
+    ("slice_concat", "cuda"),
     ("prefill_exact", "numeric"),
     ("decode_external_kv", "numeric"),
     ("kv_cache", "numeric"),
 }
+CUDA_INJECTIVE_IMPLEMENTED = {"mask_select", "slice_concat"}
 DYNAMIC_BATCHING_GATES = {
     "frontend": "unresolved_onnx_rank_or_dims_rejected",
     "relay": "unknown_extents_representable_not_executable",
@@ -222,7 +225,8 @@ def validate_matrix(root, matrix):
             if not isinstance(record["reason"], str) or not record["reason"]:
                 raise ValidationError("matrix.{}.{} reason is invalid".format(capability, layer))
             check_evidence(root, record["evidence"], "matrix.{}.{}".format(capability, layer))
-            if layer == "cuda" and record["status"] != "unsupported":
+            if (layer == "cuda" and capability not in CUDA_INJECTIVE_IMPLEMENTED and
+                    record["status"] != "unsupported"):
                 raise ValidationError("matrix.{}.cuda must remain closed".format(capability))
             if layer == "llvm" and record["status"] == "validated":
                 raise ValidationError("matrix.{}.llvm must not claim unrun local validation".format(capability))
@@ -464,7 +468,7 @@ def run_references(fixtures, matrix, manifests):
     cuda = matrix["capabilities"]["stable_softmax"]["cuda"]
     if cuda["status"] != "unsupported" or cuda["gate"] != "cuda_reduction_unsupported":
         raise ValidationError("CUDA reduction unsupported gate is open")
-    print("PASS negative gates unknown-symbolic/all-masked/capacity/CUDA/fingerprint")
+    print("PASS negative gates unknown-symbolic/all-masked/capacity/gather-reduction-CUDA/fingerprint")
 
 
 def main():
@@ -487,7 +491,7 @@ def main():
     validate_manifests(fixture_document["fixtures"], manifests)
     print("PASS schemas, fingerprints, and evidence")
     run_references(fixture_document["fixtures"], matrix, manifests)
-    print("PASS NLP reference and capability gate; no GPU execution validated")
+    print("PASS NLP reference/capability gate; injective CUDA validated, gather/reductions closed")
 
 
 if __name__ == "__main__":

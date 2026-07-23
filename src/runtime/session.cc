@@ -72,7 +72,10 @@ void ValidateShape(const Array<int64_t>& expected,
     for (size_t i = 0; i < expected.size(); ++i) {
         if (allow_dynamic && expected[i] == codegen::kDynamicDimension) continue;
         if (expected[i] != actual[i]) {
-            throw std::invalid_argument(context + " shape does not match");
+            throw std::invalid_argument(
+                context + " shape does not match at axis " + std::to_string(i) +
+                ": kernel expects " + std::to_string(expected[i]) +
+                ", plan declares " + std::to_string(actual[i]));
         }
     }
 }

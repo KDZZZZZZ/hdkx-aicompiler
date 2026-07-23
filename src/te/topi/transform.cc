@@ -131,7 +131,8 @@ Tensor concatenate(const Array<Tensor>& inputs, int axis, std::string name, std:
     }
 
     Array<int64_t> axis_extents;
-    Array<PrimExpr> output_shape = inputs[0]->shape;
+    Array<PrimExpr> output_shape;
+    for (const PrimExpr& extent : inputs[0]->shape) output_shape.push_back(extent);
     int64_t axis_total = 0;
     for (const Tensor& input : inputs) {
         if (!input.defined()) {
