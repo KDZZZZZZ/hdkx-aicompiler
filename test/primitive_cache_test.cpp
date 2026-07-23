@@ -7,6 +7,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -547,6 +548,24 @@ bool TestBackpressureAndByteBudgetAreExplicit() {
                    stats.entries == 0 && stats.evictions == 1 &&
                    stats.rejections == 1,
                "byte budget may evict discoverability but not the returned pin");
+
+    Reset(PrimitiveCacheLimits{
+        8, std::numeric_limits<uint64_t>::max(), 1, 8});
+    const PrimitiveCacheLease near_limit =
+        AcquirePrimitiveCache(MakeKey("near-limit"));
+    (void)PublishPrimitiveCacheLease(
+        near_limit,
+        MakeArtifact("near-limit",
+                     std::numeric_limits<uint64_t>::max() - 10));
+    const PrimitiveCacheLease crossing =
+        AcquirePrimitiveCache(MakeKey("crossing"));
+    const PrimitiveArtifactPin crossing_pin = PublishPrimitiveCacheLease(
+        crossing, MakeArtifact("crossing", 20));
+    const PrimitiveCacheStats crossing_stats = GetPrimitiveCacheStats();
+    TEST_CHECK(crossing_pin.defined() && crossing_stats.entries == 1 &&
+                   crossing_stats.accounted_bytes == 20 &&
+                   crossing_stats.evictions == 1,
+               "byte accounting must evict before checked addition, never wrap");
     return true;
 }
 

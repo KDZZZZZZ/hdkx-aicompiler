@@ -23,7 +23,7 @@ struct FailedAsyncRetention {
     DeviceStream stream;
     Array<Storage> storage;
     ObjectRef executable;
-    std::shared_ptr<void> context;
+    std::vector<std::shared_ptr<void>> contexts;
     void* event;
 };
 
@@ -32,7 +32,7 @@ void RetainFailedNode(const AsyncOperationNode& node) noexcept {
     try {
         (void)new FailedAsyncRetention{node.stream, node.retained_storage,
                                        node.retained_executable,
-                                       node.retained_context,
+                                       node.retained_contexts,
                                        node.backend_event};
     } catch (...) {
         std::terminate();
@@ -181,10 +181,6 @@ void AsyncOperation::RetainDependencies(Array<Storage> retained,
     }
     const auto* node = operator->();
     std::lock_guard<std::mutex> lock(node->mutex);
-    if (node->retained_context) {
-        throw std::logic_error(
-            "AsyncOperation graph dependencies are already attached");
-    }
     auto* mutable_node = const_cast<AsyncOperationNode*>(node);
     for (const auto& storage : retained) {
         if (!storage.defined()) {
@@ -202,7 +198,7 @@ void AsyncOperation::RetainDependencies(Array<Storage> retained,
             mutable_node->retained_storage.push_back(storage);
         }
     }
-    mutable_node->retained_context = std::move(context);
+    mutable_node->retained_contexts.push_back(std::move(context));
 }
 
 // 阻塞等待并恰好释放一次完成 event。

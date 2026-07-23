@@ -9,7 +9,10 @@
 #include <utility>
 #include <vector>
 
+#include "kxc/compiler/compiler.h"
 #include "kxc/compiler/identity.h"
+#include "kxc/relay/op.h"
+#include "kxc/support/object_registration.h"
 
 namespace {
 
@@ -28,6 +31,41 @@ bool Throws(const std::function<void()>& fn) {
         return true;
     }
     return false;
+}
+
+class DerivedCallNode final : public kxc::CallNode {
+public:
+    std::string hidden_semantics;
+
+    KXC_OBJECT_DECLARE
+};
+
+KXC_OBJECT_DEFINE_WITH_KEY(DerivedCallNode,
+                           "kxc.test.compiler_identity.DerivedCallNode")
+
+class UnregisteredDerivedCallNode final : public kxc::CallNode {
+public:
+    std::string hidden_semantics;
+};
+
+class UnregisteredDerivedFunctionNode final : public kxc::FunctionNode {
+public:
+    std::string hidden_semantics;
+};
+
+kxc::api::CompileConfig CpuConfig() {
+    return kxc::api::CompileConfig::Create(
+        kxc::BuildTarget(kxc::Device::CPU()), 1);
+}
+
+template <typename DerivedCall>
+kxc::Function MakeDerivedCallFunction() {
+    kxc::Var input("input", kxc::TensorType({2}, "float32"));
+    auto* call = new DerivedCall();
+    call->op = kxc::relay::Op::Get("nn_relu");
+    call->args = {input};
+    call->hidden_semantics = "must-not-be-omitted";
+    return kxc::Function({input}, kxc::Expr(kxc::ObjectRef(call)));
 }
 
 bool TestGraphLocatorIsNotUnitSemantics() {
@@ -128,6 +166,78 @@ bool TestDispatchAndPlanVariantRemainSeparate() {
     return true;
 }
 
+bool TestGraphSemanticIdentityRejectsUndefinedExprs() {
+    using namespace kxc;
+    const api::CompileConfig config = CpuConfig();
+    const Expr leaf = relay::Op::Get("nn_relu");
+    const Var binder("value", TensorType({2}, "float32"));
+    const std::vector<std::pair<const char*, Function>> malformed = {
+        {"function handle", Function()},
+        {"function body", Function({}, Expr())},
+        {"function parameter", Function({Var()}, leaf)},
+        {"nested function body", Function({}, Function({}, Expr()))},
+        {"call operator", Function({}, Call(Expr(), {}))},
+        {"call argument", Function({}, Call(leaf, {Expr()}))},
+        {"let binder", Function({}, Let(Var(), leaf, leaf))},
+        {"let value", Function({}, Let(binder, Expr(), binder))},
+        {"let body", Function({}, Let(binder, leaf, Expr()))},
+        {"if condition", Function({}, If(Expr(), leaf, leaf))},
+        {"if true branch", Function({}, If(leaf, Expr(), leaf))},
+        {"if false branch", Function({}, If(leaf, leaf, Expr()))},
+        {"tuple field", Function({}, Tuple({Expr()}))},
+        {"tuple-get source", Function({}, TupleGetItem(Expr(), 0))},
+    };
+    for (const auto& [position, graph] : malformed) {
+        TEST_CHECK(Throws([&] {
+                       (void)api::Compiler::BuildGraphArtifactKey(graph,
+                                                                  config);
+                   }),
+                   std::string("undefined ") + position +
+                       " must not produce a graph artifact key");
+    }
+    return true;
+}
+
+bool TestGraphSemanticIdentityUsesExactNodeWhitelist() {
+    using namespace kxc;
+    const api::CompileConfig config = CpuConfig();
+    Var input("input", TensorType({2}, "float32"));
+    const Function normal(
+        {input}, Call(relay::Op::Get("nn_relu"), {input}));
+    TEST_CHECK(api::Compiler::BuildGraphArtifactKey(normal, config).defined(),
+               "a supported exact Call node must produce an identity");
+    TEST_CHECK(Throws([&] {
+                   (void)api::Compiler::BuildGraphArtifactKey(
+                       MakeDerivedCallFunction<DerivedCallNode>(), config);
+               }) &&
+                   Throws([&] {
+                       (void)api::Compiler::BuildGraphArtifactKey(
+                           MakeDerivedCallFunction<
+                               UnregisteredDerivedCallNode>(),
+                           config);
+                   }),
+               "registered and unregistered derived Calls must fail closed");
+
+    auto* disguised_call = new CallNode();
+    disguised_call->op = relay::Op::Get("nn_relu");
+    const Function disguised{ObjectRef(disguised_call)};
+    auto* derived_function = new UnregisteredDerivedFunctionNode();
+    derived_function->params = {input};
+    derived_function->body = input;
+    derived_function->hidden_semantics = "must-not-be-omitted";
+    const Function derived_root{ObjectRef(derived_function)};
+    TEST_CHECK(Throws([&] {
+                   (void)api::Compiler::BuildGraphArtifactKey(disguised,
+                                                              config);
+               }) &&
+                   Throws([&] {
+                       (void)api::Compiler::BuildGraphArtifactKey(derived_root,
+                                                                  config);
+                   }),
+               "the graph root must be an exact Function node");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -136,6 +246,10 @@ int main() {
         {"digest_collision_full_equality", TestDigestCollisionUsesCanonicalEquality},
         {"artifact_field_safe_miss", TestEveryArtifactSemanticFieldCausesSafeMiss},
         {"dispatch_and_plan_are_separate", TestDispatchAndPlanVariantRemainSeparate},
+        {"graph_identity_rejects_undefined_exprs",
+         TestGraphSemanticIdentityRejectsUndefinedExprs},
+        {"graph_identity_exact_node_whitelist",
+         TestGraphSemanticIdentityUsesExactNodeWhitelist},
     };
     int failures = 0;
     for (const auto& test : tests) {

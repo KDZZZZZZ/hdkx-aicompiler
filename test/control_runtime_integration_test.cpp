@@ -997,7 +997,7 @@ bool TestAsyncCompletionRetention() {
             {ScalarBool(true), ScalarI64(5)}, DeviceStream::Default(Device::CPU()));
         CHECK(fixture.then_kernel.launcher->calls == 1 && fixture.else_kernel.launcher->calls == 0 &&
                   result.completion->retained_storage.size() == 3 &&
-                  static_cast<bool>(result.completion->retained_context),
+                  !result.completion->retained_contexts.empty(),
               "selected branch alone must allocate/launch and completion must retain its state/storage");
         completion = result.completion;
     }

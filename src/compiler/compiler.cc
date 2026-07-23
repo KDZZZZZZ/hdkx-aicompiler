@@ -6,12 +6,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -369,6 +371,143 @@ void AppendPipelineIdentityField(std::string* canonical,
                                  const std::string& value) {
     *canonical += std::to_string(name.size()) + ":" + name + "=" +
                   std::to_string(value.size()) + ":" + value + ";";
+}
+
+template <typename Node>
+const Node* AsExactExprNode(const Expr& expr) noexcept {
+    if (!expr.defined() || expr.get()->GetTypeId() != Node::_type_index ||
+        typeid(*expr.get()) != typeid(Node)) {
+        return nullptr;
+    }
+    return expr.As<Node>();
+}
+
+UnitSemanticKey BuildGraphSemanticKey(const Function& function) {
+    if (!AsExactExprNode<FunctionNode>(function)) {
+        throw std::invalid_argument(
+            "graph semantic identity requires an exact Function node");
+    }
+    std::string canonical;
+    AppendPipelineIdentityField(&canonical, "kind",
+                                "graph-semantic-key-v2");
+    std::unordered_map<const Object*, size_t> node_ids;
+    std::function<void(const Expr&)> visit = [&](const Expr& expr) {
+        if (!expr.defined()) {
+            throw std::invalid_argument(
+                "graph semantic identity has an undefined Relay Expr");
+        }
+        const auto existing = node_ids.find(expr.get());
+        if (existing != node_ids.end()) {
+            AppendPipelineIdentityField(&canonical, "node_ref",
+                                        std::to_string(existing->second));
+            return;
+        }
+        const size_t node_id = node_ids.size();
+        node_ids.emplace(expr.get(), node_id);
+        AppendPipelineIdentityField(&canonical, "node_id",
+                                    std::to_string(node_id));
+        if (const auto* relay_node = dynamic_cast<const RelayNode*>(expr.get())) {
+            if (relay_node->virtual_device_.defined()) {
+                AppendPipelineIdentityField(
+                    &canonical, "virtual_device",
+                    relay_node->virtual_device_.ToString());
+            }
+        }
+        if (const auto* constant = AsExactExprNode<ConstantNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "constant");
+            if (!constant->data.defined()) {
+                throw std::invalid_argument(
+                    "graph semantic identity has an undefined Constant");
+            }
+            const DLDataType dtype = constant->data.dtype();
+            AppendPipelineIdentityField(
+                &canonical, "constant_dtype_code",
+                std::to_string(static_cast<int>(dtype.code)));
+            AppendPipelineIdentityField(
+                &canonical, "constant_dtype_bits",
+                std::to_string(static_cast<int>(dtype.bits)));
+            AppendPipelineIdentityField(
+                &canonical, "constant_dtype_lanes",
+                std::to_string(static_cast<int>(dtype.lanes)));
+            for (int64_t dimension : constant->data.shape()) {
+                AppendPipelineIdentityField(&canonical, "constant_dimension",
+                                            std::to_string(dimension));
+            }
+            AppendPipelineIdentityField(
+                &canonical, "constant_device",
+                constant->data.device().ToString());
+            std::string bytes(constant->data.NBytes(), '\0');
+            if (!bytes.empty()) {
+                constant->data.CopyToBytes(bytes.data(), bytes.size());
+            }
+            AppendPipelineIdentityField(&canonical, "constant_bytes", bytes);
+            return;
+        }
+        if (const auto* variable = AsExactExprNode<VarNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "var");
+            AppendPipelineIdentityField(
+                &canonical, "type_annotation",
+                TypeToString(variable->type_annotation));
+            return;
+        }
+        if (const auto* op = AsExactExprNode<relay::OpNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "op");
+            AppendPipelineIdentityField(&canonical, "op_name", op->name);
+            AppendPipelineIdentityField(
+                &canonical, "op_spec",
+                op->has_spec ? relay::SerializeOperatorSpec(op->spec)
+                             : "<unspecified>");
+            return;
+        }
+        if (const auto* call = AsExactExprNode<CallNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "call");
+            AppendPipelineIdentityField(
+                &canonical, "call_attrs",
+                call->attrs.defined()
+                    ? relay::SerializeAttrs(relay::Attrs(call->attrs))
+                    : "<none>");
+            visit(call->op);
+            for (const Expr& argument : call->args) visit(argument);
+            return;
+        }
+        if (const auto* function_node = AsExactExprNode<FunctionNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "function");
+            for (const Var& parameter : function_node->params) visit(parameter);
+            visit(function_node->body);
+            return;
+        }
+        if (const auto* branch = AsExactExprNode<IfNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "if");
+            visit(branch->cond);
+            visit(branch->true_branch);
+            visit(branch->false_branch);
+            return;
+        }
+        if (const auto* let = AsExactExprNode<LetNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "let");
+            visit(let->var);
+            visit(let->value);
+            visit(let->body);
+            return;
+        }
+        if (const auto* tuple = AsExactExprNode<TupleNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "tuple");
+            for (const Expr& field : tuple->fields) visit(field);
+            return;
+        }
+        if (const auto* item = AsExactExprNode<TupleGetItemNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "tuple_get");
+            AppendPipelineIdentityField(&canonical, "tuple_index",
+                                        std::to_string(item->index));
+            visit(item->tuple);
+            return;
+        }
+        throw std::invalid_argument(
+            "graph semantic identity does not support Relay node type '" +
+            std::string(expr.get()->GetTypeKey()) + "'");
+    };
+    visit(function);
+    return UnitSemanticKey(std::move(canonical));
 }
 
 bool SameDType(DLDataType lhs, DLDataType rhs) {
@@ -753,8 +892,27 @@ CompiledGraph CompilePipeline(
         AssemblePlanVariant(module, plan, artifact_pins);
     AddResultFields(&assemble_span, result);
     if (profile_context) profile_context->Flush();
+    std::vector<ArtifactPlanBinding> bindings;
+    bindings.reserve(artifact_pins.size());
+    const Array<runtime::KernelCall> calls = plan.calls();
+    const std::vector<PrimitiveCompileState> primitives = result.primitives();
+    if (calls.size() != artifact_pins.size() ||
+        primitives.size() != artifact_pins.size()) {
+        throw std::logic_error(
+            "Compiler produced different plan-call and artifact-pin counts");
+    }
+    for (size_t index = 0; index < artifact_pins.size(); ++index) {
+        bindings.push_back(ArtifactPlanBinding{
+            index,
+            LinkSymbol{std::string(calls[index]->symbol)},
+            artifact_pins[index],
+            profiling::HashText(primitives[index].signature->ToString()),
+            profiling::HashText(
+                primitives[index].launch_metadata->ToString())});
+    }
     return CompiledGraph{std::move(module), std::move(plan),
-                         std::move(artifact_pins), std::move(variant)};
+                         std::move(artifact_pins), std::move(variant),
+                         std::move(bindings), ArtifactKey()};
 }
 
 }  // namespace
@@ -930,9 +1088,33 @@ CompiledGraph internal::FinishCompilerGraph(
                       [&] { return BuildBackends(result, config, contract); });
     profiling::ScopedSpan assemble_span(profile_context, MakeStageEvent("assemble", config), run_id);
     CompiledModule module = AssembleModule(result, profile_context);
+    runtime::ExecutablePlan plan = result.plan();
+    std::vector<ArtifactPin> artifact_pins = result.artifact_pins();
+    runtime::PlanVariant variant =
+        AssemblePlanVariant(module, plan, artifact_pins);
+    std::vector<ArtifactPlanBinding> bindings;
+    bindings.reserve(artifact_pins.size());
+    const Array<runtime::KernelCall> calls = plan.calls();
+    const std::vector<PrimitiveCompileState> primitives = result.primitives();
+    if (calls.size() != artifact_pins.size() ||
+        primitives.size() != artifact_pins.size()) {
+        throw std::logic_error(
+            "Compiler produced different plan-call and artifact-pin counts");
+    }
+    for (size_t index = 0; index < artifact_pins.size(); ++index) {
+        bindings.push_back(ArtifactPlanBinding{
+            index,
+            LinkSymbol{std::string(calls[index]->symbol)},
+            artifact_pins[index],
+            profiling::HashText(primitives[index].signature->ToString()),
+            profiling::HashText(
+                primitives[index].launch_metadata->ToString())});
+    }
     AddResultFields(&assemble_span, result);
     if (profile_context) profile_context->Flush();
-    return CompiledGraph{std::move(module), result.plan(), result.artifact_pins()};
+    return CompiledGraph{std::move(module), std::move(plan),
+                         std::move(artifact_pins), std::move(variant),
+                         std::move(bindings), ArtifactKey()};
 }
 
 Array<String> Compiler::RelayPassPolicy(int opt_level) {
@@ -974,9 +1156,30 @@ Array<String> Compiler::TIRPassPolicy(int opt_level, const Target& target) {
     return compatibility;
 }
 
-CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
+ArtifactKey Compiler::BuildGraphArtifactKey(
+    const Function& function, const CompileConfig& config) {
+    if (!function.defined()) {
+        throw std::invalid_argument(
+            "graph artifact identity requires a defined Function");
+    }
+    config.Validate();
     const internal::CompilerExecutionContract contract =
         internal::ResolveCompilerExecutionContract(config);
-    return CompilePipeline(std::move(function), std::move(config), contract);
+    return ArtifactKey(
+        BuildGraphSemanticKey(function),
+        internal::BuildTargetCapabilityFingerprint(config->target),
+        contract.canonical_bytes, 1, contract.schedule_version,
+        contract.backend_version);
+}
+
+CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
+    const ArtifactKey graph_artifact_key =
+        BuildGraphArtifactKey(function, config);
+    const internal::CompilerExecutionContract contract =
+        internal::ResolveCompilerExecutionContract(config);
+    CompiledGraph result =
+        CompilePipeline(std::move(function), std::move(config), contract);
+    result.graph_artifact_key = graph_artifact_key;
+    return result;
 }
 }  // namespace kxc::api

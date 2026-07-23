@@ -25,8 +25,15 @@ void AppendField(std::string* canonical, const std::string& name,
 
 std::string NextStandaloneTicketId() {
     static std::atomic<uint64_t> next{1};
-    return "production-transaction-v1:" +
-           std::to_string(next.fetch_add(1, std::memory_order_relaxed));
+    uint64_t value = next.load(std::memory_order_relaxed);
+    do {
+        if (value == std::numeric_limits<uint64_t>::max()) {
+            throw std::overflow_error(
+                "production transaction ticket space is exhausted");
+        }
+    } while (!next.compare_exchange_weak(
+        value, value + 1, std::memory_order_relaxed));
+    return "production-transaction-v1:" + std::to_string(value);
 }
 
 CompileFailureCategory ToPublicFailureCategory(

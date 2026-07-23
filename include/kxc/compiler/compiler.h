@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <vector>
 
 #include "kxc/compiler/compile_config.h"
@@ -17,6 +18,15 @@
 namespace kxc {
 namespace api {
 
+/*! \brief Ordered production artifact ownership for one immutable plan call. */
+struct ArtifactPlanBinding final {
+    size_t call_index{0};
+    LinkSymbol link_symbol;
+    ArtifactPin artifact_pin;
+    std::string signature_digest;
+    std::string launch_metadata_digest;
+};
+
 struct CompiledGraph final {
     CompiledModule module;
     runtime::ExecutablePlan plan;
@@ -25,6 +35,10 @@ struct CompiledGraph final {
     // Compiler declares pin identities and retains those pins in the lease.
     // Runtime observes the declaration but cannot authenticate its provenance.
     runtime::PlanVariant variant;
+    // Ordered call-to-artifact pins; no per-unit relinking is exposed.
+    std::vector<ArtifactPlanBinding> artifact_plan_bindings;
+    // Canonical whole-graph + target + normalized compiler contract identity.
+    ArtifactKey graph_artifact_key;
 };
 
 /*!
@@ -42,6 +56,10 @@ public:
      * \return 可运行的编译模块。
      */
     static CompiledGraph Compile(Function func, CompileConfig config);
+
+    /*! \brief Builds the canonical whole-graph compile identity used by adapters. */
+    static ArtifactKey BuildGraphArtifactKey(const Function& func,
+                                             const CompileConfig& config);
 
     /*! \brief Compatibility view of Relay optimization passes only.
      *

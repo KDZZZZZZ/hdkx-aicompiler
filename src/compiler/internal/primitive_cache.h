@@ -124,8 +124,12 @@ struct PrimitiveCacheStats final {
     uint64_t merged_waiters{0};
     uint64_t failures{0};
     uint64_t rejections{0};
+    // External references to currently discoverable entries only; evicted or
+    // cleared artifacts cannot be counted by this cache-local snapshot.
     uint64_t active_pins{0};
 };
+
+std::string BuildTargetCapabilityFingerprint(const Target& target);
 
 ArtifactKey BuildPrimitiveArtifactKey(
     const UnitSemanticKey& semantic_key, const Target& target,

@@ -27,7 +27,9 @@ def manifest(cmake: str) -> set[str]:
     return {token for token in re.findall(r'include/kxc/[A-Za-z0-9_./-]+\.h', match.group(1))}
 
 
-def compile_headers(root: Path, compiler: str, headers: list[Path]) -> list[str]:
+def compile_headers(
+    root: Path, compiler: str, headers: list[Path], defines: list[str]
+) -> list[str]:
     failures: list[str] = []
     include_dir = root / "include"
     dlpack_dir = root / "third_party" / "dlpack" / "include"
@@ -41,7 +43,8 @@ def compile_headers(root: Path, compiler: str, headers: list[Path]) -> list[str]
             include = header.relative_to(include_dir).as_posix()
             source.write_text(f'#include "{include}"\nint main() {{ return 0; }}\n', encoding="utf-8")
             result = subprocess.run(
-                [compiler, "-std=c++17", "-fsyntax-only", f"-I{include_dir}",
+                [compiler, "-std=c++17", "-fsyntax-only",
+                 *[f"-D{define}" for define in defines], f"-I{include_dir}",
                  f"-I{dlpack_dir}", str(source)],
                 capture_output=True,
                 text=True,
@@ -56,6 +59,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--compiler", default="c++")
+    parser.add_argument("--define", action="append", default=[])
     args = parser.parse_args()
     root = args.root.resolve()
     headers = sorted((root / "include" / "kxc").rglob("*.h"))
@@ -83,7 +87,9 @@ def main() -> int:
                 failures.append(f"{path.relative_to(root)}:{line_no}: static registration in public header")
 
     if args.compile:
-        failures.extend(compile_headers(root, args.compiler, headers))
+        failures.extend(
+            compile_headers(root, args.compiler, headers, args.define)
+        )
 
     if failures:
         print("Public-header check failed:")

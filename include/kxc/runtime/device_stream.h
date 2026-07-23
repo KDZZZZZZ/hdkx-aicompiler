@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include "kxc/support/container.h"
 #include "kxc/runtime/storage.h"
@@ -59,7 +60,8 @@ public:
     Array<Storage> retained_storage;
     /*! \brief 异步后端执行期必须保活的可执行对象；同步后端可以为空。 */
     ObjectRef retained_executable;
-    std::shared_ptr<void> retained_context;
+    /*! \brief Append-only owners retained until the completion handle is destroyed. */
+    std::vector<std::shared_ptr<void>> retained_contexts;
     /*! \brief 完成事件的拥有型后端句柄；完成或析构时释放。 */
     void* backend_event{nullptr};
     /*! \brief event 已完成且资源已回收时为 true。 */
@@ -88,6 +90,7 @@ public:
                                   Array<Storage> retained,
                                   ObjectRef executable = ObjectRef());
 
+    /*! \brief Appends storage and one owner, retained until this handle is destroyed. */
     void RetainDependencies(Array<Storage> retained,
                             std::shared_ptr<void> context) const;
 
