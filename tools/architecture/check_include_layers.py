@@ -11,6 +11,7 @@ from pathlib import Path
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
 
 ALLOWED = {
+    "shape": {"shape"},
     "support": {"support"},
     "ffi": {"ffi", "support"},
     "runtime": {"runtime", "ffi", "support"},
