@@ -79,6 +79,7 @@ bool TestStableRegistrations() {
         "ReduceMeanAttrsNode",
         "ReshapeAttrsNode",
         "TransposeAttrsNode",
+        "GatherAttrsNode",
         "ConcatenateAttrsNode",
         "SliceAttrsNode",
         "ReluAttrsNode",

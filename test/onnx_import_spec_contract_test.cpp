@@ -12,6 +12,7 @@
 #include <functional>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -94,13 +95,22 @@ void WriteFixture(const TemporaryDirectory& directory, const std::string& input_
 
 void WriteGatherFixture(const TemporaryDirectory& directory,
                         const std::string& output_shape,
-                        const std::string& attrs = R"json({"axis": 1})json") {
+                        const std::string& attrs = R"json({"axis": 1})json",
+                        const std::vector<int64_t>& indices = {0, -3},
+                        bool constant_indices = true) {
+    const std::string index_input = constant_indices
+        ? ""
+        : R"json(,
+      {"name": "indices", "shape": [2], "dtype": "int64"})json";
+    const std::string params = constant_indices
+        ? R"json([{"name": "indices", "shape": [2], "dtype": "int64", "offset": 0, "nbytes": 16}])json"
+        : "[]";
+    const std::string param_order = constant_indices ? R"json(["indices"])json" : "[]";
     const std::string json = R"json({
   "format": "kxc.onnx_import.v1",
   "function": {
     "inputs": [
-      {"name": "data", "shape": [2, 3, 4], "dtype": "float32"},
-      {"name": "indices", "shape": [5, 6], "dtype": "int64"}
+      {"name": "data", "shape": [2, 3, 4], "dtype": "float32"})json" + index_input + R"json(
     ],
     "outputs": [
       {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
@@ -109,11 +119,15 @@ void WriteGatherFixture(const TemporaryDirectory& directory,
       {"name": "gather", "op_name": "gather", "inputs": ["data", "indices"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
     ]
   },
-  "params": [],
-  "param_order": []
+  "params": )json" + params + R"json(,
+  "param_order": )json" + param_order + R"json(
 })json";
     std::ofstream(directory.path() / "model.json") << json;
-    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+    std::ofstream binary(directory.path() / "params.bin", std::ios::binary);
+    if (constant_indices) {
+        binary.write(reinterpret_cast<const char*>(indices.data()),
+                     static_cast<std::streamsize>(indices.size() * sizeof(int64_t)));
+    }
 }
 
 void WriteConcatenateFixture(const TemporaryDirectory& directory,
@@ -185,7 +199,7 @@ void WriteWhereFixture(const TemporaryDirectory& directory,
 void WriteLayerNormFixture(const TemporaryDirectory& directory,
                            const std::string& output_shape,
                            const std::string& attrs =
-                               R"json({"axis": 1, "epsilon": 0.00001, "accumulation_dtype": "float32"})json") {
+                               R"json({"axis": 1, "epsilon": 0.00001, "accumulation_dtype": "float64"})json") {
     const std::string json = R"json({
   "format": "kxc.onnx_import.v1",
   "function": {
@@ -220,7 +234,7 @@ void WriteExactTransformerOperatorSliceFixture(const TemporaryDirectory& directo
     ],
     "nodes": [
       {"name": "embedding", "op_name": "gather", "inputs": ["embedding_table", "token_ids"], "outputs": ["embedded"], "attrs": {"axis": 0}},
-      {"name": "norm", "op_name": "nn_layer_norm", "inputs": ["embedded", "scale", "bias"], "outputs": ["normalized"], "attrs": {"axis": -1, "epsilon": 0.00001, "accumulation_dtype": "float32"}},
+      {"name": "norm", "op_name": "nn_layer_norm", "inputs": ["embedded", "scale", "bias"], "outputs": ["normalized"], "attrs": {"axis": -1, "epsilon": 0.00001, "accumulation_dtype": "float64"}},
       {"name": "select", "op_name": "where", "inputs": ["condition", "normalized", "fallback"], "outputs": ["selected"], "attrs": {}},
       {"name": "prefix", "op_name": "slice", "inputs": ["selected"], "outputs": ["prefix_value"], "attrs": {"starts": [0], "ends": [1], "axes": [0], "steps": [1]}},
       {"name": "sequence", "op_name": "concatenate", "inputs": ["prefix_value", "selected"], "outputs": ["sequence_value"], "attrs": {"axis": 0}},
@@ -285,21 +299,21 @@ bool TestValidStaticMatMulSoftmaxTranspose() {
 
 bool TestValidStaticGather() {
     TemporaryDirectory directory;
-    WriteGatherFixture(directory, "[2, 5, 6, 4]");
+    WriteGatherFixture(directory, "[2, 2, 4]");
 
     const auto imported = kxc::frontend::LoadONNXImportSpec(
         (directory.path() / "model.json").string(),
         (directory.path() / "params.bin").string());
     TEST_CHECK(imported.function.defined(), "valid static Gather import spec should reify");
     TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
-                           {2, 5, 6, 4}, "float32"),
+                           {2, 2, 4}, "float32"),
                "reified Gather output should insert indices shape at axis");
     return true;
 }
 
 bool TestGatherAttrsAreStrict() {
     TemporaryDirectory directory;
-    WriteGatherFixture(directory, "[2, 5, 6, 4]",
+    WriteGatherFixture(directory, "[2, 2, 4]",
                        R"json({"axis": 1, "unknown": 0})json");
 
     TEST_CHECK(Throws([&] {
@@ -313,7 +327,7 @@ bool TestGatherAttrsAreStrict() {
 
 bool TestGatherDeclaredOutputMismatchIsRejected() {
     TemporaryDirectory directory;
-    WriteGatherFixture(directory, "[2, 5, 4]");
+    WriteGatherFixture(directory, "[2, 1, 4]");
 
     TEST_CHECK(Throws([&] {
                    kxc::frontend::LoadONNXImportSpec(
@@ -321,6 +335,36 @@ bool TestGatherDeclaredOutputMismatchIsRejected() {
                        (directory.path() / "params.bin").string());
                }),
                "declared Gather output shape must match inferred output");
+    return true;
+}
+
+bool TestGatherDynamicIndicesAreRejected() {
+    TemporaryDirectory directory;
+    WriteGatherFixture(directory, "[2, 2, 4]", R"json({"axis": 1})json",
+                       {0, -3}, false);
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "Gather reifier must reject dynamic indices even in hand-written specs");
+    return true;
+}
+
+bool TestGatherOutOfDomainConstantIndicesAreRejected() {
+    for (const std::vector<int64_t>& indices :
+         {std::vector<int64_t>{3, 0},
+          std::vector<int64_t>{std::numeric_limits<int64_t>::min(), 0}}) {
+        TemporaryDirectory directory;
+        WriteGatherFixture(directory, "[2, 2, 4]", R"json({"axis": 1})json",
+                           indices);
+        TEST_CHECK(Throws([&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   }),
+                   "Gather reifier must validate every constant index against ONNX bounds");
+    }
     return true;
 }
 
@@ -477,7 +521,7 @@ bool TestLayerNormUnsupportedAttrsAreRejected() {
     TemporaryDirectory directory;
     WriteLayerNormFixture(
         directory, "[2, 3, 4]",
-        R"json({"axis": 1, "epsilon": 0.00001, "accumulation_dtype": "float32", "stash_type": 1})json");
+        R"json({"axis": 1, "epsilon": 0.00001, "accumulation_dtype": "float64", "stash_type": 1})json");
 
     TEST_CHECK(Throws([&] {
                    kxc::frontend::LoadONNXImportSpec(
@@ -536,6 +580,9 @@ int main() {
         {"valid_static_gather", TestValidStaticGather},
         {"gather_strict_attrs", TestGatherAttrsAreStrict},
         {"gather_declared_output_mismatch", TestGatherDeclaredOutputMismatchIsRejected},
+        {"gather_dynamic_indices_rejected", TestGatherDynamicIndicesAreRejected},
+        {"gather_oob_constant_indices_rejected",
+         TestGatherOutOfDomainConstantIndicesAreRejected},
         {"valid_static_concatenate", TestValidStaticConcatenate},
         {"concatenate_declared_output_mismatch", TestConcatenateDeclaredOutputMismatchIsRejected},
         {"concatenate_strict_attrs", TestConcatenateAttrsAreStrict},

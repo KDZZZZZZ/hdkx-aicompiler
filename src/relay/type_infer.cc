@@ -786,8 +786,8 @@ Type LayerNormInferType(const Attrs& attrs, const Array<Type>& input_types) {
     if (!std::isfinite(layer_norm_attrs->epsilon) || layer_norm_attrs->epsilon <= 0.0f) {
         throw std::runtime_error("nn_layer_norm epsilon must be finite and > 0");
     }
-    if (layer_norm_attrs->accumulation_dtype != "float32") {
-        throw std::runtime_error("nn_layer_norm accumulation_dtype must be float32");
+    if (layer_norm_attrs->accumulation_dtype != "float64") {
+        throw std::runtime_error("nn_layer_norm accumulation_dtype must be float64");
     }
     const size_t suffix_rank = data->shape.size() - static_cast<size_t>(axis);
     if (scale->shape.size() != suffix_rank || bias->shape.size() != suffix_rank) {

@@ -417,7 +417,7 @@ void TestCompilerRejectsUnsupportedTransformerGraphs(const kxc::Device& device) 
         Function({norm_data, norm_scale, norm_bias},
                  Call(relay::Op::Get("nn_layer_norm"),
                       {norm_data, norm_scale, norm_bias},
-                      relay::LayerNormAttrs::Create(-1, 1e-5f, "float32"))),
+                      relay::LayerNormAttrs::Create(-1, 1e-5f, "float64"))),
         "LayerNorm reduction");
 
     Var gather_data("gather_data", TensorType({4}, "float32"));

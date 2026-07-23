@@ -49,6 +49,40 @@ void ExpectNear(const std::vector<float>& actual, const std::vector<float>& expe
     }
 }
 
+std::vector<float> LayerNormReference(
+    const std::vector<float>& data, size_t outer_size, size_t normalized_size,
+    const std::vector<float>& scale, const std::vector<float>& bias,
+    float epsilon) {
+    Check(data.size() == outer_size * normalized_size &&
+              scale.size() == normalized_size && bias.size() == normalized_size,
+          "LayerNorm reference shape mismatch");
+    std::vector<float> result(data.size(), 0.0f);
+    for (size_t outer = 0; outer < outer_size; ++outer) {
+        const size_t offset = outer * normalized_size;
+        double mean = 0.0;
+        for (size_t inner = 0; inner < normalized_size; ++inner) {
+            mean += static_cast<double>(data[offset + inner]);
+        }
+        mean /= static_cast<double>(normalized_size);
+        double variance = 0.0;
+        for (size_t inner = 0; inner < normalized_size; ++inner) {
+            const double centered =
+                static_cast<double>(data[offset + inner]) - mean;
+            variance += centered * centered;
+        }
+        variance /= static_cast<double>(normalized_size);
+        const double inverse_stddev =
+            1.0 / std::sqrt(variance + static_cast<double>(epsilon));
+        for (size_t inner = 0; inner < normalized_size; ++inner) {
+            result[offset + inner] = static_cast<float>(
+                (static_cast<double>(data[offset + inner]) - mean) *
+                    inverse_stddev * static_cast<double>(scale[inner]) +
+                static_cast<double>(bias[inner]));
+        }
+    }
+    return result;
+}
+
 // 精确比较整数结果向量。
 void ExpectEqual(const std::vector<int32_t>& actual, const std::vector<int32_t>& expected) {
     Check(actual == expected, "integer result mismatch");
@@ -553,7 +587,7 @@ void TestLayerNorm() {
     kxc::Var bias("bias", kxc::TensorType({4}, "float32"));
     constexpr float epsilon = 1e-5f;
     kxc::Call call(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
-                   kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float32"));
+                   kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float64"));
     kxc::Function func({data, scale, bias}, call);
 
     const std::vector<float> data_buf = {
@@ -566,25 +600,9 @@ void TestLayerNorm() {
     CompileAndRun("nn_layer_norm", func,
                   {Input(data_buf), Input(scale_buf), Input(bias_buf), Output(out)});
 
-    std::vector<float> expected(8, 0.0f);
-    for (size_t row = 0; row < 2; ++row) {
-        const size_t offset = row * 4;
-        float mean = 0.0f;
-        for (size_t column = 0; column < 4; ++column) mean += data_buf[offset + column];
-        mean /= 4.0f;
-        float variance = 0.0f;
-        for (size_t column = 0; column < 4; ++column) {
-            const float centered = data_buf[offset + column] - mean;
-            variance += centered * centered;
-        }
-        variance /= 4.0f;
-        const float inverse_stddev = 1.0f / std::sqrt(variance + epsilon);
-        for (size_t column = 0; column < 4; ++column) {
-            expected[offset + column] = (data_buf[offset + column] - mean) * inverse_stddev *
-                                        scale_buf[column] + bias_buf[column];
-        }
-    }
-    ExpectNear(out, expected, 2e-4f);
+    ExpectNear(out, LayerNormReference(
+                        data_buf, 2, 4, scale_buf, bias_buf, epsilon),
+               2e-4f);
 
     kxc::Var suffix_data("suffix_data", kxc::TensorType({2, 2, 2}, "float32"));
     kxc::Var suffix_scale("suffix_scale", kxc::TensorType({2, 2}, "float32"));
@@ -592,7 +610,7 @@ void TestLayerNorm() {
     kxc::Call suffix_call(
         kxc::relay::Op::Get("nn_layer_norm"),
         {suffix_data, suffix_scale, suffix_bias},
-        kxc::relay::LayerNormAttrs::Create(1, epsilon, "float32"));
+        kxc::relay::LayerNormAttrs::Create(1, epsilon, "float64"));
     kxc::Function suffix_func({suffix_data, suffix_scale, suffix_bias}, suffix_call);
     const std::vector<float> suffix_data_buf = {1, 2, 3, 4, 2, 4, 6, 8};
     const std::vector<float> suffix_scale_buf = {1, -2, 0.5f, 3};
@@ -601,28 +619,91 @@ void TestLayerNorm() {
     CompileAndRun("nn_layer_norm_suffix", suffix_func,
                   {Input(suffix_data_buf), Input(suffix_scale_buf),
                    Input(suffix_bias_buf), Output(suffix_out)});
-    std::vector<float> suffix_expected(8, 0.0f);
-    for (size_t batch = 0; batch < 2; ++batch) {
-        const size_t offset = batch * 4;
-        float mean = 0.0f;
-        for (size_t inner = 0; inner < 4; ++inner) {
-            mean += suffix_data_buf[offset + inner];
-        }
-        mean /= 4.0f;
-        float variance = 0.0f;
-        for (size_t inner = 0; inner < 4; ++inner) {
-            const float centered = suffix_data_buf[offset + inner] - mean;
-            variance += centered * centered;
-        }
-        variance /= 4.0f;
-        const float inverse_stddev = 1.0f / std::sqrt(variance + epsilon);
-        for (size_t inner = 0; inner < 4; ++inner) {
-            suffix_expected[offset + inner] =
-                (suffix_data_buf[offset + inner] - mean) * inverse_stddev *
-                    suffix_scale_buf[inner] + suffix_bias_buf[inner];
-        }
+    ExpectNear(suffix_out, LayerNormReference(
+                               suffix_data_buf, 2, 4, suffix_scale_buf,
+                               suffix_bias_buf, epsilon),
+               2e-4f);
+
+    kxc::Var extreme_data("extreme_data", kxc::TensorType({1, 2}, "float32"));
+    kxc::Var extreme_scale("extreme_scale", kxc::TensorType({2}, "float32"));
+    kxc::Var extreme_bias("extreme_bias", kxc::TensorType({2}, "float32"));
+    kxc::Function extreme_function(
+        {extreme_data, extreme_scale, extreme_bias},
+        kxc::Call(kxc::relay::Op::Get("nn_layer_norm"),
+                  {extreme_data, extreme_scale, extreme_bias},
+                  kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float64")));
+    const float maximum = std::numeric_limits<float>::max();
+    const std::vector<float> extreme_values = {maximum, maximum};
+    const std::vector<float> extreme_scale_values = {1.0f, 1.0f};
+    const std::vector<float> extreme_bias_values = {0.25f, -0.5f};
+    std::vector<float> extreme_out(2, 0.0f);
+    CompileAndRun("nn_layer_norm_float_max_constant", extreme_function,
+                  {Input(extreme_values), Input(extreme_scale_values),
+                   Input(extreme_bias_values), Output(extreme_out)});
+    ExpectNear(extreme_out, extreme_bias_values, 0.0f);
+
+    const float offset = std::numeric_limits<float>::max() / 8.0f;
+    std::vector<float> offset_values(4, offset);
+    for (size_t index = 1; index < offset_values.size(); ++index) {
+        offset_values[index] = std::nextafter(
+            offset_values[index - 1], std::numeric_limits<float>::infinity());
     }
-    ExpectNear(suffix_out, suffix_expected, 2e-4f);
+    kxc::Var offset_data("offset_data", kxc::TensorType({1, 4}, "float32"));
+    kxc::Var offset_scale("offset_scale", kxc::TensorType({4}, "float32"));
+    kxc::Var offset_bias("offset_bias", kxc::TensorType({4}, "float32"));
+    kxc::Function offset_function(
+        {offset_data, offset_scale, offset_bias},
+        kxc::Call(kxc::relay::Op::Get("nn_layer_norm"),
+                  {offset_data, offset_scale, offset_bias},
+                  kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float64")));
+    const std::vector<float> offset_scale_values(4, 1.0f);
+    const std::vector<float> offset_bias_values(4, 0.0f);
+    std::vector<float> offset_out(4, 0.0f);
+    CompileAndRun("nn_layer_norm_huge_offset", offset_function,
+                  {Input(offset_values), Input(offset_scale_values),
+                   Input(offset_bias_values), Output(offset_out)});
+    ExpectNear(offset_out, LayerNormReference(
+                               offset_values, 1, 4, offset_scale_values,
+                               offset_bias_values, epsilon),
+               2e-4f);
+
+    kxc::Var axis_zero_data("axis_zero_data", kxc::TensorType({2, 2}, "float32"));
+    kxc::Var axis_zero_scale("axis_zero_scale", kxc::TensorType({2, 2}, "float32"));
+    kxc::Var axis_zero_bias("axis_zero_bias", kxc::TensorType({2, 2}, "float32"));
+    kxc::Function axis_zero_function(
+        {axis_zero_data, axis_zero_scale, axis_zero_bias},
+        kxc::Call(kxc::relay::Op::Get("nn_layer_norm"),
+                  {axis_zero_data, axis_zero_scale, axis_zero_bias},
+                  kxc::relay::LayerNormAttrs::Create(0, epsilon, "float64")));
+    const std::vector<float> axis_zero_values = {1, 2, 4, 8};
+    const std::vector<float> axis_zero_scale_values = {1, 2, 3, 4};
+    const std::vector<float> axis_zero_bias_values = {0.5f, 1, 1.5f, 2};
+    std::vector<float> axis_zero_out(4, 0.0f);
+    CompileAndRun("nn_layer_norm_axis_zero", axis_zero_function,
+                  {Input(axis_zero_values), Input(axis_zero_scale_values),
+                   Input(axis_zero_bias_values), Output(axis_zero_out)});
+    ExpectNear(axis_zero_out, LayerNormReference(
+                                  axis_zero_values, 1, 4,
+                                  axis_zero_scale_values, axis_zero_bias_values,
+                                  epsilon),
+               2e-4f);
+
+    kxc::Var empty_prefix_data("empty_prefix_data",
+                               kxc::TensorType({0, 2}, "float32"));
+    kxc::Var empty_prefix_scale("empty_prefix_scale",
+                                kxc::TensorType({2}, "float32"));
+    kxc::Var empty_prefix_bias("empty_prefix_bias",
+                               kxc::TensorType({2}, "float32"));
+    kxc::Function empty_prefix_function(
+        {empty_prefix_data, empty_prefix_scale, empty_prefix_bias},
+        kxc::Call(kxc::relay::Op::Get("nn_layer_norm"),
+                  {empty_prefix_data, empty_prefix_scale, empty_prefix_bias},
+                  kxc::relay::LayerNormAttrs::Create(1, epsilon, "float64")));
+    std::vector<float> empty_prefix_out;
+    CompileAndRun("nn_layer_norm_empty_prefix", empty_prefix_function,
+                  {Input(std::vector<float>{}), Input(extreme_scale_values),
+                   Input(std::vector<float>{0.0f, 0.0f}),
+                   Output(empty_prefix_out)});
 }
 
 // 验证 Cast 的目标 dtype 与数值转换。
@@ -717,7 +798,7 @@ void TestModelExactTransformerOperatorSlice() {
                        kxc::relay::GatherAttrs::Create(0));
     constexpr float epsilon = 1e-5f;
     kxc::Call normalized(kxc::relay::Op::Get("nn_layer_norm"), {embedded, scale, bias},
-                         kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float32"));
+                         kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float64"));
     kxc::Call selected(kxc::relay::Op::Get("where"),
                        {condition, normalized, fallback});
     kxc::Call prefix(kxc::relay::Op::Get("slice"), {selected},

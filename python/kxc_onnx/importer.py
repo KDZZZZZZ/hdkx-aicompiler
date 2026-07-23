@@ -127,7 +127,17 @@ def import_onnx_model(
             raise UnsupportedONNXOpError(
                 f"Unsupported ONNX op '{node.op_type}' in node '{node.name or '<unnamed>'}'"
             )
-        if len(node.output) != 1:
+        if node.op_type == "LayerNormalization":
+            node_name = node.name or "<unnamed>"
+            if not 1 <= len(node.output) <= 3 or not node.output[0]:
+                raise ValueError(
+                    f"LayerNormalization node '{node_name}' requires Y and at most two empty optional output slots"
+                )
+            if any(node.output[1:]):
+                raise ValueError(
+                    f"LayerNormalization node '{node_name}' does not support non-empty Mean or InvStdDev outputs"
+                )
+        elif len(node.output) != 1:
             raise ValueError(
                 f"ONNX node '{node.name or node.op_type}' has {len(node.output)} outputs; "
                 "only single-output nodes are supported in the static-shape MVP"
@@ -178,10 +188,6 @@ def import_onnx_model(
                 raise ValueError(
                     f"LayerNormalization node '{node_name}' requires exactly three non-empty inputs"
                 )
-            if not node.output[0]:
-                raise ValueError(
-                    f"LayerNormalization node '{node_name}' requires exactly one non-empty output"
-                )
             missing = [name for name in node.input if name not in available_values]
             if missing:
                 raise ValueError(
@@ -197,6 +203,15 @@ def import_onnx_model(
                 output_declarations, default_batch,
             )
         if node.op_type == "Gather":
+            node_name = node.name or "<unnamed>"
+            if len(node.input) != 2 or not all(node.input):
+                raise ValueError(
+                    f"Gather node '{node_name}' requires exactly two non-empty inputs"
+                )
+            if not node.output[0]:
+                raise ValueError(
+                    f"Gather node '{node_name}' requires exactly one non-empty output"
+                )
             inferred_static_specs[node.output[0]] = _infer_gather_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
@@ -214,7 +229,8 @@ def import_onnx_model(
             )
 
         relay_inputs = [node.input[0]] if node.op_type == "Slice" else [name for name in node.input if name]
-        relay_outputs = [name for name in node.output]
+        relay_outputs = ([node.output[0]] if node.op_type == "LayerNormalization"
+                         else [name for name in node.output])
         nodes.append(
             RelayNodeSpec(
                 name=node.name or f"{node.op_type}_{len(nodes)}",
@@ -355,11 +371,25 @@ def _infer_gather_spec(
     )
     if not data.shape:
         raise ValueError(f"Gather node '{node_name}' requires data rank >= 1")
+    if any(dim < 0 for dim in data.shape + indices.shape):
+        raise ValueError(
+            f"Gather node '{node_name}' requires non-negative static dimensions"
+        )
     if indices.dtype not in {"int32", "int64"}:
         raise ValueError(
             f"Gather node '{node_name}' requires int32 or int64 indices; got {indices.dtype}"
         )
-    axis = _int_attr(_attrs_by_name(node), "axis", 0)
+    if node.input[1] not in params:
+        raise ValueError(
+            f"Gather node '{node_name}' requires initializer-backed constant indices"
+        )
+    attrs = _attrs_by_name(node)
+    unsupported = set(attrs) - {"axis"}
+    if unsupported:
+        raise ValueError(
+            f"Gather node '{node_name}' has unsupported attribute(s): {sorted(unsupported)}"
+        )
+    axis = _int_attr(attrs, "axis", 0)
     if axis < 0:
         axis += len(data.shape)
     if axis < 0 or axis >= len(data.shape):
@@ -368,6 +398,22 @@ def _infer_gather_spec(
         raise ValueError(
             f"Gather node '{node_name}' int32 indices cannot address axis extent > INT32_MAX"
         )
+    index_param = params[node.input[1]]
+    dtype = np.dtype("<i4" if index_param.dtype == "int32" else "<i8")
+    values = np.frombuffer(index_param.data, dtype=dtype)
+    expected_values = math.prod(index_param.shape)
+    if values.size != expected_values:
+        raise ValueError(
+            f"Gather node '{node_name}' indices initializer byte size is invalid"
+        )
+    extent = data.shape[axis]
+    for value in values:
+        index = int(value)
+        if index < -extent or index >= extent:
+            raise ValueError(
+                f"Gather node '{node_name}' constant index {index} is outside "
+                f"the ONNX domain [{-extent}, {extent - 1}]"
+            )
     result = TensorSpec(
         name=node.output[0],
         shape=data.shape[:axis] + indices.shape + data.shape[axis + 1 :],
@@ -810,7 +856,7 @@ def _convert_attrs(
         return {
             "axis": _int_attr(attrs, "axis", -1),
             "epsilon": _float_attr(attrs, "epsilon", 1e-5),
-            "accumulation_dtype": "float32",
+            "accumulation_dtype": "float64",
         }
     if node.op_type == "Where":
         if attrs:

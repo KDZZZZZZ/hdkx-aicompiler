@@ -269,13 +269,32 @@ def test_matmul_rejects_declared_output_mismatch():
 
 
 def _gather_model(data_shape, indices_shape, *, axis=0, indices_dtype=TensorProto.INT64,
+                  indices_values=None, dynamic_indices=False, node_outputs=("out",),
                   output_shape=(1,), output_dtype=TensorProto.FLOAT):
+    value_count = 1
+    for extent in indices_shape:
+        value_count *= extent
+    if indices_values is None:
+        indices_values = [0] * value_count
+    graph_inputs = [helper.make_tensor_value_info("data", TensorProto.FLOAT, data_shape)]
+    initializers = []
+    if dynamic_indices:
+        graph_inputs.append(
+            helper.make_tensor_value_info("indices", indices_dtype, indices_shape)
+        )
+    else:
+        initializers.append(
+            helper.make_tensor(
+                "indices", indices_dtype, indices_shape, list(indices_values)
+            )
+        )
     graph = helper.make_graph(
-        [helper.make_node("Gather", ["data", "indices"], ["out"], name="gather", axis=axis)],
+        [helper.make_node("Gather", ["data", "indices"], node_outputs,
+                          name="gather", axis=axis)],
         "gather_test",
-        [helper.make_tensor_value_info("data", TensorProto.FLOAT, data_shape),
-         helper.make_tensor_value_info("indices", indices_dtype, indices_shape)],
+        graph_inputs,
         [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+        initializer=initializers,
     )
     return helper.make_model(
         graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6
@@ -318,12 +337,50 @@ def test_gather_rejects_declared_output_mismatch():
         )
 
 
+def test_gather_rejects_dynamic_indices_and_empty_output_name():
+    with pytest.raises(ValueError, match="initializer-backed constant indices"):
+        import_onnx_model(_gather_model(
+            [2, 3], [1], axis=1, dynamic_indices=True, output_shape=[2, 1]
+        ))
+    with pytest.raises(ValueError, match="exactly one non-empty output"):
+        import_onnx_model(_gather_model(
+            [2, 3], [1], axis=1, node_outputs=("",), output_shape=[2, 1]
+        ))
+
+
+@pytest.mark.parametrize("indices_dtype", [TensorProto.INT32, TensorProto.INT64])
+def test_gather_accepts_constant_index_domain_boundaries(indices_dtype):
+    imported = import_onnx_model(_gather_model(
+        [2, 3], [2], axis=1, indices_dtype=indices_dtype,
+        indices_values=[-3, 2], output_shape=[2, 2]
+    ))
+
+    assert imported.function.nodes[0].inputs == ["data", "indices"]
+
+
+@pytest.mark.parametrize("bad_index", [3, -4, -(2**63)])
+def test_gather_rejects_constant_out_of_domain_indices(bad_index):
+    with pytest.raises(ValueError, match="outside the ONNX domain"):
+        import_onnx_model(_gather_model(
+            [2, 3], [1], axis=1, indices_values=[bad_index], output_shape=[2, 1]
+        ))
+
+
+def test_gather_accepts_empty_constant_indices():
+    imported = import_onnx_model(_gather_model(
+        [2, 3], [0], axis=1, indices_values=[], output_shape=[2, 0]
+    ))
+
+    assert imported.function.outputs[0].shape == [2, 0]
+
+
 @pytest.mark.parametrize(
     ("data_shape", "indices_dtype", "axis", "message"),
     [
         ([], TensorProto.INT64, 0, "data rank >= 1"),
         ([2, 3], TensorProto.FLOAT, 0, "int32 or int64 indices"),
         ([2, 3], TensorProto.INT64, 2, "axis 2 is out of range"),
+        ([-1, 3], TensorProto.INT64, 1, "non-negative static dimensions"),
     ],
 )
 def test_gather_rejects_invalid_static_contract(data_shape, indices_dtype, axis, message):
@@ -670,7 +727,7 @@ def test_layer_normalization_maps_exact_static_float32_contract():
         ("nn_layer_norm", {
             "axis": -2,
             "epsilon": pytest.approx(0.125),
-            "accumulation_dtype": "float32",
+            "accumulation_dtype": "float64",
         }),
     ]
     assert imported.function.outputs[0].shape == [2, 3, 4]
@@ -696,15 +753,26 @@ def test_layer_normalization_rejects_missing_or_extra_inputs(node_inputs, messag
         import_onnx_model(_layer_normalization_model(node_inputs=node_inputs))
 
 
+@pytest.mark.parametrize("node_outputs", [["out"], ["out", ""], ["out", "", ""]])
+def test_layer_normalization_accepts_omitted_optional_output_slots(node_outputs):
+    imported = import_onnx_model(_layer_normalization_model(node_outputs=node_outputs))
+
+    assert imported.function.nodes[0].outputs == ["out"]
+
+
 @pytest.mark.parametrize(
     ("node_outputs", "message"),
     [
-        ([], "only single-output nodes are supported"),
-        ([""], "exactly one non-empty output"),
-        (["out", "mean"], "only single-output nodes are supported"),
+        ([], "requires Y and at most two empty optional output slots"),
+        ([""], "requires Y and at most two empty optional output slots"),
+        (["out", "mean"], "non-empty Mean or InvStdDev"),
+        (["out", "", "inv_std"], "non-empty Mean or InvStdDev"),
+        (["out", "", "", ""], "requires Y and at most two empty optional output slots"),
     ],
 )
-def test_layer_normalization_rejects_missing_or_extra_outputs(node_outputs, message):
+def test_layer_normalization_rejects_requested_or_malformed_optional_outputs(
+    node_outputs, message
+):
     with pytest.raises(ValueError, match=message):
         import_onnx_model(_layer_normalization_model(node_outputs=node_outputs))
 

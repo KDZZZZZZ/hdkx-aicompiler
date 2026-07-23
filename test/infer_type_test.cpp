@@ -479,7 +479,7 @@ bool TestLayerNormInferAndLoweringContract() {
     kxc::Var scale("scale", kxc::TensorType({3, 4}, "float32"));
     kxc::Var bias("bias", kxc::TensorType({3, 4}, "float32"));
     kxc::Call layer_norm(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
-                         kxc::relay::LayerNormAttrs::Create(-2, 1e-5f, "float32"));
+                         kxc::relay::LayerNormAttrs::Create(-2, 1e-5f, "float64"));
     kxc::Function function({data, scale, bias}, layer_norm);
     kxc::relay::InferTypePass(function);
     TEST_CHECK(CheckTensor(layer_norm.checked_type(), {2, 3, 4}, "float32"),
@@ -535,7 +535,7 @@ bool TestLayerNormInferAndLoweringContract() {
                                 std::numeric_limits<float>::infinity(),
                                 std::numeric_limits<float>::quiet_NaN()}) {
         kxc::Call invalid_epsilon(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
-                                  kxc::relay::LayerNormAttrs::Create(1, epsilon, "float32"));
+                                  kxc::relay::LayerNormAttrs::Create(1, epsilon, "float64"));
         TEST_CHECK(ExpectThrow([&] {
                        kxc::relay::InferTypePass(
                            kxc::Function({data, scale, bias}, invalid_epsilon));
@@ -543,12 +543,12 @@ bool TestLayerNormInferAndLoweringContract() {
                    "LayerNorm epsilon must be finite and strictly positive");
     }
     kxc::Call invalid_accumulation(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
-                                   kxc::relay::LayerNormAttrs::Create(1, 1e-5f, "float64"));
+                                   kxc::relay::LayerNormAttrs::Create(1, 1e-5f, "float32"));
     TEST_CHECK(ExpectThrow([&] {
                    kxc::relay::InferTypePass(
                        kxc::Function({data, scale, bias}, invalid_accumulation));
                }),
-               "LayerNorm accumulation dtype must be float32");
+               "LayerNorm accumulation dtype must be float64");
 
     kxc::Var zero_data("zero_data", kxc::TensorType({2, 0, 4}, "float32"));
     kxc::Var zero_scale("zero_scale", kxc::TensorType({0, 4}, "float32"));
@@ -589,7 +589,7 @@ bool TestExactTransformerOperatorSliceComposition() {
                        kxc::relay::GatherAttrs::Create(0));
     kxc::Call normalized(kxc::relay::Op::Get("nn_layer_norm"),
                          {embedded, scale, bias},
-                         kxc::relay::LayerNormAttrs::Create(-1, 1e-5f, "float32"));
+                         kxc::relay::LayerNormAttrs::Create(-1, 1e-5f, "float64"));
     kxc::Call selected(kxc::relay::Op::Get("where"),
                        {condition, normalized, fallback});
     kxc::Call prefix(kxc::relay::Op::Get("slice"), {selected},

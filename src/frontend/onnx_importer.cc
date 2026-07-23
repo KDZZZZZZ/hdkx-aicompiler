@@ -512,6 +512,68 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
     throw std::runtime_error("Unsupported Relay op in ONNX import spec: " + op_name);
 }
 
+void ValidateGatherConstantIndices(const Array<Expr>& args,
+                                   const ObjectRef& attrs,
+                                   const Array<Var>& function_params,
+                                   const std::string& node_name) {
+    if (args.size() != 2) {
+        throw std::runtime_error(
+            "Gather import node must contain exactly data and constant indices: " +
+            node_name);
+    }
+    const auto* constant = args[1].As<ConstantNode>();
+    const auto* gather_attrs = attrs.As<relay::GatherAttrsNode>();
+    if (!constant || !constant->data.defined() || !gather_attrs) {
+        throw std::runtime_error(
+            "Gather import indices must be a constant initializer payload: " +
+            node_name);
+    }
+
+    relay::InferTypePass(Function(function_params, args[0]));
+    const auto* data_type = args[0].checked_type().As<TensorTypeNode>();
+    if (!data_type || data_type->shape.empty()) {
+        throw std::runtime_error("Gather import data must have rank >= 1: " +
+                                 node_name);
+    }
+    int axis = gather_attrs->axis;
+    const int rank = static_cast<int>(data_type->shape.size());
+    if (axis < 0) axis += rank;
+    if (axis < 0 || axis >= rank) {
+        throw std::runtime_error("Gather import axis is out of range: " + node_name);
+    }
+    const int64_t extent = data_type->shape[static_cast<size_t>(axis)];
+    if (extent < 0) {
+        throw std::runtime_error(
+            "Gather import requires a non-negative static axis extent: " +
+            node_name);
+    }
+
+    const DLDataType dtype = constant->data.dtype();
+    if (dtype.code != kDLInt || dtype.lanes != 1 ||
+        (dtype.bits != 32 && dtype.bits != 64)) {
+        throw std::runtime_error(
+            "Gather import constant indices must be int32 or int64: " + node_name);
+    }
+    const size_t count = constant->data.NBytes() / (dtype.bits / 8);
+    const auto validate = [&](int64_t index) {
+        if (index < -extent || index >= extent) {
+            throw std::runtime_error(
+                "Gather import constant index " + std::to_string(index) +
+                " is outside the ONNX domain [" + std::to_string(-extent) +
+                ", " + std::to_string(extent - 1) + "]: " + node_name);
+        }
+    };
+    if (dtype.bits == 32) {
+        std::vector<int32_t> values(count);
+        constant->data.CopyToBytes(values.data(), constant->data.NBytes());
+        for (int32_t value : values) validate(value);
+    } else {
+        std::vector<int64_t> values(count);
+        constant->data.CopyToBytes(values.data(), constant->data.NBytes());
+        for (int64_t value : values) validate(value);
+    }
+}
+
 }  // namespace
 
 // 装载 ONNX 中间规范、参数 Storage 和 Relay 数据流，返回可编译函数及参数表。
@@ -591,8 +653,9 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             ReadStringVector(Field(node, "inputs", ctx), ctx + ".inputs");
         std::vector<std::string> output_names =
             ReadStringVector(Field(node, "outputs", ctx), ctx + ".outputs");
-        if (output_names.size() != 1) {
-            throw std::runtime_error("ONNX import node must have one output: " + node_name);
+        if (output_names.size() != 1 || output_names[0].empty()) {
+            throw std::runtime_error(
+                "ONNX import node must have one non-empty output: " + node_name);
         }
 
         Array<Expr> args;
@@ -605,6 +668,9 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             args.push_back(it->second);
         }
         ObjectRef attrs = MakeAttrs(op_name, Field(node, "attrs", ctx));
+        if (op_name == "gather") {
+            ValidateGatherConstantIndices(args, attrs, function_params, node_name);
+        }
         Call call(relay::Op::Get(op_name), args, attrs);
         values[output_names[0]] = call;
     }

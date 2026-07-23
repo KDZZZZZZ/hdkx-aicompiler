@@ -365,7 +365,7 @@ bool TestCudaLayerNormScheduleRejectedBeforeBackend() {
     Function layer_norm(
         {data, scale, bias},
         Call(relay::Op::Get("nn_layer_norm"), {data, scale, bias},
-             relay::LayerNormAttrs::Create(-1, 1e-5f, "float32")));
+             relay::LayerNormAttrs::Create(-1, 1e-5f, "float64")));
     const CapabilityResult result = Verify(layer_norm, FakeCudaTarget(), 3);
     TEST_CHECK(!result.supported &&
                    result.status == CapabilityStatus::kEligibleButNotExecutable &&

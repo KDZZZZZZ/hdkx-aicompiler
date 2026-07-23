@@ -1,5 +1,5 @@
 /*! \file src/relay/op/nn/layer_norm.cc
- * \brief Registers the exact-static float32 LayerNorm vertical slice.
+ * \brief Registers exact-static float32 LayerNorm with float64 intermediates.
  */
 
 #include "kxc/relay/op_attr_types.h"
@@ -44,7 +44,7 @@ te::Tensor LayerNormCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     if (axis < 0) axis += rank;
     if (rank == 0 || axis < 0 || axis >= rank ||
         !std::isfinite(layer_norm_attrs->epsilon) || layer_norm_attrs->epsilon <= 0.0f ||
-        layer_norm_attrs->accumulation_dtype != "float32") {
+        layer_norm_attrs->accumulation_dtype != "float64") {
         throw std::runtime_error("nn_layer_norm lowering received invalid checked attrs");
     }
 
@@ -75,49 +75,59 @@ te::Tensor LayerNormCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     }
 
     const tir::DataType f32 = tir::DataType::Float(32);
-    const tir::PrimExpr divisor = tir::FloatImm(static_cast<float>(normalized_size), f32);
-    const tir::PrimExpr epsilon = tir::FloatImm(layer_norm_attrs->epsilon, f32);
-    te::Tensor sum = te::topi::sum(inputs[0], reduce_axes, true, "T_layer_norm_sum");
-    te::Tensor mean = te::compute(
+    const tir::DataType f64 = tir::DataType::Float(64);
+    const tir::PrimExpr divisor = tir::FloatImm(static_cast<double>(normalized_size), f64);
+    const tir::PrimExpr epsilon = tir::FloatImm(
+        static_cast<double>(layer_norm_attrs->epsilon), f64);
+    const te::Tensor data_f64 = te::topi::cast(
+        inputs[0], f64, "T_layer_norm_data_f64");
+    const te::Tensor scale_f64 = te::topi::cast(
+        inputs[1], f64, "T_layer_norm_scale_f64");
+    const te::Tensor bias_f64 = te::topi::cast(
+        inputs[2], f64, "T_layer_norm_bias_f64");
+    const te::Tensor sum = te::topi::sum(
+        data_f64, reduce_axes, true, "T_layer_norm_sum_f64");
+    const te::Tensor mean = te::compute(
         sum->shape,
         [sum, divisor](const Array<tir::Var>& indices) { return sum(indices) / divisor; },
-        "T_layer_norm_mean");
-    te::Tensor centered = te::compute(
-        inputs[0]->shape,
-        [data = inputs[0], mean, axis](const Array<tir::Var>& indices) {
+        "T_layer_norm_mean_f64");
+    const te::Tensor centered = te::compute(
+        data_f64->shape,
+        [data_f64, mean, axis](const Array<tir::Var>& indices) {
             Array<tir::PrimExpr> mean_indices;
             for (size_t index = 0; index < indices.size(); ++index) {
                 mean_indices.push_back(index < static_cast<size_t>(axis)
                                            ? indices[index]
                                            : tir::IntImm(0, tir::DataType::Int(64)));
             }
-            return data(indices) - mean(mean_indices);
+            return data_f64(indices) - mean(mean_indices);
         },
-        "T_layer_norm_centered");
-    te::Tensor squared = te::compute(
+        "T_layer_norm_centered_f64");
+    const te::Tensor squared = te::compute(
         centered->shape,
         [centered](const Array<tir::Var>& indices) {
             const tir::PrimExpr value = centered(indices);
             return value * value;
         },
-        "T_layer_norm_squared");
-    te::Tensor variance_sum = te::topi::sum(squared, reduce_axes, true, "T_layer_norm_variance_sum");
-    te::Tensor variance = te::compute(
+        "T_layer_norm_squared_f64");
+    const te::Tensor variance_sum = te::topi::sum(
+        squared, reduce_axes, true, "T_layer_norm_variance_sum_f64");
+    const te::Tensor variance = te::compute(
         variance_sum->shape,
         [variance_sum, divisor](const Array<tir::Var>& indices) {
             return variance_sum(indices) / divisor;
         },
-        "T_layer_norm_variance");
-    te::Tensor inv_std = te::compute(
+        "T_layer_norm_variance_f64");
+    const te::Tensor inv_std = te::compute(
         variance->shape,
-        [variance, epsilon](const Array<tir::Var>& indices) {
-            return tir::FloatImm(1.0f, tir::DataType::Float(32)) /
+        [variance, epsilon, f64](const Array<tir::Var>& indices) {
+            return tir::FloatImm(1.0, f64) /
                    te::topi::sqrt(variance(indices) + epsilon);
         },
-        "T_layer_norm_inv_std");
-    return te::compute(
-        inputs[0]->shape,
-        [centered, inv_std, scale = inputs[1], bias = inputs[2], axis](const Array<tir::Var>& indices) {
+        "T_layer_norm_inv_std_f64");
+    const te::Tensor affine_f64 = te::compute(
+        data_f64->shape,
+        [centered, inv_std, scale_f64, bias_f64, axis](const Array<tir::Var>& indices) {
             Array<tir::PrimExpr> reduced_indices;
             Array<tir::PrimExpr> affine_indices;
             for (size_t index = 0; index < indices.size(); ++index) {
@@ -126,14 +136,16 @@ te::Tensor LayerNormCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                                               : tir::IntImm(0, tir::DataType::Int(64)));
                 if (index >= static_cast<size_t>(axis)) affine_indices.push_back(indices[index]);
             }
-            return centered(indices) * inv_std(reduced_indices) * scale(affine_indices) +
-                   bias(affine_indices);
+            return centered(indices) * inv_std(reduced_indices) *
+                       scale_f64(affine_indices) +
+                   bias_f64(affine_indices);
         },
-        "T_layer_norm");
+        "T_layer_norm_affine_f64");
+    return te::topi::cast(affine_f64, f32, "T_layer_norm");
 }
 
 KXC_REGISTER_OP(nn_layer_norm)
-    .describe(R"doc(Exact-static float32 affine LayerNorm over data.shape[axis:].)doc")
+    .describe(R"doc(Exact-static float32 affine LayerNorm with float64 mean/variance intermediates.)doc")
     .set_num_inputs(3)
     .add_argument("data", "Tensor", "float32 input tensor.")
     .add_argument("scale", "Tensor", "float32 affine scale matching normalized suffix.")
