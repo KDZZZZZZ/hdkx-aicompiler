@@ -383,7 +383,7 @@ bool TestConstructionAndTypeChecks() {
     return true;
 }
 
-bool TestConstantContractAtConstruction() {
+bool TestConstantRealignmentAtModuleConstruction() {
     using namespace kxc;
     using namespace kxc::codegen;
     const Device cpu = Device::CPU();
@@ -401,12 +401,17 @@ bool TestConstantContractAtConstruction() {
     auto launcher = std::make_shared<RecordingLauncher>();
     const api::CompiledModule module =
         MakeModule(signature, constants, launcher);
-    TEST_CHECK(Throws([&] {
-                   runtime::RuntimeSession invalid(module,
-                                                   MakePlan(signature));
-               }) &&
-                   launcher->calls == 0,
-               "constant alignment must be revalidated at session construction");
+    runtime::RuntimeSession session(module, MakePlan(signature));
+    const Array<runtime::NDArray> outputs = session.Run({});
+    TEST_CHECK(outputs.size() == 1 && launcher->calls == 1 &&
+                   launcher->last_arguments.size() == 2 &&
+                   launcher->last_arguments[0].get() != misaligned.get() &&
+                   launcher->last_arguments[0]->byte_offset == 0 &&
+                   launcher->last_arguments[0].storage()->alignment >= 64 &&
+                   reinterpret_cast<uintptr_t>(
+                       launcher->last_arguments[0].storage().data()) % 64 == 0,
+               "BuildCompiledModule must freeze a signature-aligned constant "
+               "before RuntimeSession construction");
     return true;
 }
 
@@ -1241,8 +1246,8 @@ bool TestPlannedIntermediateStorageReuse() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"construction_and_type_checks", TestConstructionAndTypeChecks},
-        {"constant_contract_at_construction",
-         TestConstantContractAtConstruction},
+        {"constant_realignment_at_module_construction",
+         TestConstantRealignmentAtModuleConstruction},
         {"synchronous_assembly", TestSynchronousAssembly},
         {"module_owned_constant_execution", TestModuleOwnedConstantExecution},
         {"async_result_lifetime", TestAsyncResultLifetime},
