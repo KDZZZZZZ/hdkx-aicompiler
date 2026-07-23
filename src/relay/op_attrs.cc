@@ -28,6 +28,7 @@ KXC_OBJECT_DEFINE(ReshapeAttrsNode)
 KXC_OBJECT_DEFINE(TransposeAttrsNode)
 KXC_OBJECT_DEFINE(GatherAttrsNode)
 KXC_OBJECT_DEFINE(ConcatenateAttrsNode)
+KXC_OBJECT_DEFINE(SliceAttrsNode)
 KXC_OBJECT_DEFINE(ReluAttrsNode)
 KXC_OBJECT_DEFINE(GlobalAvgPool2DAttrsNode)
 KXC_OBJECT_DEFINE(FlattenAttrsNode)
@@ -248,6 +249,13 @@ void ConcatenateAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const
     writer.Add("axis", axis);
 }
 
+void SliceAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("starts", starts);
+    writer.Add("ends", ends);
+    writer.Add("axes", axes);
+    writer.Add("steps", steps);
+}
+
 void FlattenAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("axis", axis);
 }
@@ -380,6 +388,16 @@ GatherAttrs GatherAttrs::Create(int axis) {
 ConcatenateAttrs ConcatenateAttrs::Create(int axis) {
     auto* node = new ConcatenateAttrsNode();
     node->axis = axis;
+    return InternalCreate(node);
+}
+
+SliceAttrs SliceAttrs::Create(Array<int64_t> starts, Array<int64_t> ends,
+                               Array<int64_t> axes, Array<int64_t> steps) {
+    auto* node = new SliceAttrsNode();
+    node->starts = std::move(starts);
+    node->ends = std::move(ends);
+    node->axes = std::move(axes);
+    node->steps = std::move(steps);
     return InternalCreate(node);
 }
 

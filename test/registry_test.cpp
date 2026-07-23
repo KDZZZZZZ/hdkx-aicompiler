@@ -98,6 +98,18 @@ bool TestRelayOperatorRegistryLookupAndSpecs() {
                    Contains(concatenate_attrs, "axis"),
                "concatenate attrs serialization should include the canonical axis");
 
+    const kxc::relay::Op& slice = kxc::relay::Op::Get("slice");
+    TEST_CHECK(slice->name == "slice" && slice.spec().attrs_type_key == "SliceAttrs" &&
+                   slice.spec().input_arity.num_inputs == 1,
+               "slice should expose its unary canonical attrs contract");
+    TEST_CHECK(kxc::Registry::Global().Get("kxc.relay.op._make.slice").defined(),
+               "slice canonical FFI helper should be registered");
+    const std::string slice_attrs = kxc::relay::SerializeAttrs(
+        kxc::relay::SliceAttrs::Create({0}, {2}, {0}, {1}));
+    TEST_CHECK(Contains(slice_attrs, "SliceAttrsNode") && Contains(slice_attrs, "starts") &&
+                   Contains(slice_attrs, "steps"),
+               "slice attrs serialization should include canonical arrays");
+
     const kxc::relay::Op& layer_norm = kxc::relay::Op::Get("nn_layer_norm");
     TEST_CHECK(layer_norm->name == "nn_layer_norm" &&
                    layer_norm.spec().attrs_type_key == "LayerNormAttrs" &&

@@ -369,6 +369,24 @@ public:
     static ConcatenateAttrs Create(int axis = 0);
 };
 
+/*! \brief exact-static ONNX/Python positive-step slice attributes. */
+class SliceAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> starts;
+    Array<int64_t> ends;
+    Array<int64_t> axes;
+    Array<int64_t> steps;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class SliceAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(SliceAttrs, SliceAttrsNode)
+
+public:
+    static SliceAttrs Create(Array<int64_t> starts, Array<int64_t> ends,
+                             Array<int64_t> axes, Array<int64_t> steps);
+};
+
 KXC_DEFINE_SIMPLE_ATTRS(ReluAttrs)
 KXC_DEFINE_SIMPLE_ATTRS(GlobalAvgPool2DAttrs)
 

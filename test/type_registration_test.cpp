@@ -80,6 +80,7 @@ bool TestStableRegistrations() {
         "ReshapeAttrsNode",
         "TransposeAttrsNode",
         "ConcatenateAttrsNode",
+        "SliceAttrsNode",
         "ReluAttrsNode",
         "GlobalAvgPool2DAttrsNode",
         "FlattenAttrsNode",

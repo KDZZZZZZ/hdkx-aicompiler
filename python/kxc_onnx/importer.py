@@ -19,6 +19,7 @@ from .spec import (
 
 WHERE_BRANCH_DTYPES = {"float32", "float64", "int32", "int64", "int8", "uint8", "bool"}
 CONCATENATE_DTYPES = WHERE_BRANCH_DTYPES
+SLICE_DTYPES = WHERE_BRANCH_DTYPES
 INT64_MAX = (1 << 63) - 1
 
 
@@ -37,6 +38,7 @@ ONNX_TO_RELAY = {
     "Gather": "gather",
     "Where": "where",
     "LayerNormalization": "nn_layer_norm",
+    "Slice": "slice",
 }
 
 
@@ -131,6 +133,25 @@ def import_onnx_model(
                 "only single-output nodes are supported in the static-shape MVP"
             )
 
+        if node.op_type == "Slice":
+            node_name = node.name or "<unnamed>"
+            if opset_version < 10:
+                raise UnsupportedONNXOpError(
+                    f"Unsupported ONNX Slice opset {opset_version} in node "
+                    f"'{node_name}': input-form opset >= 10 is required"
+                )
+            if not 3 <= len(node.input) <= 5 or not all(node.input[:3]):
+                raise ValueError(
+                    f"Slice node '{node_name}' requires non-empty data/starts/ends and at most optional axes/steps"
+                )
+            if not node.output[0]:
+                raise ValueError(f"Slice node '{node_name}' requires exactly one non-empty output")
+            if node.input[0] not in available_values:
+                raise ValueError(f"Slice node '{node_name}' has unresolved data input")
+            inferred_static_specs[node.output[0]] = _infer_slice_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
         if node.op_type == "Concat":
             node_name = node.name or "<unnamed>"
             if len(node.input) != 2 or not all(node.input):
@@ -192,7 +213,7 @@ def import_onnx_model(
                 f"ONNX node '{node.name or node.op_type}' has missing input(s): {missing}"
             )
 
-        relay_inputs = [name for name in node.input if name]
+        relay_inputs = [node.input[0]] if node.op_type == "Slice" else [name for name in node.input if name]
         relay_outputs = [name for name in node.output]
         nodes.append(
             RelayNodeSpec(
@@ -353,6 +374,83 @@ def _infer_gather_spec(
         dtype=data.dtype,
     )
     _validate_declared_output("Gather", node_name, result, output_declarations, default_batch)
+    return result
+
+
+def _slice_initializer_values(node_name: str, name: str, params: dict[str, ParamTensor]) -> list[int]:
+    param = params.get(name)
+    if param is None:
+        raise ValueError(
+            f"Slice node '{node_name}' parameter '{name}' must be a static initializer"
+        )
+    if param.dtype not in {"int32", "int64"} or len(param.shape) != 1 or not param.shape or param.shape[0] <= 0:
+        raise ValueError(
+            f"Slice node '{node_name}' parameter '{name}' must be a nonempty rank-1 int32/int64 initializer"
+        )
+    dtype = np.dtype("<i4" if param.dtype == "int32" else "<i8")
+    values = np.frombuffer(param.data, dtype=dtype)
+    if values.size != param.shape[0]:
+        raise ValueError(f"Slice node '{node_name}' initializer '{name}' byte size is invalid")
+    return [int(value) for value in values]
+
+
+def _clamp_positive_step_endpoint(endpoint: int, dim: int) -> int:
+    if endpoint < 0:
+        return 0 if endpoint < -dim else endpoint + dim
+    return min(endpoint, dim)
+
+
+def _slice_attrs(node: onnx.NodeProto, params: dict[str, ParamTensor]) -> dict[str, list[int]]:
+    node_name = node.name or "<unnamed>"
+    if node.attribute:
+        raise ValueError(f"Slice node '{node_name}' does not support attributes in input form")
+    starts = _slice_initializer_values(node_name, node.input[1], params)
+    ends = _slice_initializer_values(node_name, node.input[2], params)
+    if len(starts) != len(ends):
+        raise ValueError(f"Slice node '{node_name}' starts and ends lengths must match")
+    axes = (_slice_initializer_values(node_name, node.input[3], params)
+            if len(node.input) >= 4 and node.input[3] else list(range(len(starts))))
+    steps = (_slice_initializer_values(node_name, node.input[4], params)
+             if len(node.input) >= 5 and node.input[4] else [1] * len(starts))
+    if not starts or len(axes) != len(starts) or len(steps) != len(starts):
+        raise ValueError(f"Slice node '{node_name}' starts, ends, axes, and steps must be nonempty and equal length")
+    return {"starts": starts, "ends": ends, "axes": axes, "steps": steps}
+
+
+def _infer_slice_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    data = _resolve_static_input("Slice", node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    if data.dtype not in SLICE_DTYPES:
+        raise ValueError(f"Slice node '{node_name}' requires dtype in {{float32,float64,int32,int64,int8,uint8,bool}}")
+    if not data.shape:
+        raise ValueError(f"Slice node '{node_name}' requires data rank >= 1")
+    if any(dim < 0 for dim in data.shape):
+        raise ValueError(f"Slice node '{node_name}' requires non-negative static data dimensions")
+    attrs = _slice_attrs(node, params)
+    output_shape = list(data.shape)
+    seen: set[int] = set()
+    for start, end, axis, step in zip(attrs["starts"], attrs["ends"], attrs["axes"], attrs["steps"]):
+        if step != 1:
+            raise ValueError(f"Slice node '{node_name}' requires every step to equal exactly +1")
+        normalized_axis = axis + len(data.shape) if axis < 0 else axis
+        if normalized_axis < 0 or normalized_axis >= len(data.shape) or normalized_axis in seen:
+            raise ValueError(f"Slice node '{node_name}' axes must be unique and in range")
+        seen.add(normalized_axis)
+        dim = output_shape[normalized_axis]
+        clamped_start = _clamp_positive_step_endpoint(start, dim)
+        clamped_end = _clamp_positive_step_endpoint(end, dim)
+        output_shape[normalized_axis] = max(clamped_end - clamped_start, 0)
+    result = TensorSpec(name=node.output[0], shape=output_shape, dtype=data.dtype)
+    _validate_declared_output("Slice", node_name, result, output_declarations, default_batch)
     return result
 
 
@@ -601,6 +699,13 @@ def _convert_attrs(
     opset_version: int,
 ) -> dict[str, Any]:
     attrs = _attrs_by_name(node)
+    if node.op_type == "Slice":
+        if opset_version < 10:
+            raise UnsupportedONNXOpError(
+                f"Unsupported ONNX Slice opset {opset_version} in node "
+                f"'{node.name or '<unnamed>'}': input-form opset >= 10 is required"
+            )
+        return _slice_attrs(node, params)
     if node.op_type == "Concat":
         attrs = _attrs_by_name(node)
         if set(attrs) != {"axis"}:

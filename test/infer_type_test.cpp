@@ -337,6 +337,69 @@ bool TestConcatenateInferAndLoweringContract() {
     return true;
 }
 
+bool TestSliceInferAndLoweringContract() {
+    kxc::Var data("data", kxc::TensorType({2, 3, 4}, "float32"));
+    kxc::Call slice(kxc::relay::Op::Get("slice"), {data},
+                    kxc::relay::SliceAttrs::Create({-3, -100}, {100, 3}, {-1, 1}, {1, 1}));
+    kxc::Function function({data}, slice);
+    kxc::relay::InferTypePass(function);
+    TEST_CHECK(CheckTensor(slice.checked_type(), {2, 3, 3}, "float32"),
+               "slice must normalize negative axes and clamp negative/huge endpoints");
+    TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined() &&
+                   kxc::relay::LowerOperatorCallsToTIR(function).size() == 1,
+               "slice must lower to one fresh indexed compute");
+    TEST_CHECK(kxc::Registry::Global().Get("kxc.relay.op._make.slice").defined(),
+               "canonical slice FFI entry must be registered");
+    const auto attrs = kxc::relay::SliceAttrs::Create({0}, {4}, {1}, {1});
+    const std::string serialized = kxc::relay::SerializeAttrs(attrs);
+    TEST_CHECK(serialized.find("SliceAttrsNode") != std::string::npos &&
+                   serialized.find("starts") < serialized.find("ends") &&
+                   serialized.find("ends") < serialized.find("axes") &&
+                   serialized.find("axes") < serialized.find("steps"),
+               "slice attrs must serialize in canonical starts/ends/axes/steps order");
+
+    kxc::Call identity(kxc::relay::Op::Get("slice"), {data},
+                       kxc::relay::SliceAttrs::Create({0}, {3}, {1}, {1}));
+    kxc::Function identity_function({data}, identity);
+    kxc::relay::InferTypePass(identity_function);
+    TEST_CHECK(kxc::relay::LowerToTIR(identity_function)->prim_func.defined(),
+               "identity slice must lower as a fresh compute rather than a view");
+    kxc::Call empty(kxc::relay::Op::Get("slice"), {data},
+                    kxc::relay::SliceAttrs::Create({3}, {1}, {1}, {1}));
+    kxc::Function empty_function({data}, empty);
+    kxc::relay::InferTypePass(empty_function);
+    TEST_CHECK(CheckTensor(empty.checked_type(), {2, 0, 4}, "float32") &&
+                   kxc::relay::LowerToTIR(empty_function)->prim_func.defined(),
+               "empty slice output must be legal and lower");
+
+    const auto bad = [&](kxc::Var value, kxc::relay::SliceAttrs attrs) {
+        kxc::Call call(kxc::relay::Op::Get("slice"), {value}, attrs);
+        return ExpectThrow([&] { kxc::relay::InferTypePass(kxc::Function({value}, call)); });
+    };
+    TEST_CHECK(bad(kxc::Var("scalar", kxc::TensorType({}, "float32")),
+                   kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1})) &&
+                   bad(kxc::Var("half", kxc::TensorType({2}, "float16")),
+                       kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1})) &&
+                   bad(data, kxc::relay::SliceAttrs::Create({0}, {1, 2}, {0}, {1})) &&
+                   bad(data, kxc::relay::SliceAttrs::Create({0, 1}, {1, 2}, {0, 0}, {1, 1})) &&
+                   bad(data, kxc::relay::SliceAttrs::Create({0}, {1}, {3}, {1})) &&
+                   bad(data, kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {0})) &&
+                   bad(data, kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {-1})) &&
+                   bad(data, kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {2})) &&
+                   bad(kxc::Var("dynamic", kxc::TensorType({2, -1}, "float32")),
+                       kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1})),
+               "slice must reject rank/dtype/vector/axis/step/dynamic-shape violations");
+    kxc::Call minimum(kxc::relay::Op::Get("slice"), {data},
+                      kxc::relay::SliceAttrs::Create({std::numeric_limits<int64_t>::min()},
+                                                      {std::numeric_limits<int64_t>::max()},
+                                                      {1}, {1}));
+    kxc::Function minimum_function({data}, minimum);
+    kxc::relay::InferTypePass(minimum_function);
+    TEST_CHECK(CheckTensor(minimum.checked_type(), {2, 3, 4}, "float32"),
+               "slice must clamp INT64_MIN safely without overflow");
+    return true;
+}
+
 bool TestWhereInferAndLoweringContract() {
     kxc::Var condition("condition", kxc::TensorType({2, 1, 1}, "bool"));
     kxc::Var x("x", kxc::TensorType({}, "float32"));
@@ -668,6 +731,7 @@ int main() {
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
         {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},
         {"concatenate_infer_and_lowering_contract", TestConcatenateInferAndLoweringContract},
+        {"slice_infer_and_lowering_contract", TestSliceInferAndLoweringContract},
         {"where_infer_and_lowering_contract", TestWhereInferAndLoweringContract},
         {"layer_norm_infer_and_lowering_contract", TestLayerNormInferAndLoweringContract},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},

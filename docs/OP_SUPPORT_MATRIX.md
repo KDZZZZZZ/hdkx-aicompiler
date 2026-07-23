@@ -16,7 +16,7 @@
 
 ## 当前 contract 范围
 
-下列 23 个算子已列入 Relay contract checker。此表只声明 checker 范围，**不是**
+下列 24 个算子已列入 Relay contract checker。此表只声明 checker 范围，**不是**
 production support 的肯定结论；production approval 保持 pending，直到下方 closure
 项目完成。
 
@@ -43,6 +43,7 @@ production support 的肯定结论；production approval 保持 pending，直到
 | `gather` | tensor.transform | declared | pending |
 | `cast` | tensor.transform | declared | pending |
 | `concatenate` | tensor.transform | declared | pending |
+| `slice` | tensor.transform | declared | pending |
 | `reduce_mean` | tensor.reduce | declared | pending |
 | `softmax` | nn | declared | pending |
 
@@ -84,7 +85,8 @@ approval 仍按 target 单独判断。NLP 轨新增的实现边界同样不改�
 - ONNX opset < 13 Softmax 的 trailing-flatten 语义不能直接映射为当前 Relay 单轴 softmax，因此 importer fail closed。
 - `gather` 的静态 type/TE contract 支持 int32/int64 indices 和 axis 归一化；ONNX 有效索引域为 `[-extent, extent - 1]`。KXC 对该域外的运行时索引作确定性的 typed zero-fill 扩展；LLVM numeric coverage 已接入但本机未运行，CUDA 通用间接-Load gate 保持拒绝。
 - `where` 的静态 ONNX/Relay/TE vertical slice 已覆盖三输入 trailing-axis 广播：condition 必须为 `bool`，x/y 必须同 dtype，且 branch dtype 仅限 `{float32,float64,int32,int64,int8,uint8,bool}`。LLVM numeric 源码以 `uint8_t` 提供 byte-backed bool condition ABI；本机未运行 LLVM，CUDA 未支持且未验证。`where` 只是逐元素选择，**不定义 masked-softmax 或 all-masked-row 行为**。
-- `concatenate` 是 exact-static binary vertical slice：显式 axis（含负轴归一化）、同 rank/same dtype、非 axis 维相等、int64-safe axis sum 和零 extent side/output 都有 type/lowering contract；支持 dtype `{float32,float64,int32,int64,int8,uint8,bool}`，其中 bool lowering 使用 `DataType::Bool()`。Python ONNX importer、canonical attrs/type registration/FFI、C++ contract 和 LLVM numeric 源码均有证据；本机未运行 LLVM，CUDA 未支持且未验证。NLP 聚合 `slice_concat` capability 仍 closed，因为 `Slice` 尚未实现。
+- `slice` 是 exact-static positive-step vertical slice：canonical `{starts,ends,axes,steps}` attrs，非空等长数组、unique normalized axes、严格 `step == +1`、overflow-safe ONNX/Python endpoint clamping、静态非负 extent 和受限 dtype `{float32,float64,int32,int64,int8,uint8,bool}`。identity 与 empty 均 lower 为 fresh indexed copy，绝不 view/alias。ONNX 仅接受 opset >= 10 initializer-backed input form；LLVM numeric 源码覆盖正常、identity、empty，CUDA 未支持且未验证。
+- `concatenate` 是 exact-static binary vertical slice：显式 axis（含负轴归一化）、同 rank/same dtype、非 axis 维相等、int64-safe axis sum 和零 extent side/output 都有 type/lowering contract；支持 dtype `{float32,float64,int32,int64,int8,uint8,bool}`，其中 bool lowering 使用 `DataType::Bool()`。Python ONNX importer、canonical attrs/type registration/FFI、C++ contract 和 LLVM numeric 源码均有证据；本机未运行 LLVM，CUDA 未支持且未验证。NLP 聚合 `slice_concat` capability 的 frontend/Relay/lowering/LLVM/runtime/numeric source gates 现已实现；CUDA 保持 unsupported。
 - `nn_layer_norm` 是 exact-static affine LayerNorm：三个输入均为 float32，data rank >= 1 且非负静态，axis suffix 必须为正，scale/bias 必须严格等于该 suffix，epsilon 有限且 > 0，accumulation dtype 固定为 float32。ONNX 仅导入 opset >= 17 的单输出 `LayerNormalization`；CUDA nested reduction 由通用 schedule gate fail closed。
 
 - [x] per-unit executable capability 正反例（含真实 lowering/schedule/backend proof）

@@ -423,18 +423,18 @@
     },
     "slice_concat": {
       "frontend": {
-        "status": "contracted",
-        "gate": "slice_pending",
-        "reason": "Exact-static binary Concat imports with an explicit axis, but the aggregated Slice+Concat capability remains closed until Slice is implemented.",
+        "status": "implemented",
+        "gate": "exact_static_slice_concat",
+        "reason": "Exact-static Slice input-form initializers and binary Concat are imported with canonical Relay attrs.",
         "evidence": [
           "python/kxc_onnx/importer.py",
           "test/onnx_importer_py_test.py"
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "slice_pending",
-        "reason": "Concatenate has canonical Relay attrs and binary type inference, but no Slice Relay implementation completes the aggregate.",
+        "status": "implemented",
+        "gate": "exact_static_slice_concat",
+        "reason": "Slice and Concatenate have canonical attrs, static type contracts, and no aliasing contract.",
         "evidence": [
           "include/kxc/relay/op.h",
           "src/relay/type_infer.cc",
@@ -442,9 +442,9 @@
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "slice_pending",
-        "reason": "Concatenate lowers exact-static tensors, including bool and zero extents, but Slice lowering is still pending so the aggregate remains closed.",
+        "status": "implemented",
+        "gate": "exact_static_slice_concat",
+        "reason": "Slice and Concatenate lower to fresh exact-static TE computes, including empty outputs.",
         "evidence": [
           "src/relay/op/tensor/transform.cc",
           "src/te/topi/transform.cc",
@@ -452,9 +452,9 @@
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "slice_pending_llvm_not_validated",
-        "reason": "Concat LLVM numeric coverage exists but is not locally validated; Slice is pending, so no aggregate LLVM support is claimed.",
+        "status": "implemented",
+        "gate": "conditional_llvm_slice_concat_numeric_test",
+        "reason": "Conditional LLVM numeric source covers Slice and Concatenate; it is not claimed locally validated.",
         "evidence": [
           "test/op_numeric_llvm_test.cpp"
         ]
@@ -469,18 +469,18 @@
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "slice_pending",
-        "reason": "Concat is wired through the LLVM RuntimeSession test path, but Slice is pending and the aggregate runtime capability remains closed.",
+        "status": "implemented",
+        "gate": "conditional_llvm_runtime_session_slice_concat",
+        "reason": "Slice and Concat are wired through the conditional LLVM RuntimeSession path.",
         "evidence": [
           "test/op_numeric_llvm_test.cpp",
           "test/infer_type_test.cpp"
         ]
       },
       "numeric": {
-        "status": "unsupported",
-        "gate": "slice_pending_no_aggregate_numeric_validation",
-        "reason": "Concat numeric source coverage does not validate the aggregate while Slice has no implementation or numeric evidence.",
+        "status": "implemented",
+        "gate": "conditional_llvm_slice_concat_numeric_test",
+        "reason": "Conditional LLVM numeric source covers normal, identity, and empty Slice plus Concat.",
         "evidence": [
           "test/op_numeric_llvm_test.cpp",
           "test/nlp_validation/transformer_capability_matrix.json"
@@ -488,8 +488,8 @@
       },
       "profile": {
         "status": "unsupported",
-        "gate": "slice_pending_not_profiled",
-        "reason": "The aggregate remains closed because Slice is pending; no Slice+Concat profiling was run.",
+        "gate": "not_profiled",
+        "reason": "No Slice+Concat profiling was run.",
         "evidence": [
           "test/nlp_validation/transformer_capability_matrix.json"
         ]

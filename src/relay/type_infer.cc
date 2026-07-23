@@ -275,6 +275,13 @@ bool IsConcatenateDType(const std::string& dtype) {
     return IsWhereBranchDType(dtype);
 }
 
+int64_t ClampPositiveStepEndpoint(int64_t endpoint, int64_t dim) {
+    if (endpoint < 0) {
+        return endpoint < -dim ? 0 : endpoint + dim;
+    }
+    return std::min(endpoint, dim);
+}
+
 // 推导 ONNX Where 的三元 trailing-axis 广播结果。
 Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
@@ -662,6 +669,52 @@ Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types) {
     }
     out[static_cast<size_t>(axis)] = lhs_axis + rhs_axis;
     return MakeTensorType(out, lhs->dtype);
+}
+
+// 推导 exact-static ONNX/Python positive-step slice 的输出 shape。
+Type SliceInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("slice", input_types, 1);
+    const auto* data = RequireTensor("slice", input_types[0], "data");
+    const auto* slice_attrs = attrs.As<SliceAttrsNode>();
+    if (!slice_attrs) {
+        throw std::runtime_error("slice requires SliceAttrs");
+    }
+    if (!IsConcatenateDType(data->dtype)) {
+        throw std::runtime_error(
+            "slice dtype must be float32, float64, int32, int64, int8, uint8, or bool");
+    }
+    const int rank = static_cast<int>(data->shape.size());
+    if (rank < 1) {
+        throw std::runtime_error("slice requires data rank >= 1");
+    }
+    const size_t count = slice_attrs->starts.size();
+    if (count == 0 || slice_attrs->ends.empty() || slice_attrs->axes.empty() ||
+        slice_attrs->steps.empty() || slice_attrs->ends.size() != count ||
+        slice_attrs->axes.size() != count || slice_attrs->steps.size() != count) {
+        throw std::runtime_error("slice starts, ends, axes, and steps must be nonempty and equal length");
+    }
+    std::vector<int64_t> out = ShapeVector(data);
+    for (int64_t extent : out) {
+        if (extent < 0) {
+            throw std::runtime_error("slice requires non-negative static input dimensions");
+        }
+    }
+    std::vector<bool> seen(static_cast<size_t>(rank), false);
+    for (size_t index = 0; index < count; ++index) {
+        if (slice_attrs->steps[index] != 1) {
+            throw std::runtime_error("slice requires every step to equal exactly +1");
+        }
+        const int axis = NormalizeAxis("slice", slice_attrs->axes[index], rank);
+        if (seen[static_cast<size_t>(axis)]) {
+            throw std::runtime_error("slice axes must be unique");
+        }
+        seen[static_cast<size_t>(axis)] = true;
+        const int64_t dim = out[static_cast<size_t>(axis)];
+        const int64_t start = ClampPositiveStepEndpoint(slice_attrs->starts[index], dim);
+        const int64_t end = ClampPositiveStepEndpoint(slice_attrs->ends[index], dim);
+        out[static_cast<size_t>(axis)] = std::max(end - start, int64_t{0});
+    }
+    return MakeTensorType(out, data->dtype);
 }
 
 // 按 axes 与 keepdims 推导 reduce_mean 结果 shape。

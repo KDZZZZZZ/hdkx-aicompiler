@@ -348,6 +348,24 @@
       "tests": true,
       "onnx_ops": []
     },
+    "slice": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "SliceAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Slice"
+      ]
+    },
     "softmax": {
       "schema_version": 1,
       "category": "nn",

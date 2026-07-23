@@ -464,6 +464,19 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
         return ObjectRef(relay::GatherAttrs::Create(
             ReadInt(Field(attrs, "axis", "gather attrs"), "gather attrs.axis")));
     }
+    if (op_name == "slice") {
+        const std::string ctx = "slice attrs";
+        if (attrs.o.size() != 4 || !OptionalField(attrs, "starts") ||
+            !OptionalField(attrs, "ends") || !OptionalField(attrs, "axes") ||
+            !OptionalField(attrs, "steps")) {
+            throw std::runtime_error("Slice import attrs must contain exactly starts, ends, axes, and steps");
+        }
+        return ObjectRef(relay::SliceAttrs::Create(
+            ToArray(ReadInt64Vector(Field(attrs, "starts", ctx), ctx + ".starts")),
+            ToArray(ReadInt64Vector(Field(attrs, "ends", ctx), ctx + ".ends")),
+            ToArray(ReadInt64Vector(Field(attrs, "axes", ctx), ctx + ".axes")),
+            ToArray(ReadInt64Vector(Field(attrs, "steps", ctx), ctx + ".steps"))));
+    }
     if (op_name == "concatenate") {
         const std::string ctx = "concatenate attrs";
         if (attrs.o.size() != 1 || !OptionalField(attrs, "axis")) {

@@ -737,6 +737,86 @@ def test_layer_normalization_rejects_declared_output_mismatch(output_shape, outp
         )
 
 
+def _slice_model(data_shape=(2, 3), *, starts=(-2,), ends=(99,), axes=(-1,), steps=(1,),
+                 parameter_dtype=TensorProto.INT64, output_shape=(2, 2), output_dtype=TensorProto.FLOAT,
+                 opset=13, dynamic_params=False):
+    initializer = []
+    parameter_inputs = []
+    values = {"starts": starts, "ends": ends, "axes": axes, "steps": steps}
+    for name, value in values.items():
+        if value is None:
+            continue
+        if dynamic_params:
+            parameter_inputs.append(helper.make_tensor_value_info(name, parameter_dtype, [len(value)]))
+        else:
+            initializer.append(helper.make_tensor(name, parameter_dtype, [len(value)], list(value)))
+    node_inputs = ["data", "starts", "ends"]
+    if axes is not None:
+        node_inputs.append("axes")
+    elif steps is not None:
+        node_inputs.append("")
+    if steps is not None:
+        node_inputs.append("steps")
+    graph = helper.make_graph(
+        [helper.make_node("Slice", node_inputs, ["out"], name="slice")], "slice_test",
+        [helper.make_tensor_value_info("data", TensorProto.FLOAT, data_shape)] + parameter_inputs,
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)], initializer=initializer,
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6)
+
+
+def test_slice_initializer_mapping_clamping_and_int32_int64():
+    for dtype in (TensorProto.INT32, TensorProto.INT64):
+        imported = import_onnx_model(_slice_model(parameter_dtype=dtype))
+        assert [(node.op_name, node.inputs, node.attrs) for node in imported.function.nodes] == [
+            ("slice", ["data"], {"starts": [-2], "ends": [99], "axes": [-1], "steps": [1]})
+        ]
+        assert imported.function.outputs[0].shape == [2, 2]
+
+
+def test_slice_omitted_axes_and_steps_are_canonicalized():
+    imported = import_onnx_model(_slice_model(starts=(0, -99), ends=(1, 99), axes=None,
+                                               steps=None, output_shape=(1, 3)))
+    assert imported.function.nodes[0].attrs == {
+        "starts": [0, -99], "ends": [1, 99], "axes": [0, 1], "steps": [1, 1]
+    }
+
+
+def test_slice_steps_can_use_an_empty_optional_axes_slot():
+    imported = import_onnx_model(_slice_model(starts=(0, 0), ends=(2, 3), axes=None,
+                                               steps=(1, 1), output_shape=(2, 3)))
+    assert imported.function.nodes[0].attrs == {
+        "starts": [0, 0], "ends": [2, 3], "axes": [0, 1], "steps": [1, 1]
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"opset": 9}, "opset 9"),
+        ({"dynamic_params": True}, "must be a static initializer"),
+        ({"data_shape": (), "output_shape": ()}, "data rank >= 1"),
+        ({"output_dtype": TensorProto.DOUBLE}, "declaration.*does not match inferred"),
+        ({"starts": (), "ends": (), "axes": (), "steps": (), "output_shape": (2, 3)}, "nonempty rank-1"),
+        ({"starts": (0,), "ends": (1, 2), "axes": (0,), "steps": (1,)}, "lengths must match"),
+        ({"starts": (0, 0), "ends": (1, 1), "axes": (0, 0), "steps": (1, 1)}, "unique and in range"),
+        ({"axes": (2,)}, "unique and in range"),
+        ({"steps": (0,)}, "equal exactly +1"),
+        ({"steps": (-1,)}, "equal exactly +1"),
+        ({"steps": (2,)}, "equal exactly +1"),
+    ],
+)
+def test_slice_rejects_exact_static_contract_violations(kwargs, message):
+    with pytest.raises((ValueError, UnsupportedONNXOpError), match=message):
+        import_onnx_model(_slice_model(**kwargs))
+
+
+def test_slice_int64_min_is_clamped_without_overflow():
+    imported = import_onnx_model(_slice_model(starts=(-2**63,), ends=(2**63 - 1,),
+                                               output_shape=(2, 3)))
+    assert imported.function.outputs[0].shape == [2, 3]
+
+
 def onnx_import_metadata(path: Path) -> dict:
     import json
 

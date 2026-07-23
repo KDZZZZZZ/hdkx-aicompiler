@@ -137,6 +137,22 @@ void WriteConcatenateFixture(const TemporaryDirectory& directory,
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+void WriteSliceFixture(const TemporaryDirectory& directory, const std::string& output_shape,
+                       const std::string& attrs =
+                           R"json({"starts": [-2], "ends": [99], "axes": [-1], "steps": [1]})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name": "data", "shape": [2, 3], "dtype": "float32"}],
+    "outputs": [{"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}],
+    "nodes": [{"name": "slice", "op_name": "slice", "inputs": ["data"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}]
+  },
+  "params": [], "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
 void WriteWhereFixture(const TemporaryDirectory& directory,
                        const std::string& output_shape,
                        const std::string& branch_dtype = "float32") {
@@ -262,6 +278,39 @@ bool TestConcatenateAttrsAreStrict() {
                        (directory.path() / "model.json").string(),
                        (directory.path() / "params.bin").string());
                }), "Concatenate reifier must construct and require strong axis attrs");
+    return true;
+}
+
+bool TestValidStaticSlice() {
+    TemporaryDirectory directory;
+    WriteSliceFixture(directory, "[2, 2]");
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined() &&
+                   ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                               {2, 2}, "float32"),
+               "valid static Slice import spec should reify canonical strong attrs");
+    return true;
+}
+
+bool TestSliceDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteSliceFixture(directory, "[2, 3]");
+    TEST_CHECK(Throws([&] { kxc::frontend::LoadONNXImportSpec(
+                   (directory.path() / "model.json").string(),
+                   (directory.path() / "params.bin").string()); }),
+               "declared Slice output shape must match inferred output");
+    return true;
+}
+
+bool TestSliceAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WriteSliceFixture(directory, "[2, 2]", R"json({"starts": [0]})json");
+    TEST_CHECK(Throws([&] { kxc::frontend::LoadONNXImportSpec(
+                   (directory.path() / "model.json").string(),
+                   (directory.path() / "params.bin").string()); }),
+               "Slice reifier must require all canonical strong attrs");
     return true;
 }
 
@@ -396,6 +445,9 @@ int main() {
         {"valid_static_concatenate", TestValidStaticConcatenate},
         {"concatenate_declared_output_mismatch", TestConcatenateDeclaredOutputMismatchIsRejected},
         {"concatenate_strict_attrs", TestConcatenateAttrsAreStrict},
+        {"valid_static_slice", TestValidStaticSlice},
+        {"slice_declared_output_mismatch", TestSliceDeclaredOutputMismatchIsRejected},
+        {"slice_strict_attrs", TestSliceAttrsAreStrict},
         {"valid_static_where", TestValidStaticWhere},
         {"where_declared_output_mismatch", TestWhereDeclaredOutputMismatchIsRejected},
         {"where_unsupported_branch_dtype", TestWhereUnsupportedBranchDTypeIsRejected},

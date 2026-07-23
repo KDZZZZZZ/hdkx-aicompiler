@@ -417,6 +417,32 @@ void TestConcatenate() {
           "bool concatenate must preserve byte-backed boolean values");
 }
 
+// 验证 Slice 的正步长、identity copy 和空输出数值路径。
+void TestSlice() {
+    kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("slice"), {data},
+                   kxc::relay::SliceAttrs::Create({-2}, {100}, {-1}, {1}));
+    kxc::Function function({data}, call);
+    std::vector<float> source = {1, 2, 3, 4, 5, 6};
+    std::vector<float> output(4, 0.0f);
+    CompileAndRun("slice", function, {Input(source), Output(output)});
+    ExpectNear(output, {2, 3, 5, 6});
+
+    kxc::Call identity(kxc::relay::Op::Get("slice"), {data},
+                       kxc::relay::SliceAttrs::Create({0}, {3}, {1}, {1}));
+    kxc::Function identity_function({data}, identity);
+    std::vector<float> copied(6, 0.0f);
+    CompileAndRun("slice_identity_fresh_copy", identity_function,
+                  {Input(source), Output(copied)});
+    ExpectNear(copied, source);
+
+    kxc::Call empty(kxc::relay::Op::Get("slice"), {data},
+                    kxc::relay::SliceAttrs::Create({2}, {1}, {1}, {1}));
+    kxc::Function empty_function({data}, empty);
+    std::vector<float> empty_output;
+    CompileAndRun("slice_empty", empty_function, {Input(source), Output(empty_output)});
+}
+
 // 验证 ReduceMean 的轴和 keepdims 语义。
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
@@ -697,6 +723,7 @@ int main() {
         {"reshape", TestReshape},
         {"transpose", TestTranspose},
         {"concatenate", TestConcatenate},
+        {"slice", TestSlice},
         {"reduce_mean", TestReduceMean},
         {"softmax", TestSoftmax},
         {"gather", TestGather},

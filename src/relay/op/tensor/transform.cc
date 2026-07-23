@@ -111,6 +111,13 @@ bool IsConcatenateDType(const kxc::tir::DataType& dtype) {
            dtype == kxc::tir::DataType::Bool();
 }
 
+int64_t ClampPositiveStepEndpoint(int64_t endpoint, int64_t dim) {
+    if (endpoint < 0) {
+        return endpoint < -dim ? 0 : endpoint + dim;
+    }
+    return endpoint > dim ? dim : endpoint;
+}
+
 bool MatchesRelayDType(const kxc::tir::DataType& dtype, const std::string& relay_dtype) {
     return (relay_dtype == "float32" && dtype == kxc::tir::DataType::Float(32)) ||
            (relay_dtype == "float64" && dtype == kxc::tir::DataType::Float(64)) ||
@@ -249,6 +256,69 @@ te::Tensor CastCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     }
     return RequireDefined(
         "cast", te::topi::cast(inputs[0], DTypeFromCastCode(cast_attrs->to), "T_cast"));
+}
+
+te::Tensor SliceCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                        const kxc::Type& out_type) {
+    RequireInputCount("slice", inputs, 1);
+    const auto* output_type = RequireTensorOutput("slice", out_type);
+    const auto* slice_attrs = attrs.As<SliceAttrsNode>();
+    if (!slice_attrs) {
+        throw std::runtime_error("slice expects SliceAttrs");
+    }
+    if (!inputs[0].defined() || !IsConcatenateDType(inputs[0]->dtype)) {
+        throw std::runtime_error("slice lowering requires a defined supported input tensor");
+    }
+    const int rank = static_cast<int>(inputs[0]->shape.size());
+    const size_t count = slice_attrs->starts.size();
+    if (rank < 1 || count == 0 || slice_attrs->ends.empty() || slice_attrs->axes.empty() ||
+        slice_attrs->steps.empty() || slice_attrs->ends.size() != count ||
+        slice_attrs->axes.size() != count || slice_attrs->steps.size() != count ||
+        output_type->shape.size() != static_cast<size_t>(rank) ||
+        !MatchesRelayDType(inputs[0]->dtype, output_type->dtype)) {
+        throw std::runtime_error("slice lowering input, attrs, or output type mismatch");
+    }
+    std::vector<int64_t> starts(static_cast<size_t>(rank), 0);
+    std::vector<int64_t> expected_shape;
+    expected_shape.reserve(static_cast<size_t>(rank));
+    for (int axis = 0; axis < rank; ++axis) {
+        expected_shape.push_back(StaticExtent(inputs[0]->shape[static_cast<size_t>(axis)], "slice"));
+    }
+    std::vector<bool> seen(static_cast<size_t>(rank), false);
+    for (size_t index = 0; index < count; ++index) {
+        if (slice_attrs->steps[index] != 1) {
+            throw std::runtime_error("slice lowering requires every step to equal exactly +1");
+        }
+        int64_t raw_axis = slice_attrs->axes[index];
+        if (raw_axis < 0) raw_axis += rank;
+        if (raw_axis < 0 || raw_axis >= rank || seen[static_cast<size_t>(raw_axis)]) {
+            throw std::runtime_error("slice lowering axes must be unique and in range");
+        }
+        const size_t axis = static_cast<size_t>(raw_axis);
+        seen[axis] = true;
+        const int64_t start = ClampPositiveStepEndpoint(slice_attrs->starts[index],
+                                                        expected_shape[axis]);
+        const int64_t end = ClampPositiveStepEndpoint(slice_attrs->ends[index],
+                                                      expected_shape[axis]);
+        starts[axis] = start;
+        expected_shape[axis] = std::max(end - start, int64_t{0});
+    }
+    for (int axis = 0; axis < rank; ++axis) {
+        if (output_type->shape[static_cast<size_t>(axis)] != expected_shape[static_cast<size_t>(axis)]) {
+            throw std::runtime_error("slice lowering output shape disagrees with attrs and input");
+        }
+    }
+    return RequireDefined("slice", te::compute(
+        ShapeFromTensorType(output_type, "slice"),
+        [input = inputs[0], starts](const Array<kxc::tir::Var>& indices) {
+            Array<kxc::tir::PrimExpr> input_indices;
+            for (size_t axis = 0; axis < indices.size(); ++axis) {
+                input_indices.push_back(indices[axis] +
+                    kxc::tir::IntImm(starts[axis], kxc::tir::DataType::Int(64)));
+            }
+            return input(input_indices);
+        },
+        "T_slice"));
 }
 
 te::Tensor ConcatenateCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
@@ -393,6 +463,14 @@ KXC_REGISTER_OP(cast)
     .set_attr<std::string>("TAttrs", "CastAttrs")
     .set_attr<FInferType>("FInferType", CastInferType)
     .set_attr<FRelayToTE>("FRelayToTE", CastCompute);
+
+KXC_REGISTER_OP(slice)
+    .describe(R"doc(Exact-static ONNX/Python positive-step slice into a fresh output.)doc")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "SliceAttrs")
+    .set_attr<FInferType>("FInferType", SliceInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", SliceCompute);
 
 KXC_REGISTER_OP(concatenate)
     .describe(R"doc(Concatenate exactly two static tensors along an axis into a fresh output.)doc")
