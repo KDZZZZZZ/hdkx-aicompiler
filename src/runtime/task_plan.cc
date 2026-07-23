@@ -549,6 +549,13 @@ void FrozenTaskPlan::Validate() const {
                     "A task input producer must precede its consumer");
             }
         }
+        if (task->kind == TaskKind::kCopy &&
+            !SameStorageContract(
+                values_by_id.at(task.input_value_ids()[0]),
+                values_by_id.at(task.output_value_ids()[0]))) {
+            throw std::invalid_argument(
+                "Copy task values require matching exact tensor contracts");
+        }
     }
     for (int64_t output : node->output_value_ids_) {
         if (!IsSourceValue(values_by_id.at(output)) &&

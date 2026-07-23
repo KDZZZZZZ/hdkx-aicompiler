@@ -241,6 +241,54 @@ SessionFixture MakeStaticFixture() {
             std::move(launcher)};
 }
 
+kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(bool with_shape_eval = false) {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const Device cpu = Device::CPU();
+    Array<ValueSpec> values{
+        ValueSpec(0, 0, {2, 3}, Float32(), cpu, true),
+        ValueSpec(1, 1, {3}, Float32(), cpu, false, true),
+        ValueSpec(2, 2, {2, 3}, Float32(), cpu),
+        ValueSpec(3, 3, {2, 3}, Float32(), cpu, false, false, true),
+    };
+    Array<TaskSpec> tasks{
+        TaskSpec(10, TaskKind::kAllocate, cpu, {}, {2}, {}, String(), 0, 0,
+                 64),
+        TaskSpec(11, TaskKind::kKernel, cpu, {0, 1}, {2}, {10},
+                 "session_fixture"),
+        TaskSpec(12, TaskKind::kEvent, cpu, {}, {}, {11}),
+        TaskSpec(20, TaskKind::kAllocate, cpu, {}, {3}, {12}, String(), 0, 0,
+                 64),
+    };
+    if (with_shape_eval) {
+        tasks.push_back(TaskSpec(21, TaskKind::kShapeEval, cpu, {2}, {3},
+                                 {20, 12}, "shape.program"));
+    } else {
+        tasks.push_back(TaskSpec(21, TaskKind::kCopy, cpu, {2}, {3},
+                                 {20, 12}));
+    }
+    tasks.push_back(TaskSpec(22, TaskKind::kSync, cpu, {}, {}, {21}));
+    Array<RegionSpec> regions{
+        RegionSpec(0, RegionKind::kPerCall, "", {10, 11, 12}, {0, 1}, {2},
+                   {1}, RegionEffect::kOrdered),
+        RegionSpec(1, RegionKind::kLibrary, "copy.region", {20, 21, 22}, {2},
+                   {3}, {}),
+    };
+    return FrozenTaskPlan(kFrozenTaskPlanVersion, std::move(values),
+                          std::move(tasks), std::move(regions), {0}, {1}, {3});
+}
+
+kxc::runtime::ExecutablePlan MakeAliasFallbackPlan() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const Device cpu = Device::CPU();
+    return ExecutablePlan(
+        {ValueSpec(0, 0, {2, 3}, Float32(), cpu, true),
+         ValueSpec(1, 1, {3}, Float32(), cpu, false, true),
+         ValueSpec(2, 2, {2, 3}, Float32(), cpu, false, false, true, true)},
+        {KernelCall("session_fixture", {0, 1}, {2})}, {0}, {1}, {2});
+}
+
 /*! \brief 构造器必须拒绝 undefined module 和错误 ObjectRef 节点类型。 */
 bool TestConstructionAndTypeChecks() {
     using namespace kxc;
@@ -313,6 +361,73 @@ bool TestAsyncResultLifetime() {
     TEST_CHECK(result.completion->retained_storage.size() == 3,
                "completion should retain input, constant, and output Storage");
     result.completion.Wait();
+    return true;
+}
+
+/*! \brief feature gate 必须保留显式 per-Call 路径和安全回退。 */
+bool TestTaskDagFeatureGateAndFallback() {
+    using namespace kxc;
+    SessionFixture fixture = MakeStaticFixture();
+    runtime::RuntimeSession per_call(fixture.module, fixture.plan);
+    TEST_CHECK(!per_call.UsesTaskDAG(),
+               "the existing constructor must remain the per-Call path");
+
+    runtime::RuntimeSession requested(
+        fixture.module, fixture.plan, runtime::RuntimeExecutionMode::kTaskDAG);
+#if KXC_ENABLE_REGION_TASK_DAG
+    TEST_CHECK(requested.UsesTaskDAG(),
+               "enabled task mode should adapt the ordered per-Call plan");
+#else
+    TEST_CHECK(!requested.UsesTaskDAG(),
+               "disabled task mode must fall back to the per-Call plan");
+#endif
+    runtime::NDArray input =
+        runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
+    TEST_CHECK(requested.Run({input}).size() == 1,
+               "feature-gated execution must preserve outputs");
+
+    SessionFixture alias_fixture = MakeStaticFixture();
+    runtime::RuntimeSession alias_fallback(
+        alias_fixture.module, MakeAliasFallbackPlan(),
+        runtime::RuntimeExecutionMode::kTaskDAG);
+    TEST_CHECK(!alias_fallback.UsesTaskDAG() &&
+                   alias_fallback.Run({input}).size() == 1,
+               "unsupported alias contracts must use the per-Call fallback");
+    return true;
+}
+
+/*! \brief frozen task execution must retain module, operations, and all storage. */
+bool TestFrozenTaskDagExecutionAndRetention() {
+    using namespace kxc;
+    SessionFixture fixture = MakeStaticFixture();
+#if KXC_ENABLE_REGION_TASK_DAG
+    runtime::RunAsyncResult result;
+    {
+        runtime::RuntimeSession session(fixture.module, MakeStaticTaskPlan());
+        TEST_CHECK(session.UsesTaskDAG(),
+                   "frozen task constructor must select task execution");
+        runtime::NDArray input =
+            runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
+        result = session.RunAsync({input}, DeviceStream::Default(Device::CPU()));
+    }
+    TEST_CHECK(result.outputs.size() == 1 && result.completion.IsReady() &&
+                   fixture.launcher->calls == 1,
+               "kernel/event/copy/sync task execution did not complete");
+    TEST_CHECK(result.completion->retained_storage.size() == 4,
+               "task completion must retain input, constant, intermediate, and output");
+    result.completion.Wait();
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(fixture.module,
+                                                   MakeStaticTaskPlan(true));
+               }),
+               "shape-eval must fail closed until the shape contract is integrated");
+#else
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(fixture.module,
+                                                   MakeStaticTaskPlan());
+               }),
+               "direct frozen task execution must be unavailable behind the gate");
+#endif
     return true;
 }
 
@@ -624,6 +739,19 @@ bool TestMultiEntryPlanExecution() {
                    outputs[0].storage()->alignment >= 64,
                "stable intermediate/output values or alignments were not preserved");
 
+#if KXC_ENABLE_REGION_TASK_DAG
+    runtime::RuntimeSession task_session(
+        module, plan, runtime::RuntimeExecutionMode::kTaskDAG);
+    const Array<runtime::NDArray> task_outputs =
+        task_session.Run({filled(1.0f), filled(2.0f), filled(3.0f)});
+    std::vector<float> task_actual(4);
+    task_outputs[0].CopyToBytes(task_actual.data(),
+                                task_actual.size() * sizeof(float));
+    TEST_CHECK(task_session.UsesTaskDAG() && task_actual == actual &&
+                   add_launcher->calls == 2 && mul_launcher->calls == 2,
+               "task DAG execution must equal ordered multi-entry execution");
+#endif
+
     runtime::ExecutablePlan bad_plan(
         values,
         {runtime::KernelCall("plan_add", {0, 1}, {3}),
@@ -691,6 +819,10 @@ int main() {
         {"construction_and_type_checks", TestConstructionAndTypeChecks},
         {"synchronous_assembly", TestSynchronousAssembly},
         {"async_result_lifetime", TestAsyncResultLifetime},
+        {"task_dag_feature_gate_and_fallback",
+         TestTaskDagFeatureGateAndFallback},
+        {"frozen_task_dag_execution_and_retention",
+         TestFrozenTaskDagExecutionAndRetention},
         {"input_validation", TestInputValidation},
         {"stream_validation", TestStreamValidation},
         {"input_device_validation_before_allocation",
