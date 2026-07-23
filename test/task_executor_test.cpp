@@ -34,6 +34,10 @@ bool Throws(const std::function<void()>& function) {
 
 DLDataType Float32() { return DLDataType{kDLFloat, 32, 1}; }
 
+static_assert(kxc::runtime::RuntimeEventKind::kTaskStart !=
+                  kxc::runtime::RuntimeEventKind::kTaskLaunch,
+              "task start and successful launch must be distinct events");
+
 kxc::runtime::FrozenTaskPlan MakeChainPlan(
     bool async_first = false, bool conservative_first = false) {
     using namespace kxc;
@@ -101,6 +105,20 @@ kxc::runtime::FrozenTaskPlan MakeAllKindsPlan() {
         {0}, {}, {3});
 }
 
+kxc::runtime::FrozenTaskPlan WithDeclaredManifest(
+    const kxc::runtime::FrozenTaskPlan& plan) {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const String identity("artifact:kernel:canonical-v1");
+    const String abi("exact-abi:kernel:v1");
+    Array<SelectedArtifactBinding> bindings{SelectedArtifactBinding(
+        ArtifactBindingKind::kTask, 11, identity, 0, abi, "kernel",
+        ComputeEntryBindingFingerprint(ArtifactBindingKind::kTask, 11,
+                                       identity, 0, abi, "kernel"))};
+    return plan.WithManifest(SelectedArtifactManifest(
+        ComputeFrozenTaskPlanFingerprint(plan, bindings), bindings));
+}
+
 bool TestDependencyAwareMemoryReuse() {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -159,10 +177,12 @@ bool TestIndependentBranchesDoNotReuse() {
 bool TestDeterministicExecutorCoversTaskKinds() {
     using namespace kxc;
     using namespace kxc::runtime;
-    const FrozenTaskPlan plan = PlanTaskMemory(MakeAllKindsPlan());
+    const FrozenTaskPlan plan =
+        WithDeclaredManifest(PlanTaskMemory(MakeAllKindsPlan()));
     std::unordered_map<int64_t, int> values{{0, 3}};
     std::vector<int64_t> action_order;
-    const Array<TaskTraceEvent> trace = ExecuteTasksDeterministically(
+    std::vector<RuntimeEvent> observed;
+    const Array<RuntimeEvent> trace = ExecuteTasksDeterministically(
         plan, [&](const TaskSpec& task) {
             action_order.push_back(task->task_id);
             switch (task->kind) {
@@ -184,25 +204,112 @@ bool TestDeterministicExecutorCoversTaskKinds() {
                 case TaskKind::kSync:
                     break;
             }
-        });
+        },
+        [&](const RuntimeEvent& event) { observed.push_back(event); });
     const std::vector<int64_t> expected{10, 11, 12, 20, 21, 30, 31, 32};
     TEST_CHECK(action_order == expected,
                "fake executor action order must be deterministic");
     TEST_CHECK(values.at(3) == 8,
                "kernel/copy/shape-eval fake semantics did not compose");
 
+    TEST_CHECK(observed.size() == trace.size(),
+               "synchronous observer must see every returned event");
+    for (size_t i = 0; i < trace.size(); ++i) {
+        TEST_CHECK(observed[i].kind == trace[i].kind &&
+                       observed[i].task_id == trace[i].task_id &&
+                       observed[i].dependency_task_id ==
+                           trace[i].dependency_task_id,
+                   "observer event order must be deterministic");
+    }
+
+    bool saw_wait = false;
+    bool saw_launch = false;
+    bool saw_generation = false;
+    bool saw_allocation = false;
+    bool saw_release = false;
     std::vector<int64_t> allocations;
     std::vector<int64_t> releases;
     for (const auto& event : trace) {
+        saw_wait = saw_wait || event.kind == RuntimeEventKind::kTaskWait;
+        saw_launch = saw_launch || event.kind == RuntimeEventKind::kTaskLaunch;
+        saw_allocation =
+            saw_allocation || event.kind == RuntimeEventKind::kAllocation;
+        saw_release = saw_release || event.kind == RuntimeEventKind::kRelease;
+        if (event.kind == RuntimeEventKind::kGeneration) {
+            saw_generation =
+                event.task_id == 11 && event.generation == 0 &&
+                event.artifact_identity == "artifact:kernel:canonical-v1" &&
+                event.entry_symbol == "kernel";
+        }
         if (event.kind == TaskTraceEventKind::kAllocate) {
             allocations.push_back(event.value_id);
         } else if (event.kind == TaskTraceEventKind::kRelease) {
             releases.push_back(event.value_id);
         }
     }
+    TEST_CHECK(saw_wait && saw_launch && saw_generation && saw_allocation &&
+                   saw_release,
+               "observer schema must expose the declared generation plus task lifecycle");
     TEST_CHECK(allocations == std::vector<int64_t>({1, 2, 3}) &&
                    releases == std::vector<int64_t>({1, 2}),
                "allocation/release trace must follow consumer completion");
+
+    const Array<RuntimeEvent> repeated = ExecuteTasksDeterministically(
+        plan, [](const TaskSpec&) {});
+    TEST_CHECK(repeated.size() == trace.size(),
+               "deterministic observer trace size changed between runs");
+    for (size_t i = 0; i < trace.size(); ++i) {
+        TEST_CHECK(repeated[i].kind == trace[i].kind &&
+                       repeated[i].task_id == trace[i].task_id &&
+                       repeated[i].dependency_task_id ==
+                           trace[i].dependency_task_id &&
+                       repeated[i].value_id == trace[i].value_id,
+                   "deterministic observer trace changed between runs");
+    }
+    return true;
+}
+
+bool TestTaskLifecycleEventSequence() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const FrozenTaskPlan plan =
+        WithDeclaredManifest(PlanTaskMemory(MakeAllKindsPlan()));
+
+    std::vector<RuntimeEventKind> success_events;
+    ExecuteTasksDeterministically(
+        plan, [](const TaskSpec&) {},
+        [&success_events](const RuntimeEvent& event) {
+            if (event.task_id == 11) success_events.push_back(event.kind);
+        });
+    const std::vector<RuntimeEventKind> expected_success{
+        RuntimeEventKind::kTaskWait, RuntimeEventKind::kGeneration,
+        RuntimeEventKind::kTaskStart, RuntimeEventKind::kTaskLaunch,
+        RuntimeEventKind::kTaskComplete};
+    TEST_CHECK(success_events == expected_success,
+               "kernel events must be wait -> generation -> start -> launch -> complete");
+
+    std::vector<RuntimeEventKind> failure_events;
+    TEST_CHECK(
+        Throws([&plan, &failure_events] {
+            ExecuteTasksDeterministically(
+                plan,
+                [](const TaskSpec& task) {
+                    if (task->task_id == 11) {
+                        throw std::runtime_error("fake kernel submission failed");
+                    }
+                },
+                [&failure_events](const RuntimeEvent& event) {
+                    if (event.task_id == 11) {
+                        failure_events.push_back(event.kind);
+                    }
+                });
+        }),
+        "failing action must propagate its exception");
+    const std::vector<RuntimeEventKind> expected_failure{
+        RuntimeEventKind::kTaskWait, RuntimeEventKind::kGeneration,
+        RuntimeEventKind::kTaskStart};
+    TEST_CHECK(failure_events == expected_failure,
+               "failed action must retain generation -> start without launch or complete");
     return true;
 }
 
@@ -251,6 +358,7 @@ int main() {
         {"independent_branches_do_not_reuse", TestIndependentBranchesDoNotReuse},
         {"deterministic_executor_covers_task_kinds",
          TestDeterministicExecutorCoversTaskKinds},
+        {"task_lifecycle_event_sequence", TestTaskLifecycleEventSequence},
         {"executor_failure_and_overflow_guards",
          TestExecutorFailureAndOverflowGuards},
     };

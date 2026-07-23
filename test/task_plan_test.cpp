@@ -71,6 +71,22 @@ kxc::runtime::FrozenTaskPlan MakeValidPlan() {
                           std::move(tasks), std::move(regions), {0}, {1}, {4});
 }
 
+kxc::runtime::FrozenTaskPlan WithDeclaredManifest(
+    const kxc::runtime::FrozenTaskPlan& plan, uint64_t generation = 7) {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const String identity("artifact-key-canonical-v1");
+    const String abi("exact-abi-v1");
+    Array<SelectedArtifactBinding> bindings{SelectedArtifactBinding(
+        ArtifactBindingKind::kTask, 11, identity, generation, abi,
+        "kernel_a",
+        ComputeEntryBindingFingerprint(ArtifactBindingKind::kTask, 11,
+                                       identity, generation, abi,
+                                       "kernel_a"))};
+    return plan.WithManifest(SelectedArtifactManifest(
+        ComputeFrozenTaskPlanFingerprint(plan, bindings), bindings));
+}
+
 bool TestFrozenDtoAndDeterministicTopology() {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -95,6 +111,62 @@ bool TestFrozenDtoAndDeterministicTopology() {
                                     {}));
     TEST_CHECK(plan.tasks().size() == 8,
                "public arrays must not mutate the frozen plan");
+    return true;
+}
+
+bool TestArtifactDeclarationContracts() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const FrozenTaskPlan raw = MakeValidPlan();
+    const FrozenTaskPlan frozen = WithDeclaredManifest(raw);
+    TEST_CHECK(frozen.manifest().defined() &&
+                   frozen.manifest().bindings().size() == 1 &&
+                   frozen.manifest().bindings()[0]->generation == 7 &&
+                   frozen.manifest().bindings()[0]->artifact_identity ==
+                       "artifact-key-canonical-v1",
+               "frozen plan must carry the trusted caller's per-task artifact declaration");
+
+    const String identity("artifact-key-canonical-v1");
+    const String abi("exact-abi-v1");
+    const SelectedArtifactBinding wrong_generation(
+        ArtifactBindingKind::kTask, 11, identity, 0, abi, "kernel_a",
+        ComputeEntryBindingFingerprint(ArtifactBindingKind::kTask, 11,
+                                       identity, 0, abi, "kernel_a"));
+    const Array<SelectedArtifactBinding> wrong_bindings{wrong_generation};
+    TEST_CHECK(Throws([&] {
+                   (void)raw.WithManifest(SelectedArtifactManifest(
+                       ComputeFrozenTaskPlanFingerprint(raw, wrong_bindings),
+                       wrong_bindings));
+               }),
+               "manifest generation must match its kernel task");
+
+    const SelectedArtifactBinding binding =
+        frozen.manifest().bindings()[0];
+    TEST_CHECK(Throws([&] {
+                   (void)raw.WithManifest(SelectedArtifactManifest(
+                       "wrong-plan-fingerprint", {binding}));
+               }),
+               "frozen task plan fingerprint drift must fail");
+
+    const Device cpu = Device::CPU();
+    const ExecutablePlan ordered(
+        {ValueSpec(0, 0, {1}, Float32(), cpu, true),
+         ValueSpec(1, 1, {1}, Float32(), cpu, false, false, true)},
+        {KernelCall("entry", {0}, {1})}, {0}, {}, {1});
+    const String call_identity("artifact-call-canonical-v1");
+    const String call_abi("call-exact-abi-v1");
+    const SelectedArtifactBinding call_binding(
+        ArtifactBindingKind::kCall, 0, call_identity, 0, call_abi, "entry",
+        ComputeEntryBindingFingerprint(ArtifactBindingKind::kCall, 0,
+                                       call_identity, 0, call_abi, "entry"));
+    const Array<SelectedArtifactBinding> call_bindings{call_binding};
+    const PlanVariant variant(
+        ordered, SelectedArtifactManifest(
+                     ComputePlanVariantFingerprint(ordered, call_bindings),
+                     call_bindings));
+    TEST_CHECK(variant.manifest().bindings()[0]->entry_symbol == "entry" &&
+                   !std::string(variant.manifest()->plan_fingerprint).empty(),
+               "PlanVariant must carry one structurally complete caller declaration per call");
     return true;
 }
 
@@ -336,6 +408,8 @@ int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"frozen_dto_and_deterministic_topology",
          TestFrozenDtoAndDeterministicTopology},
+        {"artifact_declaration_contracts",
+         TestArtifactDeclarationContracts},
         {"task_kind_contracts", TestTaskKindContracts},
         {"static_exact_rejects_dynamic_dimensions",
          TestStaticExactRejectsDynamicDimensions},

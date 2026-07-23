@@ -10,6 +10,7 @@
 #include "kxc/compiler/foundation_contract.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
+#include "kxc/runtime/task_plan.h"
 #include "kxc/support/container.h"
 #include "kxc/relay/relay.h"
 
@@ -21,6 +22,9 @@ struct CompiledGraph final {
     runtime::ExecutablePlan plan;
     // Compiler::Compile populates this with production-backed cache pins.
     std::vector<ArtifactPin> artifact_pins;
+    // Compiler declares pin identities and retains those pins in the lease.
+    // Runtime observes the declaration but cannot authenticate its provenance.
+    runtime::PlanVariant variant;
 };
 
 /*!

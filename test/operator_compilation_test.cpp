@@ -4,6 +4,8 @@
 
 #include <cstdint>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -464,13 +466,121 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
             adapter.Lookup(pin.handle().record().artifact_key).kind ==
                 api::ArtifactLookupKind::kHit;
     }
+    bool compiler_declaration_matches_pins = second.variant.defined() &&
+        second.variant.manifest().retention_lease() != nullptr &&
+        second.variant.manifest().bindings().size() ==
+            second.artifact_pins.size();
+    if (compiler_declaration_matches_pins) {
+        const auto bindings = second.variant.manifest().bindings();
+        for (size_t index = 0; index < bindings.size(); ++index) {
+            compiler_declaration_matches_pins =
+                compiler_declaration_matches_pins &&
+                bindings[index]->generation == 0 &&
+                bindings[index]->invocation_id ==
+                    static_cast<int64_t>(index) &&
+                bindings[index]->artifact_identity ==
+                    second.artifact_pins[index]
+                        .handle()
+                        .record()
+                        .artifact_key.canonical_bytes();
+        }
+    }
     TEST_CHECK(first.module.entry_count() == 2 &&
                    second.module.entry_count() == 2 &&
                    public_pins_are_production_backed &&
+                   compiler_declaration_matches_pins &&
                    after_first.misses == 2 && after_first.hits == 0 &&
                    after_first.entries == 2 && after_second.misses == 2 &&
                    after_second.hits == 2,
                "repeat compilation should return public pins from the production cache");
+    return true;
+}
+
+bool TestProductionCompileVariantRuntimeE2E() {
+    using namespace kxc;
+    api::internal::ClearPrimitiveCacheForTesting();
+    const api::ProductionArtifactCacheAdapter adapter;
+    std::optional<runtime::RuntimeSession> session;
+    std::optional<runtime::RunAsyncResult> run_result;
+    std::weak_ptr<const void> retained_production_lease;
+    std::vector<std::string> expected_identities;
+    size_t pin_count = 0;
+
+    {
+        const GraphFixture chain = MakeFixtures()[0];
+        api::CompiledGraph compiled = api::Compiler::Compile(
+            chain.function,
+            api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+        pin_count = compiled.artifact_pins.size();
+        const runtime::SelectedArtifactManifest declaration =
+            compiled.variant.manifest();
+        retained_production_lease = declaration.retention_lease();
+        const Array<runtime::SelectedArtifactBinding> bindings =
+            declaration.bindings();
+        TEST_CHECK(pin_count == chain.expected_compute_calls &&
+                       bindings.size() == pin_count &&
+                       declaration.retention_lease() != nullptr &&
+                       adapter.stats().active_pins == pin_count,
+                   "Compiler must assemble a production-backed declaration and lease");
+        for (size_t index = 0; index < pin_count; ++index) {
+            const std::string identity =
+                compiled.artifact_pins[index]
+                    .handle()
+                    .record()
+                    .artifact_key.canonical_bytes();
+            TEST_CHECK(bindings[index]->invocation_id ==
+                               static_cast<int64_t>(index) &&
+                           bindings[index]->generation == 0 &&
+                           std::string(bindings[index]->artifact_identity) ==
+                               identity,
+                       "Compiler declaration must match each production pin");
+            expected_identities.push_back(identity);
+        }
+
+        session.emplace(compiled.module, compiled.variant,
+                        runtime::RuntimeExecutionMode::kTaskDAG);
+#if KXC_ENABLE_REGION_TASK_DAG
+        const bool selection_ok =
+            session->UsesTaskDAG() &&
+            session->TaskDAGSelection().fallback_reason ==
+                runtime::FallbackReason::kNone;
+#else
+        const bool selection_ok =
+            !session->UsesTaskDAG() &&
+            session->TaskDAGSelection().fallback_reason ==
+                runtime::FallbackReason::kFeatureDisabled;
+#endif
+        const Array<runtime::SelectedArtifactBinding> session_bindings =
+            session->artifact_manifest().bindings();
+        bool session_declaration_matches =
+            session_bindings.size() == expected_identities.size();
+        for (size_t index = 0;
+             session_declaration_matches && index < session_bindings.size();
+             ++index) {
+            session_declaration_matches =
+                std::string(session_bindings[index]->artifact_identity) ==
+                expected_identities[index];
+        }
+        TEST_CHECK(selection_ok && session_declaration_matches,
+                   "RuntimeSession must preserve the production declaration");
+
+        run_result.emplace(session->RunAsync(
+            {FilledTensor(1.0f), FilledTensor(2.0f), FilledTensor(3.0f)},
+            DeviceStream::Default(Device::CPU())));
+    }
+
+    session.reset();
+    TEST_CHECK(run_result && run_result->outputs.size() == 1 &&
+                   TensorEquals(run_result->outputs[0], 9.0f) &&
+                   !retained_production_lease.expired() &&
+                   adapter.stats().active_pins == pin_count,
+               "completion must retain production pins and the numeric result");
+    run_result->completion.Wait();
+    run_result->completion = AsyncOperation();
+    TEST_CHECK(retained_production_lease.expired() &&
+                   adapter.stats().active_pins == 0,
+               "production pin lease must release with completion ownership");
+    api::internal::ClearPrimitiveCacheForTesting();
     return true;
 }
 
@@ -531,6 +641,8 @@ int main() {
          TestMultiOutputExecutesNumerically},
         {"primitive_cache_uses_full_stable_identity",
          TestPrimitiveCacheUsesFullStableIdentity},
+        {"production_compile_variant_runtime_e2e",
+         TestProductionCompileVariantRuntimeE2E},
         {"primitive_cache_reuses_renumbered_unit",
          TestPrimitiveCacheReusesRenumberedUnit},
 #endif
