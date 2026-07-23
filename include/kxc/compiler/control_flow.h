@@ -22,21 +22,37 @@ namespace kxc::api {
  */
 runtime::ControlPlan LowerRelayToControlPlan(Function function);
 
-/*! \brief One ControlPlan kernel binding: fixture revision or retained production authority. */
+/*! \brief Immutable process-local production selection retained by the runtime.
+ *
+ * This is deliberately not authentication or provenance: it is a typed lifetime
+ * binding minted only by Compiler::CompileControlFlowExact in this process.
+ */
+class ControlFlowArtifactLease final {
+public:
+    std::uint64_t generation() const noexcept;
+    bool Covers(runtime::TaskId task_id, const String& entry_symbol,
+                const std::string& signature_digest,
+                const std::string& launch_metadata_digest) const;
+
+private:
+    struct Entry;
+    struct State;
+    explicit ControlFlowArtifactLease(std::shared_ptr<const State> state);
+    friend class Compiler;
+    std::shared_ptr<const State> state_;
+};
+
+/*! \brief One ControlPlan kernel binding: fixture revision or compiler-minted lease. */
 struct ControlKernelBinding final {
     runtime::TaskId task_id{-1};
     CompiledModule module;
     String entry_symbol;
     /*! \brief Legacy fixture label; set only for fixture bindings. */
     std::uint64_t binding_revision{0};
-    /*! \brief Exact input-then-constant ABI ids, preserving source order per role. */
+    /*! \brief Exact physical input-then-constant ABI ids, first-occurrence unique. */
     std::vector<runtime::ValueId> abi_non_output_value_ids;
-    /*! \brief Supplied control-plane generation for a production selection. */
-    std::uint64_t authority_generation{0};
-    /*! \brief Supplied non-empty control-plane lease identity for production. */
-    std::string authority_lease;
-    /*! \brief Opaque required production retention; runtime neither interprets nor calls it. */
-    std::shared_ptr<const void> retention_lease;
+    /*! \brief Compiler-minted process-local production lease; never caller labels. */
+    std::shared_ptr<const ControlFlowArtifactLease> production_lease;
 };
 
 /*! \brief Binds a verified ControlPlan v2 into runtime-only execution schema v1.
@@ -50,10 +66,5 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
     const runtime::ControlPlan& plan,
     const std::vector<ControlKernelBinding>& bindings);
 
-/*! \brief Required, externally supplied authority for gated production binding. */
-struct ControlFlowArtifactAuthority final {
-    std::uint64_t generation{0};
-    std::string lease_id;
-};
 
 }  // namespace kxc::api

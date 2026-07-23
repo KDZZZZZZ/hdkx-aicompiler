@@ -385,22 +385,34 @@ private:
         task.source_locator = path;
         const runtime::TaskId task_id = AddTask(region, std::move(task));
         Array<Var> parameters;
-        std::unordered_set<const Object*> seen_parameters;
-        for (const Expr& argument : call->args) {
-            if (argument.As<ConstantNode>()) continue;
+        Array<Expr> substituted_arguments;
+        std::unordered_map<const Object*, Expr> substitutions;
+        for (std::size_t index = 0; index < call->args.size(); ++index) {
+            const Expr& argument = call->args[index];
+            if (argument.As<ConstantNode>()) {
+                substituted_arguments.push_back(argument);
+                continue;
+            }
             const auto* variable = argument.As<VarNode>();
-            if (!variable) {
-                Fail(path, "frozen kernel sidecar requires ANF atomic arguments");
+            if (!variable || !argument.checked_type().defined()) {
+                Fail(path, "frozen kernel sidecar requires typed ANF atomic arguments");
             }
-            if (seen_parameters.insert(argument.get()).second) {
-                parameters.push_back(Var(ObjectRef(argument)));
+            auto found = substitutions.find(argument.get());
+            if (found == substitutions.end()) {
+                Var fresh("control_task_" + std::to_string(task_id) + "_arg_" +
+                              std::to_string(parameters.size()),
+                          argument.checked_type());
+                found = substitutions.emplace(argument.get(), Expr(fresh)).first;
+                parameters.push_back(std::move(fresh));
             }
+            substituted_arguments.push_back(found->second);
         }
-        // Preserve the real Call object graph (Op, attrs, constants, and lexical
-        // operands) rather than trying to reconstruct it from kernel_ref text.
+        // Branch-local and ANF lexical Vars are replaced with fresh typed function
+        // parameters.  The task's ValueId ABI is retained separately above.
         kernel_functions_.emplace(
             task_id, Function(std::move(parameters),
-                              Call(call->op, call->args, call->attrs)));
+                              Call(call->op, std::move(substituted_arguments),
+                                   call->attrs)));
         return outputs;
     }
 

@@ -22,9 +22,7 @@ public:
     BoundControlKernel() = default;
     BoundControlKernel(api::CompiledModule module, String entry_symbol,
                        std::uint64_t binding_revision,
-                       std::uint64_t authority_generation = 0,
-                       std::string authority_lease = {},
-                       std::shared_ptr<const void> retention_lease = {});
+                       std::shared_ptr<const void> production_lease = {});
 
     void Validate() const;
     AsyncOperation Launch(const Array<NDArray>& ordered_arguments,
@@ -37,9 +35,6 @@ public:
     bool MatchesConstant(const String& key, const NDArray& candidate) const;
     /*! \brief Fixture-only caller label, with no authority, freshness, or hot-swap proof. */
     std::uint64_t binding_revision() const;
-    /*! \brief Control-plane authority, when this is a production binding. */
-    std::uint64_t authority_generation() const;
-    const std::string& authority_lease() const;
     Device device() const;
     bool defined() const noexcept;
 
@@ -98,7 +93,7 @@ struct ControlExecutionTask {
     ControlExecutionTaskKind kind{ControlExecutionTaskKind::kKernel};
     /*! \brief Unique task boundary values, unlike argument_values. */
     std::vector<ControlExecutionValueId> inputs;
-    /*! \brief Full ABI-order value ids, including outputs; duplicates matter. */
+    /*! \brief Physical ABI-order value ids, including outputs; unique per role. */
     std::vector<ControlExecutionValueId> argument_values;
     std::vector<ControlExecutionValueId> outputs;
     std::vector<ControlExecutionTaskId> dependencies;

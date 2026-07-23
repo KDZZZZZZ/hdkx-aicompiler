@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "kxc/compiler/compile_config.h"
@@ -52,7 +53,8 @@ struct CompiledGraph final {
 struct CompiledControlFlowGraph final {
     runtime::ControlExecutionPlan plan;
     std::vector<ArtifactPin> artifact_pins;
-    ControlFlowArtifactAuthority authority;
+    // Process-local lifetime binding, not caller-supplied authority or provenance.
+    std::shared_ptr<const ControlFlowArtifactLease> artifact_lease;
 };
 
 /*!
@@ -74,13 +76,13 @@ public:
     /*! \brief Explicit default-OFF production path for static CPU Relay If.
      *
      * Requires KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=ON, CPU:0/default
-     * stream, real available backend artifacts, and nonzero authority
-     * generation plus a nonempty lease_id.  Compiler::Compile remains the
-     * static-dataflow API and continues to reject Relay If.
+     * stream, and real available backend artifacts.  The compiler mints and
+     * retains a process-local typed artifact lease; it is not authentication
+     * or external provenance.  Compiler::Compile remains the static-dataflow
+     * API and continues to reject Relay If.
      */
     static CompiledControlFlowGraph CompileControlFlowExact(
-        Function func, CompileConfig config,
-        ControlFlowArtifactAuthority authority);
+        Function func, CompileConfig config);
 
     /*! \brief Builds the canonical whole-graph compile identity used by adapters. */
     static ArtifactKey BuildGraphArtifactKey(const Function& func,
