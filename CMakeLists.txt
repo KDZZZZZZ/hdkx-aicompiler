@@ -44,6 +44,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/capability.h
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
+  include/kxc/compiler/control_flow.h
   include/kxc/compiler/foundation_contract.h
   include/kxc/compiler/identity.h
   include/kxc/compiler/pipeline.h
@@ -79,12 +80,14 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/relay/transforms/fold_constant.h
   include/kxc/relay/transforms/fold_tuple_get_item.h
   include/kxc/relay/transforms/infer_type.h
+  include/kxc/relay/transforms/normalize_to_anf.h
   include/kxc/relay/transforms/pipeline.h
   include/kxc/relay/transforms/remove_standalone_reshapes.h
   include/kxc/relay/transforms/simplify_expr.h
   include/kxc/relay/type_infer.h
   include/kxc/relay/visitor.h
   include/kxc/runtime/compiled_module.h
+  include/kxc/runtime/control_plan.h
   include/kxc/runtime/device.h
   include/kxc/runtime/device_api.h
   include/kxc/runtime/device_info.h
@@ -319,6 +322,7 @@ set(KXC_IR_SOURCES
 )
 
 set(KXC_RUNTIME_CORE_SOURCES
+  src/runtime/control_plan.cc
   src/runtime/device.cc
   src/runtime/device_api.cc
   src/runtime/device_stream.cc
@@ -386,6 +390,7 @@ set(KXC_RELAY_PASS_SOURCES
   src/relay/transforms/remove_standalone_reshapes.cc
   src/relay/transforms/fold_tuple_get_item.cc
   src/relay/transforms/infer_type.cc
+  src/relay/transforms/normalize_to_anf.cc
   src/relay/transforms/eliminate_common_subexpr.cc
   src/relay/transforms/eliminate_dead_let.cc
   src/relay/transforms/capture_post_dfs_index_in_spans.cc
@@ -443,6 +448,8 @@ set(KXC_COMPILER_SOURCES
   src/compiler/cache/primitive_cache.cc
   src/compiler/capability.cc
   src/compiler/compile_config.cc
+  src/compiler/control_flow/executable_capability.cc
+  src/compiler/control_flow/relay_control_plan.cc
   src/compiler/compile_state.cc
   src/compiler/foundation_contract.cc
   src/compiler/identity.cc
@@ -832,7 +839,12 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(device_info_test test/device_info_test.cpp)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
+  kxc_add_runtime_exe(control_plan_test test/control_plan_test.cpp)
+  kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
+  kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
+  kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
+  kxc_add_runtime_exe(relay_control_plan_test test/relay_control_plan_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
@@ -846,6 +858,28 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
   kxc_add_runtime_exe(runtime_session_test test/runtime_session_test.cpp)
   kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
+
+  set(KXC_CONTROL_FLOW_TESTS
+    relay_anf_test
+    executable_capability_test
+    control_plan_test
+    control_plan_reference_executor_test
+    relay_control_plan_test)
+  foreach(_kxc_control_flow_test IN LISTS KXC_CONTROL_FLOW_TESTS)
+    add_test(NAME ${_kxc_control_flow_test}
+      COMMAND "$<TARGET_FILE:${_kxc_control_flow_test}>")
+    set_tests_properties(${_kxc_control_flow_test} PROPERTIES
+      LABELS "control-flow;cpu"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+  endforeach()
+  add_custom_target(run_control_flow_tests
+    COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
+            -L control-flow
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    DEPENDS ${KXC_CONTROL_FLOW_TESTS}
+    USES_TERMINAL
+    COMMENT "Run control-flow CTest suite")
+
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
     set(KXC_ONNX_IMPORT_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.params.bin")

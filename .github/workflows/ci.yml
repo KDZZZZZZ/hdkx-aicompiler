@@ -62,7 +62,7 @@ jobs:
       - name: Build CPU targets
         run: cmake --build out/build/ci-cpu --parallel 2
 
-      - name: Run all CPU/core CTest checks
+      - name: Run all CPU foundation CTest checks
         run: >
           ctest --test-dir out/build/ci-cpu --output-on-failure
           --no-tests=error --label-regex '(^|;)cpu(;|$)'

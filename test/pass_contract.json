@@ -231,6 +231,24 @@
         "checked_type"
       ]
     },
+    "relay.normalize_to_anf": {
+      "name": "normalize_to_anf",
+      "schema_version": 1,
+      "dialect": "relay",
+      "scope": "graph",
+      "phase": "relay_optimize",
+      "opt_level": 0,
+      "implementation_key": "kxc.relay.transform.normalize_to_anf",
+      "deterministic": true,
+      "idempotent": true,
+      "target_dependent": false,
+      "required_invariants": [
+        "checked_type"
+      ],
+      "produced_invariants": [
+        "anf"
+      ]
+    },
     "tir.fold_constant": {
       "name": "fold_constant",
       "schema_version": 1,

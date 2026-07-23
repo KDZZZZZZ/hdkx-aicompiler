@@ -15,6 +15,7 @@
 #include "kxc/profiling/profiling.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
+#include "kxc/relay/transforms/normalize_to_anf.h"
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/pipeline.h"
@@ -352,9 +353,10 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
                 "PipelineResolver cannot both enable and disable pass: " + name);
         }
     }
-    if (IsCompilerPipeline(request) && disabled.count("infer_type")) {
+    if (IsCompilerPipeline(request) &&
+        (disabled.count("infer_type") || disabled.count("normalize_to_anf"))) {
         throw std::invalid_argument(
-            "PipelineResolver cannot disable mandatory compiler infer_type steps");
+            "PipelineResolver cannot disable mandatory compiler infer_type or ANF steps");
     }
 
     Array<String> ordered;
@@ -383,6 +385,7 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
     }
     if (compiler_pipeline && request.dialect == IRDialect::kRelay) {
         ordered.push_back(String("infer_type"));
+        append_unique(String("normalize_to_anf"));
     }
 
     std::set<std::string> invariants =
@@ -569,7 +572,9 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
 
 bool PipelineInvariantValidator::IsExecutable(
     IRDialect dialect, const String& invariant) {
-    return dialect == IRDialect::kRelay && AsString(invariant) == "checked_type";
+    if (dialect != IRDialect::kRelay) return false;
+    const std::string name = AsString(invariant);
+    return name == "checked_type" || name == "anf";
 }
 
 void PipelineInvariantValidator::ValidateProductionContract(
@@ -606,6 +611,8 @@ void PipelineInvariantValidator::ValidateRelay(
                         "Relay invariant 'checked_type' is stale or inconsistent");
                 }
             }
+        } else if (name == "anf") {
+            relay::VerifyANF(function);
         }
     }
 }

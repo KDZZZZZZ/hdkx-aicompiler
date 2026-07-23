@@ -3,7 +3,10 @@
  */
 
 #include "../internal/value_graph.h"
+#include "../internal/executable_capability.h"
 
+#include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -12,9 +15,21 @@
 namespace kxc::api::internal {
 namespace {
 
+size_t TensorLeafCount(const Type& type) {
+    if (type.As<TensorTypeNode>()) return 1;
+    if (const auto* tuple = type.As<TupleTypeNode>()) {
+        size_t count = 0;
+        for (const Type& field : tuple->fields) count += TensorLeafCount(field);
+        return count;
+    }
+    throw std::invalid_argument(
+        "BuildValueGraph requires TensorType or nested TupleType leaves");
+}
+
 class ValueGraphBuilder {
 public:
-    explicit ValueGraphBuilder(Function function) {
+    ValueGraphBuilder(Function function, Device execution_device)
+        : execution_device_(std::move(execution_device)) {
         if (!function.defined()) {
             throw std::invalid_argument("BuildValueGraph requires a defined Function");
         }
@@ -22,6 +37,9 @@ public:
     }
 
     ValueGraph Build() {
+        VerifyExecutableCapability(
+            graph_.function,
+            StaticDataflowExecutableCapabilities(execution_device_));
         for (const auto& parameter : graph_.function->params) {
             if (!parameter->type_annotation.As<TensorTypeNode>()) {
                 throw std::invalid_argument(
@@ -49,6 +67,8 @@ public:
 
 private:
     ValueGraph graph_;
+    Device execution_device_;
+    std::unordered_map<const Object*, std::vector<int64_t>> bound_value_ids_;
 
     int64_t AddValue(const Expr& source, ValueOrigin origin, int64_t output_index,
                      const Type& type) {
@@ -74,19 +94,47 @@ private:
         if (!expr.defined()) {
             throw std::invalid_argument("BuildValueGraph encountered undefined Relay Expr");
         }
-        const auto memo_it = graph_.value_ids_by_expr.find(expr.get());
-        if (memo_it != graph_.value_ids_by_expr.end()) return memo_it->second;
-
         if (expr.As<VarNode>()) {
+            const auto bound_it = bound_value_ids_.find(expr.get());
+            if (bound_it != bound_value_ids_.end()) {
+                // Keep the Var identity queryable by unit lowering while resolving
+                // its let value exactly once through the lexical environment.
+                graph_.value_ids_by_expr[expr.get()] = bound_it->second;
+                return bound_it->second;
+            }
+            const auto parameter_it = graph_.value_ids_by_expr.find(expr.get());
+            if (parameter_it != graph_.value_ids_by_expr.end()) {
+                return parameter_it->second;
+            }
             throw std::invalid_argument(
                 "BuildValueGraph encountered a free or unbound Var");
         }
+        const auto memo_it = graph_.value_ids_by_expr.find(expr.get());
+        if (memo_it != graph_.value_ids_by_expr.end()) return memo_it->second;
+
         if (expr.As<ConstantNode>()) {
             return {AddValue(expr, ValueOrigin::kConstant, 0,
                              RequireCheckedType(expr, "Constant"))};
         }
         if (const auto* call = expr.As<CallNode>()) {
             return ResolveCall(expr, call);
+        }
+        if (const auto* let = expr.As<LetNode>()) {
+            const std::vector<int64_t> value_ids = Resolve(let->value);
+            const auto outer = bound_value_ids_.find(let->var.get());
+            const std::optional<std::vector<int64_t>> saved =
+                outer == bound_value_ids_.end()
+                    ? std::nullopt
+                    : std::optional<std::vector<int64_t>>(outer->second);
+            bound_value_ids_[let->var.get()] = value_ids;
+            const std::vector<int64_t> body_ids = Resolve(let->body);
+            if (saved) {
+                bound_value_ids_[let->var.get()] = *saved;
+            } else {
+                bound_value_ids_.erase(let->var.get());
+            }
+            graph_.value_ids_by_expr.emplace(expr.get(), body_ids);
+            return body_ids;
         }
         if (const auto* tuple = expr.As<TupleNode>()) {
             std::vector<int64_t> fields;
@@ -99,18 +147,34 @@ private:
         }
         if (const auto* get_item = expr.As<TupleGetItemNode>()) {
             const std::vector<int64_t> tuple_values = Resolve(get_item->tuple);
-            if (get_item->index < 0 ||
-                static_cast<size_t>(get_item->index) >= tuple_values.size()) {
+            const auto* tuple_type =
+                get_item->tuple.checked_type().As<TupleTypeNode>();
+            if (!tuple_type || get_item->index < 0 ||
+                static_cast<size_t>(get_item->index) >=
+                    tuple_type->fields.size()) {
                 throw std::invalid_argument(
-                    "TupleGetItem index is outside the stable value list");
+                    "TupleGetItem index is outside its checked TupleType");
             }
-            std::vector<int64_t> selected = {
-                tuple_values[static_cast<size_t>(get_item->index)]};
+            size_t begin = 0;
+            for (int index = 0; index < get_item->index; ++index) {
+                begin += TensorLeafCount(
+                    tuple_type->fields[static_cast<size_t>(index)]);
+            }
+            const size_t count = TensorLeafCount(
+                tuple_type->fields[static_cast<size_t>(get_item->index)]);
+            if (begin + count > tuple_values.size()) {
+                throw std::invalid_argument(
+                    "TupleGetItem checked type does not match flattened values");
+            }
+            std::vector<int64_t> selected(
+                tuple_values.begin() + static_cast<std::ptrdiff_t>(begin),
+                tuple_values.begin() +
+                    static_cast<std::ptrdiff_t>(begin + count));
             graph_.value_ids_by_expr.emplace(expr.get(), selected);
             return selected;
         }
         throw std::invalid_argument(
-            "BuildValueGraph supports parameters, constants, calls, tuples, and tuple fields");
+            "BuildValueGraph supports parameters, constants, calls, lets, tuples, and tuple fields");
     }
 
     Type RequireCheckedType(const Expr& expr, const char* kind) const {
@@ -199,8 +263,9 @@ bool IsOrdinaryCompute(relay::OperatorLoweringKind kind) {
            kind == relay::OperatorLoweringKind::kMultiTE;
 }
 
-ValueGraph BuildValueGraph(const Function& function) {
-    return ValueGraphBuilder(function).Build();
+ValueGraph BuildValueGraph(const Function& function,
+                           Device execution_device) {
+    return ValueGraphBuilder(function, std::move(execution_device)).Build();
 }
 
 }  // namespace kxc::api::internal

@@ -26,6 +26,7 @@
 #include "kxc/relay/transforms/fold_constant.h"
 #include "kxc/relay/transforms/fold_tuple_get_item.h"
 #include "kxc/relay/transforms/infer_type.h"
+#include "kxc/relay/transforms/normalize_to_anf.h"
 #include "kxc/relay/transforms/remove_standalone_reshapes.h"
 #include "kxc/relay/transforms/simplify_expr.h"
 #include "../../pass/generated/pass_contract.inc"
@@ -74,6 +75,7 @@ const std::vector<RelayPassBinding>& GetRelayPassBindings() {
         {"kxc.relay.transform.capture_post_dfs_index_in_spans",
          CapturePostDfsIndexInSpansPass},
         {"kxc.relay.transform.infer_type", InferTypePass},
+        {"kxc.relay.transform.normalize_to_anf", NormalizeToANF},
     };
     return bindings;
 }
@@ -263,6 +265,11 @@ KXC_REGISTER_GLOBAL("kxc.relay.transform.annotate_memory_scope")
 KXC_REGISTER_GLOBAL("kxc.relay.transform.infer_type")
     .set_body(ToPackedFunc([](Function func) -> ObjectRef {
         return ObjectRef(InferTypePass(func));
+    }));
+
+KXC_REGISTER_GLOBAL("kxc.relay.transform.normalize_to_anf")
+    .set_body(ToPackedFunc([](Function func) -> ObjectRef {
+        return ObjectRef(NormalizeToANF(func));
     }));
 
 }  // namespace relay

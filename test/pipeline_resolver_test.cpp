@@ -101,7 +101,7 @@ bool TestProductionPlanHasExplicitInferBoundaries() {
     using namespace kxc;
     using namespace kxc::api;
     const Target cpu = BuildTarget(Device::CPU());
-    const std::vector<size_t> relay_sizes = {2, 5, 8, 8};
+    const std::vector<size_t> relay_sizes = {3, 6, 9, 9};
     const std::vector<size_t> tir_sizes = {0, 2, 4, 8};
     for (int level = 0; level <= 3; ++level) {
         const NormalizedPipeline relay =
@@ -114,11 +114,14 @@ bool TestProductionPlanHasExplicitInferBoundaries() {
                        tir.ordered_passes.size() == tir_sizes[level],
                    "compiler plans must contain exactly their executed pass steps");
         TEST_CHECK(relay.ordered_passes[0] == String("infer_type") &&
-                       relay.ordered_passes[relay.ordered_passes.size() - 1] ==
+                       relay.ordered_passes[relay.ordered_passes.size() - 2] ==
                            String("infer_type") &&
+                       relay.ordered_passes[relay.ordered_passes.size() - 1] ==
+                           String("normalize_to_anf") &&
                        relay.execution_steps.front().occurrence == 0 &&
-                       relay.execution_steps.back().occurrence == 1,
-                   "production Relay policy must intentionally retain pre/post InferType");
+                       relay.execution_steps[relay.execution_steps.size() - 2].occurrence == 1 &&
+                       relay.execution_steps.back().occurrence == 0,
+                   "production Relay policy must retain pre/post InferType and finish with ANF");
     }
     const NormalizedPipeline plan =
         PipelineResolver::Resolve(Request(IRDialect::kRelay, 1, cpu));
@@ -245,8 +248,11 @@ bool TestCompilerArtifactIdentityUsesExecutedCanonicalPlan() {
                    contract.relay_pipeline.ordered_passes[0] ==
                        String("infer_type") &&
                    contract.relay_pipeline.ordered_passes[
+                       contract.relay_pipeline.ordered_passes.size() - 2] ==
+                       String("infer_type") &&
+                   contract.relay_pipeline.ordered_passes[
                        contract.relay_pipeline.ordered_passes.size() - 1] ==
-                       String("infer_type"),
+                       String("normalize_to_anf"),
                "artifact identity must use the exact executed Relay/lowering/TIR plan");
     return true;
 }
@@ -261,16 +267,21 @@ bool TestCanonicalChangesAndNoHiddenCompatibilityPass() {
     const NormalizedPipeline changed = PipelineResolver::Resolve(request);
     TEST_CHECK(baseline.fingerprint != changed.fingerprint &&
                    baseline.canonical_bytes != changed.canonical_bytes &&
-                   changed.ordered_passes.size() == 4 &&
+                   changed.ordered_passes.size() == 5 &&
                    changed.ordered_passes[0] == String("infer_type") &&
+                   changed.ordered_passes[changed.ordered_passes.size() - 2] ==
+                       String("infer_type") &&
                    changed.ordered_passes[changed.ordered_passes.size() - 1] ==
-                       String("infer_type"),
+                       String("normalize_to_anf"),
                "the exact ordered execution steps must determine canonical identity");
 
     PipelineRequest forbidden = Request(IRDialect::kRelay, 0, cpu);
     forbidden.disabled = {String("infer_type")};
     TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(forbidden); }),
                "mandatory compiler InferType cannot be hidden by a compatibility view");
+    forbidden.disabled = {String("normalize_to_anf")};
+    TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(forbidden); }),
+               "mandatory compiler ANF normalization cannot be disabled");
     return true;
 }
 

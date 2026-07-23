@@ -313,9 +313,28 @@ private:
                      "If is representable Relay IR but not executable by the static plan");
             return;
         }
-        if (expr.As<LetNode>()) {
-            AddIssue(locator, "Let", "control_flow.let",
-                     "Let is representable Relay IR but not executable by the value graph");
+        if (const auto* let = expr.As<LetNode>()) {
+            Visit(let->value, locator + "/value");
+            if (!let->var.defined()) {
+                AddIssue(locator + "/var", "Var", "lexical_let_binding",
+                         "Let binder is undefined");
+                return;
+            }
+            const Type binder_type = let->var.checked_type().defined()
+                                         ? let->var.checked_type()
+                                         : let->var->type_annotation;
+            CheckType(binder_type, locator + "/var", "Var", true);
+            if (let->value.checked_type().defined() && binder_type.defined() &&
+                !TypeEqual(let->value.checked_type(), binder_type)) {
+                AddIssue(locator + "/var", "Var", "typed_let_binding",
+                         "Let binder type does not match its value");
+            }
+            const bool already_bound = bound_vars_.count(let->var.get()) != 0;
+            bound_vars_.insert(let->var.get());
+            Visit(let->body, locator + "/body");
+            if (!already_bound) bound_vars_.erase(let->var.get());
+            CheckType(expr.checked_type(), locator, "Let",
+                      request_.require_checked_types);
             return;
         }
         if (expr.As<FunctionNode>()) {

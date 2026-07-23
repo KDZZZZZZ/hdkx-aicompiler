@@ -227,6 +227,27 @@ inline const std::vector<PassSpec>& Specs() {
         }
         {
             PassSpec spec;
+            spec.name = String("normalize_to_anf");
+            spec.schema_version = 1;
+            spec.dialect = ParseIRDialect("relay");
+            spec.scope = ParsePassScope("graph");
+            spec.phase = String("relay_optimize");
+            spec.opt_level = 0;
+            spec.required_invariants = {String("checked_type")};
+            spec.produced_invariants = {String("anf")};
+            spec.declarative_only_invariants = {};
+            spec.preserved_analyses = {};
+            spec.invalidated_analyses = {};
+            spec.may_change_ir = true;
+            spec.deterministic = true;
+            spec.idempotent = true;
+            spec.thread_safe = false;
+            spec.target_dependent = false;
+            spec.implementation_key = String("kxc.relay.transform.normalize_to_anf");
+            result.push_back(std::move(spec));
+        }
+        {
+            PassSpec spec;
             spec.name = String("fold_constant");
             spec.schema_version = 1;
             spec.dialect = ParseIRDialect("tir");

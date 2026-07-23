@@ -754,7 +754,10 @@ Array<String> Compiler::RelayPassPolicy(int opt_level) {
     Array<String> compatibility;
     for (const String& pass :
          PipelineResolver::Resolve(request).ordered_passes) {
-        if (std::string(pass) != "infer_type") compatibility.push_back(pass);
+        const std::string name(pass);
+        if (name != "infer_type" && name != "normalize_to_anf") {
+            compatibility.push_back(pass);
+        }
     }
     return compatibility;
 }

@@ -173,9 +173,9 @@ bool TestLetFutureModeAndDynamicFailClosed() {
                           "model/let", "",
                           CapabilityBoundary::kCompilerEntry,
                           CapabilityMode::kStaticExact, false, 2});
-    TEST_CHECK(let_result.status == CapabilityStatus::kUnsupported &&
-                   HasIssue(let_result, "control_flow.let"),
-               "Let must not pass because InferType can represent it");
+    TEST_CHECK(let_result.status != CapabilityStatus::kUnsupported &&
+                   !HasIssue(let_result, "control_flow.let"),
+               "lexical Let must remain executable after mandatory ANF normalization");
 
     const CapabilityResult mode_result = CapabilityVerifier::Verify(
         CapabilityRequest{TypedAdd(), target, "model/add", "",
@@ -235,7 +235,8 @@ bool TestRealGemmLoweringRejectionIsNotSupported() {
                        CapabilityStatus::kEligibleButNotExecutable &&
                    HasIssue(result, "per_unit_lowering") &&
                    result.Diagnostic().find("transA") != std::string::npos,
-               "nn_gemm transA must use the real lowering rejection");
+               "nn_gemm transA must use the real lowering rejection: " +
+                   result.Diagnostic());
     TEST_CHECK(ThrowsWith(
                    [&] {
                        (void)Compiler::Compile(
@@ -297,7 +298,8 @@ bool TestCustomBindingMismatchRejectedBySharedLowering() {
                        CapabilityStatus::kEligibleButNotExecutable &&
                    HasIssue(result, "per_unit_lowering") &&
                    result.Diagnostic().find("shape") != std::string::npos,
-               "custom TE output must match the inferred production boundary");
+               "custom TE output must match the inferred production boundary: " +
+                   result.Diagnostic());
     TEST_CHECK(ThrowsWith(
                    [&] {
                        (void)Compiler::Compile(
@@ -349,7 +351,8 @@ bool TestCudaReductionScheduleRejectedBeforeBackend() {
                    result.status ==
                        CapabilityStatus::kEligibleButNotExecutable &&
                    HasIssue(result, "target_schedule"),
-               "CUDA reduction must be rejected by the actual normalized schedule");
+               "CUDA reduction must be rejected by the actual normalized schedule: " +
+                   result.Diagnostic());
     return true;
 }
 

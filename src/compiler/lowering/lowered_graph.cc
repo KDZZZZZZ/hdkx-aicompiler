@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "../internal/te_to_tir.h"
 #include "kxc/compiler/capability.h"
@@ -116,8 +117,8 @@ const relay::OperatorSpec& ValidateUnitOperator(const ValueGraph& graph,
                                     op->name);
     }
     const auto* relation = std::any_cast<relay::FInferType>(&relation_it->second);
-    if (!relation) {
-        throw std::invalid_argument("Operator type relation binding has wrong type: " +
+    if (!relation || !*relation) {
+        throw std::invalid_argument("Operator type relation binding has wrong type or is empty: " +
                                     op->name);
     }
     Array<Type> argument_types;
@@ -139,20 +140,24 @@ const relay::OperatorSpec& ValidateUnitOperator(const ValueGraph& graph,
         throw std::invalid_argument("Operator output arity mismatch for op: " + op->name);
     }
     if (op->spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE) {
+        const auto lowering = op->attrs.find(op->spec.lowering_key);
+        const auto* lower =
+            lowering == op->attrs.end()
+                ? nullptr
+                : std::any_cast<relay::FRelayToTE>(&lowering->second);
         if (!unit.call.checked_type().As<TensorTypeNode>() ||
-            op->spec.lowering_key != "FRelayToTE" ||
-            op->attrs.find(op->spec.lowering_key) == op->attrs.end() ||
-            !std::any_cast<relay::FRelayToTE>(
-                &op->attrs.at(op->spec.lowering_key))) {
+            op->spec.lowering_key != "FRelayToTE" || !lower || !*lower) {
             throw std::invalid_argument("Single-output lowering contract mismatch for op: " +
                                         op->name);
         }
     } else {
+        const auto lowering = op->attrs.find(op->spec.lowering_key);
+        const auto* lower =
+            lowering == op->attrs.end()
+                ? nullptr
+                : std::any_cast<relay::FRelayToTEMulti>(&lowering->second);
         if (!unit.call.checked_type().As<TupleTypeNode>() ||
-            op->spec.lowering_key != "FRelayToTEMulti" ||
-            op->attrs.find(op->spec.lowering_key) == op->attrs.end() ||
-            !std::any_cast<relay::FRelayToTEMulti>(
-                &op->attrs.at(op->spec.lowering_key))) {
+            op->spec.lowering_key != "FRelayToTEMulti" || !lower || !*lower) {
             throw std::invalid_argument("Multi-output lowering contract mismatch for op: " +
                                         op->name);
         }
@@ -192,28 +197,52 @@ Array<te::Tensor> InvokeCurrentCall(const CallNode* call,
     return outputs;
 }
 
-void ValidateLoweringOutputs(const ValueGraph& graph,
-                             const CompilationUnit& unit,
-                             const Array<te::Tensor>& outputs) {
+void ValidateTEOutputContracts(const ValueGraph& graph,
+                               const CompilationUnit& unit,
+                               const Array<te::Tensor>& outputs,
+                               const std::string& op_name) {
     if (outputs.size() != unit.output_value_ids.size()) {
         throw std::invalid_argument(
-            "Unit TE outputs do not match stable output value ids");
+            "Unit TE output count does not match stable output values for op: " +
+            op_name);
     }
-    for (size_t output_index = 0; output_index < outputs.size(); ++output_index) {
-        const ValueInfo& value =
-            GetValue(graph, unit.output_value_ids[output_index]);
-        const auto* expected = value.checked_type.As<TensorTypeNode>();
-        const te::Tensor& actual = outputs[output_index];
-        if (!expected || actual->dtype != TIRDataType(expected) ||
-            actual->shape.size() != expected->shape.size()) {
+    for (std::size_t i = 0; i < outputs.size(); ++i) {
+        const te::Tensor& output = outputs[i];
+        if (!output.defined()) {
             throw std::invalid_argument(
-                "Operator lowering output dtype/rank does not match checked_type");
+                "Unit TE output is undefined at index " + std::to_string(i) +
+                " for op: " + op_name);
         }
-        for (size_t dimension = 0; dimension < expected->shape.size(); ++dimension) {
-            const auto* extent = actual->shape[dimension].As<tir::IntImmNode>();
-            if (!extent || extent->value != expected->shape[dimension]) {
+        const ValueInfo& value = GetValue(graph, unit.output_value_ids[i]);
+        const auto* expected = value.checked_type.As<TensorTypeNode>();
+        if (!expected) {
+            throw std::invalid_argument(
+                "Stable unit output must have TensorType for op: " + op_name);
+        }
+        if (output->dtype != TIRDataType(expected)) {
+            throw std::invalid_argument(
+                "Unit TE output dtype mismatch at index " +
+                std::to_string(i) + " for op: " + op_name);
+        }
+        if (output->shape.size() != expected->shape.size()) {
+            throw std::invalid_argument(
+                "Unit TE output rank mismatch at index " +
+                std::to_string(i) + " for op: " + op_name);
+        }
+        for (std::size_t axis = 0; axis < expected->shape.size(); ++axis) {
+            const auto* extent = output->shape[axis].As<tir::IntImmNode>();
+            if (!extent) {
                 throw std::invalid_argument(
-                    "Operator lowering output shape does not match checked_type");
+                    "Unit TE output shape is not static at index " +
+                    std::to_string(i) + ", axis " + std::to_string(axis) +
+                    " for op: " + op_name);
+            }
+            if (expected->shape[axis] < 0 ||
+                extent->value != expected->shape[axis]) {
+                throw std::invalid_argument(
+                    "Unit TE output shape mismatch at index " +
+                    std::to_string(i) + ", axis " + std::to_string(axis) +
+                    " for op: " + op_name);
             }
         }
     }
@@ -283,7 +312,7 @@ relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
 
     const Array<te::Tensor> outputs =
         InvokeCurrentCall(call, spec, logical_inputs, unit.call.checked_type());
-    ValidateLoweringOutputs(graph, unit, outputs);
+    ValidateTEOutputContracts(graph, unit, outputs, spec.name);
     return relay::internal::LowerTensorGraphToTIR(
         abi_inputs, constants, outputs,
         relay::internal::PrimFuncIdentity{
@@ -304,7 +333,7 @@ LoweredGraph LowerGraph(Function function, Device device, Target target,
         true});
     LoweredGraph result;
     result.partitioned =
-        PartitionValueGraph(BuildValueGraph(function));
+        PartitionValueGraph(BuildValueGraph(function, device));
 
     for (const CompilationUnit& unit : result.partitioned.units) {
         relay::LoweredFunction lowered =

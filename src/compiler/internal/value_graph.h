@@ -51,6 +51,7 @@ struct ValueGraph {
 };
 
 bool IsOrdinaryCompute(relay::OperatorLoweringKind kind);
-ValueGraph BuildValueGraph(const Function& function);
+ValueGraph BuildValueGraph(const Function& function,
+                           Device execution_device = Device());
 
 }  // namespace kxc::api::internal
