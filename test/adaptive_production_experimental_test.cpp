@@ -1227,6 +1227,18 @@ private:
     bool consumed_{false};
 };
 
+class EveryGenerationHealth final : public v2::HealthAuthority {
+public:
+    v2::HealthDecision Evaluate(const v2::GenerationLease& lease) override {
+        return {lease.generation(), v2::HealthDisposition::kQuarantine,
+                "fixture-health", std::to_string(lease.generation())};
+    }
+    bool VerifyAndConsume(const v2::HealthDecision& decision,
+                          const v2::GenerationLease& lease) noexcept override {
+        return decision.generation == lease.generation();
+    }
+};
+
 bool TestV2WaitersCacheEvictionAndOverflow() {
     using namespace production_path;
     kxc::api::internal::ClearPrimitiveCacheForTesting();
@@ -1392,6 +1404,147 @@ bool TestV2CriticalAuditFixes() {
     return true;
 }
 
+bool TestV2BoundedFailureAndQuarantineMetadata() {
+    using namespace production_path;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest base = MakeRequest();
+    const std::vector<kxc::api::ArtifactKey> keys = SelectedKeys(base);
+    const auto distinct_request = [&](int token) {
+        kxc::api::CompileConfig config = kxc::api::CompileConfig::Create(
+            kxc::BuildTarget(kxc::Device::CPU()), token % 4);
+        std::vector<kxc::api::ArtifactKey> distinct_keys = keys;
+        distinct_keys[0] = MakePrimitiveKey(
+            config, 0, "adaptive-v2-metadata-" + std::to_string(token));
+        return MakeRequestFromConfig(
+            MakeFunction(), config, 2, 16, 1, std::move(distinct_keys));
+    };
+    const auto same_route_request = [&](int opt_level) {
+        const kxc::api::CompileConfig config = kxc::api::CompileConfig::Create(
+            kxc::BuildTarget(kxc::Device::CPU()), opt_level);
+        return MakeRequestFromConfig(MakeFunction(), config, 2, 16, 1, keys);
+    };
+
+    std::atomic<uint64_t> negative_evicted_events{0};
+    v2::Options transient_options;
+    transient_options.worker_count = 1;
+    transient_options.max_negative_cache_entries = 3;
+    transient_options.max_negative_diagnostic_bytes = 32;
+    transient_options.transient_backoff = std::chrono::seconds(10);
+    transient_options.observer = [&](const v2::Event& event) {
+        if (event.kind == v2::EventKind::kNegativeEvicted) {
+            negative_evicted_events.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    auto transient_compiler = std::make_shared<FixtureCompiler>();
+    transient_compiler->failures_remaining.store(16);
+    v2::AdaptiveHotSwapController transient(transient_compiler, transient_options);
+    std::vector<ProductionRequest> transient_requests;
+    for (int index = 0; index < 8; ++index) {
+        transient_requests.push_back(distinct_request(index));
+        TEST_CHECK(!transient.Submit({transient_requests.back()}).Wait().ready(),
+                   "distinct transient failures must be negative-cached or evicted");
+    }
+    const auto transient_snapshot = transient.SnapshotForTesting();
+    TEST_CHECK(transient_snapshot.negative_cache_entries == 3 &&
+                   transient_snapshot.negative_cache_diagnostic_bytes <= 32 &&
+                   transient_snapshot.negative_cache_evictions == 5 &&
+                   WaitFor([&] { return negative_evicted_events.load() == 5; }),
+               "negative cache must use deterministic FIFO eviction within entry and byte bounds");
+    const int before_old_retry = transient_compiler->calls.load();
+    TEST_CHECK(!transient.Submit({transient_requests.front()}).Wait().ready() &&
+                   transient_compiler->calls.load() == before_old_retry + 1,
+               "the deterministically evicted transient record must be retried");
+    const int before_new_retry = transient_compiler->calls.load();
+    TEST_CHECK(!transient.Submit({transient_requests.back()}).Wait().ready() &&
+                   transient_compiler->calls.load() == before_new_retry,
+               "the newest transient record must remain cached");
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    std::atomic<uint64_t> negative_saturated_events{0};
+    v2::Options permanent_options = transient_options;
+    permanent_options.max_negative_cache_entries = 3;
+    permanent_options.observer = [&](const v2::Event& event) {
+        if (event.kind == v2::EventKind::kNegativeCacheSaturated) {
+            negative_saturated_events.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    auto permanent_compiler = std::make_shared<FixtureCompiler>();
+    permanent_compiler->attack = Attack::kWrongSignature;
+    v2::AdaptiveHotSwapController permanent(permanent_compiler, permanent_options);
+    std::vector<ProductionRequest> permanent_requests;
+    for (int index = 0; index < 4; ++index) {
+        permanent_requests.push_back(distinct_request(20 + index));
+        TEST_CHECK(permanent.Submit({permanent_requests.back()}).Wait().failure.category ==
+                       v2::FailureCategory::kPermanent,
+                   "distinct permanent failures must fail closed");
+    }
+    const auto permanent_snapshot = permanent.SnapshotForTesting();
+    TEST_CHECK(permanent_snapshot.negative_cache_entries == 3 &&
+                   permanent_snapshot.negative_cache_compile_blocked &&
+                   permanent_snapshot.negative_cache_drops == 1 &&
+                   WaitFor([&] { return negative_saturated_events.load() == 1; }),
+               "permanent negative-cache saturation must block publication rather than forget a failure");
+    const int before_cached_permanent = permanent_compiler->calls.load();
+    TEST_CHECK(permanent.Submit({permanent_requests.front()}).Wait().failure.category ==
+                       v2::FailureCategory::kPermanent &&
+                   permanent_compiler->calls.load() == before_cached_permanent,
+               "permanent failures within the configured bound must remain fail-closed");
+    permanent.ClearNegativeCacheForTesting();
+    TEST_CHECK(!permanent.SnapshotForTesting().negative_cache_compile_blocked,
+               "test-only negative-cache clear must explicitly release saturation blocking");
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    std::atomic<uint64_t> quarantine_saturated_events{0};
+    v2::Options quarantine_options;
+    quarantine_options.worker_count = 1;
+    quarantine_options.max_discoverable_generations = 8;
+    quarantine_options.max_producer_reported_bytes = 1024;
+    quarantine_options.max_quarantine_tombstones_per_route = 2;
+    quarantine_options.health_authority = std::make_shared<EveryGenerationHealth>();
+    quarantine_options.observer = [&](const v2::Event& event) {
+        if (event.kind == v2::EventKind::kQuarantineSaturated) {
+            quarantine_saturated_events.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    auto quarantine_compiler = std::make_shared<FixtureCompiler>();
+    v2::AdaptiveHotSwapController quarantine(quarantine_compiler, quarantine_options);
+    const auto healthy = quarantine.CompileAndPublish({base});
+    const ProductionRequest bad_one = same_route_request(0);
+    const ProductionRequest bad_two = same_route_request(2);
+    const ProductionRequest bad_three = same_route_request(3);
+    TEST_CHECK(quarantine.EvaluateHealth(quarantine.CompileAndPublish({bad_one})) &&
+                   quarantine.Acquire(Execute(base)) == healthy &&
+                   quarantine.Submit({bad_one}).Wait().failure.category ==
+                       v2::FailureCategory::kPermanent,
+               "a quarantined artifact must never be republished");
+    TEST_CHECK(quarantine.EvaluateHealth(quarantine.CompileAndPublish({bad_two})) &&
+                   quarantine.EvaluateHealth(quarantine.CompileAndPublish({bad_three})),
+               "health authority must drive per-route tombstone saturation");
+    const auto quarantine_snapshot = quarantine.SnapshotForTesting();
+    TEST_CHECK(quarantine_snapshot.quarantine_tombstones == 2 &&
+                   quarantine_snapshot.quarantine_compile_blocked_routes == 1 &&
+                   quarantine_snapshot.quarantine_saturations == 1 &&
+                   WaitFor([&] { return quarantine_saturated_events.load() == 1; }) &&
+                   quarantine.Acquire(Execute(base)) == healthy,
+               "tombstone saturation must preserve a healthy predecessor and expose exact state");
+    const int before_blocked_publish = quarantine_compiler->calls.load();
+    TEST_CHECK(quarantine.Submit({same_route_request(1)}).Wait().failure.category ==
+                       v2::FailureCategory::kPermanent &&
+                   quarantine_compiler->calls.load() == before_blocked_publish + 1,
+               "a saturated route must reject further publication rather than forget a quarantine");
+    quarantine.ClearQuarantinesForTesting();
+    TEST_CHECK(quarantine.CompileAndPublish({bad_three}) != nullptr,
+               "explicit test-only quarantine clear must release route publication");
+    TEST_CHECK(Throws([&] {
+                   v2::Options invalid;
+                   invalid.max_negative_cache_entries = 0;
+                   v2::AdaptiveHotSwapController rejected(
+                       std::make_shared<FixtureCompiler>(), invalid);
+               }),
+               "metadata bounds must be validated");
+    return true;
+}
+
 bool TestV2HealthRollbackObserverAndAbi() {
     using namespace production_path;
     kxc::api::internal::ClearPrimitiveCacheForTesting();
@@ -1496,6 +1649,8 @@ int main() {
     tests.push_back({"v2_waiters_cache_eviction_overflow",
                      TestV2WaitersCacheEvictionAndOverflow});
     tests.push_back({"v2_critical_audit_fixes", TestV2CriticalAuditFixes});
+    tests.push_back({"v2_bounded_failure_quarantine_metadata",
+                     TestV2BoundedFailureAndQuarantineMetadata});
     tests.push_back({"v2_health_rollback_observer_abi",
                      TestV2HealthRollbackObserverAndAbi});
 #endif

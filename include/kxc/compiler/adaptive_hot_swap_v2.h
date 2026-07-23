@@ -162,7 +162,8 @@ public:
 
 enum class EventKind : uint8_t {
     kQueued, kMerged, kPublished, kCancelled, kRetryCached, kEvicted,
-    kHealthDecision, kQuarantined, kRolledBack, kRejected,
+    kNegativeEvicted, kNegativeCacheSaturated,
+    kHealthDecision, kQuarantined, kQuarantineSaturated, kRolledBack, kRejected,
 };
 
 struct Event final {
@@ -186,6 +187,9 @@ struct Options final {
     size_t max_waiters_per_flight{1024};
     size_t max_discoverable_generations{8};
     uint64_t max_producer_reported_bytes{64ULL * 1024ULL * 1024ULL};
+    size_t max_negative_cache_entries{64};
+    size_t max_negative_diagnostic_bytes{64ULL * 1024ULL};
+    size_t max_quarantine_tombstones_per_route{64};
     std::chrono::milliseconds transient_backoff{100};
     std::chrono::milliseconds timeout_backoff{100};
     Observer observer;
@@ -201,6 +205,14 @@ struct Snapshot final {
     uint64_t evictions{0};
     uint64_t merged_waiters{0};
     uint64_t retry_cached{0};
+    size_t negative_cache_entries{0};
+    size_t negative_cache_diagnostic_bytes{0};
+    uint64_t negative_cache_evictions{0};
+    uint64_t negative_cache_drops{0};
+    bool negative_cache_compile_blocked{false};
+    size_t quarantine_tombstones{0};
+    size_t quarantine_compile_blocked_routes{0};
+    uint64_t quarantine_saturations{0};
     // Not measured: process/device resident bytes or external lease ownership.
     bool process_resident_bytes_known{false};
     bool device_resident_bytes_known{false};
@@ -232,6 +244,8 @@ public:
     bool EvaluateHealth(const std::shared_ptr<const GenerationLease>& lease);
     /*! \brief Test-only cache administration; it never revokes a completed lease. */
     void ClearNegativeCacheForTesting();
+    /*! \brief Test-only quarantine administration; it never revokes a completed lease. */
+    void ClearQuarantinesForTesting();
     Snapshot SnapshotForTesting() const;
 
 private:

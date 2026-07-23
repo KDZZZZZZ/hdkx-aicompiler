@@ -158,9 +158,17 @@ injection seam，`VerifyAndConsume` 是 one-shot authority；接受的 quarantin
 routing 回退到一个仍可发现的 predecessor。health evidence、resident bytes 和 numeric truth
 均非 W3 自行认证；external authentication/attestation 和 CUDA pending completion 仍不支持。
 Observer 和 health callbacks 均在锁外、异常隔离，并在 callback 窗口拒绝本 controller 的
-reentry。当前 negative cache 与 per-route quarantine artifact tombstones 尚无 entry cap；因此
-v2 不能称为在这些 metadata 维度上 fully bounded。取消和 backpressure 结果不进入 negative
-cache，且 queue/in-flight legacy slot 加法在构造时检查 overflow。
+reentry。negative cache 由已验证的 `max_negative_cache_entries` 和累计
+`max_negative_diagnostic_bytes` 精确约束：按插入顺序确定性地优先驱逐 expired/retryable
+(transient/timeout) record，绝不驱逐 permanent/unsupported record；若 permanent/unsupported
+record 已填满 entry bound，controller 全局 compile/publish fail-closed，直到显式
+`ClearNegativeCacheForTesting`。snapshot 提供 entry/diagnostic-byte、eviction/drop 和 blocked
+counters，observer 发出 negative eviction/saturation events。每个 route 的 artifact quarantine
+由已验证的 `max_quarantine_tombstones_per_route` 约束且 tombstone 永不驱逐；饱和时 route
+compile/publish fail-closed（已存在的 healthy predecessor 仍可 Acquire），直到显式
+`ClearQuarantinesForTesting`。snapshot 提供 tombstone/blocked-route/saturation counters，observer
+发出 quarantine-saturation event。取消和 backpressure 结果不进入 negative cache，且
+queue/in-flight legacy slot 加法在构造时检查 overflow。
 
 W3 focused gate：
 
