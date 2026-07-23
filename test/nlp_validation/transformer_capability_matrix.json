@@ -323,7 +323,7 @@
       "cuda": {
         "status": "validated",
         "gate": "cuda_where_injective_device_validated_sm75",
-        "reason": "Exact-static Where was executed through Compiler and RuntimeSession on an NVIDIA GTX 1650 (SM 7.5); this does not claim masked-softmax semantics.",
+        "reason": "A non-empty 1-D exact-static Where fixture was executed through Compiler and RuntimeSession on an NVIDIA GTX 1650 (SM 7.5); this does not claim masked-softmax semantics or broader CUDA shape approval.",
         "evidence": [
           "src/tir/transforms/bind_cuda_threads.cc",
           "test/codegen_cuda_test.cpp"
@@ -465,7 +465,7 @@
       "cuda": {
         "status": "validated",
         "gate": "cuda_slice_concat_injective_device_validated_sm75",
-        "reason": "Positive-step Slice and binary Concatenate were executed individually through Compiler and RuntimeSession on an NVIDIA GTX 1650 (SM 7.5), including fresh output allocation.",
+        "reason": "Non-empty 1-D positive-step Slice and binary Concatenate fixtures were executed individually through Compiler and RuntimeSession on an NVIDIA GTX 1650 (SM 7.5), including fresh output allocation; empty-output CUDA is not claimed.",
         "evidence": [
           "src/tir/transforms/bind_cuda_threads.cc",
           "test/codegen_cuda_test.cpp"

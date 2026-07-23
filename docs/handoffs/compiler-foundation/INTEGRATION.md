@@ -104,3 +104,11 @@ W1 的 mock/fake/DTO 存在不等于总计划完成。W2 至少需要：
 6. **Target evidence：** LLVM-enabled CI 真实绿色记录；CUDA reduction/library path 和 device numeric；没有证据时 capability 继续 fail closed。
 
 这些跨轨工作通过新的 W2 feature branches 继续，不直接在 `dev` 或 W1 baseline 上堆叠中间状态。
+
+## 6. W2 branch handoff 索引
+
+- `feature/compiler-foundation-nlp-transformer` 已在隔离分支完成 Gather、Where、
+  LayerNorm、binary Concatenate 与 positive-step Slice 的 exact-static vertical
+  expansion，并提供最小组合 fixture；详见
+  [`nlp-transformer.md`](./nlp-transformer.md)。该状态尚未 merge 到本 W1 integration
+  baseline，且不包含 KV cache、dynamic batching 或 CUDA reduction 支持。
