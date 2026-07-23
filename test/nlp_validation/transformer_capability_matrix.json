@@ -282,61 +282,65 @@
     },
     "mask_select": {
       "frontend": {
-        "status": "unsupported",
-        "gate": "onnx_mask_ops_unsupported",
-        "reason": "ONNX Where and dedicated attention-mask import are not implemented; the exact fixture supplies a finite additive mask tensor explicitly.",
+        "status": "implemented",
+        "gate": "onnx_where_static_contract",
+        "reason": "ONNX Where imports only resolved static bool condition and matching supported branch dtypes with joint broadcast/output validation; this does not define masked-softmax or all-masked behavior.",
         "evidence": [
           "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py",
           "docs/ONNX_IMPORTER.md"
         ]
       },
       "relay": {
-        "status": "unsupported",
-        "gate": "no_mask_select_operator",
-        "reason": "No dedicated mask/select Relay operator or all-masked-row semantic contract exists.",
+        "status": "implemented",
+        "gate": "where_bool_supported_branch_dtype_broadcast",
+        "reason": "Relay Where requires bool condition and same branch dtype in {float32,float64,int32,int64,int8,uint8,bool}, then infers joint trailing-axis broadcast; it does not define masked-softmax or all-masked behavior.",
         "evidence": [
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp",
           "test/relay_op_contract.json"
         ]
       },
       "lowering": {
-        "status": "unsupported",
-        "gate": "no_mask_select_lowering",
-        "reason": "No dedicated mask/select lowering exists; finite additive masking in the exact slice only reuses add.",
+        "status": "implemented",
+        "gate": "where_static_select_broadcast",
+        "reason": "TOPI Where lowers static bool-condition selection with joint broadcast; it does not define masked-softmax or all-masked behavior.",
+        "evidence": [
+          "src/relay/op/tensor/math.cc",
+          "src/te/topi/broadcast.cc",
+          "test/infer_type_test.cpp"
+        ]
+      },
+      "llvm": {
+        "status": "implemented",
+        "gate": "llvm_where_numeric_test_not_run_local",
+        "reason": "LLVM numeric coverage exists for static Where, but local LLVM is unavailable so it is not validated here.",
         "evidence": [
           "test/op_numeric_llvm_test.cpp"
         ]
       },
-      "llvm": {
-        "status": "unsupported",
-        "gate": "mask_select_not_implemented",
-        "reason": "No dedicated mask/select LLVM numeric test exists.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
       "cuda": {
         "status": "unsupported",
-        "gate": "mask_select_not_implemented",
-        "reason": "No dedicated mask/select CUDA implementation or device numeric test exists.",
+        "gate": "cuda_where_not_validated",
+        "reason": "CUDA Where support and device numeric validation are not claimed.",
         "evidence": [
           "test/nlp_validation/transformer_capability_matrix.json"
         ]
       },
       "runtime": {
-        "status": "unsupported",
-        "gate": "no_valid_extent_mask_contract",
-        "reason": "Runtime values do not yet carry the valid-extent mask contract needed for padded attention.",
+        "status": "implemented",
+        "gate": "where_llvm_runtime_test_not_run_local",
+        "reason": "The LLVM numeric source wires static Where through Compiler and RuntimeSession, including its byte-backed bool condition ABI; local LLVM is unavailable.",
         "evidence": [
-          "docs/plans/compiler-foundation/06-nlp-gpu-validation.md"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "numeric": {
-        "status": "contracted",
-        "gate": "finite_additive_reference_only",
-        "reason": "The CPU prefill reference covers a finite causal additive mask only; this is not general mask/select or all-masked validation.",
+        "status": "implemented",
+        "gate": "where_llvm_numeric_test_not_run_local",
+        "reason": "Static branch-selection expectations are encoded with uint8_t byte-backed bool condition input, but local LLVM execution was not run; this does not define masked-softmax or all-masked behavior.",
         "evidence": [
-          "test/nlp_validation/deterministic_fixtures.json",
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "profile": {

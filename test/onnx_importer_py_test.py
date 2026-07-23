@@ -316,6 +316,84 @@ def test_gather_rejects_invalid_static_contract(data_shape, indices_dtype, axis,
         )
 
 
+def _where_model(condition_shape, x_shape, y_shape, *, condition_dtype=TensorProto.BOOL,
+                 x_dtype=TensorProto.FLOAT, y_dtype=TensorProto.FLOAT,
+                 output_shape=(1,), output_dtype=TensorProto.FLOAT):
+    graph = helper.make_graph(
+        [helper.make_node("Where", ["condition", "x", "y"], ["out"], name="where")],
+        "where_test",
+        [helper.make_tensor_value_info("condition", condition_dtype, condition_shape),
+         helper.make_tensor_value_info("x", x_dtype, x_shape),
+         helper.make_tensor_value_info("y", y_dtype, y_shape)],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6
+    )
+
+
+def test_where_mapping_and_joint_broadcast_output_contract():
+    imported = import_onnx_model(
+        _where_model([2, 1, 1], [], [1, 3, 4], output_shape=[2, 3, 4])
+    )
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("where", {}),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3, 4]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_where_preserves_broadcast_zero_extent():
+    imported = import_onnx_model(
+        _where_model([0, 1], [1, 3], [0, 3], output_shape=[0, 3])
+    )
+
+    assert imported.function.outputs[0].shape == [0, 3]
+
+
+def test_where_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(
+            _where_model([2, 1], [], [1, 3], output_shape=[2, 2])
+        )
+
+
+def test_where_rejects_unsupported_initializer_branch_dtype():
+    graph = helper.make_graph(
+        [helper.make_node("Where", ["condition", "x", "y"], ["out"], name="where")],
+        "where_float16_initializer_test",
+        [helper.make_tensor_value_info("condition", TensorProto.BOOL, [2, 1])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+        initializer=[
+            helper.make_tensor("x", TensorProto.FLOAT16, [], [1.0]),
+            helper.make_tensor("y", TensorProto.FLOAT16, [1, 3], [1.0, 2.0, 3.0]),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6)
+
+    with pytest.raises(ValueError, match="branch dtypes"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize(
+    ("condition_shape", "x_shape", "y_shape", "condition_dtype", "x_dtype", "y_dtype", "message"),
+    [
+        ([2, 1], [], [1, 3], TensorProto.UINT8, TensorProto.FLOAT, TensorProto.FLOAT, "bool condition"),
+        ([2, 1], [], [1, 3], TensorProto.BOOL, TensorProto.FLOAT, TensorProto.INT32, "matching x/y dtypes"),
+        ([2, 2], [2, 3], [2, 3], TensorProto.BOOL, TensorProto.FLOAT, TensorProto.FLOAT, "incompatible broadcast dimensions"),
+    ],
+)
+def test_where_rejects_invalid_static_contract(
+    condition_shape, x_shape, y_shape, condition_dtype, x_dtype, y_dtype, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(
+            _where_model(condition_shape, x_shape, y_shape,
+                         condition_dtype=condition_dtype, x_dtype=x_dtype, y_dtype=y_dtype)
+        )
+
+
 def test_matmul_softmax_transpose_mapping_and_attrs():
     model = _static_operator_model(
         [

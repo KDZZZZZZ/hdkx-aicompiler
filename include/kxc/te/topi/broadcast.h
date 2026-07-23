@@ -37,6 +37,9 @@ Tensor multiply(const Tensor& A, const Tensor& B,
 Tensor divide(const Tensor& A, const Tensor& B, std::string name = "divide",
               std::string tag = kBroadcast);
 
+Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y,
+             std::string name = "where", std::string tag = kBroadcast);
+
 Tensor maximum(const Tensor& A, const Tensor& B, std::string name = "maximum", std::string tag = kBroadcast);
 
 Tensor minimum(const Tensor& A, const Tensor& B, std::string name = "minimum", std::string tag = kBroadcast);

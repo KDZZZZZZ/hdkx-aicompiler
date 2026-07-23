@@ -375,6 +375,22 @@
       "ffi": true,
       "tests": true,
       "onnx_ops": ["Transpose"]
+    },
+    "where": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 3,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": ["Where"]
     }
   },
   "documentation": "docs/OP_SUPPORT_MATRIX.md"

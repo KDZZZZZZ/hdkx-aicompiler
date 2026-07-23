@@ -239,6 +239,65 @@ bool TestGatherInferAndLoweringContract() {
     return true;
 }
 
+bool TestWhereInferAndLoweringContract() {
+    kxc::Var condition("condition", kxc::TensorType({2, 1, 1}, "bool"));
+    kxc::Var x("x", kxc::TensorType({}, "float32"));
+    kxc::Var y("y", kxc::TensorType({1, 3, 4}, "float32"));
+    kxc::Call where(kxc::relay::Op::Get("where"), {condition, x, y});
+    kxc::Function func({condition, x, y}, where);
+    kxc::relay::InferTypePass(func);
+    TEST_CHECK(CheckTensor(where.checked_type(), {2, 3, 4}, "float32"),
+               "where must jointly broadcast scalar and rank-misaligned inputs");
+    TEST_CHECK(kxc::relay::LowerToTIR(func)->prim_func.defined(),
+               "static where should lower to TIR");
+
+    kxc::Var zero_condition("zero_condition", kxc::TensorType({0, 1}, "bool"));
+    kxc::Var zero_x("zero_x", kxc::TensorType({1, 3}, "float32"));
+    kxc::Var zero_y("zero_y", kxc::TensorType({0, 3}, "float32"));
+    kxc::Call zero_where(kxc::relay::Op::Get("where"),
+                          {zero_condition, zero_x, zero_y});
+    kxc::Function zero_func({zero_condition, zero_x, zero_y}, zero_where);
+    kxc::relay::InferTypePass(zero_func);
+    TEST_CHECK(CheckTensor(zero_where.checked_type(), {0, 3}, "float32"),
+               "where must preserve broadcast zero extents");
+    TEST_CHECK(kxc::relay::LowerToTIR(zero_func)->prim_func.defined(),
+               "zero-extent where should lower to TIR");
+
+    kxc::Var non_bool("non_bool", kxc::TensorType({2, 1}, "uint8"));
+    kxc::Call invalid_condition(kxc::relay::Op::Get("where"), {non_bool, x, y});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({non_bool, x, y}, invalid_condition));
+               }),
+               "where non-bool condition should fail");
+    kxc::Var wrong_dtype("wrong_dtype", kxc::TensorType({1, 3, 4}, "int32"));
+    kxc::Call invalid_dtype(kxc::relay::Op::Get("where"), {condition, x, wrong_dtype});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({condition, x, wrong_dtype}, invalid_dtype));
+               }),
+               "where mismatched x/y dtypes should fail");
+    kxc::Var unsupported_x("unsupported_x", kxc::TensorType({}, "float16"));
+    kxc::Var unsupported_y("unsupported_y", kxc::TensorType({1, 3, 4}, "float16"));
+    kxc::Call unsupported_dtype(kxc::relay::Op::Get("where"),
+                                {condition, unsupported_x, unsupported_y});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({condition, unsupported_x, unsupported_y}, unsupported_dtype));
+               }),
+               "where unsupported but matching branch dtypes should fail during type inference");
+    kxc::Var incompatible_condition("incompatible_condition", kxc::TensorType({2, 2}, "bool"));
+    kxc::Var incompatible_x("incompatible_x", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var incompatible_y("incompatible_y", kxc::TensorType({4}, "float32"));
+    kxc::Call incompatible(kxc::relay::Op::Get("where"),
+                            {incompatible_condition, incompatible_x, incompatible_y});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({incompatible_condition, incompatible_x, incompatible_y},
+                                      incompatible));
+               }),
+               "where incompatibility in any input should fail");
+    return true;
+}
+
 bool TestSoftmaxInferTypeContract() {
     kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
     kxc::Call scalar_softmax(kxc::relay::Op::Get("softmax"), {scalar},
@@ -407,6 +466,7 @@ int main() {
         {"conv_and_pool_ops", TestConvAndPoolOps},
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
         {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},
+        {"where_infer_and_lowering_contract", TestWhereInferAndLoweringContract},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},
         {"negative_extent_lowering_gates", TestNegativeExtentLoweringGates},
         {"mvp_elementwise_lower_to_tir", TestMvpElementwiseLowerToTIR},

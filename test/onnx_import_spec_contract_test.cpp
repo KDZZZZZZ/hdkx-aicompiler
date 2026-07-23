@@ -113,6 +113,31 @@ void WriteGatherFixture(const TemporaryDirectory& directory,
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+void WriteWhereFixture(const TemporaryDirectory& directory,
+                       const std::string& output_shape,
+                       const std::string& branch_dtype = "float32") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "condition", "shape": [2, 1], "dtype": "bool"},
+      {"name": "x", "shape": [], "dtype": ")json" + branch_dtype + R"json("},
+      {"name": "y", "shape": [1, 3], "dtype": ")json" + branch_dtype + R"json("}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": ")json" + branch_dtype + R"json("}
+    ],
+    "nodes": [
+      {"name": "where", "op_name": "where", "inputs": ["condition", "x", "y"], "outputs": ["out"], "attrs": {}}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
 bool TestValidStaticMatMulSoftmaxTranspose() {
     TemporaryDirectory directory;
     WriteFixture(directory, "[2, 2, 3]", "[2, 4, 2]");
@@ -151,6 +176,46 @@ bool TestGatherDeclaredOutputMismatchIsRejected() {
                        (directory.path() / "params.bin").string());
                }),
                "declared Gather output shape must match inferred output");
+    return true;
+}
+
+bool TestValidStaticWhere() {
+    TemporaryDirectory directory;
+    WriteWhereFixture(directory, "[2, 3]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Where import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 3}, "float32"),
+               "reified Where output should use joint broadcast shape and x/y dtype");
+    return true;
+}
+
+bool TestWhereDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteWhereFixture(directory, "[2, 2]");
+
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "declared Where output shape must match inferred output");
+    return true;
+}
+
+bool TestWhereUnsupportedBranchDTypeIsRejected() {
+    TemporaryDirectory directory;
+    WriteWhereFixture(directory, "[2, 3]", "float16");
+
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "Where branch dtype outside the supported ABI set must fail during reification");
     return true;
 }
 
@@ -200,6 +265,9 @@ int main() {
         {"valid_static_matmul_softmax_transpose", TestValidStaticMatMulSoftmaxTranspose},
         {"valid_static_gather", TestValidStaticGather},
         {"gather_declared_output_mismatch", TestGatherDeclaredOutputMismatchIsRejected},
+        {"valid_static_where", TestValidStaticWhere},
+        {"where_declared_output_mismatch", TestWhereDeclaredOutputMismatchIsRejected},
+        {"where_unsupported_branch_dtype", TestWhereUnsupportedBranchDTypeIsRejected},
         {"negative_input_dimension", TestNegativeInputDimensionIsRejected},
         {"declared_output_shape_mismatch", TestDeclaredOutputShapeMismatchIsRejected},
         {"declared_output_dtype_mismatch", TestDeclaredOutputDTypeMismatchIsRejected},

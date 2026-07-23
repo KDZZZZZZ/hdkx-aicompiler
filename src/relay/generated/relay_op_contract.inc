@@ -371,6 +371,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.lowering_key = "FRelayToTE";
         return spec;
     }
+    if (name == "where") {
+        OperatorSpec spec;
+        spec.name = "where";
+        spec.schema_version = 1;
+        spec.category = "tensor.math";
+        spec.input_arity.num_inputs = 3;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
     throw std::invalid_argument("operator is absent from generated contract: " + name);
 }
 

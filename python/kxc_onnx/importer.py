@@ -16,6 +16,9 @@ from .spec import (
 )
 
 
+WHERE_BRANCH_DTYPES = {"float32", "float64", "int32", "int64", "int8", "uint8", "bool"}
+
+
 ONNX_TO_RELAY = {
     "Conv": "nn_conv2d",
     "Relu": "nn_relu",
@@ -28,6 +31,7 @@ ONNX_TO_RELAY = {
     "Softmax": "softmax",
     "Transpose": "transpose",
     "Gather": "gather",
+    "Where": "where",
 }
 
 
@@ -129,6 +133,11 @@ def import_onnx_model(
             )
         if node.op_type == "Gather":
             inferred_static_specs[node.output[0]] = _infer_gather_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
+        if node.op_type == "Where":
+            inferred_static_specs[node.output[0]] = _infer_where_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
@@ -303,6 +312,64 @@ def _infer_gather_spec(
     return result
 
 
+def _broadcast_shapes(op_type: str, node_name: str, left: list[int], right: list[int]) -> list[int]:
+    result: list[int] = []
+    for left_dim, right_dim in zip(reversed(left), reversed(right)):
+        if left_dim != right_dim and left_dim != 1 and right_dim != 1:
+            raise ValueError(
+                f"{op_type} node '{node_name}' has incompatible broadcast dimensions: "
+                f"{left} and {right}"
+            )
+        result.append(right_dim if left_dim == 1 else left_dim)
+    longer = left if len(left) > len(right) else right
+    result.extend(reversed(longer[: abs(len(left) - len(right))]))
+    return list(reversed(result))
+
+
+def _infer_where_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 3 or not all(node.input):
+        raise ValueError(f"Where node '{node_name}' requires exactly three non-empty inputs")
+    condition, x, y = (
+        _resolve_static_input("Where", node_name, name, input_specs, params,
+                              inferred_specs, value_info_by_name, default_batch)
+        for name in node.input
+    )
+    if condition.dtype != "bool":
+        raise ValueError(
+            f"Where node '{node_name}' requires bool condition; got {condition.dtype}"
+        )
+    if x.dtype not in WHERE_BRANCH_DTYPES or y.dtype not in WHERE_BRANCH_DTYPES:
+        raise ValueError(
+            f"Where node '{node_name}' requires branch dtypes in "
+            "{float32,float64,int32,int64,int8,uint8,bool}; "
+            f"got {x.dtype} and {y.dtype}"
+        )
+    if x.dtype != y.dtype:
+        raise ValueError(
+            f"Where node '{node_name}' requires matching x/y dtypes; "
+            f"got {x.dtype} and {y.dtype}"
+        )
+    result = TensorSpec(
+        name=node.output[0],
+        shape=_broadcast_shapes(
+            "Where", node_name,
+            _broadcast_shapes("Where", node_name, condition.shape, x.shape), y.shape,
+        ),
+        dtype=x.dtype,
+    )
+    _validate_declared_output("Where", node_name, result, output_declarations, default_batch)
+    return result
+
+
 def _tensor_spec_from_value_info(
     value_info: onnx.ValueInfoProto, default_batch: int | None
 ) -> TensorSpec:
@@ -417,7 +484,7 @@ def _convert_attrs(
         return {"perm": _list_attr(attrs, "perm", [])}
     if node.op_type == "Gather":
         return {"axis": _int_attr(attrs, "axis", 0)}
-    if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
+    if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul", "Where"}:
         return {}
     raise UnsupportedONNXOpError(
         f"Unsupported ONNX op '{node.op_type}' in node '{node.name or '<unnamed>'}'"

@@ -447,6 +447,23 @@ void TestGather() {
     ExpectNear(empty_out, {0, 0, 0});
 }
 
+// 验证 ONNX Where 的 byte-backed bool condition、scalar/rank broadcast 和分支选择。
+void TestWhere() {
+    kxc::Var condition("condition", kxc::TensorType({2, 1}, "bool"));
+    kxc::Var x("x", kxc::TensorType({}, "float32"));
+    kxc::Var y("y", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("where"), {condition, x, y});
+    kxc::Function func({condition, x, y}, call);
+
+    const std::vector<uint8_t> condition_data = {1, 0};
+    const std::vector<float> x_data = {10};
+    const std::vector<float> y_data = {1, 2, 3};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("where", func,
+                  {Input(condition_data), Input(x_data), Input(y_data), Output(out)});
+    ExpectNear(out, {10, 10, 10, 1, 2, 3});
+}
+
 // 验证 Cast 的目标 dtype 与数值转换。
 void TestCast() {
     kxc::Var data("data", kxc::TensorType({4}, "float32"));
@@ -601,6 +618,7 @@ int main() {
         {"reduce_mean", TestReduceMean},
         {"softmax", TestSoftmax},
         {"gather", TestGather},
+        {"where", TestWhere},
         {"cast", TestCast},
         {"model_add_chain", TestModelAddChain},
         {"model_mlp", TestModelMLP},

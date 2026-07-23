@@ -85,6 +85,13 @@ bool TestRelayOperatorRegistryLookupAndSpecs() {
                    Contains(gather_attrs, "axis"),
                "gather attrs serialization should include the canonical axis");
 
+    const kxc::relay::Op& where = kxc::relay::Op::Get("where");
+    TEST_CHECK(where->name == "where" && where.spec().attrs_type_key.empty() &&
+                   where.spec().input_arity.num_inputs == 3,
+               "where should expose its fieldless three-input canonical contract");
+    TEST_CHECK(kxc::Registry::Global().Get("kxc.relay.op._make.where").defined(),
+               "where canonical FFI helper should be registered");
+
     const kxc::relay::Op& copy = kxc::relay::Op::Get("device.copy");
     TEST_CHECK(copy.has_spec(), "explicitly registered control op should expose metadata");
     TEST_CHECK(copy.spec().effect == kxc::relay::OperatorEffectKind::kDeviceCommunication,

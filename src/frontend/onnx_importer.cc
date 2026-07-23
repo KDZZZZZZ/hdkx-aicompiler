@@ -436,7 +436,7 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
             ReadString(Field(attrs, "layout", "pool attrs"), "pool attrs.layout"),
             ReadBool(Field(attrs, "ceil_mode", "pool attrs"), "pool attrs.ceil_mode")));
     }
-    if (op_name == "add" || op_name == "matmul") {
+    if (op_name == "add" || op_name == "matmul" || op_name == "where") {
         return ObjectRef();
     }
     if (op_name == "softmax") {

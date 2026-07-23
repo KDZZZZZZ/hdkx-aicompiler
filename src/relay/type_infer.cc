@@ -265,6 +265,32 @@ Type DivideInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return BinaryBroadcastInferType("divide", input_types);
 }
 
+bool IsWhereBranchDType(const std::string& dtype) {
+    return dtype == "float32" || dtype == "float64" || dtype == "int32" ||
+           dtype == "int64" || dtype == "int8" || dtype == "uint8" || dtype == "bool";
+}
+
+// 推导 ONNX Where 的三元 trailing-axis 广播结果。
+Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    RequireArity("where", input_types, 3);
+    const auto* condition = RequireTensor("where", input_types[0], "condition");
+    const auto* x = RequireTensor("where", input_types[1], "x");
+    const auto* y = RequireTensor("where", input_types[2], "y");
+    if (condition->dtype != "bool") {
+        throw std::runtime_error("where condition dtype must be bool");
+    }
+    if (!IsWhereBranchDType(x->dtype) || !IsWhereBranchDType(y->dtype)) {
+        throw std::runtime_error(
+            "where branch dtypes must be float32, float64, int32, int64, int8, uint8, or bool");
+    }
+    RequireSameDType("where", x, y);
+    const std::vector<int64_t> condition_x =
+        BroadcastShape("where", ShapeVector(condition), ShapeVector(x));
+    return MakeTensorType(
+        BroadcastShape("where", condition_x, ShapeVector(y)), x->dtype);
+}
+
 // 推导保持 shape 与 dtype 的一元算子类型。
 Type UnarySameInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
