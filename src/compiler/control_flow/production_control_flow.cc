@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "internal_lowering.h"
+#include "production_control_flow_test.h"
 #include "kxc/profiling/profiling.h"
 
 namespace kxc::api {
@@ -60,10 +62,27 @@ namespace {
 #define KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION 0
 #endif
 
-std::atomic<std::uint64_t> next_lease_generation{1};
+// This stores the most recently issued generation.  Keeping the terminal
+// value makes overflow a permanent fail-closed state instead of wrapping.
+std::atomic<std::uint64_t> last_lease_generation{0};
 
 [[noreturn]] void Fail(const std::string& detail) {
     throw std::invalid_argument("CompileControlFlowExact: " + detail);
+}
+
+std::uint64_t MintLeaseGeneration() {
+    std::uint64_t previous = last_lease_generation.load(std::memory_order_relaxed);
+    for (;;) {
+        if (previous == std::numeric_limits<std::uint64_t>::max()) {
+            Fail("process-local artifact lease generation overflowed");
+        }
+        const std::uint64_t generation = previous + 1;
+        if (last_lease_generation.compare_exchange_weak(
+                previous, generation, std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+            return generation;
+        }
+    }
 }
 
 std::vector<runtime::ValueId> AbiNonOutputs(const runtime::ControlTask& task,
@@ -120,6 +139,18 @@ struct ResolvedBinding final {
 
 }  // namespace
 
+namespace internal {
+
+std::uint64_t MintControlFlowLeaseGenerationForTest() {
+    return MintLeaseGeneration();
+}
+
+void SetControlFlowLeaseGenerationForTest(std::uint64_t last_generation) {
+    last_lease_generation.store(last_generation, std::memory_order_relaxed);
+}
+
+}  // namespace internal
+
 CompiledControlFlowGraph Compiler::CompileControlFlowExact(
     Function function, CompileConfig config) {
 #if !KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
@@ -166,9 +197,7 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
         Fail("requires at least one real branch kernel; a pure structural If has no production artifact");
     }
 
-    const std::uint64_t generation = next_lease_generation.fetch_add(
-        1, std::memory_order_relaxed);
-    if (generation == 0) Fail("process-local artifact lease generation overflowed");
+    const std::uint64_t generation = MintLeaseGeneration();
     auto state = std::make_shared<ControlFlowArtifactLease::State>();
     state->generation = generation;
     state->entries.reserve(resolved.size());

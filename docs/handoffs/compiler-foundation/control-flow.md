@@ -293,10 +293,10 @@ where the existing real compiler can produce CPU artifacts for every frozen
 branch Call:
 
 ```text
-Relay Function with If
+Relay Function with If or bounded While
   -> InferType / ANF / static-exact ControlPlan v2
   -> compiler-private { task id -> frozen Relay Function(Call) } sidecar
-  -> Compiler::Compile(one If-free Call Function) for every kernel task
+  -> Compiler::Compile(one control-free Call Function) for every region kernel task
   -> resolved ControlExecutionPlan v1
 ```
 
@@ -309,22 +309,30 @@ Public surface and build registration:
   `kxc/compiler/control_flow.h` and resolved runtime contract in the
   already-installed `kxc/runtime/control_execution_plan.h`.  All three headers
   are present in `KXC_PUBLIC_HEADERS`.
-- `Compiler::Compile` is unchanged and continues to reject Relay `If` through
-  the static-dataflow capability gate.  The new API is the only opt-in entry.
+- `Compiler::Compile` is unchanged and continues to reject Relay `If` and
+  `While` through the static-dataflow capability gate.  The new API is the only
+  opt-in entry.
 - The lowerer sidecar is `src/compiler/control_flow/internal_lowering.h`, is
   not installed, and preserves the original Relay Call/Op/attrs/constants and
   lexical operands.  The resolver never parses `kernel_ref`; it uses task id
   only to find that private payload and calls the real `Compiler::Compile` for
-  each branch kernel.  A missing sidecar entry fails closed.
-- The resolver accepts only CPU:0/default-stream, static-exact plans and a
-  nonzero caller-supplied generation plus nonempty lease id.  A production
-  binding has `binding_revision == 0`, carries that authority metadata, and
-  carries an opaque strong pin vector.  Fixture revision bindings and
-  production authority bindings are mutually exclusive.  `BoundControlKernel`
-  stores the opaque keepalive in its immutable state, so copies of the resolved
-  plan retain the selected artifacts through cache clear and asynchronous
-  completion ownership.  The generation/lease remain observability/control
-  metadata; runtime does not authenticate or use them to select an artifact.
+  each condition, body, or branch kernel.  A missing sidecar entry fails
+  closed.
+- The resolver accepts only CPU:0/default-stream, static-exact plans.  A
+  production binding has `binding_revision == 0` and an opaque compiler-minted
+  lease; a fixture binding instead has a nonzero revision and no lease.  The
+  two forms are mutually exclusive.  `CompileControlFlowExact` mints lease
+  generations monotonically: it issues `uint64_t` maximum once, retains that
+  terminal value, and then fails closed instead of wrapping or reusing a
+  generation.  `BoundControlKernel` stores the opaque keepalive in its
+  immutable state, so copies of the resolved plan retain selected artifacts
+  through cache clear and asynchronous completion ownership.  The
+  generation/lease remain observability/control metadata; runtime does not
+  authenticate or use them to select an artifact.
+- The terminal-generation test seam is the source-private
+  `src/compiler/control_flow/production_control_flow_test.h`, included by its
+  test with a relative source path.  It is outside `include/`, absent from
+  `KXC_PUBLIC_HEADERS`, and is therefore neither installed nor public API.
 - Binding remains exact: task-id mapping, selected module entry, ABI
   non-output order (live inputs followed by constants), signature roles and
   output order are checked by `BindControlPlanForRuntime`.  Wrong entry/ABI,
@@ -332,43 +340,54 @@ Public surface and build registration:
   sidecar fail before execution.  Existing control-runtime tests also retain
   private constant snapshots and completion state across owner destruction.
 
-Supported Relay control syntax is still **only `If`** (including nested `If`
-when every selected Call is in the restricted subset).  Captured live-ins and
-constants are represented by the existing lowerer/ABI contract.  Relay has no
-`Loop` node: W3 makes no generic Relay loop, recursion, unrolling, or JIT-loop
-claim.  The plan-level fixture executor continues to test zero/one/multiple
-trips independently of Relay syntax.
+Supported Relay control syntax is restricted `If` (including nested `If`) and
+bounded `While`, when every selected Call is in the restricted subset.  A
+`While` has exactly one lexical carried-state binder, a non-negative static
+bound, CPU:0 scalar-bool condition, and one exact placement shared by its
+initial state, binder, body, and result.  It is not general recursion, host
+unrolling, or a JIT loop.  Captured live-ins and constants are represented by
+the existing lowerer/ABI contract.
 
-### W3 local evidence and limit
+### W3/W4 local evidence and limit
 
-On this machine, both builds used `KXC_ENABLE_CUDA=OFF` and
-`KXC_ENABLE_LLVM=OFF`, with control runtime enabled:
+On this machine, the follow-up passed `run_control_flow_tests` (all six tests:
+`relay_anf_test`, `executable_capability_test`, `control_plan_test`,
+`control_plan_reference_executor_test`, `relay_control_plan_test`, and
+`control_runtime_integration_test`) in both CPU-only configurations:
 
 ```bash
-cmake -S . -B /tmp/kxc-control-w3-off \
-  -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
-  -DKXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=OFF \
-  -DKXC_ENABLE_CONTROL_RUNTIME=ON \
-  -DKXC_BUILD_CODEGEN_TESTS=OFF -DKXC_BUILD_PASS_TESTS=ON
-cmake --build /tmp/kxc-control-w3-off --target run_control_flow_tests -j2
+cmake --build /tmp/kxc-relay-while-off --target run_control_flow_tests -j2
+# KXC_ENABLE_CUDA=OFF, KXC_ENABLE_LLVM=OFF,
+# KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=OFF, KXC_ENABLE_CONTROL_RUNTIME=ON
 
-cmake -S . -B /tmp/kxc-control-w3-on \
-  -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
+cmake --build /tmp/kxc-relay-while-on --target run_control_flow_tests -j2
+# KXC_ENABLE_CUDA=OFF, KXC_ENABLE_LLVM=OFF,
+# KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=ON, KXC_ENABLE_CONTROL_RUNTIME=ON
+```
+
+This covers default-off rejection, enabled-without-LLVM fail-closed behavior,
+default `Compiler::Compile` rejection for `If` and `While`, placement-gate
+negatives, the source-private terminal-generation seam, and existing resolved
+plan/runtime lifetime coverage.  The public-header compile check also passed
+for all 104 installed headers; the private seam was not added to that surface.
+
+An LLVM-requested configuration was also generated and its six control-flow
+tests passed:
+
+```bash
+cmake -S . -B /tmp/kxc-relay-while-llvm \
+  -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=ON \
   -DKXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=ON \
   -DKXC_ENABLE_CONTROL_RUNTIME=ON \
   -DKXC_BUILD_CODEGEN_TESTS=OFF -DKXC_BUILD_PASS_TESTS=ON
-cmake --build /tmp/kxc-control-w3-on --target run_control_flow_tests -j2
+cmake --build /tmp/kxc-relay-while-llvm --target run_control_flow_tests -j2
 ```
 
-Both gate configurations passed the six control-flow tests:
-`relay_anf_test`, `executable_capability_test`, `control_plan_test`,
-`control_plan_reference_executor_test`, `relay_control_plan_test`, and
-`control_runtime_integration_test`.  The latter proves default-off rejection,
-fail-closed enabled-without-LLVM behavior, default `Compiler::Compile(If)`
-rejection, fixture branch/loop ABI and branch mismatch negatives, malformed
-artifact data, private constants, and async lifetime.  LLVM was unavailable,
-so this is dependency-free artifact/lifetime evidence only: it is **not** real
-numeric LLVM JIT validation of the positive gated path.  Such validation must
-cover true/false and nested `If`, constants/live-in capture, malformed sidecar,
-wrong artifact data, cache clear, and async completion before claiming a real
-backend result.
+CMake reported that LLVM was not found and disabled code generation
+(`LLVM_DIR=LLVM_DIR-NOTFOUND`, hence `KXC_USE_LLVM=0`).  Therefore this third
+run is additional fail-closed evidence only, not LLVM JIT evidence; the numeric
+Relay-`While` E2E is compiled only when the production, LLVM, and control-runtime
+gates are all true and did not execute locally.  A real LLVM result must still
+cover zero/one/multiple and exhausted `While` trips, true/false and nested
+`If`, constants/live-in capture, malformed sidecar/artifact data, cache clear,
+and async completion before claiming backend support.

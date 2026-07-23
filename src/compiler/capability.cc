@@ -27,6 +27,12 @@
 namespace kxc::api {
 namespace {
 
+Device Placement(const Expr& expr) {
+    const auto* relay_node = dynamic_cast<const RelayNode*>(expr.get());
+    if (!relay_node || !relay_node->virtual_device_.defined()) return Device::CPU();
+    return relay_node->virtual_device_->device;
+}
+
 class Verifier final {
 public:
     Verifier(const CapabilityRequest& request, bool prove_execution)
@@ -328,6 +334,18 @@ private:
                 !TypeEqual(while_node->initial_state.checked_type(), binder_type)) {
                 AddIssue(locator + "/loop_var", "Var", "typed_loop_binding",
                          "loop binder type does not match initial state");
+            }
+            const Device state_device = Placement(while_node->initial_state);
+            if (Placement(Expr(ObjectRef(while_node->loop_var))) != state_device ||
+                Placement(while_node->body) != state_device ||
+                Placement(expr) != state_device) {
+                AddIssue(locator, "While", "exact_loop_state_placement",
+                         "While initial state, binder, body, and result must have one exact device placement");
+            }
+            if (Placement(while_node->condition) != Device::CPU()) {
+                AddIssue(locator + "/condition", "While",
+                         "cpu_loop_condition_placement",
+                         "While condition must be placed on CPU:0");
             }
             const bool already_bound = bound_vars_.count(while_node->loop_var.get()) != 0;
             bound_vars_.insert(while_node->loop_var.get());

@@ -192,6 +192,12 @@ protected:
         const auto saved = var_env_.find(op->loop_var.get());
         const bool had_saved = saved != var_env_.end();
         const Type saved_type = had_saved ? saved->second : Type();
+        // A Var object may be shared by an enclosing lexical scope.  Its memoized
+        // type is therefore scope-sensitive even though ordinary expressions are not.
+        const auto saved_memo = memo_.find(op->loop_var.get());
+        const bool had_memo = saved_memo != memo_.end();
+        const Type saved_memo_type = had_memo ? saved_memo->second : Type();
+        memo_.erase(op->loop_var.get());
         var_env_[op->loop_var.get()] = initial_type;
         SetCheckedType(Expr(ObjectRef(op->loop_var)), initial_type);
         const Type condition_type = Visit(op->condition);
@@ -206,6 +212,8 @@ protected:
         } else {
             var_env_.erase(op->loop_var.get());
         }
+        memo_.erase(op->loop_var.get());
+        if (had_memo) memo_[op->loop_var.get()] = saved_memo_type;
         if (!TypeEqual(initial_type, body_type)) {
             throw std::runtime_error("While body type mismatch: " +
                                      TypeToString(initial_type) + " vs " +

@@ -288,6 +288,28 @@ private:
         }
     }
 
+    Device Placement(const Expr& expr) const {
+        const auto* relay_node = dynamic_cast<const RelayNode*>(expr.get());
+        if (!relay_node || !relay_node->virtual_device_.defined()) return Device::CPU();
+        return relay_node->virtual_device_->device;
+    }
+
+    void VerifyLoopPlacement(const Expr& result, const WhileNode* loop,
+                             const std::string& path) const {
+        const Device state_device = Placement(loop->initial_state);
+        if (Placement(Expr(ObjectRef(loop->loop_var))) != state_device ||
+            Placement(loop->body) != state_device ||
+            Placement(result) != state_device) {
+            Fail(path, "While", "exact_loop_state_placement",
+                 "While initial state, binder, body, and result must have one exact device placement");
+        }
+        if (Placement(loop->condition) != Device::CPU()) {
+            Fail(path + ".condition", NodeKind(loop->condition),
+                 "cpu_loop_condition_placement",
+                 "While condition must be placed on CPU:0");
+        }
+    }
+
     void Visit(const Expr& expr, const std::string& path) {
         RequireChecked(expr, path);
         VerifyType(expr.checked_type(), path + ".checked_type");
@@ -357,6 +379,7 @@ private:
                 Fail(path, "While", "bounded_loop",
                      "While requires a defined binder and non-negative max_trip_count");
             }
+            VerifyLoopPlacement(expr, while_node, path);
             Visit(while_node->initial_state, path + ".initial_state");
             RequireChecked(Expr(ObjectRef(while_node->loop_var)), path + ".loop_var");
             VerifyType(while_node->loop_var.checked_type(), path + ".loop_var.checked_type");
@@ -373,7 +396,7 @@ private:
             const auto* predicate = while_node->condition.checked_type().As<TensorTypeNode>();
             if (!predicate || predicate->dtype != "bool" || !predicate->shape.empty()) {
                 Fail(path + ".condition", NodeKind(while_node->condition),
-                     "scalar_bool_loop_predicate", "While condition must be CPU scalar bool");
+                     "scalar_bool_loop_predicate", "While condition must be a scalar bool TensorType");
             }
             if (!TypeEqual(while_node->initial_state.checked_type(),
                            while_node->body.checked_type()) ||

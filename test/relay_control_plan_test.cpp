@@ -337,6 +337,34 @@ bool TestStaticAndControlGates() {
     TEST_CHECK(predicate_error.find("branch predicate must be a CPU scalar bool") != std::string::npos,
                "ControlPlan must reject an implicit non-CPU predicate copy");
 
+    Var loop_condition("loop_condition", TensorType({}, "bool"));
+    loop_condition.set_virtual_device(
+        kxc::VirtualDevice::ForDevice(kxc::Device::CUDA()));
+    Var loop_initial("loop_initial", kI64), loop_state("loop_state", kI64);
+    const std::string loop_condition_error = ErrorText([&] {
+        (void)kxc::api::LowerRelayToControlPlan(Function(
+            {loop_condition, loop_initial},
+            While(loop_initial, loop_state, loop_condition, loop_state, 0)));
+    });
+    TEST_CHECK(loop_condition_error.find("required capability=cpu_loop_condition_placement") !=
+                   std::string::npos,
+               "While condition placement must fail in the capability gate before plan lowering");
+
+    Var placement_condition("placement_condition", TensorType({}, "bool"));
+    Var placement_initial("placement_initial", kI64),
+        placement_state("placement_state", kI64);
+    placement_state.set_virtual_device(
+        kxc::VirtualDevice::ForDevice(kxc::Device::CUDA()));
+    const std::string loop_state_error = ErrorText([&] {
+        (void)kxc::api::LowerRelayToControlPlan(Function(
+            {placement_condition, placement_initial},
+            While(placement_initial, placement_state, placement_condition,
+                  placement_state, 0)));
+    });
+    TEST_CHECK(loop_state_error.find("required capability=exact_loop_state_placement") !=
+                   std::string::npos,
+               "While state placement must fail in the capability gate before plan lowering");
+
     Var mismatch_predicate("mismatch_predicate", TensorType({}, "bool"));
     Var mismatch_x("mismatch_x", kI64), mismatch_y("mismatch_y", kI64);
     If mismatch(mismatch_predicate, mismatch_x, mismatch_y);
