@@ -1,9 +1,9 @@
 # Compiler Foundation NLP/GPU 验证轨交接
 
-> **分支：** `feature/compiler-foundation-nlp-gpu`  
-> **基线：** `e295a73343f82a7852eeae4ba6d11e3d892adc52`  
-> **验证日期：** 2026-07-23  
-> **状态：** 最小 exact-static NLP 垂直切片 **Done**；dynamic shape、真实 KV-cache、CUDA reduction 和本机 LLVM/ONNX 依赖属于明确硬门禁。  
+> **分支：** `feature/compiler-foundation-nlp-gpu`
+> **基线：** `e295a73343f82a7852eeae4ba6d11e3d892adc52`
+> **验证日期：** 2026-07-23
+> **状态：** 最小 exact-static NLP 垂直切片 **Done**；dynamic shape、真实 KV-cache、CUDA reduction 和本机 LLVM/ONNX 依赖属于明确硬门禁。
 > **边界：** 本轨只建立验证资产、fail-closed gate 和最小算子/导入/后端切片，没有重塑 Compiler、`ExecutablePlan` 或 `RuntimeSession` 核心抽象。
 
 ## 1. 交付摘要
