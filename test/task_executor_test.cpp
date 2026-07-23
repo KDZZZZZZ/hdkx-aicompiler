@@ -34,6 +34,10 @@ bool Throws(const std::function<void()>& function) {
 
 DLDataType Float32() { return DLDataType{kDLFloat, 32, 1}; }
 
+static_assert(kxc::runtime::RuntimeEventKind::kTaskStart !=
+                  kxc::runtime::RuntimeEventKind::kTaskLaunch,
+              "task start and successful launch must be distinct events");
+
 kxc::runtime::FrozenTaskPlan MakeChainPlan(
     bool async_first = false, bool conservative_first = false) {
     using namespace kxc;
@@ -265,6 +269,50 @@ bool TestDeterministicExecutorCoversTaskKinds() {
     return true;
 }
 
+bool TestTaskLifecycleEventSequence() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const FrozenTaskPlan plan =
+        WithDeclaredManifest(PlanTaskMemory(MakeAllKindsPlan()));
+
+    std::vector<RuntimeEventKind> success_events;
+    ExecuteTasksDeterministically(
+        plan, [](const TaskSpec&) {},
+        [&success_events](const RuntimeEvent& event) {
+            if (event.task_id == 11) success_events.push_back(event.kind);
+        });
+    const std::vector<RuntimeEventKind> expected_success{
+        RuntimeEventKind::kTaskWait, RuntimeEventKind::kGeneration,
+        RuntimeEventKind::kTaskStart, RuntimeEventKind::kTaskLaunch,
+        RuntimeEventKind::kTaskComplete};
+    TEST_CHECK(success_events == expected_success,
+               "kernel events must be wait -> generation -> start -> launch -> complete");
+
+    std::vector<RuntimeEventKind> failure_events;
+    TEST_CHECK(
+        Throws([&plan, &failure_events] {
+            ExecuteTasksDeterministically(
+                plan,
+                [](const TaskSpec& task) {
+                    if (task->task_id == 11) {
+                        throw std::runtime_error("fake kernel submission failed");
+                    }
+                },
+                [&failure_events](const RuntimeEvent& event) {
+                    if (event.task_id == 11) {
+                        failure_events.push_back(event.kind);
+                    }
+                });
+        }),
+        "failing action must propagate its exception");
+    const std::vector<RuntimeEventKind> expected_failure{
+        RuntimeEventKind::kTaskWait, RuntimeEventKind::kGeneration,
+        RuntimeEventKind::kTaskStart};
+    TEST_CHECK(failure_events == expected_failure,
+               "failed action must retain generation -> start without launch or complete");
+    return true;
+}
+
 bool TestExecutorFailureAndOverflowGuards() {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -310,6 +358,7 @@ int main() {
         {"independent_branches_do_not_reuse", TestIndependentBranchesDoNotReuse},
         {"deterministic_executor_covers_task_kinds",
          TestDeterministicExecutorCoversTaskKinds},
+        {"task_lifecycle_event_sequence", TestTaskLifecycleEventSequence},
         {"executor_failure_and_overflow_guards",
          TestExecutorFailureAndOverflowGuards},
     };

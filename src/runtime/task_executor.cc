@@ -298,6 +298,11 @@ Array<RuntimeEvent> ExecuteTasksDeterministically(
             }
             emit(std::move(generation));
         }
+        RuntimeEvent start;
+        start.kind = RuntimeEventKind::kTaskStart;
+        start.task_id = task_id;
+        start.task_kind = task->kind;
+        emit(std::move(start));
         int64_t allocated_value_id = -1;
         int64_t allocated_storage_id = -1;
         if (task->kind == TaskKind::kAllocate) {

@@ -26,20 +26,20 @@ enum class FallbackReason : int32_t {
 
 /*! \brief Stable synchronous runtime observability schema. */
 enum class RuntimeEventKind : int32_t {
-    kTaskLaunch = 0,
+    kTaskStart = 0,
     kAllocation = 1,
     kTaskComplete = 2,
     kRelease = 3,
     kTaskWait = 4,
     kGeneration = 5,
     kFallback = 6,
-    // Source-compatible W1 spellings.
-    kTaskStart = kTaskLaunch,
+    kTaskLaunch = 7,
+    // Source-compatible W1 spelling.
     kAllocate = kAllocation,
 };
 
 struct RuntimeEvent final {
-    RuntimeEventKind kind{RuntimeEventKind::kTaskLaunch};
+    RuntimeEventKind kind{RuntimeEventKind::kTaskStart};
     int64_t task_id{-1};
     TaskKind task_kind{TaskKind::kKernel};
     int64_t value_id{-1};

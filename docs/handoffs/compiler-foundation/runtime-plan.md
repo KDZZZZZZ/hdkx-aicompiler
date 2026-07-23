@@ -177,8 +177,9 @@ observability declaration，因此以 `kMissingArtifactManifest` 回到 per-Call
 `RuntimeEvent` 的稳定 kind：
 
 - `kTaskWait`：消费一个已完成 scheduler dependency；带 dependency task id；
-- `kGeneration`：kernel submission 前记录 accepted upper-plane declaration 中的 generation、
+- `kGeneration`：kernel 的 `kTaskStart` 前记录 accepted upper-plane declaration 中的 generation、
   artifact identity 和 entry；这些字段是 observability，不是 Runtime-authenticated provenance；
+- `kTaskStart`：调用 task host action/backend submission 前记录；即使 submission 抛错也保留；
 - `kTaskLaunch`：task host action/backend submission 成功返回后记录；失败 submission 不发
   successful launch；
 - `kAllocation`：allocation 成功后记录 value/storage、bytes、alignment；
@@ -200,8 +201,8 @@ observer 在调用 `RuntimeSession`/`RunAsync` 的线程同步调用，不使用
   - per-task/per-call declaration completeness、generation/task matching、entry binding、plan
     fingerprint drift、immutable DTO；公共 caller 任意 identity 被明确当作 trusted declaration；
 - `task_executor_test`
-  - wait/generation/launch/allocation/release exact deterministic trace、declared identity、
-    dependency-aware release、failure stop/no replay；
+  - wait/generation/start/launch/complete exact deterministic lifecycle、declared identity、
+    allocation/release、dependency-aware release，以及失败 submission 有 start 但无 launch/complete；
 - `runtime_session_test`
   - runtime-plan-scoped gate OFF/ON selection query、fallback observer 与 manifested multi-entry
     numeric equality；
