@@ -427,6 +427,27 @@ void TestCompilerRejectsUnsupportedTransformerGraphs(const kxc::Device& device) 
                  Call(relay::Op::Get("gather"), {gather_data, gather_indices},
                       relay::GatherAttrs::Create(0))),
         "Gather indirect load", "indirect Load index expressions");
+
+    Var condition_2d("condition_2d", TensorType({2, 2}, "bool"));
+    Var x_2d("x_2d", TensorType({2, 2}, "float32"));
+    Var y_2d("y_2d", TensorType({2, 2}, "float32"));
+    expect_rejection(
+        Function({condition_2d, x_2d, y_2d},
+                 Call(relay::Op::Get("where"), {condition_2d, x_2d, y_2d})),
+        "multi-dimensional Where");
+
+    expect_rejection(
+        Function({x_2d},
+                 Call(relay::Op::Get("slice"), {x_2d},
+                      relay::SliceAttrs::Create({0}, {1}, {1}, {1}))),
+        "multi-dimensional Slice");
+
+    Var concat_2d_rhs("concat_2d_rhs", TensorType({2, 2}, "float32"));
+    expect_rejection(
+        Function({x_2d, concat_2d_rhs},
+                 Call(relay::Op::Get("concatenate"), {x_2d, concat_2d_rhs},
+                      relay::ConcatenateAttrs::Create(1))),
+        "multi-dimensional Concatenate");
 }
 
 /*! \brief 验证 CPU Relay Constant 放置到 CUDA 后由 RuntimeSession 自动注入。 */
@@ -464,8 +485,8 @@ void TestCompilerAdd(const kxc::Device& device) {
     }
 }
 
-/*! \brief 分别验证 Where、Slice、Concatenate 的 exact-static injective CUDA 路径。 */
-void TestCompilerTransformerInjectiveOps(const kxc::Device& device) {
+/*! \brief 仅验证非空 1-D Where、Slice、Concatenate 的本地 CUDA 证据。 */
+void TestCompilerTransformerInjectiveOps1DNonEmpty(const kxc::Device& device) {
     using namespace kxc;
     const auto require_equal = [](const std::vector<float>& actual,
                                   const std::vector<float>& expected,
@@ -577,8 +598,8 @@ int main(int argc, char** argv) {
         std::cout << "[PASS] runtime_session_constant\n";
         TestCompilerRelu(device);
         std::cout << "[PASS] runtime_session_relu\n";
-        TestCompilerTransformerInjectiveOps(device);
-        std::cout << "[PASS] runtime_session_transformer_injective_ops\n";
+        TestCompilerTransformerInjectiveOps1DNonEmpty(device);
+        std::cout << "[PASS] runtime_session_transformer_injective_ops_1d_nonempty_local_evidence\n";
         TestCompilerRejectsUnsupportedTransformerGraphs(device);
         std::cout << "[PASS] compiler_rejects_gather_and_reduction_graphs\n";
     } catch (const std::exception& error) {

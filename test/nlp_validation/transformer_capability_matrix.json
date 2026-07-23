@@ -212,8 +212,8 @@
     "embedding_gather": {
       "frontend": {
         "status": "implemented",
-        "gate": "static_gather_axis_output_contract",
-        "reason": "ONNX Gather maps axis and validates resolved static data/indices metadata and declared output shape/dtype.",
+        "gate": "constant_in_range_gather_axis_output_contract",
+        "reason": "ONNX Gather requires initializer-backed int32/int64 indices, validates every value in [-extent, extent-1], maps axis, and checks declared output shape/dtype; dynamic or OOB indices fail closed.",
         "evidence": [
           "python/kxc_onnx/importer.py",
           "test/onnx_importer_py_test.py",
@@ -321,9 +321,9 @@
         ]
       },
       "cuda": {
-        "status": "validated",
-        "gate": "cuda_where_injective_device_validated_sm75",
-        "reason": "A non-empty 1-D exact-static Where fixture was executed through Compiler and RuntimeSession on an NVIDIA GTX 1650 (SM 7.5); this does not claim masked-softmax semantics or broader CUDA shape approval.",
+        "status": "implemented",
+        "gate": "cuda_where_1d_nonempty_local_evidence",
+        "reason": "Source implements a non-empty 1-D exact-static Where Compiler/RuntimeSession fixture, but no committed GPU-CI/local-run artifact exists, so it is not validated; multidimensional Where fails closed at the target schedule.",
         "evidence": [
           "src/tir/transforms/bind_cuda_threads.cc",
           "test/codegen_cuda_test.cpp"
@@ -358,7 +358,7 @@
       "frontend": {
         "status": "implemented",
         "gate": "onnx_layer_normalization_opset17_static_exact",
-        "reason": "ONNX LayerNormalization opset >= 17 imports only three resolved float32 inputs, one output, stash_type default/1, and exact static shape/axis/epsilon contracts.",
+        "reason": "ONNX LayerNormalization opset >= 17 imports three resolved float32 inputs and Y; empty optional Mean/InvStdDev slots are accepted but non-empty requests fail closed. Attrs record float64 internal accumulation.",
         "evidence": [
           "python/kxc_onnx/importer.py",
           "test/onnx_importer_py_test.py"
@@ -367,7 +367,7 @@
       "relay": {
         "status": "implemented",
         "gate": "layer_norm_exact_static_float32",
-        "reason": "Relay nn_layer_norm requires exact-static float32 data/scale/bias, exact suffix affine shapes, finite positive epsilon, and float32 accumulation.",
+        "reason": "Relay nn_layer_norm requires exact-static float32 data/scale/bias and output, exact suffix affine shapes, finite positive float32 epsilon, and accurately records float64 internal accumulation.",
         "evidence": [
           "src/relay/type_infer.cc",
           "test/infer_type_test.cpp"
@@ -375,8 +375,8 @@
       },
       "lowering": {
         "status": "implemented",
-        "gate": "layer_norm_suffix_reduction_float32",
-        "reason": "One Relay call lowers to internal float32 sum/mean/centered/variance/inv_std TE stages over every normalized suffix axis.",
+        "gate": "layer_norm_suffix_reduction_float64",
+        "reason": "One Relay call casts float32 inputs to float64 for sum/mean/centered/variance/sqrt/affine stages over every normalized suffix axis, then casts Y back to float32.",
         "evidence": [
           "src/relay/op/nn/layer_norm.cc",
           "test/infer_type_test.cpp"
@@ -385,7 +385,7 @@
       "llvm": {
         "status": "implemented",
         "gate": "llvm_layer_norm_numeric_test_not_run_local",
-        "reason": "Conditional LLVM numeric coverage includes constant rows and tiny variance, but local LLVM is unavailable.",
+        "reason": "Conditional LLVM RuntimeSession numeric source covers FLT_MAX constant rows, huge offsets, multi-axis, axis 0, empty prefix, and tiny variance; local LLVM is unavailable.",
         "evidence": [
           "test/op_numeric_llvm_test.cpp"
         ]
@@ -410,7 +410,7 @@
       "numeric": {
         "status": "implemented",
         "gate": "layer_norm_llvm_numeric_test_not_run_local",
-        "reason": "Formula coverage is encoded in the conditional LLVM numeric test, including constant and tiny-variance rows.",
+        "reason": "A float64 host reference and full-range/multi-axis/axis-0/empty-prefix cases are encoded in the conditional LLVM numeric test, but were not run locally.",
         "evidence": [
           "test/op_numeric_llvm_test.cpp"
         ]
@@ -428,7 +428,7 @@
       "frontend": {
         "status": "implemented",
         "gate": "exact_static_slice_concat",
-        "reason": "Exact-static Slice input-form initializers and binary Concat are imported with canonical Relay attrs.",
+        "reason": "Exact-static Slice requires all provided control initializers to share int32 or int64 width and canonicalizes values to int64 attrs; binary Concat imports canonical axis attrs.",
         "evidence": [
           "python/kxc_onnx/importer.py",
           "test/onnx_importer_py_test.py"
@@ -463,9 +463,9 @@
         ]
       },
       "cuda": {
-        "status": "validated",
-        "gate": "cuda_slice_concat_injective_device_validated_sm75",
-        "reason": "Non-empty 1-D positive-step Slice and binary Concatenate fixtures were executed individually through Compiler and RuntimeSession on an NVIDIA GTX 1650 (SM 7.5), including fresh output allocation; empty-output CUDA is not claimed.",
+        "status": "implemented",
+        "gate": "cuda_slice_concat_1d_nonempty_local_evidence",
+        "reason": "Source implements non-empty 1-D positive-step Slice and binary Concatenate Compiler/RuntimeSession fixtures, but no committed GPU-CI/local-run artifact exists, so they are not validated; multidimensional and empty-output CUDA are not claimed.",
         "evidence": [
           "src/tir/transforms/bind_cuda_threads.cc",
           "test/codegen_cuda_test.cpp"
@@ -724,8 +724,8 @@
       },
       "lowering": {
         "status": "unsupported",
-        "gate": "negative_static_extents_rejected",
-        "reason": "Both legacy and per-unit lowering reject negative dimensions before generating TIR.",
+        "gate": "static_lowering_size_contract",
+        "reason": "Shared whole-graph and production per-unit lowering rejects negative or >INT32_MAX iteration extents and checked row-major element/flatten/byte overflow against int64 and size_t, while preserving zero-element tensors.",
         "evidence": [
           "src/compiler/lowering/relay_to_tir.cc",
           "src/compiler/lowering/lowered_graph.cc",

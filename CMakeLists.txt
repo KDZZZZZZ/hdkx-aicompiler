@@ -912,6 +912,9 @@ if(KXC_BUILD_PASS_TESTS)
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
     set(KXC_ONNX_IMPORT_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.params.bin")
+    set(KXC_ONNX_TRANSFORMER_PROTO "${CMAKE_CURRENT_BINARY_DIR}/onnx/exact_transformer.onnx")
+    set(KXC_ONNX_TRANSFORMER_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/exact_transformer.import.json")
+    set(KXC_ONNX_TRANSFORMER_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/exact_transformer.params.bin")
     add_custom_command(
       OUTPUT "${KXC_ONNX_IMPORT_JSON}" "${KXC_ONNX_IMPORT_PARAMS}"
       COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/onnx"
@@ -929,13 +932,36 @@ if(KXC_BUILD_PASS_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/spec.py"
       VERBATIM
       COMMENT "Generate ResNet18 ONNX import fixture")
+    add_custom_command(
+      OUTPUT
+        "${KXC_ONNX_TRANSFORMER_PROTO}"
+        "${KXC_ONNX_TRANSFORMER_JSON}"
+        "${KXC_ONNX_TRANSFORMER_PARAMS}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/onnx"
+      COMMAND "${CMAKE_COMMAND}" -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
+              "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_transformer_fixture.py"
+              --onnx "${KXC_ONNX_TRANSFORMER_PROTO}"
+              --json "${KXC_ONNX_TRANSFORMER_JSON}"
+              --params "${KXC_ONNX_TRANSFORMER_PARAMS}"
+      DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_transformer_fixture.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/__init__.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/importer.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/spec.py"
+      VERBATIM
+      COMMENT "Generate exact Transformer protobuf/import fixtures")
     add_custom_target(onnx_importer_fixture DEPENDS
-      "${KXC_ONNX_IMPORT_JSON}" "${KXC_ONNX_IMPORT_PARAMS}")
+      "${KXC_ONNX_IMPORT_JSON}" "${KXC_ONNX_IMPORT_PARAMS}"
+      "${KXC_ONNX_TRANSFORMER_PROTO}" "${KXC_ONNX_TRANSFORMER_JSON}"
+      "${KXC_ONNX_TRANSFORMER_PARAMS}")
     kxc_add_runtime_exe(onnx_importer_test test/onnx_importer_test.cpp)
     add_dependencies(onnx_importer_test onnx_importer_fixture)
     target_compile_definitions(onnx_importer_test PRIVATE
       KXC_ONNX_IMPORT_JSON_PATH="${KXC_ONNX_IMPORT_JSON}"
-      KXC_ONNX_IMPORT_PARAMS_PATH="${KXC_ONNX_IMPORT_PARAMS}")
+      KXC_ONNX_IMPORT_PARAMS_PATH="${KXC_ONNX_IMPORT_PARAMS}"
+      KXC_ONNX_TRANSFORMER_JSON_PATH="${KXC_ONNX_TRANSFORMER_JSON}"
+      KXC_ONNX_TRANSFORMER_PARAMS_PATH="${KXC_ONNX_TRANSFORMER_PARAMS}")
   else()
     message(WARNING "Python3 with onnx and numpy was not found; skipping onnx_importer_test target.")
   endif()
@@ -1134,8 +1160,12 @@ endforeach()
 
 kxc_add_ctest_if_target(codegen_llvm_test "llvm;codegen")
 kxc_add_ctest_if_target(op_numeric_llvm_test "llvm;numeric")
-kxc_add_ctest_if_target(onnx_importer_test "llvm;onnx;integration")
-kxc_add_ctest_if_target(codegen_cuda_test "cuda;hardware;codegen")
+if(KXC_USE_LLVM)
+  kxc_add_ctest_if_target(onnx_importer_test "llvm;onnx;protobuf;e2e;integration")
+else()
+  kxc_add_ctest_if_target(onnx_importer_test "onnx;integration")
+endif()
+kxc_add_ctest_if_target(codegen_cuda_test "cuda;hardware;codegen;local-evidence")
 kxc_add_ctest_if_target(cupti_smoke_test "cuda;hardware")
 
 if(Python3_Interpreter_FOUND)
