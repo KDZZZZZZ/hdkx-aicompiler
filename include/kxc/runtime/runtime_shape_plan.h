@@ -140,6 +140,8 @@ private:
 
 namespace detail {
 void FailNextRuntimeShapeOwnerTransferForTest() noexcept;
+/*! \brief Deterministically fails CUDA retention after launcher return; test seam only. */
+void FailNextRuntimeShapeCudaRetentionForTest() noexcept;
 }  // namespace detail
 
 struct RuntimeShapeLaunchArgs {

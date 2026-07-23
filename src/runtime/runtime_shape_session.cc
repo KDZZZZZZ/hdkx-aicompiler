@@ -29,6 +29,7 @@ namespace {
 constexpr std::size_t kMaxExpressionDepth = 64;
 constexpr std::size_t kMaxExpressionNodes = 4096;
 std::atomic<bool> fail_next_owner_transfer{false};
+std::atomic<bool> fail_next_cuda_retention{false};
 
 [[noreturn]] void Fail(const std::string& detail) {
     throw std::invalid_argument("RuntimeShape: " + detail);
@@ -418,6 +419,10 @@ void FailNextRuntimeShapeOwnerTransferForTest() noexcept {
     fail_next_owner_transfer.store(true, std::memory_order_release);
 }
 
+void FailNextRuntimeShapeCudaRetentionForTest() noexcept {
+    fail_next_cuda_retention.store(true, std::memory_order_release);
+}
+
 }  // namespace detail
 
 struct RuntimeShapePlan::Impl {
@@ -595,6 +600,8 @@ struct RuntimeShapeAsyncResult::State {
     RuntimeShapePlan plan;
     std::shared_ptr<void> caller_lease;
     std::vector<std::shared_ptr<void>> input_owners;
+    std::vector<::kxc::Storage> input_storage;
+    ::kxc::DeviceStream stream;
     bool ok{false};
     RuntimeShapeFailureKind failure_kind{RuntimeShapeFailureKind::kNone};
     std::string failure_reason;
@@ -604,16 +611,27 @@ struct RuntimeShapeAsyncResult::State {
     ::kxc::AsyncOperation completion;
     std::size_t retained_device_bytes{0};
     bool completion_reported{false};
+    bool quarantined{false};
     mutable std::mutex mutex;
-
-    ~State() {
-        // This is ownership retirement only; Storage may still have other owners.
-        events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kRetire,
-                                           static_cast<std::size_t>(-1),
-                                           retained_device_bytes,
-                                           "result ownership retired; no physical release implied"});
-    }
 };
+
+namespace {
+
+// A callback that might have submitted work but provides no usable completion
+// leaves no safe release point.  Keep the whole run alive for process lifetime.
+template <typename State>
+void QuarantineRunState(const std::shared_ptr<State>& state) noexcept {
+    try {
+        static auto* retained = new std::vector<std::shared_ptr<State>>();
+        static auto* mutex = new std::mutex();
+        std::lock_guard<std::mutex> lock(*mutex);
+        retained->push_back(state);
+    } catch (...) {
+        std::terminate();
+    }
+}
+
+}  // namespace
 
 RuntimeShapeAsyncResult::RuntimeShapeAsyncResult(std::shared_ptr<State> state)
     : state_(std::move(state)) {}
@@ -643,11 +661,19 @@ namespace {
 template <typename State>
 void MarkCompletion(const std::shared_ptr<State>& state) noexcept {
     std::lock_guard<std::mutex> lock(state->mutex);
-    if (!state->completion_reported) {
-        state->completion_reported = true;
+    if (state->completion_reported) return;
+    state->completion_reported = true;
+    try {
         state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kCompletion,
                                                    static_cast<std::size_t>(-1), 0,
                                                    "CUDA completion observed; ownership retained"});
+        // Retire means only that result ownership may now retire; it never asserts a free.
+        state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kRetire,
+                                                   static_cast<std::size_t>(-1),
+                                                   state->retained_device_bytes,
+                                                   "completion observed; logical retirement eligible, not physical free"});
+    } catch (...) {
+        // Completion is still recorded; event telemetry must not terminate polling/waiting.
     }
 }
 
@@ -658,9 +684,13 @@ void MarkCompletionFailure(const std::shared_ptr<State>& state,
     state->ok = false;
     state->failure_kind = RuntimeShapeFailureKind::kCompletionFailed;
     state->failure_reason = reason;
-    state->outputs.clear();
+    // A quarantined run has no proven dependency attachment, so its outputs stay alive.
+    if (!state->quarantined) state->outputs.clear();
     // The completion still owns CUDA Storage; do not under-report retained bytes.
-    state->events.push_back(FailureEvent(reason));
+    try {
+        state->events.push_back(FailureEvent(reason));
+    } catch (...) {
+    }
 }
 
 RuntimeShapeFailureKind ClassifyShapeFailure(const std::string& reason) {
@@ -761,6 +791,8 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunImpl(
                 return fail(RuntimeShapeFailureKind::kShapeAbiRejected,
                             "CUDA stream device does not match entry device contract");
             }
+            // Preserve the stream even when a callback fails to return completion.
+            state->stream = stream;
         }
         if (inputs.size() != spec.inputs.size()) Fail("input count does not match");
         std::vector<std::vector<RuntimeShapeExtent>> input_shapes;
@@ -786,6 +818,7 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunImpl(
                 }
             }
             state->input_owners.push_back(input.owner);
+            if (cuda_async) state->input_storage.push_back(input.storage);
             for (const auto& guard : contract.axis_guards) {
                 const RuntimeShapeExtent extent = input.shape[guard.axis];
                 if (extent < guard.lower || extent > guard.upper ||
@@ -881,40 +914,65 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunImpl(
             return RuntimeShapeAsyncResult(std::move(state));
         }
         ::kxc::AsyncOperation completion;
+        const auto fail_closed = [&](const char* reason) noexcept {
+            // No completion proves the callback did not submit.  Quarantine the
+            // entire run before reporting failure so no CUDA Storage can be freed.
+            state->quarantined = true;
+            state->retained_device_bytes = total_bytes;
+            QuarantineRunState(state);
+            try {
+                state->ok = false;
+                state->failure_kind = RuntimeShapeFailureKind::kSubmissionFailed;
+                state->failure_reason = reason;
+                state->events.push_back(FailureEvent(reason));
+            } catch (...) {
+            }
+            return RuntimeShapeAsyncResult(state);
+        };
+        const auto fail_after_submission = [&](const char* reason) noexcept {
+            if (!completion.defined()) return fail_closed(reason);
+            try {
+                completion.Wait();
+                MarkCompletion(state);
+            } catch (...) {
+                // The returned operation is the only possible completion proof;
+                // retain it and the run forever rather than clearing outputs.
+                state->completion = std::move(completion);
+                return fail_closed(reason);
+            }
+            return fail(RuntimeShapeFailureKind::kSubmissionFailed, reason);
+        };
         try {
             std::lock_guard<std::mutex> lock(plan_.launcher_mutex());
             completion = spec.entry.cuda_launcher(RuntimeShapeCudaLaunchArgs{inputs, state->outputs,
                 runtime_extent_values, spec.entry.exact_abi_fingerprint, stream});
-        } catch (const std::exception& error) {
-            return fail(RuntimeShapeFailureKind::kSubmissionFailed,
-                        std::string("CUDA launcher threw: ") + error.what());
         } catch (...) {
-            return fail(RuntimeShapeFailureKind::kSubmissionFailed,
-                        "CUDA launcher threw a non-standard exception");
+            return fail_closed("CUDA launcher threw after possible submission; run state quarantined");
         }
         if (!completion.defined()) {
-            return fail(RuntimeShapeFailureKind::kLaunchRejected, "CUDA launcher rejected submission");
+            return fail_closed("CUDA launcher returned no completion; run state quarantined");
         }
-        if (completion.device() != execution_device) {
-            return fail(RuntimeShapeFailureKind::kSubmissionFailed,
-                        "CUDA launcher returned completion on wrong device");
-        }
-        if (completion->backend_event == nullptr || completion->completed) {
-            return fail(RuntimeShapeFailureKind::kSubmissionFailed,
-                        "CUDA launcher must return a pending backend-event completion");
-        }
-        auto retention = std::make_shared<RuntimeShapeAsyncRetention>();
-        retention->plan = plan_;
-        retention->caller_lease = state->caller_lease;
-        retention->input_owners = state->input_owners;
-        ::kxc::Array<::kxc::Storage> output_storage;
-        for (const auto& input : inputs) retention->input_storage.push_back(input.storage);
-        for (const auto& output : state->outputs) output_storage.push_back(output.storage_);
         try {
+            if (completion.device() != execution_device) {
+                return fail_after_submission("CUDA launcher returned completion on wrong device");
+            }
+            if (completion->backend_event == nullptr || completion->completed) {
+                return fail_after_submission(
+                    "CUDA launcher must return a pending backend-event completion");
+            }
+            auto retention = std::make_shared<RuntimeShapeAsyncRetention>();
+            retention->plan = plan_;
+            retention->caller_lease = state->caller_lease;
+            retention->input_owners = state->input_owners;
+            retention->input_storage = state->input_storage;
+            ::kxc::Array<::kxc::Storage> output_storage;
+            for (const auto& output : state->outputs) output_storage.push_back(output.storage_);
+            if (fail_next_cuda_retention.exchange(false, std::memory_order_acq_rel)) {
+                throw std::bad_alloc();
+            }
             completion.RetainDependencies(std::move(output_storage), retention);
-        } catch (const std::exception& error) {
-            return fail(RuntimeShapeFailureKind::kSubmissionFailed,
-                        std::string("CUDA completion retention failed: ") + error.what());
+        } catch (...) {
+            return fail_after_submission("CUDA completion retention failed");
         }
         state->completion = std::move(completion);
         state->retained_device_bytes = total_bytes;

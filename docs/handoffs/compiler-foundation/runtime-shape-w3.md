@@ -41,10 +41,21 @@ seam.
 `retained_device_bytes()` is exact per-result CUDA output storage retained by
 that result/completion; it is not a process-wide resident-memory claim. It can
 remain nonzero after completion because `AsyncOperation` intentionally retains
-its storage until final completion/result ownership drops. Events distinguish
-shape evaluation, allocation, CPU kernel acceptance or CUDA submission,
-observed completion, failure, and ownership retirement. Retire explicitly does
-not claim physical deallocation.
+its storage until final completion/result ownership drops. `kRetire` is emitted
+only with an observed CUDA completion as logical retirement eligibility; it
+never claims a physical free and is never synthesized by result destruction.
+
+After invoking a CUDA launcher, every rejected wrong-device/pending completion
+or retention-attachment error first waits the returned completion before output
+storage is cleared. A callback that throws or returns no completion after
+possible submission has no proof point, so the complete run state (outputs,
+input/module/caller leases, the submitting stream, and any returned operation) is permanently
+quarantined and the failed result reports retained bytes instead of assuming
+that no work was submitted. This is intentionally process-lifetime retention:
+safety takes precedence over reclamation. The same no-early-release rule is
+consistent with `CudaModuleLauncher`, whose own post-launch error path syncs
+before release and permanently retains its operation when synchronization
+cannot establish completion.
 
 `RuntimeShapeFailureKind` lets an upper control plane distinguish disabled,
 applicability/guard miss, shape/ABI rejection, resource exhaustion/OOM, launch
@@ -58,10 +69,13 @@ fallback is an explicit upper-plane action to another prevalidated frozen
 CPU focused coverage exercises gate ON/OFF, exact ABI mismatch, scalar ABI,
 required CPU data, zero-byte output, layout/scope restrictions, checked sizes,
 budget and callback failure, RAII transfer, fake CPU retention, leases, and
-serialized trusted callbacks. The conditional CUDA test uses a real CUDA event
-and stream blocker, checks pending retention across session/owner destruction,
-wait/accounting, budget and guard failure before launch, rejected/wrong-device
-completion, and CTest skip code 77 when no CUDA hardware exists.
+serialized trusted callbacks. The conditional CUDA test uses real CUDA events
+and host callbacks to check pending retention across session/owner destruction,
+that post-submit retention failure waits before clearing output, that a
+post-submit callback exception without a completion quarantines its complete
+run state, and that rejected/wrong-device completion paths do not clear output
+before completion is observed. CTest uses skip code 77 when no CUDA hardware
+exists.
 
 Local CUDA validation ran the conditional `runtime_shape_cuda_async_test` with
 `KXC_ENABLE_RUNTIME_SHAPE_CUDA=ON` against an available CUDA device. This is

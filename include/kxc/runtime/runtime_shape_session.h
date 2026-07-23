@@ -29,7 +29,7 @@ enum class RuntimeShapeEventKind {
     kKernel,
     kSubmission,
     kCompletion,
-    /*! \brief Ownership retirement, not a claim that physical memory was released. */
+    /*! \brief Observed-completion retirement eligibility, never physical deallocation. */
     kRetire,
     kFailure,
 };
