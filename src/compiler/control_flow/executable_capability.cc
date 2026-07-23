@@ -4,11 +4,14 @@
 
 #include "../internal/executable_capability.h"
 
+#include <any>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include "kxc/relay/op.h"
+#include "kxc/relay/op_attr_types.h"
 
 namespace kxc::api::internal {
 namespace {
@@ -52,6 +55,11 @@ public:
             RequireChecked(Expr(ObjectRef(parameter)), path);
             VerifyType(parameter->type_annotation, path + ".type_annotation");
             VerifyType(parameter.checked_type(), path + ".checked_type");
+            if (!parameter->type_annotation.As<TensorTypeNode>() &&
+                !options_.allow_tuple_parameters) {
+                Fail(path, "Var", "tensor_parameter",
+                     "static ValueGraph parameters must be TensorType");
+            }
             if (!TypeEqual(parameter->type_annotation, parameter.checked_type())) {
                 Fail(path, "Var", "typed_parameter", "annotation and checked_type differ");
             }
@@ -83,6 +91,23 @@ private:
         if (!expr.checked_type().defined()) {
             Fail(path, NodeKind(expr), "defined_typed_relay", "checked_type is missing");
         }
+        const auto* relay_node = dynamic_cast<const RelayNode*>(expr.get());
+        if (!relay_node || !relay_node->virtual_device_.defined()) return;
+        const Device actual = relay_node->virtual_device_->device;
+        if (!actual.defined() ||
+            (actual.device_type() != kCPU && actual.device_type() != kCUDA)) {
+            Fail(path, NodeKind(expr), "explicit_execution_device",
+                 "VirtualDevice must define a CPU or CUDA device");
+        }
+        if (options_.execution_device.defined()) {
+            if (actual != options_.execution_device) {
+                Fail(path, NodeKind(expr), "matching_execution_device",
+                     "Relay placement differs from the requested execution device");
+            }
+        } else if (!options_.allow_device_regions) {
+            Fail(path, NodeKind(expr), "explicit_execution_device",
+                 "explicit Relay placement requires an execution device");
+        }
     }
 
     void VerifyType(const Type& type, const std::string& path) const {
@@ -107,6 +132,98 @@ private:
         Fail(path, "Type", "static_tensor_or_tuple_type", "unsupported Relay type");
     }
 
+    void VerifyCallContract(const Expr& expr, const CallNode* call,
+                            const std::string& path) const {
+        const auto* op = call->op.As<relay::OpNode>();
+        if (!op || !op->has_spec) {
+            Fail(path, "Call", "registered_ordinary_op_call",
+                 "Call target is not a specified Op");
+        }
+        const relay::Op* registered = relay::Op::TryGet(op->name);
+        if (!registered || registered->get() != call->op.get()) {
+            Fail(path, "Call", "registered_ordinary_op_call",
+                 "Call target is not the registered Op instance");
+        }
+        try {
+            relay::ValidateOperatorSpec(op->spec);
+        } catch (const std::exception& error) {
+            Fail(path, "Call", "registered_ordinary_op_call", error.what());
+        }
+        if (!IsOrdinaryOperator(op->spec.lowering_kind)) {
+            Fail(path, "Call", "registered_ordinary_op_call",
+                 "operator is not an ordinary static-dataflow operation");
+        }
+        if (op->spec.effect != relay::OperatorEffectKind::kPure ||
+            !op->spec.deterministic || op->spec.alias_contract != "none") {
+            Fail(path, "Call", "pure_deterministic_no_alias",
+                 "operator is not a pure deterministic non-aliasing kernel");
+        }
+        const size_t actual_arity = call->args.size();
+        if ((op->spec.input_arity.num_inputs >= 0 &&
+             actual_arity !=
+                 static_cast<size_t>(op->spec.input_arity.num_inputs)) ||
+            (op->spec.input_arity.num_inputs < 0 &&
+             (actual_arity <
+                  static_cast<size_t>(op->spec.input_arity.min_inputs) ||
+              actual_arity >
+                  static_cast<size_t>(op->spec.input_arity.max_inputs)))) {
+            Fail(path, "Call", "operator_input_arity",
+                 "Call input arity differs from OperatorSpec");
+        }
+        if (call->attrs.defined()) {
+            if (op->spec.attrs_type_key.empty()) {
+                Fail(path, "Call", "operator_attrs_schema",
+                     "Call defines attrs outside its OperatorSpec schema");
+            }
+            const std::string actual(call->attrs.get()->GetTypeKey());
+            if (actual != op->spec.attrs_type_key &&
+                actual != op->spec.attrs_type_key + "Node") {
+                Fail(path, "Call", "operator_attrs_schema",
+                     "Call attrs type differs from OperatorSpec");
+            }
+        }
+        const auto relation = op->attrs.find(op->spec.type_relation_key);
+        const auto lowering = op->attrs.find(op->spec.lowering_key);
+        if (relation == op->attrs.end() || lowering == op->attrs.end()) {
+            Fail(path, "Call", "operator_implementation_binding",
+                 "OperatorSpec implementation binding is missing");
+        }
+        const auto* infer =
+            std::any_cast<relay::FInferType>(&relation->second);
+        if (!infer) {
+            Fail(path, "Call", "operator_implementation_binding",
+                 "type relation binding has the wrong type");
+        }
+        if (op->spec.lowering_kind ==
+                relay::OperatorLoweringKind::kSingleTE &&
+            !std::any_cast<relay::FRelayToTE>(&lowering->second)) {
+            Fail(path, "Call", "operator_implementation_binding",
+                 "single-output lowering binding has the wrong type");
+        }
+        if (op->spec.lowering_kind ==
+                relay::OperatorLoweringKind::kMultiTE &&
+            !std::any_cast<relay::FRelayToTEMulti>(&lowering->second)) {
+            Fail(path, "Call", "operator_implementation_binding",
+                 "multi-output lowering binding has the wrong type");
+        }
+        Array<Type> input_types;
+        for (const Expr& argument : call->args) {
+            input_types.push_back(argument.checked_type());
+        }
+        const relay::Attrs attrs =
+            call->attrs.defined() ? relay::Attrs(call->attrs) : relay::Attrs();
+        Type inferred;
+        try {
+            inferred = (*infer)(attrs, input_types);
+        } catch (const std::exception& error) {
+            Fail(path, "Call", "operator_type_relation", error.what());
+        }
+        if (!TypeEqual(inferred, expr.checked_type())) {
+            Fail(path, "Call", "operator_type_relation",
+                 "Call checked_type is stale for OperatorSpec");
+        }
+    }
+
     void VerifyBoundVar(const Expr& expr, const VarNode* var,
                         const std::string& path) const {
         if (bindings_.count(expr.get()) == 0) {
@@ -124,25 +241,7 @@ private:
         }
         if (expr.As<ConstantNode>()) return;
         if (const auto* call = expr.As<CallNode>()) {
-            const auto* op = call->op.As<relay::OpNode>();
-            if (!op || !op->has_spec) {
-                Fail(path, "Call", "registered_ordinary_op_call",
-                     "Call target is not a specified Op");
-            }
-            const relay::Op* registered = relay::Op::TryGet(op->name);
-            if (!registered || registered->get() != call->op.get()) {
-                Fail(path, "Call", "registered_ordinary_op_call",
-                     "Call target is not the registered Op instance");
-            }
-            try {
-                relay::ValidateOperatorSpec(op->spec);
-            } catch (const std::exception& error) {
-                Fail(path, "Call", "registered_ordinary_op_call", error.what());
-            }
-            if (!IsOrdinaryOperator(op->spec.lowering_kind)) {
-                Fail(path, "Call", "registered_ordinary_op_call",
-                     "operator is not an ordinary static-dataflow operation");
-            }
+            VerifyCallContract(expr, call, path);
             for (size_t i = 0; i < call->args.size(); ++i) {
                 Visit(call->args[i], path + ".args[" + std::to_string(i) + "]");
             }
@@ -223,8 +322,11 @@ private:
 
 }  // namespace
 
-ExecutableCapabilityOptions StaticDataflowExecutableCapabilities() {
-    return ExecutableCapabilityOptions{};
+ExecutableCapabilityOptions StaticDataflowExecutableCapabilities(
+    Device execution_device) {
+    ExecutableCapabilityOptions options;
+    options.execution_device = std::move(execution_device);
+    return options;
 }
 
 void VerifyExecutableCapability(const Function& function,
@@ -233,6 +335,14 @@ void VerifyExecutableCapability(const Function& function,
         throw std::invalid_argument(
             "Executable capability error: path=options.version; node=Options; "
             "required capability=static_options_v1; detail=unsupported options version");
+    }
+    if (options.execution_device.defined() &&
+        options.execution_device.device_type() != kCPU &&
+        options.execution_device.device_type() != kCUDA) {
+        throw std::invalid_argument(
+            "Executable capability error: path=options.execution_device; "
+            "node=Options; required capability=cpu_or_cuda_device; "
+            "detail=unsupported execution device");
     }
     CapabilityVerifier(options).Verify(function);
 }

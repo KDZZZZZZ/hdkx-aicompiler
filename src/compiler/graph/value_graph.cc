@@ -5,6 +5,7 @@
 #include "../internal/value_graph.h"
 #include "../internal/executable_capability.h"
 
+#include <cstddef>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -14,9 +15,21 @@
 namespace kxc::api::internal {
 namespace {
 
+size_t TensorLeafCount(const Type& type) {
+    if (type.As<TensorTypeNode>()) return 1;
+    if (const auto* tuple = type.As<TupleTypeNode>()) {
+        size_t count = 0;
+        for (const Type& field : tuple->fields) count += TensorLeafCount(field);
+        return count;
+    }
+    throw std::invalid_argument(
+        "BuildValueGraph requires TensorType or nested TupleType leaves");
+}
+
 class ValueGraphBuilder {
 public:
-    explicit ValueGraphBuilder(Function function) {
+    ValueGraphBuilder(Function function, Device execution_device)
+        : execution_device_(std::move(execution_device)) {
         if (!function.defined()) {
             throw std::invalid_argument("BuildValueGraph requires a defined Function");
         }
@@ -24,8 +37,9 @@ public:
     }
 
     ValueGraph Build() {
-        VerifyExecutableCapability(graph_.function,
-                                   StaticDataflowExecutableCapabilities());
+        VerifyExecutableCapability(
+            graph_.function,
+            StaticDataflowExecutableCapabilities(execution_device_));
         for (const auto& parameter : graph_.function->params) {
             if (!parameter->type_annotation.As<TensorTypeNode>()) {
                 throw std::invalid_argument(
@@ -53,6 +67,7 @@ public:
 
 private:
     ValueGraph graph_;
+    Device execution_device_;
     std::unordered_map<const Object*, std::vector<int64_t>> bound_value_ids_;
 
     int64_t AddValue(const Expr& source, ValueOrigin origin, int64_t output_index,
@@ -132,13 +147,29 @@ private:
         }
         if (const auto* get_item = expr.As<TupleGetItemNode>()) {
             const std::vector<int64_t> tuple_values = Resolve(get_item->tuple);
-            if (get_item->index < 0 ||
-                static_cast<size_t>(get_item->index) >= tuple_values.size()) {
+            const auto* tuple_type =
+                get_item->tuple.checked_type().As<TupleTypeNode>();
+            if (!tuple_type || get_item->index < 0 ||
+                static_cast<size_t>(get_item->index) >=
+                    tuple_type->fields.size()) {
                 throw std::invalid_argument(
-                    "TupleGetItem index is outside the stable value list");
+                    "TupleGetItem index is outside its checked TupleType");
             }
-            std::vector<int64_t> selected = {
-                tuple_values[static_cast<size_t>(get_item->index)]};
+            size_t begin = 0;
+            for (int index = 0; index < get_item->index; ++index) {
+                begin += TensorLeafCount(
+                    tuple_type->fields[static_cast<size_t>(index)]);
+            }
+            const size_t count = TensorLeafCount(
+                tuple_type->fields[static_cast<size_t>(get_item->index)]);
+            if (begin + count > tuple_values.size()) {
+                throw std::invalid_argument(
+                    "TupleGetItem checked type does not match flattened values");
+            }
+            std::vector<int64_t> selected(
+                tuple_values.begin() + static_cast<std::ptrdiff_t>(begin),
+                tuple_values.begin() +
+                    static_cast<std::ptrdiff_t>(begin + count));
             graph_.value_ids_by_expr.emplace(expr.get(), selected);
             return selected;
         }
@@ -232,8 +263,9 @@ bool IsOrdinaryCompute(relay::OperatorLoweringKind kind) {
            kind == relay::OperatorLoweringKind::kMultiTE;
 }
 
-ValueGraph BuildValueGraph(const Function& function) {
-    return ValueGraphBuilder(function).Build();
+ValueGraph BuildValueGraph(const Function& function,
+                           Device execution_device) {
+    return ValueGraphBuilder(function, std::move(execution_device)).Build();
 }
 
 }  // namespace kxc::api::internal

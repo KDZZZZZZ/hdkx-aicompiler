@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include "kxc/relay/relay.h"
+#include "kxc/runtime/device.h"
 
 namespace kxc::api::internal {
 
@@ -16,10 +17,14 @@ struct ExecutableCapabilityOptions {
 
     uint32_t version{kVersion};
     bool allow_if{false};
+    bool allow_tuple_parameters{false};
+    bool allow_device_regions{false};
+    Device execution_device;
 };
 
 /*! \brief The static-dataflow contract used before ValueGraph construction. */
-ExecutableCapabilityOptions StaticDataflowExecutableCapabilities();
+ExecutableCapabilityOptions StaticDataflowExecutableCapabilities(
+    Device execution_device = Device());
 
 /*! \brief Verifies the typed, static-exact Relay subset required by an executable. */
 void VerifyExecutableCapability(const Function& function,

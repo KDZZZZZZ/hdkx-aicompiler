@@ -138,6 +138,8 @@ public:
         internal::ExecutableCapabilityOptions options;
         options.version = internal::ExecutableCapabilityOptions::kVersion;
         options.allow_if = true;
+        options.allow_tuple_parameters = true;
+        options.allow_device_regions = true;
         internal::VerifyExecutableCapability(function_, options);
 
         const runtime::RegionId root = NewRegion("function");

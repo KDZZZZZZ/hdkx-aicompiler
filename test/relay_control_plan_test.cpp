@@ -183,8 +183,10 @@ bool TestStaticAndControlGates() {
     TEST_CHECK(duplicate_error.find("duplicate graph output") != std::string::npos,
                "ControlPlan v1 graph outputs must be unique");
 
+    Var ordinary_predicate("ordinary_predicate", TensorType({}, "bool"));
     Var a("a", kI64), b("b", kI64);
-    Function ordinary_if({predicate, a, b}, If(predicate, a, b));
+    Function ordinary_if({ordinary_predicate, a, b},
+                         If(ordinary_predicate, a, b));
     ordinary_if = kxc::relay::InferTypePass(ordinary_if);
     const std::string graph_error = ErrorText([&] {
         (void)kxc::api::internal::BuildValueGraph(ordinary_if);

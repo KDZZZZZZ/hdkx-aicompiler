@@ -274,7 +274,7 @@ LoweredGraph LowerGraph(Function function, Device device) {
     function = relay::InferTypePass(function);
     LoweredGraph result;
     result.partitioned =
-        PartitionValueGraph(BuildValueGraph(function));
+        PartitionValueGraph(BuildValueGraph(function, device));
 
     for (const CompilationUnit& unit : result.partitioned.units) {
         relay::LoweredFunction lowered =

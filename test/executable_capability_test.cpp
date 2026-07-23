@@ -2,6 +2,7 @@
  * \brief Standalone static-exact executable capability and ValueGraph checks.
  */
 
+#include <any>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -161,6 +162,102 @@ bool TestValueGraphLetMatchesNestedTopology() {
     return true;
 }
 
+bool TestPlacementAndOperatorContractsFailClosed() {
+    using namespace kxc;
+    using namespace kxc::api::internal;
+    const TensorType type({4}, "float32");
+
+    Var placed("placed", type);
+    placed.set_virtual_device(VirtualDevice::ForDevice(Device::CUDA()));
+    Function placed_function({placed}, placed);
+    placed_function = relay::InferTypePass(placed_function);
+    const std::string missing_device = ErrorText(
+        [&] { (void)BuildValueGraph(placed_function); });
+    TEST_CHECK(missing_device.find("explicit_execution_device") !=
+                   std::string::npos,
+               "explicit placement without an execution device must fail");
+    const std::string mismatched_device = ErrorText(
+        [&] { (void)BuildValueGraph(placed_function, Device::CPU()); });
+    TEST_CHECK(mismatched_device.find("matching_execution_device") !=
+                   std::string::npos,
+               "placement must match the static execution device");
+    (void)BuildValueGraph(placed_function, Device::CUDA());
+
+    const relay::Op& add = relay::Op::Get("add");
+    auto* add_node = const_cast<relay::OpNode*>(add.operator->());
+    const relay::OperatorSpec saved_spec = add_node->spec;
+    Var x("x", type);
+    Var y("y", type);
+    Function add_function({x, y}, Add(x, y));
+    add_function = relay::InferTypePass(add_function);
+
+    add_node->spec.effect = relay::OperatorEffectKind::kStateful;
+    const std::string effect_error = ErrorText(
+        [&] { (void)BuildValueGraph(add_function, Device::CPU()); });
+    add_node->spec = saved_spec;
+    TEST_CHECK(effect_error.find("pure_deterministic_no_alias") !=
+                   std::string::npos,
+               "stateful ordinary operators must not enter static ValueGraph");
+
+    add_node->spec.alias_contract = "must_alias";
+    const std::string alias_error = ErrorText(
+        [&] { (void)BuildValueGraph(add_function, Device::CPU()); });
+    add_node->spec = saved_spec;
+    TEST_CHECK(alias_error.find("pure_deterministic_no_alias") !=
+                   std::string::npos,
+               "aliasing ordinary operators must not enter static ValueGraph");
+
+    const std::string lowering_key = saved_spec.lowering_key;
+    const std::any saved_lowering = add_node->attrs.at(lowering_key);
+    add_node->attrs.erase(lowering_key);
+    const std::string binding_error = ErrorText(
+        [&] { (void)BuildValueGraph(add_function, Device::CPU()); });
+    add_node->attrs.emplace(lowering_key, saved_lowering);
+    TEST_CHECK(binding_error.find("operator_implementation_binding") !=
+                   std::string::npos,
+               "missing lowering bindings must fail in the capability gate");
+    return true;
+}
+
+bool TestNestedTupleGetItemKeepsAllLeaves() {
+    using namespace kxc;
+    using namespace kxc::api::internal;
+    const TensorType type({4}, "float32");
+    Var x("x", type);
+    Var y("y", type);
+    Var z("z", type);
+    Tuple nested({Add(x, y), Tuple({Add(y, z), Add(z, x)})});
+    Function function({x, y, z}, TupleGetItem(nested, 1));
+    function = relay::InferTypePass(function);
+    const ValueGraph graph = BuildValueGraph(function, Device::CPU());
+    TEST_CHECK(graph.calls.size() == 3 &&
+                   SameIds(graph.output_value_ids, {4, 5}),
+               "TupleGetItem of a nested field must return every flattened leaf");
+    return true;
+}
+
+bool TestTupleParameterCapabilityIsNotOverclaimed() {
+    using namespace kxc;
+    using namespace kxc::api::internal;
+    const TensorType tensor({4}, "float32");
+    const TupleType tuple_type({tensor, tensor});
+    Var parameter("parameter", tuple_type);
+    SetCheckedType(Expr(ObjectRef(parameter)), tuple_type);
+    TupleGetItem first(parameter, 0);
+    SetCheckedType(first, tensor);
+    Function function({parameter}, first);
+    SetCheckedType(function, tensor);
+    const std::string error = ErrorText([&] {
+        VerifyExecutableCapability(function,
+                                    StaticDataflowExecutableCapabilities(
+                                        Device::CPU()));
+    });
+    TEST_CHECK(error.find("required capability=tensor_parameter") !=
+                   std::string::npos,
+               "static ValueGraph verifier must reject tuple parameters itself");
+    return true;
+}
+
 bool TestValueGraphFreeVarRejects() {
     using namespace kxc;
     using namespace kxc::api::internal;
@@ -180,6 +277,10 @@ int main() {
         {"static_exact_diagnostics_and_if_gate", TestStaticExactDiagnosticsAndIfGate},
         {"function_value_rejected", TestFunctionValueIsRejected},
         {"value_graph_let_matches_nested", TestValueGraphLetMatchesNestedTopology},
+        {"placement_and_operator_contracts",
+         TestPlacementAndOperatorContractsFailClosed},
+        {"nested_tuple_get_item_leaves", TestNestedTupleGetItemKeepsAllLeaves},
+        {"tuple_parameter_gate", TestTupleParameterCapabilityIsNotOverclaimed},
         {"value_graph_free_var_rejected", TestValueGraphFreeVarRejects},
     };
     for (const auto& test : tests) {
