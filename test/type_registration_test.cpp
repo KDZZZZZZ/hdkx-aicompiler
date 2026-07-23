@@ -101,6 +101,7 @@ bool TestStableRegistrations() {
         "TupleNode",
         "TupleGetItemNode",
         "IfNode",
+        "WhileNode",
         "LetNode",
         "kxc.relay.ConstantBindingNode",
         "kxc.relay.LoweredFunctionNode",
