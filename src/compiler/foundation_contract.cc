@@ -4,6 +4,8 @@
 
 #include "kxc/compiler/foundation_contract.h"
 
+#include "internal/primitive_cache.h"
+
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -43,11 +45,39 @@ ArtifactPin::ArtifactPin(ArtifactHandle handle) : handle_(std::move(handle)) {
     }
 }
 
+ArtifactPin::ArtifactPin(ArtifactHandle handle, std::shared_ptr<const void> owner)
+    : handle_(std::move(handle)), owner_(std::move(owner)) {
+    if (!handle_.defined() || !owner_) {
+        throw std::invalid_argument(
+            "production ArtifactPin requires an ArtifactHandle and owner");
+    }
+}
+
 bool ArtifactPin::defined() const noexcept { return handle_.defined(); }
 
 const ArtifactHandle& ArtifactPin::handle() const {
     if (!handle_.defined()) throw std::logic_error("ArtifactPin is undefined");
     return handle_;
+}
+
+ArtifactLookup ProductionArtifactCacheAdapter::Lookup(const ArtifactKey& key) const {
+    const internal::PrimitiveArtifactPin pin = internal::LookupPrimitiveCache(key);
+    if (!pin.defined()) return {};
+    return ArtifactLookup{ArtifactLookupKind::kHit, internal::ToArtifactPin(pin)};
+}
+
+ArtifactCacheStats ProductionArtifactCacheAdapter::stats() const {
+    const internal::PrimitiveCacheStats stats = internal::GetPrimitiveCacheStats();
+    return ArtifactCacheStats{stats.hits,
+                              stats.misses,
+                              stats.entries,
+                              stats.accounted_bytes,
+                              stats.evictions,
+                              stats.in_flight,
+                              stats.merged_waiters,
+                              stats.failures,
+                              stats.rejections,
+                              stats.active_pins};
 }
 
 std::string CompileRequest::CanonicalSingleflightKey() const {

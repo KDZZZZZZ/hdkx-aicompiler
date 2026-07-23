@@ -1,6 +1,6 @@
 # 01：共同基础——契约、identity 与 artifact cache
 
-> **状态：** 阻塞（本轨可实现项完成；仅待 02–06 分支消费 CoreContract v1）
+> **状态：** 进行中（第二轮 supervisor fix 已实现并通过本地 CPU closure；仍待 LLVM CI 与终审，不再称“仅阻塞于 02–06”）
 > **所属路线：** [编译器基础路线图](README.md)  
 > **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **前置：** 无；本轨的最小冻结接口应允许 02–06 使用 mock/fake 并行开发。
@@ -174,15 +174,19 @@ M1 的冻结原则是“窄而可替换”：每个 mock/fake 只实现表中的
 
 ## 9. Done 条件
 
-- [x] capability verifier 在三个规定边界 fail closed，并有可定位的正反例。
+- [x] capability verifier 结构化区分 `unsupported`、`eligible-but-not-executable` 与 `executable`；`supported=true` 只来自同一 production compile path 的 lowering、schedule、ABI 和 backend 成功证明。
+- [x] `nn_gemm transA`、tuple parameter、backend unavailable、CUDA capability/reduction schedule、custom lowering output mismatch 与 `supported => Compiler::Compile success` 矩阵有正反例。
 - [x] operator/pass 的关键 metadata、binding、default pipeline 与文档锚点由 JSON -> generated C++ -> checker 单向链管理。
-- [x] `PipelineResolver` 成为生产 pipeline 顺序与 fingerprint 的唯一解析点；兼容 policy 只委托 resolver。
+- [x] `PipelineResolver` 显式包含 pre/post InferType、Relay/TIR pass 与 target schedule；`PipelineExecutor` 消费并复核完整 normalized transition，production 每次编译只解析一次。
 - [x] `GraphValueLocator`、`UnitSemanticKey`、`ArtifactKey`、`DispatchKey`、`PlanVariantKey`、symbol、storage id 有独立 canonical 定义和测试。
 - [x] 无关 graph-local 重编号或 symbol 变化不影响 unit semantic/artifact identity；所有语义/ABI/target 变化安全 miss。
 - [x] ready cache lookup 返回 immutable pin/handle；淘汰只移除可发现性，已发 pin 和 executable 强引用继续有效。
+- [x] public `ProductionArtifactCacheAdapter` 与 `CompiledGraph::artifact_pins` 以 opaque owner 保活真实 production `PrimitiveArtifactPin`，不会把 adapter miss 变成 owner flight。
 - [x] production same-key singleflight、failure/retry、bounded bytes/in-flight/backpressure，以及取消/预算/observer 的 CoreContract v1 fake 均有确定性并发/合同测试。
 - [x] whole-graph lowering 明确降为 compatibility/testing，生产能力声明以 per-unit `Compiler::Compile` 为准。
-- [ ] 02–06 各自分支已实际消费 CoreContract v1 mock/fake，且没有绕过 runtime/compiler 单向依赖的私有耦合（跨 worktree 硬阻塞；本轨已提供 conformance fake）。
+- [ ] 02–06 各自分支已实际消费 CoreContract v1 mock/fake，且没有绕过 runtime/compiler 单向依赖的私有耦合（跨轨集成项；不是本轨唯一 blocker）。
+- [x] CPU-only CTest 实际运行 23 个 core C++ executables 与 4 个 contract/include/public-header checks（27/27）。
+- [ ] LLVM-enabled CI 实际运行 `operator_compilation_test` 的 relocation/cache reuse、`codegen_llvm_test`、`op_numeric_llvm_test` 与 ONNX compile（workflow 已配置；本机无 LLVM，待 CI 记录）。
 - [x] 文档状态、feature gate、测试证据一致；没有把 `-1`、fuzzy cache 或历史 adaptive runtime 宣称为当前 dynamic shape/hot swap 能力。
 
 ## 10. 风险、决策门与状态
@@ -196,4 +200,4 @@ M1 的冻结原则是“窄而可替换”：每个 mock/fake 只实现表中的
 | legacy 路径继续被新增功能使用 | production/compatibility 标签与 capability test | 新特性不得只接 legacy lowering |
 | 其他轨道等待实现而失去并行性 | fake resolver/store/coordinator/assembler 合同 | M1 review 验证各轨 mock 已可运行 |
 
-本轨源码、单元/并发测试、generated contract 和文档收敛已完成。状态保持“阻塞”仅因为独立的 02–06 worktree 尚未逐轨提交 CoreContract v1 消费证据；本轨不修改其他 worktree。完整提交、测试和后续集成要求见 `docs/handoffs/compiler-foundation/core.md`。
+第二轮 supervisor fix 的源码、CPU 单元/并发/contract/header closure 与文档已在本轨完成；状态仍为“进行中”，因为 LLVM-enabled CI 尚需外部 builder 执行并由终审确认，02–06 的消费证据另作跨轨集成项。完整证据与限制见 `docs/handoffs/compiler-foundation/core.md`。

@@ -62,17 +62,10 @@ jobs:
       - name: Build CPU targets
         run: cmake --build out/build/ci-cpu --parallel 2
 
-      - name: Run type inference test
-        run: cmake --build out/build/ci-cpu --target run_infer_type_test
-
-      - name: Run device info test
-        run: cmake --build out/build/ci-cpu --target run_device_info_test
-
-      - name: Run pass pipeline test
-        run: cmake --build out/build/ci-cpu --target run_pass_pipeline_test
-
-      - name: Run profiling bundle test
-        run: cmake --build out/build/ci-cpu --target run_profile_bundle_test
+      - name: Run all CPU/core CTest checks
+        run: >
+          ctest --test-dir out/build/ci-cpu --output-on-failure
+          --label-regex '(^|;)cpu(;|$)'
 
   llvm-resnet18:
     name: ResNet18 LLVM compile
@@ -106,11 +99,16 @@ jobs:
           -DKXC_BUILD_PASS_TESTS=ON
           -DKXC_BUILD_CODEGEN_TESTS=ON
 
-      - name: Build and run MVP op LLVM numeric tests
-        run: cmake --build out/build/ci-llvm --target run_op_numeric_llvm_test --parallel 2
+      - name: Build LLVM compiler and numeric test targets
+        run: >
+          cmake --build out/build/ci-llvm --parallel 2 --target
+          operator_compilation_test codegen_llvm_test op_numeric_llvm_test
+          onnx_importer_test
 
-      - name: Build and compile ResNet18 to LLVM
-        run: cmake --build out/build/ci-llvm --target run_onnx_importer_test --parallel 2
+      - name: Run LLVM operator, relocation/cache, codegen, and numeric checks
+        run: >
+          ctest --test-dir out/build/ci-llvm --output-on-failure
+          --tests-regex '^(operator_compilation_test|codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test)$'
 
   python-onnx-importer:
     name: Python ONNX importer tests

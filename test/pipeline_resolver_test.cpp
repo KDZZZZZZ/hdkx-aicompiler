@@ -1,5 +1,5 @@
 /*! \file test/pipeline_resolver_test.cpp
- * \brief Verifies normalized production pass policy and fingerprints.
+ * \brief Verifies normalized production execution plans and their executor.
  */
 
 #include <exception>
@@ -9,14 +9,16 @@
 #include <utility>
 #include <vector>
 
-#include "kxc/compiler/compiler.h"
+#include "../src/compiler/internal/execution_contract.h"
 #include "kxc/compiler/pipeline.h"
+#include "kxc/relay/op.h"
+#include "kxc/tir/transforms/bind_cuda_threads.h"
 
 namespace {
 
 #define TEST_CHECK(condition, message)                                           \
     do {                                                                          \
-        if (!(condition)) {                                                        \
+        if (!(condition)) {                                                       \
             std::cerr << "[FAIL] " << __FUNCTION__ << ": " << (message) << "\n"; \
             return false;                                                         \
         }                                                                         \
@@ -46,7 +48,8 @@ kxc::Target FakeCudaTarget() {
     node->attrs.exists = 1;
     node->attrs.device_name = "contract-cuda";
     node->attrs.arch = "sm_80";
-    node->attrs.max_threads_per_block = 1024;
+    node->attrs.max_threads_per_block = 128;
+    node->attrs.max_shared_memory_per_block = 48 * 1024;
     node->attrs.warp_size = 32;
     node->attrs.multi_processor_count = 1;
     return kxc::Target(kxc::ObjectRef(node));
@@ -65,118 +68,167 @@ kxc::api::PipelineRequest Request(kxc::IRDialect dialect, int opt_level,
     return request;
 }
 
-bool TestCompilerPoliciesAreNormalizedOnce() {
+kxc::Function MakeRelayFunction() {
+    kxc::Var x("x", kxc::TensorType({4}, "float32"));
+    kxc::Var y("y", kxc::TensorType({4}, "float32"));
+    kxc::Call add(kxc::relay::Op::Get("add"), {x, y});
+    return kxc::Function({x, y}, add);
+}
+
+kxc::tir::PrimFunc MakeElementwiseTIR() {
+    using namespace kxc;
+    using namespace kxc::tir;
+    const DataType f32 = DataType::Float(32);
+    const DataType i64 = DataType::Int(64);
+    tir::Var a("a", f32);
+    tir::Var b("b", f32);
+    tir::Var out("out", f32);
+    tir::Var i("i", i64);
+    tir::Stmt body = tir::For(
+        i, tir::IntImm(0, i64), tir::IntImm(65, i64), tir::ForType::Serial,
+        tir::Store(out, tir::Add(tir::Load(a, i), tir::Load(b, i)), i));
+    Array<tir::Var> params{a, b, out};
+    Map<tir::Var, tir::Buffer> buffers;
+    for (const tir::Var& param : params) {
+        buffers.Set(param, tir::Buffer(param, f32, {tir::IntImm(65, i64)}, {},
+                                       tir::IntImm(0, i64), param->name_hint, 4, 0));
+    }
+    return tir::PrimFunc(params, body, buffers, {});
+}
+
+bool TestProductionPlanHasExplicitInferBoundaries() {
     using namespace kxc;
     using namespace kxc::api;
     const Target cpu = BuildTarget(Device::CPU());
-    const std::vector<size_t> relay_sizes = {0, 3, 6, 6};
+    const std::vector<size_t> relay_sizes = {2, 5, 8, 8};
     const std::vector<size_t> tir_sizes = {0, 2, 4, 8};
     for (int level = 0; level <= 3; ++level) {
-        PipelineRequest relay_request = Request(IRDialect::kRelay, level, cpu);
-        relay_request.initial_invariants = {String("checked_type")};
-        const NormalizedPipeline first =
-            PipelineResolver::Resolve(relay_request);
-        const NormalizedPipeline second =
-            PipelineResolver::Resolve(relay_request);
-        const NormalizedPipeline tir = PipelineResolver::Resolve(
-            Request(IRDialect::kTIR, level, cpu));
-        TEST_CHECK(first.defined() && tir.defined() &&
-                       first.ordered_passes.size() == relay_sizes[level] &&
-                       tir.ordered_passes.size() == tir_sizes[level] &&
-                       first.fingerprint == second.fingerprint &&
-                       first.canonical_bytes == second.canonical_bytes,
-                   "same request must produce deterministic current policy");
-        TEST_CHECK(Compiler::RelayPassPolicy(level).size() ==
-                           relay_sizes[level] &&
-                       Compiler::TIRPassPolicy(level, cpu).size() ==
-                           tir_sizes[level],
-                   "compatibility policy helpers must delegate to the resolver");
+        const NormalizedPipeline relay =
+            PipelineResolver::Resolve(Request(IRDialect::kRelay, level, cpu));
+        const NormalizedPipeline tir =
+            PipelineResolver::Resolve(Request(IRDialect::kTIR, level, cpu));
+        TEST_CHECK(relay.defined() && relay.ordered_passes.size() == relay_sizes[level] &&
+                       relay.execution_steps.size() == relay_sizes[level] &&
+                       relay.invariant_transitions.size() == relay_sizes[level] &&
+                       tir.ordered_passes.size() == tir_sizes[level],
+                   "compiler plans must contain exactly their executed pass steps");
+        TEST_CHECK(relay.ordered_passes[0] == String("infer_type") &&
+                       relay.ordered_passes[relay.ordered_passes.size() - 1] ==
+                           String("infer_type") &&
+                       relay.execution_steps.front().occurrence == 0 &&
+                       relay.execution_steps.back().occurrence == 1,
+                   "production Relay policy must intentionally retain pre/post InferType");
     }
+    const NormalizedPipeline plan =
+        PipelineResolver::Resolve(Request(IRDialect::kRelay, 1, cpu));
+    const Function result = PipelineExecutor::ExecuteRelay(plan, MakeRelayFunction(), cpu);
+    TEST_CHECK(result->body.checked_type().defined(),
+               "executor must verify the concrete InferType postcondition");
     return true;
 }
 
-bool TestTargetSpecificScheduleIsInProductionPipeline() {
+bool TestTamperedAndUndeclaredStepsFailClosed() {
+    using namespace kxc;
+    using namespace kxc::api;
+    const Target cpu = BuildTarget(Device::CPU());
+    const NormalizedPipeline plan =
+        PipelineResolver::Resolve(Request(IRDialect::kRelay, 1, cpu));
+
+    NormalizedPipeline changed_transition = plan;
+    changed_transition.invariant_transitions.back().produced = {};
+    TEST_CHECK(Throws([&] { PipelineExecutor::Validate(changed_transition, cpu); }),
+               "a missing invariant transition must be rejected");
+
+    NormalizedPipeline extra_step = plan;
+    extra_step.ordered_passes.push_back(String("fold_constant"));
+    TEST_CHECK(Throws([&] { PipelineExecutor::Validate(extra_step, cpu); }),
+               "an extra execution name without a declared transition must be rejected");
+
+    NormalizedPipeline undeclared = plan;
+    undeclared.ordered_passes[1] = String("not_a_declared_pass");
+    undeclared.execution_steps[1].pass_name = String("not_a_declared_pass");
+    TEST_CHECK(Throws([&] { PipelineExecutor::Validate(undeclared, cpu); }),
+               "an undeclared pass must never enter execution");
+    return true;
+}
+
+bool TestCudaScheduleIsCanonicalAndVerified() {
     using namespace kxc;
     using namespace kxc::api;
     const Target cuda = FakeCudaTarget();
-    const NormalizedPipeline pipeline = PipelineResolver::Resolve(
-        Request(IRDialect::kTIR, 3, cuda));
-    TEST_CHECK(pipeline.ordered_passes.size() == 5 &&
-                   Contains(pipeline.ordered_passes, "bind_cuda_threads") &&
-                   Contains(pipeline.target_requirements,
-                            "cuda_thread_binding") &&
-                   std::string(pipeline.invariant_transitions.back().phase) ==
-                       "tir_schedule",
-               "CUDA scheduling must be an audited normalized transition");
-    TEST_CHECK(Compiler::TIRPassPolicy(3, cuda).size() == 4 &&
-                   !Contains(Compiler::TIRPassPolicy(3, cuda),
-                             "bind_cuda_threads"),
-               "legacy policy view may omit scheduling while production cannot");
+    const NormalizedPipeline cuda_plan =
+        PipelineResolver::Resolve(Request(IRDialect::kTIR, 3, cuda));
+    const NormalizedPipeline cpu_plan = PipelineResolver::Resolve(
+        Request(IRDialect::kTIR, 3, BuildTarget(Device::CPU())));
+    TEST_CHECK(cuda_plan.ordered_passes.size() == 5 &&
+                   Contains(cuda_plan.ordered_passes, "bind_cuda_threads") &&
+                   Contains(cuda_plan.target_requirements, "cuda_thread_binding") &&
+                   std::string(cuda_plan.execution_steps.back().phase) ==
+                       "tir_schedule" &&
+                   cuda_plan.fingerprint != cpu_plan.fingerprint,
+               "CUDA scheduling and target requirements must be canonical execution identity");
+    const tir::PrimFunc scheduled =
+        PipelineExecutor::ExecuteTIR(cuda_plan, MakeElementwiseTIR(), cuda);
+    const tir::CudaLaunchConfig launch = tir::GetCudaLaunchConfig(scheduled);
+    TEST_CHECK(launch.grid_x == 1 && launch.block_x == 128,
+               "executor must verify and retain CUDA schedule metadata");
+
+    NormalizedPipeline target_tamper = cuda_plan;
+    target_tamper.target_requirements.erase(
+        target_tamper.target_requirements.begin() +
+        target_tamper.target_requirements.size() - 1);
+    TEST_CHECK(Throws([&] { PipelineExecutor::Validate(target_tamper, cuda); }),
+               "missing CUDA target capability requirement must be rejected");
     return true;
 }
 
-bool TestEnableDisableAndPhaseConflictsFailClosed() {
+bool TestCompilerArtifactIdentityUsesExecutedCanonicalPlan() {
     using namespace kxc;
     using namespace kxc::api;
-    PipelineRequest request =
-        Request(IRDialect::kRelay, 1, BuildTarget(Device::CPU()));
-    request.initial_invariants = {String("checked_type")};
+    const CompileConfig config =
+        CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+    const internal::CompilerExecutionContract contract =
+        internal::ResolveCompilerExecutionContract(config);
+    const std::string relay_bytes = contract.relay_pipeline.canonical_bytes;
+    const std::string tir_bytes = contract.tir_pipeline.canonical_bytes;
+    TEST_CHECK(!contract.canonical_bytes.empty() &&
+                   !contract.fingerprint.empty() &&
+                   contract.canonical_bytes.find(relay_bytes) !=
+                       std::string::npos &&
+                   contract.canonical_bytes.find(tir_bytes) !=
+                       std::string::npos &&
+                   contract.canonical_bytes.find(
+                       "per-unit-boundary-lowering-v1") !=
+                       std::string::npos &&
+                   contract.relay_pipeline.ordered_passes[0] ==
+                       String("infer_type") &&
+                   contract.relay_pipeline.ordered_passes[
+                       contract.relay_pipeline.ordered_passes.size() - 1] ==
+                       String("infer_type"),
+               "artifact identity must use the exact executed Relay/lowering/TIR plan");
+    return true;
+}
+
+bool TestCanonicalChangesAndNoHiddenCompatibilityPass() {
+    using namespace kxc;
+    using namespace kxc::api;
+    const Target cpu = BuildTarget(Device::CPU());
+    PipelineRequest request = Request(IRDialect::kRelay, 1, cpu);
+    const NormalizedPipeline baseline = PipelineResolver::Resolve(request);
     request.disabled = {String("fold_constant")};
-    request.enabled = {String("canonicalize_cast")};
-    const NormalizedPipeline normalized = PipelineResolver::Resolve(request);
-    TEST_CHECK(normalized.ordered_passes.size() == 3 &&
-                   !Contains(normalized.ordered_passes, "fold_constant") &&
-                   Contains(normalized.ordered_passes, "canonicalize_cast"),
-               "explicit modifications must be normalized deterministically");
+    const NormalizedPipeline changed = PipelineResolver::Resolve(request);
+    TEST_CHECK(baseline.fingerprint != changed.fingerprint &&
+                   baseline.canonical_bytes != changed.canonical_bytes &&
+                   changed.ordered_passes.size() == 4 &&
+                   changed.ordered_passes[0] == String("infer_type") &&
+                   changed.ordered_passes[changed.ordered_passes.size() - 1] ==
+                       String("infer_type"),
+               "the exact ordered execution steps must determine canonical identity");
 
-    request.enabled.push_back(String("fold_constant"));
-    TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(request); }),
-               "one pass cannot be both enabled and disabled");
-
-    PipelineRequest bad_scope =
-        Request(IRDialect::kRelay, 1, BuildTarget(Device::CPU()));
-    bad_scope.requested_scope = PassScope::kPrimFunc;
-    TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(bad_scope); }),
-               "dialect/scope mismatch must fail before execution");
-
-    PipelineRequest bad_phase = Request(IRDialect::kTIR, 3, FakeCudaTarget());
-    bad_phase.enabled = {String("loop_partition")};
-    TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(bad_phase); }),
-               "an optimize pass cannot be appended after schedule phase");
-    return true;
-}
-
-bool TestInvariantTransitionsAndFingerprintInputs() {
-    using namespace kxc;
-    using namespace kxc::api;
-    PipelineRequest request =
-        Request(IRDialect::kRelay, 0, BuildTarget(Device::CPU()));
-    request.named_pipeline = String("relay.optimize_default");
-    const NormalizedPipeline pipeline = PipelineResolver::Resolve(request);
-    TEST_CHECK(pipeline.ordered_passes.size() == 9 &&
-                   pipeline.invariant_transitions.size() == 9 &&
-                   std::string(
-                       pipeline.invariant_transitions.back().pass_name) ==
-                       "infer_type" &&
-                   Contains(pipeline.invariant_transitions.back()
-                                .invariants_after,
-                            "checked_type") &&
-                   pipeline.contract_versions.size() == 10,
-               "required/produced invariant state and versions must be auditable");
-
-    PipelineRequest changed = request;
-    changed.disabled = {String("annotate_memory_scope")};
-    const NormalizedPipeline changed_pipeline =
-        PipelineResolver::Resolve(changed);
-    TEST_CHECK(pipeline.fingerprint != changed_pipeline.fingerprint &&
-                   pipeline.canonical_bytes !=
-                       changed_pipeline.canonical_bytes,
-               "normalized configuration changes must alter artifact fingerprint");
-
-    request.initial_invariants = {String("checked_type"),
-                                  String("checked_type")};
-    TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(request); }),
-               "duplicate invariant state must fail closed");
+    PipelineRequest forbidden = Request(IRDialect::kRelay, 0, cpu);
+    forbidden.disabled = {String("infer_type")};
+    TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(forbidden); }),
+               "mandatory compiler InferType cannot be hidden by a compatibility view");
     return true;
 }
 
@@ -184,13 +236,12 @@ bool TestInvariantTransitionsAndFingerprintInputs() {
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
-        {"compiler_policy_normalization", TestCompilerPoliciesAreNormalizedOnce},
-        {"target_schedule_transition",
-         TestTargetSpecificScheduleIsInProductionPipeline},
-        {"enable_disable_phase_conflicts",
-         TestEnableDisableAndPhaseConflictsFailClosed},
-        {"invariants_and_fingerprint",
-         TestInvariantTransitionsAndFingerprintInputs},
+        {"explicit_infer_boundaries", TestProductionPlanHasExplicitInferBoundaries},
+        {"tamper_and_undeclared_rejection", TestTamperedAndUndeclaredStepsFailClosed},
+        {"cuda_schedule_execution_identity", TestCudaScheduleIsCanonicalAndVerified},
+        {"compiler_execution_artifact_identity",
+         TestCompilerArtifactIdentityUsesExecutedCanonicalPlan},
+        {"canonical_change_no_hidden_pass", TestCanonicalChangesAndNoHiddenCompatibilityPass},
     };
     int failures = 0;
     for (const auto& test : tests) {

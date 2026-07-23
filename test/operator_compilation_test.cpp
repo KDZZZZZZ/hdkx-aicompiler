@@ -84,6 +84,12 @@ size_t CountUniqueCalls(const kxc::Function& function) {
     return calls.size();
 }
 
+kxc::api::internal::LoweredGraph LowerForTest(
+    const kxc::Function& function) {
+    return kxc::api::internal::LowerGraph(
+        kxc::relay::InferTypePass(function));
+}
+
 bool ReadIntAttr(const kxc::tir::PrimFunc& function, const char* key,
                  int64_t* value) {
     const kxc::String attr_key(key);
@@ -182,7 +188,7 @@ bool TestPerOperatorTargetCardinality() {
     for (const auto& fixture : MakeFixtures()) {
         const size_t expected_units = CountUniqueCalls(fixture.function);
         const kxc::api::internal::LoweredGraph lowered =
-            kxc::api::internal::LowerGraph(fixture.function);
+            LowerForTest(fixture.function);
         TEST_CHECK(expected_units == fixture.expected_compute_calls,
                    std::string(fixture.name) +
                        " must allocate exactly one target unit per compute Call");
@@ -226,7 +232,7 @@ bool TestPerOperatorTargetCardinality() {
 bool TestProducerCallsRemainOutsideConsumerPrimFunc() {
     const GraphFixture chain = MakeFixtures()[0];
     const kxc::api::internal::LoweredGraph lowered =
-        kxc::api::internal::LowerGraph(chain.function);
+        LowerForTest(chain.function);
     TEST_CHECK(lowered.primitives.size() == 2,
                "chain must lower to two independent primitives");
     int64_t first_inputs = -1;
@@ -252,8 +258,7 @@ bool TestSharedConstantUsesStableGraphValueKey() {
     Call first = Add(input, constant);
     Function function({input}, Multiply(first, constant));
 
-    const api::internal::LoweredGraph lowered =
-        api::internal::LowerGraph(function);
+    const api::internal::LoweredGraph lowered = LowerForTest(function);
     TEST_CHECK(lowered.primitives.size() == 2 && lowered.constants.size() == 1,
                "shared constant must be deduplicated graph-wide");
     TEST_CHECK(lowered.plan.constant_value_ids().size() == 1 &&
@@ -328,8 +333,7 @@ bool TestSingleUnitSupportsMultipleOutputs() {
     Var input("input", type);
     Call call(MultiOutputTestOp(), {input});
     Function function({input}, call);
-    const api::internal::LoweredGraph lowered =
-        api::internal::LowerGraph(function);
+    const api::internal::LoweredGraph lowered = LowerForTest(function);
     TEST_CHECK(lowered.primitives.size() == 1 &&
                    lowered.plan.output_value_ids().size() == 2,
                "one multi-output Call must remain one unit with two stable values");
@@ -451,12 +455,22 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
     const auto second = api::Compiler::Compile(function, config);
     const api::internal::PrimitiveCacheStats after_second =
         api::internal::GetPrimitiveCacheStats();
+    api::ProductionArtifactCacheAdapter adapter;
+    bool public_pins_are_production_backed =
+        first.artifact_pins.size() == 2 && second.artifact_pins.size() == 2;
+    for (const api::ArtifactPin& pin : second.artifact_pins) {
+        public_pins_are_production_backed =
+            public_pins_are_production_backed && pin.defined() &&
+            adapter.Lookup(pin.handle().record().artifact_key).kind ==
+                api::ArtifactLookupKind::kHit;
+    }
     TEST_CHECK(first.module.entry_count() == 2 &&
                    second.module.entry_count() == 2 &&
+                   public_pins_are_production_backed &&
                    after_first.misses == 2 && after_first.hits == 0 &&
                    after_first.entries == 2 && after_second.misses == 2 &&
                    after_second.hits == 2,
-               "repeat compilation should hit full primitive cache keys");
+               "repeat compilation should return public pins from the production cache");
     return true;
 }
 

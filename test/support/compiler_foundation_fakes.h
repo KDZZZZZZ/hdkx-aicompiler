@@ -22,6 +22,11 @@ public:
     }
 
     void Set(const CapabilityRequest& request, CapabilityResult result) {
+        if (result.supported !=
+            (result.status == CapabilityStatus::kExecutable)) {
+            throw std::invalid_argument(
+                "FakeCapabilityVerifier result status is inconsistent");
+        }
         results_.insert_or_assign(Key(request), std::move(result));
     }
 

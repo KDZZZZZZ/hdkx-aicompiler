@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../src/compiler/internal/primitive_cache.h"
+#include "kxc/compiler/foundation_contract.h"
 
 namespace {
 
@@ -100,6 +101,49 @@ bool TestPinSurvivesEviction() {
                "evicted key should miss while the old pin remains usable");
     FailPrimitiveCacheLease(first_again, PrimitiveFailureCategory::kCancelled,
                             "test cleanup", std::chrono::milliseconds(0));
+    return true;
+}
+
+bool TestProductionAdapterReadOnlyPinSurvivesEviction() {
+    using namespace kxc::api;
+    using namespace kxc::api::internal;
+    Reset(PrimitiveCacheLimits{1, 64, 8, 8});
+    const ArtifactKey first_key = MakeKey("adapter-first");
+    const PrimitiveCacheLease first = AcquirePrimitiveCache(first_key);
+    TEST_CHECK(first.access() == PrimitiveCacheAccess::kOwner,
+               "fixture must publish the first production artifact");
+    (void)PublishPrimitiveCacheLease(first, MakeArtifact("adapter_first"));
+
+    const ProductionArtifactCacheAdapter adapter;
+    const ArtifactCacheStats before_lookup = adapter.stats();
+    const ArtifactLookup lookup = adapter.Lookup(first_key);
+    const ArtifactCacheStats after_hit = adapter.stats();
+    TEST_CHECK(lookup.kind == ArtifactLookupKind::kHit && lookup.pin.defined() &&
+                   lookup.pin.handle().record().artifact_key == first_key &&
+                   !lookup.pin.handle().record().executable_token.empty() &&
+                   !lookup.pin.handle().record().signature_digest.empty() &&
+                   !lookup.pin.handle().record().launch_metadata_digest.empty() &&
+                   !lookup.pin.handle().record().provenance.empty() &&
+                   lookup.pin.handle().record().byte_size > 0 &&
+                   !lookup.pin.handle().record().validation_record.empty() &&
+                   after_hit.hits == before_lookup.hits &&
+                   after_hit.misses == before_lookup.misses &&
+                   after_hit.in_flight == 0,
+               "adapter hit must expose a complete pinned record without mutation");
+
+    const PrimitiveCacheLease second = AcquirePrimitiveCache(MakeKey("adapter-second"));
+    (void)PublishPrimitiveCacheLease(second, MakeArtifact("adapter_second"));
+    const ArtifactCacheStats before_miss = adapter.stats();
+    const ArtifactLookup evicted = adapter.Lookup(first_key);
+    const ArtifactLookup missing = adapter.Lookup(MakeKey("adapter-missing"));
+    const ArtifactCacheStats after_miss = adapter.stats();
+    TEST_CHECK(evicted.kind == ArtifactLookupKind::kMiss &&
+                   missing.kind == ArtifactLookupKind::kMiss &&
+                   lookup.pin.handle().record().executable_token ==
+                       "primitive-v1:" + first_key.canonical_bytes() &&
+                   after_miss.misses == before_miss.misses &&
+                   after_miss.in_flight == before_miss.in_flight,
+               "adapter misses must not create flights and eviction cannot invalidate pins");
     return true;
 }
 
@@ -233,6 +277,8 @@ bool TestBackpressureAndByteBudgetAreExplicit() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"pin_survives_eviction", TestPinSurvivesEviction},
+        {"production_adapter_read_only_pin",
+         TestProductionAdapterReadOnlyPinSurvivesEviction},
         {"same_key_singleflight", TestSameKeySingleflight},
         {"digest_collision_not_merged", TestDigestCollisionDoesNotMerge},
         {"failure_retry_and_bound", TestFailureIsBoundedAndRetryable},

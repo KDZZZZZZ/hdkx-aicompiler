@@ -4,6 +4,8 @@
 
 #include "../internal/primitive_cache.h"
 
+#include "kxc/profiling/profiling.h"
+
 #include <algorithm>
 #include <condition_variable>
 #include <mutex>
@@ -264,6 +266,34 @@ ArtifactKey BuildPrimitiveArtifactKey(
     return ArtifactKey(semantic_key, TargetFingerprint(target),
                        pipeline_fingerprint, kKernelABIVersion,
                        schedule_version, backend_version);
+}
+
+PrimitiveArtifactPin LookupPrimitiveCache(const ArtifactKey& key) {
+    const std::string canonical = KeyBytes(key);
+    PrimitiveCache& cache = Cache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    const auto ready = cache.entries.find(canonical);
+    return ready == cache.entries.end()
+               ? PrimitiveArtifactPin{}
+               : PrimitiveArtifactPin(ready->second.artifact);
+}
+
+ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin) {
+    if (!pin.defined()) {
+        throw std::invalid_argument(
+            "cannot expose an undefined primitive artifact pin");
+    }
+    const CachedPrimitive& artifact = pin.artifact();
+    ArtifactRecord record{pin.key(),
+                          "primitive-v1:" + pin.key().canonical_bytes(),
+                          profiling::HashText(artifact.signature.ToString()),
+                          profiling::HashText(
+                              artifact.launch_metadata.ToString()),
+                          artifact.provenance,
+                          artifact.accounted_bytes,
+                          artifact.validation_record};
+    return ArtifactPin(ArtifactHandle(std::move(record)),
+                       std::make_shared<PrimitiveArtifactPin>(pin));
 }
 
 PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey& key) {

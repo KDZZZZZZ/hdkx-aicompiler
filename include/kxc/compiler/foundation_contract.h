@@ -38,7 +38,7 @@ enum class CompileFailureCategory {
 };
 enum class CacheEventKind { kHit, kMiss, kStore, kEvict, kPin, kFailure };
 
-/*! \brief Immutable, validated ready-artifact description for cross-track fakes. */
+/*! \brief Immutable, validated ready-artifact description for fakes and adapters. */
 struct ArtifactRecord final {
     ArtifactKey artifact_key;
     std::string executable_token;
@@ -48,6 +48,12 @@ struct ArtifactRecord final {
     uint64_t byte_size{0};
     std::string validation_record;
 };
+
+class ArtifactPin;
+namespace internal {
+class PrimitiveArtifactPin;
+ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin);
+}  // namespace internal
 
 class ArtifactHandle final {
 public:
@@ -71,12 +77,39 @@ public:
     const ArtifactHandle& handle() const;
 
 private:
+    friend ArtifactPin internal::ToArtifactPin(
+        const internal::PrimitiveArtifactPin& pin);
+
+    ArtifactPin(ArtifactHandle handle, std::shared_ptr<const void> owner);
+
     ArtifactHandle handle_;
+    // Production pins keep the internal cache pin alive without exposing it.
+    std::shared_ptr<const void> owner_;
 };
 
 struct ArtifactLookup final {
     ArtifactLookupKind kind{ArtifactLookupKind::kMiss};
     ArtifactPin pin;
+};
+
+struct ArtifactCacheStats final {
+    uint64_t hits{0};
+    uint64_t misses{0};
+    uint64_t entries{0};
+    uint64_t accounted_bytes{0};
+    uint64_t evictions{0};
+    uint64_t in_flight{0};
+    uint64_t merged_waiters{0};
+    uint64_t failures{0};
+    uint64_t rejections{0};
+    uint64_t active_pins{0};
+};
+
+/*! \brief Read-only view of the process-local production primitive cache. */
+class ProductionArtifactCacheAdapter final {
+public:
+    ArtifactLookup Lookup(const ArtifactKey& key) const;
+    ArtifactCacheStats stats() const;
 };
 
 struct CancellationToken final {

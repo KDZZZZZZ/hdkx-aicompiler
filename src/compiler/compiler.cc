@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "internal/compile_state.h"
+#include "internal/execution_contract.h"
 #include "internal/kernel_abi_builder.h"
 #include "internal/lowered_graph.h"
 #include "internal/primitive_cache.h"
@@ -28,12 +29,9 @@
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
 #include "kxc/relay/pass/print_ir.h"
-#include "kxc/relay/transforms/infer_type.h"
-#include "kxc/relay/transforms/pipeline.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/tir/pass/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
-#include "kxc/tir/transforms/pipeline.h"
 
 #if KXC_USE_LLVM
 #include <llvm/IR/LLVMContext.h>
@@ -238,21 +236,6 @@ String ReadKernelSymbol(const tir::PrimFunc& function) {
     return String(symbol);
 }
 
-tir::PrimFunc AttachTIRDiagnosticHash(const tir::PrimFunc& function) {
-    const String tir_hash_key("kxc.tir_hash");
-    Map<String, ObjectRef> attrs;
-    for (const auto& item : function->attrs) {
-        if (!(item.first == tir_hash_key)) attrs.Set(item.first, item.second);
-    }
-    tir::PrimFunc diagnostic(function->params, function->body,
-                             function->buffer_map, attrs);
-    std::ostringstream stream;
-    tir::pass::DumpPrimFunc(diagnostic, stream);
-    attrs.Set(tir_hash_key, String(profiling::HashText(stream.str())));
-    return tir::PrimFunc(function->params, function->body,
-                         function->buffer_map, std::move(attrs));
-}
-
 Map<String, runtime::NDArray> PlaceConstants(
     const Map<String, runtime::NDArray>& source, const Target& target) {
     Map<String, runtime::NDArray> result;
@@ -279,7 +262,6 @@ NormalizedPipeline ResolveRelayPipeline(const CompileConfig& config) {
     request.target = config->target;
     request.opt_level = config->opt_level;
     request.named_pipeline = String("compiler");
-    request.initial_invariants = {String("checked_type")};
     return PipelineResolver::Resolve(request);
 }
 
@@ -293,36 +275,36 @@ NormalizedPipeline ResolveTIRPipeline(const CompileConfig& config) {
     return PipelineResolver::Resolve(request);
 }
 
-CompileResult ValidateInput(Function function, const CompileConfig& config) {
+CompileResult ValidateInput(
+    Function function, const CompileConfig& config,
+    const internal::CompilerExecutionContract& contract) {
     config.Validate();
-    const NormalizedPipeline pipeline = ResolveRelayPipeline(config);
-    CapabilityVerifier::Require(CapabilityRequest{
-        function, config->target, "graph", std::string(pipeline.fingerprint),
+    CapabilityVerifier::RequireEligible(CapabilityRequest{
+        function, config->target, "graph", contract.fingerprint,
         CapabilityBoundary::kCompilerEntry, CapabilityMode::kStaticExact,
-        false});
+        false, config->opt_level});
     return CompileResult::Validate(config->target, std::move(function));
 }
 
-CompileResult OptimizeRelay(const CompileResult& input,
-                            const CompileConfig& config) {
-    const NormalizedPipeline pipeline = ResolveRelayPipeline(config);
-    Function typed = relay::InferTypePass(input.validated_relay());
-    Function optimized = relay::RunRelayPassPipeline(
-        typed, pipeline.ordered_passes);
-    optimized = relay::InferTypePass(optimized);
-    CapabilityVerifier::Require(CapabilityRequest{
-        optimized, input.target(), "graph", std::string(pipeline.fingerprint),
+CompileResult OptimizeRelay(
+    const CompileResult& input, const CompileConfig& config,
+    const internal::CompilerExecutionContract& contract) {
+    Function optimized = PipelineExecutor::ExecuteRelay(
+        contract.relay_pipeline, input.validated_relay(), input.target());
+    CapabilityVerifier::RequireEligible(CapabilityRequest{
+        optimized, input.target(), "graph", contract.fingerprint,
         CapabilityBoundary::kPostGraphPass, CapabilityMode::kStaticExact,
-        true});
+        true, config->opt_level});
     return input.AfterRelayOptimization(std::move(optimized));
 }
 
-CompileResult LowerOperators(const CompileResult& input,
-                             const CompileConfig& config) {
+CompileResult LowerOperators(
+    const CompileResult& input,
+    const internal::CompilerExecutionContract& contract) {
     const Device device(input.target()->device_type, input.target()->device_id);
-    const NormalizedPipeline pipeline = ResolveRelayPipeline(config);
     internal::LoweredGraph lowered = internal::LowerGraph(
-        input.optimized_relay(), device, input.target(), pipeline.fingerprint);
+        input.optimized_relay(), device, input.target(),
+        String(contract.fingerprint));
     std::vector<PrimitiveCompileState> primitives;
     primitives.reserve(lowered.primitives.size());
     for (const internal::LoweredPrimitive& source : lowered.primitives) {
@@ -339,16 +321,15 @@ CompileResult LowerOperators(const CompileResult& input,
         PlaceConstants(lowered.constants, input.target()));
 }
 
-CompileResult OptimizeTIR(const CompileResult& input,
-                          const CompileConfig& config) {
-    const NormalizedPipeline pipeline = ResolveTIRPipeline(config);
+CompileResult OptimizeTIR(
+    const CompileResult& input,
+    const internal::CompilerExecutionContract& contract) {
     std::vector<tir::PrimFunc> optimized;
     for (const PrimitiveCompileState& primitive : input.primitives()) {
         optimized.push_back(RunPrimitiveStage(
             "optimize_tir", primitive, [&] {
-                tir::PrimFunc result = RunTIRPassPipeline(
-                    primitive.tir, pipeline.ordered_passes);
-                return AttachTIRDiagnosticHash(result);
+                return PipelineExecutor::ExecuteTIR(
+                    contract.tir_pipeline, primitive.tir, input.target());
             }));
     }
     return input.AfterTIROptimization(std::move(optimized));
@@ -369,18 +350,6 @@ void AppendPipelineIdentityField(std::string* canonical,
                                  const std::string& value) {
     *canonical += std::to_string(name.size()) + ":" + name + "=" +
                   std::to_string(value.size()) + ":" + value + ";";
-}
-
-std::string CurrentPipelineIdentity(const CompileConfig& config) {
-    const NormalizedPipeline relay_pipeline = ResolveRelayPipeline(config);
-    const NormalizedPipeline tir_pipeline = ResolveTIRPipeline(config);
-    std::string canonical;
-    AppendPipelineIdentityField(&canonical, "kind", "compiler-pipeline-v2");
-    AppendPipelineIdentityField(&canonical, "relay",
-                                std::string(relay_pipeline.canonical_bytes));
-    AppendPipelineIdentityField(&canonical, "tir",
-                                std::string(tir_pipeline.canonical_bytes));
-    return canonical;
 }
 
 bool SameDType(DLDataType lhs, DLDataType rhs) {
@@ -479,8 +448,9 @@ CompileResult BuildSignatures(const CompileResult& input) {
     return input.AfterSignatures(std::move(signatures));
 }
 
-CompileResult BuildBackends(const CompileResult& input,
-                            const CompileConfig& config) {
+CompileResult BuildBackends(
+    const CompileResult& input, const CompileConfig& config,
+    const internal::CompilerExecutionContract& contract) {
     const Target target = input.target();
     const Device device(target->device_type, target->device_id);
     const std::vector<PrimitiveCompileState> primitives = input.primitives();
@@ -488,8 +458,7 @@ CompileResult BuildBackends(const CompileResult& input,
         primitives.size());
     std::vector<std::optional<codegen::CompiledKernel>> kernel_slots(
         primitives.size());
-    const std::string pipeline_fingerprint =
-        CurrentPipelineIdentity(config);
+    const std::string& pipeline_identity = contract.canonical_bytes;
     std::vector<internal::PrimitiveCacheLease> leases;
     std::vector<internal::PrimitiveArtifactPin> pins(primitives.size());
     std::vector<size_t> misses;
@@ -502,8 +471,9 @@ CompileResult BuildBackends(const CompileResult& input,
                 PrimitiveContext(primitive) + " has no signature");
         }
         const ArtifactKey artifact_key = internal::BuildPrimitiveArtifactKey(
-            primitive.semantic_key, target, pipeline_fingerprint,
-            "per-unit-schedule-v1", BackendVersion(target));
+            primitive.semantic_key, target, pipeline_identity,
+            contract.schedule_version.c_str(),
+            contract.backend_version.c_str());
         leases.push_back(internal::AcquirePrimitiveCache(artifact_key));
         const internal::PrimitiveCacheAccess access = leases.back().access();
         if (access == internal::PrimitiveCacheAccess::kOwner) {
@@ -636,9 +606,15 @@ CompileResult BuildBackends(const CompileResult& input,
         cache_hits.push_back(leases[i].access() !=
                              internal::PrimitiveCacheAccess::kOwner);
     }
+    std::vector<ArtifactPin> public_pins;
+    public_pins.reserve(pins.size());
+    for (const internal::PrimitiveArtifactPin& pin : pins) {
+        public_pins.push_back(internal::ToArtifactPin(pin));
+    }
     owner_guard.Dismiss();
     return input.AfterBackends(std::move(metadata), std::move(kernels),
-                               std::move(cache_hits));
+                               std::move(cache_hits),
+                               std::move(public_pins));
 }
 
 CompiledModule AssembleModule(
@@ -659,7 +635,9 @@ CompiledModule AssembleModule(
         std::move(profile_context));
 }
 
-CompiledGraph CompilePipeline(Function function, CompileConfig config) {
+CompiledGraph CompilePipeline(
+    Function function, CompileConfig config,
+    const internal::CompilerExecutionContract& contract) {
     config.Validate();
     auto profile_context = MaybeCreateProfileContext(config);
     const std::string run_id =
@@ -673,27 +651,65 @@ CompiledGraph CompilePipeline(Function function, CompileConfig config) {
     PassContext::Scope pass_scope(pass_context);
 
     CompileResult result = RunStage(
-        "validate", config, [&] { return ValidateInput(function, config); });
-    result = RunStage("optimize_relay", config,
-                      [&] { return OptimizeRelay(result, config); });
+        "validate", config,
+        [&] { return ValidateInput(function, config, contract); });
+    result = RunStage(
+        "optimize_relay", config,
+        [&] { return OptimizeRelay(result, config, contract); });
     result = RunStage("lower", config,
-                      [&] { return LowerOperators(result, config); });
+                      [&] { return LowerOperators(result, contract); });
     result = RunStage("optimize_tir", config,
-                      [&] { return OptimizeTIR(result, config); });
+                      [&] { return OptimizeTIR(result, contract); });
     result = RunStage("build_signature", config,
                       [&] { return BuildSignatures(result); });
-    result = RunStage("build_backend", config,
-                      [&] { return BuildBackends(result, config); });
+    result = RunStage(
+        "build_backend", config,
+        [&] { return BuildBackends(result, config, contract); });
 
     profiling::ScopedSpan assemble_span(
         profile_context, MakeStageEvent("assemble", config), run_id);
     CompiledModule module = AssembleModule(result, profile_context);
     AddResultFields(&assemble_span, result);
     if (profile_context) profile_context->Flush();
-    return CompiledGraph{std::move(module), result.plan()};
+    return CompiledGraph{std::move(module), result.plan(),
+                         result.artifact_pins()};
 }
 
 }  // namespace
+
+internal::CompilerExecutionContract
+internal::ResolveCompilerExecutionContract(const CompileConfig& config) {
+    config.Validate();
+    CompilerExecutionContract contract;
+    contract.relay_pipeline = ResolveRelayPipeline(config);
+    contract.tir_pipeline = ResolveTIRPipeline(config);
+    contract.schedule_version = "per-unit-schedule-v2";
+    contract.backend_version = BackendVersion(config->target);
+    AppendPipelineIdentityField(&contract.canonical_bytes, "kind",
+                                "compiler-execution-plan-v3");
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "relay",
+        std::string(contract.relay_pipeline.canonical_bytes));
+    AppendPipelineIdentityField(&contract.canonical_bytes, "lowering",
+                                "per-unit-boundary-lowering-v1");
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "tir",
+        std::string(contract.tir_pipeline.canonical_bytes));
+    AppendPipelineIdentityField(&contract.canonical_bytes, "kernel_abi",
+                                "kernel-abi-v1");
+    AppendPipelineIdentityField(&contract.canonical_bytes, "schedule",
+                                contract.schedule_version);
+    AppendPipelineIdentityField(&contract.canonical_bytes, "backend",
+                                contract.backend_version);
+    contract.fingerprint = profiling::HashText(contract.canonical_bytes);
+    return contract;
+}
+
+void internal::ProbeCompilerExecution(
+    Function function, CompileConfig config,
+    const CompilerExecutionContract& contract) {
+    (void)CompilePipeline(std::move(function), std::move(config), contract);
+}
 
 Array<String> Compiler::RelayPassPolicy(int opt_level) {
     auto* policy_target_node = new TargetNode();
@@ -706,8 +722,12 @@ Array<String> Compiler::RelayPassPolicy(int opt_level) {
     request.target = Target(ObjectRef(policy_target_node));
     request.opt_level = opt_level;
     request.named_pipeline = String("compiler");
-    request.initial_invariants = {String("checked_type")};
-    return PipelineResolver::Resolve(request).ordered_passes;
+    Array<String> compatibility;
+    for (const String& pass :
+         PipelineResolver::Resolve(request).ordered_passes) {
+        if (std::string(pass) != "infer_type") compatibility.push_back(pass);
+    }
+    return compatibility;
 }
 
 Array<String> Compiler::TIRPassPolicy(int opt_level, const Target& target) {
@@ -728,6 +748,8 @@ Array<String> Compiler::TIRPassPolicy(int opt_level, const Target& target) {
 }
 
 CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
-    return CompilePipeline(std::move(function), std::move(config));
+    const internal::CompilerExecutionContract contract =
+        internal::ResolveCompilerExecutionContract(config);
+    return CompilePipeline(std::move(function), std::move(config), contract);
 }
 }  // namespace kxc::api

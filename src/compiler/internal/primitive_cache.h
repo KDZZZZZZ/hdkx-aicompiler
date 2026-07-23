@@ -6,7 +6,7 @@
 #include <string>
 
 #include "../../codegen/internal/compiled_kernel.h"
-#include "kxc/compiler/identity.h"
+#include "kxc/compiler/foundation_contract.h"
 #include "kxc/target/target.h"
 
 namespace kxc::api::internal {
@@ -36,6 +36,7 @@ public:
 
 private:
     friend class PrimitiveCacheLease;
+    friend PrimitiveArtifactPin LookupPrimitiveCache(const ArtifactKey&);
     friend PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey&);
     friend PrimitiveArtifactPin PublishPrimitiveCacheLease(
         const PrimitiveCacheLease&, CachedPrimitive);
@@ -118,6 +119,10 @@ ArtifactKey BuildPrimitiveArtifactKey(
     const UnitSemanticKey& semantic_key, const Target& target,
     const std::string& pipeline_fingerprint,
     const char* schedule_version, const char* backend_version);
+
+/*! \brief Finds a ready artifact without changing cache state or creating a flight. */
+PrimitiveArtifactPin LookupPrimitiveCache(const ArtifactKey& key);
+ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin);
 
 PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey& key);
 PrimitiveArtifactPin WaitPrimitiveCacheLease(

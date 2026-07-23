@@ -1,100 +1,77 @@
-# Compiler Foundation Core handoff
+# Compiler Foundation Core handoff — supervisor fix round 2
 
-> **Branch:** `feature/compiler-foundation-core`  
-> **Base:** `e295a73` (foundation roadmap on top of `3b95aca`)  
-> **Status:** Core-track implementation complete; blocked only on independent
-> 02–06 branches recording actual CoreContract v1 consumption.  
+> **Branch:** `feature/compiler-foundation-core`
+> **Status:** implementation ready for supervisor re-review; **not** “Core complete” and
+> not “blocked only by 02–06”. LLVM-enabled CI execution and final review remain open.
 > **Runtime boundary:** unchanged — `RuntimeSession` remains a static
 > `CompiledModule + ExecutablePlan` data-plane executor.
 
-## Delivered review stages
+## Closed in this round
 
-| Stage | Commit | Delivered contract |
+| Requirement | Production implementation | Evidence |
 |---|---|---|
-| Capability truth | `cf6fcc0` | `CapabilityVerifier` fails closed at compiler entry, post-graph-pass and pre-partition; stable locator/missing-capability diagnostics; static-exact only. |
-| Identity split | `96223cf` | `GraphValueLocator`, `UnitSemanticKey`, `ArtifactKey`, `DispatchKey`, `PlanVariantKey`; unit-local canonical mapping excludes graph ids/symbol/storage; full canonical equality despite digest collision. |
-| Artifact lifecycle | `2b0a2e3` | Immutable `PrimitiveArtifactPin`, eviction-safe ownership, production same-key singleflight, bounded entries/bytes/in-flight/failures, retry records and explicit backpressure; symbol/signature alias validation. |
-| Metadata/pipeline authority | `22b6c3d` | JSON -> generated C++ -> strict checker chain for operator/pass metadata; implementation-only binding tables; `PipelineResolver` is production order/invariant/fingerprint source. |
-| Frozen cross-track contract | `0acdb8d` | CoreContract v1 artifact/request/ticket/outcome/observer/selected-plan DTOs and deterministic capability/resolver/store/coordinator/assembler fakes. |
-| Legacy/docs convergence | `8e3c45a` | Whole-graph `LowerToTIR` is compatibility/testing only; stale guides are archived; production claims point to per-unit `Compiler::Compile`. |
+| Executable capability truth | `CapabilityResult` distinguishes `unsupported`, `eligible_but_not_executable`, and `executable`. `supported` is true only after `CapabilityVerifier` executes the real normalized per-unit compile path through lowering, target schedule, signature and backend. This executable probe intentionally participates in production cache/singleflight; it is not a metadata-only query. Backend-disabled builds and incomplete CUDA snapshots remain eligible but not executable. | `test/compiler_capability_test.cpp`: control flow/dynamic/tuple rejection, `nn_gemm transA`, custom lowering shape mismatch, backend unavailable, CUDA compute capability, CUDA reduction schedule, and `supported => Compiler::Compile` matrix. |
+| One production execution plan | `Compiler::Compile` resolves one Relay/TIR execution contract per invocation. Compiler Relay plans explicitly contain pre/post `infer_type`; `PipelineExecutor` executes the `NormalizedPipeline` and revalidates step identity, binding, phase, invariant transitions, target requirements, canonical bytes, checked type and CUDA launch metadata. `LowerGraph` no longer runs an unrecorded InferType pass. | `test/pipeline_resolver_test.cpp`; production integration in `src/compiler/compiler.cc`; compatibility-only inference remains in `LowerToTIR`/`LowerOperatorCallsToTIR`. |
+| Artifact identity from execution | Artifact keys consume canonical bytes from the exact resolved Relay plan, per-unit lowering version, exact TIR plan/schedule, ABI and backend version. Digest remains indexing/diagnostic only; full canonical bytes decide equality. | `test/compiler_identity_test.cpp`, `test/primitive_cache_test.cpp`, LLVM block in `test/operator_compilation_test.cpp`. |
+| Public production adapter | `CompiledGraph::artifact_pins` exposes CoreContract `ArtifactPin`s backed by opaque strong owners of real `PrimitiveArtifactPin`s. `ProductionArtifactCacheAdapter` provides read-only full-key lookup/stats; a miss never creates a singleflight owner. | `primitive_cache_test::production_adapter_read_only_pin`; LLVM cache test checks compiler-returned pins resolve in the production cache. |
+| Production pin/cache/singleflight | Existing full-canonical cache, same-key singleflight, failure TTL, bounds/backpressure, ABI relocation and eviction-safe pin semantics are preserved. | `primitive_cache_test`, `compiler_foundation_contract_test`, LLVM relocation case in `operator_compilation_test`. |
+| CPU CI closure | CTest registers all 23 CPU/core executables plus Relay/pass contracts, include-layer and compiled public-header checks. CPU workflow runs the complete `cpu` label. | Local CPU-only run: **27/27 passed**. |
+| LLVM CI closure | LLVM workflow explicitly builds and runs operator compilation (including symbol relocation/cache reuse), LLVM codegen, per-op numeric, and ONNX compile tests. | Workflow configured; this worktree has no LLVM package, so execution remains an external CI requirement. |
+| Legacy documentation | `Compiler::Compile -> per-unit LowerGraph -> CompiledModule + ExecutablePlan` is the production authority. Whole-graph `relay::LowerToTIR` is compatibility/testing-only and cannot establish support. | `MODULE_GUIDE.md`, `OP_SUPPORT_MATRIX.md`, Track01 plan/roadmap. |
 
-## Frozen v1 integration surface
-
-Other tracks may consume only these public/value contracts and deterministic
-fakes until their production integration review:
+## Frozen public/value surface
 
 - `include/kxc/compiler/capability.h`
 - `include/kxc/compiler/identity.h`
 - `include/kxc/compiler/pipeline.h`
 - `include/kxc/compiler/foundation_contract.h`
+- `include/kxc/compiler/compiler.h` (`CompiledGraph::artifact_pins`)
 - `test/support/compiler_foundation_fakes.h`
 
-They must not include `src/compiler/internal/*` or `src/runtime/internal/*`, and
-must not use object addresses, graph-local value/unit/storage ids, link symbols,
-request heat or `kDynamicDimension == -1` as semantic/artifact/dispatch identity.
-Generation `0` plus explicit `static-exact` applicability is the fallback oracle.
-There is no fuzzy fallback.
+Consumers must not include `src/compiler/internal/*` or `src/runtime/internal/*`.
+Graph-local value/unit/storage ids, object addresses, link symbols, request heat and
+`kDynamicDimension == -1` do not enter semantic/artifact/dispatch identity. There is
+no fuzzy fallback. The fake store/coordinator remain deterministic cross-track test
+utilities; production cache retention is supplied by the adapter above.
 
-## Verification run in this worktree
+## Verification performed locally
 
 Configured without downloads or external access:
 
 ```text
 cmake --preset dev-ninja-cpu
 CUDA: disabled
-LLVM: requested but not found in the environment
-ONNX Python fixture: skipped because onnx/numpy are not installed
+LLVM: requested but not found
+ONNX C++ fixture: skipped because onnx/numpy are not installed
 ```
 
-Passing focused executables:
+Commands and results:
 
-- `compiler_capability_test`
-- `compiler_identity_test`
-- `compiler_foundation_contract_test`
-- `pipeline_resolver_test`
-- `primitive_cache_test` (12-thread same-key merge, pin/eviction, collision,
-  failure/retry/bounds/backpressure)
-- `graph_partition_test`
-- `compiler_contract_test`
-- `compiler_extension_contract_test`
-- `pass_pipeline_test`
-- `operator_compilation_test` (non-LLVM contract cases in this environment)
-- `executable_plan_test`
-- `kernel_signature_test`
-- `compiled_module_test`
-- `runtime_session_test`
+```bash
+cmake --build out/build/dev-ninja-cpu --parallel 2
+ctest --test-dir out/build/dev-ninja-cpu --output-on-failure \
+  --label-regex '(^|;)cpu(;|$)'
+# 27/27 passed
 
-Passing generated/static checks:
+python python/tools/check_relay_op_contract.py --root .
+python python/tools/check_pass_contract.py --root .
+python tools/architecture/check_include_layers.py --root .
+python tools/architecture/check_public_headers.py --root . --compile
+# included in the 27/27 CTest result
+```
 
-- `check_relay_op_contract`: 19/19
-- `check_pass_contract`: 19/19
-- `check_include_layers`
-- `check_public_headers`
-- `git diff --check`
+Before handoff, `git diff --check` is required. No network, push, or merge is part of
+this track.
 
-The LLVM-only numerical cache tests now include a graph-renumbered, different
-symbol reuse case. They are compiled/run when LLVM is available; this worktree
-could not execute that conditional block because no local LLVM package exists.
-No test was weakened or disabled to hide that environment limitation.
+## Remaining review/integration items
 
-## Remaining hard blockers and required follow-up
-
-1. **02 Shape:** consume CoreContract v1 with `DispatchKey`; exact shape first;
-   prove no `-1` enters semantic/artifact/dispatch/profile DTOs.
-2. **03 Adaptive:** consume `ArtifactPin`, request/ticket/outcome and observer;
-   preserve the ready-cache singleflight semantics or layer service scheduling
-   above it; never move coordination into `RuntimeSession`.
-3. **04 Control flow:** use explicit capability mode/fake rejection until its
-   executable task contract is integrated; do not bypass the three gates.
-4. **05 Region/runtime plan:** prove graph renumbering does not alter region
-   semantic keys and retain per-call fallback; consume selected immutable
-   artifacts only.
-5. **06 NLP/GPU validation:** report rejection/cache miss/compile failure
-   separately; do not infer capability from importer or legacy `LowerToTIR`.
-6. **LLVM integration environment:** on an LLVM-enabled builder, run
-   `operator_compilation_test`, `op_numeric_llvm_test`, and the broader compiler
-   regression to execute the new cached-symbol relocation path numerically.
-
-Once items 1–5 have branch-local mock/fake evidence, M1 can move from “blocked”
-to “completed” without further Core-track architecture changes. Any DTO version
-change must state compatibility, key/ABI/fingerprint impact and fallback.
+1. Run the LLVM CI selection on an LLVM-enabled builder and retain the job record:
+   `operator_compilation_test`, `codegen_llvm_test`, `op_numeric_llvm_test`, and
+   `onnx_importer_test`.
+2. Supervisor reviews the stronger capability semantics, normalized execution
+   identity, and public production-pin adapter. This handoff does not self-approve.
+3. Tracks 02–06 record their branch-local CoreContract consumption separately.
+   Their consumption is required for M1 integration, but is no longer described as
+   the only blocker or as evidence that Track01 was already complete.
+4. Any DTO/key/ABI/pipeline change must state compatibility, canonical identity
+   impact, and exact fallback. `RuntimeSession` must remain compiler/cache-free.

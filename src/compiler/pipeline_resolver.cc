@@ -1,19 +1,20 @@
 /*! \file src/compiler/pipeline_resolver.cc
- * \brief Resolves the generated pass contract into one production pipeline.
+ * \brief Resolves and executes the generated pass contract without hidden passes.
  */
 
 #include "kxc/compiler/pipeline.h"
 
-#include <algorithm>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <vector>
 
+#include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
 #include "kxc/relay/transforms/pipeline.h"
+#include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/pipeline.h"
 #include "../pass/generated/pass_contract.inc"
 
@@ -30,20 +31,89 @@ void AppendField(std::string* canonical, const std::string& name,
                   std::to_string(value.size()) + ":" + value + ";";
 }
 
+void AppendArray(std::string* canonical, const std::string& name,
+                 const Array<String>& values) {
+    for (const String& value : values) AppendField(canonical, name, AsString(value));
+}
+
+std::string StepKindName(PipelineExecutionStepKind kind) {
+    switch (kind) {
+        case PipelineExecutionStepKind::kPass:
+            return "pass";
+    }
+    throw std::invalid_argument("PipelineExecutor has an unknown step kind");
+}
+
+bool EqualArray(const Array<String>& lhs, const Array<String>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (!(lhs[i] == rhs[i])) return false;
+    }
+    return true;
+}
+
+int PhaseRank(const PassSpec& spec) {
+    const std::string phase = AsString(spec.phase);
+    if (spec.dialect == IRDialect::kRelay && phase == "relay_optimize") return 0;
+    if (spec.dialect == IRDialect::kTIR && phase == "tir_optimize") return 0;
+    if (spec.dialect == IRDialect::kTIR && phase == "tir_schedule") return 1;
+    throw std::invalid_argument("PipelineResolver has no phase ordering for " +
+                                PassSpecKey(spec.dialect, spec.name));
+}
+
+Array<String> SetToArray(const std::set<std::string>& values) {
+    Array<String> result;
+    for (const std::string& value : values) result.push_back(String(value));
+    return result;
+}
+
+std::set<std::string> UniqueValues(const Array<String>& values,
+                                   const char* field) {
+    std::set<std::string> result;
+    for (const String& value : values) {
+        const std::string name = AsString(value);
+        if (name.empty() || !result.insert(name).second) {
+            throw std::invalid_argument(std::string("PipelineResolver ") + field +
+                                        " must be unique and non-empty");
+        }
+    }
+    return result;
+}
+
+std::unordered_set<std::string> UniqueNames(const Array<String>& values,
+                                             const char* field) {
+    std::unordered_set<std::string> result;
+    for (const String& value : values) {
+        const std::string name = AsString(value);
+        if (name.empty() || !result.insert(name).second) {
+            throw std::invalid_argument(std::string("PipelineResolver ") + field +
+                                        " contains an empty or duplicate pass");
+        }
+    }
+    return result;
+}
+
+void RequireTarget(const Target& target, const char* caller) {
+    if (!target.defined() || !target.As<TargetNode>()) {
+        throw std::invalid_argument(std::string(caller) +
+                                    " requires a defined Target capability snapshot");
+    }
+    const bool cpu = target->kind == "llvm" && target->device_type == kCPU;
+    const bool cuda = target->kind == "cuda" && target->device_type == kCUDA;
+    if (!cpu && !cuda) {
+        throw std::invalid_argument(std::string(caller) +
+                                    " target kind and device type are inconsistent");
+    }
+}
+
 Array<String> CompilerPolicy(const PipelineRequest& request) {
     const std::string dialect = ToString(request.dialect);
     if (request.opt_level < 0 || request.opt_level > 3) {
-        throw std::invalid_argument(
-            "PipelineResolver requires opt_level in [0, 3]");
+        throw std::invalid_argument("PipelineResolver requires opt_level in [0, 3]");
     }
     std::string name = dialect + ".compiler.";
     if (request.dialect == IRDialect::kTIR && request.opt_level == 3) {
-        if (!request.target.defined() || !request.target.As<TargetNode>()) {
-            throw std::invalid_argument(
-                "TIR O3 pipeline requires a defined Target");
-        }
-        if (request.target->kind == "cuda" &&
-            request.target->device_type == kCUDA) {
+        if (request.target->kind == "cuda" && request.target->device_type == kCUDA) {
             name += "cuda.o3";
         } else if (request.target->kind == "llvm" &&
                    request.target->device_type == kCPU) {
@@ -62,52 +132,74 @@ Array<String> BasePipeline(const PipelineRequest& request) {
     const std::string named = AsString(request.named_pipeline);
     if (named.empty() || named == "compiler") return CompilerPolicy(request);
     if (named == "optimize_default") {
-        return pass_contract_generated::Pipeline(
-            ToString(request.dialect) + ".optimize_default");
+        return pass_contract_generated::Pipeline(ToString(request.dialect) +
+                                                  ".optimize_default");
     }
     return pass_contract_generated::Pipeline(named);
 }
 
-std::unordered_set<std::string> UniqueNames(const Array<String>& values,
-                                             const char* field) {
-    std::unordered_set<std::string> result;
-    for (const String& value : values) {
-        const std::string name = AsString(value);
-        if (name.empty() || !result.insert(name).second) {
-            throw std::invalid_argument(std::string("PipelineResolver ") + field +
-                                        " contains an empty or duplicate pass");
-        }
+bool IsCompilerPipeline(const PipelineRequest& request) {
+    const std::string named = AsString(request.named_pipeline);
+    return named.empty() || named == "compiler";
+}
+
+std::string CanonicalBytes(const NormalizedPipeline& pipeline) {
+    std::string canonical;
+    AppendField(&canonical, "kind", "normalized-pipeline-v2");
+    AppendField(&canonical, "contract_version",
+                std::to_string(pass_contract_generated::kContractVersion));
+    AppendField(&canonical, "dialect", ToString(pipeline.dialect));
+    AppendField(&canonical, "scope", ToString(pipeline.scope));
+    AppendField(&canonical, "opt_level", std::to_string(pipeline.opt_level));
+    AppendField(&canonical, "named_pipeline", AsString(pipeline.named_pipeline));
+    AppendArray(&canonical, "initial_invariant", pipeline.initial_invariants);
+    AppendArray(&canonical, "initial_analysis", pipeline.initial_analyses);
+    AppendArray(&canonical, "target_requirement", pipeline.target_requirements);
+    for (const PipelineExecutionStep& step : pipeline.execution_steps) {
+        AppendField(&canonical, "step_kind", StepKindName(step.kind));
+        AppendField(&canonical, "step_dialect", ToString(step.dialect));
+        AppendField(&canonical, "step_scope", ToString(step.scope));
+        AppendField(&canonical, "step_occurrence", std::to_string(step.occurrence));
+        AppendField(&canonical, "step_pass", AsString(step.pass_name));
+        AppendField(&canonical, "step_phase", AsString(step.phase));
+        AppendField(&canonical, "step_schema", std::to_string(step.schema_version));
+        AppendField(&canonical, "step_implementation", AsString(step.implementation_key));
     }
-    return result;
-}
-
-int PhaseRank(const PassSpec& spec) {
-    const std::string phase = AsString(spec.phase);
-    if (spec.dialect == IRDialect::kRelay && phase == "relay_optimize") return 0;
-    if (spec.dialect == IRDialect::kTIR && phase == "tir_optimize") return 0;
-    if (spec.dialect == IRDialect::kTIR && phase == "tir_schedule") return 1;
-    throw std::invalid_argument("PipelineResolver has no phase ordering for " +
-                                PassSpecKey(spec.dialect, spec.name));
-}
-
-Array<String> SetToArray(const std::set<std::string>& values) {
-    Array<String> result;
-    for (const std::string& value : values) result.push_back(String(value));
-    return result;
-}
-
-void RequireTarget(const PipelineRequest& request) {
-    if (!request.target.defined() || !request.target.As<TargetNode>()) {
-        throw std::invalid_argument(
-            "PipelineResolver requires a defined Target capability snapshot");
+    for (const PipelineInvariantTransition& transition :
+         pipeline.invariant_transitions) {
+        AppendField(&canonical, "transition_pass", AsString(transition.pass_name));
+        AppendField(&canonical, "transition_phase", AsString(transition.phase));
+        AppendArray(&canonical, "transition_required", transition.required);
+        AppendArray(&canonical, "transition_produced", transition.produced);
+        AppendArray(&canonical, "transition_preserved", transition.preserved_analyses);
+        AppendArray(&canonical, "transition_invalidated", transition.invalidated_analyses);
+        AppendArray(&canonical, "transition_invariants_before",
+                    transition.invariants_before);
+        AppendArray(&canonical, "transition_invariants_after",
+                    transition.invariants_after);
+        AppendArray(&canonical, "transition_analyses_before", transition.analyses_before);
+        AppendArray(&canonical, "transition_analyses_after", transition.analyses_after);
     }
-    const bool cpu = request.target->kind == "llvm" &&
-                     request.target->device_type == kCPU;
-    const bool cuda = request.target->kind == "cuda" &&
-                      request.target->device_type == kCUDA;
-    if (!cpu && !cuda) {
+    return canonical;
+}
+
+void EnsureRegistered(IRDialect dialect) {
+    if (dialect == IRDialect::kRelay) {
+        (void)relay::RelayRegisteredPassSpecs();
+    } else if (dialect == IRDialect::kTIR) {
+        (void)tir::TIRRegisteredPassSpecs();
+    }
+}
+
+void ValidateTargetRequirements(const NormalizedPipeline& pipeline,
+                                const Target& target, bool has_cuda_schedule) {
+    RequireTarget(target, "PipelineExecutor");
+    Array<String> expected{
+        String(target->kind + ":" + std::to_string(static_cast<int>(target->device_type)))};
+    if (has_cuda_schedule) expected.push_back(String("cuda_thread_binding"));
+    if (!EqualArray(pipeline.target_requirements, expected)) {
         throw std::invalid_argument(
-            "PipelineResolver target kind and device type are inconsistent");
+            "PipelineExecutor target requirements do not match execution steps");
     }
 }
 
@@ -119,12 +211,9 @@ bool NormalizedPipeline::defined() const noexcept {
            fingerprint.defined() && !std::string(fingerprint).empty();
 }
 
-NormalizedPipeline PipelineResolver::Resolve(
-    const PipelineRequest& request) {
-    if (request.dialect != IRDialect::kRelay &&
-        request.dialect != IRDialect::kTIR) {
-        throw std::invalid_argument(
-            "PipelineResolver requires Relay or TIR dialect");
+NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
+    if (request.dialect != IRDialect::kRelay && request.dialect != IRDialect::kTIR) {
+        throw std::invalid_argument("PipelineResolver requires Relay or TIR dialect");
     }
     const PassScope expected_scope = request.dialect == IRDialect::kRelay
                                          ? PassScope::kGraph
@@ -133,12 +222,8 @@ NormalizedPipeline PipelineResolver::Resolve(
         throw std::invalid_argument(
             "PipelineResolver requested scope does not match dialect");
     }
-    RequireTarget(request);
-    if (request.dialect == IRDialect::kRelay) {
-        (void)relay::RelayRegisteredPassSpecs();
-    } else {
-        (void)tir::TIRRegisteredPassSpecs();
-    }
+    RequireTarget(request.target, "PipelineResolver");
+    EnsureRegistered(request.dialect);
 
     const auto enabled = UniqueNames(request.enabled, "enabled");
     const auto disabled = UniqueNames(request.disabled, "disabled");
@@ -148,73 +233,62 @@ NormalizedPipeline PipelineResolver::Resolve(
                 "PipelineResolver cannot both enable and disable pass: " + name);
         }
     }
+    if (IsCompilerPipeline(request) && disabled.count("infer_type")) {
+        throw std::invalid_argument(
+            "PipelineResolver cannot disable mandatory compiler infer_type steps");
+    }
 
     Array<String> ordered;
     std::unordered_set<std::string> seen;
-    for (const String& pass : BasePipeline(request)) {
+    const auto append_unique = [&ordered, &seen](const String& pass) {
         const std::string name = AsString(pass);
         if (name.empty() || !seen.insert(name).second) {
             throw std::invalid_argument(
                 "generated pipeline contains an empty or duplicate pass");
         }
-        if (!disabled.count(name)) ordered.push_back(pass);
+        ordered.push_back(pass);
+    };
+    const bool compiler_pipeline = IsCompilerPipeline(request);
+    if (compiler_pipeline && request.dialect == IRDialect::kRelay) {
+        // These are real contract passes, deliberately duplicated around Relay optimization.
+        ordered.push_back(String("infer_type"));
+        seen.insert("infer_type");
+    }
+    for (const String& pass : BasePipeline(request)) {
+        const std::string name = AsString(pass);
+        if (!disabled.count(name)) append_unique(pass);
     }
     for (const String& pass : request.enabled) {
         const std::string name = AsString(pass);
         if (seen.insert(name).second) ordered.push_back(pass);
     }
+    if (compiler_pipeline && request.dialect == IRDialect::kRelay) {
+        ordered.push_back(String("infer_type"));
+    }
 
-    std::set<std::string> invariants;
-    for (const String& invariant : request.initial_invariants) {
-        const std::string name = AsString(invariant);
-        if (name.empty() || !invariants.insert(name).second) {
-            throw std::invalid_argument(
-                "PipelineResolver initial invariants must be unique and non-empty");
-        }
-    }
-    std::set<std::string> analyses;
-    for (const String& analysis : request.initial_analyses) {
-        const std::string name = AsString(analysis);
-        if (name.empty() || !analyses.insert(name).second) {
-            throw std::invalid_argument(
-                "PipelineResolver initial analyses must be unique and non-empty");
-        }
-    }
+    std::set<std::string> invariants =
+        UniqueValues(request.initial_invariants, "initial invariants");
+    std::set<std::string> analyses =
+        UniqueValues(request.initial_analyses, "initial analyses");
 
     NormalizedPipeline result;
     result.dialect = request.dialect;
     result.scope = expected_scope;
+    result.opt_level = request.opt_level;
+    result.named_pipeline = request.named_pipeline;
+    result.initial_invariants = request.initial_invariants;
+    result.initial_analyses = request.initial_analyses;
     result.ordered_passes = ordered;
+    result.target_requirements = {
+        String(request.target->kind + ":" +
+               std::to_string(static_cast<int>(request.target->device_type)))};
     result.contract_versions.push_back(String(
-        "pass-contract-v" +
-        std::to_string(pass_contract_generated::kContractVersion)));
-    result.target_requirements.push_back(String(
-        request.target->kind + ":" +
-        std::to_string(static_cast<int>(request.target->device_type))));
-
-    std::string canonical;
-    AppendField(&canonical, "kind", "normalized-pipeline-v1");
-    AppendField(&canonical, "contract_version",
-                std::to_string(pass_contract_generated::kContractVersion));
-    AppendField(&canonical, "dialect", ToString(request.dialect));
-    AppendField(&canonical, "scope", ToString(expected_scope));
-    AppendField(&canonical, "target_kind", request.target->kind);
-    AppendField(&canonical, "target_device",
-                std::to_string(static_cast<int>(request.target->device_type)));
-    AppendField(&canonical, "opt_level", std::to_string(request.opt_level));
-    AppendField(&canonical, "named_pipeline",
-                AsString(request.named_pipeline));
-    for (const std::string& invariant : invariants) {
-        AppendField(&canonical, "initial_invariant", invariant);
-    }
-    for (const std::string& analysis : analyses) {
-        AppendField(&canonical, "initial_analysis", analysis);
-    }
+        "pass-contract-v" + std::to_string(pass_contract_generated::kContractVersion)));
 
     int previous_phase = -1;
+    std::unordered_map<std::string, size_t> occurrences;
     for (const String& name : ordered) {
-        const PassSpec& spec =
-            PassRegistry::Global().Get(request.dialect, name);
+        const PassSpec& spec = PassRegistry::Global().Get(request.dialect, name);
         ValidatePassSpec(spec);
         if (spec.scope != expected_scope) {
             throw std::invalid_argument(
@@ -223,20 +297,27 @@ NormalizedPipeline PipelineResolver::Resolve(
         }
         const int phase = PhaseRank(spec);
         if (phase < previous_phase) {
-            throw std::invalid_argument(
-                "PipelineResolver pass phases are out of order");
+            throw std::invalid_argument("PipelineResolver pass phases are out of order");
         }
         previous_phase = phase;
         if (spec.target_dependent) {
-            if (!(request.target->kind == "cuda" &&
-                  request.target->device_type == kCUDA)) {
+            if (!(request.target->kind == "cuda" && request.target->device_type == kCUDA)) {
                 throw std::invalid_argument(
                     "target-dependent pass requires a supported CUDA Target: " +
                     AsString(spec.name));
             }
-            result.target_requirements.push_back(
-                String("cuda_thread_binding"));
+            result.target_requirements.push_back(String("cuda_thread_binding"));
         }
+
+        PipelineExecutionStep step;
+        step.dialect = spec.dialect;
+        step.scope = spec.scope;
+        step.occurrence = occurrences[AsString(spec.name)]++;
+        step.pass_name = spec.name;
+        step.phase = spec.phase;
+        step.schema_version = spec.schema_version;
+        step.implementation_key = spec.implementation_key;
+        result.execution_steps.push_back(std::move(step));
 
         PipelineInvariantTransition transition;
         transition.pass_name = spec.name;
@@ -249,10 +330,9 @@ NormalizedPipeline PipelineResolver::Resolve(
         transition.analyses_before = SetToArray(analyses);
         for (const String& required : spec.required_invariants) {
             if (!invariants.count(AsString(required))) {
-                throw std::invalid_argument(
-                    "PipelineResolver missing required invariant '" +
-                    AsString(required) + "' before pass " +
-                    AsString(spec.name));
+                throw std::invalid_argument("PipelineResolver missing required invariant '" +
+                                            AsString(required) + "' before pass " +
+                                            AsString(spec.name));
             }
         }
         for (const String& invalidated : spec.invalidated_analyses) {
@@ -267,20 +347,132 @@ NormalizedPipeline PipelineResolver::Resolve(
         result.contract_versions.push_back(String(
             PassSpecKey(spec.dialect, spec.name) + "@v" +
             std::to_string(spec.schema_version)));
-        AppendField(&canonical, "pass", AsString(spec.name));
-        AppendField(&canonical, "pass_schema",
-                    std::to_string(spec.schema_version));
-        AppendField(&canonical, "phase", AsString(spec.phase));
-        for (const std::string& invariant : invariants) {
-            AppendField(&canonical, "invariant", invariant);
+    }
+    result.canonical_bytes = String(CanonicalBytes(result));
+    result.fingerprint =
+        String(profiling::HashText(static_cast<std::string>(result.canonical_bytes)));
+    return result;
+}
+
+void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
+                                const Target& target) {
+    if (!pipeline.defined()) {
+        throw std::invalid_argument("PipelineExecutor requires a defined normalized pipeline");
+    }
+    if (pipeline.dialect != IRDialect::kRelay && pipeline.dialect != IRDialect::kTIR) {
+        throw std::invalid_argument("PipelineExecutor pipeline dialect is invalid");
+    }
+    const PassScope expected_scope = pipeline.dialect == IRDialect::kRelay
+                                         ? PassScope::kGraph
+                                         : PassScope::kPrimFunc;
+    if (pipeline.scope != expected_scope ||
+        pipeline.ordered_passes.size() != pipeline.execution_steps.size() ||
+        pipeline.execution_steps.size() != pipeline.invariant_transitions.size()) {
+        throw std::invalid_argument("PipelineExecutor pipeline step vectors disagree");
+    }
+    EnsureRegistered(pipeline.dialect);
+    std::set<std::string> invariants =
+        UniqueValues(pipeline.initial_invariants, "initial invariants");
+    std::set<std::string> analyses =
+        UniqueValues(pipeline.initial_analyses, "initial analyses");
+    std::unordered_map<std::string, size_t> occurrences;
+    int previous_phase = -1;
+    bool has_cuda_schedule = false;
+    for (size_t i = 0; i < pipeline.execution_steps.size(); ++i) {
+        const PipelineExecutionStep& step = pipeline.execution_steps[i];
+        const PipelineInvariantTransition& transition =
+            pipeline.invariant_transitions[i];
+        if (step.kind != PipelineExecutionStepKind::kPass ||
+            step.dialect != pipeline.dialect || step.scope != pipeline.scope ||
+            !(pipeline.ordered_passes[i] == step.pass_name) ||
+            step.occurrence != occurrences[AsString(step.pass_name)]++) {
+            throw std::invalid_argument("PipelineExecutor step identity was tampered");
         }
-        for (const std::string& analysis : analyses) {
-            AppendField(&canonical, "analysis", analysis);
+        const PassSpec& spec = PassRegistry::Global().Get(step.dialect, step.pass_name);
+        ValidatePassSpec(spec);
+        if (spec.scope != expected_scope || step.phase != spec.phase ||
+            step.schema_version != spec.schema_version ||
+            step.implementation_key != spec.implementation_key ||
+            transition.pass_name != spec.name || transition.phase != spec.phase ||
+            !EqualArray(transition.required, spec.required_invariants) ||
+            !EqualArray(transition.produced, spec.produced_invariants) ||
+            !EqualArray(transition.preserved_analyses, spec.preserved_analyses) ||
+            !EqualArray(transition.invalidated_analyses, spec.invalidated_analyses) ||
+            !EqualArray(transition.invariants_before, SetToArray(invariants)) ||
+            !EqualArray(transition.analyses_before, SetToArray(analyses))) {
+            throw std::invalid_argument("PipelineExecutor pass contract transition was tampered");
+        }
+        const int phase = PhaseRank(spec);
+        if (phase < previous_phase) {
+            throw std::invalid_argument("PipelineExecutor pass phases are out of order");
+        }
+        previous_phase = phase;
+        for (const String& required : spec.required_invariants) {
+            if (!invariants.count(AsString(required))) {
+                throw std::invalid_argument("PipelineExecutor missing required invariant '" +
+                                            AsString(required) + "'");
+            }
+        }
+        for (const String& invalidated : spec.invalidated_analyses) {
+            analyses.erase(AsString(invalidated));
+        }
+        for (const String& produced : spec.produced_invariants) {
+            invariants.insert(AsString(produced));
+        }
+        if (!EqualArray(transition.invariants_after, SetToArray(invariants)) ||
+            !EqualArray(transition.analyses_after, SetToArray(analyses))) {
+            throw std::invalid_argument("PipelineExecutor post-pass transition was tampered");
+        }
+        has_cuda_schedule = has_cuda_schedule || spec.target_dependent;
+    }
+    ValidateTargetRequirements(pipeline, target, has_cuda_schedule);
+    const std::string canonical = CanonicalBytes(pipeline);
+    if (canonical != AsString(pipeline.canonical_bytes) ||
+        profiling::HashText(canonical) != AsString(pipeline.fingerprint)) {
+        throw std::invalid_argument("PipelineExecutor canonical pipeline identity was tampered");
+    }
+}
+
+Function PipelineExecutor::ExecuteRelay(const NormalizedPipeline& pipeline,
+                                        const Function& function,
+                                        const Target& target) {
+    Validate(pipeline, target);
+    if (pipeline.dialect != IRDialect::kRelay || !function.defined()) {
+        throw std::invalid_argument("PipelineExecutor ExecuteRelay requires Relay pipeline and Function");
+    }
+    PassContext::Scope scope(PassContext::MergeTarget(PassContext::Current(), target));
+    Function current = function;
+    for (size_t i = 0; i < pipeline.execution_steps.size(); ++i) {
+        current = relay::RunRelayPassPipeline(
+            current, {pipeline.execution_steps[i].pass_name});
+        if (std::string(pipeline.execution_steps[i].pass_name) == "infer_type" &&
+            !current->body.checked_type().defined()) {
+            throw std::runtime_error("PipelineExecutor infer_type did not establish checked_type");
         }
     }
-    result.canonical_bytes = String(canonical);
-    result.fingerprint = String(profiling::HashText(canonical));
-    return result;
+    return current;
+}
+
+tir::PrimFunc PipelineExecutor::ExecuteTIR(const NormalizedPipeline& pipeline,
+                                           const tir::PrimFunc& function,
+                                           const Target& target) {
+    Validate(pipeline, target);
+    if (pipeline.dialect != IRDialect::kTIR || !function.defined()) {
+        throw std::invalid_argument("PipelineExecutor ExecuteTIR requires TIR pipeline and PrimFunc");
+    }
+    PassContext::Scope scope(PassContext::MergeTarget(PassContext::Current(), target));
+    tir::PrimFunc current = function;
+    for (const PipelineExecutionStep& step : pipeline.execution_steps) {
+        current = tir::RunTIRPassPipeline(current, {step.pass_name});
+        const PassSpec& spec = PassRegistry::Global().Get(step.dialect, step.pass_name);
+        if (spec.target_dependent) {
+            const tir::CudaLaunchConfig launch = tir::GetCudaLaunchConfig(current);
+            if (launch.grid_x == 0 || launch.block_x == 0) {
+                throw std::runtime_error("PipelineExecutor CUDA schedule produced invalid launch metadata");
+            }
+        }
+    }
+    return current;
 }
 
 }  // namespace kxc::api

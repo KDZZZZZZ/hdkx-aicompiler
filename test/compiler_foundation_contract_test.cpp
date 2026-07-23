@@ -156,7 +156,12 @@ bool TestExplicitCapabilityAndPipelineFakes() {
     FakeCapabilityVerifier verifier;
     TEST_CHECK(!verifier.Verify(capability).supported,
                "fake capability must fail closed without an explicit result");
+    CapabilityResult inconsistent;
+    inconsistent.supported = true;
+    TEST_CHECK(Throws([&] { verifier.Set(capability, inconsistent); }),
+               "fake cannot make supported disagree with executable status");
     CapabilityResult accepted;
+    accepted.status = CapabilityStatus::kExecutable;
     accepted.supported = true;
     verifier.Set(capability, accepted);
     TEST_CHECK(verifier.Verify(capability).supported,

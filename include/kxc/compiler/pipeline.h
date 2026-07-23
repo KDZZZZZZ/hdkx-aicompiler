@@ -4,11 +4,14 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
 #include "kxc/pass/pass.h"
+#include "kxc/relay/relay.h"
 #include "kxc/target/target.h"
+#include "kxc/tir/stmt.h"
 
 namespace kxc::api {
 
@@ -22,6 +25,21 @@ struct PipelineRequest final {
     Array<String> disabled;
     Array<String> initial_invariants;
     Array<String> initial_analyses;
+};
+
+enum class PipelineExecutionStepKind {
+    kPass,
+};
+
+struct PipelineExecutionStep final {
+    PipelineExecutionStepKind kind{PipelineExecutionStepKind::kPass};
+    IRDialect dialect{IRDialect::kUnknown};
+    PassScope scope{PassScope::kUnknown};
+    size_t occurrence{0};
+    String pass_name;
+    String phase;
+    int schema_version{0};
+    String implementation_key;
 };
 
 struct PipelineInvariantTransition final {
@@ -40,7 +58,12 @@ struct PipelineInvariantTransition final {
 struct NormalizedPipeline final {
     IRDialect dialect{IRDialect::kUnknown};
     PassScope scope{PassScope::kUnknown};
+    int opt_level{0};
+    String named_pipeline;
+    Array<String> initial_invariants;
+    Array<String> initial_analyses;
     Array<String> ordered_passes;
+    std::vector<PipelineExecutionStep> execution_steps;
     std::vector<PipelineInvariantTransition> invariant_transitions;
     Array<String> target_requirements;
     Array<String> contract_versions;
@@ -53,6 +76,19 @@ struct NormalizedPipeline final {
 class PipelineResolver final {
 public:
     static NormalizedPipeline Resolve(const PipelineRequest& request);
+};
+
+/*! Executes exactly the audited pass steps in a NormalizedPipeline. */
+class PipelineExecutor final {
+public:
+    static void Validate(const NormalizedPipeline& pipeline,
+                         const Target& target);
+    static Function ExecuteRelay(const NormalizedPipeline& pipeline,
+                                 const Function& function,
+                                 const Target& target);
+    static tir::PrimFunc ExecuteTIR(const NormalizedPipeline& pipeline,
+                                    const tir::PrimFunc& function,
+                                    const Target& target);
 };
 
 }  // namespace kxc::api
