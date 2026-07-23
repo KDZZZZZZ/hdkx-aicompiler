@@ -528,6 +528,22 @@ void TestWhere() {
     CompileAndRun("where", func,
                   {Input(condition_data), Input(x_data), Input(y_data), Output(out)});
     ExpectNear(out, {10, 10, 10, 1, 2, 3});
+
+    kxc::runtime::NDArray constant_condition = kxc::runtime::NDArray::Empty(
+        {2, 1}, kxc::runtime::DataTypeFromString("bool"), kxc::Device::CPU());
+    constant_condition.CopyFromBytes(condition_data.data(), condition_data.size());
+    kxc::Var bool_x("bool_x", kxc::TensorType({1, 3}, "bool"));
+    kxc::Var bool_y("bool_y", kxc::TensorType({2, 1}, "bool"));
+    kxc::Call bool_call(kxc::relay::Op::Get("where"),
+                        {kxc::Constant(constant_condition), bool_x, bool_y});
+    kxc::Function bool_func({bool_x, bool_y}, bool_call);
+    const std::vector<uint8_t> bool_x_data = {1, 0, 1};
+    const std::vector<uint8_t> bool_y_data = {0, 1};
+    std::vector<uint8_t> bool_out(6, 0);
+    CompileAndRun("where_bool_constant", bool_func,
+                  {Input(bool_x_data), Input(bool_y_data), Output(bool_out)});
+    Check(bool_out == std::vector<uint8_t>({1, 0, 1, 1, 1, 1}),
+          "Where bool Constant/branch result mismatch");
 }
 
 // 验证 LayerNorm 的常量行、微小方差行和仿射参数语义。
@@ -569,6 +585,44 @@ void TestLayerNorm() {
         }
     }
     ExpectNear(out, expected, 2e-4f);
+
+    kxc::Var suffix_data("suffix_data", kxc::TensorType({2, 2, 2}, "float32"));
+    kxc::Var suffix_scale("suffix_scale", kxc::TensorType({2, 2}, "float32"));
+    kxc::Var suffix_bias("suffix_bias", kxc::TensorType({2, 2}, "float32"));
+    kxc::Call suffix_call(
+        kxc::relay::Op::Get("nn_layer_norm"),
+        {suffix_data, suffix_scale, suffix_bias},
+        kxc::relay::LayerNormAttrs::Create(1, epsilon, "float32"));
+    kxc::Function suffix_func({suffix_data, suffix_scale, suffix_bias}, suffix_call);
+    const std::vector<float> suffix_data_buf = {1, 2, 3, 4, 2, 4, 6, 8};
+    const std::vector<float> suffix_scale_buf = {1, -2, 0.5f, 3};
+    const std::vector<float> suffix_bias_buf = {0.25f, -0.5f, 1, -1};
+    std::vector<float> suffix_out(8, 0.0f);
+    CompileAndRun("nn_layer_norm_suffix", suffix_func,
+                  {Input(suffix_data_buf), Input(suffix_scale_buf),
+                   Input(suffix_bias_buf), Output(suffix_out)});
+    std::vector<float> suffix_expected(8, 0.0f);
+    for (size_t batch = 0; batch < 2; ++batch) {
+        const size_t offset = batch * 4;
+        float mean = 0.0f;
+        for (size_t inner = 0; inner < 4; ++inner) {
+            mean += suffix_data_buf[offset + inner];
+        }
+        mean /= 4.0f;
+        float variance = 0.0f;
+        for (size_t inner = 0; inner < 4; ++inner) {
+            const float centered = suffix_data_buf[offset + inner] - mean;
+            variance += centered * centered;
+        }
+        variance /= 4.0f;
+        const float inverse_stddev = 1.0f / std::sqrt(variance + epsilon);
+        for (size_t inner = 0; inner < 4; ++inner) {
+            suffix_expected[offset + inner] =
+                (suffix_data_buf[offset + inner] - mean) * inverse_stddev *
+                    suffix_scale_buf[inner] + suffix_bias_buf[inner];
+        }
+    }
+    ExpectNear(suffix_out, suffix_expected, 2e-4f);
 }
 
 // 验证 Cast 的目标 dtype 与数值转换。

@@ -676,20 +676,41 @@ def _attribute_value(attr: onnx.AttributeProto) -> Any:
 
 
 def _attrs_by_name(node: onnx.NodeProto) -> dict[str, Any]:
-    return {attr.name: _attribute_value(attr) for attr in node.attribute}
+    attrs: dict[str, Any] = {}
+    for attr in node.attribute:
+        if attr.name in attrs:
+            raise ValueError(
+                f"ONNX node '{node.name or node.op_type}' has duplicate attribute '{attr.name}'"
+            )
+        attrs[attr.name] = _attribute_value(attr)
+    return attrs
 
 
 def _list_attr(attrs: dict[str, Any], name: str, default: list[int]) -> list[int]:
-    value = attrs.get(name, default)
-    return [int(x) for x in value]
+    if name not in attrs:
+        return list(default)
+    value = attrs[name]
+    if not isinstance(value, list) or any(type(item) is not int for item in value):
+        raise ValueError(f"ONNX attribute '{name}' must have exact INTS type")
+    return value
 
 
 def _int_attr(attrs: dict[str, Any], name: str, default: int) -> int:
-    return int(attrs.get(name, default))
+    if name not in attrs:
+        return default
+    value = attrs[name]
+    if type(value) is not int:
+        raise ValueError(f"ONNX attribute '{name}' must have exact INT type")
+    return value
 
 
 def _float_attr(attrs: dict[str, Any], name: str, default: float) -> float:
-    return float(attrs.get(name, default))
+    if name not in attrs:
+        return default
+    value = attrs[name]
+    if type(value) is not float:
+        raise ValueError(f"ONNX attribute '{name}' must have exact FLOAT type")
+    return value
 
 
 def _convert_attrs(
@@ -759,6 +780,12 @@ def _convert_attrs(
     if node.op_type == "Transpose":
         return {"perm": _list_attr(attrs, "perm", [])}
     if node.op_type == "Gather":
+        unsupported = set(attrs) - {"axis"}
+        if unsupported:
+            raise ValueError(
+                f"Gather node '{node.name or '<unnamed>'}' has unsupported attribute(s): "
+                f"{sorted(unsupported)}"
+            )
         return {"axis": _int_attr(attrs, "axis", 0)}
     if node.op_type == "LayerNormalization":
         node_name = node.name or "<unnamed>"
@@ -772,7 +799,13 @@ def _convert_attrs(
             "epsilon": _float_attr(attrs, "epsilon", 1e-5),
             "accumulation_dtype": "float32",
         }
-    if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul", "Where"}:
+    if node.op_type == "Where":
+        if attrs:
+            raise ValueError(
+                f"Where node '{node.name or '<unnamed>'}' does not support attributes"
+            )
+        return {}
+    if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
         return {}
     raise UnsupportedONNXOpError(
         f"Unsupported ONNX op '{node.op_type}' in node '{node.name or '<unnamed>'}'"

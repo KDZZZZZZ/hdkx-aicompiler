@@ -3,8 +3,10 @@
  */
 
 #include "kxc/frontend/onnx_importer.h"
+#include "kxc/compiler/lowering/relay_to_tir.h"
 
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -202,6 +204,67 @@ void WriteLayerNormFixture(const TemporaryDirectory& directory,
 })json";
     std::ofstream(directory.path() / "model.json") << json;
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+void WriteExactTransformerOperatorSliceFixture(const TemporaryDirectory& directory) {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "embedding_table", "shape": [4, 2], "dtype": "float32"}
+    ],
+    "outputs": [
+      {"name": "context", "shape": [3, 2], "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "embedding", "op_name": "gather", "inputs": ["embedding_table", "token_ids"], "outputs": ["embedded"], "attrs": {"axis": 0}},
+      {"name": "norm", "op_name": "nn_layer_norm", "inputs": ["embedded", "scale", "bias"], "outputs": ["normalized"], "attrs": {"axis": -1, "epsilon": 0.00001, "accumulation_dtype": "float32"}},
+      {"name": "select", "op_name": "where", "inputs": ["condition", "normalized", "fallback"], "outputs": ["selected"], "attrs": {}},
+      {"name": "prefix", "op_name": "slice", "inputs": ["selected"], "outputs": ["prefix_value"], "attrs": {"starts": [0], "ends": [1], "axes": [0], "steps": [1]}},
+      {"name": "sequence", "op_name": "concatenate", "inputs": ["prefix_value", "selected"], "outputs": ["sequence_value"], "attrs": {"axis": 0}},
+      {"name": "keys", "op_name": "transpose", "inputs": ["sequence_value"], "outputs": ["keys_value"], "attrs": {"perm": [1, 0]}},
+      {"name": "scores", "op_name": "matmul", "inputs": ["sequence_value", "keys_value"], "outputs": ["scores_value"], "attrs": {}},
+      {"name": "weights", "op_name": "softmax", "inputs": ["scores_value"], "outputs": ["weights_value"], "attrs": {"axis": -1}},
+      {"name": "context_node", "op_name": "matmul", "inputs": ["weights_value", "sequence_value"], "outputs": ["context"], "attrs": {}}
+    ]
+  },
+  "params": [
+    {"name": "token_ids", "shape": [2], "dtype": "int64", "offset": 0, "nbytes": 16},
+    {"name": "condition", "shape": [2, 1], "dtype": "bool", "offset": 16, "nbytes": 2},
+    {"name": "fallback", "shape": [1, 2], "dtype": "float32", "offset": 18, "nbytes": 8},
+    {"name": "scale", "shape": [2], "dtype": "float32", "offset": 26, "nbytes": 8},
+    {"name": "bias", "shape": [2], "dtype": "float32", "offset": 34, "nbytes": 8}
+  ],
+  "param_order": ["token_ids", "condition", "fallback", "scale", "bias"]
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream binary(directory.path() / "params.bin", std::ios::binary);
+    const auto write = [&binary](const auto& values) {
+        binary.write(reinterpret_cast<const char*>(values.data()),
+                     static_cast<std::streamsize>(values.size() * sizeof(values[0])));
+    };
+    write(std::vector<int64_t>{0, 2});
+    write(std::vector<uint8_t>{1, 0});
+    write(std::vector<float>{0.0f, 0.0f});
+    write(std::vector<float>{1.0f, 1.0f});
+    write(std::vector<float>{0.0f, 0.0f});
+}
+
+bool TestExactTransformerOperatorSliceReifier() {
+    TemporaryDirectory directory;
+    WriteExactTransformerOperatorSliceFixture(directory);
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined() && imported.params.size() == 5,
+               "exact Transformer operator slice must reify initializer-backed values");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {3, 2}, "float32"),
+               "exact Transformer operator slice must preserve its declared output contract");
+    TEST_CHECK(kxc::relay::LowerToTIR(imported.function)->prim_func.defined(),
+               "reified bool Constant and exact Transformer operator slice must lower to TIR");
+    return true;
 }
 
 bool TestValidStaticMatMulSoftmaxTranspose() {
@@ -439,6 +502,7 @@ bool TestDeclaredOutputDTypeMismatchIsRejected() {
 
 int main() {
     const std::vector<std::pair<std::string, bool (*)()>> tests = {
+        {"exact_transformer_operator_slice_reifier", TestExactTransformerOperatorSliceReifier},
         {"valid_static_matmul_softmax_transpose", TestValidStaticMatMulSoftmaxTranspose},
         {"valid_static_gather", TestValidStaticGather},
         {"gather_declared_output_mismatch", TestGatherDeclaredOutputMismatchIsRejected},

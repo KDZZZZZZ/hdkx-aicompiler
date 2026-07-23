@@ -8,6 +8,7 @@
 #include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/relay/transforms/pipeline.h"
 
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -411,6 +412,20 @@ bool TestWhereInferAndLoweringContract() {
                "where must jointly broadcast scalar and rank-misaligned inputs");
     TEST_CHECK(kxc::relay::LowerToTIR(func)->prim_func.defined(),
                "static where should lower to TIR");
+
+    kxc::runtime::NDArray condition_bytes = kxc::runtime::NDArray::Empty(
+        {2, 1}, kxc::runtime::DataTypeFromString("bool"), kxc::Device::CPU());
+    const std::vector<uint8_t> condition_values{1, 0};
+    condition_bytes.CopyFromBytes(condition_values.data(), condition_values.size());
+    kxc::Var constant_x("constant_x", kxc::TensorType({1, 3}, "bool"));
+    kxc::Var constant_y("constant_y", kxc::TensorType({2, 1}, "bool"));
+    kxc::Call constant_where(kxc::relay::Op::Get("where"),
+                             {kxc::Constant(condition_bytes), constant_x, constant_y});
+    kxc::Function constant_function({constant_x, constant_y}, constant_where);
+    kxc::relay::InferTypePass(constant_function);
+    TEST_CHECK(CheckTensor(constant_where.checked_type(), {2, 3}, "bool") &&
+                   kxc::relay::LowerToTIR(constant_function)->prim_func.defined(),
+               "byte-backed bool Constant and bool branches must lower as TIR bool");
 
     kxc::Var zero_condition("zero_condition", kxc::TensorType({0, 1}, "bool"));
     kxc::Var zero_x("zero_x", kxc::TensorType({1, 3}, "float32"));

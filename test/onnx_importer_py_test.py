@@ -294,6 +294,23 @@ def test_gather_mapping_and_inferred_output_contract():
     assert imported.function.outputs[0].dtype == "float32"
 
 
+def test_gather_rejects_non_integer_or_duplicate_axis_attribute():
+    with pytest.raises(ValueError, match="axis.*exact INT type"):
+        import_onnx_model(_gather_model([2, 3], [1], axis=0.5))
+
+    model = _gather_model([2, 3], [1], axis=0)
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="duplicate attribute 'axis'"):
+        import_onnx_model(model)
+
+
+def test_gather_rejects_unknown_attribute():
+    model = _gather_model([2, 3], [1], axis=0)
+    model.graph.node[0].attribute.extend([helper.make_attribute("unknown", 1)])
+    with pytest.raises(ValueError, match="unsupported attribute"):
+        import_onnx_model(model)
+
+
 def test_gather_rejects_declared_output_mismatch():
     with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
         import_onnx_model(
@@ -385,6 +402,11 @@ def test_concat_bool_dtype_maps_and_infers_output():
     assert imported.function.outputs[0].dtype == "bool"
 
 
+def test_concat_rejects_non_integer_axis_attribute():
+    with pytest.raises(ValueError, match="axis.*exact INT type"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], axis=1.5))
+
+
 def test_concat_requires_explicit_axis():
     with pytest.raises(ValueError, match="exactly the axis attribute"):
         import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], include_axis=False))
@@ -460,6 +482,13 @@ def test_where_mapping_and_joint_broadcast_output_contract():
     ]
     assert imported.function.outputs[0].shape == [2, 3, 4]
     assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_where_rejects_attributes():
+    model = _where_model([2, 1], [2, 3], [2, 3], output_shape=[2, 3])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
 
 
 def test_where_preserves_broadcast_zero_extent():
@@ -684,6 +713,19 @@ def test_layer_normalization_rejects_missing_or_extra_outputs(node_outputs, mess
 def test_layer_normalization_rejects_non_float32_stash_type(stash_type):
     with pytest.raises(ValueError, match="stash_type default/1"):
         import_onnx_model(_layer_normalization_model(stash_type=stash_type))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"axis": 1.5}, "axis.*exact INT type"),
+        ({"epsilon": 1}, "epsilon.*exact FLOAT type"),
+        ({"stash_type": 1.0}, "stash_type.*exact INT type"),
+    ],
+)
+def test_layer_normalization_rejects_malformed_attribute_types(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_layer_normalization_model(**kwargs))
 
 
 def test_layer_normalization_rejects_unsupported_attribute():

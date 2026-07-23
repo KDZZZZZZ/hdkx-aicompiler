@@ -51,9 +51,8 @@ tir::DataType DTypeFromString(const std::string& dtype) {
 tir::DataType DTypeFromDL(const DLDataType& dl_dtype) {
     if (dl_dtype.code == kDLFloat) return tir::DataType::Float(dl_dtype.bits, dl_dtype.lanes);
     if (dl_dtype.code == kDLInt) return tir::DataType::Int(dl_dtype.bits, dl_dtype.lanes);
-    if (dl_dtype.code == kDLUInt || dl_dtype.code == kDLBool) {
-        return tir::DataType::UInt(dl_dtype.bits, dl_dtype.lanes);
-    }
+    if (dl_dtype.code == kDLUInt) return tir::DataType::UInt(dl_dtype.bits, dl_dtype.lanes);
+    if (dl_dtype.code == kDLBool) return tir::DataType::Bool(dl_dtype.lanes);
     throw std::runtime_error("Unsupported DLDataType code in constant");
 }
 
