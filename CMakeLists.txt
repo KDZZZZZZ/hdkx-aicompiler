@@ -911,6 +911,10 @@ if(KXC_BUILD_PASS_TESTS)
     kxc_add_runtime_exe(restricted_shape_runtime_bridge_test
       test/restricted_shape_runtime_bridge_test.cpp)
   endif()
+  if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE AND KXC_USE_LLVM)
+    kxc_add_runtime_exe(restricted_shape_runtime_llvm_e2e_test
+      test/restricted_shape_runtime_llvm_e2e_test.cpp)
+  endif()
   kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
   kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
   if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
@@ -934,6 +938,12 @@ if(KXC_BUILD_PASS_TESTS)
       add_test(NAME restricted_shape_runtime_bridge_test COMMAND restricted_shape_runtime_bridge_test)
       set_tests_properties(restricted_shape_runtime_bridge_test PROPERTIES
         LABELS "shape-restricted-runtime-bridge;runtime-shape;cpu")
+    endif()
+    if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE AND KXC_USE_LLVM)
+      add_test(NAME restricted_shape_runtime_llvm_e2e_test
+        COMMAND restricted_shape_runtime_llvm_e2e_test)
+      set_tests_properties(restricted_shape_runtime_llvm_e2e_test PROPERTIES
+        LABELS "llvm;numeric;e2e;runtime-shape;shape-restricted-runtime-bridge")
     endif()
     add_custom_target(run_restricted_symbolic_shape_test
       COMMAND "$<TARGET_FILE:restricted_symbolic_shape_test>"
