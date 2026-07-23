@@ -1,6 +1,8 @@
 # 编译器基础路线图
 
-> **状态：** 集成中；01 的 static-exact closure 已通过本地 CPU 验证，其他轨道仍按独立门禁合入。LLVM workflow 已配置，但本机无 LLVM 绿色记录。
+> **状态：** W1 isolated/default-off baseline 已集成；W2 production adapters 与跨轨闭环实施中。LLVM workflow 已配置，但本机无 LLVM 绿色记录。
+>
+> **集成证据：** [`../../handoffs/compiler-foundation/INTEGRATION.md`](../../handoffs/compiler-foundation/INTEGRATION.md)
 >
 > **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
 >
