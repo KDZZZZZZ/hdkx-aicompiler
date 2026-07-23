@@ -110,6 +110,8 @@ bool TestValidAndCanonical() {
     for (std::size_t i = 1; i < cuda_data.values.size(); ++i) {
         cuda_data.values[i].device = "cuda";
     }
+    cuda_data.regions[1].tasks[0].device = "cuda";
+    cuda_data.regions[2].tasks[0].device = "cuda";
     cuda_data.Validate();
     return true;
 }
@@ -128,6 +130,10 @@ bool TestSchemaAndValueContracts() {
     CHECK(Throws([&] { plan.Validate(); }), "duplicate value must fail");
     plan = BranchPlan(); plan.values[0].source_locator.clear();
     CHECK(Throws([&] { plan.Validate(); }), "missing value locator must fail");
+    plan = LinearPlan(); plan.values[1].device = "cuda";
+    CHECK(Throws([&] { plan.Validate(); }), "kernel device mismatch must fail");
+    plan = LinearPlan(); plan.regions[0].tasks[0].stream = "async";
+    CHECK(Throws([&] { plan.Validate(); }), "undeclared stream semantics must fail");
     return true;
 }
 

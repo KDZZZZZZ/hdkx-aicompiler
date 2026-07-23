@@ -258,6 +258,9 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
                 Fail("task omits the dependency for a local input producer");
             }
         }
+        if (!IsDevice(task.device) || task.stream != "default") {
+            Fail("task device/stream is unsupported by ControlPlan v1");
+        }
         ValidateEffects(task.effect, task.inputs, "task");
         ValidateAlias(task.alias, state, "task");
         if (task.kind == ControlTaskKind::kKernel) {
@@ -271,15 +274,25 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
                 !SameIds(task.inputs, unique_arguments)) {
                 Fail("kernel task has an invalid kind-specific contract");
             }
+            for (ValueId input : task.inputs) {
+                if (Value(state, input, "kernel input").device != task.device) {
+                    Fail("kernel input device differs from its task device");
+                }
+            }
+            for (ValueId output : task.outputs) {
+                if (Value(state, output, "kernel output").device != task.device) {
+                    Fail("kernel output device differs from its task device");
+                }
+            }
         } else if (task.kind == ControlTaskKind::kBranch) {
             if (!task.kernel_ref.empty() || !task.argument_values.empty() ||
-                !IsEmpty(task.loop)) {
+                !IsEmpty(task.loop) || task.device != "cpu") {
                 Fail("branch task has an invalid kind-specific contract");
             }
             ValidateBranch(state, task, available);
         } else if (task.kind == ControlTaskKind::kLoop) {
             if (!task.kernel_ref.empty() || !task.argument_values.empty() ||
-                !IsEmpty(task.branch)) {
+                !IsEmpty(task.branch) || task.device != "cpu") {
                 Fail("loop task has an invalid kind-specific contract");
             }
             ValidateLoop(state, task, available);
@@ -470,7 +483,8 @@ std::string ControlPlan::CanonicalText() const {
         out << " loc=" << Quote(region.source_locator) << " "; PrintEffect(out, region.effect); out << " "; PrintAlias(out, region.alias); out << "\n";
         for (const ControlTask& task : region.tasks) {
             out << "  task " << task.id << " kind=" << static_cast<int>(task.kind) << " in="; PrintIds(out, task.inputs); out << " args="; PrintIds(out, task.argument_values); out << " out="; PrintIds(out, task.outputs); out << " dep="; PrintIds(out, task.dependencies);
-            out << " ref=" << Quote(task.kernel_ref) << " loc=" << Quote(task.source_locator) << " "; PrintEffect(out, task.effect); out << " "; PrintAlias(out, task.alias);
+            out << " ref=" << Quote(task.kernel_ref) << " loc=" << Quote(task.source_locator)
+                << " device=" << Quote(task.device) << " stream=" << Quote(task.stream) << " "; PrintEffect(out, task.effect); out << " "; PrintAlias(out, task.alias);
             if (task.kind == ControlTaskKind::kBranch) {
                 out << " branch=" << task.branch.predicate << ':' << task.branch.then_region << ':' << task.branch.else_region;
                 for (const PhiBinding& phi : task.branch.phis) out << " phi=" << phi.result << ':' << phi.then_value << ':' << phi.else_value;

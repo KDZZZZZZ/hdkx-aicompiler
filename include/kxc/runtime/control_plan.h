@@ -82,6 +82,8 @@ struct ControlTask {
     std::vector<TaskId> dependencies;
     std::string kernel_ref;
     std::string source_locator;
+    std::string device{"cpu"};
+    std::string stream{"default"};
     EffectSummary effect;
     AliasSummary alias;
     BranchSpec branch;
