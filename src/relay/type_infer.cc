@@ -291,8 +291,8 @@ Type MatMulInferType(const Attrs& attrs, const Array<Type>& input_types) {
 
     const std::vector<int64_t> a = ShapeVector(lhs);
     const std::vector<int64_t> b = ShapeVector(rhs);
-    if (a.size() != 2 || b.size() != 2) {
-        throw std::runtime_error("matmul currently expects rank-2 inputs");
+    if (a.size() < 2 || b.size() < 2) {
+        throw std::runtime_error("matmul expects rank >= 2 inputs");
     }
     const int64_t k_a = a[a.size() - 1];
     const int64_t k_b = b[b.size() - 2];
@@ -300,7 +300,12 @@ Type MatMulInferType(const Attrs& attrs, const Array<Type>& input_types) {
         throw std::runtime_error("matmul reduction dimension mismatch");
     }
 
-    return MakeTensorType({a[0], b[1]}, lhs->dtype);
+    std::vector<int64_t> a_batch(a.begin(), a.end() - 2);
+    std::vector<int64_t> b_batch(b.begin(), b.end() - 2);
+    std::vector<int64_t> out = BroadcastShape("matmul batch", a_batch, b_batch);
+    out.push_back(a[a.size() - 2]);
+    out.push_back(b[b.size() - 1]);
+    return MakeTensorType(out, lhs->dtype);
 }
 
 // 推导 dense 的批维和 units 输出维度。
@@ -585,11 +590,15 @@ Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
 Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("softmax", input_types, 1);
     const auto* data = RequireTensor("softmax", input_types[0], "data");
-    const auto* softmax_attrs = attrs.As<SoftmaxAttrsNode>();
-    if (!data->shape.empty()) {
-        NormalizeAxis("softmax", softmax_attrs ? softmax_attrs->axis : -1,
-                      static_cast<int>(data->shape.size()));
+    if (data->shape.empty()) {
+        throw std::runtime_error("softmax requires rank at least 1");
     }
+    if (data->dtype != "float32" && data->dtype != "float64") {
+        throw std::runtime_error("softmax requires float32 or float64 input");
+    }
+    const auto* softmax_attrs = attrs.As<SoftmaxAttrsNode>();
+    NormalizeAxis("softmax", softmax_attrs ? softmax_attrs->axis : -1,
+                  static_cast<int>(data->shape.size()));
     return input_types[0];
 }
 

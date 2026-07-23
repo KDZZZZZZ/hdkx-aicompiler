@@ -63,6 +63,11 @@ jobs:
           cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}
           --target run_runtime_plan_tests --parallel 2
 
+      - name: Check dependency-free NLP reference and capability gate
+        run: >
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}
+          --target check_nlp_gpu_validation
+
       - name: Run all CPU foundation CTest checks
         run: >
           ctest --test-dir out/build/ci-cpu-${{ matrix.region_task_dag }}

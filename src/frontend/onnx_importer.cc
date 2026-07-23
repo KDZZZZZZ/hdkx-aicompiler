@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "kxc/relay/op.h"
+#include "kxc/relay/transforms/infer_type.h"
 
 namespace kxc {
 namespace frontend {
@@ -330,7 +331,7 @@ bool ReadBool(const Json& value, const std::string& ctx) {
     return RequireKind(value, Json::Bool, ctx).b;
 }
 
-// 读取有序整数数组，用于 shape 和算子维度属性。
+// 读取有序整数数组，用于算子维度属性。
 std::vector<int64_t> ReadInt64Vector(const Json& value, const std::string& ctx) {
     RequireKind(value, Json::Array, ctx);
     std::vector<int64_t> out;
@@ -339,6 +340,19 @@ std::vector<int64_t> ReadInt64Vector(const Json& value, const std::string& ctx) 
         out.push_back(ReadInt64(value.a[i], ctx + "[" + std::to_string(i) + "]"));
     }
     return out;
+}
+
+// 读取 JSON 静态 shape；零维合法，负数和非整数维度一律拒绝。
+std::vector<int64_t> ReadStaticShape(const Json& value, const std::string& ctx) {
+    std::vector<int64_t> shape = ReadInt64Vector(value, ctx);
+    for (size_t axis = 0; axis < shape.size(); ++axis) {
+        if (shape[axis] < 0) {
+            throw std::runtime_error(
+                "Expected non-negative static dimension in " + ctx + "[" +
+                std::to_string(axis) + "]");
+        }
+    }
+    return shape;
 }
 
 // 读取有序字符串数组，用于值名称列表。
@@ -422,8 +436,17 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
             ReadString(Field(attrs, "layout", "pool attrs"), "pool attrs.layout"),
             ReadBool(Field(attrs, "ceil_mode", "pool attrs"), "pool attrs.ceil_mode")));
     }
-    if (op_name == "add") {
+    if (op_name == "add" || op_name == "matmul") {
         return ObjectRef();
+    }
+    if (op_name == "softmax") {
+        return ObjectRef(relay::SoftmaxAttrs::Create(
+            ReadInt(Field(attrs, "axis", "softmax attrs"), "softmax attrs.axis")));
+    }
+    if (op_name == "transpose") {
+        return ObjectRef(relay::TransposeAttrs::Create(
+            ToArray(ReadInt64Vector(Field(attrs, "perm", "transpose attrs"),
+                                    "transpose attrs.perm"))));
     }
     if (op_name == "nn_global_avg_pool2d") {
         return ObjectRef(relay::GlobalAvgPool2DAttrs::Create());
@@ -472,7 +495,7 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         const Json& input = inputs_json.a[i];
         std::string ctx = "function.inputs[" + std::to_string(i) + "]";
         std::string name = ReadString(Field(input, "name", ctx), ctx + ".name");
-        std::vector<int64_t> shape = ReadInt64Vector(Field(input, "shape", ctx), ctx + ".shape");
+        std::vector<int64_t> shape = ReadStaticShape(Field(input, "shape", ctx), ctx + ".shape");
         std::string dtype = ReadString(Field(input, "dtype", ctx), ctx + ".dtype");
         Var var(name, TensorType(ToArray(shape), dtype));
         function_params.push_back(var);
@@ -485,7 +508,7 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         const Json& param = params_json.a[i];
         std::string ctx = "root.params[" + std::to_string(i) + "]";
         std::string name = ReadString(Field(param, "name", ctx), ctx + ".name");
-        std::vector<int64_t> shape = ReadInt64Vector(Field(param, "shape", ctx), ctx + ".shape");
+        std::vector<int64_t> shape = ReadStaticShape(Field(param, "shape", ctx), ctx + ".shape");
         std::string dtype = ReadString(Field(param, "dtype", ctx), ctx + ".dtype");
         int64_t offset = ReadInt64(Field(param, "offset", ctx), ctx + ".offset");
         int64_t nbytes = ReadInt64(Field(param, "nbytes", ctx), ctx + ".nbytes");
@@ -540,10 +563,16 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
     }
 
     Array<Expr> output_exprs;
+    std::vector<std::vector<int64_t>> declared_output_shapes;
+    std::vector<std::string> declared_output_dtypes;
     for (size_t i = 0; i < outputs_json.a.size(); ++i) {
         const Json& output = outputs_json.a[i];
         std::string ctx = "function.outputs[" + std::to_string(i) + "]";
         std::string name = ReadString(Field(output, "name", ctx), ctx + ".name");
+        declared_output_shapes.push_back(
+            ReadStaticShape(Field(output, "shape", ctx), ctx + ".shape"));
+        declared_output_dtypes.push_back(
+            ReadString(Field(output, "dtype", ctx), ctx + ".dtype"));
         auto it = values.find(name);
         if (it == values.end()) {
             throw std::runtime_error("Missing graph output value in ONNX import spec: " + name);
@@ -555,7 +584,21 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         throw std::runtime_error("ONNX import spec has no graph outputs");
     }
     Expr body = output_exprs.size() == 1 ? output_exprs[0] : Expr(Tuple(output_exprs));
-    result.function = Function(function_params, body);
+    result.function = relay::InferTypePass(Function(function_params, body));
+    for (size_t i = 0; i < output_exprs.size(); ++i) {
+        const auto* inferred = output_exprs[i].checked_type().As<TensorTypeNode>();
+        if (!inferred || inferred->dtype != declared_output_dtypes[i] ||
+            inferred->shape.size() != declared_output_shapes[i].size()) {
+            throw std::runtime_error("ONNX import output contract mismatch for '" +
+                                     result.output_names[i] + "'");
+        }
+        for (size_t axis = 0; axis < declared_output_shapes[i].size(); ++axis) {
+            if (inferred->shape[axis] != declared_output_shapes[i][axis]) {
+                throw std::runtime_error("ONNX import output contract mismatch for '" +
+                                         result.output_names[i] + "'");
+            }
+        }
+    }
     return result;
 }
 

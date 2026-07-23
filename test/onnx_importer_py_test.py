@@ -74,6 +74,263 @@ def test_resnet18_serialization_records_param_offsets(tmp_path):
     assert as_dict["function"]["nodes"][-1]["op_name"] == "nn_gemm"
 
 
+def _model_with_io_shapes(input_shape, output_shape=None):
+    output_shape = input_shape if output_shape is None else output_shape
+    graph = helper.make_graph(
+        [],
+        "shape_test",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, input_shape)],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, output_shape)],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 11)], ir_version=6)
+
+
+def test_known_zero_dimension_is_preserved():
+    imported = import_onnx_model(_model_with_io_shapes([0, 3]))
+
+    assert imported.function.inputs[0].shape == [0, 3]
+    assert imported.function.outputs[0].shape == [0, 3]
+
+
+def _unknown_rank_value_info(name):
+    value_info = onnx.ValueInfoProto()
+    value_info.name = name
+    value_info.type.tensor_type.elem_type = TensorProto.FLOAT
+    return value_info
+
+
+def _model_with_value_infos(input_value_info, output_value_info):
+    graph = helper.make_graph([], "rank_test", [input_value_info], [output_value_info])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 11)], ir_version=6)
+
+
+def test_unknown_input_rank_is_rejected_with_value_context():
+    model = _model_with_value_infos(
+        _unknown_rank_value_info("input"),
+        helper.make_tensor_value_info("output", TensorProto.FLOAT, [1]),
+    )
+
+    with pytest.raises(ValueError, match=r"Unresolved ONNX rank.*tensor 'input'.*no shape field"):
+        import_onnx_model(model)
+
+
+def test_unknown_output_rank_is_rejected_with_value_context():
+    model = _model_with_value_infos(
+        helper.make_tensor_value_info("input", TensorProto.FLOAT, [1]),
+        _unknown_rank_value_info("output"),
+    )
+
+    with pytest.raises(ValueError, match=r"Unresolved ONNX rank.*tensor 'output'.*no shape field"):
+        import_onnx_model(model)
+
+
+def test_scalar_shape_field_is_preserved():
+    model = _model_with_io_shapes([])
+
+    assert model.graph.input[0].type.tensor_type.HasField("shape")
+    assert model.graph.output[0].type.tensor_type.HasField("shape")
+    imported = import_onnx_model(model)
+    assert imported.function.inputs[0].shape == []
+    assert imported.function.outputs[0].shape == []
+
+
+def test_symbolic_batch_requires_explicit_binding():
+    model = _model_with_io_shapes(["batch", 3])
+
+    with pytest.raises(
+        ValueError, match=r"tensor 'input'.*axis 0.*dim_param='batch'"
+    ):
+        import_onnx_model(model)
+
+
+def test_explicit_symbolic_batch_binding_is_applied_to_inputs_and_outputs():
+    imported = import_onnx_model(_model_with_io_shapes(["batch", 3]), default_batch=4)
+
+    assert imported.function.inputs[0].shape == [4, 3]
+    assert imported.function.outputs[0].shape == [4, 3]
+
+
+@pytest.mark.parametrize("shape", [[1, "channels"], [1, None]])
+def test_non_batch_unresolved_dimensions_are_rejected_even_with_batch_binding(shape):
+    with pytest.raises(ValueError, match=r"tensor 'input'.*axis 1"):
+        import_onnx_model(_model_with_io_shapes(shape), default_batch=4)
+
+
+def test_output_unresolved_dimension_error_includes_value_name_and_dim_param():
+    model = _model_with_io_shapes([1, 3], [1, "classes"])
+
+    with pytest.raises(
+        ValueError, match=r"tensor 'output'.*axis 1.*dim_param='classes'"
+    ):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize("default_batch", [0, -1])
+def test_explicit_default_batch_must_be_positive(default_batch):
+    with pytest.raises(ValueError, match="default_batch must be positive"):
+        import_onnx_model(_model_with_io_shapes(["batch", 3]), default_batch=default_batch)
+
+
+def _static_operator_model(nodes, opset):
+    graph = helper.make_graph(
+        nodes,
+        "static_operator_model",
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [1, 2, 3]),
+         helper.make_tensor_value_info("b", TensorProto.FLOAT, [1, 3, 2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 2])],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6
+    )
+
+
+def _matmul_model(a_shape, b_shape, *, a_dtype=TensorProto.FLOAT, b_dtype=TensorProto.FLOAT,
+                  output_name="unused", output_shape=(1,)):
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["a", "b"], ["scores"], name="matmul")],
+        "matmul_test",
+        [helper.make_tensor_value_info("a", a_dtype, a_shape),
+         helper.make_tensor_value_info("b", b_dtype, b_shape)],
+        [helper.make_tensor_value_info(output_name, TensorProto.FLOAT, output_shape)],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6)
+
+
+@pytest.mark.parametrize(
+    ("a_shape", "b_shape", "a_dtype", "b_dtype", "message"),
+    [
+        ([3], [3, 2], TensorProto.FLOAT, TensorProto.FLOAT, "rank >= 2"),
+        ([1, 2, 3], [1, 4, 2], TensorProto.FLOAT, TensorProto.FLOAT, "K dimensions differ"),
+        ([2, 2, 3], [3, 3, 2], TensorProto.FLOAT, TensorProto.FLOAT, "leading batch dimensions"),
+        ([1, 2, 3], [1, 3, 2], TensorProto.FLOAT, TensorProto.INT32, "matching input dtypes"),
+    ],
+)
+def test_matmul_rejects_invalid_static_input_contract(
+    a_shape, b_shape, a_dtype, b_dtype, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_matmul_model(a_shape, b_shape, a_dtype=a_dtype, b_dtype=b_dtype))
+
+
+def test_matmul_accepts_static_batch_broadcast():
+    imported = import_onnx_model(
+        _matmul_model(
+            [2, 1, 3, 4],
+            [1, 7, 4, 5],
+            output_name="scores",
+            output_shape=[2, 7, 3, 5],
+        )
+    )
+
+    assert imported.function.outputs[0].shape == [2, 7, 3, 5]
+
+
+def test_matmul_infers_prior_matmul_output_for_chains():
+    graph = helper.make_graph(
+        [
+            helper.make_node("MatMul", ["a", "b"], ["scores"], name="first"),
+            helper.make_node("MatMul", ["scores", "c"], ["out"], name="second"),
+        ],
+        "matmul_chain",
+        [
+            helper.make_tensor_value_info("a", TensorProto.FLOAT, [1, 2, 3]),
+            helper.make_tensor_value_info("b", TensorProto.FLOAT, [1, 3, 4]),
+            helper.make_tensor_value_info("c", TensorProto.FLOAT, [1, 4, 5]),
+        ],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 5])],
+    )
+    assert len(import_onnx_model(helper.make_model(graph)).function.nodes) == 2
+
+
+def test_matmul_rejects_missing_non_matmul_intermediate_metadata():
+    graph = helper.make_graph(
+        [
+            helper.make_node("MatMul", ["a", "b"], ["scores"], name="first"),
+            helper.make_node("Softmax", ["scores"], ["weights"], name="softmax"),
+            helper.make_node("MatMul", ["weights", "c"], ["out"], name="second"),
+        ],
+        "matmul_missing_metadata",
+        [
+            helper.make_tensor_value_info("a", TensorProto.FLOAT, [1, 2, 3]),
+            helper.make_tensor_value_info("b", TensorProto.FLOAT, [1, 3, 4]),
+            helper.make_tensor_value_info("c", TensorProto.FLOAT, [1, 4, 5]),
+        ],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 5])],
+    )
+    with pytest.raises(ValueError, match=r"input 'weights' metadata is absent or unresolved"):
+        import_onnx_model(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)]))
+
+
+def test_matmul_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'scores' declaration.*does not match inferred"):
+        import_onnx_model(
+            _matmul_model([1, 2, 3], [1, 3, 4], output_name="scores", output_shape=[1, 2, 5])
+        )
+
+
+def test_matmul_softmax_transpose_mapping_and_attrs():
+    model = _static_operator_model(
+        [
+            helper.make_node("MatMul", ["a", "b"], ["scores"], name="matmul"),
+            helper.make_node("Softmax", ["scores"], ["weights"], name="softmax", axis=1),
+            helper.make_node("Transpose", ["weights"], ["out"], name="transpose", perm=[0, 2, 1]),
+        ],
+        opset=13,
+    )
+
+    imported = import_onnx_model(model)
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("matmul", {}),
+        ("softmax", {"axis": 1}),
+        ("transpose", {"perm": [0, 2, 1]}),
+    ]
+
+
+def _softmax_model(shape, opset):
+    graph = helper.make_graph(
+        [helper.make_node("Softmax", ["input"], ["output"], name="softmax")],
+        "softmax_test",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, shape)],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6
+    )
+
+
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+@pytest.mark.parametrize("opset", [1, 11, 12])
+def test_softmax_before_opset13_is_rejected(shape, opset):
+    with pytest.raises(
+        UnsupportedONNXOpError,
+        match=rf"Softmax opset {opset}.*flattened-axis.*single-axis",
+    ):
+        import_onnx_model(_softmax_model(shape, opset))
+
+
+@pytest.mark.parametrize("shape", [[2, 3], [2, 3, 4]])
+def test_softmax_opset13_default_axis_is_relay_last_axis(shape):
+    imported = import_onnx_model(_softmax_model(shape, 13))
+
+    assert imported.function.nodes[0].attrs == {"axis": -1}
+
+
+def test_transpose_empty_perm_uses_relay_default():
+    model = _static_operator_model(
+        [
+            helper.make_node("MatMul", ["a", "b"], ["scores"], name="matmul"),
+            helper.make_node("Softmax", ["scores"], ["weights"], name="softmax"),
+            helper.make_node("Transpose", ["weights"], ["out"], name="transpose"),
+        ],
+        opset=13,
+    )
+    imported = import_onnx_model(model)
+
+    assert imported.function.nodes[1].attrs == {"axis": -1}
+    assert imported.function.nodes[2].attrs == {"perm": []}
+
+
 def test_unsupported_op_error_includes_op_type_and_node_name():
     graph = helper.make_graph(
         [

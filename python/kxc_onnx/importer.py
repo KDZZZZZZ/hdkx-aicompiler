@@ -24,6 +24,9 @@ ONNX_TO_RELAY = {
     "GlobalAveragePool": "nn_global_avg_pool2d",
     "Flatten": "nn_flatten",
     "Gemm": "nn_gemm",
+    "MatMul": "matmul",
+    "Softmax": "softmax",
+    "Transpose": "transpose",
 }
 
 
@@ -46,7 +49,9 @@ def onnx_dtype_to_kxc(dtype: int) -> str:
     return mapping[dtype]
 
 
-def import_onnx(model_path: str | Path, default_batch: int = 1) -> ImportedONNXModel:
+def import_onnx(
+    model_path: str | Path, default_batch: int | None = None
+) -> ImportedONNXModel:
     model_path = Path(model_path)
     model = onnx.load(str(model_path))
     return import_onnx_model(model, default_batch=default_batch, base_dir=model_path.parent)
@@ -54,11 +59,22 @@ def import_onnx(model_path: str | Path, default_batch: int = 1) -> ImportedONNXM
 
 def import_onnx_model(
     model: ModelProto,
-    default_batch: int = 1,
+    default_batch: int | None = None,
     base_dir: str | Path | None = None,
 ) -> ImportedONNXModel:
+    if default_batch is not None and (
+        not isinstance(default_batch, int)
+        or isinstance(default_batch, bool)
+        or default_batch <= 0
+    ):
+        raise ValueError("default_batch must be a positive integer when explicitly supplied")
+
     graph = model.graph
     base_dir_path = Path(base_dir) if base_dir is not None else None
+    opset_version = next(
+        (int(opset.version) for opset in model.opset_import if opset.domain in {"", "ai.onnx"}),
+        1,
+    )
 
     params: dict[str, ParamTensor] = {}
     param_order: list[str] = []
@@ -79,6 +95,9 @@ def import_onnx_model(
         value_info.name: value_info
         for value_info in list(graph.input) + list(graph.output) + list(graph.value_info)
     }
+    matmul_output_declarations: dict[str, list[onnx.ValueInfoProto]] = {}
+    for value_info in list(graph.output) + list(graph.value_info):
+        matmul_output_declarations.setdefault(value_info.name, []).append(value_info)
 
     inputs = [
         _tensor_spec_from_value_info(value_info, default_batch)
@@ -88,6 +107,8 @@ def import_onnx_model(
     outputs = [_tensor_spec_from_value_info(value_info, default_batch) for value_info in graph.output]
 
     nodes: list[RelayNodeSpec] = []
+    input_specs = {spec.name: spec for spec in inputs}
+    inferred_matmul_specs: dict[str, TensorSpec] = {}
     available_values = {x.name for x in inputs} | set(params)
     for node in graph.node:
         if node.op_type not in ONNX_TO_RELAY:
@@ -98,6 +119,17 @@ def import_onnx_model(
             raise ValueError(
                 f"ONNX node '{node.name or node.op_type}' has {len(node.output)} outputs; "
                 "only single-output nodes are supported in the static-shape MVP"
+            )
+
+        if node.op_type == "MatMul":
+            inferred_matmul_specs[node.output[0]] = _infer_matmul_spec(
+                node,
+                input_specs,
+                params,
+                inferred_matmul_specs,
+                value_info_by_name,
+                matmul_output_declarations,
+                default_batch,
             )
 
         missing = [name for name in node.input if name and name not in available_values]
@@ -114,7 +146,7 @@ def import_onnx_model(
                 op_name=ONNX_TO_RELAY[node.op_type],
                 inputs=relay_inputs,
                 outputs=relay_outputs,
-                attrs=_convert_attrs(node, params, value_info_by_name),
+                attrs=_convert_attrs(node, params, value_info_by_name, opset_version),
             )
         )
         available_values.update(relay_outputs)
@@ -126,14 +158,107 @@ def import_onnx_model(
     )
 
 
-def _tensor_spec_from_value_info(value_info: onnx.ValueInfoProto, default_batch: int) -> TensorSpec:
+def _infer_matmul_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_matmul_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(f"MatMul node '{node_name}' requires exactly two non-empty inputs")
+
+    def resolve(name: str) -> TensorSpec:
+        if name in inferred_matmul_specs:
+            return inferred_matmul_specs[name]
+        if name in params:
+            param = params[name]
+            return TensorSpec(name=name, shape=param.shape, dtype=param.dtype)
+        if name in input_specs:
+            return input_specs[name]
+        value_info = value_info_by_name.get(name)
+        if value_info is None:
+            raise ValueError(
+                f"MatMul node '{node_name}' input '{name}' metadata is absent or unresolved"
+            )
+        try:
+            return _tensor_spec_from_value_info(value_info, default_batch)
+        except ValueError as error:
+            raise ValueError(
+                f"MatMul node '{node_name}' input '{name}' metadata is unresolved: {error}"
+            ) from error
+
+    left, right = (resolve(name) for name in node.input)
+    if len(left.shape) < 2 or len(right.shape) < 2:
+        raise ValueError(f"MatMul node '{node_name}' requires both inputs to have rank >= 2")
+    if left.dtype != right.dtype:
+        raise ValueError(
+            f"MatMul node '{node_name}' requires matching input dtypes; "
+            f"got {left.dtype} and {right.dtype}"
+        )
+    if left.shape[-1] != right.shape[-2]:
+        raise ValueError(
+            f"MatMul node '{node_name}' K dimensions differ: "
+            f"{left.shape[-1]} != {right.shape[-2]}"
+        )
+
+    batch: list[int] = []
+    for left_dim, right_dim in zip(reversed(left.shape[:-2]), reversed(right.shape[:-2])):
+        if left_dim != right_dim and left_dim != 1 and right_dim != 1:
+            raise ValueError(
+                f"MatMul node '{node_name}' has incompatible leading batch dimensions: "
+                f"{left.shape[:-2]} and {right.shape[:-2]}"
+            )
+        batch.append(left_dim if right_dim == 1 else right_dim)
+    batch.extend(reversed(left.shape[:-2][: len(left.shape[:-2]) - len(right.shape[:-2])]))
+    batch.extend(reversed(right.shape[:-2][: len(right.shape[:-2]) - len(left.shape[:-2])]))
+    result = TensorSpec(
+        name=node.output[0],
+        shape=list(reversed(batch)) + [left.shape[-2], right.shape[-1]],
+        dtype=left.dtype,
+    )
+
+    for declared in output_declarations.get(result.name, []):
+        try:
+            declared_spec = _tensor_spec_from_value_info(declared, default_batch)
+        except ValueError as error:
+            raise ValueError(
+                f"MatMul node '{node_name}' output '{result.name}' metadata is unresolved: {error}"
+            ) from error
+        if declared_spec.shape != result.shape or declared_spec.dtype != result.dtype:
+            raise ValueError(
+                f"MatMul node '{node_name}' output '{result.name}' declaration "
+                f"{declared_spec.shape}/{declared_spec.dtype} does not match inferred "
+                f"{result.shape}/{result.dtype}"
+            )
+    return result
+
+
+def _tensor_spec_from_value_info(
+    value_info: onnx.ValueInfoProto, default_batch: int | None
+) -> TensorSpec:
     tensor_type = value_info.type.tensor_type
+    if not tensor_type.HasField("shape"):
+        raise ValueError(
+            f"Unresolved ONNX rank for tensor '{value_info.name}': "
+            "tensor_type has no shape field"
+        )
     shape: list[int] = []
-    for index, dim in enumerate(tensor_type.shape.dim):
+    for axis, dim in enumerate(tensor_type.shape.dim):
         if dim.HasField("dim_value"):
             shape.append(int(dim.dim_value))
+        elif axis == 0 and default_batch is not None:
+            shape.append(default_batch)
         else:
-            shape.append(int(default_batch) if index == 0 else 1)
+            message = (
+                f"Unresolved ONNX dimension for tensor '{value_info.name}' at axis {axis}"
+            )
+            if dim.dim_param:
+                message += f" (dim_param='{dim.dim_param}')"
+            raise ValueError(message)
     return TensorSpec(
         name=value_info.name,
         shape=shape,
@@ -176,6 +301,7 @@ def _convert_attrs(
     node: onnx.NodeProto,
     params: dict[str, ParamTensor],
     value_info_by_name: dict[str, onnx.ValueInfoProto],
+    opset_version: int,
 ) -> dict[str, Any]:
     attrs = _attrs_by_name(node)
     if node.op_type == "Conv":
@@ -213,7 +339,17 @@ def _convert_attrs(
             "transA": _int_attr(attrs, "transA", 0),
             "transB": _int_attr(attrs, "transB", 0),
         }
-    if node.op_type in {"Relu", "Add", "GlobalAveragePool"}:
+    if node.op_type == "Softmax":
+        if opset_version < 13:
+            raise UnsupportedONNXOpError(
+                f"Unsupported ONNX Softmax opset {opset_version} in node "
+                f"'{node.name or '<unnamed>'}': pre-opset-13 flattened-axis semantics "
+                "cannot be represented by Relay single-axis softmax"
+            )
+        return {"axis": _int_attr(attrs, "axis", -1)}
+    if node.op_type == "Transpose":
+        return {"perm": _list_attr(attrs, "perm", [])}
+    if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
         return {}
     raise UnsupportedONNXOpError(
         f"Unsupported ONNX op '{node.op_type}' in node '{node.name or '<unnamed>'}'"

@@ -749,6 +749,14 @@ if(KXC_BUILD_RESNET18_IR_DUMP)
 endif()
 
 if(Python3_Interpreter_FOUND)
+  add_custom_target(check_nlp_gpu_validation
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_nlp_gpu_validation.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    USES_TERMINAL
+    COMMENT "Check deterministic NLP reference and capability gates"
+  )
   add_custom_target(check_relay_op_contract
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_relay_op_contract.py"
@@ -856,6 +864,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
   kxc_add_runtime_exe(relay_control_plan_test test/relay_control_plan_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
+  kxc_add_runtime_exe(onnx_import_spec_contract_test test/onnx_import_spec_contract_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
   kxc_add_runtime_exe(compiler_capability_test test/compiler_capability_test.cpp)
@@ -1001,6 +1010,13 @@ if(KXC_BUILD_PASS_TESTS)
     USES_TERMINAL
     COMMENT "Run infer_type_test"
   )
+  add_custom_target(run_onnx_import_spec_contract_test
+    COMMAND "$<TARGET_FILE:onnx_import_spec_contract_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS onnx_import_spec_contract_test
+    USES_TERMINAL
+    COMMENT "Run onnx_import_spec_contract_test"
+  )
   add_custom_target(run_compiler_contract_test
     COMMAND "$<TARGET_FILE:compiler_contract_test>"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
@@ -1104,7 +1120,8 @@ endfunction()
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test
     pass_pipeline_test pipeline_resolver_test device_info_test device_runtime_test
-    executable_plan_test graph_partition_test infer_type_test profile_bundle_test
+    executable_plan_test graph_partition_test infer_type_test
+    onnx_import_spec_contract_test profile_bundle_test
     compiler_contract_test compiler_capability_test compiler_identity_test
     compiler_foundation_contract_test operator_compilation_test primitive_cache_test
     compiler_extension_contract_test kernel_signature_test compiled_module_test

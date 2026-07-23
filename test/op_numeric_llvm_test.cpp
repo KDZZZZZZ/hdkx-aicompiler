@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -35,6 +36,9 @@ void ExpectNear(const std::vector<float>& actual, const std::vector<float>& expe
                 float tolerance = 1e-4f) {
     Check(actual.size() == expected.size(), "result size mismatch");
     for (size_t i = 0; i < actual.size(); ++i) {
+        if (!std::isfinite(actual[i]) || !std::isfinite(expected[i])) {
+            throw std::runtime_error("non-finite value at " + std::to_string(i));
+        }
         const float diff = std::fabs(actual[i] - expected[i]);
         if (diff > tolerance) {
             throw std::runtime_error("value mismatch at " + std::to_string(i) +
@@ -213,6 +217,20 @@ void TestMatmul() {
     ExpectNear(out, {22, 28, 49, 64});
 }
 
+// 验证 batched MatMul 的 leading batch broadcast 和 LLVM 数值结果。
+void TestBatchedMatmul() {
+    kxc::Var a("a", kxc::TensorType({2, 2, 3}, "float32"));
+    kxc::Var b("b", kxc::TensorType({1, 3, 2}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("matmul"), {a, b});
+    kxc::Function func({a, b}, call);
+
+    std::vector<float> a_data = {1, 2, 3, 4, 5, 6, 1, 0, 1, 0, 1, 0};
+    std::vector<float> b_data = {1, 2, 3, 4, 5, 6};
+    std::vector<float> out(8, 0.0f);
+    CompileAndRun("batched_matmul", func, {Input(a_data), Input(b_data), Output(out)});
+    ExpectNear(out, {22, 28, 49, 64, 6, 8, 3, 4});
+}
+
 // 验证 Dense 的权重布局和 LLVM 数值结果。
 void TestDense() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
@@ -371,25 +389,28 @@ void TestReduceMean() {
     ExpectNear(out, {2.0f, 5.0f});
 }
 
-// 验证 Softmax 的归一化轴和数值稳定性。
+// 验证 Softmax 通过 max-subtraction 在极大正负 logits 下保持有限。
 void TestSoftmax() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("softmax"), {data},
-                   kxc::relay::SoftmaxAttrs::Create(1));
+                   kxc::relay::SoftmaxAttrs::Create(-1));
     kxc::Function func({data}, call);
 
-    std::vector<float> data_buf = {1, 2, 3, 1, 3, 5};
+    std::vector<float> data_buf = {1000, 1001, 999, -1000, -999, -1001};
     std::vector<float> out(6, 0.0f);
     CompileAndRun("softmax", func, {Input(data_buf), Output(out)});
 
     std::vector<float> expected(6, 0.0f);
     for (size_t row = 0; row < 2; ++row) {
-        float denom = 0.0f;
+        const auto begin = data_buf.begin() + static_cast<std::ptrdiff_t>(row * 3);
+        const float max_value = *std::max_element(begin, begin + 3);
+        float denominator = 0.0f;
         for (size_t col = 0; col < 3; ++col) {
-            denom += std::exp(data_buf[row * 3 + col]);
+            denominator += std::exp(data_buf[row * 3 + col] - max_value);
         }
         for (size_t col = 0; col < 3; ++col) {
-            expected[row * 3 + col] = std::exp(data_buf[row * 3 + col]) / denom;
+            expected[row * 3 + col] =
+                std::exp(data_buf[row * 3 + col] - max_value) / denominator;
         }
     }
     ExpectNear(out, expected);
@@ -473,6 +494,57 @@ void TestModelCNN() {
     ExpectNear(out, {10, 20});
 }
 
+// 精确静态 causal prefill attention：batched MatMul、有限加性 mask、稳定 softmax、batched MatMul。
+void TestModelPrefillExactAttention() {
+    kxc::Var query("query", kxc::TensorType({1, 2, 2}, "float32"));
+    kxc::Var key_transposed("key_transposed", kxc::TensorType({1, 2, 2}, "float32"));
+    kxc::Var finite_causal_mask("finite_causal_mask", kxc::TensorType({1, 2, 2}, "float32"));
+    kxc::Var value("value", kxc::TensorType({1, 2, 2}, "float32"));
+    kxc::Call scores(kxc::relay::Op::Get("matmul"), {query, key_transposed});
+    kxc::Call masked_scores(kxc::relay::Op::Get("add"), {scores, finite_causal_mask});
+    kxc::Call weights(kxc::relay::Op::Get("softmax"), {masked_scores},
+                      kxc::relay::SoftmaxAttrs::Create(-1));
+    kxc::Call context(kxc::relay::Op::Get("matmul"), {weights, value});
+    kxc::Function func({query, key_transposed, finite_causal_mask, value}, context);
+
+    const std::vector<float> query_data = {1, 0, 0, 1};
+    const std::vector<float> key_transposed_data = {1, 0, 0, 1};
+    const std::vector<float> mask_data = {0, -10000, 0, 0};
+    const std::vector<float> value_data = {1, 2, 3, 4};
+    std::vector<float> out(4, 0.0f);
+    CompileAndRun("model_prefill_exact_attention", func,
+                  {Input(query_data), Input(key_transposed_data), Input(mask_data),
+                   Input(value_data), Output(out)});
+    const float p = std::exp(0.0f) / (std::exp(0.0f) + std::exp(1.0f));
+    ExpectNear(out, {1, 2, p * 1 + (1 - p) * 3, p * 2 + (1 - p) * 4});
+}
+
+// Exact-static decode attention over externally supplied K/V; this is not a KV-cache update or lifetime test.
+void TestModelDecodeExternalKV() {
+    kxc::Var query("query", kxc::TensorType({1, 1, 2}, "float32"));
+    kxc::Var external_key_transposed("external_key_transposed",
+                                    kxc::TensorType({1, 2, 3}, "float32"));
+    kxc::Var external_value("external_value", kxc::TensorType({1, 3, 2}, "float32"));
+    kxc::Call scores(kxc::relay::Op::Get("matmul"), {query, external_key_transposed});
+    kxc::Call weights(kxc::relay::Op::Get("softmax"), {scores},
+                      kxc::relay::SoftmaxAttrs::Create(-1));
+    kxc::Call context(kxc::relay::Op::Get("matmul"), {weights, external_value});
+    kxc::Function func({query, external_key_transposed, external_value}, context);
+
+    const std::vector<float> query_data = {1, 0};
+    const std::vector<float> external_key_data = {1, 0, 0, 1, -1, 0};
+    const std::vector<float> external_value_data = {1, 2, 3, 4, 5, 6};
+    std::vector<float> out(2, 0.0f);
+    CompileAndRun("model_decode_external_kv", func,
+                  {Input(query_data), Input(external_key_data), Input(external_value_data),
+                   Output(out)});
+    const float denominator = std::exp(1.0f) + std::exp(0.0f) + std::exp(-1.0f);
+    const float w0 = std::exp(1.0f) / denominator;
+    const float w1 = 1.0f / denominator;
+    const float w2 = std::exp(-1.0f) / denominator;
+    ExpectNear(out, {w0 + 3 * w1 + 5 * w2, 2 * w0 + 4 * w1 + 6 * w2});
+}
+
 }  // namespace
 
 // 运行全部算子及模型级 LLVM 数值测试。
@@ -484,6 +556,7 @@ int main() {
         {"divide", TestDivide},
         {"sqrt", TestSqrt},
         {"matmul", TestMatmul},
+        {"batched_matmul", TestBatchedMatmul},
         {"nn_dense", TestDense},
         {"nn_gemm", TestGemm},
         {"nn_relu", TestRelu},
@@ -500,6 +573,8 @@ int main() {
         {"model_add_chain", TestModelAddChain},
         {"model_mlp", TestModelMLP},
         {"model_cnn", TestModelCNN},
+        {"model_prefill_exact_attention", TestModelPrefillExactAttention},
+        {"model_decode_external_kv", TestModelDecodeExternalKV},
     };
 
     for (const auto& test : tests) {

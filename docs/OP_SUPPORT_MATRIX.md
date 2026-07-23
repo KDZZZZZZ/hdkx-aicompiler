@@ -72,8 +72,12 @@ compile integration check.
 
 ## Closure checklist
 
-Track01 现为 **ready for supervisor re-review**，但各算子的 production approval
-仍按 target 单独判断：
+Track01 的仓内 static-exact contract 已进入集成验证，但各算子的 production
+approval 仍按 target 单独判断。NLP 轨新增的实现边界同样不改变这一规则：
+
+- `matmul` 的 type/TE contract 已扩展为 rank >= 2，并按 ONNX/NumPy 规则广播 leading batch dimensions；LLVM 数值测试源码存在，但本机尚无 LLVM 绿色记录，CUDA reduction/nested-loop schedule 仍拒绝。
+- `softmax` 使用 max-subtraction 改善有限 logits 的数值稳定性；masked/all-masked 和非有限输入策略仍未支持，CUDA reduction schedule 仍拒绝。
+- ONNX opset < 13 Softmax 的 trailing-flatten 语义不能直接映射为当前 Relay 单轴 softmax，因此 importer fail closed。
 
 - [x] per-unit executable capability 正反例（含真实 lowering/schedule/backend proof）
 - [x] normalized production pipeline、executable invariant 与 public static-exact transaction/pin adapter

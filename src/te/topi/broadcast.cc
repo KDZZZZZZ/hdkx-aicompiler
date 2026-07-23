@@ -4,6 +4,8 @@
 
 #include "kxc/te/topi/broadcast.h"
 
+#include <stdexcept>
+
 namespace kxc {
 namespace te {
 namespace topi {
@@ -18,6 +20,9 @@ Array<PrimExpr> GetBroadcastIndices(
         Array<PrimExpr> input_indices;
         size_t in_ndim = input_shape.size();
         size_t out_ndim = output_shape.size();
+        if (in_ndim > out_ndim) {
+            throw std::runtime_error("broadcast input rank exceeds output rank");
+        }
         size_t offset = out_ndim - in_ndim;
         
         for (size_t i = 0; i < in_ndim; ++i) {
@@ -58,10 +63,15 @@ Array<PrimExpr> InferBroadcastShape(
                 else if (v2 == 1) out_shape.push_back(dim1);
                 else if (v1 == v2) out_shape.push_back(dim1);
                 else {
-                     out_shape.push_back((v1 > v2) ? dim1 : dim2); 
+                    throw std::runtime_error("incompatible static broadcast dimensions");
                 }
+            } else if (GetConstInt(dim1, &v1) && v1 == 1) {
+                out_shape.push_back(dim2);
+            } else if (GetConstInt(dim2, &v2) && v2 == 1) {
+                out_shape.push_back(dim1);
             } else {
-                out_shape.push_back(dim1); 
+                // Two dynamic dimensions remain symbolic; no known dimension is invented.
+                out_shape.push_back(dim1);
             }
         }
         return out_shape;
