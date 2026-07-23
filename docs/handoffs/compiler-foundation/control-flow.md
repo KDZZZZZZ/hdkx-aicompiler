@@ -1,5 +1,9 @@
 # Compiler Foundation / Dynamic Graph & Control Flow 交接
 
+> **W2 更新：** 本页记录 W1 preparation baseline；default-OFF resolved CPU executor、
+> typed `CompiledModule` adapter 与新限制见
+> [`control-runtime.md`](control-runtime.md)。真实 Relay/TE artifact resolver 仍未接入。
+>
 > 分支：`feature/compiler-foundation-control-flow`
 >
 > 范围：Track 04，static-exact Shape 控制流语义与 Track 05 frozen mock 边界

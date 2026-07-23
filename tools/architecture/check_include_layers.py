@@ -10,6 +10,16 @@ from pathlib import Path
 
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
 
+CONTROL_RUNTIME_DATA_PLANE = {
+    "include/kxc/runtime/control_execution_plan.h",
+    "include/kxc/runtime/control_session.h",
+    "src/runtime/control_execution_plan.cc",
+    "src/runtime/control_session.cc",
+}
+CONTROL_RUNTIME_FORBIDDEN = (
+    "compiler", "relay", "cache", "kxc/te/", "/te/", "thread", "future"
+)
+
 ALLOWED = {
     "shape": {"shape"},
     "support": {"support"},
@@ -50,7 +60,9 @@ def owner(path: Path, root: Path) -> str | None:
         if relative[:3] == ("src", "relay", "distributed"):
             return "relay_distributed"
         if relative[1] == "runtime" and (
-            "compiled_module" in path.name or "compiled_module_node" in path.name
+            "compiled_module" in path.name or
+            "compiled_module_node" in path.name or
+            path.name == "control_execution_plan.cc"
         ):
             return "runtime_executable"
         return relative[1]
@@ -77,6 +89,13 @@ def main() -> int:
             if not match:
                 continue
             include = match.group(1)
+            relative_path = path.relative_to(root).as_posix()
+            if (relative_path in CONTROL_RUNTIME_DATA_PLANE and
+                    any(token in include.lower() for token in CONTROL_RUNTIME_FORBIDDEN)):
+                failures.append(
+                    f"{path.relative_to(root)}:{line_no}: control runtime data plane "
+                    f"may not include compiler/Relay/TE/cache/background work: {include}"
+                )
             if is_public and (include.startswith("src/") or "/internal/" in include):
                 failures.append(f"{path.relative_to(root)}:{line_no}: public header includes private path {include}")
             if not include.startswith("kxc/"):

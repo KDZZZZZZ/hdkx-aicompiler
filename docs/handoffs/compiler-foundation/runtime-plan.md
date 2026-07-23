@@ -1,12 +1,14 @@
 # Compiler Foundation：Runtime manifest / observability 交接
 
-> **分支：** `feature/compiler-foundation-runtime-observability`
+> **分支：** `feature/compiler-foundation-runtime-observability`（基于 default-OFF Region Task DAG）
 >
-> **基线：** `525950a`（default-OFF Region Task DAG）
+> **状态：** W2 Track05 generation-0 static-exact trusted declaration、可审计 fallback 与同步 observer 已实现；feature gate 仍默认关闭。
 >
-> **状态：** W2 Track05 generation-0 static-exact trusted declaration、可审计 fallback 与同步 observer 已实现；feature gate 仍默认关闭
+> **控制流边界：** 控制流没有被塞入 `FrozenTaskPlan v1`，而是由独立 default-OFF
+> `ControlExecutionPlan v1` / `ControlRuntimeSession` experimental executor 接入，见
+> [`control-runtime.md`](control-runtime.md)。
 >
-> **非能力声明：** 本交接不声明 non-zero generation、dynamic shape、Fusion/Library/ControlFlow 执行、多 stream/device、后台调度或真实 pending CUDA retention 已完成。
+> **非能力声明：** 本交接不声明 non-zero generation、dynamic shape、Fusion/Library/production ControlFlow 执行、多 stream/device、后台调度或真实 pending CUDA retention 已完成。
 
 ## 1. 架构边界
 

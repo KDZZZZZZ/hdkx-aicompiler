@@ -97,7 +97,9 @@ DeviceStream DeviceStream::Default(const Device& device) {
 // 返回 stream 所属的物理设备。
 Device DeviceStream::device() const { return operator->()->device; }
 // 判断该对象是否仅引用后端默认 stream。
-bool DeviceStream::is_default() const { return !operator->()->owns_handle; }
+bool DeviceStream::is_default() const {
+    return !operator->()->owns_handle && operator->()->backend_handle == nullptr;
+}
 
 // 等待当前 stream 中此前提交的全部工作完成。
 void DeviceStream::Sync() const {

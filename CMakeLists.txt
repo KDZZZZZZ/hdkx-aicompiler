@@ -16,6 +16,8 @@ option(KXC_ENABLE_CUDA "Enable CUDA support when toolkit is available" ON)
 option(KXC_ENABLE_LLVM "Enable LLVM backend for codegen" ON)
 option(KXC_ENABLE_REGION_TASK_DAG
   "Enable experimental RuntimeSession execution of frozen Region task DAGs" OFF)
+option(KXC_ENABLE_CONTROL_RUNTIME
+  "Enable experimental static-exact CPU control runtime execution" OFF)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build the diagnostic ResNet18 IR dump tool" OFF)
 option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
@@ -89,7 +91,9 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/relay/type_infer.h
   include/kxc/relay/visitor.h
   include/kxc/runtime/compiled_module.h
+  include/kxc/runtime/control_execution_plan.h
   include/kxc/runtime/control_plan.h
+  include/kxc/runtime/control_session.h
   include/kxc/runtime/device.h
   include/kxc/runtime/device_api.h
   include/kxc/runtime/device_info.h
@@ -444,6 +448,7 @@ set(KXC_CODEGEN_C_SOURCES src/codegen/c/codegen_c.cc)
 
 set(KXC_RUNTIME_EXECUTABLE_SOURCES
   src/runtime/compiled_module.cc
+  src/runtime/control_execution_plan.cc
   src/runtime/kernel_argument_validation.cc
 )
 
@@ -454,6 +459,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/cache/primitive_cache.cc
   src/compiler/capability.cc
   src/compiler/compile_config.cc
+  src/compiler/control_flow/control_plan_adapter.cc
   src/compiler/control_flow/executable_capability.cc
   src/compiler/control_flow/relay_control_plan.cc
   src/compiler/compile_state.cc
@@ -471,6 +477,7 @@ set(KXC_COMPILER_SOURCES
 )
 
 set(KXC_RUNTIME_SESSION_SOURCES
+  src/runtime/control_session.cc
   src/runtime/session.cc
 )
 
@@ -496,7 +503,8 @@ function(kxc_configure_module_obj target)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
     KXC_USE_LLVM=${KXC_USE_LLVM}
-    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>)
+    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
+    KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>)
 endfunction()
 
 function(kxc_enable_cuda target)
@@ -676,7 +684,8 @@ function(kxc_add_runtime_exe target source_file)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
     KXC_USE_LLVM=${KXC_USE_LLVM}
-    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>)
+    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
+    KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>)
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
   endif()
@@ -857,6 +866,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
   kxc_add_runtime_exe(control_plan_test test/control_plan_test.cpp)
   kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
+  kxc_add_runtime_exe(control_runtime_integration_test test/control_runtime_integration_test.cpp)
   kxc_add_runtime_exe(task_plan_test test/task_plan_test.cpp)
   kxc_add_runtime_exe(task_executor_test test/task_executor_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
@@ -891,13 +901,25 @@ if(KXC_BUILD_PASS_TESTS)
       LABELS "control-flow;cpu"
       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   endforeach()
+  add_test(NAME control_runtime_integration_test
+    COMMAND "$<TARGET_FILE:control_runtime_integration_test>")
+  set_tests_properties(control_runtime_integration_test PROPERTIES
+    LABELS "control-flow;control-runtime;runtime-plan;cpu"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   add_custom_target(run_control_flow_tests
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
             -L control-flow
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-    DEPENDS ${KXC_CONTROL_FLOW_TESTS}
+    DEPENDS ${KXC_CONTROL_FLOW_TESTS} control_runtime_integration_test
     USES_TERMINAL
     COMMENT "Run control-flow CTest suite")
+  add_custom_target(run_control_runtime_tests
+    COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
+            -L control-runtime
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    DEPENDS control_runtime_integration_test
+    USES_TERMINAL
+    COMMENT "Run resolved control-runtime CTest suite")
 
   foreach(_kxc_runtime_plan_test IN ITEMS
       task_plan_test task_executor_test runtime_session_test)
@@ -1049,6 +1071,7 @@ if(KXC_BUILD_PASS_TESTS)
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L runtime-plan
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     DEPENDS task_plan_test task_executor_test runtime_session_test
+            control_runtime_integration_test
     USES_TERMINAL
     COMMENT "Run runtime plan CTest suite"
   )

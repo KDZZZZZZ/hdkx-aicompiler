@@ -6,7 +6,15 @@
 >
 > **W1 集成提交：** `e05d9d7`
 >
-> **状态：** W1 isolated/default-off baseline 已集成；W2 各 feature branch 实施中。Track05 已在 `feature/compiler-foundation-runtime-observability` 完成 generation-0 trusted declaration/observability，尚待集成；其余 production adapters 和跨轨闭环未完成。本页不是 dynamic Shape、hot swap、dynamic control flow、Transformer 或 GPU attention 的生产能力声明。
+> **状态：** W1 isolated/default-off baseline 已集成；W2 Track05 generation-0 trusted declaration/observability 与 Track04/05 experimental resolved control executor 已集成；其余 production adapters 和跨轨闭环未完成。本页不是 dynamic Shape、production hot swap、production dynamic control flow、完整 Transformer 或 GPU attention 的能力声明。
+>
+> **W2 Track 04/05 experimental 增量：** default-OFF、CPU:0 static-exact
+> `ControlExecutionPlan v1`、typed fixture `CompiledModule` binding adapter 和
+> `ControlRuntimeSession` 不执行 `kernel_ref`，不改变 `Compiler::Compile` 的默认 If
+> 拒绝，也不是 production control backend 或 artifact generator。caller `binding_revision`
+> 只是一项 fixture label，不提供 staleness check、authority lease 或 hot-swap proof；真实
+> Relay/TE resolver 和 authority-issued lease 仍是生产门禁。详见
+> [`control-runtime.md`](control-runtime.md)。
 
 ## 1. 已合并轨道
 
@@ -98,8 +106,12 @@ W1 的 mock/fake/DTO 存在不等于总计划完成。W2 至少需要：
 
 1. **Shape production exact path：** 从真实 Relay/type/partition 生成不可变 GraphTemplate；exact profile 只重特化受 Shape 影响 unit；组装真实 static module/plan；RuntimeSession 仍只执行 frozen variant。
 2. **Adaptive production exact path：** Core canonical key、production artifact pin、真实 compiler adapter、selected generation manifest、plan assembler 和 completion lease retention；不得在 Run 内 lookup/compile。
-3. **Control production path：** unresolved Relay kernel 解析为 immutable artifact，ControlPlan 映射到 runtime-only task/control schema；单 stream branch/loop/Phi/backedge liveness 与双 oracle 验证。
-4. **Runtime manifest/observability：** Track05 feature branch 已实现纯 Runtime per-call/task trusted declaration、generation-0 exact ABI/entry/plan structural consistency 复验、结构化 fallback query/observer、task wait/launch/allocation/logical-retire/generation 事件和 Async lease retention；Runtime 不 include Compiler，gate 仍默认 OFF，non-zero generation 仍拒绝。公共 Runtime API 接受 caller identity 与 type-erased lease，因此不提供 provenance/authentication；identity↔production `ArtifactPin` 关联仅由当前 Compiler 组装路径建立。集成后仍须补 authoritative Track03 generation lease、CUDA numeric/pending retention 与 Compute Sanitizer，才能考虑默认开启。
+3. **Control production path：** default-OFF fixture 已为 runtime-only resolved schema、private
+   constant snapshots、typed module-entry adapter、CPU single-stream Branch/Loop/Phi/backedge
+   conservative liveness 与双 oracle提供 experimental evidence；仍需真实 Relay/TE
+   lowering/cache resolver 和 authority-issued generation lease。完成前不称 production
+   backend、artifact generation 或 Relay control compilation。
+4. **Runtime manifest/observability：** Track05 已实现纯 Runtime per-call/task trusted declaration、generation-0 exact ABI/entry/plan structural consistency 复验、结构化 fallback query/observer、task wait/start/launch/allocation/logical-retire/generation 事件和 Async lease retention；Runtime 不 include Compiler，gate 仍默认 OFF，non-zero generation 仍拒绝。公共 Runtime API 接受 caller identity 与 type-erased lease，因此不提供 provenance/authentication；identity↔production `ArtifactPin` 关联仅由当前 Compiler 组装路径建立。仍须补 authoritative Track03 generation lease、LLVM/CUDA numeric、pending CUDA retention 与 Compute Sanitizer，才能考虑默认开启。
 5. **NLP vertical expansion：** Gather/embedding、mask/select、normalization、Slice/Concat 和 KV page/capacity/valid extent；逐项 frontend/type/lowering/backend/runtime/negative evidence。
 6. **Target evidence：** LLVM-enabled CI 真实绿色记录；CUDA reduction/library path 和 device numeric；没有证据时 capability 继续 fail closed。
 
