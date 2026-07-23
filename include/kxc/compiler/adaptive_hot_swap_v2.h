@@ -43,6 +43,12 @@ class CancellationToken final {
 public:
     CancellationToken() = default;
     bool cancelled() const noexcept;
+    /*! Controller-only callback registration. Cancel invokes registered callbacks
+     * synchronously after releasing its state mutex; callbacks may take the
+     * controller publication mutex. False means cancellation won registration. */
+    bool RegisterControllerCallback(std::function<void()> callback,
+                                    uint64_t* registration) const;
+    void UnregisterControllerCallback(uint64_t registration) const noexcept;
 private:
     struct State;
     explicit CancellationToken(std::shared_ptr<State> state);
@@ -108,9 +114,13 @@ struct GenerationAuthorityRequest final {
     uint64_t producer_reported_bytes{0};
 };
 /*! \brief Issues opaque monotonic leases. Controller code cannot mint lease internals.
- * Authorities must be thread-safe; v2 serializes issuance but may be called by
- * other control planes. The built-in authority is process-local test evidence,
- * not an authentication/attestation service. */
+ * v2 serializes Issue under its publication mutex. An external authority is a
+ * trusted transactional dependency: it must return a complete lease for the
+ * supplied request, must not throw after externally committing a lease, and
+ * must tolerate controller rejection of an invalid returned lease.
+ * Same-controller re-entry from Issue or NextGenerationForTesting fails fast.
+ * The built-in authority is process-local test evidence, not
+ * authentication/attestation. */
 class GenerationAuthority {
 public:
     virtual ~GenerationAuthority() = default;
@@ -165,8 +175,9 @@ private:
 
 enum class HealthDisposition : uint8_t { kHealthy, kQuarantine };
 struct HealthDecision final { Generation generation{0}; HealthDisposition disposition{HealthDisposition::kHealthy}; std::string evidence_id; std::string replay_token; };
-/*! \brief Evaluate may run concurrently; VerifyAndConsume is serialized by v2 and
- * invoked only while the referenced lease is still the route head. */
+/*! \brief Evaluate may run outside v2 locks. VerifyAndConsume runs serialized
+ * under v2's route and health locks, only while the lease is the route head,
+ * and is noexcept. Same-controller re-entry fails fast. */
 class HealthAuthority {
 public:
     virtual ~HealthAuthority() = default;
@@ -196,6 +207,12 @@ struct Options final {
     /*! Test seam. Throwing/failing stages are checked before any route mutation. */
     std::function<bool(PublicationStage)> fail_publication_stage;
 };
+/* Cancellation linearizes when its registered controller callback obtains the
+ * publication mutex. Final commit observes live demand under that mutex: a
+ * cancellation that linearizes first suppresses publication; otherwise commit
+ * wins. Deadlines are observations, not timers: they are checked at admission,
+ * worker entry, and final commit, so expiry after that final observation may
+ * coexist with a published generation. */
 struct Snapshot final {
     Generation next_generation{1}; size_t queued_flights{0}, active_flights{0}, discoverable_generations{0};
     uint64_t producer_reported_discoverable_bytes{0}, evictions{0}, merged_waiters{0}, retry_cached{0};

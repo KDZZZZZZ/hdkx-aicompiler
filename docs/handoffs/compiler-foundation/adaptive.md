@@ -159,8 +159,9 @@ controller routing/history，外部 `GenerationLease` 和 completion retained va
 injection seam，`VerifyAndConsume` 是 one-shot authority；接受的 quarantine 原子地将 future
 routing 回退到一个仍可发现的 predecessor。health evidence、resident bytes 和 numeric truth
 均非 W3 自行认证；external authentication/attestation 和 CUDA pending completion 仍不支持。
-Observer 和 health callbacks 均在锁外、异常隔离，并在 callback 窗口拒绝本 controller 的
-reentry。negative cache 由已验证的 `max_negative_cache_entries` 和累计
+Observer callbacks 在锁外且异常隔离，并在 callback 窗口拒绝本 controller 的 reentry。
+`Evaluate` 可在锁外执行；`VerifyAndConsume` 在 route/health locks 下串行执行、是 `noexcept`，
+对同一 controller 的 re-entry 会 fail-fast，避免重取这些锁导致 deadlock。negative cache 由已验证的 `max_negative_cache_entries` 和累计
 `max_negative_diagnostic_bytes` 精确约束：按插入顺序确定性地优先驱逐 expired/retryable
 (transient/timeout) record，绝不驱逐 permanent/unsupported record；若 permanent/unsupported
 record 已填满 entry bound，controller 全局 compile/publish fail-closed，直到显式
@@ -175,12 +176,13 @@ queue/in-flight legacy slot 加法在构造时检查 overflow。
 W3 的 `PreparedCandidate` 是 prepare-only：validation receipt、selected artifacts 和
 `RuntimeSession` 在 authority issuance 前冻结，不能直接路由或构造 generation。opaque
 `GenerationLease` 只能由 `GenerationAuthority::MakeLease` 创建；它绑定 immutable prepared
-candidate、derived selection identity、exact route/ABI、receipt 和 producer byte declaration。
+candidate、derived selection identity、exact route/ABI、receipt 和 producer byte declaration。`Issue` 和
+`NextGenerationForTesting` 在 route lock 下调用；对同一 controller 的 re-entry 会 fail-fast。
 `EvaluateHealth` 允许不同 callers concurrent `Evaluate`，但仅在 lease 仍为 route head 时、在
 serialized `VerifyAndConsume` 中消耗 evidence；过时 health 不会消耗 token。observer callback
 仍在所有 controller APIs 上维持跨线程 fail-fast window；health authority evaluation/verification
-不占用该窗口，因此并发 health consumers 不会互相被误拒绝。health authority 不得从
-`VerifyAndConsume` re-enter the same controller（它在 route lock 下执行）。
+不占用该窗口，因此并发 health consumers 不会互相被误拒绝。`VerifyAndConsume` 对同一
+controller 的 re-entry 会 fail-fast（它在 route/health locks 下执行）。
 
 W3 focused gate：
 

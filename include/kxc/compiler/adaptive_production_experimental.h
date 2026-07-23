@@ -46,7 +46,7 @@ public:
     const DispatchKey& dispatch_key() const noexcept;
     const PlanAbiFingerprint& plan_abi() const noexcept;
     const std::vector<OrderedArtifactIdentity>& ordered_artifacts() const noexcept;
-    /*! \brief Verified baseline pins that freeze launcher object identity. */
+    /*! \brief Verified baseline pins defining represented callable ABI. */
     const std::vector<ArtifactPin>& verified_artifact_pins() const noexcept;
     void Validate() const;
 

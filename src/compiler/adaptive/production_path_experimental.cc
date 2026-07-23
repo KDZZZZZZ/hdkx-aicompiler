@@ -276,10 +276,10 @@ VerifiedGraphArtifacts VerifyGraphArtifacts(
 
 /*! \brief Structural gate over a verified baseline and pinned cache objects.
  *
- * Executable payload bytes are not serializable here. The current proof is
- * exact immutable cache ArtifactKey equality plus launcher shared-object
- * identity and full CachedPrimitive/module contract equality; it is not
- * cryptographic code provenance or remote attestation.
+ * A replacement may use distinct selected artifacts and launcher objects. Its
+ * represented callable ABI is the signature plus launch target/backend/metadata;
+ * the candidate's own pin/module/public-record consistency remains strict. This
+ * is structural compatibility, not cryptographic provenance or attestation.
  */
 class ProductionValidationAuthority final {
 public:
@@ -305,9 +305,12 @@ public:
                 internal::ProductionArtifactAccess::Pin(candidate.pins[index]);
             if (actual.call_index != expected.call_index ||
                 actual.link_symbol != expected.link_symbol ||
-                !SameCachedPrimitive(actual_pin.artifact(), expected_pin.artifact())) {
+                actual_pin.artifact().signature.ToString() !=
+                    expected_pin.artifact().signature.ToString() ||
+                actual_pin.artifact().launch_metadata.ToString() !=
+                    expected_pin.artifact().launch_metadata.ToString()) {
                 throw std::invalid_argument(
-                    "adaptive candidate changed a verified primitive typed contract");
+                    "adaptive candidate changed a verified callable ABI");
             }
         }
         if (BuildStaticExactDispatchKey(request.artifact_key(), graph.plan) !=
