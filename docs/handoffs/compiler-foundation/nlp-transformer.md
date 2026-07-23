@@ -4,9 +4,11 @@
 >
 > 基线：`525950a`（`baseline/compiler-foundation-w1`）
 >
-> 终审基线：`952be66`
+> 终审输入基线：`952be66`
 >
-> 状态：终审修复进行中；尚未 push、merge 或取得 production approval。CUDA 仅有 source/local-evidence 状态，不是可复现 GPU CI。
+> 终审实现提交：`628c34f`
+>
+> 状态：终审修复与可用本地验证完成；尚未 push、merge 或取得 production approval。CUDA 仅有 source/local-evidence 状态，不是可复现 GPU CI。
 
 ## 1. 本次交付范围
 
@@ -141,10 +143,13 @@ CI 的 LLVM job 选择 `op_numeric_llvm_test` 与 `onnx_importer_test`；后者�
 | `1b53ba8` | strict ONNX attrs、bool Constant reification、组合 reifier 与多轴 LayerNorm coverage |
 | `299b27e` | CUDA injective validation、Gather/reduction rejection 与 Concat ABI shape 修复 |
 | `8f0c664` | C++ reifier 对 Gather/Where 非 canonical attrs 的 fail-closed 修正 |
+| `ffccf1d` | shared static lowering extent/product/flatten/byte overflow gate 与 Slice Tind 宽度统一 |
+| `2f768a6` | LayerNorm optional-output/f64 contract、ONNX Gather constant-safe 双边 gate、FFI invocation tests |
+| `628c34f` | 真实 protobuf-to-LLVM RuntimeSession CI fixture 与 CUDA source/local-evidence 降级 |
 
 ## 6. 集成注意事项
 
-1. 从 `525950a..299b27e` 按顺序审查/集成，保留前五个 per-operator 原子提交。
+1. 从 `525950a..628c34f` 按顺序审查/集成；终审实现提交不可从范围中省略。
 2. 不要把 capability matrix 中 reference numeric `validated` 等同于本机 LLVM
    backend validation；每层状态和 gate 必须分别解释。
 3. 保持 Gather OOB zero-fill 是 KXC 的显式 Relay 扩展；默认 ONNX Gather 只允许
