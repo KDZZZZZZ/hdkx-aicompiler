@@ -71,6 +71,29 @@ std::vector<RuntimeShapeExtent> EvaluateShape(
     return result;
 }
 
+void ValidateInputContract(const RuntimeShapeInputContract& contract) {
+    if (contract.dtype.empty()) Fail("input dtype is empty");
+    (void)DTypeBytes(contract.dtype);
+    if (contract.device != "CPU:0") Fail("v1 requires input device CPU:0");
+    if (contract.abi_version != RuntimeShapePlan::kAbiVersion) {
+        Fail("input ABI version does not match");
+    }
+    std::size_t previous_axis = 0;
+    bool first = true;
+    for (const auto& guard : contract.axis_guards) {
+        if (guard.axis >= contract.rank || (!first && guard.axis <= previous_axis) ||
+            guard.upper < guard.lower || guard.divisible_by == 0) {
+            Fail("input axis guard is invalid");
+        }
+        if (guard.exact && (*guard.exact < guard.lower || *guard.exact > guard.upper ||
+                            *guard.exact % guard.divisible_by != 0)) {
+            Fail("input axis exact guard is outside its domain");
+        }
+        previous_axis = guard.axis;
+        first = false;
+    }
+}
+
 void ValidateContract(const RuntimeShapeTensorContract& contract) {
     if (contract.dtype.empty()) Fail("output dtype is empty");
     (void)DTypeBytes(contract.dtype);
@@ -376,6 +399,20 @@ std::string RuntimeShapePlan::ExactAbiFingerprint(
         AppendU64(bytes, input.rank);
         AppendString(bytes, input.device);
         AppendU64(bytes, input.abi_version);
+        AppendU64(bytes, input.axis_guards.size());
+        for (const auto& guard : input.axis_guards) {
+            AppendU64(bytes, guard.axis);
+            AppendU64(bytes, guard.lower);
+            AppendU64(bytes, guard.upper);
+            AppendU64(bytes, guard.divisible_by);
+            AppendU64(bytes, guard.exact.has_value() ? 1 : 0);
+            if (guard.exact) AppendU64(bytes, *guard.exact);
+            AppendU64(bytes, guard.equal_to.has_value() ? 1 : 0);
+            if (guard.equal_to) {
+                AppendU64(bytes, guard.equal_to->input_index);
+                AppendU64(bytes, guard.equal_to->axis);
+            }
+        }
     }
     AppendU64(bytes, outputs.size());
     const auto append_expressions = [&bytes](const std::vector<RuntimeShapeExpr>& expressions) {
@@ -404,11 +441,12 @@ void RuntimeShapePlan::Validate() const {
     const auto& spec = impl_->spec;
     if (spec.abi_version != kAbiVersion) Fail("plan ABI version does not match");
     if (spec.inputs.empty() || spec.outputs.empty()) Fail("plan requires inputs and outputs");
-    for (const auto& input : spec.inputs) {
-        if (input.dtype.empty()) Fail("input dtype is empty");
-        (void)DTypeBytes(input.dtype);
-        if (input.device != "CPU:0") Fail("v1 requires input device CPU:0");
-        if (input.abi_version != kAbiVersion) Fail("input ABI version does not match");
+    for (const auto& input : spec.inputs) ValidateInputContract(input);
+    for (const auto& input : spec.inputs) for (const auto& guard : input.axis_guards) {
+        if (guard.equal_to && (guard.equal_to->input_index >= spec.inputs.size() ||
+                               guard.equal_to->axis >= spec.inputs[guard.equal_to->input_index].rank)) {
+            Fail("input axis equality guard is out of range");
+        }
     }
     for (const auto& output : spec.outputs) ValidateContract(output);
     (void)ExactAbiFingerprint(spec.inputs, spec.outputs);
@@ -501,7 +539,24 @@ RuntimeShapeAsyncResult RuntimeShapeSession::RunAsync(
             if (input.dtype != contract.dtype) Fail("input dtype does not match");
             if (input.device != contract.device) Fail("input device does not match");
             if (input.abi_version != contract.abi_version) Fail("input ABI version does not match");
+            for (const auto& guard : contract.axis_guards) {
+                const RuntimeShapeExtent extent = input.shape[guard.axis];
+                if (extent < guard.lower || extent > guard.upper ||
+                    extent % guard.divisible_by != 0 ||
+                    (guard.exact && extent != *guard.exact)) {
+                    Fail("input axis guard mismatch");
+                }
+            }
             input_shapes.push_back(input.shape);
+        }
+        for (std::size_t index = 0; index < inputs.size(); ++index) {
+            for (const auto& guard : spec.inputs[index].axis_guards) {
+                if (guard.equal_to &&
+                    inputs[index].shape[guard.axis] !=
+                        inputs[guard.equal_to->input_index].shape[guard.equal_to->axis]) {
+                    Fail("input axis equality guard mismatch");
+                }
+            }
         }
         state->events.push_back(RuntimeShapeEvent{RuntimeShapeEventKind::kShapeEval,
                                                    static_cast<std::size_t>(-1), 0,

@@ -409,6 +409,28 @@ std::vector<shape::GuardedUnitSpecializationRequest> RestrictedDispatchDecision:
     return RebuildGuarded(*impl_);
 }
 
+const shape::GraphTemplate& RestrictedDispatchDecision::graph_template() const {
+    if (!impl_) Reject("decision is undefined");
+    VerifyDecision(*impl_);
+    return impl_->graph;
+}
+
+const shape::GuardedShapeProfile* RestrictedDispatchDecision::guarded_profile() const {
+    if (!impl_) Reject("decision is undefined");
+    VerifyDecision(*impl_);
+    return impl_->guarded_profile ? &*impl_->guarded_profile : nullptr;
+}
+
+const shape::BucketPolicy* RestrictedDispatchDecision::bucket_policy() const {
+    const auto* profile = guarded_profile();
+    return profile ? profile->bucket_policy() : nullptr;
+}
+
+const shape::PolymorphicPolicy* RestrictedDispatchDecision::polymorphic_policy() const {
+    const auto* profile = guarded_profile();
+    return profile ? profile->polymorphic_policy() : nullptr;
+}
+
 RestrictedDispatchDecision RestrictedSymbolicShapeAdapter::MintExact(
     const PreparedRestrictedSymbolicTemplate& prepared, const shape::BindingSet& bindings) {
     RequireEnabled();

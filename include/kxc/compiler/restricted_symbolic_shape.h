@@ -41,6 +41,11 @@ public:
     [[nodiscard]] const shape::experimental::v1::ExactOracle& exact_oracle() const;
     [[nodiscard]] std::vector<shape::experimental::v1::UnitSpecializationRequest> exact_requests() const;
     [[nodiscard]] std::vector<shape::experimental::v1::GuardedUnitSpecializationRequest> guarded_requests() const;
+    /*! \brief Immutable validated snapshots; null when this is an exact decision. */
+    [[nodiscard]] const shape::experimental::v1::GraphTemplate& graph_template() const;
+    [[nodiscard]] const shape::experimental::v1::GuardedShapeProfile* guarded_profile() const;
+    [[nodiscard]] const shape::experimental::v1::BucketPolicy* bucket_policy() const;
+    [[nodiscard]] const shape::experimental::v1::PolymorphicPolicy* polymorphic_policy() const;
 
     // Declared only to support the private pimpl; no state is public.
     struct Impl;

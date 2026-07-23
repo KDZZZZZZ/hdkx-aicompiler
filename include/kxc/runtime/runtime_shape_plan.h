@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,11 +48,28 @@ private:
     friend class RuntimeShapePlan;
 };
 
+struct RuntimeShapeInputAxisReference {
+    std::size_t input_index{0};
+    std::size_t axis{0};
+};
+
+struct RuntimeShapeInputAxisGuard {
+    std::size_t axis{0};
+    RuntimeShapeExtent lower{0};
+    RuntimeShapeExtent upper{0};
+    RuntimeShapeExtent divisible_by{1};
+    std::optional<RuntimeShapeExtent> exact;
+    /*! \brief Optional equality to a previously checked input axis. */
+    std::optional<RuntimeShapeInputAxisReference> equal_to;
+};
+
 struct RuntimeShapeInputContract {
     std::string dtype;
     std::size_t rank{0};
     std::string device{"CPU:0"};
     std::uint32_t abi_version{1};
+    /*! \brief Immutable axis constraints checked before ShapeEval or allocation. */
+    std::vector<RuntimeShapeInputAxisGuard> axis_guards;
 };
 
 /*! \brief Shape and allocation contract for one dynamic output. */
