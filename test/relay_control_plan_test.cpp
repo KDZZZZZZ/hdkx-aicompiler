@@ -260,6 +260,31 @@ bool TestRelaySourceWhileExecution() {
     });
     TEST_CHECK(exhausted_error.find("max_trip_count exhausted") != std::string::npos,
                "true condition after the bound must throw rather than host-unroll");
+
+    const TensorType boolean({}, "bool");
+    Var first("first", boolean), second("second", boolean), third("third", boolean);
+    Var tail("tail", boolean), value("value", kI64), shifted_state("shifted_state");
+    const Expr shifted_initial = Tuple({first, second, third, tail, value});
+    const Expr shifted_condition = TupleGetItem(shifted_state, 0);
+    const Expr shifted_body = Tuple({TupleGetItem(shifted_state, 1),
+                                     TupleGetItem(shifted_state, 2),
+                                     TupleGetItem(shifted_state, 3), tail,
+                                     Add(TupleGetItem(shifted_state, 4), increment)});
+    const ControlPlan shifted_plan = kxc::api::LowerRelayToControlPlan(Function(
+        {first, second, third, tail, value, increment},
+        While(shifted_initial, shifted_state, shifted_condition, shifted_body, 3)));
+    const auto shifted = ControlPlanReferenceExecutor(ArithmeticKernels()).Execute(
+        shifted_plan,
+        {{shifted_plan.graph_inputs[0], FakeValue::Bool(true)},
+         {shifted_plan.graph_inputs[1], FakeValue::Bool(true)},
+         {shifted_plan.graph_inputs[2], FakeValue::Bool(true)},
+         {shifted_plan.graph_inputs[3], FakeValue::Bool(false)},
+         {shifted_plan.graph_inputs[4], FakeValue::I64(7)},
+         {shifted_plan.graph_inputs[5], FakeValue::I64(1)}});
+    TEST_CHECK(shifted_plan.graph_outputs.size() == 5 &&
+                   shifted.values.at(shifted_plan.graph_outputs[4]).integer == 10 &&
+                   loops(shifted.trace) == 3,
+               "tuple-carried Relay While must preserve all leaves across multiple trips");
     return true;
 }
 

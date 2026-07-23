@@ -569,7 +569,7 @@ bool TestProductionRelayWhileNumericE2E() {
         const kxc::Expr condition = kxc::TupleGetItem(state, 0);
         const kxc::Expr body = kxc::Tuple(
             {kxc::TupleGetItem(state, 1), kxc::TupleGetItem(state, 2),
-             kxc::TupleGetItem(state, 3),
+             kxc::TupleGetItem(state, 3), tail,
              kxc::Call(kxc::relay::Op::Get("add"),
                        {kxc::TupleGetItem(state, 4), increment})});
         return kxc::Function({first, second, third, tail, value, increment},
