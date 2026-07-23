@@ -10,7 +10,7 @@
 
 namespace kxc::pass_contract_generated {
 
-inline constexpr int kContractVersion = 1;
+inline constexpr int kContractVersion = 2;
 
 inline const std::vector<PassSpec>& Specs() {
     static const std::vector<PassSpec> specs = [] {
@@ -25,6 +25,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -45,6 +46,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -65,6 +67,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -85,6 +88,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -105,6 +109,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -125,6 +130,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 3;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -145,6 +151,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -165,6 +172,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -185,6 +193,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -205,6 +214,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {String("checked_type")};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -225,6 +235,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -245,6 +256,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -265,6 +277,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -285,6 +298,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -305,6 +319,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -325,6 +340,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -345,6 +361,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -365,6 +382,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 1;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;
@@ -385,6 +403,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.opt_level = 3;
             spec.required_invariants = {};
             spec.produced_invariants = {};
+            spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.may_change_ir = true;

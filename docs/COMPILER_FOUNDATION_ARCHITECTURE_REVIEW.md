@@ -6,10 +6,11 @@
 > **验证证据：** 同一 HEAD 已通过 19/19 Relay operator contract、19/19 Pass contract，以及 `graph_partition_test`、`operator_compilation_test`、`runtime_session_test`、`kernel_signature_test`、`infer_type_test`、`pass_pipeline_test`、`compiler_extension_contract_test`。  
 > **本次文档变更：** 只新增并静态检查本文，未重新构建二进制；历史自适应实现只作设计取证。  
 > **文档定位：** 目标架构审查与迁移准则，不是“当前已经实现”的能力声明。
-> **Core 第二轮处置（2026-07-23）：** supervisor fix 已实现 executable capability、
-> normalized production executor、public production-pin adapter 与 CPU 27/27 closure，
-> 现提交终审复核；不得称 “Core complete” 或 “仅阻塞于 02–06”。LLVM-enabled CI
-> 仍须外部 builder 执行，证据与限制见 [`handoffs/compiler-foundation/core.md`](handoffs/compiler-foundation/core.md)。
+> **Core Track01 仓内处置（2026-07-23）：** 已实现 executable capability/invariant、
+> normalized production executor、public static-exact transaction/pin adapter 与 CPU
+> 27/27 closure。dispatch/异步取消/细分预算/generation/hot swap 仍归 Track03；
+> 不得称全路线完成。LLVM workflow 已配置，但本机/当前会话无绿色记录，仍须外部
+> builder 执行；证据与限制见 [`handoffs/compiler-foundation/core.md`](handoffs/compiler-foundation/core.md)。
 
 ## 1. 执行摘要
 
@@ -462,7 +463,7 @@ flowchart LR
 
 | 波次 | 可并行工作 | 汇合产物 | 进入条件 |
 |---|---|---|---|
-| W0：接口冻结 | 01 的 verifier、schema/pipeline、identity、artifact lifecycle；02–06 同时写 fake contract tests | `CoreContract v1` 与 capability matrix | 不扩大当前能力，现有静态回归保持通过 |
+| W0：接口冻结 | 01 的 verifier、schema/pipeline、identity、artifact lifecycle；02–06 同时写 fake contract tests | `CoreContract v2` 与 capability matrix | 不扩大当前能力，现有静态回归保持通过 |
 | W1：静态 exact | 02 exact GraphTemplate/profile；03 synchronous singleflight/slot；05 per-call task-DAG adapter | exact `PlanVariant` + immutable artifact generation | canonical key、pin、static Plan ABI 通过 contract suite |
 | W2：有限自适应 | 02 bucket；03 background/backpressure/canary；05 conservative region/memory DAG | 有限 Shape Profile + 同 ABI 热替换 + per-call 回退 | bucket 数值/tail 证明，in-flight 生命周期和回退安全 |
 | W3：执行语义扩展 | 04 static If/loop；05 control task、多 stream基础；02 allowlist polymorphic | structured control-flow plan 与受限 runtime extent | effect/alias/Phi/liveness/guard 验证齐全 |

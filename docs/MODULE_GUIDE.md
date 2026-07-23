@@ -1,7 +1,8 @@
 # hdkx-aicompiler 模块指南
 
-> **状态：第二轮 supervisor fix 已实现，待终审。** 本页只说明当前模块边界和入口；
-> 单个 Relay 节点/目标的生产批准仍以 executable capability 与对应 backend CI 为准。
+> **状态：Track01 仓内 closure 已实现并通过 CPU 验证，待 LLVM 绿色记录与终审。**
+> 本页只说明当前模块边界和入口；单个 Relay 节点/目标的生产批准仍以
+> executable capability 与对应 backend CI 为准。
 
 ## 生产编译入口
 
@@ -75,10 +76,11 @@ CUDA/CUPTI 硬件测试分别带有 `llvm` 与 `cuda;hardware` 标签，CPU-only
 **Ready for supervisor re-review；不自称 Core complete。**
 
 - [x] executable capability 使用真实 normalized per-unit compile proof
-- [x] public `CompiledGraph::artifact_pins` / `ProductionArtifactCacheAdapter` 保活真实 production pin
+- [x] public `ProductionArtifactCacheAdapter` transaction/singleflight 接入真实 primitive cache，并保活 production pin
+- [x] normalized pipeline 在每步后执行已证明 invariant 的 validator
 - [x] 本地 CPU CTest、contract、include/public-header：27/27
 - [x] LLVM workflow 包含 relocation/cache、codegen、numeric、ONNX compile
-- [ ] LLVM-enabled builder 实际执行记录与目标后端逐项批准
+- [ ] LLVM-enabled builder 实际绿色记录与目标后端逐项批准（本机/当前会话无 LLVM 记录）
 
 历史 Adaptive Runtime、fuzzy cache、旧目录名和“whole graph 是主链”的说明均不再是
 当前指南。详见 [`COMPILER_EXTENSION_CONTRACT.md`](COMPILER_EXTENSION_CONTRACT.md)、

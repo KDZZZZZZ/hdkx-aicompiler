@@ -1,9 +1,11 @@
 # hdkx-aicompiler 架构与实现状态（历史快照）
 
-> **状态：已归档。** 本文固定描述 `cdb4c6f`，不得作为当前 capability
-> 声明。当前 per-unit 编译、CoreContract v1、capability/pipeline/identity/cache
-> 事实见 [`COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
-> 与 [`handoffs/compiler-foundation/core.md`](handoffs/compiler-foundation/core.md)，最终仍以当前源码/测试为准。
+> **历史文档／非当前事实源（HISTORICAL, NON-AUTHORITATIVE）。**
+> 本文仅保留历史设计/状态背景，不得用于证明当前 capability 或测试通过。
+> 当前事实只以 [`MODULE_GUIDE.md`](MODULE_GUIDE.md)、[`core handoff`](handoffs/compiler-foundation/core.md)、
+> 当前源码和可重复测试为准。
+>
+> 本文固定描述 `cdb4c6f`，已归档。
 >
 > 最后核对日期：2026-07-21
 >
@@ -112,17 +114,17 @@ ExecutionPlan、Disco worker 和 CCL 是另一条实验性路径，目前没有�
 
 | 层 | 主要目录 | 核心职责 | 不负责 |
 |---|---|---|---|
-| 基础对象层 | [include/base](../include/base) | ObjectRef、TypeInfo、容器、PackedFunc、Registry、Arena | 张量计算语义 |
-| 设备运行层 | [src/base](../src/base) | Device、Storage、NDArray、Stream、复制和设备属性 | 图优化和算子 lowering |
+| 基础对象层 | [include/kxc/support](../include/kxc/support) | ObjectRef、TypeInfo、容器、PackedFunc、Registry、Arena | 张量计算语义 |
+| 设备运行层 | [src/runtime](../src/runtime) | Device、Storage、NDArray、Stream、复制和设备属性 | 图优化和算子 lowering |
 | Relay | [src/relay](../src/relay) | 高层表达式、算子注册、类型推导、Relay Pass | 设备内存分配 |
-| TE/TOPI | [include/te](../include/te) | 描述 tensor compute 和归约 | 后端资源生命周期 |
+| TE/TOPI | [include/kxc/te](../include/kxc/te) | 描述 tensor compute 和归约 | 后端资源生命周期 |
 | TIR | [src/tir](../src/tir) | 标量循环 IR、语句优化、CUDA thread binding | 模型导入 |
-| Compiler API | [src/api](../src/api) | 固定阶段编译、ABI 冻结、模块组装 | 运行时输入自动装配 |
+| Compiler API | [src/compiler](../src/compiler) | 固定阶段编译、ABI 冻结、模块组装 | 运行时输入自动装配 |
 | Codegen | [src/codegen](../src/codegen) | LLVM/CUDA 发射、JIT/module 生命周期、launcher | Relay 图改写 |
 | Runtime | [src/runtime](../src/runtime) | 输入校验、常量注入、输出分配、同步和异步启动 | 编译、缓存和 specialization |
 | Frontend | [python/kxc_onnx](../python/kxc_onnx)、[src/frontend](../src/frontend) | ONNX 解析、参数序列化、Relay 构造 | 任意 ONNX 算子兼容 |
-| Disco | [src/base/disco](../src/base/disco) | worker、DRef、通信和计划解释结构 | 当前不具备真实 kernel 执行 |
-| Profiling | [src/base/profiling.cc](../src/base/profiling.cc) | span、事件、bundle 和分析数据 | 修改编译语义 |
+| Disco | [src/distributed](../src/distributed) | worker、DRef、通信和计划解释结构 | 当前不具备真实 kernel 执行 |
+| Profiling | [src/profiling](../src/profiling) | span、事件、bundle 和分析数据 | 修改编译语义 |
 
 ### 2.3 必须保持的不变量
 
@@ -141,11 +143,11 @@ ExecutionPlan、Disco worker 和 CCL 是另一条实验性路径，目前没有�
 
 核心入口：
 
-- [object.h](../include/base/object.h)
-- [container.h](../include/base/container.h)
-- [arena.h](../include/base/arena.h)
-- [packedfunc.h](../include/base/packedfunc.h)
-- [registry.h](../include/base/registry.h)
+- [object.h](../include/kxc/support/object.h)
+- [container.h](../include/kxc/support/container.h)
+- [arena.h](../include/kxc/support/arena.h)
+- [packed_func.h](../include/kxc/ffi/packed_func.h)
+- [registry.h](../include/kxc/ffi/registry.h)
 
 当前职责：
 
@@ -161,15 +163,15 @@ ExecutionPlan、Disco worker 和 CCL 是另一条实验性路径，目前没有�
 - Array/Map 使用家族 TypeInfo；Relay attrs 已迁移到对象容器。
 - 公共 API 的容器迁移基本完成。
 - Pass 内部的 std::vector、std::unordered_map 和 std::unordered_set 大多是局部算法状态，不应机械迁移。
-- [op.h](../include/relay/op.h) 中 KXC_DECLARE_ATTRS_REF 会生成 self-friend 编译警告，应清理。
+- [op.h](../include/kxc/relay/op.h) 中 KXC_DECLARE_ATTRS_REF 会生成 self-friend 编译警告，应清理。
 
 ### 3.2 Device、Target 与设备发现
 
 核心入口：
 
-- [device.h](../include/base/device.h)
-- [device_api.h](../include/base/device_api.h)
-- [target.h](../include/base/target.h)
+- [device.h](../include/kxc/runtime/device.h)
+- [device_api.h](../include/kxc/runtime/device_api.h)
+- [target.h](../include/kxc/target/target.h)
 
 当前职责：
 
@@ -190,9 +192,9 @@ ExecutionPlan、Disco worker 和 CCL 是另一条实验性路径，目前没有�
 
 核心入口：
 
-- [storage.h](../include/base/storage.h)
-- [ndarray.h](../include/base/ndarray.h)
-- [device_stream.h](../include/base/device_stream.h)
+- [storage.h](../include/kxc/runtime/storage.h)
+- [ndarray.h](../include/kxc/runtime/ndarray.h)
+- [device_stream.h](../include/kxc/runtime/device_stream.h)
 
 当前职责：
 
@@ -240,9 +242,9 @@ ExecutionPlan、Disco worker 和 CCL 是另一条实验性路径，目前没有�
 
 核心入口：
 
-- [relay.h](../include/relay/relay.h)
-- [op.h](../include/relay/op.h)
-- [op_macros.h](../include/relay/op_macros.h)
+- [relay.h](../include/kxc/relay/relay.h)
+- [op.h](../include/kxc/relay/op.h)
+- [op_macros.h](../include/kxc/relay/op_macros.h)
 - [type_infer.cc](../src/relay/type_infer.cc)
 
 正式算子必须同时具备：
@@ -260,8 +262,8 @@ ExecutionPlan、Disco worker 和 CCL 是另一条实验性路径，目前没有�
 
 ## 5. Compiler 与完整编译链
 
-公共入口为 [compiler.h](../include/api/compiler.h) 中的 Compiler::Compile。
-实现位于 [compiler.cc](../src/api/compiler.cc)。
+公共入口为 [compiler.h](../include/kxc/compiler/compiler.h) 中的 Compiler::Compile。
+实现位于 [compiler.cc](../src/compiler/compiler.cc)。
 
 ### 5.1 七个固定阶段
 
@@ -279,7 +281,7 @@ ExecutionPlan、Disco worker 和 CCL 是另一条实验性路径，目前没有�
 
 ### 5.2 Relay 到 TE/TIR
 
-核心实现位于 [lower.cc](../src/relay/backend/lower.cc)。
+核心实现位于 [relay_to_tir.cc](../src/compiler/lowering/relay_to_tir.cc)。
 
 当前支持：
 
@@ -304,8 +306,8 @@ ExecutionPlan、Disco worker 和 CCL 是另一条实验性路径，目前没有�
 
 KernelSignature 和 KernelLaunchMetadata 位于：
 
-- [kernel_signature.h](../include/codegen/kernel_signature.h)
-- [kernel_signature.cc](../src/codegen/kernel_signature.cc)
+- [kernel_abi.h](../include/kxc/runtime/kernel_abi.h)
+- [kernel_abi.cc](../src/runtime/kernel_abi.cc)
 
 参数角色固定为：
 
@@ -468,8 +470,8 @@ BindCudaThreads 要求：
 
 核心实现：
 
-- [codegen_llvm.cc](../src/codegen/codegen_llvm.cc)
-- [llvm_jit.cc](../src/codegen/llvm_jit.cc)
+- [codegen_llvm.cc](../src/codegen/llvm/codegen_llvm.cc)
+- [llvm_jit.cc](../src/codegen/llvm/llvm_jit.cc)
 
 当前支持：
 
@@ -493,8 +495,8 @@ BindCudaThreads 要求：
 
 核心实现：
 
-- [codegen_cuda.cc](../src/codegen/codegen_cuda.cc)
-- [cuda_module.cc](../src/codegen/cuda_module.cc)
+- [codegen_cuda.cc](../src/codegen/cuda/codegen_cuda.cc)
+- [cuda_module.cc](../src/codegen/cuda/cuda_module.cc)
 - [bind_cuda_threads.cc](../src/tir/transforms/bind_cuda_threads.cc)
 
 编译与执行链：
@@ -529,7 +531,7 @@ PrimFunc
 
 ### 9.3 C source emitter
 
-[codegen_c.cc](../src/codegen/codegen_c.cc) 仍被 LLVM 测试用于诊断源码输出。
+[codegen_c.cc](../src/codegen/c/codegen_c.cc) 仍被 LLVM 测试用于诊断源码输出。
 它不是 Compiler 可执行后端，不应再被文档描述为正式 C backend。
 后续应移入 debug/test target，或在删除诊断能力后整体移除。
 
@@ -539,8 +541,8 @@ PrimFunc
 
 核心实现：
 
-- [compiled_kernel.cc](../src/codegen/compiled_kernel.cc)
-- [compiled_module.cc](../src/api/compiled_module.cc)
+- [compiled_kernel.cc](../src/codegen/common/compiled_kernel.cc)
+- [compiled_module.cc](../src/runtime/compiled_module.cc)
 
 CompiledKernel 统一持有：
 
@@ -562,7 +564,7 @@ CompiledModule 在组装和 Launch 时校验：
 
 ### 10.2 RuntimeSession
 
-核心实现位于 [runtime_session.cc](../src/runtime/runtime_session.cc)。
+核心实现位于 [session.cc](../src/runtime/session.cc)。
 
 RuntimeSession 的职责：
 
@@ -594,10 +596,10 @@ profiling 不参与编译语义，不允许为了记录事件而改变 IR。
 
 核心实现：
 
-- [execution_plan.h](../include/base/execution_plan.h)
-- [multi_device.cc](../src/relay/transforms/multi_device.cc)
-- [executor.cc](../src/base/disco/executor.cc)
-- [ccl_cpu.cc](../src/base/disco/ccl_cpu.cc)
+- [execution_plan.h](../include/kxc/distributed/execution_plan.h)
+- [multi_device.cc](../src/compiler/distributed/multi_device.cc)
+- [executor.cc](../src/distributed/executor.cc)
+- [ccl_cpu.cc](../src/distributed/ccl_cpu.cc)
 
 已经实现的结构：
 
@@ -754,16 +756,16 @@ Omen 当前仍位于旧分支 device-info-query-contract@c3b007f，且工作区�
 
 建议按以下顺序审查：
 
-1. [src/api/compiler.cc](../src/api/compiler.cc)：七阶段管线和优化等级。
-2. [src/relay/backend/lower.cc](../src/relay/backend/lower.cc)：Relay、TE、TIR 和参数 ABI。
-3. [src/codegen/kernel_signature.cc](../src/codegen/kernel_signature.cc)：Signature 冻结规则。
-4. [src/codegen/codegen_llvm.cc](../src/codegen/codegen_llvm.cc) 与 [src/codegen/llvm_jit.cc](../src/codegen/llvm_jit.cc)：CPU 后端。
-5. [src/tir/transforms/bind_cuda_threads.cc](../src/tir/transforms/bind_cuda_threads.cc)、[src/codegen/codegen_cuda.cc](../src/codegen/codegen_cuda.cc) 与 [src/codegen/cuda_module.cc](../src/codegen/cuda_module.cc)：CUDA 后端。
-6. [src/api/compiled_module.cc](../src/api/compiled_module.cc) 与 [src/runtime/runtime_session.cc](../src/runtime/runtime_session.cc)：运行边界。
+1. [src/compiler/compiler.cc](../src/compiler/compiler.cc)：七阶段管线和优化等级。
+2. [src/compiler/lowering/relay_to_tir.cc](../src/compiler/lowering/relay_to_tir.cc)：Relay、TE、TIR 和参数 ABI。
+3. [src/runtime/kernel_abi.cc](../src/runtime/kernel_abi.cc)：Signature 冻结规则。
+4. [src/codegen/llvm/codegen_llvm.cc](../src/codegen/llvm/codegen_llvm.cc) 与 [src/codegen/llvm/llvm_jit.cc](../src/codegen/llvm/llvm_jit.cc)：CPU 后端。
+5. [src/tir/transforms/bind_cuda_threads.cc](../src/tir/transforms/bind_cuda_threads.cc)、[src/codegen/cuda/codegen_cuda.cc](../src/codegen/cuda/codegen_cuda.cc) 与 [src/codegen/cuda/cuda_module.cc](../src/codegen/cuda/cuda_module.cc)：CUDA 后端。
+6. [src/runtime/compiled_module.cc](../src/runtime/compiled_module.cc) 与 [src/runtime/session.cc](../src/runtime/session.cc)：运行边界。
 7. [src/relay/type_infer.cc](../src/relay/type_infer.cc) 与 [src/relay/op](../src/relay/op)：19 个算子语义。
 8. [src/relay/transforms](../src/relay/transforms) 与 [src/tir/transforms](../src/tir/transforms)：Pass。
-9. [src/base/device_api.cc](../src/base/device_api.cc)、[src/base/ndarray.cc](../src/base/ndarray.cc) 和 [src/base/device_stream.cc](../src/base/device_stream.cc)：设备和异步生命周期。
-10. [src/relay/transforms/multi_device.cc](../src/relay/transforms/multi_device.cc) 与 [src/base/disco/executor.cc](../src/base/disco/executor.cc)：尚未闭环的多设备路径。
+9. [src/runtime/device_api.cc](../src/runtime/device_api.cc)、[src/runtime/ndarray.cc](../src/runtime/ndarray.cc) 和 [src/runtime/device_stream.cc](../src/runtime/device_stream.cc)：设备和异步生命周期。
+10. [src/compiler/distributed/multi_device.cc](../src/compiler/distributed/multi_device.cc) 与 [src/distributed/executor.cc](../src/distributed/executor.cc)：尚未闭环的多设备路径。
 
 ## 16. 文档更新规则
 

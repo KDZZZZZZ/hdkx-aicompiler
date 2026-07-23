@@ -54,6 +54,7 @@ def render(contract: dict[str, Any]) -> str:
                 f"            spec.opt_level = {int(spec['opt_level'])};",
                 f"            spec.required_invariants = {cpp_array(spec['required_invariants'])};",
                 f"            spec.produced_invariants = {cpp_array(spec['produced_invariants'])};",
+                f"            spec.declarative_only_invariants = {cpp_array(spec['declarative_only_invariants'])};",
                 f"            spec.preserved_analyses = {cpp_array(spec['preserved_analyses'])};",
                 f"            spec.invalidated_analyses = {cpp_array(spec['invalidated_analyses'])};",
                 f"            spec.may_change_ir = {'true' if spec['may_change_ir'] else 'false'};",

@@ -24,6 +24,8 @@ struct PrimitiveArtifact final {
 struct PrimitiveFlight final {
     std::mutex mutex;
     std::condition_variable ready;
+    uint64_t ticket_id{0};
+    uint64_t merged_waiters{0};
     bool completed{false};
     PrimitiveArtifactPin pin;
     PrimitiveFailureRecord failure;
@@ -52,6 +54,7 @@ struct PrimitiveCache final {
     std::unordered_map<std::string, FailureEntry> failures;
     PrimitiveCacheLimits limits;
     uint64_t next_stamp{1};
+    uint64_t next_ticket_id{1};
     uint64_t hits{0};
     uint64_t misses{0};
     uint64_t evictions{0};
@@ -253,6 +256,19 @@ const PrimitiveFailureRecord& PrimitiveCacheLease::failure() const {
     return failure_;
 }
 
+std::string PrimitiveCacheLease::ticket_id() const {
+    if (!flight_) {
+        throw std::logic_error("primitive cache lease has no shared ticket");
+    }
+    return "primitive-flight-v1:" + std::to_string(flight_->ticket_id);
+}
+
+uint64_t PrimitiveCacheLease::merged_waiter_count() const {
+    if (!flight_) return 0;
+    std::lock_guard<std::mutex> lock(flight_->mutex);
+    return flight_->merged_waiters;
+}
+
 ArtifactKey BuildPrimitiveArtifactKey(
     const UnitSemanticKey& semantic_key, const Target& target,
     const std::string& pipeline_fingerprint, const char* schedule_version,
@@ -322,6 +338,10 @@ PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey& key) {
     const auto active = cache.in_flight.find(canonical);
     if (active != cache.in_flight.end()) {
         ++cache.merged_waiters;
+        {
+            std::lock_guard<std::mutex> flight_lock(active->second->mutex);
+            ++active->second->merged_waiters;
+        }
         lease.access_ = PrimitiveCacheAccess::kWait;
         lease.flight_ = active->second;
         return lease;
@@ -338,16 +358,19 @@ PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey& key) {
     ++cache.misses;
     lease.access_ = PrimitiveCacheAccess::kOwner;
     lease.flight_ = std::make_shared<PrimitiveFlight>();
+    lease.flight_->ticket_id = cache.next_ticket_id++;
     cache.in_flight.emplace(canonical, lease.flight_);
     return lease;
 }
 
-PrimitiveArtifactPin WaitPrimitiveCacheLease(
+PrimitiveCacheWaitResult WaitPrimitiveCacheLeaseResult(
     const PrimitiveCacheLease& lease) {
-    if (lease.access_ == PrimitiveCacheAccess::kHit) return lease.pin();
+    if (lease.access_ == PrimitiveCacheAccess::kHit) {
+        return PrimitiveCacheWaitResult{lease.pin(), {}};
+    }
     if (lease.access_ == PrimitiveCacheAccess::kFailed ||
         lease.access_ == PrimitiveCacheAccess::kRejected) {
-        ThrowFailure(lease.failure_);
+        return PrimitiveCacheWaitResult{{}, lease.failure_};
     }
     if (!lease.flight_) {
         throw std::logic_error("primitive cache lease has no in-flight request");
@@ -355,8 +378,16 @@ PrimitiveArtifactPin WaitPrimitiveCacheLease(
     std::unique_lock<std::mutex> lock(lease.flight_->mutex);
     lease.flight_->ready.wait(lock,
                               [&] { return lease.flight_->completed; });
-    if (lease.flight_->pin.defined()) return lease.flight_->pin;
-    ThrowFailure(lease.flight_->failure);
+    return PrimitiveCacheWaitResult{lease.flight_->pin,
+                                    lease.flight_->failure};
+}
+
+PrimitiveArtifactPin WaitPrimitiveCacheLease(
+    const PrimitiveCacheLease& lease) {
+    const PrimitiveCacheWaitResult result =
+        WaitPrimitiveCacheLeaseResult(lease);
+    if (result.succeeded()) return result.pin;
+    ThrowFailure(result.failure);
 }
 
 PrimitiveArtifactPin PublishPrimitiveCacheLease(
@@ -475,6 +506,33 @@ void ForgetPrimitiveFailureForTesting(const ArtifactKey& key) {
     cache.failures.erase(KeyBytes(key));
 }
 
+ProductionArtifactCandidate ProductionArtifactAccess::Make(
+    CachedPrimitive artifact) {
+    return ProductionArtifactCandidate(
+        std::make_shared<const CachedPrimitive>(std::move(artifact)));
+}
+
+CachedPrimitive ProductionArtifactAccess::Copy(
+    const ProductionArtifactCandidate& candidate) {
+    if (!candidate.owner_) {
+        throw std::invalid_argument("production artifact candidate is undefined");
+    }
+    return *std::static_pointer_cast<const CachedPrimitive>(candidate.owner_);
+}
+
+PrimitiveArtifactPin ProductionArtifactAccess::Pin(const ArtifactPin& pin) {
+    if (!pin.defined() || !pin.owner_) {
+        throw std::invalid_argument("ArtifactPin is not backed by the production cache");
+    }
+    const auto primitive =
+        std::static_pointer_cast<const PrimitiveArtifactPin>(pin.owner_);
+    if (!primitive || !primitive->defined() || primitive->key() !=
+                                                 pin.handle().record().artifact_key) {
+        throw std::invalid_argument("production ArtifactPin owner is inconsistent");
+    }
+    return *primitive;
+}
+
 void ClearPrimitiveCacheForTesting() {
     PrimitiveCache& cache = Cache();
     std::vector<std::shared_ptr<PrimitiveFlight>> active;
@@ -486,6 +544,7 @@ void ClearPrimitiveCacheForTesting() {
         cache.failures.clear();
         cache.limits = PrimitiveCacheLimits{};
         cache.next_stamp = 1;
+        cache.next_ticket_id = 1;
         cache.hits = 0;
         cache.misses = 0;
         cache.evictions = 0;

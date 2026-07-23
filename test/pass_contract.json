@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "rules": {
     "single_registration": true,
     "deterministic_order": true,
@@ -12,6 +12,7 @@
       "opt_level",
       "required_invariants",
       "produced_invariants",
+      "declarative_only_invariants",
       "preserved_analyses",
       "invalidated_analyses",
       "may_change_ir",
@@ -25,6 +26,7 @@
   "pass_defaults": {
     "required_invariants": [],
     "produced_invariants": [],
+    "declarative_only_invariants": [],
     "preserved_analyses": [],
     "invalidated_analyses": [],
     "may_change_ir": true,

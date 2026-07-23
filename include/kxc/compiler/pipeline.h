@@ -47,6 +47,7 @@ struct PipelineInvariantTransition final {
     String phase;
     Array<String> required;
     Array<String> produced;
+    Array<String> declarative_only;
     Array<String> preserved_analyses;
     Array<String> invalidated_analyses;
     Array<String> invariants_before;
@@ -76,6 +77,17 @@ struct NormalizedPipeline final {
 class PipelineResolver final {
 public:
     static NormalizedPipeline Resolve(const PipelineRequest& request);
+};
+
+/*! \brief Executable proof registry for production pipeline invariants. */
+class PipelineInvariantValidator final {
+public:
+    static bool IsExecutable(IRDialect dialect, const String& invariant);
+    static void ValidateProductionContract(const PassSpec& spec);
+    static void ValidateRelay(const Array<String>& invariants,
+                              const Function& function);
+    static void ValidateTIR(const Array<String>& invariants,
+                            const tir::PrimFunc& function);
 };
 
 /*! Executes exactly the audited pass steps in a NormalizedPipeline. */

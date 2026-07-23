@@ -1,6 +1,6 @@
 # Relay 算子支持矩阵
 
-> **状态：第二轮 supervisor fix 已实现，逐 target 批准仍进行中。** 本页中的
+> **状态：Track01 仓内 closure 已实现，逐 target 批准仍进行中。** 本页中的
 > contract/numeric 记录不能替代 `Compiler::Compile` per-unit executable proof 与
 > backend CI。未列出或未获目标批准的算子必须 fail closed。
 
@@ -76,10 +76,10 @@ Track01 现为 **ready for supervisor re-review**，但各算子的 production a
 仍按 target 单独判断：
 
 - [x] per-unit executable capability 正反例（含真实 lowering/schedule/backend proof）
-- [x] normalized production pipeline 与 public production pin adapter
+- [x] normalized production pipeline、executable invariant 与 public static-exact transaction/pin adapter
 - [x] 本地 CPU CTest、contract、include/public-header：27/27
 - [x] LLVM workflow 选择 relocation/cache-reuse 与 numeric/codegen 测试
-- [ ] LLVM-enabled builder 的实际绿色记录
+- [ ] LLVM-enabled builder 的实际绿色记录（workflow 已配置；本机/当前会话无记录）
 - [ ] 每个 target 的 attrs/shape/schedule 限制逐项批准
 
 TOPI helpers outside this table are not supported merely because declarations exist.

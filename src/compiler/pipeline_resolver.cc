@@ -13,6 +13,8 @@
 
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/relay/op.h"
+#include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/pipeline.h"
@@ -145,7 +147,7 @@ bool IsCompilerPipeline(const PipelineRequest& request) {
 
 std::string CanonicalBytes(const NormalizedPipeline& pipeline) {
     std::string canonical;
-    AppendField(&canonical, "kind", "normalized-pipeline-v2");
+    AppendField(&canonical, "kind", "normalized-pipeline-v3");
     AppendField(&canonical, "contract_version",
                 std::to_string(pass_contract_generated::kContractVersion));
     AppendField(&canonical, "dialect", ToString(pipeline.dialect));
@@ -171,6 +173,8 @@ std::string CanonicalBytes(const NormalizedPipeline& pipeline) {
         AppendField(&canonical, "transition_phase", AsString(transition.phase));
         AppendArray(&canonical, "transition_required", transition.required);
         AppendArray(&canonical, "transition_produced", transition.produced);
+        AppendArray(&canonical, "transition_declarative_only",
+                    transition.declarative_only);
         AppendArray(&canonical, "transition_preserved", transition.preserved_analyses);
         AppendArray(&canonical, "transition_invalidated", transition.invalidated_analyses);
         AppendArray(&canonical, "transition_invariants_before",
@@ -200,6 +204,121 @@ void ValidateTargetRequirements(const NormalizedPipeline& pipeline,
     if (!EqualArray(pipeline.target_requirements, expected)) {
         throw std::invalid_argument(
             "PipelineExecutor target requirements do not match execution steps");
+    }
+}
+
+using CheckedTypeSnapshot = std::pair<Expr, Type>;
+
+bool CollectCompleteCheckedTypes(
+    const Expr& expr, std::unordered_set<const Object*>* visited,
+    std::vector<CheckedTypeSnapshot>* snapshots) {
+    if (!expr.defined()) return false;
+    if (expr.As<relay::OpNode>()) return true;
+    if (!expr.checked_type().defined()) return false;
+    if (!visited->insert(expr.get()).second) return true;
+    snapshots->emplace_back(expr, expr.checked_type());
+    if (expr.As<ConstantNode>() || expr.As<VarNode>()) return true;
+    if (const auto* call = expr.As<CallNode>()) {
+        for (const Expr& argument : call->args) {
+            if (!CollectCompleteCheckedTypes(argument, visited, snapshots)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (const auto* function = expr.As<FunctionNode>()) {
+        for (const Var& parameter : function->params) {
+            if (!CollectCompleteCheckedTypes(parameter, visited, snapshots)) {
+                return false;
+            }
+        }
+        return CollectCompleteCheckedTypes(function->body, visited,
+                                           snapshots);
+    }
+    if (const auto* branch = expr.As<IfNode>()) {
+        return CollectCompleteCheckedTypes(branch->cond, visited, snapshots) &&
+               CollectCompleteCheckedTypes(branch->true_branch, visited,
+                                           snapshots) &&
+               CollectCompleteCheckedTypes(branch->false_branch, visited,
+                                           snapshots);
+    }
+    if (const auto* let = expr.As<LetNode>()) {
+        return CollectCompleteCheckedTypes(let->var, visited, snapshots) &&
+               CollectCompleteCheckedTypes(let->value, visited, snapshots) &&
+               CollectCompleteCheckedTypes(let->body, visited, snapshots);
+    }
+    if (const auto* tuple = expr.As<TupleNode>()) {
+        for (const Expr& field : tuple->fields) {
+            if (!CollectCompleteCheckedTypes(field, visited, snapshots)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (const auto* item = expr.As<TupleGetItemNode>()) {
+        return CollectCompleteCheckedTypes(item->tuple, visited, snapshots);
+    }
+    return false;
+}
+
+class CheckedTypeRestore final {
+public:
+    explicit CheckedTypeRestore(
+        const std::vector<CheckedTypeSnapshot>* snapshots)
+        : snapshots_(snapshots) {}
+
+    ~CheckedTypeRestore() {
+        for (const auto& [expr, type] : *snapshots_) {
+            SetCheckedType(expr, type);
+        }
+    }
+
+private:
+    const std::vector<CheckedTypeSnapshot>* snapshots_;
+};
+
+bool ContainsName(const Array<String>& values, const std::string& expected) {
+    for (const String& value : values) {
+        if (AsString(value) == expected) return true;
+    }
+    return false;
+}
+
+void ValidateInvariantContract(const PassSpec& spec) {
+    for (const String& required : spec.required_invariants) {
+        const std::string name = AsString(required);
+        if (ContainsName(spec.declarative_only_invariants, name) ||
+            !PipelineInvariantValidator::IsExecutable(spec.dialect, required)) {
+            throw std::invalid_argument(
+                "PipelineResolver cannot use declarative-only or unsupported invariant '" +
+                name + "' as a production precondition for " +
+                PassSpecKey(spec.dialect, spec.name));
+        }
+    }
+    for (const String& produced : spec.produced_invariants) {
+        const std::string name = AsString(produced);
+        const bool executable =
+            PipelineInvariantValidator::IsExecutable(spec.dialect, produced);
+        const bool declarative =
+            ContainsName(spec.declarative_only_invariants, name);
+        if (executable == declarative) {
+            throw std::invalid_argument(
+                "PassSpec " + PassSpecKey(spec.dialect, spec.name) +
+                " must classify produced invariant '" + name +
+                " as exactly one of executable or declarative-only");
+        }
+    }
+}
+
+void ValidateExecutableInvariantNames(IRDialect dialect,
+                                      const Array<String>& invariants,
+                                      const char* context) {
+    for (const String& invariant : invariants) {
+        if (!PipelineInvariantValidator::IsExecutable(dialect, invariant)) {
+            throw std::invalid_argument(std::string(context) +
+                                        " contains unsupported production invariant '" +
+                                        AsString(invariant) + "'");
+        }
     }
 }
 
@@ -268,6 +387,9 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
 
     std::set<std::string> invariants =
         UniqueValues(request.initial_invariants, "initial invariants");
+    ValidateExecutableInvariantNames(request.dialect,
+                                     request.initial_invariants,
+                                     "PipelineResolver initial invariants");
     std::set<std::string> analyses =
         UniqueValues(request.initial_analyses, "initial analyses");
 
@@ -289,7 +411,7 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
     std::unordered_map<std::string, size_t> occurrences;
     for (const String& name : ordered) {
         const PassSpec& spec = PassRegistry::Global().Get(request.dialect, name);
-        ValidatePassSpec(spec);
+        PipelineInvariantValidator::ValidateProductionContract(spec);
         if (spec.scope != expected_scope) {
             throw std::invalid_argument(
                 "PipelineResolver pass scope does not match request: " +
@@ -324,6 +446,7 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
         transition.phase = spec.phase;
         transition.required = spec.required_invariants;
         transition.produced = spec.produced_invariants;
+        transition.declarative_only = spec.declarative_only_invariants;
         transition.preserved_analyses = spec.preserved_analyses;
         transition.invalidated_analyses = spec.invalidated_analyses;
         transition.invariants_before = SetToArray(invariants);
@@ -339,7 +462,10 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
             analyses.erase(AsString(invalidated));
         }
         for (const String& produced : spec.produced_invariants) {
-            invariants.insert(AsString(produced));
+            if (PipelineInvariantValidator::IsExecutable(spec.dialect,
+                                                         produced)) {
+                invariants.insert(AsString(produced));
+            }
         }
         transition.invariants_after = SetToArray(invariants);
         transition.analyses_after = SetToArray(analyses);
@@ -373,6 +499,9 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
     EnsureRegistered(pipeline.dialect);
     std::set<std::string> invariants =
         UniqueValues(pipeline.initial_invariants, "initial invariants");
+    ValidateExecutableInvariantNames(pipeline.dialect,
+                                     pipeline.initial_invariants,
+                                     "PipelineExecutor initial invariants");
     std::set<std::string> analyses =
         UniqueValues(pipeline.initial_analyses, "initial analyses");
     std::unordered_map<std::string, size_t> occurrences;
@@ -389,13 +518,15 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
             throw std::invalid_argument("PipelineExecutor step identity was tampered");
         }
         const PassSpec& spec = PassRegistry::Global().Get(step.dialect, step.pass_name);
-        ValidatePassSpec(spec);
+        PipelineInvariantValidator::ValidateProductionContract(spec);
         if (spec.scope != expected_scope || step.phase != spec.phase ||
             step.schema_version != spec.schema_version ||
             step.implementation_key != spec.implementation_key ||
             transition.pass_name != spec.name || transition.phase != spec.phase ||
             !EqualArray(transition.required, spec.required_invariants) ||
             !EqualArray(transition.produced, spec.produced_invariants) ||
+            !EqualArray(transition.declarative_only,
+                        spec.declarative_only_invariants) ||
             !EqualArray(transition.preserved_analyses, spec.preserved_analyses) ||
             !EqualArray(transition.invalidated_analyses, spec.invalidated_analyses) ||
             !EqualArray(transition.invariants_before, SetToArray(invariants)) ||
@@ -417,7 +548,10 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
             analyses.erase(AsString(invalidated));
         }
         for (const String& produced : spec.produced_invariants) {
-            invariants.insert(AsString(produced));
+            if (PipelineInvariantValidator::IsExecutable(spec.dialect,
+                                                         produced)) {
+                invariants.insert(AsString(produced));
+            }
         }
         if (!EqualArray(transition.invariants_after, SetToArray(invariants)) ||
             !EqualArray(transition.analyses_after, SetToArray(analyses))) {
@@ -433,6 +567,62 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
     }
 }
 
+bool PipelineInvariantValidator::IsExecutable(
+    IRDialect dialect, const String& invariant) {
+    return dialect == IRDialect::kRelay && AsString(invariant) == "checked_type";
+}
+
+void PipelineInvariantValidator::ValidateProductionContract(
+    const PassSpec& spec) {
+    ValidatePassSpec(spec);
+    ValidateInvariantContract(spec);
+}
+
+void PipelineInvariantValidator::ValidateRelay(
+    const Array<String>& invariants, const Function& function) {
+    if (!function.defined()) {
+        throw std::invalid_argument(
+            "Relay invariant validation requires a defined Function");
+    }
+    for (const String& invariant : invariants) {
+        const std::string name = AsString(invariant);
+        if (!IsExecutable(IRDialect::kRelay, invariant)) {
+            throw std::invalid_argument(
+                "no executable Relay invariant validator for '" + name + "'");
+        }
+        if (name == "checked_type") {
+            std::unordered_set<const Object*> visited;
+            std::vector<CheckedTypeSnapshot> snapshots;
+            if (!CollectCompleteCheckedTypes(Expr(ObjectRef(function)),
+                                             &visited, &snapshots)) {
+                throw std::runtime_error(
+                    "Relay invariant 'checked_type' is incomplete");
+            }
+            const CheckedTypeRestore restore(&snapshots);
+            (void)relay::InferTypePass(function);
+            for (const auto& [expr, type] : snapshots) {
+                if (!TypeEqual(type, expr.checked_type())) {
+                    throw std::runtime_error(
+                        "Relay invariant 'checked_type' is stale or inconsistent");
+                }
+            }
+        }
+    }
+}
+
+void PipelineInvariantValidator::ValidateTIR(
+    const Array<String>& invariants, const tir::PrimFunc& function) {
+    if (!function.defined()) {
+        throw std::invalid_argument(
+            "TIR invariant validation requires a defined PrimFunc");
+    }
+    for (const String& invariant : invariants) {
+        throw std::invalid_argument(
+            "no executable TIR invariant validator for '" +
+            AsString(invariant) + "'");
+    }
+}
+
 Function PipelineExecutor::ExecuteRelay(const NormalizedPipeline& pipeline,
                                         const Function& function,
                                         const Target& target) {
@@ -442,13 +632,13 @@ Function PipelineExecutor::ExecuteRelay(const NormalizedPipeline& pipeline,
     }
     PassContext::Scope scope(PassContext::MergeTarget(PassContext::Current(), target));
     Function current = function;
+    PipelineInvariantValidator::ValidateRelay(pipeline.initial_invariants,
+                                              current);
     for (size_t i = 0; i < pipeline.execution_steps.size(); ++i) {
         current = relay::RunRelayPassPipeline(
             current, {pipeline.execution_steps[i].pass_name});
-        if (std::string(pipeline.execution_steps[i].pass_name) == "infer_type" &&
-            !current->body.checked_type().defined()) {
-            throw std::runtime_error("PipelineExecutor infer_type did not establish checked_type");
-        }
+        PipelineInvariantValidator::ValidateRelay(
+            pipeline.invariant_transitions[i].invariants_after, current);
     }
     return current;
 }
@@ -462,8 +652,13 @@ tir::PrimFunc PipelineExecutor::ExecuteTIR(const NormalizedPipeline& pipeline,
     }
     PassContext::Scope scope(PassContext::MergeTarget(PassContext::Current(), target));
     tir::PrimFunc current = function;
-    for (const PipelineExecutionStep& step : pipeline.execution_steps) {
+    PipelineInvariantValidator::ValidateTIR(pipeline.initial_invariants,
+                                            current);
+    for (size_t i = 0; i < pipeline.execution_steps.size(); ++i) {
+        const PipelineExecutionStep& step = pipeline.execution_steps[i];
         current = tir::RunTIRPassPipeline(current, {step.pass_name});
+        PipelineInvariantValidator::ValidateTIR(
+            pipeline.invariant_transitions[i].invariants_after, current);
         const PassSpec& spec = PassRegistry::Global().Get(step.dialect, step.pass_name);
         if (spec.target_dependent) {
             const tir::CudaLaunchConfig launch = tir::GetCudaLaunchConfig(current);

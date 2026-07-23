@@ -1,5 +1,5 @@
 /*! \file test/compiler_foundation_contract_test.cpp
- * \brief Cross-track conformance tests using only frozen CoreContract v1 DTOs/fakes.
+ * \brief Cross-track conformance tests using only frozen CoreContract v2 DTOs/fakes.
  */
 
 #include <exception>
@@ -219,8 +219,8 @@ bool TestFrozenGenerationZeroPlanAndSentinelRejection() {
 }  // namespace
 
 int main() {
-    static_assert(kxc::api::kCompilerFoundationContractVersion == 1,
-                  "test consumes CoreContract v1");
+    static_assert(kxc::api::kCompilerFoundationContractVersion == 2,
+                  "test consumes CoreContract v2");
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"immutable_pin_eviction", TestImmutableHandleAndEvictionPin},
         {"singleflight_and_cancel", TestCompileRequestSingleflightAndCancellation},

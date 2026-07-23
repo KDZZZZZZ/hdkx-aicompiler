@@ -1,6 +1,11 @@
 # Device 预期模型与模块交互
 
-> 本文以 Device 子系统的目标架构和规范接口为主，并在各节明确标注当前落地状态与尚未实现边界。实施顺序见 [Device Runtime 实施计划](../.omx/plans/2026-07-17-device-runtime-roadmap.md)。
+> **历史文档／非当前事实源（HISTORICAL, NON-AUTHORITATIVE）。**
+> 本文仅保留历史设计/状态背景，不得用于证明当前 capability 或测试通过。
+> 当前事实只以 [`MODULE_GUIDE.md`](MODULE_GUIDE.md)、[`core handoff`](handoffs/compiler-foundation/core.md)、
+> 当前源码和可重复测试为准。
+>
+> 原 Device Runtime 实施计划已移除；本文中的目标接口和落地状态均按历史背景阅读。
 
 ## 1. 目标
 

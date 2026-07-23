@@ -23,6 +23,7 @@ struct CachedPrimitive final {
 
 struct PrimitiveArtifact;
 struct PrimitiveFlight;
+struct PrimitiveCacheWaitResult;
 class PrimitiveCacheLease;
 
 /*! \brief Strong immutable handle; cache eviction only removes discoverability. */
@@ -77,9 +78,13 @@ public:
     const ArtifactKey& key() const;
     const PrimitiveArtifactPin& pin() const;
     const PrimitiveFailureRecord& failure() const;
+    std::string ticket_id() const;
+    uint64_t merged_waiter_count() const;
 
 private:
     friend PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey&);
+    friend PrimitiveCacheWaitResult WaitPrimitiveCacheLeaseResult(
+        const PrimitiveCacheLease&);
     friend PrimitiveArtifactPin WaitPrimitiveCacheLease(
         const PrimitiveCacheLease&);
     friend PrimitiveArtifactPin PublishPrimitiveCacheLease(
@@ -93,6 +98,13 @@ private:
     PrimitiveArtifactPin pin_;
     PrimitiveFailureRecord failure_;
     std::shared_ptr<PrimitiveFlight> flight_;
+};
+
+struct PrimitiveCacheWaitResult final {
+    PrimitiveArtifactPin pin;
+    PrimitiveFailureRecord failure;
+
+    bool succeeded() const noexcept { return pin.defined(); }
 };
 
 struct PrimitiveCacheLimits final {
@@ -125,6 +137,8 @@ PrimitiveArtifactPin LookupPrimitiveCache(const ArtifactKey& key);
 ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin);
 
 PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey& key);
+PrimitiveCacheWaitResult WaitPrimitiveCacheLeaseResult(
+    const PrimitiveCacheLease& lease);
 PrimitiveArtifactPin WaitPrimitiveCacheLease(
     const PrimitiveCacheLease& lease);
 PrimitiveArtifactPin PublishPrimitiveCacheLease(
@@ -138,5 +152,12 @@ PrimitiveCacheStats GetPrimitiveCacheStats();
 void SetPrimitiveCacheLimitsForTesting(PrimitiveCacheLimits limits);
 void ForgetPrimitiveFailureForTesting(const ArtifactKey& key);
 void ClearPrimitiveCacheForTesting();
+
+/*! \brief Narrow bridge between opaque public transactions and compiler internals. */
+struct ProductionArtifactAccess final {
+    static ProductionArtifactCandidate Make(CachedPrimitive artifact);
+    static CachedPrimitive Copy(const ProductionArtifactCandidate& candidate);
+    static PrimitiveArtifactPin Pin(const ArtifactPin& pin);
+};
 
 }  // namespace kxc::api::internal

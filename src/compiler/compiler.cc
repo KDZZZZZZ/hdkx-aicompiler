@@ -409,16 +409,20 @@ uint64_t AccountedTIRBytes(const tir::PrimFunc& function) {
 class PrimitiveOwnerGuard final {
 public:
     explicit PrimitiveOwnerGuard(
-        const std::vector<internal::PrimitiveCacheLease>* leases)
-        : leases_(leases) {}
+        const std::vector<ProductionCompileTransaction>* transactions)
+        : transactions_(transactions) {}
 
     ~PrimitiveOwnerGuard() {
-        if (dismissed_ || leases_ == nullptr) return;
-        for (const auto& lease : *leases_) {
+        if (dismissed_ || transactions_ == nullptr) return;
+        const ProductionArtifactCacheAdapter adapter;
+        for (const auto& transaction : *transactions_) {
+            if (!transaction.owns_compile()) continue;
             try {
-                internal::FailPrimitiveCacheLease(
-                    lease, internal::PrimitiveFailureCategory::kCompile,
-                    "compile owner abandoned before publishing a validated artifact");
+                (void)adapter.Fail(
+                    transaction,
+                    CompileFailure{
+                        CompileFailureCategory::kCompile, 1000,
+                        "compile owner abandoned before publishing a validated artifact"});
             } catch (...) {
             }
         }
@@ -427,9 +431,21 @@ public:
     void Dismiss() noexcept { dismissed_ = true; }
 
 private:
-    const std::vector<internal::PrimitiveCacheLease>* leases_{nullptr};
+    const std::vector<ProductionCompileTransaction>* transactions_{nullptr};
     bool dismissed_{false};
 };
+
+internal::PrimitiveArtifactPin RequireProductionPin(
+    const CompileOutcome& outcome, const std::string& context) {
+    if (outcome.state == CompileRequestState::kReady &&
+        outcome.pin.defined()) {
+        return internal::ProductionArtifactAccess::Pin(outcome.pin);
+    }
+    const std::string diagnostic =
+        outcome.failure ? outcome.failure->diagnostic : "missing compile outcome";
+    throw std::runtime_error(context + " production cache transaction failed: " +
+                             diagnostic);
+}
 
 CompileResult BuildSignatures(const CompileResult& input) {
     std::vector<codegen::KernelSignature> signatures;
@@ -459,11 +475,12 @@ CompileResult BuildBackends(
     std::vector<std::optional<codegen::CompiledKernel>> kernel_slots(
         primitives.size());
     const std::string& pipeline_identity = contract.canonical_bytes;
-    std::vector<internal::PrimitiveCacheLease> leases;
+    const ProductionArtifactCacheAdapter cache_adapter;
+    std::vector<ProductionCompileTransaction> transactions;
     std::vector<internal::PrimitiveArtifactPin> pins(primitives.size());
     std::vector<size_t> misses;
-    leases.reserve(primitives.size());
-    PrimitiveOwnerGuard owner_guard(&leases);
+    transactions.reserve(primitives.size());
+    PrimitiveOwnerGuard owner_guard(&transactions);
     for (size_t i = 0; i < primitives.size(); ++i) {
         const PrimitiveCompileState& primitive = primitives[i];
         if (!primitive.signature) {
@@ -474,13 +491,22 @@ CompileResult BuildBackends(
             primitive.semantic_key, target, pipeline_identity,
             contract.schedule_version.c_str(),
             contract.backend_version.c_str());
-        leases.push_back(internal::AcquirePrimitiveCache(artifact_key));
-        const internal::PrimitiveCacheAccess access = leases.back().access();
-        if (access == internal::PrimitiveCacheAccess::kOwner) {
+        CompileRequest request;
+        request.artifact_key = artifact_key;
+        request.request_origin = "Compiler::Compile";
+        request.cancellation.id = "compiler-sync-" + std::to_string(i);
+        transactions.push_back(cache_adapter.Acquire(request));
+        if (transactions.back().owns_compile()) {
             misses.push_back(i);
-        } else if (access == internal::PrimitiveCacheAccess::kFailed ||
-                   access == internal::PrimitiveCacheAccess::kRejected) {
-            (void)internal::WaitPrimitiveCacheLease(leases.back());
+            continue;
+        }
+        const CompileRequestState state = transactions.back().ticket().state;
+        if (state == CompileRequestState::kFailed ||
+            state == CompileRequestState::kCancelled ||
+            state == CompileRequestState::kRejected) {
+            (void)RequireProductionPin(
+                cache_adapter.Wait(transactions.back()),
+                PrimitiveContext(primitive));
         }
     }
 
@@ -576,12 +602,17 @@ CompileResult BuildBackends(
                 PrimitiveContext(primitives[index]) +
                 " backend batch did not produce an executable");
         }
-        pins[index] = internal::PublishPrimitiveCacheLease(
-            leases[index],
-            internal::CachedPrimitive{
-                *primitives[index].signature, *metadata_slots[index],
-                *kernel_slots[index], AccountedTIRBytes(primitives[index].tir),
-                "Compiler::Compile", "signature+backend-validated"});
+        pins[index] = RequireProductionPin(
+            cache_adapter.Publish(
+                transactions[index],
+                internal::ProductionArtifactAccess::Make(
+                    internal::CachedPrimitive{
+                        *primitives[index].signature, *metadata_slots[index],
+                        *kernel_slots[index],
+                        AccountedTIRBytes(primitives[index].tir),
+                        "Compiler::Compile",
+                        "signature+backend-validated"})),
+            PrimitiveContext(primitives[index]));
     }
 
     std::vector<codegen::KernelLaunchMetadata> metadata;
@@ -592,10 +623,9 @@ CompileResult BuildBackends(
     cache_hits.reserve(primitives.size());
     for (size_t i = 0; i < primitives.size(); ++i) {
         if (!pins[i].defined()) {
-            pins[i] = leases[i].access() ==
-                              internal::PrimitiveCacheAccess::kHit
-                          ? leases[i].pin()
-                          : internal::WaitPrimitiveCacheLease(leases[i]);
+            pins[i] = RequireProductionPin(
+                cache_adapter.Wait(transactions[i]),
+                PrimitiveContext(primitives[i]));
         }
         const internal::CachedPrimitive& artifact = pins[i].artifact();
         metadata_slots[i] = artifact.launch_metadata;
@@ -603,8 +633,7 @@ CompileResult BuildBackends(
             pins[i], *primitives[i].signature, PrimitiveContext(primitives[i]));
         metadata.push_back(*metadata_slots[i]);
         kernels.push_back(*kernel_slots[i]);
-        cache_hits.push_back(leases[i].access() !=
-                             internal::PrimitiveCacheAccess::kOwner);
+        cache_hits.push_back(!transactions[i].owns_compile());
     }
     std::vector<ArtifactPin> public_pins;
     public_pins.reserve(pins.size());

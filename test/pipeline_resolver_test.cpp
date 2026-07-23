@@ -12,6 +12,7 @@
 #include "../src/compiler/internal/execution_contract.h"
 #include "kxc/compiler/pipeline.h"
 #include "kxc/relay/op.h"
+#include "kxc/relay/transforms/infer_type.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 
 namespace {
@@ -182,6 +183,47 @@ bool TestCudaScheduleIsCanonicalAndVerified() {
     return true;
 }
 
+bool TestExecutableInvariantValidationFailsClosed() {
+    using namespace kxc;
+    using namespace kxc::api;
+    PassSpec fake_pass;
+    fake_pass.name = String("fake_claims_checked_type");
+    fake_pass.dialect = IRDialect::kRelay;
+    fake_pass.scope = PassScope::kGraph;
+    fake_pass.phase = String("relay_optimize");
+    fake_pass.implementation_key = String("kxc.test.fake_claims_checked_type");
+    fake_pass.produced_invariants = {String("checked_type")};
+    PipelineInvariantValidator::ValidateProductionContract(fake_pass);
+    const Function stale_claim = relay::InferTypePass(MakeRelayFunction());
+    SetCheckedType(stale_claim->body, TensorType({5}, "float32"));
+    TEST_CHECK(
+        Throws([&] {
+            PipelineInvariantValidator::ValidateRelay(
+                fake_pass.produced_invariants, stale_claim);
+        }),
+        "a pass declaration with complete but stale types cannot prove an invariant");
+
+    PassSpec declarative = fake_pass;
+    declarative.name = String("fake_declarative_shape");
+    declarative.produced_invariants = {String("shape_solved")};
+    declarative.declarative_only_invariants = {String("shape_solved")};
+    PipelineInvariantValidator::ValidateProductionContract(declarative);
+    declarative.required_invariants = {String("shape_solved")};
+    TEST_CHECK(
+        Throws([&] {
+            PipelineInvariantValidator::ValidateProductionContract(declarative);
+        }),
+        "declarative-only metadata cannot become a production precondition");
+
+    PipelineRequest unsupported = Request(
+        IRDialect::kRelay, 0, BuildTarget(Device::CPU()));
+    unsupported.initial_invariants = {String("declarative_shape_solved")};
+    TEST_CHECK(
+        Throws([&] { (void)PipelineResolver::Resolve(unsupported); }),
+        "an invariant without an executable validator cannot be a production precondition");
+    return true;
+}
+
 bool TestCompilerArtifactIdentityUsesExecutedCanonicalPlan() {
     using namespace kxc;
     using namespace kxc::api;
@@ -239,6 +281,8 @@ int main() {
         {"explicit_infer_boundaries", TestProductionPlanHasExplicitInferBoundaries},
         {"tamper_and_undeclared_rejection", TestTamperedAndUndeclaredStepsFailClosed},
         {"cuda_schedule_execution_identity", TestCudaScheduleIsCanonicalAndVerified},
+        {"executable_invariant_fail_closed",
+         TestExecutableInvariantValidationFailsClosed},
         {"compiler_execution_artifact_identity",
          TestCompilerArtifactIdentityUsesExecutedCanonicalPlan},
         {"canonical_change_no_hidden_pass", TestCanonicalChangesAndNoHiddenCompatibilityPass},

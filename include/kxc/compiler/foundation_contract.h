@@ -14,7 +14,7 @@
 
 namespace kxc::api {
 
-inline constexpr int kCompilerFoundationContractVersion = 1;
+inline constexpr int kCompilerFoundationContractVersion = 2;
 
 enum class ArtifactLookupKind { kHit, kMiss };
 enum class CompilePriority { kPrewarm, kNormal, kUrgent };
@@ -50,8 +50,10 @@ struct ArtifactRecord final {
 };
 
 class ArtifactPin;
+class ProductionArtifactCandidate;
 namespace internal {
 class PrimitiveArtifactPin;
+struct ProductionArtifactAccess;
 ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin);
 }  // namespace internal
 
@@ -79,6 +81,7 @@ public:
 private:
     friend ArtifactPin internal::ToArtifactPin(
         const internal::PrimitiveArtifactPin& pin);
+    friend struct internal::ProductionArtifactAccess;
 
     ArtifactPin(ArtifactHandle handle, std::shared_ptr<const void> owner);
 
@@ -105,11 +108,25 @@ struct ArtifactCacheStats final {
     uint64_t active_pins{0};
 };
 
-/*! \brief Read-only view of the process-local production primitive cache. */
-class ProductionArtifactCacheAdapter final {
-public:
-    ArtifactLookup Lookup(const ArtifactKey& key) const;
-    ArtifactCacheStats stats() const;
+enum class CompilePolicyLayer {
+    kPrimitiveCacheTransaction,
+    kAdaptiveCoordinator,
+};
+
+/*! \brief Explicit ownership boundary between Core static-exact cache work and Track03. */
+struct ProductionCompileOwnership final {
+    CompilePolicyLayer exact_singleflight{
+        CompilePolicyLayer::kPrimitiveCacheTransaction};
+    CompilePolicyLayer failure_ttl{
+        CompilePolicyLayer::kPrimitiveCacheTransaction};
+    CompilePolicyLayer global_backpressure{
+        CompilePolicyLayer::kPrimitiveCacheTransaction};
+    CompilePolicyLayer asynchronous_cancellation{
+        CompilePolicyLayer::kAdaptiveCoordinator};
+    CompilePolicyLayer priority_and_budget_scheduling{
+        CompilePolicyLayer::kAdaptiveCoordinator};
+    CompilePolicyLayer dispatch_and_generation{
+        CompilePolicyLayer::kAdaptiveCoordinator};
 };
 
 struct CancellationToken final {
@@ -146,6 +163,52 @@ struct CompileTicket final {
     CompileRequestState state{CompileRequestState::kAbsent};
     uint64_t merged_waiter_count{0};
     std::optional<CompileOutcome> outcome;
+};
+
+/*! \brief Opaque validated executable candidate; only production internals create it. */
+class ProductionArtifactCandidate final {
+public:
+    ProductionArtifactCandidate() = default;
+    bool defined() const noexcept;
+
+private:
+    friend struct internal::ProductionArtifactAccess;
+    explicit ProductionArtifactCandidate(std::shared_ptr<const void> owner);
+
+    std::shared_ptr<const void> owner_;
+};
+
+/*! \brief One public waiter/owner view over an opaque production cache lease. */
+class ProductionCompileTransaction final {
+public:
+    ProductionCompileTransaction() = default;
+
+    bool defined() const noexcept;
+    bool owns_compile() const noexcept;
+    CompileTicket ticket() const;
+
+private:
+    struct Impl;
+    explicit ProductionCompileTransaction(std::shared_ptr<Impl> impl);
+
+    friend class ProductionArtifactCacheAdapter;
+    std::shared_ptr<Impl> impl_;
+};
+
+/*! \brief Static-exact adapter over the process-local production primitive cache. */
+class ProductionArtifactCacheAdapter final {
+public:
+    ProductionCompileOwnership ownership() const noexcept;
+    ArtifactLookup Lookup(const ArtifactKey& key) const;
+    ProductionCompileTransaction Acquire(const CompileRequest& request) const;
+    CompileOutcome Wait(const ProductionCompileTransaction& transaction) const;
+    CompileOutcome Wait(const ProductionCompileTransaction& transaction,
+                        const CancellationToken& cancellation) const;
+    CompileOutcome Publish(const ProductionCompileTransaction& transaction,
+                           ProductionArtifactCandidate candidate) const;
+    CompileOutcome Fail(const ProductionCompileTransaction& transaction,
+                        CompileFailure failure) const;
+    ArtifactCacheStats stats() const;
 };
 
 struct CacheObserverEvent final {
