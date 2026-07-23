@@ -228,17 +228,12 @@ CompileResult CompileResult::AfterTIROptimization(
 }
 
 CompileResult CompileResult::AfterSignatures(
-    std::vector<codegen::KernelSignature> signatures,
-    std::vector<bool> cache_hits) const {
+    std::vector<codegen::KernelSignature> signatures) const {
     const auto* current = operator->();
     RequireStage(current->stage_, CompileStage::kTIROptimized,
                  "AfterSignatures");
     if (signatures.size() != current->primitives_.size()) {
         throw std::invalid_argument("AfterSignatures primitive count changed");
-    }
-    if (cache_hits.empty()) cache_hits.resize(signatures.size(), false);
-    if (cache_hits.size() != signatures.size()) {
-        throw std::invalid_argument("AfterSignatures cache-hit count changed");
     }
     auto* next = new CompileResultNode();
     next->stage_ = CompileStage::kSignatureBuilt;
@@ -247,7 +242,6 @@ CompileResult CompileResult::AfterSignatures(
     next->primitives_ = current->primitives_;
     for (size_t i = 0; i < signatures.size(); ++i) {
         next->primitives_[i].signature = std::move(signatures[i]);
-        next->primitives_[i].cache_hit = cache_hits[i];
     }
     next->plan_ = current->plan_;
     next->constants_ = CopyConstants(current->constants_);
@@ -258,13 +252,18 @@ CompileResult CompileResult::AfterSignatures(
 
 CompileResult CompileResult::AfterBackends(
     std::vector<codegen::KernelLaunchMetadata> launch_metadata,
-    std::vector<codegen::CompiledKernel> kernels) const {
+    std::vector<codegen::CompiledKernel> kernels,
+    std::vector<bool> cache_hits) const {
     const auto* current = operator->();
     RequireStage(current->stage_, CompileStage::kSignatureBuilt,
                  "AfterBackends");
     if (launch_metadata.size() != current->primitives_.size() ||
         kernels.size() != current->primitives_.size()) {
         throw std::invalid_argument("AfterBackends primitive count changed");
+    }
+    if (cache_hits.empty()) cache_hits.resize(kernels.size(), false);
+    if (cache_hits.size() != kernels.size()) {
+        throw std::invalid_argument("AfterBackends cache-hit count changed");
     }
     auto* next = new CompileResultNode();
     next->stage_ = CompileStage::kBackendCompiled;
@@ -274,6 +273,7 @@ CompileResult CompileResult::AfterBackends(
     for (size_t i = 0; i < kernels.size(); ++i) {
         next->primitives_[i].launch_metadata = std::move(launch_metadata[i]);
         next->primitives_[i].kernel = std::move(kernels[i]);
+        next->primitives_[i].cache_hit = cache_hits[i];
     }
     next->plan_ = current->plan_;
     next->constants_ = CopyConstants(current->constants_);

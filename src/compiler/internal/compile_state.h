@@ -70,11 +70,11 @@ public:
     CompileResult AfterTIROptimization(
         std::vector<tir::PrimFunc> optimized_tir) const;
     CompileResult AfterSignatures(
-        std::vector<codegen::KernelSignature> signatures,
-        std::vector<bool> cache_hits = {}) const;
+        std::vector<codegen::KernelSignature> signatures) const;
     CompileResult AfterBackends(
         std::vector<codegen::KernelLaunchMetadata> launch_metadata,
-        std::vector<codegen::CompiledKernel> kernels) const;
+        std::vector<codegen::CompiledKernel> kernels,
+        std::vector<bool> cache_hits = {}) const;
 
     void ValidateState() const;
     CompileStage stage() const;

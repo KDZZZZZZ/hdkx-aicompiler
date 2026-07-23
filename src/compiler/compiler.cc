@@ -348,26 +348,102 @@ const char* BackendVersion(const Target& target) {
     throw std::invalid_argument("Primitive cache target has no backend version");
 }
 
-CompileResult BuildSignatures(const CompileResult& input,
-                              const CompileConfig& config) {
-    std::vector<codegen::KernelSignature> signatures;
-    std::vector<bool> cache_hits;
-    for (const PrimitiveCompileState& primitive : input.primitives()) {
-        const std::string cache_key = internal::BuildPrimitiveCacheKey(
-            String(primitive.semantic_key.digest()), input.target(), config->opt_level,
-            BackendVersion(input.target()));
-        const auto cached = internal::LookupPrimitiveCache(cache_key);
-        if (cached) {
-            if (!(cached->signature->symbol == primitive.symbol) ||
-                !cached->kernel.IsReady()) {
-                throw std::logic_error(
-                    PrimitiveContext(primitive) +
-                    " cache entry does not match its stable symbol");
-            }
-            signatures.push_back(cached->signature);
-            cache_hits.push_back(true);
-            continue;
+std::string CurrentPipelineFingerprint(const CompileConfig& config) {
+    std::ostringstream out;
+    out << "compiler-pipeline-v1|opt=" << config->opt_level << "|relay=";
+    for (const String& pass : Compiler::RelayPassPolicy(config->opt_level)) {
+        out << std::string(pass) << ',';
+    }
+    out << "|tir=";
+    for (const String& pass :
+         Compiler::TIRPassPolicy(config->opt_level, config->target)) {
+        out << std::string(pass) << ',';
+    }
+    return out.str();
+}
+
+bool SameDType(DLDataType lhs, DLDataType rhs) {
+    return lhs.code == rhs.code && lhs.bits == rhs.bits &&
+           lhs.lanes == rhs.lanes;
+}
+
+bool SameShape(const Array<int64_t>& lhs, const Array<int64_t>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i] != rhs[i]) return false;
+    }
+    return true;
+}
+
+void ValidateArtifactABI(const codegen::KernelSignature& cached,
+                         const codegen::KernelSignature& current,
+                         const std::string& context) {
+    const Array<codegen::KernelArgSpec> cached_args = cached.arguments();
+    const Array<codegen::KernelArgSpec> current_args = current.arguments();
+    if (cached_args.size() != current_args.size()) {
+        throw std::logic_error(context + " cached artifact ABI arity changed");
+    }
+    for (size_t i = 0; i < cached_args.size(); ++i) {
+        const auto& lhs = cached_args[i];
+        const auto& rhs = current_args[i];
+        if (lhs->role != rhs->role || !SameDType(lhs->dtype, rhs->dtype) ||
+            lhs->device != rhs->device || lhs->alignment != rhs->alignment ||
+            lhs->mutable_data != rhs->mutable_data ||
+            !SameShape(lhs.shape(), rhs.shape())) {
+            throw std::logic_error(context +
+                                   " cached artifact ABI contract changed");
         }
+    }
+}
+
+codegen::CompiledKernel RelocateCachedKernel(
+    const internal::PrimitiveArtifactPin& pin,
+    const codegen::KernelSignature& current_signature,
+    const std::string& context) {
+    const internal::CachedPrimitive& artifact = pin.artifact();
+    ValidateArtifactABI(artifact.signature, current_signature, context);
+    if (!artifact.kernel.IsReady() || !artifact.kernel->launcher) {
+        throw std::logic_error(context + " cached artifact is not executable");
+    }
+    return codegen::CompiledKernel(current_signature,
+                                   artifact.launch_metadata,
+                                   artifact.kernel->launcher);
+}
+
+uint64_t AccountedTIRBytes(const tir::PrimFunc& function) {
+    std::ostringstream out;
+    tir::pass::DumpPrimFunc(function, out);
+    return std::max<uint64_t>(1, static_cast<uint64_t>(out.str().size()));
+}
+
+class PrimitiveOwnerGuard final {
+public:
+    explicit PrimitiveOwnerGuard(
+        const std::vector<internal::PrimitiveCacheLease>* leases)
+        : leases_(leases) {}
+
+    ~PrimitiveOwnerGuard() {
+        if (dismissed_ || leases_ == nullptr) return;
+        for (const auto& lease : *leases_) {
+            try {
+                internal::FailPrimitiveCacheLease(
+                    lease, internal::PrimitiveFailureCategory::kCompile,
+                    "compile owner abandoned before publishing a validated artifact");
+            } catch (...) {
+            }
+        }
+    }
+
+    void Dismiss() noexcept { dismissed_ = true; }
+
+private:
+    const std::vector<internal::PrimitiveCacheLease>* leases_{nullptr};
+    bool dismissed_{false};
+};
+
+CompileResult BuildSignatures(const CompileResult& input) {
+    std::vector<codegen::KernelSignature> signatures;
+    for (const PrimitiveCompileState& primitive : input.primitives()) {
         signatures.push_back(RunPrimitiveStage(
             "build_signature", primitive, [&] {
                 const String symbol = ReadKernelSymbol(primitive.tir);
@@ -378,9 +454,8 @@ CompileResult BuildSignatures(const CompileResult& input,
                 return codegen::BuildKernelSignature(
                     primitive.tir, input.constants(), input.target(), symbol);
             }));
-        cache_hits.push_back(false);
     }
-    return input.AfterSignatures(std::move(signatures), std::move(cache_hits));
+    return input.AfterSignatures(std::move(signatures));
 }
 
 CompileResult BuildBackends(const CompileResult& input,
@@ -392,31 +467,30 @@ CompileResult BuildBackends(const CompileResult& input,
         primitives.size());
     std::vector<std::optional<codegen::CompiledKernel>> kernel_slots(
         primitives.size());
-    std::vector<std::string> cache_keys;
+    const std::string pipeline_fingerprint =
+        CurrentPipelineFingerprint(config);
+    std::vector<internal::PrimitiveCacheLease> leases;
+    std::vector<internal::PrimitiveArtifactPin> pins(primitives.size());
     std::vector<size_t> misses;
-    cache_keys.reserve(primitives.size());
+    leases.reserve(primitives.size());
+    PrimitiveOwnerGuard owner_guard(&leases);
     for (size_t i = 0; i < primitives.size(); ++i) {
         const PrimitiveCompileState& primitive = primitives[i];
         if (!primitive.signature) {
             throw std::logic_error(
                 PrimitiveContext(primitive) + " has no signature");
         }
-        cache_keys.push_back(internal::BuildPrimitiveCacheKey(
-            String(primitive.semantic_key.digest()), target, config->opt_level,
-            BackendVersion(target)));
-        if (!primitive.cache_hit) {
+        const ArtifactKey artifact_key = internal::BuildPrimitiveArtifactKey(
+            primitive.semantic_key, target, pipeline_fingerprint,
+            "per-unit-schedule-v1", BackendVersion(target));
+        leases.push_back(internal::AcquirePrimitiveCache(artifact_key));
+        const internal::PrimitiveCacheAccess access = leases.back().access();
+        if (access == internal::PrimitiveCacheAccess::kOwner) {
             misses.push_back(i);
-            continue;
+        } else if (access == internal::PrimitiveCacheAccess::kFailed ||
+                   access == internal::PrimitiveCacheAccess::kRejected) {
+            (void)internal::WaitPrimitiveCacheLease(leases.back());
         }
-        const auto cached = internal::PeekPrimitiveCache(cache_keys.back());
-        if (!cached || cached->signature.get() != primitive.signature->get() ||
-            !cached->kernel.IsReady()) {
-            throw std::logic_error(
-                PrimitiveContext(primitive) +
-                " cache entry disappeared or changed during compilation");
-        }
-        metadata_slots[i] = cached->launch_metadata;
-        kernel_slots[i] = cached->kernel;
     }
 
     if (!misses.empty() && target->kind == "llvm" &&
@@ -505,27 +579,45 @@ CompileResult BuildBackends(const CompileResult& input,
         throw std::runtime_error("Compiler Target has no matching backend");
     }
 
-    std::vector<codegen::KernelLaunchMetadata> metadata;
-    std::vector<codegen::CompiledKernel> kernels;
-    metadata.reserve(primitives.size());
-    kernels.reserve(primitives.size());
-    for (size_t i = 0; i < primitives.size(); ++i) {
-        if (!metadata_slots[i] || !kernel_slots[i]) {
+    for (size_t index : misses) {
+        if (!metadata_slots[index] || !kernel_slots[index]) {
             throw std::logic_error(
-                PrimitiveContext(primitives[i]) +
+                PrimitiveContext(primitives[index]) +
                 " backend batch did not produce an executable");
         }
-        if (!primitives[i].cache_hit) {
-            internal::StorePrimitiveCache(
-                cache_keys[i],
-                internal::CachedPrimitive{*primitives[i].signature,
-                                          *metadata_slots[i],
-                                          *kernel_slots[i]});
+        pins[index] = internal::PublishPrimitiveCacheLease(
+            leases[index],
+            internal::CachedPrimitive{
+                *primitives[index].signature, *metadata_slots[index],
+                *kernel_slots[index], AccountedTIRBytes(primitives[index].tir),
+                "Compiler::Compile", "signature+backend-validated"});
+    }
+
+    std::vector<codegen::KernelLaunchMetadata> metadata;
+    std::vector<codegen::CompiledKernel> kernels;
+    std::vector<bool> cache_hits;
+    metadata.reserve(primitives.size());
+    kernels.reserve(primitives.size());
+    cache_hits.reserve(primitives.size());
+    for (size_t i = 0; i < primitives.size(); ++i) {
+        if (!pins[i].defined()) {
+            pins[i] = leases[i].access() ==
+                              internal::PrimitiveCacheAccess::kHit
+                          ? leases[i].pin()
+                          : internal::WaitPrimitiveCacheLease(leases[i]);
         }
+        const internal::CachedPrimitive& artifact = pins[i].artifact();
+        metadata_slots[i] = artifact.launch_metadata;
+        kernel_slots[i] = RelocateCachedKernel(
+            pins[i], *primitives[i].signature, PrimitiveContext(primitives[i]));
         metadata.push_back(*metadata_slots[i]);
         kernels.push_back(*kernel_slots[i]);
+        cache_hits.push_back(leases[i].access() !=
+                             internal::PrimitiveCacheAccess::kOwner);
     }
-    return input.AfterBackends(std::move(metadata), std::move(kernels));
+    owner_guard.Dismiss();
+    return input.AfterBackends(std::move(metadata), std::move(kernels),
+                               std::move(cache_hits));
 }
 
 CompiledModule AssembleModule(
@@ -567,7 +659,7 @@ CompiledGraph CompilePipeline(Function function, CompileConfig config) {
     result = RunStage("optimize_tir", config,
                       [&] { return OptimizeTIR(result, config); });
     result = RunStage("build_signature", config,
-                      [&] { return BuildSignatures(result, config); });
+                      [&] { return BuildSignatures(result); });
     result = RunStage("build_backend", config,
                       [&] { return BuildBackends(result, config); });
 
