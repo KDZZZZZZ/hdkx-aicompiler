@@ -4,10 +4,10 @@
 
 - 上游事实基线：`dev@3b95aca188122ff52ebdb2f43d390d21273ff3e2`
 - 本轮集成分支：`integration/compiler-foundation`
-- 并行开发共同基线：`e295a73343f82a7852eeae4ba6d11e3d892adc52`
-- 基线包含两项原子提交：
-  - `f6c8d64`：项目级 compiler foundation Agent Skills。
-  - `e295a73`：架构审查与六条能力计划。
+- W0 规划共同基线：`e295a73343f82a7852eeae4ba6d11e3d892adc52`
+- W1 固定基线分支：`baseline/compiler-foundation-w1@525950a`
+- W1 已集成六条 isolated/default-off baseline，并通过 Region Task DAG OFF/ON 的 38/38 CPU CTest；详细证据见 [`../../handoffs/compiler-foundation/INTEGRATION.md`](../../handoffs/compiler-foundation/INTEGRATION.md)。
+- W2 feature branches 从 `integration/compiler-foundation@525950a` 分叉，专门处理跨轨 production adapter，不回写 W1 固定基线。
 
 `dev` 不接收并行开发中的中间状态。所有能力分支先进入
 `integration/compiler-foundation`，通过统一门禁后，才具备提交 GitHub PR 到
@@ -23,6 +23,16 @@
 | Dynamic graph / control flow | `feature/compiler-foundation-control-flow` | `hdkx-aicompiler-wt-control-flow` |
 | Region / ExecutionPlan / runtime | `feature/compiler-foundation-runtime-plan` | `hdkx-aicompiler-wt-runtime-plan` |
 | NLP / GPU validation | `feature/compiler-foundation-nlp-gpu` | `hdkx-aicompiler-wt-nlp-gpu` |
+
+W2 跨轨分支：
+
+| 能力 | 分支 | worktree |
+|---|---|---|
+| Shape production exact adapter | `feature/compiler-foundation-shape-production` | `hdkx-aicompiler-wt-shape-production` |
+| Adaptive production exact adapter | `feature/compiler-foundation-adaptive-production` | `hdkx-aicompiler-wt-adaptive-production` |
+| Control runtime adapter/executor | `feature/compiler-foundation-control-runtime` | `hdkx-aicompiler-wt-control-runtime` |
+| Runtime manifest/observability | `feature/compiler-foundation-runtime-observability` | `hdkx-aicompiler-wt-runtime-observability` |
+| Transformer operator slices | `feature/compiler-foundation-nlp-transformer` | `hdkx-aicompiler-wt-nlp-transformer` |
 
 ## 3. 开发规则
 
