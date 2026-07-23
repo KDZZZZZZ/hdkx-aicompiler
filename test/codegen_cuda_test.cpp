@@ -332,7 +332,7 @@ std::vector<float> CompileAndRunRelay(
     runtime::RunAsyncResult run_result;
     {
         api::CompiledGraph compiled = api::Compiler::Compile(
-            function, api::CompileConfig::Create(BuildTarget(device), 2));
+            function, api::CompileConfig::Create(BuildTarget(device), 3));
         runtime::RuntimeSession session(compiled.module, compiled.plan);
         const Array<runtime::ValueSpec> value_specs = compiled.plan.values();
         const auto find_value = [&](int64_t value_id) {
@@ -379,21 +379,24 @@ std::vector<float> CompileAndRunRelay(
     return result;
 }
 
-/*! \brief Compiler 必须在 CUDA 调度阶段拒绝 reduction/nested-loop Relay 图，不能暗示 device 数值支持。 */
-void TestCompilerRejectsReductionGraphs(const kxc::Device& device) {
+/*! \brief Compiler 必须在 CUDA 调度阶段拒绝 gather/reduction，不能静默回退 CPU。 */
+void TestCompilerRejectsUnsupportedTransformerGraphs(const kxc::Device& device) {
     using namespace kxc;
     const auto expect_rejection = [&device](const Function& function,
-                                            const std::string& name) {
+                                            const std::string& name,
+                                            const std::string& required_detail = "") {
         std::string diagnostic;
         try {
             (void)api::Compiler::Compile(
-                function, api::CompileConfig::Create(BuildTarget(device), 2));
+                function, api::CompileConfig::Create(BuildTarget(device), 3));
         } catch (const std::exception& error) {
             diagnostic = error.what();
         }
-        Require(diagnostic.find("BindCudaThreads") != std::string::npos,
+        Require(diagnostic.find("BindCudaThreads") != std::string::npos &&
+                    (required_detail.empty() ||
+                     diagnostic.find(required_detail) != std::string::npos),
                 "Compiler CUDA did not reject unsupported " + name +
-                    " at the reduction scheduling gate: " + diagnostic);
+                    " at the target schedule gate: " + diagnostic);
     };
 
     Var logits("logits", TensorType({1, 2}, "float32"));
@@ -406,6 +409,45 @@ void TestCompilerRejectsReductionGraphs(const kxc::Device& device) {
     Var rhs("rhs", TensorType({1, 2, 2}, "float32"));
     expect_rejection(Function({lhs, rhs}, Call(relay::Op::Get("matmul"), {lhs, rhs})),
                      "batched matmul reduction");
+
+    Var norm_data("norm_data", TensorType({2, 2}, "float32"));
+    Var norm_scale("norm_scale", TensorType({2}, "float32"));
+    Var norm_bias("norm_bias", TensorType({2}, "float32"));
+    expect_rejection(
+        Function({norm_data, norm_scale, norm_bias},
+                 Call(relay::Op::Get("nn_layer_norm"),
+                      {norm_data, norm_scale, norm_bias},
+                      relay::LayerNormAttrs::Create(-1, 1e-5f, "float64"))),
+        "LayerNorm reduction");
+
+    Var gather_data("gather_data", TensorType({4}, "float32"));
+    Var gather_indices("gather_indices", TensorType({2}, "int64"));
+    expect_rejection(
+        Function({gather_data, gather_indices},
+                 Call(relay::Op::Get("gather"), {gather_data, gather_indices},
+                      relay::GatherAttrs::Create(0))),
+        "Gather indirect load", "indirect Load index expressions");
+
+    Var condition_2d("condition_2d", TensorType({2, 2}, "bool"));
+    Var x_2d("x_2d", TensorType({2, 2}, "float32"));
+    Var y_2d("y_2d", TensorType({2, 2}, "float32"));
+    expect_rejection(
+        Function({condition_2d, x_2d, y_2d},
+                 Call(relay::Op::Get("where"), {condition_2d, x_2d, y_2d})),
+        "multi-dimensional Where");
+
+    expect_rejection(
+        Function({x_2d},
+                 Call(relay::Op::Get("slice"), {x_2d},
+                      relay::SliceAttrs::Create({0}, {1}, {1}, {1}))),
+        "multi-dimensional Slice");
+
+    Var concat_2d_rhs("concat_2d_rhs", TensorType({2, 2}, "float32"));
+    expect_rejection(
+        Function({x_2d, concat_2d_rhs},
+                 Call(relay::Op::Get("concatenate"), {x_2d, concat_2d_rhs},
+                      relay::ConcatenateAttrs::Create(1))),
+        "multi-dimensional Concatenate");
 }
 
 /*! \brief 验证 CPU Relay Constant 放置到 CUDA 后由 RuntimeSession 自动注入。 */
@@ -441,6 +483,48 @@ void TestCompilerAdd(const kxc::Device& device) {
         Require(std::fabs(actual[i] - expected[i]) < 1e-5f,
                 "Compiler CUDA add mismatch at " + std::to_string(i));
     }
+}
+
+/*! \brief 仅验证非空 1-D Where、Slice、Concatenate 的本地 CUDA 证据。 */
+void TestCompilerTransformerInjectiveOps1DNonEmpty(const kxc::Device& device) {
+    using namespace kxc;
+    const auto require_equal = [](const std::vector<float>& actual,
+                                  const std::vector<float>& expected,
+                                  const std::string& name) {
+        Require(actual.size() == expected.size(), name + " CUDA result size mismatch");
+        for (size_t i = 0; i < actual.size(); ++i) {
+            Require(std::fabs(actual[i] - expected[i]) < 1e-5f,
+                    name + " CUDA result mismatch at " + std::to_string(i));
+        }
+    };
+
+    runtime::NDArray condition = runtime::NDArray::Empty(
+        {4}, runtime::DataTypeFromString("bool"), Device::CPU());
+    const std::vector<uint8_t> condition_values{1, 0, 1, 0};
+    condition.CopyFromBytes(condition_values.data(), condition_values.size());
+    Var x("x", TensorType({4}, "float32"));
+    Var fallback("fallback", TensorType({4}, "float32"));
+    Function where_function(
+        {x, fallback},
+        Call(relay::Op::Get("where"), {Constant(condition), x, fallback}));
+    require_equal(CompileAndRunRelay(
+                      where_function, device,
+                      {{1, 2, 3, 4}, {10, 20, 30, 40}}, 4),
+                  {1, 20, 3, 40}, "Where");
+
+    Function slice_function(
+        {x}, Call(relay::Op::Get("slice"), {x},
+                  relay::SliceAttrs::Create({1}, {3}, {0}, {1})));
+    require_equal(CompileAndRunRelay(slice_function, device, {{1, 2, 3, 4}}, 2),
+                  {2, 3}, "Slice");
+
+    Var lhs("lhs", TensorType({2}, "float32"));
+    Var rhs("rhs", TensorType({2}, "float32"));
+    Function concatenate_function(
+        {lhs, rhs}, Call(relay::Op::Get("concatenate"), {lhs, rhs},
+                         relay::ConcatenateAttrs::Create(0)));
+    require_equal(CompileAndRunRelay(concatenate_function, device, {{2, 3}, {7, 8}}, 4),
+                  {2, 3, 7, 8}, "Concatenate");
 }
 
 /*! \brief 验证 Relay relu 也能经过 Compiler 与 RuntimeSession CUDA 主路径。 */
@@ -514,8 +598,10 @@ int main(int argc, char** argv) {
         std::cout << "[PASS] runtime_session_constant\n";
         TestCompilerRelu(device);
         std::cout << "[PASS] runtime_session_relu\n";
-        TestCompilerRejectsReductionGraphs(device);
-        std::cout << "[PASS] compiler_rejects_reduction_graphs\n";
+        TestCompilerTransformerInjectiveOps1DNonEmpty(device);
+        std::cout << "[PASS] runtime_session_transformer_injective_ops_1d_nonempty_local_evidence\n";
+        TestCompilerRejectsUnsupportedTransformerGraphs(device);
+        std::cout << "[PASS] compiler_rejects_gather_and_reduction_graphs\n";
     } catch (const std::exception& error) {
         std::cerr << "[FAIL] cuda_runtime: " << error.what() << '\n';
         return 1;

@@ -40,6 +40,11 @@ Call MakeDivide(Expr lhs, Expr rhs) {
     return Call(GetOp("divide"), {lhs, rhs});
 }
 
+// 构造三元 Where 调用。
+Call MakeWhere(Expr condition, Expr x, Expr y) {
+    return Call(GetOp("where"), {condition, x, y});
+}
+
 // 构造平方根调用。
 Call MakeSqrt(Expr data) {
     return Call(GetOp("sqrt"), {data});
@@ -75,6 +80,23 @@ Call MakeTranspose(Expr data, Array<int64_t> axes) {
     return Call(GetOp("transpose"), {data}, TransposeAttrs::Create(std::move(axes)));
 }
 
+// 构造 Gather 调用。
+Call MakeGather(Expr data, Expr indices, int axis) {
+    return Call(GetOp("gather"), {data, indices}, GatherAttrs::Create(axis));
+}
+
+// 构造 exact-static positive-step slice 调用。
+Call MakeSlice(Expr data, Array<int64_t> starts, Array<int64_t> ends,
+               Array<int64_t> axes, Array<int64_t> steps) {
+    return Call(GetOp("slice"), {data}, SliceAttrs::Create(
+        std::move(starts), std::move(ends), std::move(axes), std::move(steps)));
+}
+
+// 构造 exact-static binary concatenate 调用。
+Call MakeConcatenate(Expr lhs, Expr rhs, int axis) {
+    return Call(GetOp("concatenate"), {lhs, rhs}, ConcatenateAttrs::Create(axis));
+}
+
 // 构造二维卷积调用及完整布局属性。
 Call MakeNNConv2D(Expr data, Expr weight, Array<int64_t> strides,
                   Array<int64_t> padding, Array<int64_t> dilation, int groups,
@@ -90,6 +112,14 @@ Call MakeNNConv2D(Expr data, Expr weight, Array<int64_t> strides,
 // 构造全连接调用。
 Call MakeNNDense(Expr data, Expr weight, int units, std::string out_dtype) {
     return Call(GetOp("nn_dense"), {data, weight}, DenseAttrs::Create(units, std::move(out_dtype)));
+}
+
+// 构造 exact-static affine LayerNorm 调用。
+Call MakeNNLayerNorm(Expr data, Expr scale, Expr bias, int axis, double epsilon,
+                     std::string accumulation_dtype) {
+    return Call(GetOp("nn_layer_norm"), {data, scale, bias},
+                LayerNormAttrs::Create(axis, static_cast<float>(epsilon),
+                                       std::move(accumulation_dtype)));
 }
 
 // 构造 ReLU 调用。
@@ -139,6 +169,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.add").set_body(ToPackedFunc(MakeAdd));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.subtract").set_body(ToPackedFunc(MakeSubtract));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.mul").set_body(ToPackedFunc(MakeMul));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.divide").set_body(ToPackedFunc(MakeDivide));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.where").set_body(ToPackedFunc(MakeWhere));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sqrt").set_body(ToPackedFunc(MakeSqrt));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.matmul").set_body(ToPackedFunc(MakeMatmul));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.cast").set_body(ToPackedFunc(MakeCast));
@@ -146,8 +177,13 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_mean").set_body(ToPackedFunc(Make
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape").set_body(ToPackedFunc(MakeReshape));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.softmax").set_body(ToPackedFunc(MakeSoftmax));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.transpose").set_body(ToPackedFunc(MakeTranspose));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.gather").set_body(ToPackedFunc(MakeGather));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.slice").set_body(ToPackedFunc(MakeSlice));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.concatenate").set_body(ToPackedFunc(MakeConcatenate));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_conv2d").set_body(ToPackedFunc(MakeNNConv2D));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_dense").set_body(ToPackedFunc(MakeNNDense));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_layer_norm")
+    .set_body(ToPackedFunc(MakeNNLayerNorm));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_relu").set_body(ToPackedFunc(MakeNNRelu));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_max_pool2d").set_body(ToPackedFunc(MakeNNMaxPool2D));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_avg_pool2d").set_body(ToPackedFunc(MakeNNAvgPool2D));

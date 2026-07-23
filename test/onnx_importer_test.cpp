@@ -16,6 +16,7 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,14 @@
 
 #ifndef KXC_ONNX_IMPORT_PARAMS_PATH
 #define KXC_ONNX_IMPORT_PARAMS_PATH "resnet18.params.bin"
+#endif
+
+#ifndef KXC_ONNX_TRANSFORMER_JSON_PATH
+#define KXC_ONNX_TRANSFORMER_JSON_PATH "exact_transformer.import.json"
+#endif
+
+#ifndef KXC_ONNX_TRANSFORMER_PARAMS_PATH
+#define KXC_ONNX_TRANSFORMER_PARAMS_PATH "exact_transformer.params.bin"
 #endif
 
 #ifndef KXC_USE_LLVM
@@ -168,6 +177,77 @@ bool TestLoadResNet18ImportSpec() {
     return true;
 }
 
+// 从真实 ONNX protobuf 生成的 spec 必须经 reifier、LLVM Compiler 和
+// RuntimeSession 完成 exact Transformer 数值链路；该小 fixture 不使用跳过开关。
+bool TestRunExactTransformerProtobufLLVM() {
+    kxc::frontend::ImportedONNXModel imported =
+        kxc::frontend::LoadONNXImportSpec(
+            KXC_ONNX_TRANSFORMER_JSON_PATH,
+            KXC_ONNX_TRANSFORMER_PARAMS_PATH);
+    TEST_CHECK(imported.function.defined() && imported.function->params.size() == 1 &&
+                   imported.params.size() == 9 &&
+                   imported.input_names.size() == 1 &&
+                   imported.input_names[0] == "embedding_table" &&
+                   imported.output_names.size() == 1 &&
+                   imported.output_names[0] == "context",
+               "protobuf Transformer fixture must preserve importer/reifier bindings");
+    TEST_CHECK(CheckTensor(imported.function->body.checked_type(), {3, 2}, "float32"),
+               "protobuf Transformer fixture output contract mismatch");
+#if KXC_USE_LLVM
+    const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
+    const auto compiled = kxc::api::Compiler::Compile(
+        prepared, kxc::api::CompileConfig::Create(
+                      kxc::BuildTarget(kxc::Device::CPU()), 1));
+    TEST_CHECK(compiled.module.IsReady() && compiled.plan.calls().size() == 9,
+               "protobuf Transformer fixture must compile to nine LLVM units");
+
+    const std::vector<float> table_values = {1, 3, 2, 2, 4, 0, 0, 4};
+    kxc::runtime::NDArray table = kxc::runtime::NDArray::Empty(
+        {4, 2}, kxc::runtime::DataTypeFromString("float32"),
+        kxc::Device::CPU());
+    table.CopyFromBytes(table_values.data(), table.NBytes());
+    kxc::runtime::RuntimeSession session(compiled.module, compiled.plan);
+    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({table});
+    TEST_CHECK(outputs.size() == 1 && ShapeEquals(outputs[0], {3, 2}),
+               "protobuf Transformer RuntimeSession output shape mismatch");
+
+    std::vector<float> actual(6, 0.0f);
+    outputs[0].CopyToBytes(actual.data(), outputs[0].NBytes());
+    constexpr float epsilon = 1e-5f;
+    const float a = static_cast<float>(1.0 / std::sqrt(1.0 + epsilon));
+    const std::vector<float> sequence = {-a, a, -a, a, 0, 0};
+    std::vector<float> expected(6, 0.0f);
+    for (size_t row = 0; row < 3; ++row) {
+        float scores[3]{};
+        float maximum = -std::numeric_limits<float>::infinity();
+        for (size_t column = 0; column < 3; ++column) {
+            scores[column] =
+                sequence[row * 2] * sequence[column * 2] +
+                sequence[row * 2 + 1] * sequence[column * 2 + 1];
+            maximum = std::max(maximum, scores[column]);
+        }
+        float denominator = 0.0f;
+        float probabilities[3]{};
+        for (size_t column = 0; column < 3; ++column) {
+            probabilities[column] = std::exp(scores[column] - maximum);
+            denominator += probabilities[column];
+        }
+        for (size_t column = 0; column < 3; ++column) {
+            const float probability = probabilities[column] / denominator;
+            expected[row * 2] += probability * sequence[column * 2];
+            expected[row * 2 + 1] += probability * sequence[column * 2 + 1];
+        }
+    }
+    for (size_t index = 0; index < actual.size(); ++index) {
+        TEST_CHECK(std::isfinite(actual[index]) &&
+                       std::fabs(actual[index] - expected[index]) <= 3e-4f,
+                   "protobuf Transformer RuntimeSession numeric mismatch at " +
+                       std::to_string(index));
+    }
+#endif
+    return true;
+}
+
 // 验证导入的 ResNet18 可完成 Relay 到 LLVM 编译。
 bool TestCompileResNet18ToLLVM() {
 #if KXC_USE_LLVM
@@ -264,6 +344,9 @@ int main() {
         if (!TestLoadResNet18ImportSpec()) {
             return 1;
         }
+        if (!TestRunExactTransformerProtobufLLVM()) {
+            return 1;
+        }
         if (!TestCompileResNet18ToLLVM()) {
             return 1;
         }
@@ -276,8 +359,15 @@ int main() {
     }
 
     std::cout << "[PASS] onnx_importer_load_resnet18\n";
+#if KXC_USE_LLVM
+    std::cout << "[PASS] onnx_transformer_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_importer_compile_resnet18_llvm\n";
-    std::cout << "[PASS] onnx_importer_run_resnet18_llvm\n";
-    std::cout << "All ONNX importer tests passed.\n";
+    if (ShouldRunResNet18Kernel()) {
+        std::cout << "[PASS] onnx_importer_run_resnet18_llvm\n";
+    }
+#else
+    std::cout << "[SKIP] onnx_transformer_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
+#endif
+    std::cout << "All available ONNX importer tests passed.\n";
     return 0;
 }

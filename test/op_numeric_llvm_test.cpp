@@ -13,6 +13,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -46,6 +47,40 @@ void ExpectNear(const std::vector<float>& actual, const std::vector<float>& expe
                                      ", expected=" + std::to_string(expected[i]));
         }
     }
+}
+
+std::vector<float> LayerNormReference(
+    const std::vector<float>& data, size_t outer_size, size_t normalized_size,
+    const std::vector<float>& scale, const std::vector<float>& bias,
+    float epsilon) {
+    Check(data.size() == outer_size * normalized_size &&
+              scale.size() == normalized_size && bias.size() == normalized_size,
+          "LayerNorm reference shape mismatch");
+    std::vector<float> result(data.size(), 0.0f);
+    for (size_t outer = 0; outer < outer_size; ++outer) {
+        const size_t offset = outer * normalized_size;
+        double mean = 0.0;
+        for (size_t inner = 0; inner < normalized_size; ++inner) {
+            mean += static_cast<double>(data[offset + inner]);
+        }
+        mean /= static_cast<double>(normalized_size);
+        double variance = 0.0;
+        for (size_t inner = 0; inner < normalized_size; ++inner) {
+            const double centered =
+                static_cast<double>(data[offset + inner]) - mean;
+            variance += centered * centered;
+        }
+        variance /= static_cast<double>(normalized_size);
+        const double inverse_stddev =
+            1.0 / std::sqrt(variance + static_cast<double>(epsilon));
+        for (size_t inner = 0; inner < normalized_size; ++inner) {
+            result[offset + inner] = static_cast<float>(
+                (static_cast<double>(data[offset + inner]) - mean) *
+                    inverse_stddev * static_cast<double>(scale[inner]) +
+                static_cast<double>(bias[inner]));
+        }
+    }
+    return result;
 }
 
 // 精确比较整数结果向量。
@@ -376,6 +411,72 @@ void TestTranspose() {
     ExpectNear(out, {1, 4, 2, 5, 3, 6});
 }
 
+// 验证 binary concatenate 的元素顺序，以及空侧仍产生独立的 copy output。
+void TestConcatenate() {
+    kxc::Var lhs("lhs", kxc::TensorType({2, 2}, "float32"));
+    kxc::Var rhs("rhs", kxc::TensorType({2, 1}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("concatenate"), {lhs, rhs},
+                   kxc::relay::ConcatenateAttrs::Create(-1));
+    kxc::Function function({lhs, rhs}, call);
+    std::vector<float> lhs_data = {1, 2, 3, 4};
+    std::vector<float> rhs_data = {10, 20};
+    std::vector<float> output(6, 0.0f);
+    CompileAndRun("concatenate", function,
+                  {Input(lhs_data), Input(rhs_data), Output(output)});
+    ExpectNear(output, {1, 2, 10, 3, 4, 20});
+
+    kxc::Var empty("empty", kxc::TensorType({2, 0}, "float32"));
+    kxc::Var source("source", kxc::TensorType({2, 2}, "float32"));
+    kxc::Call empty_side(kxc::relay::Op::Get("concatenate"), {empty, source},
+                         kxc::relay::ConcatenateAttrs::Create(1));
+    kxc::Function empty_function({empty, source}, empty_side);
+    std::vector<float> empty_data;
+    std::vector<float> source_data = {7, 8, 9, 10};
+    std::vector<float> copied(4, 0.0f);
+    CompileAndRun("concatenate_empty_side_fresh_copy", empty_function,
+                  {Input(empty_data), Input(source_data), Output(copied)});
+    ExpectNear(copied, source_data);
+
+    kxc::Var bool_lhs("bool_lhs", kxc::TensorType({1, 2}, "bool"));
+    kxc::Var bool_rhs("bool_rhs", kxc::TensorType({1, 1}, "bool"));
+    kxc::Call bool_call(kxc::relay::Op::Get("concatenate"), {bool_lhs, bool_rhs},
+                        kxc::relay::ConcatenateAttrs::Create(1));
+    kxc::Function bool_function({bool_lhs, bool_rhs}, bool_call);
+    const std::vector<uint8_t> bool_lhs_data = {1, 0};
+    const std::vector<uint8_t> bool_rhs_data = {1};
+    std::vector<uint8_t> bool_output(3, 0);
+    CompileAndRun("concatenate_bool", bool_function,
+                  {Input(bool_lhs_data), Input(bool_rhs_data), Output(bool_output)});
+    Check(bool_output == std::vector<uint8_t>({1, 0, 1}),
+          "bool concatenate must preserve byte-backed boolean values");
+}
+
+// 验证 Slice 的正步长、identity copy 和空输出数值路径。
+void TestSlice() {
+    kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("slice"), {data},
+                   kxc::relay::SliceAttrs::Create({-2}, {100}, {-1}, {1}));
+    kxc::Function function({data}, call);
+    std::vector<float> source = {1, 2, 3, 4, 5, 6};
+    std::vector<float> output(4, 0.0f);
+    CompileAndRun("slice", function, {Input(source), Output(output)});
+    ExpectNear(output, {2, 3, 5, 6});
+
+    kxc::Call identity(kxc::relay::Op::Get("slice"), {data},
+                       kxc::relay::SliceAttrs::Create({0}, {3}, {1}, {1}));
+    kxc::Function identity_function({data}, identity);
+    std::vector<float> copied(6, 0.0f);
+    CompileAndRun("slice_identity_fresh_copy", identity_function,
+                  {Input(source), Output(copied)});
+    ExpectNear(copied, source);
+
+    kxc::Call empty(kxc::relay::Op::Get("slice"), {data},
+                    kxc::relay::SliceAttrs::Create({2}, {1}, {1}, {1}));
+    kxc::Function empty_function({data}, empty);
+    std::vector<float> empty_output;
+    CompileAndRun("slice_empty", empty_function, {Input(source), Output(empty_output)});
+}
+
 // 验证 ReduceMean 的轴和 keepdims 语义。
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
@@ -414,6 +515,195 @@ void TestSoftmax() {
         }
     }
     ExpectNear(out, expected);
+}
+
+// 验证 Gather 的正负合法索引、越界零填充和 INT64_MIN 防溢出语义。
+void TestGather() {
+    kxc::Var data("data", kxc::TensorType({4}, "float32"));
+    kxc::Var indices("indices", kxc::TensorType({5}, "int64"));
+    kxc::Call call(kxc::relay::Op::Get("gather"), {data, indices},
+                   kxc::relay::GatherAttrs::Create(0));
+    kxc::Function func({data, indices}, call);
+
+    std::vector<float> data_buf = {10, 20, 30, 40};
+    std::vector<int64_t> indices_buf = {0, -1, 4, -5,
+                                        std::numeric_limits<int64_t>::min()};
+    std::vector<float> out(5, 0.0f);
+    CompileAndRun("gather", func, {Input(data_buf), Input(indices_buf), Output(out)});
+    ExpectNear(out, {10, 40, 0, 0, 0});
+
+    kxc::Var empty_data("empty_data", kxc::TensorType({0}, "float32"));
+    kxc::Var empty_indices("empty_indices", kxc::TensorType({3}, "int64"));
+    kxc::Call empty_call(kxc::relay::Op::Get("gather"),
+                         {empty_data, empty_indices},
+                         kxc::relay::GatherAttrs::Create(0));
+    kxc::Function empty_func({empty_data, empty_indices}, empty_call);
+    std::vector<float> empty_data_buf;
+    std::vector<int64_t> empty_indices_buf = {0, -1,
+                                              std::numeric_limits<int64_t>::min()};
+    std::vector<float> empty_out(3, 1.0f);
+    CompileAndRun("gather_zero_axis_extent", empty_func,
+                  {Input(empty_data_buf), Input(empty_indices_buf), Output(empty_out)});
+    ExpectNear(empty_out, {0, 0, 0});
+}
+
+// 验证 ONNX Where 的 byte-backed bool condition、scalar/rank broadcast 和分支选择。
+void TestWhere() {
+    kxc::Var condition("condition", kxc::TensorType({2, 1}, "bool"));
+    kxc::Var x("x", kxc::TensorType({}, "float32"));
+    kxc::Var y("y", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("where"), {condition, x, y});
+    kxc::Function func({condition, x, y}, call);
+
+    const std::vector<uint8_t> condition_data = {1, 0};
+    const std::vector<float> x_data = {10};
+    const std::vector<float> y_data = {1, 2, 3};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("where", func,
+                  {Input(condition_data), Input(x_data), Input(y_data), Output(out)});
+    ExpectNear(out, {10, 10, 10, 1, 2, 3});
+
+    kxc::runtime::NDArray constant_condition = kxc::runtime::NDArray::Empty(
+        {2, 1}, kxc::runtime::DataTypeFromString("bool"), kxc::Device::CPU());
+    constant_condition.CopyFromBytes(condition_data.data(), condition_data.size());
+    kxc::Var bool_x("bool_x", kxc::TensorType({1, 3}, "bool"));
+    kxc::Var bool_y("bool_y", kxc::TensorType({2, 1}, "bool"));
+    kxc::Call bool_call(kxc::relay::Op::Get("where"),
+                        {kxc::Constant(constant_condition), bool_x, bool_y});
+    kxc::Function bool_func({bool_x, bool_y}, bool_call);
+    const std::vector<uint8_t> bool_x_data = {1, 0, 1};
+    const std::vector<uint8_t> bool_y_data = {0, 1};
+    std::vector<uint8_t> bool_out(6, 0);
+    CompileAndRun("where_bool_constant", bool_func,
+                  {Input(bool_x_data), Input(bool_y_data), Output(bool_out)});
+    Check(bool_out == std::vector<uint8_t>({1, 0, 1, 1, 1, 1}),
+          "Where bool Constant/branch result mismatch");
+}
+
+// 验证 LayerNorm 的常量行、微小方差行和仿射参数语义。
+void TestLayerNorm() {
+    kxc::Var data("data", kxc::TensorType({2, 4}, "float32"));
+    kxc::Var scale("scale", kxc::TensorType({4}, "float32"));
+    kxc::Var bias("bias", kxc::TensorType({4}, "float32"));
+    constexpr float epsilon = 1e-5f;
+    kxc::Call call(kxc::relay::Op::Get("nn_layer_norm"), {data, scale, bias},
+                   kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float64"));
+    kxc::Function func({data, scale, bias}, call);
+
+    const std::vector<float> data_buf = {
+        5.0f, 5.0f, 5.0f, 5.0f,
+        1.0f, 1.0001f, 0.9999f, 1.0002f,
+    };
+    const std::vector<float> scale_buf = {1.5f, -2.0f, 0.5f, 3.0f};
+    const std::vector<float> bias_buf = {0.25f, -0.5f, 1.0f, 2.0f};
+    std::vector<float> out(8, 0.0f);
+    CompileAndRun("nn_layer_norm", func,
+                  {Input(data_buf), Input(scale_buf), Input(bias_buf), Output(out)});
+
+    ExpectNear(out, LayerNormReference(
+                        data_buf, 2, 4, scale_buf, bias_buf, epsilon),
+               2e-4f);
+
+    kxc::Var suffix_data("suffix_data", kxc::TensorType({2, 2, 2}, "float32"));
+    kxc::Var suffix_scale("suffix_scale", kxc::TensorType({2, 2}, "float32"));
+    kxc::Var suffix_bias("suffix_bias", kxc::TensorType({2, 2}, "float32"));
+    kxc::Call suffix_call(
+        kxc::relay::Op::Get("nn_layer_norm"),
+        {suffix_data, suffix_scale, suffix_bias},
+        kxc::relay::LayerNormAttrs::Create(1, epsilon, "float64"));
+    kxc::Function suffix_func({suffix_data, suffix_scale, suffix_bias}, suffix_call);
+    const std::vector<float> suffix_data_buf = {1, 2, 3, 4, 2, 4, 6, 8};
+    const std::vector<float> suffix_scale_buf = {1, -2, 0.5f, 3};
+    const std::vector<float> suffix_bias_buf = {0.25f, -0.5f, 1, -1};
+    std::vector<float> suffix_out(8, 0.0f);
+    CompileAndRun("nn_layer_norm_suffix", suffix_func,
+                  {Input(suffix_data_buf), Input(suffix_scale_buf),
+                   Input(suffix_bias_buf), Output(suffix_out)});
+    ExpectNear(suffix_out, LayerNormReference(
+                               suffix_data_buf, 2, 4, suffix_scale_buf,
+                               suffix_bias_buf, epsilon),
+               2e-4f);
+
+    kxc::Var extreme_data("extreme_data", kxc::TensorType({1, 2}, "float32"));
+    kxc::Var extreme_scale("extreme_scale", kxc::TensorType({2}, "float32"));
+    kxc::Var extreme_bias("extreme_bias", kxc::TensorType({2}, "float32"));
+    kxc::Function extreme_function(
+        {extreme_data, extreme_scale, extreme_bias},
+        kxc::Call(kxc::relay::Op::Get("nn_layer_norm"),
+                  {extreme_data, extreme_scale, extreme_bias},
+                  kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float64")));
+    const float maximum = std::numeric_limits<float>::max();
+    const std::vector<float> extreme_values = {maximum, maximum};
+    const std::vector<float> extreme_scale_values = {1.0f, 1.0f};
+    const std::vector<float> extreme_bias_values = {0.25f, -0.5f};
+    std::vector<float> extreme_out(2, 0.0f);
+    CompileAndRun("nn_layer_norm_float_max_constant", extreme_function,
+                  {Input(extreme_values), Input(extreme_scale_values),
+                   Input(extreme_bias_values), Output(extreme_out)});
+    ExpectNear(extreme_out, extreme_bias_values, 0.0f);
+
+    const float offset = std::numeric_limits<float>::max() / 8.0f;
+    std::vector<float> offset_values(4, offset);
+    for (size_t index = 1; index < offset_values.size(); ++index) {
+        offset_values[index] = std::nextafter(
+            offset_values[index - 1], std::numeric_limits<float>::infinity());
+    }
+    kxc::Var offset_data("offset_data", kxc::TensorType({1, 4}, "float32"));
+    kxc::Var offset_scale("offset_scale", kxc::TensorType({4}, "float32"));
+    kxc::Var offset_bias("offset_bias", kxc::TensorType({4}, "float32"));
+    kxc::Function offset_function(
+        {offset_data, offset_scale, offset_bias},
+        kxc::Call(kxc::relay::Op::Get("nn_layer_norm"),
+                  {offset_data, offset_scale, offset_bias},
+                  kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float64")));
+    const std::vector<float> offset_scale_values(4, 1.0f);
+    const std::vector<float> offset_bias_values(4, 0.0f);
+    std::vector<float> offset_out(4, 0.0f);
+    CompileAndRun("nn_layer_norm_huge_offset", offset_function,
+                  {Input(offset_values), Input(offset_scale_values),
+                   Input(offset_bias_values), Output(offset_out)});
+    ExpectNear(offset_out, LayerNormReference(
+                               offset_values, 1, 4, offset_scale_values,
+                               offset_bias_values, epsilon),
+               2e-4f);
+
+    kxc::Var axis_zero_data("axis_zero_data", kxc::TensorType({2, 2}, "float32"));
+    kxc::Var axis_zero_scale("axis_zero_scale", kxc::TensorType({2, 2}, "float32"));
+    kxc::Var axis_zero_bias("axis_zero_bias", kxc::TensorType({2, 2}, "float32"));
+    kxc::Function axis_zero_function(
+        {axis_zero_data, axis_zero_scale, axis_zero_bias},
+        kxc::Call(kxc::relay::Op::Get("nn_layer_norm"),
+                  {axis_zero_data, axis_zero_scale, axis_zero_bias},
+                  kxc::relay::LayerNormAttrs::Create(0, epsilon, "float64")));
+    const std::vector<float> axis_zero_values = {1, 2, 4, 8};
+    const std::vector<float> axis_zero_scale_values = {1, 2, 3, 4};
+    const std::vector<float> axis_zero_bias_values = {0.5f, 1, 1.5f, 2};
+    std::vector<float> axis_zero_out(4, 0.0f);
+    CompileAndRun("nn_layer_norm_axis_zero", axis_zero_function,
+                  {Input(axis_zero_values), Input(axis_zero_scale_values),
+                   Input(axis_zero_bias_values), Output(axis_zero_out)});
+    ExpectNear(axis_zero_out, LayerNormReference(
+                                  axis_zero_values, 1, 4,
+                                  axis_zero_scale_values, axis_zero_bias_values,
+                                  epsilon),
+               2e-4f);
+
+    kxc::Var empty_prefix_data("empty_prefix_data",
+                               kxc::TensorType({0, 2}, "float32"));
+    kxc::Var empty_prefix_scale("empty_prefix_scale",
+                                kxc::TensorType({2}, "float32"));
+    kxc::Var empty_prefix_bias("empty_prefix_bias",
+                               kxc::TensorType({2}, "float32"));
+    kxc::Function empty_prefix_function(
+        {empty_prefix_data, empty_prefix_scale, empty_prefix_bias},
+        kxc::Call(kxc::relay::Op::Get("nn_layer_norm"),
+                  {empty_prefix_data, empty_prefix_scale, empty_prefix_bias},
+                  kxc::relay::LayerNormAttrs::Create(1, epsilon, "float64")));
+    std::vector<float> empty_prefix_out;
+    CompileAndRun("nn_layer_norm_empty_prefix", empty_prefix_function,
+                  {Input(std::vector<float>{}), Input(extreme_scale_values),
+                   Input(std::vector<float>{0.0f, 0.0f}),
+                   Output(empty_prefix_out)});
 }
 
 // 验证 Cast 的目标 dtype 与数值转换。
@@ -494,6 +784,76 @@ void TestModelCNN() {
     ExpectNear(out, {10, 20});
 }
 
+// 最小 exact-static Transformer operator slice：embedding、norm、select、slice/concat、attention。
+// 该 fixture 不包含 KV cache、dynamic batching 或动态 shape 语义。
+void TestModelExactTransformerOperatorSlice() {
+    kxc::Var embedding_table("embedding_table", kxc::TensorType({4, 2}, "float32"));
+    kxc::Var token_ids("token_ids", kxc::TensorType({2}, "int64"));
+    kxc::Var condition("condition", kxc::TensorType({2, 1}, "bool"));
+    kxc::Var fallback("fallback", kxc::TensorType({1, 2}, "float32"));
+    kxc::Var scale("scale", kxc::TensorType({2}, "float32"));
+    kxc::Var bias("bias", kxc::TensorType({2}, "float32"));
+
+    kxc::Call embedded(kxc::relay::Op::Get("gather"), {embedding_table, token_ids},
+                       kxc::relay::GatherAttrs::Create(0));
+    constexpr float epsilon = 1e-5f;
+    kxc::Call normalized(kxc::relay::Op::Get("nn_layer_norm"), {embedded, scale, bias},
+                         kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float64"));
+    kxc::Call selected(kxc::relay::Op::Get("where"),
+                       {condition, normalized, fallback});
+    kxc::Call prefix(kxc::relay::Op::Get("slice"), {selected},
+                     kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1}));
+    kxc::Call sequence(kxc::relay::Op::Get("concatenate"), {prefix, selected},
+                       kxc::relay::ConcatenateAttrs::Create(0));
+    kxc::Call keys(kxc::relay::Op::Get("transpose"), {sequence},
+                   kxc::relay::TransposeAttrs::Create({1, 0}));
+    kxc::Call scores(kxc::relay::Op::Get("matmul"), {sequence, keys});
+    kxc::Call weights(kxc::relay::Op::Get("softmax"), {scores},
+                      kxc::relay::SoftmaxAttrs::Create(-1));
+    kxc::Call context(kxc::relay::Op::Get("matmul"), {weights, sequence});
+    kxc::Function function(
+        {embedding_table, token_ids, condition, fallback, scale, bias}, context);
+
+    const std::vector<float> table_data = {1, 3, 2, 2, 4, 0, 0, 4};
+    const std::vector<int64_t> token_data = {0, 2};
+    const std::vector<uint8_t> condition_data = {1, 0};
+    const std::vector<float> fallback_data = {0, 0};
+    const std::vector<float> scale_data = {1, 1};
+    const std::vector<float> bias_data = {0, 0};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun(
+        "model_exact_transformer_operator_slice", function,
+        {Input(table_data), Input(token_data), Input(condition_data),
+         Input(fallback_data), Input(scale_data), Input(bias_data), Output(out)});
+
+    const float a = 1.0f / std::sqrt(1.0f + epsilon);
+    const std::vector<float> sequence_data = {-a, a, -a, a, 0, 0};
+    std::vector<float> expected(6, 0.0f);
+    for (size_t row = 0; row < 3; ++row) {
+        float row_max = -std::numeric_limits<float>::infinity();
+        float scores_data[3]{};
+        for (size_t column = 0; column < 3; ++column) {
+            scores_data[column] =
+                sequence_data[row * 2] * sequence_data[column * 2] +
+                sequence_data[row * 2 + 1] * sequence_data[column * 2 + 1];
+            row_max = std::max(row_max, scores_data[column]);
+        }
+        float denominator = 0.0f;
+        float probabilities[3]{};
+        for (size_t column = 0; column < 3; ++column) {
+            probabilities[column] = std::exp(scores_data[column] - row_max);
+            denominator += probabilities[column];
+        }
+        for (size_t column = 0; column < 3; ++column) {
+            probabilities[column] /= denominator;
+            expected[row * 2] += probabilities[column] * sequence_data[column * 2];
+            expected[row * 2 + 1] +=
+                probabilities[column] * sequence_data[column * 2 + 1];
+        }
+    }
+    ExpectNear(out, expected, 3e-4f);
+}
+
 // 精确静态 causal prefill attention：batched MatMul、有限加性 mask、稳定 softmax、batched MatMul。
 void TestModelPrefillExactAttention() {
     kxc::Var query("query", kxc::TensorType({1, 2, 2}, "float32"));
@@ -567,12 +927,18 @@ int main() {
         {"nn_flatten", TestFlatten},
         {"reshape", TestReshape},
         {"transpose", TestTranspose},
+        {"concatenate", TestConcatenate},
+        {"slice", TestSlice},
         {"reduce_mean", TestReduceMean},
         {"softmax", TestSoftmax},
+        {"gather", TestGather},
+        {"where", TestWhere},
+        {"nn_layer_norm", TestLayerNorm},
         {"cast", TestCast},
         {"model_add_chain", TestModelAddChain},
         {"model_mlp", TestModelMLP},
         {"model_cnn", TestModelCNN},
+        {"model_exact_transformer_operator_slice", TestModelExactTransformerOperatorSlice},
         {"model_prefill_exact_attention", TestModelPrefillExactAttention},
         {"model_decode_external_kv", TestModelDecodeExternalKV},
     };

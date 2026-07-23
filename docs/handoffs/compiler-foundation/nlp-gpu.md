@@ -1,5 +1,10 @@
 # Compiler Foundation NLP/GPU 验证轨交接
 
+> **历史文档：** 本页记录早期 `nlp-gpu` 基线，其中“Gather/Where 未实现”等语句
+> 不再是 HEAD 能力声明。当前终审 contract 以
+> [`nlp-transformer.md`](nlp-transformer.md)、[`../../ONNX_IMPORTER.md`](../../ONNX_IMPORTER.md)
+> 和机器矩阵为准。
+>
 > **分支：** `feature/compiler-foundation-nlp-gpu`
 > **基线：** `e295a73343f82a7852eeae4ba6d11e3d892adc52`
 > **验证日期：** 2026-07-23

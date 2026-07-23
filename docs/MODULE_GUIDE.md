@@ -69,7 +69,7 @@ ctest --test-dir out/build/cpu --output-on-failure --label-regex '(^|;)cpu(;|$)'
 `cpu` 标签包括所有已构建的 CPU/core C++ executables、Relay/pass contract、
 include-layer 和 public-header compile 检查。`cuda_schedule_test` 在该集合中仅
 验证合成 CUDA Target 的结构契约，不查询或启动 CUDA 硬件。LLVM 数值/codegen 与
-CUDA/CUPTI 硬件测试分别带有 `llvm` 与 `cuda;hardware` 标签，CPU-only job 不运行它们。
+CUDA/CUPTI 硬件测试分别带有 `llvm` 与 `cuda;hardware` 标签，CPU-only job 不运行它们。`codegen_cuda_test` 另带 `local-evidence`：该标签仅定位非空 1-D source fixture；没有提交的 GPU run artifact 时不能升级为 `validated`；多维 Where/Slice/Concat 与 Gather/reduction 仍 fail closed。
 
 ## 当前 closure 状态
 
@@ -79,7 +79,7 @@ CUDA/CUPTI 硬件测试分别带有 `llvm` 与 `cuda;hardware` 标签，CPU-only
 - [x] public `ProductionArtifactCacheAdapter` transaction/singleflight 接入真实 primitive cache，并保活 production pin
 - [x] normalized pipeline 在每步后执行已证明 invariant 的 validator
 - [x] 本地 CPU CTest、contract、include/public-header：27/27
-- [x] LLVM workflow 包含 relocation/cache、codegen、numeric、ONNX compile
+- [x] LLVM workflow 包含 relocation/cache、codegen、numeric，以及真实 ONNX protobuf -> Python serializer -> C++ reifier -> LLVM RuntimeSession 数值链路
 - [ ] LLVM-enabled builder 实际绿色记录与目标后端逐项批准（本机/当前会话无 LLVM 记录）
 
 历史 Adaptive Runtime、fuzzy cache、旧目录名和“whole graph 是主链”的说明均不再是

@@ -13,6 +13,7 @@ Type AddInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SubtractInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type MultiplyInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type DivideInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type UnarySameInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type CastInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type MatMulInferType(const Attrs& attrs, const Array<Type>& input_types);
@@ -24,7 +25,11 @@ Type GlobalAvgPool2DInferType(const Attrs& attrs, const Array<Type>& input_types
 Type FlattenInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type SliceInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type LayerNormInferType(const Attrs& attrs, const Array<Type>& input_types);
 }  // namespace relay
 }  // namespace kxc

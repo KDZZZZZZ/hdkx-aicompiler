@@ -4,6 +4,9 @@
 
 #include "kxc/te/topi/transform.h"
 
+#include <limits>
+#include <stdexcept>
+
 namespace kxc {
 namespace te {
 namespace topi {
@@ -111,85 +114,85 @@ Tensor squeeze(const Tensor& x, Array<int> axes , std::string name , std::string
     );
 }
 
-Tensor concatenate(const Array<Tensor>& inputs, int axis , std::string name , std::string tag ){
+Tensor concatenate(const Array<Tensor>& inputs, int axis, std::string name, std::string tag) {
     if (inputs.empty()) {
         throw std::runtime_error("topi::concatenate expects at least one input tensor");
     }
-    
-    size_t ndim = inputs[0]->shape.size();
-    if (axis < 0) axis += (int)ndim;
-    
-    Array<PrimExpr> output_shape = inputs[0]->shape;
-    PrimExpr axis_len = 0;
-    for (const auto& t : inputs) {
-        axis_len = axis_len + t->shape[axis];
+    if (!inputs[0].defined()) {
+        throw std::runtime_error("topi::concatenate input tensor is undefined");
     }
-    output_shape[axis] = axis_len;
-    
+    const size_t rank = inputs[0]->shape.size();
+    if (rank == 0) {
+        throw std::runtime_error("topi::concatenate requires rank >= 1 inputs");
+    }
+    if (axis < 0) axis += static_cast<int>(rank);
+    if (axis < 0 || axis >= static_cast<int>(rank)) {
+        throw std::runtime_error("topi::concatenate axis out of range");
+    }
+
+    Array<int64_t> axis_extents;
+    Array<PrimExpr> output_shape;
+    for (const PrimExpr& extent : inputs[0]->shape) output_shape.push_back(extent);
+    int64_t axis_total = 0;
+    for (const Tensor& input : inputs) {
+        if (!input.defined()) {
+            throw std::runtime_error("topi::concatenate input tensor is undefined");
+        }
+        if (input->shape.size() != rank) {
+            throw std::runtime_error("topi::concatenate input rank mismatch");
+        }
+        if (input->dtype != inputs[0]->dtype) {
+            throw std::runtime_error("topi::concatenate input dtype mismatch");
+        }
+        for (size_t index = 0; index < rank; ++index) {
+            const auto* extent = input->shape[index].As<tir::IntImmNode>();
+            const auto* reference = inputs[0]->shape[index].As<tir::IntImmNode>();
+            if (!extent || !reference || extent->value < 0 || reference->value < 0) {
+                throw std::runtime_error("topi::concatenate requires static non-negative input dimensions");
+            }
+            if (static_cast<int>(index) != axis && extent->value != reference->value) {
+                throw std::runtime_error("topi::concatenate non-axis dimensions must exactly match");
+            }
+            if (static_cast<int>(index) == axis) {
+                if (axis_total > std::numeric_limits<int64_t>::max() - extent->value) {
+                    throw std::runtime_error("topi::concatenate axis extent sum overflows int64");
+                }
+                axis_total += extent->value;
+                axis_extents.push_back(extent->value);
+            }
+        }
+    }
+    output_shape[static_cast<size_t>(axis)] =
+        tir::IntImm(axis_total, tir::DataType::Int(64));
+
     return compute(
         output_shape,
-        [&](const Array<tir::Var>& indices) {
-            // Logic: Iterate inputs, check range.
-            // Since we can't easily do recursive Select in generic lambda without fold,
-            // we'll build the Select chain manually.
-            
-            PrimExpr current_idx = indices[axis];
-            PrimExpr ret; // Initialized to last one or default
-            
-            PrimExpr offset = 0;
-            
-            // Reverse iteration to build Select(cond, val, else_val)
-            // But we need to know offsets.
-            // Let's do forward and accumulate offsets.
-            // Actually, best to do it recursively or loop.
-            // We want: if (idx < s0) t0(idx) else if (idx < s0+s1) t1(idx-s0) ...
-            
-            // To build this as expression:
-            // Select(idx < s0, t0(...), Select(idx < s0+s1, t1(...), ...))
-            
-            // We need to construct the expression.
-            // Last fallback: last tensor (or 0 if out of bound, but assuming valid).
-            
-            // Let's pre-calculate offsets if they are constant?
-            // Even if symbolic, we can chain Add.
-            
-            // We need to start from the last one to wrap.
-            // inputs[N-1]
-            // Unused last_indices removed
-            
-            // This is getting complicated for symbolic offsets in a loop.
-            // Let's build a vector of cumulative offsets first.
+        [inputs, axis, axis_extents](const Array<tir::Var>& indices) {
             Array<PrimExpr> offsets;
-            offsets.push_back(0);
-            for (size_t i = 0; i < inputs.size() - 1; ++i) {
-                // offsets.back() works on Array? No, need operator[] or back()
-                // Array has operator[].
-                offsets.push_back(offsets[offsets.size()-1] + inputs[i]->shape[axis]);
+            offsets.push_back(tir::IntImm(0, tir::DataType::Int(64)));
+            for (size_t i = 1; i < inputs.size(); ++i) {
+                offsets.push_back(offsets[i - 1] +
+                                  tir::IntImm(axis_extents[i - 1], tir::DataType::Int(64)));
             }
-            
-            // Now build from back
-            size_t n = inputs.size();
-            // Start with last tensor
-            Array<PrimExpr> idx_n; 
-            for(auto v : indices) idx_n.push_back(v);
-            // Use operator[] for mutable update
-            idx_n[axis] = idx_n[axis] - offsets[n-1];
-            ret = inputs[n-1](idx_n);
-            
-            for (int i = (int)n - 2; i >= 0; --i) {
-                Array<PrimExpr> idx_i;
-                for(auto v : indices) idx_i.push_back(v);
-                idx_i[axis] = idx_i[axis] - offsets[i];
-                
-                PrimExpr cond = indices[axis] < (offsets[i] + inputs[i]->shape[axis]);
-                ret = Select(cond, inputs[i](idx_i), ret);
+            Array<PrimExpr> last_indices;
+            for (const tir::Var& value : indices) last_indices.push_back(value);
+            last_indices[static_cast<size_t>(axis)] =
+                last_indices[static_cast<size_t>(axis)] - offsets[inputs.size() - 1];
+            PrimExpr result = inputs[inputs.size() - 1](last_indices);
+            for (int i = static_cast<int>(inputs.size()) - 2; i >= 0; --i) {
+                Array<PrimExpr> input_indices;
+                for (const tir::Var& value : indices) input_indices.push_back(value);
+                input_indices[static_cast<size_t>(axis)] =
+                    input_indices[static_cast<size_t>(axis)] - offsets[static_cast<size_t>(i)];
+                const PrimExpr limit = offsets[static_cast<size_t>(i)] +
+                    tir::IntImm(axis_extents[static_cast<size_t>(i)], tir::DataType::Int(64));
+                // Select is lowered lazily, so a zero-extent branch never evaluates its Load.
+                result = Select(indices[static_cast<size_t>(axis)] < limit,
+                                inputs[static_cast<size_t>(i)](input_indices), result);
             }
-            
-            return ret;
+            return result;
         },
-        name,
-        tag
-    );
+        name, tag);
 }
 
 }  // namespace topi

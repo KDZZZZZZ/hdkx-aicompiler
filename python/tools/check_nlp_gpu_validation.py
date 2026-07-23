@@ -21,10 +21,14 @@ VALIDATED = {
     ("decode_external_kv", "numeric"),
     ("kv_cache", "numeric"),
 }
+CUDA_LOCAL_EVIDENCE_GATES = {
+    "mask_select": "cuda_where_1d_nonempty_local_evidence",
+    "slice_concat": "cuda_slice_concat_1d_nonempty_local_evidence",
+}
 DYNAMIC_BATCHING_GATES = {
     "frontend": "unresolved_onnx_rank_or_dims_rejected",
     "relay": "unknown_extents_representable_not_executable",
-    "lowering": "negative_static_extents_rejected",
+    "lowering": "static_lowering_size_contract",
     "runtime": "no_dynamic_execution_plan",
 }
 IMPLEMENTED = {
@@ -39,6 +43,32 @@ IMPLEMENTED = {
     ("batched_matmul", "llvm"),
     ("batched_matmul", "runtime"),
     ("batched_matmul", "numeric"),
+    ("embedding_gather", "frontend"),
+    ("embedding_gather", "relay"),
+    ("embedding_gather", "lowering"),
+    ("embedding_gather", "llvm"),
+    ("embedding_gather", "runtime"),
+    ("embedding_gather", "numeric"),
+    ("mask_select", "frontend"),
+    ("mask_select", "relay"),
+    ("mask_select", "lowering"),
+    ("mask_select", "llvm"),
+    ("mask_select", "runtime"),
+    ("mask_select", "numeric"),
+    ("mask_select", "cuda"),
+    ("normalization", "frontend"),
+    ("normalization", "relay"),
+    ("normalization", "lowering"),
+    ("normalization", "llvm"),
+    ("normalization", "runtime"),
+    ("normalization", "numeric"),
+    ("slice_concat", "frontend"),
+    ("slice_concat", "relay"),
+    ("slice_concat", "lowering"),
+    ("slice_concat", "llvm"),
+    ("slice_concat", "runtime"),
+    ("slice_concat", "numeric"),
+    ("slice_concat", "cuda"),
     ("prefill_exact", "relay"),
     ("prefill_exact", "lowering"),
     ("prefill_exact", "llvm"),
@@ -198,15 +228,34 @@ def validate_matrix(root, matrix):
             if not isinstance(record["reason"], str) or not record["reason"]:
                 raise ValidationError("matrix.{}.{} reason is invalid".format(capability, layer))
             check_evidence(root, record["evidence"], "matrix.{}.{}".format(capability, layer))
-            if layer == "cuda" and record["status"] != "unsupported":
+            if layer == "cuda" and record["status"] == "validated":
+                raise ValidationError(
+                    "matrix.{}.cuda cannot be promoted to validated by text-only evidence".format(
+                        capability
+                    )
+                )
+            if (layer == "cuda" and capability not in CUDA_LOCAL_EVIDENCE_GATES and
+                    record["status"] != "unsupported"):
                 raise ValidationError("matrix.{}.cuda must remain closed".format(capability))
             if layer == "llvm" and record["status"] == "validated":
                 raise ValidationError("matrix.{}.llvm must not claim unrun local validation".format(capability))
-    for capability in ("stable_softmax", "batched_matmul", "prefill_exact",
-                       "decode_external_kv"):
+    for capability in ("stable_softmax", "batched_matmul", "normalization",
+                       "prefill_exact", "decode_external_kv"):
         cuda = matrix["capabilities"][capability]["cuda"]
         if cuda["gate"] != "cuda_reduction_unsupported":
             raise ValidationError("{} CUDA reduction gate is not closed".format(capability))
+    for capability, gate in CUDA_LOCAL_EVIDENCE_GATES.items():
+        cuda = matrix["capabilities"][capability]["cuda"]
+        if cuda["status"] != "implemented" or cuda["gate"] != gate:
+            raise ValidationError(
+                "{} CUDA record must remain implemented/local-evidence only".format(
+                    capability
+                )
+            )
+    gather_cuda = matrix["capabilities"]["embedding_gather"]["cuda"]
+    if (gather_cuda["status"] != "unsupported" or
+            gather_cuda["gate"] != "cuda_indirect_load_schedule_unsupported"):
+        raise ValidationError("embedding_gather CUDA indirect-load gate is open or inaccurate")
     for layer, gate in DYNAMIC_BATCHING_GATES.items():
         dynamic = matrix["capabilities"]["dynamic_batching"][layer]
         if dynamic["status"] != "unsupported" or dynamic["gate"] != gate:
@@ -436,7 +485,7 @@ def run_references(fixtures, matrix, manifests):
     cuda = matrix["capabilities"]["stable_softmax"]["cuda"]
     if cuda["status"] != "unsupported" or cuda["gate"] != "cuda_reduction_unsupported":
         raise ValidationError("CUDA reduction unsupported gate is open")
-    print("PASS negative gates unknown-symbolic/all-masked/capacity/CUDA/fingerprint")
+    print("PASS negative gates unknown-symbolic/all-masked/capacity/gather-reduction-CUDA/fingerprint")
 
 
 def main():
@@ -459,7 +508,7 @@ def main():
     validate_manifests(fixture_document["fixtures"], manifests)
     print("PASS schemas, fingerprints, and evidence")
     run_references(fixture_document["fixtures"], matrix, manifests)
-    print("PASS NLP reference and capability gate; no GPU execution validated")
+    print("PASS NLP reference/capability gate; injective CUDA local evidence only, gather/reductions closed")
 
 
 if __name__ == "__main__":

@@ -264,6 +264,23 @@ public:
     static SoftmaxAttrs Create(int axis);
 };
 
+/*! \brief nn.layer_norm axis, float32 epsilon, and float64 internal accumulation. */
+class LayerNormAttrsNode : public BaseAttrsNode {
+public:
+    int axis = -1;
+    float epsilon = 1e-5f;
+    std::string accumulation_dtype = "float64";
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class LayerNormAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(LayerNormAttrs, LayerNormAttrsNode)
+
+public:
+    static LayerNormAttrs Create(int axis = -1, float epsilon = 1e-5f,
+                                 std::string accumulation_dtype = "float64");
+};
+
 KXC_DEFINE_SIMPLE_ATTRS(AddAttrs)
 
 /*! \brief cast 的目标 dtype 编码属性。 */
@@ -322,6 +339,52 @@ class TransposeAttrs : public Attrs {
 
 public:
     static TransposeAttrs Create(Array<int64_t> perm);
+};
+
+/*! \brief gather 的数据轴属性。 */
+class GatherAttrsNode : public BaseAttrsNode {
+public:
+    int axis = 0;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class GatherAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(GatherAttrs, GatherAttrsNode)
+
+public:
+    static GatherAttrs Create(int axis = 0);
+};
+
+/*! \brief concatenate 的拼接轴属性。 */
+class ConcatenateAttrsNode : public BaseAttrsNode {
+public:
+    int axis = 0;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ConcatenateAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ConcatenateAttrs, ConcatenateAttrsNode)
+
+public:
+    static ConcatenateAttrs Create(int axis = 0);
+};
+
+/*! \brief exact-static ONNX/Python positive-step slice attributes. */
+class SliceAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> starts;
+    Array<int64_t> ends;
+    Array<int64_t> axes;
+    Array<int64_t> steps;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class SliceAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(SliceAttrs, SliceAttrsNode)
+
+public:
+    static SliceAttrs Create(Array<int64_t> starts, Array<int64_t> ends,
+                             Array<int64_t> axes, Array<int64_t> steps);
 };
 
 KXC_DEFINE_SIMPLE_ATTRS(ReluAttrs)

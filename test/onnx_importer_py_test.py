@@ -268,6 +268,336 @@ def test_matmul_rejects_declared_output_mismatch():
         )
 
 
+def _gather_model(data_shape, indices_shape, *, axis=0, indices_dtype=TensorProto.INT64,
+                  indices_values=None, dynamic_indices=False, node_outputs=("out",),
+                  output_shape=(1,), output_dtype=TensorProto.FLOAT):
+    value_count = 1
+    for extent in indices_shape:
+        value_count *= extent
+    if indices_values is None:
+        indices_values = [0] * value_count
+    graph_inputs = [helper.make_tensor_value_info("data", TensorProto.FLOAT, data_shape)]
+    initializers = []
+    if dynamic_indices:
+        graph_inputs.append(
+            helper.make_tensor_value_info("indices", indices_dtype, indices_shape)
+        )
+    else:
+        initializers.append(
+            helper.make_tensor(
+                "indices", indices_dtype, indices_shape, list(indices_values)
+            )
+        )
+    graph = helper.make_graph(
+        [helper.make_node("Gather", ["data", "indices"], node_outputs,
+                          name="gather", axis=axis)],
+        "gather_test",
+        graph_inputs,
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+        initializer=initializers,
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6
+    )
+
+
+def test_gather_mapping_and_inferred_output_contract():
+    imported = import_onnx_model(
+        _gather_model([2, 3, 4], [5, 6], axis=1, output_shape=[2, 5, 6, 4])
+    )
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("gather", {"axis": 1}),
+    ]
+    assert imported.function.outputs[0].shape == [2, 5, 6, 4]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_gather_rejects_non_integer_or_duplicate_axis_attribute():
+    with pytest.raises(ValueError, match="axis.*exact INT type"):
+        import_onnx_model(_gather_model([2, 3], [1], axis=0.5))
+
+    model = _gather_model([2, 3], [1], axis=0)
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="duplicate attribute 'axis'"):
+        import_onnx_model(model)
+
+
+def test_gather_rejects_unknown_attribute():
+    model = _gather_model([2, 3], [1], axis=0)
+    model.graph.node[0].attribute.extend([helper.make_attribute("unknown", 1)])
+    with pytest.raises(ValueError, match="unsupported attribute"):
+        import_onnx_model(model)
+
+
+def test_gather_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(
+            _gather_model([2, 3, 4], [5, 6], axis=1, output_shape=[2, 5, 4])
+        )
+
+
+def test_gather_rejects_dynamic_indices_and_empty_output_name():
+    with pytest.raises(ValueError, match="initializer-backed constant indices"):
+        import_onnx_model(_gather_model(
+            [2, 3], [1], axis=1, dynamic_indices=True, output_shape=[2, 1]
+        ))
+    with pytest.raises(ValueError, match="exactly one non-empty output"):
+        import_onnx_model(_gather_model(
+            [2, 3], [1], axis=1, node_outputs=("",), output_shape=[2, 1]
+        ))
+
+
+@pytest.mark.parametrize("indices_dtype", [TensorProto.INT32, TensorProto.INT64])
+def test_gather_accepts_constant_index_domain_boundaries(indices_dtype):
+    imported = import_onnx_model(_gather_model(
+        [2, 3], [2], axis=1, indices_dtype=indices_dtype,
+        indices_values=[-3, 2], output_shape=[2, 2]
+    ))
+
+    assert imported.function.nodes[0].inputs == ["data", "indices"]
+
+
+@pytest.mark.parametrize("bad_index", [3, -4, -(2**63)])
+def test_gather_rejects_constant_out_of_domain_indices(bad_index):
+    with pytest.raises(ValueError, match="outside the ONNX domain"):
+        import_onnx_model(_gather_model(
+            [2, 3], [1], axis=1, indices_values=[bad_index], output_shape=[2, 1]
+        ))
+
+
+def test_gather_accepts_empty_constant_indices():
+    imported = import_onnx_model(_gather_model(
+        [2, 3], [0], axis=1, indices_values=[], output_shape=[2, 0]
+    ))
+
+    assert imported.function.outputs[0].shape == [2, 0]
+
+
+@pytest.mark.parametrize(
+    ("data_shape", "indices_dtype", "axis", "message"),
+    [
+        ([], TensorProto.INT64, 0, "data rank >= 1"),
+        ([2, 3], TensorProto.FLOAT, 0, "int32 or int64 indices"),
+        ([2, 3], TensorProto.INT64, 2, "axis 2 is out of range"),
+        ([-1, 3], TensorProto.INT64, 1, "non-negative static dimensions"),
+    ],
+)
+def test_gather_rejects_invalid_static_contract(data_shape, indices_dtype, axis, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(
+            _gather_model(data_shape, [1], axis=axis, indices_dtype=indices_dtype)
+        )
+
+
+def _concat_model(
+    lhs_shape,
+    rhs_shape,
+    output_shape,
+    *,
+    axis=0,
+    lhs_dtype=TensorProto.FLOAT,
+    rhs_dtype=None,
+    output_dtype=None,
+    node_inputs=("lhs", "rhs"),
+    include_axis=True,
+):
+    rhs_dtype = lhs_dtype if rhs_dtype is None else rhs_dtype
+    output_dtype = lhs_dtype if output_dtype is None else output_dtype
+    attrs = {"axis": axis} if include_axis else {}
+    graph = helper.make_graph(
+        [helper.make_node("Concat", node_inputs, ["out"], name="concat", **attrs)],
+        "concat_test",
+        [
+            helper.make_tensor_value_info("lhs", lhs_dtype, lhs_shape),
+            helper.make_tensor_value_info("rhs", rhs_dtype, rhs_shape),
+            helper.make_tensor_value_info("extra", lhs_dtype, lhs_shape),
+        ],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6
+    )
+
+
+@pytest.mark.parametrize(
+    ("lhs_shape", "rhs_shape", "axis", "output_shape"),
+    [
+        ([2, 2], [2, 3], 1, [2, 5]),
+        ([2, 2], [2, 3], -1, [2, 5]),
+    ],
+)
+def test_concat_maps_positive_and_negative_axis(
+    lhs_shape, rhs_shape, axis, output_shape
+):
+    imported = import_onnx_model(_concat_model(lhs_shape, rhs_shape, output_shape, axis=axis))
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("concatenate", {"axis": axis}),
+    ]
+    assert imported.function.outputs[0].shape == output_shape
+
+
+@pytest.mark.parametrize(
+    ("lhs_shape", "rhs_shape", "output_shape"),
+    [
+        ([2, 0], [2, 3], [2, 3]),
+        ([2, 0], [2, 0], [2, 0]),
+    ],
+)
+def test_concat_preserves_empty_side_and_empty_output(lhs_shape, rhs_shape, output_shape):
+    imported = import_onnx_model(_concat_model(lhs_shape, rhs_shape, output_shape, axis=1))
+
+    assert imported.function.outputs[0].shape == output_shape
+
+
+def test_concat_bool_dtype_maps_and_infers_output():
+    imported = import_onnx_model(
+        _concat_model([1, 2], [1, 1], [1, 3], axis=1, lhs_dtype=TensorProto.BOOL)
+    )
+
+    assert imported.function.outputs[0].dtype == "bool"
+
+
+def test_concat_rejects_non_integer_axis_attribute():
+    with pytest.raises(ValueError, match="axis.*exact INT type"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], axis=1.5))
+
+
+def test_concat_requires_explicit_axis():
+    with pytest.raises(ValueError, match="exactly the axis attribute"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], include_axis=False))
+
+
+def test_concat_rejects_rank_zero_and_out_of_range_axis():
+    with pytest.raises(ValueError, match="rank >= 1"):
+        import_onnx_model(_concat_model([], [], [], axis=0))
+    with pytest.raises(ValueError, match="axis 2 is out of range"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], axis=2))
+
+
+@pytest.mark.parametrize("node_inputs", [("lhs",), ("lhs", "rhs", "extra"), ("lhs", "")])
+def test_concat_requires_exactly_two_nonempty_inputs(node_inputs):
+    with pytest.raises(ValueError, match="exactly two non-empty inputs"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], node_inputs=node_inputs))
+
+
+@pytest.mark.parametrize(
+    ("lhs_shape", "rhs_shape", "rhs_dtype", "message"),
+    [
+        ([2, 2], [2, 3], TensorProto.INT32, "matching input dtypes"),
+        ([2, 2], [2, 3, 1], TensorProto.FLOAT, "input ranks must match"),
+        ([2, 2], [3, 3], TensorProto.FLOAT, "non-axis dimensions must exactly match"),
+    ],
+)
+def test_concat_rejects_dtype_rank_and_nonaxis_mismatches(
+    lhs_shape, rhs_shape, rhs_dtype, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(
+            _concat_model(lhs_shape, rhs_shape, [2, 5], axis=1, rhs_dtype=rhs_dtype)
+        )
+
+
+def test_concat_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_concat_model([2, 2], [2, 3], [2, 4], axis=1))
+
+
+def test_concat_rejects_unsupported_dtype():
+    with pytest.raises(ValueError, match="Unsupported ONNX tensor dtype"):
+        import_onnx_model(
+            _concat_model(
+                [2, 2], [2, 3], [2, 5], axis=1, lhs_dtype=TensorProto.FLOAT16
+            )
+        )
+
+
+def _where_model(condition_shape, x_shape, y_shape, *, condition_dtype=TensorProto.BOOL,
+                 x_dtype=TensorProto.FLOAT, y_dtype=TensorProto.FLOAT,
+                 output_shape=(1,), output_dtype=TensorProto.FLOAT):
+    graph = helper.make_graph(
+        [helper.make_node("Where", ["condition", "x", "y"], ["out"], name="where")],
+        "where_test",
+        [helper.make_tensor_value_info("condition", condition_dtype, condition_shape),
+         helper.make_tensor_value_info("x", x_dtype, x_shape),
+         helper.make_tensor_value_info("y", y_dtype, y_shape)],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6
+    )
+
+
+def test_where_mapping_and_joint_broadcast_output_contract():
+    imported = import_onnx_model(
+        _where_model([2, 1, 1], [], [1, 3, 4], output_shape=[2, 3, 4])
+    )
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("where", {}),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3, 4]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_where_rejects_attributes():
+    model = _where_model([2, 1], [2, 3], [2, 3], output_shape=[2, 3])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+def test_where_preserves_broadcast_zero_extent():
+    imported = import_onnx_model(
+        _where_model([0, 1], [1, 3], [0, 3], output_shape=[0, 3])
+    )
+
+    assert imported.function.outputs[0].shape == [0, 3]
+
+
+def test_where_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(
+            _where_model([2, 1], [], [1, 3], output_shape=[2, 2])
+        )
+
+
+def test_where_rejects_unsupported_initializer_branch_dtype():
+    graph = helper.make_graph(
+        [helper.make_node("Where", ["condition", "x", "y"], ["out"], name="where")],
+        "where_float16_initializer_test",
+        [helper.make_tensor_value_info("condition", TensorProto.BOOL, [2, 1])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+        initializer=[
+            helper.make_tensor("x", TensorProto.FLOAT16, [], [1.0]),
+            helper.make_tensor("y", TensorProto.FLOAT16, [1, 3], [1.0, 2.0, 3.0]),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6)
+
+    with pytest.raises(ValueError, match="branch dtypes"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize(
+    ("condition_shape", "x_shape", "y_shape", "condition_dtype", "x_dtype", "y_dtype", "message"),
+    [
+        ([2, 1], [], [1, 3], TensorProto.UINT8, TensorProto.FLOAT, TensorProto.FLOAT, "bool condition"),
+        ([2, 1], [], [1, 3], TensorProto.BOOL, TensorProto.FLOAT, TensorProto.INT32, "matching x/y dtypes"),
+        ([2, 2], [2, 3], [2, 3], TensorProto.BOOL, TensorProto.FLOAT, TensorProto.FLOAT, "incompatible broadcast dimensions"),
+    ],
+)
+def test_where_rejects_invalid_static_contract(
+    condition_shape, x_shape, y_shape, condition_dtype, x_dtype, y_dtype, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(
+            _where_model(condition_shape, x_shape, y_shape,
+                         condition_dtype=condition_dtype, x_dtype=x_dtype, y_dtype=y_dtype)
+        )
+
+
 def test_matmul_softmax_transpose_mapping_and_attrs():
     model = _static_operator_model(
         [
@@ -348,6 +678,264 @@ def test_unsupported_op_error_includes_op_type_and_node_name():
 
     with pytest.raises(UnsupportedONNXOpError, match="Identity.*bad_identity"):
         import_onnx_model(model, default_batch=1)
+
+
+def _layer_normalization_model(
+    data_shape=(2, 3, 4),
+    scale_shape=(3, 4),
+    bias_shape=(3, 4),
+    *,
+    data_dtype=TensorProto.FLOAT,
+    scale_dtype=TensorProto.FLOAT,
+    bias_dtype=TensorProto.FLOAT,
+    output_shape=None,
+    output_dtype=TensorProto.FLOAT,
+    axis=1,
+    epsilon=1e-5,
+    stash_type=None,
+    extra_attrs=None,
+    node_inputs=None,
+    node_outputs=None,
+    opset=17,
+):
+    node_inputs = ["data", "scale", "bias"] if node_inputs is None else node_inputs
+    node_outputs = ["out"] if node_outputs is None else node_outputs
+    attrs = {"axis": axis, "epsilon": epsilon}
+    if stash_type is not None:
+        attrs["stash_type"] = stash_type
+    if extra_attrs is not None:
+        attrs.update(extra_attrs)
+    graph = helper.make_graph(
+        [helper.make_node("LayerNormalization", node_inputs, node_outputs,
+                          name="layer_norm", **attrs)],
+        "layer_norm_test",
+        [helper.make_tensor_value_info("data", data_dtype, data_shape),
+         helper.make_tensor_value_info("scale", scale_dtype, scale_shape),
+         helper.make_tensor_value_info("bias", bias_dtype, bias_shape)],
+        [helper.make_tensor_value_info(
+            "out", output_dtype, data_shape if output_shape is None else output_shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6
+    )
+
+
+def test_layer_normalization_maps_exact_static_float32_contract():
+    imported = import_onnx_model(_layer_normalization_model(axis=-2, epsilon=0.125))
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("nn_layer_norm", {
+            "axis": -2,
+            "epsilon": pytest.approx(0.125),
+            "accumulation_dtype": "float64",
+        }),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3, 4]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+@pytest.mark.parametrize("opset", [1, 16])
+def test_layer_normalization_before_opset17_is_rejected(opset):
+    with pytest.raises(UnsupportedONNXOpError, match=rf"LayerNormalization opset {opset}.*>= 17"):
+        import_onnx_model(_layer_normalization_model(opset=opset))
+
+
+@pytest.mark.parametrize(
+    ("node_inputs", "message"),
+    [
+        (["data", "scale"], "exactly three non-empty inputs"),
+        (["data", "scale", "bias", "extra"], "exactly three non-empty inputs"),
+        (["data", "scale", ""], "exactly three non-empty inputs"),
+    ],
+)
+def test_layer_normalization_rejects_missing_or_extra_inputs(node_inputs, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_layer_normalization_model(node_inputs=node_inputs))
+
+
+@pytest.mark.parametrize("node_outputs", [["out"], ["out", ""], ["out", "", ""]])
+def test_layer_normalization_accepts_omitted_optional_output_slots(node_outputs):
+    imported = import_onnx_model(_layer_normalization_model(node_outputs=node_outputs))
+
+    assert imported.function.nodes[0].outputs == ["out"]
+
+
+@pytest.mark.parametrize(
+    ("node_outputs", "message"),
+    [
+        ([], "requires Y and at most two empty optional output slots"),
+        ([""], "requires Y and at most two empty optional output slots"),
+        (["out", "mean"], "non-empty Mean or InvStdDev"),
+        (["out", "", "inv_std"], "non-empty Mean or InvStdDev"),
+        (["out", "", "", ""], "requires Y and at most two empty optional output slots"),
+    ],
+)
+def test_layer_normalization_rejects_requested_or_malformed_optional_outputs(
+    node_outputs, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_layer_normalization_model(node_outputs=node_outputs))
+
+
+@pytest.mark.parametrize("stash_type", [0, 2])
+def test_layer_normalization_rejects_non_float32_stash_type(stash_type):
+    with pytest.raises(ValueError, match="stash_type default/1"):
+        import_onnx_model(_layer_normalization_model(stash_type=stash_type))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"axis": 1.5}, "axis.*exact INT type"),
+        ({"epsilon": 1}, "epsilon.*exact FLOAT type"),
+        ({"stash_type": 1.0}, "stash_type.*exact INT type"),
+    ],
+)
+def test_layer_normalization_rejects_malformed_attribute_types(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_layer_normalization_model(**kwargs))
+
+
+def test_layer_normalization_rejects_unsupported_attribute():
+    with pytest.raises(ValueError, match="unsupported attribute"):
+        import_onnx_model(_layer_normalization_model(extra_attrs={"unsupported": 1}))
+
+
+def test_layer_normalization_rejects_non_float32_input_dtype():
+    with pytest.raises(ValueError, match="requires float32 data, scale, and bias"):
+        import_onnx_model(_layer_normalization_model(scale_dtype=TensorProto.INT32))
+
+
+@pytest.mark.parametrize(
+    ("data_shape", "scale_shape", "bias_shape", "message"),
+    [
+        ([], (), (), "data rank >= 1"),
+        ((2, 3, 4), (4,), (3, 4), "scale and bias shapes must exactly equal"),
+        ((2, 0, 4), (0, 4), (0, 4), "normalized suffix dimensions must be > 0"),
+    ],
+)
+def test_layer_normalization_rejects_invalid_static_shapes(
+    data_shape, scale_shape, bias_shape, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_layer_normalization_model(data_shape, scale_shape, bias_shape))
+
+
+@pytest.mark.parametrize("axis", [3, -4])
+def test_layer_normalization_rejects_out_of_range_axis(axis):
+    with pytest.raises(ValueError, match="axis .* is out of range"):
+        import_onnx_model(_layer_normalization_model(axis=axis))
+
+
+@pytest.mark.parametrize("epsilon", [0.0, -1e-5, float("inf"), float("nan")])
+def test_layer_normalization_rejects_nonpositive_or_nonfinite_epsilon(epsilon):
+    with pytest.raises(ValueError, match="epsilon must be finite and > 0"):
+        import_onnx_model(_layer_normalization_model(epsilon=epsilon))
+
+
+@pytest.mark.parametrize(
+    ("output_shape", "output_dtype"),
+    [
+        ((2, 3, 5), TensorProto.FLOAT),
+        ((2, 3, 4), TensorProto.DOUBLE),
+    ],
+)
+def test_layer_normalization_rejects_declared_output_mismatch(output_shape, output_dtype):
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(
+            _layer_normalization_model(output_shape=output_shape, output_dtype=output_dtype)
+        )
+
+
+def _slice_model(data_shape=(2, 3), *, starts=(-2,), ends=(99,), axes=(-1,), steps=(1,),
+                 parameter_dtype=TensorProto.INT64, parameter_dtypes=None,
+                 output_shape=(2, 2), output_dtype=TensorProto.FLOAT,
+                 opset=13, dynamic_params=False):
+    initializer = []
+    parameter_inputs = []
+    parameter_dtypes = {} if parameter_dtypes is None else parameter_dtypes
+    values = {"starts": starts, "ends": ends, "axes": axes, "steps": steps}
+    for name, value in values.items():
+        if value is None:
+            continue
+        dtype = parameter_dtypes.get(name, parameter_dtype)
+        if dynamic_params:
+            parameter_inputs.append(helper.make_tensor_value_info(name, dtype, [len(value)]))
+        else:
+            initializer.append(helper.make_tensor(name, dtype, [len(value)], list(value)))
+    node_inputs = ["data", "starts", "ends"]
+    if axes is not None:
+        node_inputs.append("axes")
+    elif steps is not None:
+        node_inputs.append("")
+    if steps is not None:
+        node_inputs.append("steps")
+    graph = helper.make_graph(
+        [helper.make_node("Slice", node_inputs, ["out"], name="slice")], "slice_test",
+        [helper.make_tensor_value_info("data", TensorProto.FLOAT, data_shape)] + parameter_inputs,
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)], initializer=initializer,
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6)
+
+
+def test_slice_initializer_mapping_clamping_and_int32_int64():
+    for dtype in (TensorProto.INT32, TensorProto.INT64):
+        imported = import_onnx_model(_slice_model(parameter_dtype=dtype))
+        assert [(node.op_name, node.inputs, node.attrs) for node in imported.function.nodes] == [
+            ("slice", ["data"], {"starts": [-2], "ends": [99], "axes": [-1], "steps": [1]})
+        ]
+        assert imported.function.outputs[0].shape == [2, 2]
+
+
+def test_slice_rejects_mixed_control_initializer_integer_widths():
+    with pytest.raises(ValueError, match="one consistent int32 or int64 dtype"):
+        import_onnx_model(_slice_model(
+            parameter_dtype=TensorProto.INT32,
+            parameter_dtypes={"ends": TensorProto.INT64},
+        ))
+
+
+def test_slice_omitted_axes_and_steps_are_canonicalized():
+    imported = import_onnx_model(_slice_model(starts=(0, -99), ends=(1, 99), axes=None,
+                                               steps=None, output_shape=(1, 3)))
+    assert imported.function.nodes[0].attrs == {
+        "starts": [0, -99], "ends": [1, 99], "axes": [0, 1], "steps": [1, 1]
+    }
+
+
+def test_slice_steps_can_use_an_empty_optional_axes_slot():
+    imported = import_onnx_model(_slice_model(starts=(0, 0), ends=(2, 3), axes=None,
+                                               steps=(1, 1), output_shape=(2, 3)))
+    assert imported.function.nodes[0].attrs == {
+        "starts": [0, 0], "ends": [2, 3], "axes": [0, 1], "steps": [1, 1]
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"opset": 9}, "opset 9"),
+        ({"dynamic_params": True}, "must be a static initializer"),
+        ({"data_shape": (), "output_shape": ()}, "data rank >= 1"),
+        ({"output_dtype": TensorProto.DOUBLE}, "declaration.*does not match inferred"),
+        ({"starts": (), "ends": (), "axes": (), "steps": (), "output_shape": (2, 3)}, "nonempty rank-1"),
+        ({"starts": (0,), "ends": (1, 2), "axes": (0,), "steps": (1,)}, "lengths must match"),
+        ({"starts": (0, 0), "ends": (1, 1), "axes": (0, 0), "steps": (1, 1)}, "unique and in range"),
+        ({"axes": (2,)}, "unique and in range"),
+        ({"steps": (0,)}, "equal exactly +1"),
+        ({"steps": (-1,)}, "equal exactly +1"),
+        ({"steps": (2,)}, "equal exactly +1"),
+    ],
+)
+def test_slice_rejects_exact_static_contract_violations(kwargs, message):
+    with pytest.raises((ValueError, UnsupportedONNXOpError), match=message):
+        import_onnx_model(_slice_model(**kwargs))
+
+
+def test_slice_int64_min_is_clamped_without_overflow():
+    imported = import_onnx_model(_slice_model(starts=(-2**63,), ends=(2**63 - 1,),
+                                               output_shape=(2, 3)))
+    assert imported.function.outputs[0].shape == [2, 3]
 
 
 def onnx_import_metadata(path: Path) -> dict:

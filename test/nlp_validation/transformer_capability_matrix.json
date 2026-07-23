@@ -211,59 +211,65 @@
     },
     "embedding_gather": {
       "frontend": {
-        "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "status": "implemented",
+        "gate": "constant_in_range_gather_axis_output_contract",
+        "reason": "ONNX Gather requires initializer-backed int32/int64 indices, validates every value in [-extent, extent-1], maps axis, and checks declared output shape/dtype; dynamic or OOB indices fail closed.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py",
+          "test/onnx_import_spec_contract_test.cpp"
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "status": "implemented",
+        "gate": "static_rank_axis_indices_contract",
+        "reason": "Relay normalizes axis, requires rank >= 1 data and int32/int64 indices, and infers inserted index dimensions.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "status": "implemented",
+        "gate": "static_gather_zero_fill",
+        "reason": "TE lowering accepts static non-negative axis extents and deterministically zero-fills out-of-domain indices.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/op/tensor/transform.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "llvm_gather_numeric_test_not_run_local",
+        "reason": "LLVM numeric coverage exercises valid positive/negative indices, OOB zero-fill, INT64_MIN, and zero axis extent; local LLVM is unavailable.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "cuda": {
         "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
+        "gate": "cuda_indirect_load_schedule_unsupported",
+        "reason": "The generic CUDA schedule rejects Gather's indirect Load index before backend execution; no device numeric support is claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/codegen_cuda_test.cpp",
+          "test/compiler_capability_test.cpp",
+          "test/cuda_schedule_test.cpp"
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "reference_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "status": "implemented",
+        "gate": "llvm_gather_numeric_test_not_run_local",
+        "reason": "The conditional LLVM numeric test uses Compiler and RuntimeSession; local LLVM is unavailable.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "numeric": {
-        "status": "unsupported",
-        "gate": "no_numeric_gate",
-        "reason": "No numeric fixture in Phase A.",
+        "status": "implemented",
+        "gate": "llvm_gather_numeric_test_not_run_local",
+        "reason": "Expected Gather values cover the deterministic KXC zero-fill extension, but local LLVM execution was not run.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "profile": {
@@ -277,61 +283,66 @@
     },
     "mask_select": {
       "frontend": {
-        "status": "unsupported",
-        "gate": "onnx_mask_ops_unsupported",
-        "reason": "ONNX Where and dedicated attention-mask import are not implemented; the exact fixture supplies a finite additive mask tensor explicitly.",
+        "status": "implemented",
+        "gate": "onnx_where_static_contract",
+        "reason": "ONNX Where imports only resolved static bool condition and matching supported branch dtypes with joint broadcast/output validation; this does not define masked-softmax or all-masked behavior.",
         "evidence": [
           "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py",
           "docs/ONNX_IMPORTER.md"
         ]
       },
       "relay": {
-        "status": "unsupported",
-        "gate": "no_mask_select_operator",
-        "reason": "No dedicated mask/select Relay operator or all-masked-row semantic contract exists.",
+        "status": "implemented",
+        "gate": "where_bool_supported_branch_dtype_broadcast",
+        "reason": "Relay Where requires bool condition and same branch dtype in {float32,float64,int32,int64,int8,uint8,bool}, then infers joint trailing-axis broadcast; it does not define masked-softmax or all-masked behavior.",
         "evidence": [
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp",
           "test/relay_op_contract.json"
         ]
       },
       "lowering": {
-        "status": "unsupported",
-        "gate": "no_mask_select_lowering",
-        "reason": "No dedicated mask/select lowering exists; finite additive masking in the exact slice only reuses add.",
+        "status": "implemented",
+        "gate": "where_static_select_broadcast",
+        "reason": "TOPI Where lowers static bool-condition selection with joint broadcast; it does not define masked-softmax or all-masked behavior.",
+        "evidence": [
+          "src/relay/op/tensor/math.cc",
+          "src/te/topi/broadcast.cc",
+          "test/infer_type_test.cpp"
+        ]
+      },
+      "llvm": {
+        "status": "implemented",
+        "gate": "llvm_where_numeric_test_not_run_local",
+        "reason": "LLVM numeric coverage exists for static Where, but local LLVM is unavailable so it is not validated here.",
         "evidence": [
           "test/op_numeric_llvm_test.cpp"
         ]
       },
-      "llvm": {
-        "status": "unsupported",
-        "gate": "mask_select_not_implemented",
-        "reason": "No dedicated mask/select LLVM numeric test exists.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
       "cuda": {
-        "status": "unsupported",
-        "gate": "mask_select_not_implemented",
-        "reason": "No dedicated mask/select CUDA implementation or device numeric test exists.",
+        "status": "implemented",
+        "gate": "cuda_where_1d_nonempty_local_evidence",
+        "reason": "Source implements a non-empty 1-D exact-static Where Compiler/RuntimeSession fixture, but no committed GPU-CI/local-run artifact exists, so it is not validated; multidimensional Where fails closed at the target schedule.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "test/codegen_cuda_test.cpp"
         ]
       },
       "runtime": {
-        "status": "unsupported",
-        "gate": "no_valid_extent_mask_contract",
-        "reason": "Runtime values do not yet carry the valid-extent mask contract needed for padded attention.",
+        "status": "implemented",
+        "gate": "where_llvm_runtime_test_not_run_local",
+        "reason": "The LLVM numeric source wires static Where through Compiler and RuntimeSession, including its byte-backed bool condition ABI; local LLVM is unavailable.",
         "evidence": [
-          "docs/plans/compiler-foundation/06-nlp-gpu-validation.md"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "numeric": {
-        "status": "contracted",
-        "gate": "finite_additive_reference_only",
-        "reason": "The CPU prefill reference covers a finite causal additive mask only; this is not general mask/select or all-masked validation.",
+        "status": "implemented",
+        "gate": "where_llvm_numeric_test_not_run_local",
+        "reason": "Static branch-selection expectations are encoded with uint8_t byte-backed bool condition input, but local LLVM execution was not run; this does not define masked-softmax or all-masked behavior.",
         "evidence": [
-          "test/nlp_validation/deterministic_fixtures.json",
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "profile": {
@@ -345,59 +356,63 @@
     },
     "normalization": {
       "frontend": {
-        "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "status": "implemented",
+        "gate": "onnx_layer_normalization_opset17_static_exact",
+        "reason": "ONNX LayerNormalization opset >= 17 imports three resolved float32 inputs and Y; empty optional Mean/InvStdDev slots are accepted but non-empty requests fail closed. Attrs record float64 internal accumulation.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py"
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "status": "implemented",
+        "gate": "layer_norm_exact_static_float32",
+        "reason": "Relay nn_layer_norm requires exact-static float32 data/scale/bias and output, exact suffix affine shapes, finite positive float32 epsilon, and accurately records float64 internal accumulation.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "status": "implemented",
+        "gate": "layer_norm_suffix_reduction_float64",
+        "reason": "One Relay call casts float32 inputs to float64 for sum/mean/centered/variance/sqrt/affine stages over every normalized suffix axis, then casts Y back to float32.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/op/nn/layer_norm.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "llvm_layer_norm_numeric_test_not_run_local",
+        "reason": "Conditional LLVM RuntimeSession numeric source covers FLT_MAX constant rows, huge offsets, multi-axis, axis 0, empty prefix, and tiny variance; local LLVM is unavailable.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "cuda": {
         "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
+        "gate": "cuda_reduction_unsupported",
+        "reason": "CUDA nested reductions are rejected by the normalized generic target schedule; no CPU fallback or device numeric support is claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/codegen_cuda_test.cpp",
+          "test/compiler_capability_test.cpp"
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "reference_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "status": "implemented",
+        "gate": "layer_norm_llvm_runtime_test_not_run_local",
+        "reason": "The conditional LLVM numeric test wires LayerNorm through Compiler and RuntimeSession; local LLVM is unavailable.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "numeric": {
-        "status": "unsupported",
-        "gate": "no_numeric_gate",
-        "reason": "No numeric fixture in Phase A.",
+        "status": "implemented",
+        "gate": "layer_norm_llvm_numeric_test_not_run_local",
+        "reason": "A float64 host reference and full-range/multi-axis/axis-0/empty-prefix cases are encoded in the conditional LLVM numeric test, but were not run locally.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "profile": {
@@ -411,65 +426,73 @@
     },
     "slice_concat": {
       "frontend": {
-        "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "status": "implemented",
+        "gate": "exact_static_slice_concat",
+        "reason": "Exact-static Slice requires all provided control initializers to share int32 or int64 width and canonicalizes values to int64 attrs; binary Concat imports canonical axis attrs.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py"
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "status": "implemented",
+        "gate": "exact_static_slice_concat",
+        "reason": "Slice and Concatenate have canonical attrs, static type contracts, and no aliasing contract.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "include/kxc/relay/op.h",
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "status": "implemented",
+        "gate": "exact_static_slice_concat",
+        "reason": "Slice and Concatenate lower to fresh exact-static TE computes, including empty outputs.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/op/tensor/transform.cc",
+          "src/te/topi/transform.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "conditional_llvm_slice_concat_numeric_test",
+        "reason": "Conditional LLVM numeric source covers Slice and Concatenate; it is not claimed locally validated.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
+        "status": "implemented",
+        "gate": "cuda_slice_concat_1d_nonempty_local_evidence",
+        "reason": "Source implements non-empty 1-D positive-step Slice and binary Concatenate Compiler/RuntimeSession fixtures, but no committed GPU-CI/local-run artifact exists, so they are not validated; multidimensional and empty-output CUDA are not claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "test/codegen_cuda_test.cpp"
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "reference_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "status": "implemented",
+        "gate": "conditional_llvm_runtime_session_slice_concat",
+        "reason": "Slice and Concat are wired through the conditional LLVM RuntimeSession path.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp",
+          "test/infer_type_test.cpp"
         ]
       },
       "numeric": {
-        "status": "unsupported",
-        "gate": "no_numeric_gate",
-        "reason": "No numeric fixture in Phase A.",
+        "status": "implemented",
+        "gate": "conditional_llvm_slice_concat_numeric_test",
+        "reason": "Conditional LLVM numeric source covers normal, identity, and empty Slice plus Concat.",
         "evidence": [
+          "test/op_numeric_llvm_test.cpp",
           "test/nlp_validation/transformer_capability_matrix.json"
         ]
       },
       "profile": {
         "status": "unsupported",
         "gate": "not_profiled",
-        "reason": "No profiling was run.",
+        "reason": "No Slice+Concat profiling was run.",
         "evidence": [
           "test/nlp_validation/transformer_capability_matrix.json"
         ]
@@ -701,8 +724,8 @@
       },
       "lowering": {
         "status": "unsupported",
-        "gate": "negative_static_extents_rejected",
-        "reason": "Both legacy and per-unit lowering reject negative dimensions before generating TIR.",
+        "gate": "static_lowering_size_contract",
+        "reason": "Shared whole-graph and production per-unit lowering rejects negative or >INT32_MAX iteration extents and checked row-major element/flatten/byte overflow against int64 and size_t, while preserving zero-element tensors.",
         "evidence": [
           "src/compiler/lowering/relay_to_tir.cc",
           "src/compiler/lowering/lowered_graph.cc",

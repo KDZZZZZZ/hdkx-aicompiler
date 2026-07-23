@@ -5,6 +5,8 @@
 #include "kxc/relay/type_infer.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -75,12 +77,25 @@ bool SameOrUnknown(int64_t lhs, int64_t rhs) {
     return !IsKnown(lhs) || !IsKnown(rhs) || lhs == rhs;
 }
 
-// 计算已知 shape 区间乘积，含未知维度时返回 -1。
+// 计算 shape 区间乘积；零维使结果为 0，否则含未知维度时返回 -1。
 int64_t KnownProduct(const std::vector<int64_t>& shape, size_t begin, size_t end) {
+    bool has_zero = false;
+    bool has_unknown = false;
+    for (size_t i = begin; i < end; ++i) {
+        has_zero = has_zero || shape[i] == 0;
+        has_unknown = has_unknown || !IsKnown(shape[i]);
+    }
+    if (has_zero) {
+        return 0;
+    }
+    if (has_unknown) {
+        return -1;
+    }
+
     int64_t product = 1;
     for (size_t i = begin; i < end; ++i) {
-        if (!IsKnown(shape[i])) {
-            return -1;
+        if (product > std::numeric_limits<int64_t>::max() / shape[i]) {
+            throw std::overflow_error("shape product overflows int64");
         }
         product *= shape[i];
     }
@@ -262,6 +277,43 @@ Type MultiplyInferType(const Attrs& attrs, const Array<Type>& input_types) {
 Type DivideInferType(const Attrs& attrs, const Array<Type>& input_types) {
     (void)attrs;
     return BinaryBroadcastInferType("divide", input_types);
+}
+
+bool IsWhereBranchDType(const std::string& dtype) {
+    return dtype == "float32" || dtype == "float64" || dtype == "int32" ||
+           dtype == "int64" || dtype == "int8" || dtype == "uint8" || dtype == "bool";
+}
+
+bool IsConcatenateDType(const std::string& dtype) {
+    return IsWhereBranchDType(dtype);
+}
+
+int64_t ClampPositiveStepEndpoint(int64_t endpoint, int64_t dim) {
+    if (endpoint < 0) {
+        return endpoint < -dim ? 0 : endpoint + dim;
+    }
+    return std::min(endpoint, dim);
+}
+
+// 推导 ONNX Where 的三元 trailing-axis 广播结果。
+Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    RequireArity("where", input_types, 3);
+    const auto* condition = RequireTensor("where", input_types[0], "condition");
+    const auto* x = RequireTensor("where", input_types[1], "x");
+    const auto* y = RequireTensor("where", input_types[2], "y");
+    if (condition->dtype != "bool") {
+        throw std::runtime_error("where condition dtype must be bool");
+    }
+    if (!IsWhereBranchDType(x->dtype) || !IsWhereBranchDType(y->dtype)) {
+        throw std::runtime_error(
+            "where branch dtypes must be float32, float64, int32, int64, int8, uint8, or bool");
+    }
+    RequireSameDType("where", x, y);
+    const std::vector<int64_t> condition_x =
+        BroadcastShape("where", ShapeVector(condition), ShapeVector(x));
+    return MakeTensorType(
+        BroadcastShape("where", condition_x, ShapeVector(y)), x->dtype);
 }
 
 // 推导保持 shape 与 dtype 的一元算子类型。
@@ -480,29 +532,26 @@ Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     const std::vector<int64_t> input_shape = ShapeVector(data);
     const int64_t input_product = KnownProduct(input_shape, 0, input_shape.size());
     std::vector<int64_t> out;
+    std::vector<int64_t> known_shape;
     out.reserve(reshape_attrs->newshape.size());
+    known_shape.reserve(reshape_attrs->newshape.size());
 
     int infer_index = -1;
-    int64_t known_product = 1;
     for (size_t i = 0; i < reshape_attrs->newshape.size(); ++i) {
         int64_t dim = reshape_attrs->newshape[i];
         if (dim > 0) {
             out.push_back(dim);
-            known_product *= dim;
+            known_shape.push_back(dim);
         } else if (dim == 0) {
             if (reshape_attrs->allowzero) {
                 out.push_back(0);
-                known_product = 0;
+                known_shape.push_back(0);
             } else {
                 if (i >= input_shape.size()) {
                     throw std::runtime_error("reshape 0-dim copy index exceeds input rank");
                 }
                 out.push_back(input_shape[i]);
-                if (IsKnown(input_shape[i])) {
-                    known_product *= input_shape[i];
-                } else {
-                    known_product = -1;
-                }
+                known_shape.push_back(input_shape[i]);
             }
         } else if (dim == -1) {
             if (infer_index >= 0) {
@@ -514,6 +563,7 @@ Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
             throw std::runtime_error("reshape only supports positive, 0, and -1 dimensions");
         }
     }
+    const int64_t known_product = KnownProduct(known_shape, 0, known_shape.size());
 
     if (infer_index >= 0 && input_product >= 0 && known_product > 0) {
         if (input_product % known_product != 0) {
@@ -554,6 +604,126 @@ Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types) {
         }
         seen[static_cast<size_t>(normalized)] = true;
         out.push_back(data->shape[static_cast<size_t>(normalized)]);
+    }
+    return MakeTensorType(out, data->dtype);
+}
+
+// 按 ONNX Gather 规则替换 data.axis，并验证静态索引类型边界。
+Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("gather", input_types, 2);
+    const auto* data = RequireTensor("gather", input_types[0], "data");
+    const auto* indices = RequireTensor("gather", input_types[1], "indices");
+    if (data->shape.empty()) {
+        throw std::runtime_error("gather requires data rank >= 1");
+    }
+    if (indices->dtype != "int32" && indices->dtype != "int64") {
+        throw std::runtime_error("gather indices dtype must be int32 or int64");
+    }
+    const auto* gather_attrs = attrs.As<GatherAttrsNode>();
+    if (!gather_attrs) {
+        throw std::runtime_error("gather requires GatherAttrs");
+    }
+    const int axis = NormalizeAxis("gather", gather_attrs->axis,
+                                   static_cast<int>(data->shape.size()));
+    const int64_t extent = data->shape[static_cast<size_t>(axis)];
+    if (indices->dtype == "int32" && IsKnown(extent) &&
+        extent > std::numeric_limits<int32_t>::max()) {
+        throw std::runtime_error("gather int32 indices cannot address axis extent > INT32_MAX");
+    }
+    std::vector<int64_t> out;
+    out.reserve(data->shape.size() + indices->shape.size() - 1);
+    for (int i = 0; i < axis; ++i) out.push_back(data->shape[static_cast<size_t>(i)]);
+    for (int64_t dim : indices->shape) out.push_back(dim);
+    for (size_t i = static_cast<size_t>(axis) + 1; i < data->shape.size(); ++i) {
+        out.push_back(data->shape[i]);
+    }
+    return MakeTensorType(out, data->dtype);
+}
+
+// 推导 exact-static binary concatenate 的输出 shape 与 dtype。
+Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("concatenate", input_types, 2);
+    const auto* lhs = RequireTensor("concatenate", input_types[0], "lhs");
+    const auto* rhs = RequireTensor("concatenate", input_types[1], "rhs");
+    const auto* concatenate_attrs = attrs.As<ConcatenateAttrsNode>();
+    if (!concatenate_attrs) {
+        throw std::runtime_error("concatenate requires ConcatenateAttrs");
+    }
+    if (!IsConcatenateDType(lhs->dtype) || !IsConcatenateDType(rhs->dtype)) {
+        throw std::runtime_error(
+            "concatenate dtype must be float32, float64, int32, int64, int8, uint8, or bool");
+    }
+    RequireSameDType("concatenate", lhs, rhs);
+    if (lhs->shape.empty() || rhs->shape.empty()) {
+        throw std::runtime_error("concatenate requires rank >= 1 inputs");
+    }
+    if (lhs->shape.size() != rhs->shape.size()) {
+        throw std::runtime_error("concatenate input rank mismatch");
+    }
+    const int rank = static_cast<int>(lhs->shape.size());
+    const int axis = NormalizeAxis("concatenate", concatenate_attrs->axis, rank);
+    std::vector<int64_t> out = ShapeVector(lhs);
+    for (int index = 0; index < rank; ++index) {
+        const int64_t lhs_dim = lhs->shape[static_cast<size_t>(index)];
+        const int64_t rhs_dim = rhs->shape[static_cast<size_t>(index)];
+        if (lhs_dim < 0 || rhs_dim < 0) {
+            throw std::runtime_error("concatenate requires non-negative static input dimensions");
+        }
+        if (index != axis && lhs_dim != rhs_dim) {
+            throw std::runtime_error("concatenate non-axis dimensions must exactly match");
+        }
+    }
+    const int64_t lhs_axis = lhs->shape[static_cast<size_t>(axis)];
+    const int64_t rhs_axis = rhs->shape[static_cast<size_t>(axis)];
+    if (lhs_axis > std::numeric_limits<int64_t>::max() - rhs_axis) {
+        throw std::runtime_error("concatenate axis extent sum overflows int64");
+    }
+    out[static_cast<size_t>(axis)] = lhs_axis + rhs_axis;
+    return MakeTensorType(out, lhs->dtype);
+}
+
+// 推导 exact-static ONNX/Python positive-step slice 的输出 shape。
+Type SliceInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("slice", input_types, 1);
+    const auto* data = RequireTensor("slice", input_types[0], "data");
+    const auto* slice_attrs = attrs.As<SliceAttrsNode>();
+    if (!slice_attrs) {
+        throw std::runtime_error("slice requires SliceAttrs");
+    }
+    if (!IsConcatenateDType(data->dtype)) {
+        throw std::runtime_error(
+            "slice dtype must be float32, float64, int32, int64, int8, uint8, or bool");
+    }
+    const int rank = static_cast<int>(data->shape.size());
+    if (rank < 1) {
+        throw std::runtime_error("slice requires data rank >= 1");
+    }
+    const size_t count = slice_attrs->starts.size();
+    if (count == 0 || slice_attrs->ends.empty() || slice_attrs->axes.empty() ||
+        slice_attrs->steps.empty() || slice_attrs->ends.size() != count ||
+        slice_attrs->axes.size() != count || slice_attrs->steps.size() != count) {
+        throw std::runtime_error("slice starts, ends, axes, and steps must be nonempty and equal length");
+    }
+    std::vector<int64_t> out = ShapeVector(data);
+    for (int64_t extent : out) {
+        if (extent < 0) {
+            throw std::runtime_error("slice requires non-negative static input dimensions");
+        }
+    }
+    std::vector<bool> seen(static_cast<size_t>(rank), false);
+    for (size_t index = 0; index < count; ++index) {
+        if (slice_attrs->steps[index] != 1) {
+            throw std::runtime_error("slice requires every step to equal exactly +1");
+        }
+        const int axis = NormalizeAxis("slice", slice_attrs->axes[index], rank);
+        if (seen[static_cast<size_t>(axis)]) {
+            throw std::runtime_error("slice axes must be unique");
+        }
+        seen[static_cast<size_t>(axis)] = true;
+        const int64_t dim = out[static_cast<size_t>(axis)];
+        const int64_t start = ClampPositiveStepEndpoint(slice_attrs->starts[index], dim);
+        const int64_t end = ClampPositiveStepEndpoint(slice_attrs->ends[index], dim);
+        out[static_cast<size_t>(axis)] = std::max(end - start, int64_t{0});
     }
     return MakeTensorType(out, data->dtype);
 }
@@ -599,6 +769,50 @@ Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
     const auto* softmax_attrs = attrs.As<SoftmaxAttrsNode>();
     NormalizeAxis("softmax", softmax_attrs ? softmax_attrs->axis : -1,
                   static_cast<int>(data->shape.size()));
+    return input_types[0];
+}
+
+Type LayerNormInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("nn_layer_norm", input_types, 3);
+    const auto* data = RequireTensor("nn_layer_norm", input_types[0], "data");
+    const auto* scale = RequireTensor("nn_layer_norm", input_types[1], "scale");
+    const auto* bias = RequireTensor("nn_layer_norm", input_types[2], "bias");
+    const auto* layer_norm_attrs = attrs.As<LayerNormAttrsNode>();
+    if (!layer_norm_attrs) {
+        throw std::runtime_error("nn_layer_norm requires LayerNormAttrs");
+    }
+    if (data->dtype != "float32" || scale->dtype != "float32" || bias->dtype != "float32") {
+        throw std::runtime_error("nn_layer_norm requires float32 data, scale, and bias");
+    }
+    if (data->shape.empty()) {
+        throw std::runtime_error("nn_layer_norm requires data rank >= 1");
+    }
+    for (size_t index = 0; index < data->shape.size(); ++index) {
+        if (data->shape[index] < 0) {
+            throw std::runtime_error("nn_layer_norm requires non-negative static data dimensions");
+        }
+    }
+    const int axis = NormalizeAxis("nn_layer_norm", layer_norm_attrs->axis,
+                                   static_cast<int>(data->shape.size()));
+    if (!std::isfinite(layer_norm_attrs->epsilon) || layer_norm_attrs->epsilon <= 0.0f) {
+        throw std::runtime_error("nn_layer_norm epsilon must be finite and > 0");
+    }
+    if (layer_norm_attrs->accumulation_dtype != "float64") {
+        throw std::runtime_error("nn_layer_norm accumulation_dtype must be float64");
+    }
+    const size_t suffix_rank = data->shape.size() - static_cast<size_t>(axis);
+    if (scale->shape.size() != suffix_rank || bias->shape.size() != suffix_rank) {
+        throw std::runtime_error("nn_layer_norm scale and bias shapes must exactly equal data.shape[axis:]");
+    }
+    for (size_t index = 0; index < suffix_rank; ++index) {
+        const int64_t extent = data->shape[static_cast<size_t>(axis) + index];
+        if (extent <= 0) {
+            throw std::runtime_error("nn_layer_norm normalized suffix dimensions must be > 0");
+        }
+        if (scale->shape[index] != extent || bias->shape[index] != extent) {
+            throw std::runtime_error("nn_layer_norm scale and bias shapes must exactly equal data.shape[axis:]");
+        }
+    }
     return input_types[0];
 }
 

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "kxc/compiler/lowering/relay_to_tir.h"
@@ -25,6 +26,12 @@ struct PrimFuncIdentity {
     int64_t operator_schema_version{-1};
     String structural_hash;
 };
+
+// Shared fail-closed contract for the current int32 iteration domain and
+// int64/size_t row-major addressing/allocation domain.
+void ValidateStaticLoweringTensor(const Array<tir::PrimExpr>& shape,
+                                  tir::DataType dtype,
+                                  const std::string& context);
 
 LoweredFunction LowerTensorGraphToTIR(
     const Array<te::Tensor>& inputs,

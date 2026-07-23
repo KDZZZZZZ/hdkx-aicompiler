@@ -23,10 +23,22 @@ void RequireInputCount(const char* op_name, const Array<te::Tensor>& inputs, siz
     }
 }
 
-void RequireTensorOutput(const char* op_name, const kxc::Type& out_type) {
-    if (!out_type.As<TensorTypeNode>()) {
+const TensorTypeNode* RequireTensorOutput(const char* op_name, const kxc::Type& out_type) {
+    const auto* output = out_type.As<TensorTypeNode>();
+    if (!output) {
         throw std::runtime_error(std::string(op_name) + " expects TensorType output");
     }
+    return output;
+}
+
+bool MatchesRelayDType(kxc::tir::DataType dtype, const std::string& relay_dtype) {
+    return (relay_dtype == "float32" && dtype == kxc::tir::DataType::Float(32)) ||
+           (relay_dtype == "float64" && dtype == kxc::tir::DataType::Float(64)) ||
+           (relay_dtype == "int32" && dtype == kxc::tir::DataType::Int(32)) ||
+           (relay_dtype == "int64" && dtype == kxc::tir::DataType::Int(64)) ||
+           (relay_dtype == "int8" && dtype == kxc::tir::DataType::Int(8)) ||
+           (relay_dtype == "uint8" && dtype == kxc::tir::DataType::UInt(8)) ||
+           (relay_dtype == "bool" && dtype == kxc::tir::DataType::Bool());
 }
 
 te::Tensor RequireDefined(const char* op_name, const te::Tensor& tensor) {
@@ -68,6 +80,23 @@ te::Tensor DivideCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     RequireInputCount("divide", inputs, 2);
     RequireTensorOutput("divide", out_type);
     return RequireDefined("divide", te::topi::divide(inputs[0], inputs[1], "T_divide"));
+}
+
+te::Tensor WhereCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                        const kxc::Type& out_type) {
+    if (attrs.defined()) {
+        throw std::runtime_error("where does not accept attrs");
+    }
+    RequireInputCount("where", inputs, 3);
+    const auto* output = RequireTensorOutput("where", out_type);
+    if (inputs[0]->dtype != kxc::tir::DataType::Bool()) {
+        throw std::runtime_error("where condition dtype must be bool");
+    }
+    if (inputs[1]->dtype != inputs[2]->dtype ||
+        !MatchesRelayDType(inputs[1]->dtype, output->dtype)) {
+        throw std::runtime_error("where output and branch dtypes must match");
+    }
+    return RequireDefined("where", te::topi::where(inputs[0], inputs[1], inputs[2], "T_where"));
 }
 
 te::Tensor SqrtCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
@@ -117,6 +146,15 @@ KXC_REGISTER_OP(divide)
     .add_argument("rhs", "Tensor", "The right hand side input tensor.")
     .set_attr<FInferType>("FInferType", DivideInferType)
     .set_attr<FRelayToTE>("FRelayToTE", DivideCompute);
+
+KXC_REGISTER_OP(where)
+    .describe(R"doc(Select x or y according to a boolean condition with exact trailing-axis broadcast.)doc")
+    .set_num_inputs(3)
+    .add_argument("condition", "Tensor", "Boolean selection condition.")
+    .add_argument("x", "Tensor", "Value selected when condition is true.")
+    .add_argument("y", "Tensor", "Value selected when condition is false.")
+    .set_attr<FInferType>("FInferType", WhereInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", WhereCompute);
 
 KXC_REGISTER_OP(sqrt)
     .describe(R"doc(Square root of elements.)doc")

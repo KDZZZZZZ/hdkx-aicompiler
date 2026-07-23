@@ -134,6 +134,30 @@ Tensor divide(const Tensor& A, const Tensor& B, std::string name,
                            std::divides<PrimExpr>());
 }
 
+Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y,
+             std::string name, std::string tag) {
+    if (!condition.defined() || !x.defined() || !y.defined()) {
+        throw std::runtime_error("where requires defined tensors");
+    }
+    if (condition->dtype != tir::DataType::Bool()) {
+        throw std::runtime_error("where condition dtype must be bool");
+    }
+    if (x->dtype != y->dtype) {
+        throw std::runtime_error("where x and y dtype mismatch");
+    }
+    const auto output_shape = detail::InferBroadcastShape(
+        detail::InferBroadcastShape(condition->shape, x->shape), y->shape);
+    return compute(
+        output_shape,
+        [condition, x, y, output_shape](const Array<tir::Var>& indices) {
+            return tir::Select(
+                condition(detail::GetBroadcastIndices(indices, condition->shape, output_shape)),
+                x(detail::GetBroadcastIndices(indices, x->shape, output_shape)),
+                y(detail::GetBroadcastIndices(indices, y->shape, output_shape)));
+        },
+        std::move(name), std::move(tag));
+}
+
 Tensor maximum(const Tensor& A, const Tensor& B, std::string name , std::string tag ){
      auto output_shape = detail::InferBroadcastShape(A->shape, B->shape); 
         return compute( 

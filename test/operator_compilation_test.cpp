@@ -3,7 +3,9 @@
  */
 
 #include <cstdint>
+#include <exception>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -247,6 +249,31 @@ bool TestProducerCallsRemainOutsideConsumerPrimFunc() {
                "each chain unit must expose only its two boundary values");
     TEST_CHECK(lowered.primitives[1].lowered->prim_func->params.size() == 3,
                "consumer PrimFunc ABI must be two inputs plus one output");
+    return true;
+}
+
+bool TestProductionLoweringRejectsStaticSizeOverflow() {
+    using namespace kxc;
+    const auto make_function = [](Array<int64_t> shape) {
+        Var lhs("lhs", TensorType(shape, "float32"));
+        Var rhs("rhs", TensorType(shape, "float32"));
+        return Function({lhs, rhs}, Add(lhs, rhs));
+    };
+    const auto rejects = [&](Array<int64_t> shape) {
+        try {
+            (void)LowerForTest(make_function(std::move(shape)));
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    constexpr int64_t kInt32Max = std::numeric_limits<int32_t>::max();
+    TEST_CHECK(rejects({kInt32Max + 1}),
+               "production per-unit lowering must reject extents above INT32_MAX");
+    TEST_CHECK(rejects({kInt32Max, kInt32Max, 3}),
+               "production per-unit lowering must reject row-major product overflow");
+    TEST_CHECK(LowerForTest(make_function({0, kInt32Max, kInt32Max})).primitives.size() == 1,
+               "production per-unit lowering must retain legal zero-element tensors");
     return true;
 }
 
@@ -630,6 +657,8 @@ int main() {
         {"per_operator_target_cardinality", TestPerOperatorTargetCardinality},
         {"producer_calls_remain_outside_consumer",
          TestProducerCallsRemainOutsideConsumerPrimFunc},
+        {"production_lowering_rejects_static_size_overflow",
+         TestProductionLoweringRejectsStaticSizeOverflow},
         {"shared_constant_uses_stable_key", TestSharedConstantUsesStableGraphValueKey},
         {"single_unit_supports_multiple_outputs", TestSingleUnitSupportsMultipleOutputs},
 #if KXC_USE_LLVM

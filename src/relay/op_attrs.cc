@@ -20,11 +20,15 @@ KXC_OBJECT_DEFINE(Conv2DAttrsNode)
 KXC_OBJECT_DEFINE(DenseAttrsNode)
 KXC_OBJECT_DEFINE(MaxPool2DAttrsNode)
 KXC_OBJECT_DEFINE(SoftmaxAttrsNode)
+KXC_OBJECT_DEFINE(LayerNormAttrsNode)
 KXC_OBJECT_DEFINE(AddAttrsNode)
 KXC_OBJECT_DEFINE(CastAttrsNode)
 KXC_OBJECT_DEFINE(ReduceMeanAttrsNode)
 KXC_OBJECT_DEFINE(ReshapeAttrsNode)
 KXC_OBJECT_DEFINE(TransposeAttrsNode)
+KXC_OBJECT_DEFINE(GatherAttrsNode)
+KXC_OBJECT_DEFINE(ConcatenateAttrsNode)
+KXC_OBJECT_DEFINE(SliceAttrsNode)
 KXC_OBJECT_DEFINE(ReluAttrsNode)
 KXC_OBJECT_DEFINE(GlobalAvgPool2DAttrsNode)
 KXC_OBJECT_DEFINE(FlattenAttrsNode)
@@ -213,6 +217,12 @@ void SoftmaxAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("axis", axis);
 }
 
+void LayerNormAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axis", axis);
+    writer.Add("epsilon", epsilon);
+    writer.Add("accumulation_dtype", accumulation_dtype);
+}
+
 void CastAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("to", to);
 }
@@ -229,6 +239,21 @@ void ReshapeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
 
 void TransposeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("perm", perm);
+}
+
+void GatherAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axis", axis);
+}
+
+void ConcatenateAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axis", axis);
+}
+
+void SliceAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("starts", starts);
+    writer.Add("ends", ends);
+    writer.Add("axes", axes);
+    writer.Add("steps", steps);
 }
 
 void FlattenAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
@@ -315,6 +340,15 @@ SoftmaxAttrs SoftmaxAttrs::Create(int axis) {
     return InternalCreate(node);
 }
 
+LayerNormAttrs LayerNormAttrs::Create(int axis, float epsilon,
+                                      std::string accumulation_dtype) {
+    auto* node = new LayerNormAttrsNode();
+    node->axis = axis;
+    node->epsilon = epsilon;
+    node->accumulation_dtype = std::move(accumulation_dtype);
+    return InternalCreate(node);
+}
+
 // 创建 dtype 转换属性。
 CastAttrs CastAttrs::Create(int to) {
     auto* node = new CastAttrsNode();
@@ -342,6 +376,28 @@ ReshapeAttrs ReshapeAttrs::Create(Array<int64_t> newshape, int allowzero) {
 TransposeAttrs TransposeAttrs::Create(Array<int64_t> perm) {
     auto* node = new TransposeAttrsNode();
     node->perm = std::move(perm);
+    return InternalCreate(node);
+}
+
+GatherAttrs GatherAttrs::Create(int axis) {
+    auto* node = new GatherAttrsNode();
+    node->axis = axis;
+    return InternalCreate(node);
+}
+
+ConcatenateAttrs ConcatenateAttrs::Create(int axis) {
+    auto* node = new ConcatenateAttrsNode();
+    node->axis = axis;
+    return InternalCreate(node);
+}
+
+SliceAttrs SliceAttrs::Create(Array<int64_t> starts, Array<int64_t> ends,
+                               Array<int64_t> axes, Array<int64_t> steps) {
+    auto* node = new SliceAttrsNode();
+    node->starts = std::move(starts);
+    node->ends = std::move(ends);
+    node->axes = std::move(axes);
+    node->steps = std::move(steps);
     return InternalCreate(node);
 }
 

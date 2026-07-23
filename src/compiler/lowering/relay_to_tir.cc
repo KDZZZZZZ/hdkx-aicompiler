@@ -51,9 +51,8 @@ tir::DataType DTypeFromString(const std::string& dtype) {
 tir::DataType DTypeFromDL(const DLDataType& dl_dtype) {
     if (dl_dtype.code == kDLFloat) return tir::DataType::Float(dl_dtype.bits, dl_dtype.lanes);
     if (dl_dtype.code == kDLInt) return tir::DataType::Int(dl_dtype.bits, dl_dtype.lanes);
-    if (dl_dtype.code == kDLUInt || dl_dtype.code == kDLBool) {
-        return tir::DataType::UInt(dl_dtype.bits, dl_dtype.lanes);
-    }
+    if (dl_dtype.code == kDLUInt) return tir::DataType::UInt(dl_dtype.bits, dl_dtype.lanes);
+    if (dl_dtype.code == kDLBool) return tir::DataType::Bool(dl_dtype.lanes);
     throw std::runtime_error("Unsupported DLDataType code in constant");
 }
 
@@ -69,6 +68,8 @@ Array<tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type) {
         }
         shape.push_back(tir::IntImm(dim, tir::DataType::Int(64)));
     }
+    internal::ValidateStaticLoweringTensor(
+        shape, DTypeFromString(type->dtype), "LowerToTIR TensorType");
     return shape;
 }
 
@@ -235,6 +236,8 @@ protected:
             shape.push_back(tir::IntImm(dim, tir::DataType::Int(64)));
         }
         tir::DataType dtype = DTypeFromDL(op->data->dl_tensor.dtype);
+        internal::ValidateStaticLoweringTensor(
+            shape, dtype, "LowerToTIR constant");
         const size_t ordinal = constant_records_.size();
         std::string name = "const_" + std::to_string(ordinal);
         String key("relay.constant." + std::to_string(ordinal));
@@ -501,6 +504,90 @@ tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
     return WrapDataLoops(op, store);
 }
 
+bool CheckedAddInt64(int64_t lhs, int64_t rhs, int64_t* result) {
+    if ((rhs > 0 && lhs > std::numeric_limits<int64_t>::max() - rhs) ||
+        (rhs < 0 && lhs < std::numeric_limits<int64_t>::min() - rhs)) {
+        return false;
+    }
+    *result = lhs + rhs;
+    return true;
+}
+
+bool CheckedSubInt64(int64_t lhs, int64_t rhs, int64_t* result) {
+    if ((rhs > 0 && lhs < std::numeric_limits<int64_t>::min() + rhs) ||
+        (rhs < 0 && lhs > std::numeric_limits<int64_t>::max() + rhs)) {
+        return false;
+    }
+    *result = lhs - rhs;
+    return true;
+}
+
+bool CheckedMulInt64(int64_t lhs, int64_t rhs, int64_t* result) {
+    if (lhs == 0 || rhs == 0) {
+        *result = 0;
+        return true;
+    }
+    if ((lhs == -1 && rhs == std::numeric_limits<int64_t>::min()) ||
+        (rhs == -1 && lhs == std::numeric_limits<int64_t>::min())) {
+        return false;
+    }
+    if (lhs > 0) {
+        if ((rhs > 0 && lhs > std::numeric_limits<int64_t>::max() / rhs) ||
+            (rhs < 0 && rhs < std::numeric_limits<int64_t>::min() / lhs)) {
+            return false;
+        }
+    } else if ((rhs > 0 && lhs < std::numeric_limits<int64_t>::min() / rhs) ||
+               (rhs < 0 && lhs < std::numeric_limits<int64_t>::max() / rhs)) {
+        return false;
+    }
+    *result = lhs * rhs;
+    return true;
+}
+
+bool EvaluateStaticInt64(const tir::PrimExpr& expression, int64_t* result) {
+    if (const auto* value = expression.As<tir::IntImmNode>()) {
+        if (value->dtype.code != 0 && value->dtype.code != 1) return false;
+        *result = value->value;
+        return true;
+    }
+    const auto* binary = expression.As<tir::BinaryOpNode>();
+    if (!binary) return false;
+    int64_t lhs = 0;
+    int64_t rhs = 0;
+    if (!EvaluateStaticInt64(binary->a, &lhs) ||
+        !EvaluateStaticInt64(binary->b, &rhs)) {
+        return false;
+    }
+    if (expression.As<tir::AddNode>()) return CheckedAddInt64(lhs, rhs, result);
+    if (expression.As<tir::SubNode>()) return CheckedSubInt64(lhs, rhs, result);
+    if (expression.As<tir::MulNode>()) return CheckedMulInt64(lhs, rhs, result);
+    if (expression.As<tir::DivNode>()) {
+        if (rhs == 0 ||
+            (lhs == std::numeric_limits<int64_t>::min() && rhs == -1)) {
+            return false;
+        }
+        *result = lhs / rhs;
+        return true;
+    }
+    if (expression.As<tir::ModNode>()) {
+        if (rhs == 0 ||
+            (lhs == std::numeric_limits<int64_t>::min() && rhs == -1)) {
+            return false;
+        }
+        *result = lhs % rhs;
+        return true;
+    }
+    if (expression.As<tir::MinNode>()) {
+        *result = std::min(lhs, rhs);
+        return true;
+    }
+    if (expression.As<tir::MaxNode>()) {
+        *result = std::max(lhs, rhs);
+        return true;
+    }
+    return false;
+}
+
 // 为公开输出生成唯一且可读的 TIR 参数名。
 std::string MakeOutputVarName(const te::Tensor& tensor,
                               size_t output_index,
@@ -522,6 +609,65 @@ std::string MakeOutputVarName(const te::Tensor& tensor,
 }  // namespace
 
 namespace internal {
+
+void ValidateStaticLoweringTensor(const Array<tir::PrimExpr>& shape,
+                                  tir::DataType dtype,
+                                  const std::string& context) {
+    if (dtype.bits == 0 || dtype.lanes == 0) {
+        throw std::invalid_argument(context +
+                                    " has an invalid zero-width tensor dtype");
+    }
+    const size_t scalar_bytes =
+        (static_cast<size_t>(dtype.bits) + 7U) / 8U;
+    if (scalar_bytes > std::numeric_limits<size_t>::max() / dtype.lanes) {
+        throw std::overflow_error(context + " dtype byte width overflows size_t");
+    }
+    const size_t element_bytes = scalar_bytes * dtype.lanes;
+
+    bool has_zero_extent = false;
+    std::vector<int64_t> extents;
+    extents.reserve(shape.size());
+    for (size_t axis = 0; axis < shape.size(); ++axis) {
+        int64_t extent = 0;
+        if (!EvaluateStaticInt64(shape[axis], &extent)) {
+            throw std::invalid_argument(
+                context + " requires an int64-representable static integer extent at axis " +
+                std::to_string(axis));
+        }
+        if (extent < 0) {
+            throw std::invalid_argument(
+                context + " requires non-negative extent at axis " +
+                std::to_string(axis));
+        }
+        if (extent > std::numeric_limits<int32_t>::max()) {
+            throw std::overflow_error(
+                context + " extent exceeds the int32 iteration domain at axis " +
+                std::to_string(axis));
+        }
+        has_zero_extent = has_zero_extent || extent == 0;
+        extents.push_back(extent);
+    }
+
+    int64_t elements = has_zero_extent ? 0 : 1;
+    if (!has_zero_extent) {
+        for (int64_t extent : extents) {
+            if (elements > std::numeric_limits<int64_t>::max() / extent) {
+                throw std::overflow_error(
+                    context + " row-major element count/flatten index overflows int64");
+            }
+            elements *= extent;
+        }
+    }
+    if (elements != 0 &&
+        elements > std::numeric_limits<int64_t>::max() /
+                       static_cast<int64_t>(element_bytes)) {
+        throw std::overflow_error(context + " tensor byte count overflows int64");
+    }
+    if (static_cast<uint64_t>(elements) >
+        std::numeric_limits<size_t>::max() / element_bytes) {
+        throw std::overflow_error(context + " tensor byte count overflows size_t");
+    }
+}
 
 LoweredFunction LowerTensorGraphToTIR(
     const Array<te::Tensor>& inputs,
@@ -552,6 +698,9 @@ LoweredFunction LowerTensorGraphToTIR(
             throw std::invalid_argument(
                 "TE-to-TIR output tensors must be distinct logical values");
         }
+        ValidateStaticLoweringTensor(
+            output->shape, output->dtype,
+            "TE-to-TIR output tensor '" + output->name + "'");
         if (!output->op.As<te::ComputeOpNode>()) {
             throw std::invalid_argument(
                 "TE-to-TIR public outputs must be produced by ComputeOp");
@@ -569,6 +718,22 @@ LoweredFunction LowerTensorGraphToTIR(
                   [](const te::Tensor& lhs, const te::Tensor& rhs) {
                       return lhs->value_index < rhs->value_index;
                   });
+        for (const auto& tensor : entry.second) {
+            ValidateStaticLoweringTensor(
+                tensor->shape, tensor->dtype,
+                "TE-to-TIR tensor '" + tensor->name + "'");
+        }
+    }
+    for (const auto& operation : topo_ops) {
+        const auto* compute = operation.As<te::ComputeOpNode>();
+        if (!compute || compute->reduce_axis.empty()) continue;
+        Array<tir::PrimExpr> reduction_shape;
+        for (const auto& axis : compute->reduce_axis) {
+            reduction_shape.push_back(axis->dom_extent);
+        }
+        ValidateStaticLoweringTensor(
+            reduction_shape, tir::DataType::UInt(8),
+            "TE-to-TIR reduction iteration domain for '" + operation->name + "'");
     }
 
     Array<tir::Var> params;
@@ -578,6 +743,9 @@ LoweredFunction LowerTensorGraphToTIR(
         if (!tensor.defined()) {
             throw std::invalid_argument("TE-to-TIR input tensor is undefined");
         }
+        ValidateStaticLoweringTensor(
+            tensor->shape, tensor->dtype,
+            "TE-to-TIR input tensor '" + tensor->name + "'");
         tir::Var data_var(tensor->name, tensor->dtype);
         tir::Buffer buffer(data_var, tensor->dtype, tensor->shape, {},
                            tir::IntImm(0), tensor->name, 0, 0);
@@ -596,6 +764,9 @@ LoweredFunction LowerTensorGraphToTIR(
                 "TE-to-TIR constant tensor record is incomplete");
         }
         const te::Tensor& tensor = record.tensor;
+        ValidateStaticLoweringTensor(
+            tensor->shape, tensor->dtype,
+            "TE-to-TIR constant tensor '" + tensor->name + "'");
         tir::Var data_var(tensor->name, tensor->dtype);
         tir::Buffer buffer(data_var, tensor->dtype, tensor->shape, {},
                            tir::IntImm(0), tensor->name, 0, 0);
