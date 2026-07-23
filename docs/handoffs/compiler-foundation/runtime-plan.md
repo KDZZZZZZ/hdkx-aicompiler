@@ -10,7 +10,7 @@
 | 项目 | 当前准确状态 |
 |---|---|
 | `semantic_key` | **仅为 DTO 预留字段。** 本分支不生成、不规范化、不验证生产 semantic key，也没有 artifact cache 消费它；测试中的非空字符串只是 fixture 标签。 |
-| `artifact_generation` | **仅为 DTO 预留字段。** validator 只检查非负；`RuntimeSession` 只接受 `0`，尚无 selected-generation manifest、artifact binding 或 pin。 |
+| `artifact_generation` | **仅为 DTO 预留字段。** Kernel task 在 DTO 层允许非负值，非 Kernel task 必须为 `0`；`RuntimeSession` 进一步只接受 Kernel generation `0`。尚无 selected-generation manifest、artifact binding 或 pin。 |
 | pending GPU retention | **未验证。** 当前 retention 证据来自同步 CPU fake；本分支没有真实 pending CUDA task-DAG、提前释放 handle 或 Compute Sanitizer 证据。 |
 
 ## 1. 架构边界
@@ -106,7 +106,7 @@ validator 从 task/value producer-consumer 关系反推 region boundary，拒绝
 - `Allocate`：一个 output 与 power-of-two alignment；
 - `Sync`：v1 同步当前提交 stream。
 
-公共字段还包括 `task_id`、显式 `dependency_task_ids`、`device`、`stream_id` 和预留的 `artifact_generation`。v1 强制所有 value/task 位于同一物理 device 且 `stream_id == 0`。generation 在 DTO/fake 中只校验非负；真实 `RuntimeSession` 仅接受 `0`，不表示 generation 选择或保活已经接通。
+公共字段还包括 `task_id`、显式 `dependency_task_ids`、`device`、`stream_id` 和预留的 `artifact_generation`。v1 强制所有 value/task 位于同一物理 device 且 `stream_id == 0`。Kernel task 在 DTO 层允许非负 generation，其他 task kind 必须为 `0`；真实 `RuntimeSession` 进一步只接受 Kernel generation `0`，不表示 generation 选择或保活已经接通。
 
 ### 3.3 FrozenTaskPlan
 
