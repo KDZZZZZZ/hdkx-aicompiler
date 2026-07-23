@@ -270,6 +270,18 @@ String ReadStringAttr(const tir::PrimFunc& function, const char* key) {
     return String(function->attrs.at(attr_key));
 }
 
+void FreezeConstantPayloads(ValueGraph* graph) {
+    for (ValueInfo& value : graph->values) {
+        if (value.origin != ValueOrigin::kConstant) continue;
+        const auto* constant = value.source.As<ConstantNode>();
+        if (!constant || !constant->data.defined()) {
+            throw std::invalid_argument(
+                "Prepared static graph constant has no NDArray payload");
+        }
+        value.source = Constant(constant->data.CopyTo(constant->data.device()));
+    }
+}
+
 }  // namespace
 
 relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
@@ -326,20 +338,48 @@ relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
             String(unit.semantic_key.digest())});
 }
 
-LoweredGraph LowerGraph(Function function, Device device, Target target,
-                        String pipeline_fingerprint) {
+PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
+                                       Target target,
+                                       String pipeline_fingerprint) {
     if (!function.defined() || !device.defined()) {
         throw std::invalid_argument(
-            "LowerGraph requires a defined Function and Device");
+            "PrepareStaticGraph requires a defined Function and Device");
     }
     if (!target.defined()) target = BuildTarget(device);
+    if (!target.As<TargetNode>() ||
+        target->device_type != device.device_type() ||
+        target->device_id != device.device_id()) {
+        throw std::invalid_argument(
+            "PrepareStaticGraph requires matching Target and Device identity");
+    }
     CapabilityVerifier::RequireEligible(CapabilityRequest{
         function, target, "graph", std::string(pipeline_fingerprint),
         CapabilityBoundary::kPrePartition, CapabilityMode::kStaticExact,
         true});
+    PreparedStaticGraph prepared;
+    prepared.capability_boundary_checks = 1;
+    ValueGraph value_graph = BuildValueGraph(function, device);
+    prepared.value_graph_builds = 1;
+    FreezeConstantPayloads(&value_graph);
+    prepared.partitioned = PartitionValueGraph(std::move(value_graph));
+    prepared.partitions = 1;
+    prepared.device = std::move(device);
+    prepared.target = std::move(target);
+    prepared.pipeline_fingerprint = std::move(pipeline_fingerprint);
+    return prepared;
+}
+
+LoweredGraph LowerPreparedStaticGraph(const PreparedStaticGraph& prepared) {
+    if (!prepared.device.defined() ||
+        !prepared.target.As<TargetNode>() ||
+        prepared.target->device_type != prepared.device.device_type() ||
+        prepared.target->device_id != prepared.device.device_id()) {
+        throw std::invalid_argument(
+            "LowerPreparedStaticGraph requires bound Device and Target identity");
+    }
+    ValidatePartition(prepared.partitioned);
     LoweredGraph result;
-    result.partitioned =
-        PartitionValueGraph(BuildValueGraph(function, device));
+    result.partitioned = prepared.partitioned;
 
     for (const CompilationUnit& unit : result.partitioned.units) {
         relay::LoweredFunction lowered =
@@ -368,7 +408,7 @@ LoweredGraph LowerGraph(Function function, Device device, Target target,
         const auto* type = value.checked_type.As<TensorTypeNode>();
         value_specs.push_back(runtime::ValueSpec(
             value.value_id, value.value_id, type->shape,
-            runtime::DataTypeFromString(type->dtype), device,
+            runtime::DataTypeFromString(type->dtype), prepared.device,
             value.origin == ValueOrigin::kParameter,
             value.origin == ValueOrigin::kConstant, value.is_graph_output));
     }
@@ -379,6 +419,15 @@ LoweredGraph LowerGraph(Function function, Device device, Target target,
         result.partitioned.output_value_ids);
     ValidateLoweredGraph(result);
     return result;
+}
+
+LoweredGraph LowerGraph(Function function, Device device, Target target,
+                        String pipeline_fingerprint) {
+    if (!target.defined()) target = BuildTarget(device);
+    PreparedStaticGraph prepared = PrepareStaticGraph(
+        std::move(function), device, std::move(target),
+        std::move(pipeline_fingerprint));
+    return LowerPreparedStaticGraph(prepared);
 }
 
 void ValidateLoweredGraph(const LoweredGraph& graph) {

@@ -39,7 +39,7 @@ ALLOWED = {
         "distributed", "tir", "runtime", "target", "pass", "profiling", "support", "ffi",
     },
     "compiler": {
-        "compiler", "relay", "te", "tir", "ir", "distributed", "pass",
+        "compiler", "shape", "relay", "te", "tir", "ir", "distributed", "pass",
         "profiling", "runtime", "target", "support", "ffi",
     },
     "relay_distributed": {

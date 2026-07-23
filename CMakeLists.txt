@@ -18,6 +18,8 @@ option(KXC_ENABLE_REGION_TASK_DAG
   "Enable experimental RuntimeSession execution of frozen Region task DAGs" OFF)
 option(KXC_ENABLE_CONTROL_RUNTIME
   "Enable experimental static-exact CPU control runtime execution" OFF)
+option(KXC_ENABLE_SHAPE_PRODUCTION_EXACT
+  "Enable the production exact Relay/compiler/shape adapter" OFF)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build the diagnostic ResNet18 IR dump tool" OFF)
 option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
@@ -52,6 +54,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/foundation_contract.h
   include/kxc/compiler/identity.h
   include/kxc/compiler/pipeline.h
+  include/kxc/compiler/shape_exact.h
   include/kxc/compiler/lowering/relay_to_tir.h
   include/kxc/distributed/ccl_backend.h
   include/kxc/distributed/dref.h
@@ -192,6 +195,7 @@ foreach(_kxc_public_module IN ITEMS
   target_link_libraries(kxc_public_api INTERFACE ${_kxc_module_target})
   list(APPEND KXC_PUBLIC_MODULE_TARGETS ${_kxc_module_target})
 endforeach()
+target_link_libraries(kxc_compiler_api INTERFACE kxc_shape_api)
 
 if(KXC_ENABLE_CUDA)
   find_package(CUDAToolkit QUIET)
@@ -467,6 +471,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/identity.cc
   src/compiler/pipeline_resolver.cc
   src/compiler/compiler.cc
+  src/compiler/shape_exact.cc
   src/compiler/graph/partition.cc
   src/compiler/graph/value_graph.cc
   src/compiler/kernel_abi_builder.cc
@@ -504,7 +509,8 @@ function(kxc_configure_module_obj target)
     KXC_USE_CUDA=${KXC_USE_CUDA}
     KXC_USE_LLVM=${KXC_USE_LLVM}
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
-    KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>)
+    KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
+    KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>)
 endfunction()
 
 function(kxc_enable_cuda target)
@@ -685,7 +691,8 @@ function(kxc_add_runtime_exe target source_file)
     KXC_USE_CUDA=${KXC_USE_CUDA}
     KXC_USE_LLVM=${KXC_USE_LLVM}
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
-    KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>)
+    KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
+    KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>)
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
   endif()
@@ -834,9 +841,17 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
 
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
+  kxc_add_runtime_exe(shape_production_exact_test test/shape_production_exact_test.cpp)
   kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
   kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
   if(BUILD_TESTING)
+    add_test(NAME shape_production_exact_test COMMAND shape_production_exact_test)
+    set_tests_properties(shape_production_exact_test PROPERTIES LABELS "shape-production;cpu")
+    add_custom_target(run_shape_production_exact_test
+      COMMAND "$<TARGET_FILE:shape_production_exact_test>"
+      DEPENDS shape_production_exact_test
+      USES_TERMINAL
+      COMMENT "Run shape production exact adapter test")
     foreach(_kxc_adaptive_test IN ITEMS
         adaptive_contract_test
         adaptive_coordinator_test

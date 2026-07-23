@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "internal/compiled_module_node.h"
 #include "internal/kernel_argument_validation.h"
 #include "internal/session_node.h"
 #include "internal/value_table.h"
@@ -115,7 +116,8 @@ ValidatedPlanContract ValidateModuleAndPlan(
             "RuntimeSession requires a defined ExecutablePlan");
     }
     plan.Validate();
-    const Map<String, NDArray> module_constants = module.constants();
+    const Map<String, NDArray>& module_constants =
+        api::internal::BorrowCompiledModuleConstants(module);
 
     const Array<String> module_symbols = module.symbols();
     const Array<KernelCall> calls = plan.calls();
@@ -346,7 +348,8 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
             "RuntimeSession requires a defined FrozenTaskPlan");
     }
     plan.Validate();
-    const Map<String, NDArray> module_constants = module.constants();
+    const Map<String, NDArray>& module_constants =
+        api::internal::BorrowCompiledModuleConstants(module);
     for (const auto& region : plan.regions()) {
         switch (region->kind) {
             case RegionKind::kPerCall:
@@ -616,7 +619,8 @@ void ValidateBoundSourceArguments(
     const api::CompiledModule& module, const ExecutablePlan& plan,
     const std::unordered_map<int64_t, ValueSpec>& values,
     const std::shared_ptr<internal::ValueTable>& table) {
-    const Map<String, NDArray> constants = module.constants();
+    const Map<String, NDArray>& constants =
+        api::internal::BorrowCompiledModuleConstants(module);
     for (const auto& call : plan.calls()) {
         const codegen::KernelSignature signature = module.signature(call->symbol);
         Array<int64_t> regular_inputs;
@@ -885,7 +889,8 @@ void ValidateBoundTaskSources(
     const api::CompiledModule& module, const FrozenTaskPlan& plan,
     const std::unordered_map<int64_t, ValueSpec>& values,
     const std::shared_ptr<internal::ValueTable>& table) {
-    const Map<String, NDArray> constants = module.constants();
+    const Map<String, NDArray>& constants =
+        api::internal::BorrowCompiledModuleConstants(module);
     for (const auto& task : plan.tasks()) {
         if (task->kind != TaskKind::kKernel) continue;
         const codegen::KernelSignature signature = module.signature(task->symbol);
@@ -1107,7 +1112,8 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
             table->Bind(spec, inputs[i]);
         }
 
-        const Map<String, NDArray> constants = node->module.constants();
+        const Map<String, NDArray>& constants =
+            api::internal::BorrowCompiledModuleConstants(node->module);
         for (int64_t value_id : node->task_plan.constant_value_ids()) {
             const auto key = node->constant_keys_by_value.find(value_id);
             if (key == node->constant_keys_by_value.end() ||
@@ -1200,7 +1206,8 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
         table->Bind(spec, inputs[i]);
     }
 
-    const Map<String, NDArray> constants = node->module.constants();
+    const Map<String, NDArray>& constants =
+        api::internal::BorrowCompiledModuleConstants(node->module);
     for (int64_t value_id : node->plan.constant_value_ids()) {
         const auto key = node->constant_keys_by_value.find(value_id);
         if (key == node->constant_keys_by_value.end() ||

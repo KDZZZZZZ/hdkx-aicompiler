@@ -16,11 +16,15 @@ class CompiledModule : public ObjectRef {
 public:
     explicit CompiledModule(const ObjectRef& ref);
 
+    /*! \brief Launches one entry; equal constant snapshots are validated then
+     * replaced by the module-owned immutable payloads. */
     AsyncOperation Launch(const String& symbol,
                           const Array<runtime::NDArray>& ordered_arguments,
                           const DeviceStream& stream) const;
     codegen::KernelSignature signature(const String& symbol) const;
     codegen::KernelLaunchMetadata launch_metadata(const String& symbol) const;
+    /*! \brief Returns independent payload snapshots; callers cannot mutate
+     * the module. */
     Map<String, runtime::NDArray> constants() const;
     bool HasFunction(const String& symbol) const;
     size_t entry_count() const;

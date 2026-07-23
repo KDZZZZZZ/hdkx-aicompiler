@@ -431,12 +431,63 @@ bool TestSynchronousAssembly() {
                    fixture.launcher->last_arguments.size() == 3,
                "session should launch exactly one three-argument kernel");
     TEST_CHECK(fixture.launcher->last_arguments[0].get() == input.get() &&
-                   fixture.launcher->last_arguments[1].get() ==
+                   fixture.launcher->last_arguments[1].get() !=
                        fixture.constant.get() &&
                    fixture.launcher->last_arguments[2].get() == outputs[0].get(),
-               "session changed input/constant/output ABI order or identity");
+               "session must preserve ABI order and inject module-owned constants");
     TEST_CHECK(fixture.launcher->saw_compiled_kernel_owner,
                "launch should pass the compiled kernel owner to the launcher");
+    return true;
+}
+
+/*! \brief 构建后修改源常量不得改变 RuntimeSession 的数值结果。 */
+bool TestModuleOwnedConstantExecution() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    const Array<int64_t> shape{4};
+    const String key("relay.constant.runtime-owned");
+    KernelSignature signature(
+        "runtime_owned_constant",
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), shape, cpu),
+         KernelArgSpec("weight", KernelArgRole::kConstant, Float32(), shape,
+                       cpu, 64, false, key),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), shape,
+                       cpu, 64, true)});
+    KernelLaunchMetadata metadata(cpu, CodeGenBackend::kLLVM);
+    auto launcher = std::make_shared<BinaryElementwiseLauncher>(false);
+    CompiledKernel executable(signature, metadata, launcher);
+
+    runtime::NDArray source =
+        runtime::NDArray::Empty(shape, Float32(), cpu);
+    const std::vector<float> original{1, 1, 1, 1};
+    source.CopyFromBytes(original.data(), original.size() * sizeof(float));
+    Map<String, runtime::NDArray> constants;
+    constants.Set(key, source);
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu),
+        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
+                                            metadata, executable}},
+        constants);
+
+    const std::vector<float> mutation{9, 9, 9, 9};
+    source.CopyFromBytes(mutation.data(), mutation.size() * sizeof(float));
+    runtime::RuntimeSession session(module, MakePlan(signature));
+    runtime::NDArray input =
+        runtime::NDArray::Empty(shape, Float32(), cpu);
+    const std::vector<float> input_values{1, 2, 3, 4};
+    input.CopyFromBytes(input_values.data(),
+                        input_values.size() * sizeof(float));
+    const Array<runtime::NDArray> outputs = session.Run({input});
+    std::vector<float> actual(4);
+    outputs[0].CopyToBytes(actual.data(), actual.size() * sizeof(float));
+    std::vector<float> launched_constant(4);
+    launcher->last_arguments[1].CopyToBytes(
+        launched_constant.data(), launched_constant.size() * sizeof(float));
+    TEST_CHECK(actual == std::vector<float>({2, 3, 4, 5}) &&
+                   launched_constant == original &&
+                   launcher->last_arguments[1].get() != source.get(),
+               "RuntimeSession must execute with the build-time constant snapshot");
     return true;
 }
 
@@ -952,7 +1003,7 @@ bool TestZeroInputAndMultipleOutputs() {
                    outputs[1].NBytes() == 0,
                "scalar and zero-size output allocation is incorrect");
     TEST_CHECK(launcher->last_arguments.size() == 3 &&
-                   launcher->last_arguments[0].get() == constant.get() &&
+                   launcher->last_arguments[0].get() != constant.get() &&
                    launcher->last_arguments[1].get() == outputs[0].get() &&
                    launcher->last_arguments[2].get() == outputs[1].get(),
                "zero-input constant/output ABI order is incorrect");
@@ -1193,6 +1244,7 @@ int main() {
         {"constant_contract_at_construction",
          TestConstantContractAtConstruction},
         {"synchronous_assembly", TestSynchronousAssembly},
+        {"module_owned_constant_execution", TestModuleOwnedConstantExecution},
         {"async_result_lifetime", TestAsyncResultLifetime},
         {"task_dag_feature_gate_and_fallback",
          TestTaskDagFeatureGateAndFallback},

@@ -225,6 +225,10 @@ void DeviceCopySync(const Device& from_device, const void* from,
                        nbytes);
 }
 
+void DeviceSynchronize(const Device& device) {
+    GetDeviceAPI(device.device_type())->DeviceSync(device);
+}
+
 // 将结构化设备属性投影为兼容 PackedFunc 的单项返回值。
 void DeviceAPI::GetAttr(const Device& device, DeviceAttrKind kind, RetValue* rv) {
     const DeviceAttributes attrs = GetDeviceAttributes(device);

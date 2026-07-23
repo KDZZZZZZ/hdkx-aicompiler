@@ -4,7 +4,7 @@
 >
 > **基线：** `e295a73`（compiler-foundation roadmap）
 >
-> **状态：** guarded resolver 基线 blocker 已关闭；隔离 Shape contract 仍只是 **experimental review candidate**，没有稳定 public v1，也不代表 production Shape 完成。生产 Relay/Frontend/Runtime/Codegen 接入仍受下文 Core/Adaptive/Runtime/Region contract 阻塞。
+> **状态：** W2 增加 default-OFF 的 production exact Relay/compiler adapter；它只支持 concrete Relay 的单一 empty profile 和现有 static RuntimeSession。隔离 Shape contract 仍是 **experimental review candidate**，没有稳定 public v1；bucket、polymorphic、symbolic/dynamic output 以及稳定 Shape ABI 均未完成。
 >
 > **重要边界：** 本页不宣称生产主链已经支持 dynamic shape、bucket kernel、polymorphic launch、dynamic output allocation 或稳定 Shape ABI。bucket/polymorphic 仍只有 guarded deterministic fake。
 
@@ -146,15 +146,61 @@ namespace：`kxc::shape::experimental::v1::fakes::compiler_foundation_v1`
 构建/架构：
 
 - `CMakeLists.txt` 新增独立 `kxc_shape_api`、`kxc_shape_obj` 和三个 focused test target。
-- `tools/architecture/check_include_layers.py` 将 Shape 设为只允许依赖自身的底层模块。
+- `tools/architecture/check_include_layers.py` 保持 Shape 只允许依赖自身的底层模块；Compiler 被明确允许依赖 Shape，Runtime/Shape 不反向依赖 Compiler。
 - Shape experimental 头只 include Shape/stdlib；没有 include `kxc/compiler/*`、`kxc/relay/*`、`kxc/runtime/*`、frontend 或 private header。
 - 安装 smoke 已确认四个头落在 `${prefix}/include/kxc/shape[/fakes]`，且安装副本均保留 experimental-v1/no-source-or-binary-ABI-compatibility 标记。
 - `.github/workflows/ci.yml` 的 CPU job 明确执行三个 `run_shape_*` target，而不再只编译 test executable。
-- 未修改生产 Relay、type inference、lowering、`KernelSignature`、`ValueSpec`、memory planner、`RuntimeSession`、cache 或 frontend。
+- W2 在 Compiler/lowering 内增加可复用 prepared graph 和 production exact adapter，统一 Compiler 与 production primitive cache 的稳定 target-capability canonicalizer，并把 public `CompiledModule::constants()` 收紧为 payload deep snapshots；RuntimeSession 仅改用 private immutable constant borrow，职责和静态数据面不变。未修改 Relay/type inference、`KernelSignature`、`ValueSpec`、memory-planning 算法或 frontend。
 
-## 3. 测试证据
+## 3. W2 production exact（default-OFF）
 
-### 3.1 分阶段 focused tests
+### 3.1 API、流和边界
+
+新增 installed experimental-v1 adapter：`include/kxc/compiler/shape_exact.h`，实现：`src/compiler/shape_exact.cc`，namespace 为 `kxc::api::experimental::shape_exact::v1`。实现调用真实 production compiler/cache，但 public surface 直接消费 experimental Shape 类型，故头文件明确不承诺 source/binary ABI compatibility；没有伪装成稳定 `kxc::api` ABI。CMake gate 为 `KXC_ENABLE_SHAPE_PRODUCTION_EXACT`，默认 `OFF`；实现始终编译，但 API 在 gate 关闭时明确拒绝。该 API 没有 `CompileConfig` opt-in 字段，也没有 fake backend。
+
+- `ProductionExactShapeAdapter::PrepareGraphTemplate(Function, CompileConfig)` 仅解析一次真实 `CompilerExecutionContract`，在真实 `PassContext::MergeTarget`/Scope 下执行 validate、Relay normalized pipeline、entry/post-pass/pre-partition 三个 capability boundary、`BuildValueGraph` 和 `PartitionValueGraph`。
+- `src/compiler/internal/prepared_static_graph.h` 与 `PrepareStaticGraph`/`LowerPreparedStaticGraph` 分开图准备和 per-unit lowering；旧 `LowerGraph` 仍由两步组合，兼容现有静态路径。prepared object 绑定 Device、Target 和 pipeline identity；adapter 的 immutable pimpl 保存 deep-copied target/config snapshot、execution contract、prepared partition 和 `GraphTemplate`。constant NDArray 在 preparation 时复制为独立 payload snapshot，调用方后续修改原始 NDArray 不会改变 prepared graph/module；public `CompiledModule::constants()` 也返回独立 payload snapshots，无法反向修改 variant 或 prepared template，RuntimeSession 则通过 private const borrow 避免执行面复制。prepare/finish 共用同一 profiling context/run id。实际操作边界递增的 counters 为 contract=1、Relay pipeline=1、capability=3、ValueGraph=1、partition=1。
+- `GraphTemplate` 直接从 prepared `ValueGraph`/`PartitionedGraph` 构造，不重新遍历用户 Relay 或重跑 pass。graph semantic identity 不再借用 debug Relay printer，而是长度分隔的 prepared-graph canonical bytes：包含 ordered graph/value/unit routing、value type/origin/output role 和 constant dtype/shape/full payload bytes。constant payload 因此绑定 graph/profile/plan，但不进入可跨图复用的 `UnitSemanticKey`/primitive `ArtifactKey`。shape unit semantic key 包装完整 production core `UnitSemanticKey::canonical_bytes()`；`value.<id>` 仅用于 routing。
+- target identity 使用 Compiler/production cache 共用的一个 canonicalizer，包含所有稳定 codegen capability（含 `max_shared_memory_per_block`）；volatile `available_global_memory` 明确不进入 reusable identity。调用方 Target 在 adapter 入口 deep-copy，此后变化不影响 prepared template。
+- 当前 Relay `TensorTypeNode::shape` 仍为 concrete `Array<int64_t>`、TE lowering 仍要求 `IntImm`，故 `ShapeProgram` 声明零 symbols，只有 empty `BindingSet` 可以 instantiate；non-empty binding/multi-profile 明确 hard-gate。`-1`、负维、非 f16/f32、非 unit lane、arch/device/target/backend 不匹配均 fail closed；没有 larger/fuzzy reuse。
+- exact contract 是 contiguous row-major、显式 canonical stride、`global` memory scope、natural dtype alignment，并强制 logical=physical=valid。adapter 在接受 variant 前逐一检查 exact profile、value-name↔unit-boundary contracts、shape artifact full fields/signature digest、`ValueSpec`、ordered `KernelCall` ids、compiled signature dtype/shape/device/alignment、launch metadata、target/backend ABI、full reconstructed production `ArtifactKey`、public strong `ArtifactPin` 及 pin signature/launch digests。shape digest 永不等同 compiler artifact digest。
+- `AssembleExactPlan` 使用真实 compiler TIR/codegen 和 production cache singleflight/publish/wait，保留 pins；返回 `ExactPlanVariant(module, plan, shape profile key, shape plan key, pins)`。shape plan identity 以长度分隔字段绑定 graph/profile、每个 shape+production artifact、pin signature/launch digest、link symbol、static generation `0`，以及完整 static `ExecutablePlan` value/storage/call routing 和 `last-use-sequential-single-stream-v1` memory-plan version。`RuntimeSession` 只接收 variant 的 module+plan，不接触 Compiler、Shape 或 cache。
+
+### 3.2 Tests and current evidence
+
+新增 `test/shape_production_exact_test.cpp`，CTest labels：`shape-production;cpu`，并有 `run_shape_production_exact_test` custom target。
+
+- Gate OFF: adapter fails closed.
+- Gate ON + LLVM OFF: true preparation/counter immutability, prepared constant payload deep-freeze、public `CompiledModule` constant accessor deep-copy regression, empty exact profile, non-empty binding hard gate, `-1`/unsupported dtype/no-compute/foreign-profile negatives, stable target snapshot与 production artifact target identity（并验证 volatile available-memory exclusion），same-shape/dtype different-constant graph/profile split，以及已知 backend unavailable 在 cache acquire 前拒绝；这些负例/prepare-only cases 不改变 entry/miss/in-flight/failure 计数。
+- `#if KXC_USE_LLVM`: clears production cache; verifies two-unit add→mul miss then hit/pins, all preparation counters unchanged, graph-local unit renumbering reuses/relocates semantic artifacts, a different concrete extent produces new exact misses（无 larger/smaller fuzzy reuse），不同 constant payload 复用同一 primitive artifact 但产生不同 frozen PlanVariant/module numeric result（并验证 prepare 后原 payload mutation 不泄漏）, module/plan cardinality and cache lookup, static `RuntimeSession` numeric execution, runtime shape/dtype negatives, and session lifetime after all variant/prepared/oracle objects are destroyed plus cache clear.
+
+本机已执行（CPU, CUDA/LLVM OFF, gate ON）：
+
+```bash
+cmake -S . -B out/build/shape-production -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
+  -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON \
+  -DKXC_BUILD_PASS_TESTS=ON -DKXC_BUILD_CODEGEN_TESTS=OFF
+cmake --build out/build/shape-production --target shape_production_exact_test --parallel 2
+ctest --test-dir out/build/shape-production --output-on-failure -R shape_production_exact_test
+ctest --test-dir out/build/shape-production --output-on-failure --no-tests=error \
+  --label-regex '(^|;)cpu(;|$)'
+cmake --build out/build/shape-production --target check_include_layers check_public_headers --parallel 2
+cmake -S . -B out/build/shape-production-off -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
+  -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=OFF \
+  -DKXC_BUILD_PASS_TESTS=ON -DKXC_BUILD_CODEGEN_TESTS=OFF
+cmake --build out/build/shape-production-off --target shape_production_exact_test --parallel 2
+ctest --test-dir out/build/shape-production-off --output-on-failure -R shape_production_exact_test
+```
+
+结果：gate-ON `shape_production_exact_test` passed；随后完整 CPU label CTest 为 **39/39 passed**；Relay op contract **19/19**、pass contract **20/20**；include-layer 244 files passed；96 public headers self-contained/compiled passed。另以同样 CPU/LLVM-OFF 配置、`-DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=OFF` 构建并运行 `shape_production_exact_test`，gate-OFF branch passed。LLVM package 本机不可用，因此上列 conditional LLVM E2E numeric/cache/runtime coverage **未在本机运行**。CI CPU smoke 和 LLVM job 均启用 gate；LLVM job builds/runs this test in its explicit regex。本机配置明确关闭 CUDA，当前也没有 W2 CUDA exact E2E 证据，故不作 CUDA production-exact 完成声明。
+
+当前硬 blocker 仍是 Relay `Array<int64_t>`/TE `IntImm` concrete-only shape representation；没有 production bucket/polymorphic claim，也没有 dynamic shape/output claim。
+
+## 4. W1 Shape contract 测试证据
+
+### 4.1 分阶段 focused tests
 
 CPU-only、LLVM/CUDA disabled：
 
@@ -183,7 +229,7 @@ cmake --build out/shape-phase1 --target \
 
 覆盖的关键负例包括：`-1`/负维、常量和 binding-time overflow、derived stride/physical byte overflow、未知 layout、zero/overlap/noncanonical stride、未绑定/矛盾 constraint、显式 gated SameRank/LayoutCompatible、非法 broadcast/range/divisibility、logical/physical/valid 越界、same key/different full template oracle、f32/f16、device kind/id、target/backend/ABI miss、非 exact profile、larger exact artifact 误复用、consumer-before-producer、bucket 无 guard/tail/pad/crop、capacity 过小、错误 physical stride、polymorphic 域外/整除失败/缺 proof/runtime scalar/错误 ordinal。guarded resolver 边界另覆盖 forged call order/locator、input/output sequence、rank、noncanonical stride、physical byte overflow、dtype、device kind/id、target、backend、backend ABI、guard canonical、完整 artifact payload 和缺失 request；全部拒绝且不污染 coordinator 状态。
 
-### 3.2 ASan + UBSan
+### 4.2 ASan + UBSan
 
 ```bash
 cmake -S . -B out/shape-sanitize -G Ninja \
@@ -201,7 +247,7 @@ cmake --build out/shape-sanitize --target \
 
 另以 `-Wall -Wextra -Wpedantic -Werror` 构建并运行三个 Shape tests，全部通过。
 
-### 3.3 现有静态路径回归
+### 4.3 现有静态路径回归
 
 在 `out/shape-regression`（CPU-only、LLVM/CUDA disabled）构建并运行：
 
@@ -220,9 +266,9 @@ cmake --build out/shape-sanitize --target \
 
 本机 Python 缺少 ONNX/Numpy，因此 CMake 按既有逻辑跳过 `onnx_importer_test`；遵守约束，未安装或下载依赖。
 
-## 4. 提交
+## 5. 历史 W1 提交与 W2 工作树状态
 
-按 exact-first 顺序形成原子提交：
+W1 按 exact-first 顺序形成原子提交：
 
 1. `7667750 feat(shape): add symbolic shape foundation`
 2. `079f7b9 feat(shape): add exact specialization contracts`
@@ -230,15 +276,15 @@ cmake --build out/shape-sanitize --target \
 4. `0cc1f1a fix(shape): disambiguate guarded request check`
 5. `2755501 docs(shape): add compiler foundation handoff`
 6. `fb96107 fix(shape): harden experimental exact contracts`
-7. 当前原子提交（guarded resolver trusted reconstruction、forged-request negatives、installed-header ABI 标记与本 handoff 更新）
+7. guarded resolver trusted reconstruction、forged-request negatives、installed-header ABI 标记与本 handoff 更新。
 
-未 push、未 merge，也未修改其他 worktree。
+本节 W2 production exact 以单一 atomic feature commit 交付；最终 commit SHA 由本次交接报告记录。未 push、未 merge，也未修改其他 worktree。
 
-## 5. 跨轨硬阻塞
+## 6. 跨轨硬阻塞
 
-### 5.1 Core / Track 01
+### 6.1 Core / Track 01
 
-生产 GraphTemplate/artifact 接入必须等待：
+W2 exact 已消费下列 Core facilities；symbolic/multi-profile 扩展仍必须维持这些边界：
 
 1. capability verifier 在 compiler 入口、graph Pass 后、partition 前 fail closed；
 2. `UnitSemanticKey` 从当前 partition structural hash 中移除 graph-local value id、symbol、span 等；
@@ -247,9 +293,9 @@ cmake --build out/shape-sanitize --target \
 5. immutable artifact pin，避免 cache hit 后二次 peek 被淘汰；
 6. dtype、argument role、alias、workspace 等非 Shape signature contract。
 
-在这些字段冻结前，本轨只提供 `compiler_foundation_v1` fake，不能把 fake artifact 写入共享生产 cache。
+W2 adapter 不写 fake artifact：它只通过 production primitive cache 交易并保留真实 pin。
 
-### 5.2 Relay / Frontend
+### 6.2 Relay / Frontend
 
 生产 symbolic path 仍被以下事实阻塞：
 
@@ -260,7 +306,7 @@ cmake --build out/shape-sanitize --target \
 
 集成前必须提供 preserve/bind/reject 的版本化 frontend/type adapter，并对每个 allowlisted op 建立 type relation、ShapeProgram 和 lowering 的同源规则或 concrete differential test。不能把 unknown non-batch dim 填 `1` 后写入新 key。
 
-### 5.3 Adaptive / Track 03
+### 6.3 Adaptive / Track 03
 
 当前 coordinator 只是 deterministic synchronous fake。生产 shape-aware dispatch 需要 Track 03 提供：
 
@@ -272,7 +318,7 @@ cmake --build out/shape-sanitize --target \
 
 Track 03 接入不得改变本轨 exact applicability，也不得将 cache miss 或 larger capacity 变成 fallback。
 
-### 5.4 Runtime / Codegen / Track 05
+### 6.4 Runtime / Codegen / Track 05
 
 bucket 真正执行之前必须具备：
 
@@ -295,7 +341,7 @@ ShapeEvalTask -> AllocateTask -> KernelTask
 
 当前 `ShapeProgram::Evaluate` 已能纯计算可确定 output contract，但本轨没有越权修改 runtime task/allocator。data-dependent/ragged output 继续拒绝。
 
-## 6. 建议集成顺序
+## 7. 建议集成顺序
 
 1. **先接 Core M1 DTO。** 用正式 capability/pipeline/unit/artifact/dispatch key 替换 `compiler_foundation_v1` fake 字段；保留 full canonical equality 测试。
 2. **接 frontend/Relay preserve-bind-reject adapter。** 新 symbolic 路径不得产生 `-1`；旧静态构造保持兼容。
@@ -306,8 +352,8 @@ ShapeEvalTask -> AllocateTask -> KernelTask
 7. **最后开放 polymorphic。** 等 runtime extent ABI 与 codegen guard 同时冻结后，映射 `PolymorphicPolicy`；域外 dispatch 必须在 launch 前拒绝。
 8. **dynamic output 最后。** 仅将可确定 ShapeProgram 结果交给正式 ShapeEval/Allocate task；ragged/data-dependent 另立协议。
 
-## 7. 交接判定
+## 8. 交接判定
 
-本工作树当前只提供可复审的 **isolated experimental contract**：Shape IR、exact solver、强类型 tensor/environment identity、full-template-bound exact oracle、严格 contiguous layout，以及从可信 template/profile/policy 重建并验证 request 的 guarded bucket/polymorphic fake 与正反例。installed experimental headers 不承诺 source/binary ABI compatibility；它们不是稳定 public v1，也不是 production Shape 完成声明。
+本工作树提供可复审的 experimental-v1 Shape contract，并提供 **default-OFF、concrete-only W2 production exact adapter**。adapter 是 production compiler/cache/module/plan/pin 的窄桥，但 installed experimental headers 仍不承诺 source/binary ABI compatibility，也不构成 stable public v1 或完整 dynamic Shape 完成声明。
 
-未完成项仍需要其他轨道的生产 contract 或数据面：Core identity/capability/cache、Relay/frontend symbolic representation、Adaptive lifecycle、Runtime physical plan、Codegen extent ABI、Region task vocabulary。故状态为 **experimental review candidate / stable public ABI and production integration not done**；不通过侵入现有 Relay/Runtime、`-1` 或 `cached_dims >= query_dims` 绕过依赖。
+未完成项仍需要其他轨道的生产 contract 或数据面：Relay/frontend symbolic representation、Adaptive multi-profile lifecycle、Runtime physical bucket plan、Codegen extent ABI、Region task vocabulary。状态为 **W2 exact gated / stable public ABI and dynamic production integration not done**；不通过侵入现有 Relay/Runtime、`-1` 或 `cached_dims >= query_dims` 绕过依赖。

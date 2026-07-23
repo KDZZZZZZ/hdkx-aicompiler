@@ -9,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace kxc::api {
 namespace {
@@ -31,6 +32,19 @@ std::string DTypeText(DLDataType dtype) {
         detail);
 }
 
+bool SamePayload(const runtime::NDArray& left,
+                 const runtime::NDArray& right) {
+    if (left.get() == right.get()) return true;
+    if (left.NBytes() != right.NBytes()) return false;
+    std::vector<unsigned char> left_bytes(left.NBytes());
+    std::vector<unsigned char> right_bytes(right.NBytes());
+    left.CopyToBytes(left_bytes.empty() ? nullptr : left_bytes.data(),
+                     left_bytes.size());
+    right.CopyToBytes(right_bytes.empty() ? nullptr : right_bytes.data(),
+                      right_bytes.size());
+    return left_bytes == right_bytes;
+}
+
 }  // namespace
 
 /*! \brief 按 DLPack 三元组比较 dtype，不忽略 vector lanes。 */
@@ -39,7 +53,7 @@ bool SameDType(DLDataType lhs, DLDataType rhs) {
            lhs.lanes == rhs.lanes;
 }
 
-/*! \brief 执行不依赖其他参数的安全检查，并验证 constant 对象身份。 */
+/*! \brief 执行不依赖其他参数的安全检查，并验证 constant 完整 payload。 */
 void ValidateKernelArgument(
     const codegen::KernelSignature& signature, size_t index,
     const codegen::KernelArgSpec& spec, const runtime::NDArray& argument,
@@ -127,9 +141,18 @@ void ValidateKernelArgument(
                                "bound constant is missing");
         }
         const runtime::NDArray& bound = constants.at(spec->constant_key);
-        if (argument.get() != bound.get()) {
+        bool matches = false;
+        try {
+            matches = SamePayload(argument, bound);
+        } catch (const std::exception& error) {
             ThrowArgumentError(signature, index, spec,
-                               "constant argument does not match the bound payload");
+                               std::string("constant payload comparison failed: ") +
+                                   error.what());
+        }
+        if (!matches) {
+            ThrowArgumentError(
+                signature, index, spec,
+                "constant argument does not match the bound payload bytes");
         }
     }
 }

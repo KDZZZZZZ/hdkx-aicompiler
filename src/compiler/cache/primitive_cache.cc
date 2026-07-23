@@ -4,6 +4,7 @@
 
 #include "../internal/primitive_cache.h"
 
+#include "../internal/execution_contract.h"
 #include "kxc/profiling/profiling.h"
 
 #include <algorithm>
@@ -147,61 +148,6 @@ void EvictReadyArtifacts(PrimitiveCache* cache) {
     }
 }
 
-void AppendTargetField(std::string* canonical, const std::string& name,
-                       const std::string& value) {
-    *canonical += std::to_string(name.size()) + ":" + name + "=" +
-                  std::to_string(value.size()) + ":" + value + ";";
-}
-
-std::string TargetFingerprint(const Target& target) {
-    if (!target.defined() || !target.As<TargetNode>()) {
-        throw std::invalid_argument(
-            "primitive artifact identity requires a defined Target");
-    }
-    const TargetNode* node = target.operator->();
-    std::string out;
-    AppendTargetField(&out, "kind", "target-v1");
-    AppendTargetField(&out, "target_kind", node->kind);
-    AppendTargetField(&out, "device_type",
-                      std::to_string(static_cast<int>(node->device_type)));
-    AppendTargetField(&out, "device_id", std::to_string(node->device_id));
-    AppendTargetField(&out, "exists", std::to_string(node->attrs.exists));
-    AppendTargetField(&out, "device_name", node->attrs.device_name);
-    AppendTargetField(&out, "arch", node->attrs.arch);
-    AppendTargetField(&out, "max_clock_khz",
-                      std::to_string(node->attrs.max_clock_rate_khz));
-    AppendTargetField(&out, "max_registers_block",
-                      std::to_string(node->attrs.max_registers_per_block));
-    AppendTargetField(&out, "api_version",
-                      std::to_string(node->attrs.api_version));
-    AppendTargetField(&out, "driver_version",
-                      std::to_string(node->attrs.driver_version));
-    AppendTargetField(&out, "l2_bytes",
-                      std::to_string(node->attrs.l2_cache_size_bytes));
-    AppendTargetField(&out, "global_bytes",
-                      std::to_string(node->attrs.total_global_memory));
-    AppendTargetField(
-        &out, "shared_mem_sm",
-        std::to_string(node->attrs.max_shared_memory_per_multiprocessor));
-    AppendTargetField(
-        &out, "registers_sm",
-        std::to_string(node->attrs.max_registers_per_multiprocessor));
-    AppendTargetField(
-        &out, "threads_sm",
-        std::to_string(node->attrs.max_threads_per_multiprocessor));
-    AppendTargetField(&out, "threads_block",
-                      std::to_string(node->attrs.max_threads_per_block));
-    AppendTargetField(&out, "warp",
-                      std::to_string(node->attrs.warp_size));
-    AppendTargetField(&out, "compute_major",
-                      std::to_string(node->attrs.compute_version_major));
-    AppendTargetField(&out, "compute_minor",
-                      std::to_string(node->attrs.compute_version_minor));
-    AppendTargetField(&out, "multiprocessors",
-                      std::to_string(node->attrs.multi_processor_count));
-    return out;
-}
-
 PrimitiveFailureRecord FailureWithRemaining(
     const FailureEntry& entry, Clock::time_point now) {
     PrimitiveFailureRecord failure = entry.failure;
@@ -279,7 +225,7 @@ ArtifactKey BuildPrimitiveArtifactKey(
         throw std::invalid_argument(
             "primitive artifact key requires semantics, pipeline, schedule, and backend");
     }
-    return ArtifactKey(semantic_key, TargetFingerprint(target),
+    return ArtifactKey(semantic_key, CanonicalTargetSnapshot(target),
                        pipeline_fingerprint, kKernelABIVersion,
                        schedule_version, backend_version);
 }

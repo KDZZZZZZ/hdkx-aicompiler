@@ -6,7 +6,7 @@
 
 #include <vector>
 
-#include "compilation_unit.h"
+#include "prepared_static_graph.h"
 #include "kxc/compiler/lowering/relay_to_tir.h"
 
 namespace kxc::api::internal {
@@ -28,6 +28,10 @@ struct LoweredGraph {
 
 relay::LoweredFunction LowerCompilationUnit(
     const ValueGraph& graph, const CompilationUnit& unit);
+PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
+                                       Target target,
+                                       String pipeline_fingerprint);
+LoweredGraph LowerPreparedStaticGraph(const PreparedStaticGraph& prepared);
 LoweredGraph LowerGraph(Function function,
                         Device device = Device::CPU(),
                         Target target = Target(),
