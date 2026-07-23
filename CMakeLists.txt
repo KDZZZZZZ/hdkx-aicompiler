@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+enable_testing()
+
 option(KXC_ENABLE_CUDA "Enable CUDA support when toolkit is available" ON)
 option(KXC_ENABLE_LLVM "Enable LLVM backend for codegen" ON)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build the diagnostic ResNet18 IR dump tool" OFF)
@@ -35,8 +37,12 @@ set(KXC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/include")
 
 set(KXC_PUBLIC_HEADERS
+  include/kxc/compiler/capability.h
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
+  include/kxc/compiler/foundation_contract.h
+  include/kxc/compiler/identity.h
+  include/kxc/compiler/pipeline.h
   include/kxc/compiler/lowering/relay_to_tir.h
   include/kxc/distributed/ccl_backend.h
   include/kxc/distributed/dref.h
@@ -417,9 +423,13 @@ set(KXC_RUNTIME_EXECUTABLE_SOURCES
 )
 
 set(KXC_COMPILER_SOURCES
-    src/compiler/cache/primitive_cache.cc
-    src/compiler/compile_config.cc
+  src/compiler/cache/primitive_cache.cc
+  src/compiler/capability.cc
+  src/compiler/compile_config.cc
   src/compiler/compile_state.cc
+  src/compiler/foundation_contract.cc
+  src/compiler/identity.cc
+  src/compiler/pipeline_resolver.cc
   src/compiler/compiler.cc
   src/compiler/graph/partition.cc
   src/compiler/graph/value_graph.cc
@@ -732,6 +742,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(registry_test test/registry_test.cpp)
   kxc_add_runtime_exe(type_registration_test test/type_registration_test.cpp)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
+  kxc_add_runtime_exe(pipeline_resolver_test test/pipeline_resolver_test.cpp)
   kxc_add_runtime_exe(device_info_test test/device_info_test.cpp)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
@@ -739,7 +750,11 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
+  kxc_add_runtime_exe(compiler_capability_test test/compiler_capability_test.cpp)
+  kxc_add_runtime_exe(compiler_identity_test test/compiler_identity_test.cpp)
+  kxc_add_runtime_exe(compiler_foundation_contract_test test/compiler_foundation_contract_test.cpp)
   kxc_add_runtime_exe(operator_compilation_test test/operator_compilation_test.cpp)
+  kxc_add_runtime_exe(primitive_cache_test test/primitive_cache_test.cpp)
   kxc_add_runtime_exe(compiler_extension_contract_test test/compiler_extension_contract_test.cpp)
   kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
@@ -912,4 +927,58 @@ if(KXC_BUILD_CODEGEN_TESTS AND KXC_USE_LLVM)
     USES_TERMINAL
     COMMENT "Run per-op LLVM numeric tests"
   )
+endif()
+
+# CTest is the CI execution surface. Keep the existing run_* custom targets for
+# developer compatibility, but make every CPU/core executable independently
+# runnable and keep backend/hardware tests out of the CPU label.
+function(kxc_add_ctest_if_target target labels)
+  if(TARGET ${target})
+    add_test(NAME ${target} COMMAND "$<TARGET_FILE:${target}>")
+    set_tests_properties(${target} PROPERTIES LABELS "${labels}")
+  endif()
+endfunction()
+
+foreach(_kxc_cpu_core_test IN ITEMS
+    object_test packed_func_test registry_test type_registration_test
+    pass_pipeline_test pipeline_resolver_test device_info_test device_runtime_test
+    executable_plan_test graph_partition_test infer_type_test profile_bundle_test
+    compiler_contract_test compiler_capability_test compiler_identity_test
+    compiler_foundation_contract_test operator_compilation_test primitive_cache_test
+    compiler_extension_contract_test kernel_signature_test compiled_module_test
+    runtime_session_test cuda_schedule_test)
+  # cuda_schedule_test exercises CPU-only scheduling contracts with synthetic
+  # Target snapshots; it neither requires nor launches CUDA hardware.
+  kxc_add_ctest_if_target(${_kxc_cpu_core_test} "cpu;core")
+endforeach()
+
+kxc_add_ctest_if_target(codegen_llvm_test "llvm;codegen")
+kxc_add_ctest_if_target(op_numeric_llvm_test "llvm;numeric")
+kxc_add_ctest_if_target(onnx_importer_test "llvm;onnx;integration")
+kxc_add_ctest_if_target(codegen_cuda_test "cuda;hardware;codegen")
+kxc_add_ctest_if_target(cupti_smoke_test "cuda;hardware")
+
+if(Python3_Interpreter_FOUND)
+  add_test(NAME relay_op_contract
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_relay_op_contract.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/relay_op_contract.json")
+  add_test(NAME pass_contract
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_pass_contract.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/pass_contract.json")
+  add_test(NAME include_layers
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_include_layers.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}")
+  add_test(NAME public_headers
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_public_headers.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --compile
+            --compiler "${CMAKE_CXX_COMPILER}")
+  set_tests_properties(relay_op_contract pass_contract include_layers public_headers
+    PROPERTIES LABELS "cpu;contract")
 endif()

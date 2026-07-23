@@ -1,6 +1,6 @@
 # 01：共同基础——契约、identity 与 artifact cache
 
-> **状态：** 规划中（尚未开始实现）  
+> **状态：** 进行中（仓内 Track01 边界已实现并通过本地 CPU closure；LLVM workflow 已配置，但本机/当前会话无 LLVM 绿色记录，仍待 LLVM builder 与终审）
 > **所属路线：** [编译器基础路线图](README.md)  
 > **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **前置：** 无；本轨的最小冻结接口应允许 02–06 使用 mock/fake 并行开发。
@@ -119,7 +119,16 @@
 | 背压 | 全局、per-model、per-target/backend 并发和 bytes 预算；低价值 prewarm 可被拒绝，显式请求不得静默丢失。 |
 | fake | `FakeCompileCoordinator` 用可控 promise、clock 和队列结果模拟合并、失败、取消、饱和与发布顺序。 |
 
-03 将实现此合同的生产协调器；01 只冻结状态、输入/输出和可观测字段，确保 02/05/06 可以先构造 deterministic fake artifact 流。
+01 的 production adapter 只闭合 **static-exact primitive transaction**：完整
+`ArtifactKey` 的 acquire/wait/publish/fail、同 key flight、failure TTL、wait 前取消
+快照、全局 in-flight 背压和 eviction-safe pin。它明确拒绝带 `DispatchKey`、
+非 normal priority 或非 global budget 的请求；这些请求不会被静默降级。
+
+03 仍拥有生产控制面：可唤醒的异步 per-waiter cancellation、队列与优先级、
+per-model/per-target budget、artifact+dispatch 协调、generation 发布、canary/
+rollback 和 hot swap。`ProductionCompileOwnership` 将此边界暴露为公共事实；03
+不得在 `RuntimeSession` 内实现这些策略，也不得另建与 primitive cache 竞争的
+static-exact flight 表。
 
 ### 5.6 版本与 plan 交接合同
 
@@ -155,7 +164,7 @@ M1 的冻结原则是“窄而可替换”：每个 mock/fake 只实现表中的
 8. **收敛 legacy lowering 和文档。** whole-graph `LowerToTIR` 标记 compatibility/testing；能力矩阵、扩展指南、runtime/profiling 文档标 current/target/archived，并链接 production `Compiler::Compile` 证据。
 9. **完成跨轨 M1 review。** 02–06 使用相同 fake contracts 编译其测试；确认无私有 header、object address、value id、symbol 或 sentinel 泄漏进入新公共合同。
 
-## 8. 测试计划（实现后执行；本次不运行）
+## 8. 测试与实现证据（2026-07-23）
 
 | 类别 | 正例 | 反例/并发例 | 断言 |
 |---|---|---|---|
@@ -174,16 +183,20 @@ M1 的冻结原则是“窄而可替换”：每个 mock/fake 只实现表中的
 
 ## 9. Done 条件
 
-- [ ] capability verifier 在三个规定边界 fail closed，并有可定位的正反例。
-- [ ] operator/pass 的关键 metadata、binding、default pipeline 与文档锚点有一个权威 source 或严格可执行的单向生成/校验链。
-- [ ] `PipelineResolver` 成为生产 pipeline 顺序与 fingerprint 的唯一解析点；重复 policy 不再是事实源。
-- [ ] `GraphValueLocator`、`UnitSemanticKey`、`ArtifactKey`、`DispatchKey`、`PlanVariantKey`、symbol、storage id 有独立 canonical 定义和测试。
-- [ ] 无关 graph-local 重编号或 symbol 变化不影响 unit semantic/artifact identity；所有语义/ABI/target 变化安全 miss。
-- [ ] ready cache lookup 返回 immutable pin/handle；淘汰不使已命中编译、plan 或 in-flight launch 失效。
-- [ ] compile request 的 singleflight、failure/retry、取消、预算和背压合同及 observer 字段冻结，并可由 deterministic fake 验证。
-- [ ] whole-graph lowering 明确降为 compatibility/testing，生产能力声明以 per-unit `Compiler::Compile` 为准。
-- [ ] 02–06 已用 mock/fake 消费 M1 合同，且没有绕过 runtime/compiler 单向依赖的私有耦合。
-- [ ] 文档状态、feature gate、测试证据一致；没有把 `-1`、fuzzy cache 或历史 adaptive runtime 宣称为当前 dynamic shape/hot swap 能力。
+- [x] capability verifier 结构化区分 `unsupported`、`eligible-but-not-executable` 与 `executable`；`supported=true` 只来自同一 production compile path 的 lowering、schedule、ABI 和 backend 成功证明。
+- [x] `nn_gemm transA`、tuple parameter、backend unavailable、CUDA capability/reduction schedule、custom lowering output mismatch 与 `supported => Compiler::Compile success` 矩阵有正反例。
+- [x] operator/pass 的关键 metadata、binding、default pipeline 与文档锚点由 JSON -> generated C++ -> checker 单向链管理。
+- [x] `PipelineResolver` 显式包含 pre/post InferType、Relay/TIR pass 与 target schedule；`PipelineExecutor` 消费并复核完整 normalized transition，production 每次编译只解析一次，并在每步后执行已证明 invariant 的 validator；declarative-only invariant 不得成为生产前置条件。
+- [x] `GraphValueLocator`、`UnitSemanticKey`、`ArtifactKey`、`DispatchKey`、`PlanVariantKey`、symbol、storage id 有独立 canonical 定义和测试。
+- [x] 无关 graph-local 重编号或 symbol 变化不影响 unit semantic/artifact identity；所有语义/ABI/target 变化安全 miss。
+- [x] ready cache lookup 返回 immutable pin/handle；淘汰只移除可发现性，已发 pin 和 executable 强引用继续有效。
+- [x] public `ProductionArtifactCacheAdapter::Acquire/Wait/Publish/Fail` 与 `CompiledGraph::artifact_pins` 通过 opaque transaction/candidate/pin 接入真实 production primitive cache；同完整 static-exact key 合并，失败 TTL/retry、waiter 取消快照、全局背压和 eviction pin 均有 public-to-production 端到端测试。
+- [x] Core/Track03 ownership 在 `ProductionCompileOwnership` 中明确：dispatch、异步取消、优先级与细分预算请求在 Core adapter fail closed；Track03 的 coordinator/generation/hot-swap 仍未由 Track01 冒充完成。
+- [x] whole-graph lowering 明确降为 compatibility/testing，生产能力声明以 per-unit `Compiler::Compile` 为准。
+- [ ] 02–06 各自分支已实际消费 CoreContract v2 mock/fake，且没有绕过 runtime/compiler 单向依赖的私有耦合（跨轨集成项；不是本轨唯一 blocker）。
+- [x] CPU-only CTest 实际运行 23 个 core C++ executables 与 4 个 contract/include/public-header checks（27/27）。
+- [ ] LLVM-enabled CI 实际运行 `operator_compilation_test` 的 relocation/cache reuse、`codegen_llvm_test`、`op_numeric_llvm_test` 与 ONNX compile（workflow 已配置；本机无 LLVM，待 CI 记录）。
+- [x] 文档状态、feature gate、测试证据一致；没有把 `-1`、fuzzy cache 或历史 adaptive runtime 宣称为当前 dynamic shape/hot swap 能力。
 
 ## 10. 风险、决策门与状态
 
@@ -196,4 +209,4 @@ M1 的冻结原则是“窄而可替换”：每个 mock/fake 只实现表中的
 | legacy 路径继续被新增功能使用 | production/compatibility 标签与 capability test | 新特性不得只接 legacy lowering |
 | 其他轨道等待实现而失去并行性 | fake resolver/store/coordinator/assembler 合同 | M1 review 验证各轨 mock 已可运行 |
 
-本轨状态保持“规划中”，直到 M1 的接口、测试与文档收敛全部满足。本文仅定义计划和草案；未创建实现代码，未运行构建或测试。
+仓内 Track01 的 static-exact transaction/pin、executable invariant、CPU 单元/并发/contract/header closure 与历史文档标记已完成；这不包含 Track03 自适应协调策略。状态仍为“进行中”，因为 LLVM workflow 虽已配置，本机/当前会话没有 LLVM-enabled 绿色记录，仍须外部 builder 执行并由终审确认；02–06 的消费证据另作跨轨集成项。完整证据与限制见 `docs/handoffs/compiler-foundation/core.md`。

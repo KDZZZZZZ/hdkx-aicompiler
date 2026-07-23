@@ -84,6 +84,12 @@ size_t CountUniqueCalls(const kxc::Function& function) {
     return calls.size();
 }
 
+kxc::api::internal::LoweredGraph LowerForTest(
+    const kxc::Function& function) {
+    return kxc::api::internal::LowerGraph(
+        kxc::relay::InferTypePass(function));
+}
+
 bool ReadIntAttr(const kxc::tir::PrimFunc& function, const char* key,
                  int64_t* value) {
     const kxc::String attr_key(key);
@@ -159,7 +165,7 @@ std::vector<GraphFixture> MakeFixtures() {
     };
 }
 
-bool TestWholeGraphSinglePrimFuncBaseline() {
+bool TestWholeGraphCompatibilityBaseline() {
     for (const auto& fixture : MakeFixtures()) {
         const kxc::relay::LoweredFunction lowered =
             kxc::relay::LowerToTIR(fixture.function);
@@ -182,7 +188,7 @@ bool TestPerOperatorTargetCardinality() {
     for (const auto& fixture : MakeFixtures()) {
         const size_t expected_units = CountUniqueCalls(fixture.function);
         const kxc::api::internal::LoweredGraph lowered =
-            kxc::api::internal::LowerGraph(fixture.function);
+            LowerForTest(fixture.function);
         TEST_CHECK(expected_units == fixture.expected_compute_calls,
                    std::string(fixture.name) +
                        " must allocate exactly one target unit per compute Call");
@@ -226,7 +232,7 @@ bool TestPerOperatorTargetCardinality() {
 bool TestProducerCallsRemainOutsideConsumerPrimFunc() {
     const GraphFixture chain = MakeFixtures()[0];
     const kxc::api::internal::LoweredGraph lowered =
-        kxc::api::internal::LowerGraph(chain.function);
+        LowerForTest(chain.function);
     TEST_CHECK(lowered.primitives.size() == 2,
                "chain must lower to two independent primitives");
     int64_t first_inputs = -1;
@@ -252,8 +258,7 @@ bool TestSharedConstantUsesStableGraphValueKey() {
     Call first = Add(input, constant);
     Function function({input}, Multiply(first, constant));
 
-    const api::internal::LoweredGraph lowered =
-        api::internal::LowerGraph(function);
+    const api::internal::LoweredGraph lowered = LowerForTest(function);
     TEST_CHECK(lowered.primitives.size() == 2 && lowered.constants.size() == 1,
                "shared constant must be deduplicated graph-wide");
     TEST_CHECK(lowered.plan.constant_value_ids().size() == 1 &&
@@ -328,8 +333,7 @@ bool TestSingleUnitSupportsMultipleOutputs() {
     Var input("input", type);
     Call call(MultiOutputTestOp(), {input});
     Function function({input}, call);
-    const api::internal::LoweredGraph lowered =
-        api::internal::LowerGraph(function);
+    const api::internal::LoweredGraph lowered = LowerForTest(function);
     TEST_CHECK(lowered.primitives.size() == 1 &&
                    lowered.plan.output_value_ids().size() == 2,
                "one multi-output Call must remain one unit with two stable values");
@@ -451,12 +455,58 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
     const auto second = api::Compiler::Compile(function, config);
     const api::internal::PrimitiveCacheStats after_second =
         api::internal::GetPrimitiveCacheStats();
+    api::ProductionArtifactCacheAdapter adapter;
+    bool public_pins_are_production_backed =
+        first.artifact_pins.size() == 2 && second.artifact_pins.size() == 2;
+    for (const api::ArtifactPin& pin : second.artifact_pins) {
+        public_pins_are_production_backed =
+            public_pins_are_production_backed && pin.defined() &&
+            adapter.Lookup(pin.handle().record().artifact_key).kind ==
+                api::ArtifactLookupKind::kHit;
+    }
     TEST_CHECK(first.module.entry_count() == 2 &&
                    second.module.entry_count() == 2 &&
+                   public_pins_are_production_backed &&
                    after_first.misses == 2 && after_first.hits == 0 &&
                    after_first.entries == 2 && after_second.misses == 2 &&
                    after_second.hits == 2,
-               "repeat compilation should hit full primitive cache keys");
+               "repeat compilation should return public pins from the production cache");
+    return true;
+}
+
+bool TestPrimitiveCacheReusesRenumberedUnit() {
+    using namespace kxc;
+    api::internal::ClearPrimitiveCacheForTesting();
+    TensorType type({4}, "float32");
+    Var lhs("lhs", type);
+    Var rhs("rhs", type);
+    const api::CompileConfig config =
+        api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+    const auto direct = api::Compiler::Compile(
+        Function({lhs, rhs}, Add(lhs, rhs)), config);
+    const api::internal::PrimitiveCacheStats after_direct =
+        api::internal::GetPrimitiveCacheStats();
+
+    Var shifted_lhs("lhs", type);
+    Var shifted_rhs("rhs", type);
+    Var unrelated("unrelated", type);
+    Function shifted(
+        {shifted_lhs, shifted_rhs, unrelated},
+        Tuple({Multiply(shifted_lhs, unrelated),
+               Add(shifted_lhs, shifted_rhs)}));
+    const auto reused = api::Compiler::Compile(shifted, config);
+    const api::internal::PrimitiveCacheStats after_reused =
+        api::internal::GetPrimitiveCacheStats();
+    runtime::RuntimeSession session(reused.module, reused.plan);
+    const Array<runtime::NDArray> outputs = session.Run(
+        {FilledTensor(2.0f), FilledTensor(3.0f), FilledTensor(4.0f)});
+    TEST_CHECK(direct.module.entry_count() == 1 &&
+                   reused.module.entry_count() == 2 && outputs.size() == 2 &&
+                   TensorEquals(outputs[0], 8.0f) &&
+                   TensorEquals(outputs[1], 5.0f) &&
+                   after_direct.misses == 1 && after_direct.hits == 0 &&
+                   after_reused.misses == 2 && after_reused.hits == 1,
+               "renumbered add must reuse a validated symbol alias numerically");
     return true;
 }
 
@@ -466,7 +516,7 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
-        {"whole_graph_single_primfunc_baseline", TestWholeGraphSinglePrimFuncBaseline},
+        {"whole_graph_compatibility_baseline", TestWholeGraphCompatibilityBaseline},
         {"per_operator_target_cardinality", TestPerOperatorTargetCardinality},
         {"producer_calls_remain_outside_consumer",
          TestProducerCallsRemainOutsideConsumerPrimFunc},
@@ -481,6 +531,8 @@ int main() {
          TestMultiOutputExecutesNumerically},
         {"primitive_cache_uses_full_stable_identity",
          TestPrimitiveCacheUsesFullStableIdentity},
+        {"primitive_cache_reuses_renumbered_unit",
+         TestPrimitiveCacheReusesRenumberedUnit},
 #endif
     };
     bool ok = true;

@@ -52,7 +52,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Add"]
+      "onnx_ops": [
+        "Add"
+      ]
     },
     "cast": {
       "schema_version": 1,
@@ -150,7 +152,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Conv"]
+      "onnx_ops": [
+        "Conv"
+      ]
     },
     "nn_dense": {
       "schema_version": 1,
@@ -182,7 +186,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Flatten"]
+      "onnx_ops": [
+        "Flatten"
+      ]
     },
     "nn_gemm": {
       "schema_version": 1,
@@ -198,7 +204,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Gemm"]
+      "onnx_ops": [
+        "Gemm"
+      ]
     },
     "nn_global_avg_pool2d": {
       "schema_version": 1,
@@ -214,7 +222,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["GlobalAveragePool"]
+      "onnx_ops": [
+        "GlobalAveragePool"
+      ]
     },
     "nn_max_pool2d": {
       "schema_version": 1,
@@ -230,7 +240,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["MaxPool"]
+      "onnx_ops": [
+        "MaxPool"
+      ]
     },
     "nn_relu": {
       "schema_version": 1,
@@ -246,7 +258,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Relu"]
+      "onnx_ops": [
+        "Relu"
+      ]
     },
     "reduce_mean": {
       "schema_version": 1,
@@ -344,5 +358,6 @@
       "tests": true,
       "onnx_ops": []
     }
-  }
+  },
+  "documentation": "docs/OP_SUPPORT_MATRIX.md"
 }

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../../codegen/internal/compiled_kernel.h"
+#include "kxc/compiler/foundation_contract.h"
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/executable_plan.h"
 #include "kxc/runtime/kernel_abi.h"
@@ -32,7 +33,7 @@ struct PrimitiveCompileState {
     int64_t unit_id{-1};
     String symbol;
     String operator_identity;
-    String structural_hash;
+    UnitSemanticKey semantic_key;
     tir::PrimFunc tir;
     std::optional<codegen::KernelSignature> signature;
     std::optional<codegen::KernelLaunchMetadata> launch_metadata;
@@ -51,6 +52,7 @@ private:
     Target target_;
     std::optional<Function> relay_;
     std::vector<PrimitiveCompileState> primitives_;
+    std::vector<ArtifactPin> artifact_pins_;
     std::optional<runtime::ExecutablePlan> plan_;
     Map<String, runtime::NDArray> constants_;
 };
@@ -69,11 +71,12 @@ public:
     CompileResult AfterTIROptimization(
         std::vector<tir::PrimFunc> optimized_tir) const;
     CompileResult AfterSignatures(
-        std::vector<codegen::KernelSignature> signatures,
-        std::vector<bool> cache_hits = {}) const;
+        std::vector<codegen::KernelSignature> signatures) const;
     CompileResult AfterBackends(
         std::vector<codegen::KernelLaunchMetadata> launch_metadata,
-        std::vector<codegen::CompiledKernel> kernels) const;
+        std::vector<codegen::CompiledKernel> kernels,
+        std::vector<bool> cache_hits = {},
+        std::vector<ArtifactPin> artifact_pins = {}) const;
 
     void ValidateState() const;
     CompileStage stage() const;
@@ -82,6 +85,7 @@ public:
     Function validated_relay() const;
     Function optimized_relay() const;
     std::vector<PrimitiveCompileState> primitives() const;
+    std::vector<ArtifactPin> artifact_pins() const;
     runtime::ExecutablePlan plan() const;
     Map<String, runtime::NDArray> constants() const;
     const CompileResultNode* operator->() const;

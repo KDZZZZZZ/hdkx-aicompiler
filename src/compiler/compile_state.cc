@@ -126,7 +126,7 @@ void ValidatePrimitiveIdentity(const PrimitiveCompileState& primitive,
     if (primitive.unit_id != static_cast<int64_t>(index) ||
         std::string(primitive.symbol).empty() ||
         std::string(primitive.operator_identity).empty() ||
-        std::string(primitive.structural_hash).empty()) {
+        !primitive.semantic_key.defined()) {
         throw std::invalid_argument(
             "CompileResult primitive identities must be dense and non-empty");
     }
@@ -138,7 +138,7 @@ void ValidatePrimitiveIdentity(const PrimitiveCompileState& primitive,
         !(ReadStringAttr(primitive.tir, "kxc.operator_identity", context) ==
           primitive.operator_identity) ||
         !(ReadStringAttr(primitive.tir, "kxc.structural_hash", context) ==
-          primitive.structural_hash)) {
+          String(primitive.semantic_key.digest()))) {
         throw std::invalid_argument(context +
                                     " identity drifted from PrimFunc metadata");
     }
@@ -219,9 +219,6 @@ CompileResult CompileResult::AfterTIROptimization(
     next->primitives_ = current->primitives_;
     for (size_t i = 0; i < optimized_tir.size(); ++i) {
         next->primitives_[i].tir = std::move(optimized_tir[i]);
-        next->primitives_[i].structural_hash = ReadStringAttr(
-            next->primitives_[i].tir, "kxc.structural_hash",
-            PrimitiveContext(next->primitives_[i]));
     }
     next->plan_ = current->plan_;
     next->constants_ = CopyConstants(current->constants_);
@@ -231,17 +228,12 @@ CompileResult CompileResult::AfterTIROptimization(
 }
 
 CompileResult CompileResult::AfterSignatures(
-    std::vector<codegen::KernelSignature> signatures,
-    std::vector<bool> cache_hits) const {
+    std::vector<codegen::KernelSignature> signatures) const {
     const auto* current = operator->();
     RequireStage(current->stage_, CompileStage::kTIROptimized,
                  "AfterSignatures");
     if (signatures.size() != current->primitives_.size()) {
         throw std::invalid_argument("AfterSignatures primitive count changed");
-    }
-    if (cache_hits.empty()) cache_hits.resize(signatures.size(), false);
-    if (cache_hits.size() != signatures.size()) {
-        throw std::invalid_argument("AfterSignatures cache-hit count changed");
     }
     auto* next = new CompileResultNode();
     next->stage_ = CompileStage::kSignatureBuilt;
@@ -250,7 +242,6 @@ CompileResult CompileResult::AfterSignatures(
     next->primitives_ = current->primitives_;
     for (size_t i = 0; i < signatures.size(); ++i) {
         next->primitives_[i].signature = std::move(signatures[i]);
-        next->primitives_[i].cache_hit = cache_hits[i];
     }
     next->plan_ = current->plan_;
     next->constants_ = CopyConstants(current->constants_);
@@ -261,13 +252,22 @@ CompileResult CompileResult::AfterSignatures(
 
 CompileResult CompileResult::AfterBackends(
     std::vector<codegen::KernelLaunchMetadata> launch_metadata,
-    std::vector<codegen::CompiledKernel> kernels) const {
+    std::vector<codegen::CompiledKernel> kernels,
+    std::vector<bool> cache_hits,
+    std::vector<ArtifactPin> artifact_pins) const {
     const auto* current = operator->();
     RequireStage(current->stage_, CompileStage::kSignatureBuilt,
                  "AfterBackends");
     if (launch_metadata.size() != current->primitives_.size() ||
         kernels.size() != current->primitives_.size()) {
         throw std::invalid_argument("AfterBackends primitive count changed");
+    }
+    if (cache_hits.empty()) cache_hits.resize(kernels.size(), false);
+    if (cache_hits.size() != kernels.size()) {
+        throw std::invalid_argument("AfterBackends cache-hit count changed");
+    }
+    if (!artifact_pins.empty() && artifact_pins.size() != kernels.size()) {
+        throw std::invalid_argument("AfterBackends artifact-pin count changed");
     }
     auto* next = new CompileResultNode();
     next->stage_ = CompileStage::kBackendCompiled;
@@ -277,7 +277,9 @@ CompileResult CompileResult::AfterBackends(
     for (size_t i = 0; i < kernels.size(); ++i) {
         next->primitives_[i].launch_metadata = std::move(launch_metadata[i]);
         next->primitives_[i].kernel = std::move(kernels[i]);
+        next->primitives_[i].cache_hit = cache_hits[i];
     }
+    next->artifact_pins_ = std::move(artifact_pins);
     next->plan_ = current->plan_;
     next->constants_ = CopyConstants(current->constants_);
     CompileResult result(next);
@@ -309,6 +311,10 @@ void CompileResult::ValidateState() const {
         throw std::invalid_argument(
             "CompileResult constants cannot exist before lowering");
     }
+    if (!needs_primitives && !node->artifact_pins_.empty()) {
+        throw std::invalid_argument(
+            "CompileResult artifact pins cannot exist before lowering");
+    }
     ValidateConstants(node->constants_);
     if (!needs_primitives) return;
 
@@ -323,6 +329,15 @@ void CompileResult::ValidateState() const {
         HasReached(node->stage_, CompileStage::kSignatureBuilt);
     const bool needs_backend =
         HasReached(node->stage_, CompileStage::kBackendCompiled);
+    if (!needs_backend && !node->artifact_pins_.empty()) {
+        throw std::invalid_argument(
+            "CompileResult artifact pins require backend compilation");
+    }
+    if (!node->artifact_pins_.empty() &&
+        node->artifact_pins_.size() != node->primitives_.size()) {
+        throw std::invalid_argument(
+            "CompileResult artifact-pin count does not match primitives");
+    }
     const Device expected(node->target_->device_type, node->target_->device_id);
     for (size_t i = 0; i < node->primitives_.size(); ++i) {
         const PrimitiveCompileState& primitive = node->primitives_[i];
@@ -353,6 +368,13 @@ void CompileResult::ValidateState() const {
                                         " backend presence does not match stage");
         }
         if (needs_backend) {
+            if (!node->artifact_pins_.empty() &&
+                (!node->artifact_pins_[i].defined() ||
+                 node->artifact_pins_[i].handle().record().artifact_key
+                         .unit_semantic_key() != primitive.semantic_key)) {
+                throw std::invalid_argument(context +
+                                            " production artifact pin drifted");
+            }
             primitive.launch_metadata->Validate();
             if ((*primitive.launch_metadata)->device != expected ||
                 !primitive.kernel->IsReady() ||
@@ -402,6 +424,13 @@ std::vector<PrimitiveCompileState> CompileResult::primitives() const {
         throw std::logic_error("primitives require lowered stage");
     }
     return operator->()->primitives_;
+}
+
+std::vector<ArtifactPin> CompileResult::artifact_pins() const {
+    if (stage() != CompileStage::kBackendCompiled) {
+        throw std::logic_error("artifact_pins require backend_compiled stage");
+    }
+    return operator->()->artifact_pins_;
 }
 
 runtime::ExecutablePlan CompileResult::plan() const {

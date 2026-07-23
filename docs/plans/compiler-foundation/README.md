@@ -1,6 +1,6 @@
 # 编译器基础路线图
 
-> **状态：** 实施中；未通过各轨 Done 条件的内容仍不是当前能力。
+> **状态：** 集成中；01 的 static-exact closure 已通过本地 CPU 验证，其他轨道仍按独立门禁合入。LLVM workflow 已配置，但本机无 LLVM 绿色记录。
 >
 > **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
 >
@@ -36,7 +36,7 @@ dynamic shape 可以在静态图模板上发生；hot swap 可以优化一个静
 
 | # | 能力轨道 | 文档 | 当前状态 | 首要交付 |
 |---|---|---|---|---|
-| 01 | 共同基础：契约、identity、cache | [01 core](01-core-contracts-identity-cache.md) | 规划中 | capability verifier、单源 schema、key 分离、安全 artifact cache |
+| 01 | 共同基础：契约、identity、cache | [01 core](01-core-contracts-identity-cache.md) | 进行中（待 LLVM 绿色记录/终审） | executable capability/invariant、static-exact production transaction/pin adapter、key 分离、pinned singleflight cache |
 | 02 | shape profile 与 dynamic shape | [02 shape](02-shape-system-and-specialization.md) | 规划中 | `GraphTemplate`、Shape IR、exact profile |
 | 03 | 自适应编译与安全 hot swap | [03 adaptive hot swap](03-adaptive-compilation-hot-swap.md) | 规划中 | coordinator、singleflight、slot generation |
 | 04 | dynamic graph | [04 dynamic graph](04-dynamic-graph-control-flow.md) | 规划中 | 受限控制流/结构化 region/CFG 契约 |
@@ -127,8 +127,8 @@ flowchart LR
 
 | 里程碑 | 进入条件 | 集成产物 | 状态 |
 |---|---|---|---|
-| M0：事实收敛 | 本路线图与现有架构审查一致 | capability matrix、legacy/current/target 文档标记 | 规划中 |
-| M1：核心冻结 | 01 的最小接口和 key/cache 语义审查通过 | 可供 fake 使用的 core contract | 未开始 |
+| M0：事实收敛 | 本路线图与现有架构审查一致 | capability matrix、legacy/current/target 文档标记 | 第二轮修正已完成，待终审 |
+| M1：核心冻结 | 01 的最小接口和 key/cache 语义审查通过 | CoreContract v2、static-exact production transaction/pin adapter、artifact pin/singleflight | 进行中（CPU 27/27；待 LLVM 绿色记录与跨轨消费确认） |
 | M2：exact shape | 02 能从模板绑定静态 exact profile | `GraphTemplate` + exact `PlanVariant` | 未开始 |
 | M3：受控自适应 | 03 可合并同 key 请求并安全发布 generation | coordinator + slot + failure/backpressure | 未开始 |
 | M4：可扩展执行 | 04/05 的 task/region 计划可验证且保留回退 | dynamic task vocabulary、region plan | 未开始 |
@@ -142,4 +142,4 @@ M1 之前，各轨内部可以独立实现纯 IR、状态机、executor 或 fixt
 
 跨轨 PR 必须注明消费的接口版本、key/ABI/pipeline fingerprint 变化、是否影响 mock/fake，以及回退路径。任何轨道都不得扩展 `RuntimeSession` 的职责来绕过控制面，也不得将 object address、graph-local value id 或 backend symbol 作为跨图 artifact identity。
 
-本文未实现接口，未运行构建或测试。
+本路线图本身不实现接口。Track01 的本地 CPU evidence 为 27/27 CTest。Core adapter 只拥有 static-exact primitive transaction、failure TTL、取消快照、全局背压与 pin；Track03 仍拥有 dispatch/队列/异步取消/细分预算/generation/hot swap。LLVM workflow 已要求 operator relocation/cache、codegen、numeric 与 ONNX compile，但本机/当前会话未发现 LLVM 且没有绿色运行记录，不能把已配置 workflow 或未执行的条件块写成已通过。

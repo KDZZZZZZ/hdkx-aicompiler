@@ -33,6 +33,7 @@ struct PassSpec {
     int opt_level{0};
     Array<String> required_invariants;
     Array<String> produced_invariants;
+    Array<String> declarative_only_invariants;
     Array<String> preserved_analyses;
     Array<String> invalidated_analyses;
     bool may_change_ir{true};

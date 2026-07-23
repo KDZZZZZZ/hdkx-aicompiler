@@ -18,20 +18,20 @@
 #include <vector>
 
 #include "internal/compile_state.h"
+#include "internal/execution_contract.h"
 #include "internal/kernel_abi_builder.h"
 #include "internal/lowered_graph.h"
 #include "internal/primitive_cache.h"
 #include "../runtime/internal/compiled_module_node.h"
+#include "kxc/compiler/capability.h"
+#include "kxc/compiler/pipeline.h"
 #include "../runtime/internal/memory_plan.h"
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
 #include "kxc/relay/pass/print_ir.h"
-#include "kxc/relay/transforms/infer_type.h"
-#include "kxc/relay/transforms/pipeline.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/tir/pass/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
-#include "kxc/tir/transforms/pipeline.h"
 
 #if KXC_USE_LLVM
 #include <llvm/IR/LLVMContext.h>
@@ -236,24 +236,6 @@ String ReadKernelSymbol(const tir::PrimFunc& function) {
     return String(symbol);
 }
 
-tir::PrimFunc RefreshStructuralHash(const tir::PrimFunc& function) {
-    const String structural_hash_key("kxc.structural_hash");
-    Map<String, ObjectRef> attrs;
-    for (const auto& item : function->attrs) {
-        if (!(item.first == structural_hash_key)) {
-            attrs.Set(item.first, item.second);
-        }
-    }
-    tir::PrimFunc canonical(function->params, function->body,
-                            function->buffer_map, attrs);
-    std::ostringstream stream;
-    tir::pass::DumpPrimFunc(canonical, stream);
-    attrs.Set(structural_hash_key,
-              String(profiling::HashText(stream.str())));
-    return tir::PrimFunc(function->params, function->body,
-                         function->buffer_map, std::move(attrs));
-}
-
 Map<String, runtime::NDArray> PlaceConstants(
     const Map<String, runtime::NDArray>& source, const Target& target) {
     Map<String, runtime::NDArray> result;
@@ -273,24 +255,56 @@ Map<String, runtime::NDArray> PlaceConstants(
     return result;
 }
 
-CompileResult ValidateInput(Function function, const CompileConfig& config) {
+NormalizedPipeline ResolveRelayPipeline(const CompileConfig& config) {
+    PipelineRequest request;
+    request.dialect = IRDialect::kRelay;
+    request.requested_scope = PassScope::kGraph;
+    request.target = config->target;
+    request.opt_level = config->opt_level;
+    request.named_pipeline = String("compiler");
+    return PipelineResolver::Resolve(request);
+}
+
+NormalizedPipeline ResolveTIRPipeline(const CompileConfig& config) {
+    PipelineRequest request;
+    request.dialect = IRDialect::kTIR;
+    request.requested_scope = PassScope::kPrimFunc;
+    request.target = config->target;
+    request.opt_level = config->opt_level;
+    request.named_pipeline = String("compiler");
+    return PipelineResolver::Resolve(request);
+}
+
+CompileResult ValidateInput(
+    Function function, const CompileConfig& config,
+    const internal::CompilerExecutionContract& contract) {
     config.Validate();
+    CapabilityVerifier::RequireEligible(CapabilityRequest{
+        function, config->target, "graph", contract.fingerprint,
+        CapabilityBoundary::kCompilerEntry, CapabilityMode::kStaticExact,
+        false, config->opt_level});
     return CompileResult::Validate(config->target, std::move(function));
 }
 
-CompileResult OptimizeRelay(const CompileResult& input,
-                            const CompileConfig& config) {
-    Function typed = relay::InferTypePass(input.validated_relay());
-    Function optimized = relay::RunRelayPassPipeline(
-        typed, Compiler::RelayPassPolicy(config->opt_level));
-    optimized = relay::InferTypePass(optimized);
+CompileResult OptimizeRelay(
+    const CompileResult& input, const CompileConfig& config,
+    const internal::CompilerExecutionContract& contract) {
+    Function optimized = PipelineExecutor::ExecuteRelay(
+        contract.relay_pipeline, input.validated_relay(), input.target());
+    CapabilityVerifier::RequireEligible(CapabilityRequest{
+        optimized, input.target(), "graph", contract.fingerprint,
+        CapabilityBoundary::kPostGraphPass, CapabilityMode::kStaticExact,
+        true, config->opt_level});
     return input.AfterRelayOptimization(std::move(optimized));
 }
 
-CompileResult LowerOperators(const CompileResult& input) {
+CompileResult LowerOperators(
+    const CompileResult& input,
+    const internal::CompilerExecutionContract& contract) {
     const Device device(input.target()->device_type, input.target()->device_id);
-    internal::LoweredGraph lowered =
-        internal::LowerGraph(input.optimized_relay(), device);
+    internal::LoweredGraph lowered = internal::LowerGraph(
+        input.optimized_relay(), device, input.target(),
+        String(contract.fingerprint));
     std::vector<PrimitiveCompileState> primitives;
     primitives.reserve(lowered.primitives.size());
     for (const internal::LoweredPrimitive& source : lowered.primitives) {
@@ -298,7 +312,7 @@ CompileResult LowerOperators(const CompileResult& input) {
         primitive.unit_id = source.unit_id;
         primitive.symbol = source.symbol;
         primitive.operator_identity = source.operator_identity;
-        primitive.structural_hash = source.structural_hash;
+        primitive.semantic_key = source.semantic_key;
         primitive.tir = source.lowered->prim_func;
         primitives.push_back(std::move(primitive));
     }
@@ -307,26 +321,15 @@ CompileResult LowerOperators(const CompileResult& input) {
         PlaceConstants(lowered.constants, input.target()));
 }
 
-CompileResult OptimizeTIR(const CompileResult& input,
-                          const CompileConfig& config) {
-    Array<String> passes =
-        Compiler::TIRPassPolicy(config->opt_level, input.target());
-    if (passes.empty()) {
-        passes = {String("fold_constant"), String("simplify_expr")};
-    }
+CompileResult OptimizeTIR(
+    const CompileResult& input,
+    const internal::CompilerExecutionContract& contract) {
     std::vector<tir::PrimFunc> optimized;
     for (const PrimitiveCompileState& primitive : input.primitives()) {
         optimized.push_back(RunPrimitiveStage(
             "optimize_tir", primitive, [&] {
-                tir::PrimFunc result =
-                    RunTIRPassPipeline(primitive.tir, passes);
-#if KXC_USE_CUDA
-                if (input.target()->kind == "cuda" &&
-                    input.target()->device_type == kCUDA) {
-                    result = tir::BindCudaThreads(result, input.target()).prim_func();
-                }
-#endif
-                return RefreshStructuralHash(result);
+                return PipelineExecutor::ExecuteTIR(
+                    contract.tir_pipeline, primitive.tir, input.target());
             }));
     }
     return input.AfterTIROptimization(std::move(optimized));
@@ -342,26 +345,111 @@ const char* BackendVersion(const Target& target) {
     throw std::invalid_argument("Primitive cache target has no backend version");
 }
 
-CompileResult BuildSignatures(const CompileResult& input,
-                              const CompileConfig& config) {
-    std::vector<codegen::KernelSignature> signatures;
-    std::vector<bool> cache_hits;
-    for (const PrimitiveCompileState& primitive : input.primitives()) {
-        const std::string cache_key = internal::BuildPrimitiveCacheKey(
-            primitive.structural_hash, input.target(), config->opt_level,
-            BackendVersion(input.target()));
-        const auto cached = internal::LookupPrimitiveCache(cache_key);
-        if (cached) {
-            if (!(cached->signature->symbol == primitive.symbol) ||
-                !cached->kernel.IsReady()) {
-                throw std::logic_error(
-                    PrimitiveContext(primitive) +
-                    " cache entry does not match its stable symbol");
-            }
-            signatures.push_back(cached->signature);
-            cache_hits.push_back(true);
-            continue;
+void AppendPipelineIdentityField(std::string* canonical,
+                                 const std::string& name,
+                                 const std::string& value) {
+    *canonical += std::to_string(name.size()) + ":" + name + "=" +
+                  std::to_string(value.size()) + ":" + value + ";";
+}
+
+bool SameDType(DLDataType lhs, DLDataType rhs) {
+    return lhs.code == rhs.code && lhs.bits == rhs.bits &&
+           lhs.lanes == rhs.lanes;
+}
+
+bool SameShape(const Array<int64_t>& lhs, const Array<int64_t>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i] != rhs[i]) return false;
+    }
+    return true;
+}
+
+void ValidateArtifactABI(const codegen::KernelSignature& cached,
+                         const codegen::KernelSignature& current,
+                         const std::string& context) {
+    const Array<codegen::KernelArgSpec> cached_args = cached.arguments();
+    const Array<codegen::KernelArgSpec> current_args = current.arguments();
+    if (cached_args.size() != current_args.size()) {
+        throw std::logic_error(context + " cached artifact ABI arity changed");
+    }
+    for (size_t i = 0; i < cached_args.size(); ++i) {
+        const auto& lhs = cached_args[i];
+        const auto& rhs = current_args[i];
+        if (lhs->role != rhs->role || !SameDType(lhs->dtype, rhs->dtype) ||
+            lhs->device != rhs->device || lhs->alignment != rhs->alignment ||
+            lhs->mutable_data != rhs->mutable_data ||
+            !SameShape(lhs.shape(), rhs.shape())) {
+            throw std::logic_error(context +
+                                   " cached artifact ABI contract changed");
         }
+    }
+}
+
+codegen::CompiledKernel RelocateCachedKernel(
+    const internal::PrimitiveArtifactPin& pin,
+    const codegen::KernelSignature& current_signature,
+    const std::string& context) {
+    const internal::CachedPrimitive& artifact = pin.artifact();
+    ValidateArtifactABI(artifact.signature, current_signature, context);
+    if (!artifact.kernel.IsReady() || !artifact.kernel->launcher) {
+        throw std::logic_error(context + " cached artifact is not executable");
+    }
+    return codegen::CompiledKernel(current_signature,
+                                   artifact.launch_metadata,
+                                   artifact.kernel->launcher);
+}
+
+uint64_t AccountedTIRBytes(const tir::PrimFunc& function) {
+    std::ostringstream out;
+    tir::pass::DumpPrimFunc(function, out);
+    return std::max<uint64_t>(1, static_cast<uint64_t>(out.str().size()));
+}
+
+class PrimitiveOwnerGuard final {
+public:
+    explicit PrimitiveOwnerGuard(
+        const std::vector<ProductionCompileTransaction>* transactions)
+        : transactions_(transactions) {}
+
+    ~PrimitiveOwnerGuard() {
+        if (dismissed_ || transactions_ == nullptr) return;
+        const ProductionArtifactCacheAdapter adapter;
+        for (const auto& transaction : *transactions_) {
+            if (!transaction.owns_compile()) continue;
+            try {
+                (void)adapter.Fail(
+                    transaction,
+                    CompileFailure{
+                        CompileFailureCategory::kCompile, 1000,
+                        "compile owner abandoned before publishing a validated artifact"});
+            } catch (...) {
+            }
+        }
+    }
+
+    void Dismiss() noexcept { dismissed_ = true; }
+
+private:
+    const std::vector<ProductionCompileTransaction>* transactions_{nullptr};
+    bool dismissed_{false};
+};
+
+internal::PrimitiveArtifactPin RequireProductionPin(
+    const CompileOutcome& outcome, const std::string& context) {
+    if (outcome.state == CompileRequestState::kReady &&
+        outcome.pin.defined()) {
+        return internal::ProductionArtifactAccess::Pin(outcome.pin);
+    }
+    const std::string diagnostic =
+        outcome.failure ? outcome.failure->diagnostic : "missing compile outcome";
+    throw std::runtime_error(context + " production cache transaction failed: " +
+                             diagnostic);
+}
+
+CompileResult BuildSignatures(const CompileResult& input) {
+    std::vector<codegen::KernelSignature> signatures;
+    for (const PrimitiveCompileState& primitive : input.primitives()) {
         signatures.push_back(RunPrimitiveStage(
             "build_signature", primitive, [&] {
                 const String symbol = ReadKernelSymbol(primitive.tir);
@@ -372,13 +460,13 @@ CompileResult BuildSignatures(const CompileResult& input,
                 return codegen::BuildKernelSignature(
                     primitive.tir, input.constants(), input.target(), symbol);
             }));
-        cache_hits.push_back(false);
     }
-    return input.AfterSignatures(std::move(signatures), std::move(cache_hits));
+    return input.AfterSignatures(std::move(signatures));
 }
 
-CompileResult BuildBackends(const CompileResult& input,
-                            const CompileConfig& config) {
+CompileResult BuildBackends(
+    const CompileResult& input, const CompileConfig& config,
+    const internal::CompilerExecutionContract& contract) {
     const Target target = input.target();
     const Device device(target->device_type, target->device_id);
     const std::vector<PrimitiveCompileState> primitives = input.primitives();
@@ -386,31 +474,40 @@ CompileResult BuildBackends(const CompileResult& input,
         primitives.size());
     std::vector<std::optional<codegen::CompiledKernel>> kernel_slots(
         primitives.size());
-    std::vector<std::string> cache_keys;
+    const std::string& pipeline_identity = contract.canonical_bytes;
+    const ProductionArtifactCacheAdapter cache_adapter;
+    std::vector<ProductionCompileTransaction> transactions;
+    std::vector<internal::PrimitiveArtifactPin> pins(primitives.size());
     std::vector<size_t> misses;
-    cache_keys.reserve(primitives.size());
+    transactions.reserve(primitives.size());
+    PrimitiveOwnerGuard owner_guard(&transactions);
     for (size_t i = 0; i < primitives.size(); ++i) {
         const PrimitiveCompileState& primitive = primitives[i];
         if (!primitive.signature) {
             throw std::logic_error(
                 PrimitiveContext(primitive) + " has no signature");
         }
-        cache_keys.push_back(internal::BuildPrimitiveCacheKey(
-            primitive.structural_hash, target, config->opt_level,
-            BackendVersion(target)));
-        if (!primitive.cache_hit) {
+        const ArtifactKey artifact_key = internal::BuildPrimitiveArtifactKey(
+            primitive.semantic_key, target, pipeline_identity,
+            contract.schedule_version.c_str(),
+            contract.backend_version.c_str());
+        CompileRequest request;
+        request.artifact_key = artifact_key;
+        request.request_origin = "Compiler::Compile";
+        request.cancellation.id = "compiler-sync-" + std::to_string(i);
+        transactions.push_back(cache_adapter.Acquire(request));
+        if (transactions.back().owns_compile()) {
             misses.push_back(i);
             continue;
         }
-        const auto cached = internal::PeekPrimitiveCache(cache_keys.back());
-        if (!cached || cached->signature.get() != primitive.signature->get() ||
-            !cached->kernel.IsReady()) {
-            throw std::logic_error(
-                PrimitiveContext(primitive) +
-                " cache entry disappeared or changed during compilation");
+        const CompileRequestState state = transactions.back().ticket().state;
+        if (state == CompileRequestState::kFailed ||
+            state == CompileRequestState::kCancelled ||
+            state == CompileRequestState::kRejected) {
+            (void)RequireProductionPin(
+                cache_adapter.Wait(transactions.back()),
+                PrimitiveContext(primitive));
         }
-        metadata_slots[i] = cached->launch_metadata;
-        kernel_slots[i] = cached->kernel;
     }
 
     if (!misses.empty() && target->kind == "llvm" &&
@@ -499,27 +596,54 @@ CompileResult BuildBackends(const CompileResult& input,
         throw std::runtime_error("Compiler Target has no matching backend");
     }
 
-    std::vector<codegen::KernelLaunchMetadata> metadata;
-    std::vector<codegen::CompiledKernel> kernels;
-    metadata.reserve(primitives.size());
-    kernels.reserve(primitives.size());
-    for (size_t i = 0; i < primitives.size(); ++i) {
-        if (!metadata_slots[i] || !kernel_slots[i]) {
+    for (size_t index : misses) {
+        if (!metadata_slots[index] || !kernel_slots[index]) {
             throw std::logic_error(
-                PrimitiveContext(primitives[i]) +
+                PrimitiveContext(primitives[index]) +
                 " backend batch did not produce an executable");
         }
-        if (!primitives[i].cache_hit) {
-            internal::StorePrimitiveCache(
-                cache_keys[i],
-                internal::CachedPrimitive{*primitives[i].signature,
-                                          *metadata_slots[i],
-                                          *kernel_slots[i]});
+        pins[index] = RequireProductionPin(
+            cache_adapter.Publish(
+                transactions[index],
+                internal::ProductionArtifactAccess::Make(
+                    internal::CachedPrimitive{
+                        *primitives[index].signature, *metadata_slots[index],
+                        *kernel_slots[index],
+                        AccountedTIRBytes(primitives[index].tir),
+                        "Compiler::Compile",
+                        "signature+backend-validated"})),
+            PrimitiveContext(primitives[index]));
+    }
+
+    std::vector<codegen::KernelLaunchMetadata> metadata;
+    std::vector<codegen::CompiledKernel> kernels;
+    std::vector<bool> cache_hits;
+    metadata.reserve(primitives.size());
+    kernels.reserve(primitives.size());
+    cache_hits.reserve(primitives.size());
+    for (size_t i = 0; i < primitives.size(); ++i) {
+        if (!pins[i].defined()) {
+            pins[i] = RequireProductionPin(
+                cache_adapter.Wait(transactions[i]),
+                PrimitiveContext(primitives[i]));
         }
+        const internal::CachedPrimitive& artifact = pins[i].artifact();
+        metadata_slots[i] = artifact.launch_metadata;
+        kernel_slots[i] = RelocateCachedKernel(
+            pins[i], *primitives[i].signature, PrimitiveContext(primitives[i]));
         metadata.push_back(*metadata_slots[i]);
         kernels.push_back(*kernel_slots[i]);
+        cache_hits.push_back(!transactions[i].owns_compile());
     }
-    return input.AfterBackends(std::move(metadata), std::move(kernels));
+    std::vector<ArtifactPin> public_pins;
+    public_pins.reserve(pins.size());
+    for (const internal::PrimitiveArtifactPin& pin : pins) {
+        public_pins.push_back(internal::ToArtifactPin(pin));
+    }
+    owner_guard.Dismiss();
+    return input.AfterBackends(std::move(metadata), std::move(kernels),
+                               std::move(cache_hits),
+                               std::move(public_pins));
 }
 
 CompiledModule AssembleModule(
@@ -540,7 +664,9 @@ CompiledModule AssembleModule(
         std::move(profile_context));
 }
 
-CompiledGraph CompilePipeline(Function function, CompileConfig config) {
+CompiledGraph CompilePipeline(
+    Function function, CompileConfig config,
+    const internal::CompilerExecutionContract& contract) {
     config.Validate();
     auto profile_context = MaybeCreateProfileContext(config);
     const std::string run_id =
@@ -554,73 +680,105 @@ CompiledGraph CompilePipeline(Function function, CompileConfig config) {
     PassContext::Scope pass_scope(pass_context);
 
     CompileResult result = RunStage(
-        "validate", config, [&] { return ValidateInput(function, config); });
-    result = RunStage("optimize_relay", config,
-                      [&] { return OptimizeRelay(result, config); });
-    result = RunStage("lower", config, [&] { return LowerOperators(result); });
+        "validate", config,
+        [&] { return ValidateInput(function, config, contract); });
+    result = RunStage(
+        "optimize_relay", config,
+        [&] { return OptimizeRelay(result, config, contract); });
+    result = RunStage("lower", config,
+                      [&] { return LowerOperators(result, contract); });
     result = RunStage("optimize_tir", config,
-                      [&] { return OptimizeTIR(result, config); });
+                      [&] { return OptimizeTIR(result, contract); });
     result = RunStage("build_signature", config,
-                      [&] { return BuildSignatures(result, config); });
-    result = RunStage("build_backend", config,
-                      [&] { return BuildBackends(result, config); });
+                      [&] { return BuildSignatures(result); });
+    result = RunStage(
+        "build_backend", config,
+        [&] { return BuildBackends(result, config, contract); });
 
     profiling::ScopedSpan assemble_span(
         profile_context, MakeStageEvent("assemble", config), run_id);
     CompiledModule module = AssembleModule(result, profile_context);
     AddResultFields(&assemble_span, result);
     if (profile_context) profile_context->Flush();
-    return CompiledGraph{std::move(module), result.plan()};
+    return CompiledGraph{std::move(module), result.plan(),
+                         result.artifact_pins()};
 }
 
 }  // namespace
 
+internal::CompilerExecutionContract
+internal::ResolveCompilerExecutionContract(const CompileConfig& config) {
+    config.Validate();
+    CompilerExecutionContract contract;
+    contract.relay_pipeline = ResolveRelayPipeline(config);
+    contract.tir_pipeline = ResolveTIRPipeline(config);
+    contract.schedule_version = "per-unit-schedule-v2";
+    contract.backend_version = BackendVersion(config->target);
+    AppendPipelineIdentityField(&contract.canonical_bytes, "kind",
+                                "compiler-execution-plan-v3");
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "relay",
+        std::string(contract.relay_pipeline.canonical_bytes));
+    AppendPipelineIdentityField(&contract.canonical_bytes, "lowering",
+                                "per-unit-boundary-lowering-v1");
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "tir",
+        std::string(contract.tir_pipeline.canonical_bytes));
+    AppendPipelineIdentityField(&contract.canonical_bytes, "kernel_abi",
+                                "kernel-abi-v1");
+    AppendPipelineIdentityField(&contract.canonical_bytes, "schedule",
+                                contract.schedule_version);
+    AppendPipelineIdentityField(&contract.canonical_bytes, "backend",
+                                contract.backend_version);
+    contract.fingerprint = profiling::HashText(contract.canonical_bytes);
+    return contract;
+}
+
+void internal::ProbeCompilerExecution(
+    Function function, CompileConfig config,
+    const CompilerExecutionContract& contract) {
+    (void)CompilePipeline(std::move(function), std::move(config), contract);
+}
+
 Array<String> Compiler::RelayPassPolicy(int opt_level) {
-    if (opt_level < 0 || opt_level > 3) {
-        throw std::invalid_argument(
-            "Relay pass policy requires opt_level 0..3");
+    auto* policy_target_node = new TargetNode();
+    policy_target_node->kind = "llvm";
+    policy_target_node->device_type = kCPU;
+    policy_target_node->device_id = 0;
+    PipelineRequest request;
+    request.dialect = IRDialect::kRelay;
+    request.requested_scope = PassScope::kGraph;
+    request.target = Target(ObjectRef(policy_target_node));
+    request.opt_level = opt_level;
+    request.named_pipeline = String("compiler");
+    Array<String> compatibility;
+    for (const String& pass :
+         PipelineResolver::Resolve(request).ordered_passes) {
+        if (std::string(pass) != "infer_type") compatibility.push_back(pass);
     }
-    if (opt_level == 0) return {};
-    if (opt_level == 1) {
-        return {String("fold_tuple_get_item"), String("fold_constant"),
-                String("simplify_expr")};
-    }
-    return {String("fold_tuple_get_item"), String("fold_constant"),
-            String("simplify_expr"), String("canonicalize_cast"),
-            String("remove_standalone_reshapes"),
-            String("eliminate_dead_let")};
+    return compatibility;
 }
 
 Array<String> Compiler::TIRPassPolicy(int opt_level, const Target& target) {
-    if (opt_level < 0 || opt_level > 3) {
-        throw std::invalid_argument(
-            "TIR pass policy requires opt_level 0..3");
+    PipelineRequest request;
+    request.dialect = IRDialect::kTIR;
+    request.requested_scope = PassScope::kPrimFunc;
+    request.target = target;
+    request.opt_level = opt_level;
+    request.named_pipeline = String("compiler");
+    Array<String> compatibility;
+    for (const String& pass :
+         PipelineResolver::Resolve(request).ordered_passes) {
+        if (std::string(pass) != "bind_cuda_threads") {
+            compatibility.push_back(pass);
+        }
     }
-    if (!target.defined() || !target.As<TargetNode>()) {
-        throw std::invalid_argument(
-            "TIR pass policy requires a defined Target");
-    }
-    if (opt_level == 0) return {};
-    if (opt_level == 1) {
-        return {String("fold_constant"), String("simplify_expr")};
-    }
-    if (opt_level == 2) {
-        return {String("fold_constant"), String("simplify_expr"),
-                String("force_narrow_index_to_i32"),
-                String("convert_for_loops_serial")};
-    }
-    if (target->kind == "cuda" && target->device_type == kCUDA) {
-        return {String("fold_constant"), String("simplify_expr"),
-                String("force_narrow_index_to_i32"), String("remove_no_op")};
-    }
-    return {String("fold_constant"), String("simplify_expr"),
-            String("force_narrow_index_to_i32"),
-            String("convert_for_loops_serial"), String("loop_partition"),
-            String("unroll_loop"), String("vectorize_loop"),
-            String("remove_no_op")};
+    return compatibility;
 }
 
 CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
-    return CompilePipeline(std::move(function), std::move(config));
+    const internal::CompilerExecutionContract contract =
+        internal::ResolveCompilerExecutionContract(config);
+    return CompilePipeline(std::move(function), std::move(config), contract);
 }
 }  // namespace kxc::api

@@ -107,8 +107,8 @@ bool TestEquivalentGraphsAreDeterministic() {
     for (size_t i = 0; i < first.units.size(); ++i) {
         TEST_CHECK(first.units[i].unit_id == second.units[i].unit_id &&
                        first.units[i].symbol == second.units[i].symbol &&
-                       first.units[i].structural_hash ==
-                           second.units[i].structural_hash,
+                       first.units[i].semantic_key ==
+                           second.units[i].semantic_key,
                    "stable unit identity must not depend on Object addresses");
     }
     return true;
@@ -166,7 +166,53 @@ bool TestRepeatedLogicalArgumentUsesOneBoundaryValue() {
     return true;
 }
 
-bool TestAttrsValuesParticipateInStructuralHash() {
+bool TestGraphRenumberingDoesNotChangeSemanticKey() {
+    using namespace kxc;
+    using namespace kxc::api::internal;
+    TensorType type({4}, "float32");
+    Var lhs("lhs", type);
+    Var rhs("rhs", type);
+    const PartitionedGraph direct = PartitionValueGraph(BuildValueGraph(
+        relay::InferTypePass(Function({lhs, rhs}, Add(lhs, rhs)))));
+
+    Var shifted_lhs("lhs", type);
+    Var shifted_rhs("rhs", type);
+    Var unrelated("unrelated", type);
+    const PartitionedGraph shifted = PartitionValueGraph(BuildValueGraph(
+        relay::InferTypePass(Function(
+            {shifted_lhs, shifted_rhs, unrelated},
+            Tuple({Multiply(shifted_lhs, unrelated),
+                   Add(shifted_lhs, shifted_rhs)})))));
+    TEST_CHECK(direct.units.size() == 1 && shifted.units.size() == 2 &&
+                   direct.units[0].symbol != shifted.units[1].symbol &&
+                   direct.units[0].output_value_ids[0] !=
+                       shifted.units[1].output_value_ids[0],
+               "fixture must move the same add to another graph position");
+    TEST_CHECK(direct.units[0].semantic_key == shifted.units[1].semantic_key &&
+                   direct.units[0].semantic_key.digest() ==
+                       shifted.units[1].semantic_key.digest(),
+               "graph-local value ids and symbols must not enter unit semantics");
+    return true;
+}
+
+bool TestLogicalBoundaryMappingParticipatesInSemanticKey() {
+    using namespace kxc;
+    using namespace kxc::api::internal;
+    TensorType type({4}, "float32");
+    Var repeated_input("input", type);
+    const PartitionedGraph repeated = PartitionValueGraph(BuildValueGraph(
+        relay::InferTypePass(
+            Function({repeated_input}, Add(repeated_input, repeated_input)))));
+    Var lhs("lhs", type);
+    Var rhs("rhs", type);
+    const PartitionedGraph distinct = PartitionValueGraph(BuildValueGraph(
+        relay::InferTypePass(Function({lhs, rhs}, Add(lhs, rhs)))));
+    TEST_CHECK(repeated.units[0].semantic_key != distinct.units[0].semantic_key,
+               "unit-local logical argument mapping is part of kernel semantics");
+    return true;
+}
+
+bool TestAttrsValuesParticipateInSemanticKey() {
     using namespace kxc;
     using namespace kxc::api::internal;
     TensorType type({2, 2}, "float32");
@@ -178,9 +224,8 @@ bool TestAttrsValuesParticipateInStructuralHash() {
         relay::InferTypePass(Function({second_input}, Softmax(second_input, 1)))));
     TEST_CHECK(first.units.size() == 1 && second.units.size() == 1,
                "single-call attrs fixtures must each produce one unit");
-    TEST_CHECK(!(first.units[0].structural_hash ==
-                 second.units[0].structural_hash),
-               "different attrs values must produce different unit hashes");
+    TEST_CHECK(first.units[0].semantic_key != second.units[0].semantic_key,
+               "different attrs values must produce different unit keys");
     return true;
 }
 
@@ -195,8 +240,12 @@ int main() {
         {"unchecked_graph_fails_before_partition", TestUncheckedGraphFailsBeforePartition},
         {"repeated_argument_uses_one_boundary",
          TestRepeatedLogicalArgumentUsesOneBoundaryValue},
-        {"attrs_values_participate_in_hash",
-         TestAttrsValuesParticipateInStructuralHash},
+        {"graph_renumbering_preserves_semantics",
+         TestGraphRenumberingDoesNotChangeSemanticKey},
+        {"logical_boundary_mapping_is_semantic",
+         TestLogicalBoundaryMappingParticipatesInSemanticKey},
+        {"attrs_values_participate_in_semantics",
+         TestAttrsValuesParticipateInSemanticKey},
     };
     int failures = 0;
     for (const auto& test : tests) {

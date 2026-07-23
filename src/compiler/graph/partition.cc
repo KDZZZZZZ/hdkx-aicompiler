@@ -5,14 +5,11 @@
 #include "../internal/compilation_unit.h"
 
 #include <cctype>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-
-#include "kxc/profiling/profiling.h"
 
 namespace kxc::api::internal {
 namespace {
@@ -31,42 +28,65 @@ std::string BuildUnitSymbol(int64_t unit_id, const std::string& operator_name) {
            SanitizeSymbolPart(operator_name);
 }
 
-std::string BuildStructuralHash(const CallInfo& call,
-                                const ValueGraph& graph) {
+void AppendCanonicalField(std::string* canonical, const std::string& name,
+                          const std::string& value) {
+    *canonical += std::to_string(name.size()) + ":" + name + "=" +
+                  std::to_string(value.size()) + ":" + value + ";";
+}
+
+UnitSemanticKey BuildUnitSemanticKey(const CallInfo& call,
+                                     const ValueGraph& graph) {
     const auto* call_node = call.call.As<CallNode>();
     const auto* op = call_node ? call_node->op.As<relay::OpNode>() : nullptr;
     if (!call_node || !op) {
         throw std::invalid_argument(
-            "Structural hash requires an operator Call");
+            "Unit semantic identity requires an operator Call");
     }
-    std::ostringstream canonical;
-    canonical << relay::SerializeOperatorSpec(op->spec) << ";inputs=";
-    for (int64_t id : call.argument_value_ids) {
+
+    std::string canonical;
+    AppendCanonicalField(&canonical, "kind", "unit-semantic-key-v1");
+    AppendCanonicalField(&canonical, "operator",
+                         relay::SerializeOperatorSpec(op->spec));
+
+    std::unordered_map<int64_t, size_t> boundary_index;
+    for (size_t index = 0; index < call.input_value_ids.size(); ++index) {
+        const int64_t id = call.input_value_ids[index];
         if (id < 0 || static_cast<size_t>(id) >= graph.values.size()) {
             throw std::invalid_argument(
-                "Structural hash references an invalid input value id");
+                "Unit semantic identity references an invalid input value id");
         }
-        canonical << id << ':'
-                  << TypeToString(graph.values[static_cast<size_t>(id)].checked_type)
-                  << ',';
+        boundary_index.emplace(id, index);
+        const ValueInfo& value = graph.values[static_cast<size_t>(id)];
+        AppendCanonicalField(
+            &canonical, "input_role",
+            value.origin == ValueOrigin::kConstant ? "constant" : "input");
+        AppendCanonicalField(&canonical, "input_type",
+                             TypeToString(value.checked_type));
     }
-    canonical << ";outputs=";
+    for (int64_t id : call.argument_value_ids) {
+        const auto boundary = boundary_index.find(id);
+        if (boundary == boundary_index.end()) {
+            throw std::invalid_argument(
+                "Logical argument is outside the unit boundary");
+        }
+        AppendCanonicalField(&canonical, "logical_input",
+                             std::to_string(boundary->second));
+    }
     for (int64_t id : call.output_value_ids) {
         if (id < 0 || static_cast<size_t>(id) >= graph.values.size()) {
             throw std::invalid_argument(
-                "Structural hash references an invalid output value id");
+                "Unit semantic identity references an invalid output value id");
         }
-        canonical << id << ':'
-                  << TypeToString(graph.values[static_cast<size_t>(id)].checked_type)
-                  << ',';
+        AppendCanonicalField(
+            &canonical, "output_type",
+            TypeToString(graph.values[static_cast<size_t>(id)].checked_type));
     }
-    canonical << ";attrs=";
-    if (call_node->attrs.defined()) {
-        canonical << relay::SerializeAttrs(relay::Attrs(call_node->attrs));
-    } else {
-        canonical << "<none>";
-    }
-    return profiling::HashText(canonical.str());
+    AppendCanonicalField(
+        &canonical, "attrs",
+        call_node->attrs.defined()
+            ? relay::SerializeAttrs(relay::Attrs(call_node->attrs))
+            : "<none>");
+    return UnitSemanticKey(std::move(canonical));
 }
 
 bool SameIds(const Array<int64_t>& lhs, const Array<int64_t>& rhs) {
@@ -94,7 +114,7 @@ PartitionedGraph PartitionValueGraph(ValueGraph value_graph) {
                              call.call,
                              call.input_value_ids,
                              call.output_value_ids,
-                             String(BuildStructuralHash(call, value_graph))};
+                             BuildUnitSemanticKey(call, value_graph)};
         result.calls.push_back(
             runtime::KernelCall(unit.symbol, unit.input_value_ids,
                                 unit.output_value_ids));
@@ -155,9 +175,9 @@ void ValidatePartition(const PartitionedGraph& partitioned) {
         }
         if (std::string(unit.symbol).empty() ||
             !symbols.insert(std::string(unit.symbol)).second ||
-            std::string(unit.structural_hash).empty()) {
+            !unit.semantic_key.defined()) {
             throw std::invalid_argument(
-                "CompilationUnit symbol and structural hash must be non-empty and unique");
+                "CompilationUnit symbol and semantic key must be valid");
         }
         if (!SameIds(unit.input_value_ids, call_it->second->input_value_ids) ||
             !SameIds(unit.output_value_ids, call_it->second->output_value_ids)) {

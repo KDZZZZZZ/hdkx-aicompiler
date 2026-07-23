@@ -4,6 +4,7 @@
 
 #include "kxc/relay/op.h"
 #include "kxc/ffi/registration.h"
+#include "generated/relay_op_contract.inc"
 
 #include <algorithm>
 #include <mutex>
@@ -16,58 +17,10 @@ namespace relay {
 
 namespace {
 
-bool StartsWith(const std::string& value, const std::string& prefix) {
-    return value.rfind(prefix, 0) == 0;
-}
-
-std::string InferCategoryFromName(const std::string& name) {
-    if (StartsWith(name, "device.")) {
-        return "device";
-    }
-    if (name == "softmax" || StartsWith(name, "nn_")) {
-        if (name == "nn_flatten") {
-            return "tensor.transform";
-        }
-        return "nn";
-    }
-    if (StartsWith(name, "reduce_")) {
-        return "tensor.reduce";
-    }
-    if (name == "cast" || name == "reshape" || name == "transpose") {
-        return "tensor.transform";
-    }
-    return "tensor.math";
-}
-
-OperatorSpec MakeDefaultSpec(const std::string& name) {
-    OperatorSpec spec;
-    spec.name = name;
-    spec.category = InferCategoryFromName(name);
-    return spec;
-}
-
-void FillLegacyDefaults(OpNode* node) {
-    if (!node) {
-        return;
-    }
-    node->has_spec = true;
-    if (node->spec.name.empty()) {
-        node->spec.name = node->name;
-    }
-    if (node->spec.category.empty()) {
-        node->spec.category = InferCategoryFromName(node->name);
-    }
-    if (node->spec.schema_version <= 0) {
-        node->spec.schema_version = 1;
-    }
-    if (node->spec.input_arity.num_inputs == -1 && node->num_inputs != -1) {
-        node->spec.input_arity.num_inputs = node->num_inputs;
-    }
+void FinalizeOperatorArguments(OpNode* node) {
+    if (!node || !node->has_spec) return;
     if (node->spec.arguments.empty() && !node->arguments.empty()) {
         node->spec.arguments = node->arguments;
-    }
-    if (node->spec.alias_contract.empty()) {
-        node->spec.alias_contract = "none";
     }
 }
 
@@ -147,7 +100,7 @@ public:
         }
         Op op(name);
         OpNode* node = const_cast<OpNode*>(op.operator->());
-        node->spec = MakeDefaultSpec(name);
+        node->spec = op_contract_generated::Spec(name);
         node->has_spec = true;
         op_map_.insert({name, op});
         return op_map_.at(name);
@@ -195,7 +148,8 @@ public:
         std::vector<OperatorSpec> specs;
         specs.reserve(op_map_.size());
         for (auto& kv : op_map_) {
-            FillLegacyDefaults(const_cast<OpNode*>(kv.second.operator->()));
+            FinalizeOperatorArguments(
+                const_cast<OpNode*>(kv.second.operator->()));
             specs.push_back(kv.second->spec);
         }
         std::sort(specs.begin(), specs.end(),
@@ -208,7 +162,8 @@ public:
     void Check() {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& kv : op_map_) {
-            FillLegacyDefaults(const_cast<OpNode*>(kv.second.operator->()));
+            FinalizeOperatorArguments(
+                const_cast<OpNode*>(kv.second.operator->()));
             ValidateRegisteredSpec(kv.second.operator->());
         }
         frozen_ = true;

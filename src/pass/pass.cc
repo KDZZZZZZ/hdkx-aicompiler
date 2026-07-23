@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -35,6 +36,21 @@ void RequireNonEmpty(const String& value, const char* field_name,
     if (AsStdString(value).empty()) {
         throw std::invalid_argument("PassSpec " + pass_key + " has empty " + field_name);
     }
+}
+
+std::set<std::string> ValidateNames(const Array<String>& values,
+                                    const char* field_name,
+                                    const std::string& pass_key) {
+    std::set<std::string> names;
+    for (const String& value : values) {
+        const std::string name = AsStdString(value);
+        if (name.empty() || !names.insert(name).second) {
+            throw std::invalid_argument("PassSpec " + pass_key + " " +
+                                        field_name +
+                                        " must be unique and non-empty");
+        }
+    }
+    return names;
 }
 
 }  // namespace
@@ -104,6 +120,21 @@ void ValidatePassSpec(const PassSpec& spec) {
                                     " requires non-negative opt_level");
     }
     RequireNonEmpty(spec.implementation_key, "implementation_key", pass_key);
+    const std::set<std::string> required =
+        ValidateNames(spec.required_invariants, "required_invariants", pass_key);
+    const std::set<std::string> produced =
+        ValidateNames(spec.produced_invariants, "produced_invariants", pass_key);
+    const std::set<std::string> declarative = ValidateNames(
+        spec.declarative_only_invariants, "declarative_only_invariants", pass_key);
+    for (const std::string& invariant : declarative) {
+        if (!required.count(invariant) && !produced.count(invariant)) {
+            throw std::invalid_argument(
+                "PassSpec " + pass_key + " marks undeclared invariant '" +
+                invariant + "' as declarative-only");
+        }
+    }
+    (void)ValidateNames(spec.preserved_analyses, "preserved_analyses", pass_key);
+    (void)ValidateNames(spec.invalidated_analyses, "invalidated_analyses", pass_key);
     if (spec.dialect == IRDialect::kRelay && spec.scope == PassScope::kPrimFunc) {
         throw std::invalid_argument("PassSpec " + pass_key +
                                     " cannot use prim_func scope for Relay dialect");

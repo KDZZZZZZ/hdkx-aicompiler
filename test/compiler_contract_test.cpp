@@ -617,7 +617,7 @@ bool TestMultiPrimitiveCompileStateIdentity() {
         primitive.unit_id = source.unit_id;
         primitive.symbol = source.symbol;
         primitive.operator_identity = source.operator_identity;
-        primitive.structural_hash = source.structural_hash;
+        primitive.semantic_key = source.semantic_key;
         primitive.tir = source.lowered->prim_func;
         primitives.push_back(primitive);
         tir_functions.push_back(primitive.tir);

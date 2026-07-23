@@ -15,7 +15,7 @@ struct LoweredPrimitive {
     int64_t unit_id{-1};
     String symbol;
     String operator_identity;
-    String structural_hash;
+    UnitSemanticKey semantic_key;
     relay::LoweredFunction lowered;
 };
 
@@ -29,7 +29,9 @@ struct LoweredGraph {
 relay::LoweredFunction LowerCompilationUnit(
     const ValueGraph& graph, const CompilationUnit& unit);
 LoweredGraph LowerGraph(Function function,
-                        Device device = Device::CPU());
+                        Device device = Device::CPU(),
+                        Target target = Target(),
+                        String pipeline_fingerprint = String());
 void ValidateLoweredGraph(const LoweredGraph& graph);
 
 }  // namespace kxc::api::internal

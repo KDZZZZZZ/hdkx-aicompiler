@@ -4,7 +4,10 @@
 
 #pragma once
 
+#include <vector>
+
 #include "kxc/compiler/compile_config.h"
+#include "kxc/compiler/foundation_contract.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
 #include "kxc/support/container.h"
@@ -16,6 +19,8 @@ namespace api {
 struct CompiledGraph final {
     CompiledModule module;
     runtime::ExecutablePlan plan;
+    // Compiler::Compile populates this with production-backed cache pins.
+    std::vector<ArtifactPin> artifact_pins;
 };
 
 /*!
@@ -34,9 +39,17 @@ public:
      */
     static CompiledGraph Compile(Function func, CompileConfig config);
 
-    /*! \brief 返回 opt_level 对应的确定性 Relay pass 顺序。 */
+    /*! \brief Compatibility view of Relay optimization passes only.
+     *
+     * Production pre/post InferType steps are present in PipelineResolver's
+     * NormalizedPipeline and intentionally omitted from this legacy view.
+     */
     static Array<String> RelayPassPolicy(int opt_level);
-    /*! \brief 返回 opt_level 和 Target 对应的确定性 TIR pass 顺序。 */
+    /*! \brief Compatibility view of TIR optimization passes only.
+     *
+     * Production target scheduling remains visible only in the normalized
+     * execution plan consumed by PipelineExecutor.
+     */
     static Array<String> TIRPassPolicy(int opt_level, const Target& target);
 };
 

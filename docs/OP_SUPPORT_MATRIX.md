@@ -1,64 +1,87 @@
-# Relay MVP 算子支持矩阵
+# Relay 算子支持矩阵
 
-本文档记录当前 TinyTVM MVP Relay 算子的实现状态。矩阵只覆盖 `test/relay_op_contract.json` 中声明的 MVP 算子；未进入矩阵的 TOPI/Relay helper 不视为已支持，调用时必须显式报错，不能返回空 `Tensor` 或错误替代实现。
+> **状态：Track01 仓内 closure 已实现，逐 target 批准仍进行中。** 本页中的
+> contract/numeric 记录不能替代 `Compiler::Compile` per-unit executable proof 与
+> backend CI。未列出或未获目标批准的算子必须 fail closed。
 
-## 支持判定
+## 判定规则
 
-一个 MVP 算子只有同时满足以下条件，才能标记为 `tested`：
+`test/relay_op_contract.json` 是 MVP operator contract 的机器可读输入。一个算子只有
+在 schema、type、lowering binding、FFI、per-unit compile、目标后端数值结果和 CI
+均有可追溯证据时，才可由审查者标为 production supported。
 
-- schema：有唯一 canonical Relay op 注册，包含输入个数、参数说明和属性类型。
-- type：注册 `FInferType`，能推导静态 shape/dtype，并对不支持形态立即失败。
-- lowering：注册 `FRelayToTE`，生成定义完整的 TE tensor。
-- ffi：有 canonical `_make.<op>` helper，不允许 alias helper。
-- tir：有 `LowerToTIR` 测试引用。
-- llvm：有 Relay -> TIR -> LLVM JIT -> 运行 -> 数值比对测试引用。
-- ci：checker 和 CPU/LLVM 测试进入 CI。
+`relay::LowerToTIR` 的单 whole-graph `PrimFunc` 测试只属于 compatibility/testing；它
+不能证明 per-unit `Compiler::Compile`、artifact cache 或 `ExecutablePlan` 路径支持该
+算子。
 
-## 检查命令
+## 当前 contract 范围
+
+下列 19 个算子已列入 Relay contract checker。此表只声明 checker 范围，**不是**
+production support 的肯定结论；production approval 保持 pending，直到下方 closure
+项目完成。
+
+| 算子 | 分类 | Contract | Production approval |
+|---|---|---|---|
+| `add` | tensor.math | declared | pending |
+| `subtract` | tensor.math | declared | pending |
+| `mul` | tensor.math | declared | pending |
+| `divide` | tensor.math | declared | pending |
+| `sqrt` | tensor.math | declared | pending |
+| `matmul` | tensor.math | declared | pending |
+| `nn_dense` | nn | declared | pending |
+| `nn_gemm` | nn | declared | pending |
+| `nn_relu` | nn | declared | pending |
+| `nn_conv2d` | nn | declared | pending |
+| `nn_max_pool2d` | nn | declared | pending |
+| `nn_avg_pool2d` | nn | declared | pending |
+| `nn_global_avg_pool2d` | nn | declared | pending |
+| `nn_flatten` | tensor.transform | declared | pending |
+| `reshape` | tensor.transform | declared | pending |
+| `transpose` | tensor.transform | declared | pending |
+| `cast` | tensor.transform | declared | pending |
+| `reduce_mean` | tensor.reduce | declared | pending |
+| `softmax` | nn | declared | pending |
+
+## 当前显式拒绝边界
+
+- `nn_gemm` 的 `transA != 0`：type relation 可表达，但 production TE lowering 明确拒绝；capability 返回 `eligible_but_not_executable`，不得标 supported。
+- function tuple parameter：当前 value graph ABI 只接受 `TensorType` parameters；tuple outputs/flat multi-output 不等于 tuple parameter support。
+- LLVM/CUDA backend 未编入当前构建：结构可 eligible，但 `supported=false`。
+- CUDA Target 必须有可用 device、compute capability 与 launch limits；O3 reduction 不能通过当前保守 `bind_cuda_threads` schedule，因此在 backend 前返回 target-schedule rejection。
+- custom lowering 的 tensor 数量、dtype、rank 或 shape 与 checked type 不一致时，由 production per-unit lowering 与 capability 同源拒绝。
+
+## Required CI evidence
+
+CPU CI configures with CUDA and LLVM disabled, then runs every CTest labelled
+`cpu`: all built CPU/core C++ tests, Relay/pass contracts, include-layer checks,
+and compiled public-header checks. It does not run conditional LLVM, CUDA, CUPTI,
+or hardware tests.
+
+LLVM CI explicitly builds and runs:
 
 ```bash
-python python/tools/check_relay_op_contract.py --root .
-cmake --build out/build/<llvm-build> --target run_op_numeric_llvm_test
-cmake --build out/build/<llvm-build> --target run_onnx_importer_test
+ctest --test-dir out/build/ci-llvm --output-on-failure \
+  --tests-regex '^(operator_compilation_test|codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test)$'
 ```
 
-`run_op_numeric_llvm_test` 覆盖 19 个 MVP 算子的 per-op 数值测试，并包含 add 链、MLP、CNN 三个小模型级组合测试。`run_onnx_importer_test` 覆盖 ResNet18 ONNX 导入和 LLVM 编译路径；设置 `KXC_RUN_RESNET18_EXEC=1` 后会执行编译后的 ResNet18 kernel。
+`operator_compilation_test` contains the LLVM numerical per-unit and primitive-cache
+renumbered/symbol-relocation reuse assertions. `codegen_llvm_test` and
+`op_numeric_llvm_test` provide the relevant LLVM codegen and operator numerical
+coverage. `onnx_importer_test` is the conditional ONNX fixture/import and LLVM
+compile integration check.
 
-## MVP 矩阵
+## Closure checklist
 
-| 算子 | 分类 | 类型推断 | TE lowering | TIR 测试 | LLVM 数值测试 | 备注 |
-|---|---|---:|---:|---:|---:|---|
-| `add` | tensor.math | Y | Y | Y | Y | 支持 broadcast |
-| `subtract` | tensor.math | Y | Y | Y | Y | 支持 broadcast |
-| `mul` | tensor.math | Y | Y | Y | Y | Relay canonical 名称为 `mul` |
-| `divide` | tensor.math | Y | Y | Y | Y | 支持 broadcast |
-| `sqrt` | tensor.math | Y | Y | Y | Y | LLVM 走 intrinsic |
-| `matmul` | tensor.math | Y | Y | Y | Y | 当前只支持 rank-2 |
-| `nn_dense` | nn | Y | Y | Y | Y | weight 形状为 `[N, K]` |
-| `nn_gemm` | nn | Y | Y | Y | Y | 支持 `transB`，暂不支持 `transA=1` |
-| `nn_relu` | nn | Y | Y | Y | Y | elementwise |
-| `nn_conv2d` | nn | Y | Y | Y | Y | NCHW/OIHW，支持可选 bias |
-| `nn_max_pool2d` | nn | Y | Y | Y | Y | NCHW |
-| `nn_avg_pool2d` | nn | Y | Y | Y | Y | NCHW |
-| `nn_global_avg_pool2d` | nn | Y | Y | Y | Y | NCHW |
-| `nn_flatten` | tensor.transform | Y | Y | Y | Y | 静态 shape |
-| `reshape` | tensor.transform | Y | Y | Y | Y | 静态 shape |
-| `transpose` | tensor.transform | Y | Y | Y | Y | 支持负轴归一化 |
-| `cast` | tensor.transform | Y | Y | Y | Y | LLVM 直接生成 cast 指令 |
-| `reduce_mean` | tensor.reduce | Y | Y | Y | Y | 静态 reduction shape |
-| `softmax` | nn | Y | Y | Y | Y | 当前实现为 exp/sum/div |
+Track01 现为 **ready for supervisor re-review**，但各算子的 production approval
+仍按 target 单独判断：
 
-## 非 MVP helper 规则
+- [x] per-unit executable capability 正反例（含真实 lowering/schedule/backend proof）
+- [x] normalized production pipeline、executable invariant 与 public static-exact transaction/pin adapter
+- [x] 本地 CPU CTest、contract、include/public-header：27/27
+- [x] LLVM workflow 选择 relocation/cache-reuse 与 numeric/codegen 测试
+- [ ] LLVM-enabled builder 的实际绿色记录（workflow 已配置；本机/当前会话无记录）
+- [ ] 每个 target 的 attrs/shape/schedule 限制逐项批准
 
-`include/te/topi` 里的 helper 只有被 Relay MVP lowering 使用并进入矩阵后，才算已支持。其他 helper 必须遵守：
-
-- 不允许 `return Tensor()` 作为失败路径。
-- 不允许用其他 reducer 伪装实现，例如用 `sum` 代替 `prod`。
-- 不允许保留 `TODO`、`placeholder`、`for now` 等占位标记。
-- 当前不能实现的 helper 必须抛出明确异常。
-
-当前状态：
-
-- `topi::min` 已接入真实 `te::min` reducer。
-- 未实现的 `topi::prod` 和 `topi::einsum` 公共 helper 已删除；调用方不能把“存在但只会抛错”误判为支持。
-- `topi::concatenate` 的空输入路径显式失败。
+TOPI helpers outside this table are not supported merely because declarations exist.
+They must explicitly reject unsupported inputs rather than return an empty tensor,
+placeholder result, or silent substitute.

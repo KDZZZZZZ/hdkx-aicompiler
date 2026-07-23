@@ -1,6 +1,11 @@
 # Issue #3 Relay Type/Shape Inference 实现设计
 
-状态：Proposed
+> **历史文档／非当前事实源（HISTORICAL, NON-AUTHORITATIVE）。**
+> 本文仅保留历史设计/状态背景，不得用于证明当前 capability 或测试通过。
+> 当前事实只以 [`MODULE_GUIDE.md`](MODULE_GUIDE.md)、[`core handoff`](handoffs/compiler-foundation/core.md)、
+> 当前源码和可重复测试为准。
+
+状态：Historical proposal
 日期：2026-06-06
 关联 issue：https://github.com/KDZZZZZZ/hdkx-aicompiler/issues/3
 
@@ -58,8 +63,8 @@ Issue #3 和 issue #8 有依赖关系，但不应该完整合并实现：
 
 当前仓库已经有最小类型结构：
 
-- [include/base/expr.h](../include/base/expr.h) 定义了 `TypeNode`、`Type` 和 `ExprNode::checked_type_`。
-- [include/relay/relay.h](../include/relay/relay.h) 定义了 `TensorTypeNode`，字段为 `shape: Array<int64_t>` 和 `dtype: std::string`。
+- [include/kxc/ir/expr.h](../include/kxc/ir/expr.h) 定义了 `TypeNode`、`Type` 和 `ExprNode::checked_type_`。
+- [include/kxc/relay/relay.h](../include/kxc/relay/relay.h) 定义了 `TensorTypeNode`，字段为 `shape: Array<int64_t>` 和 `dtype: std::string`。
 - `VarNode` 有 `type_annotation`，调用方可以写 `Var("x", TensorType(...))`。
 
 缺口是：
@@ -71,7 +76,7 @@ Issue #3 和 issue #8 有依赖关系，但不应该完整合并实现：
 
 ### 2.2 LowerToTIR 已经隐式依赖 typed Relay
 
-[src/relay/backend/lower.cc](../src/relay/backend/lower.cc) 里有两处关键依赖：
+[src/compiler/lowering/relay_to_tir.cc](../src/compiler/lowering/relay_to_tir.cc) 里有两处关键依赖：
 
 - `LowerToTIR` 要求 function params 有 `TensorType` annotation。
 - `RelayToTEConverter::VisitCall` 会读取 `ref.checked_type()`，然后传给 op 的 `FRelayToTE`。
@@ -85,7 +90,7 @@ Issue #3 后，`LowerToTIR` 应只接收已经被验证的 typed Relay function�
 
 ### 2.3 Op registry 有 lowering hook，没有 type hook
 
-[include/relay/op_attr_types.h](../include/relay/op_attr_types.h) 目前只有：
+[include/kxc/relay/op_attr_types.h](../include/kxc/relay/op_attr_types.h) 目前只有：
 
 ```cpp
 using FRelayToTE =
@@ -106,10 +111,10 @@ Issue #3 可以先实现 type rule，但测试必须区分“type inference 支�
 
 当前 shape 公式主要在 TE/TOPI helper 里：
 
-- [include/te/topi/broadcast.h](../include/te/topi/broadcast.h)：broadcast shape
-- [include/te/topi/nn.h](../include/te/topi/nn.h)：dense、matmul、conv2d、pool
-- [include/te/topi/transform.h](../include/te/topi/transform.h)：transpose、squeeze、concat 等
-- [include/te/topi/reduction.h](../include/te/topi/reduction.h)：reduce
+- [include/kxc/te/topi/broadcast.h](../include/kxc/te/topi/broadcast.h)：broadcast shape
+- [include/kxc/te/topi/nn.h](../include/kxc/te/topi/nn.h)：dense、matmul、conv2d、pool
+- [include/kxc/te/topi/transform.h](../include/kxc/te/topi/transform.h)：transpose、squeeze、concat 等
+- [include/kxc/te/topi/reduction.h](../include/kxc/te/topi/reduction.h)：reduce
 
 这些代码负责构造 TE compute，不应该承担 Relay 类型校验职责。Relay inference 必须成为更早、更严格的一层。
 
@@ -117,7 +122,7 @@ Issue #3 可以先实现 type rule，但测试必须区分“type inference 支�
 
 [src/relay/transforms/pipeline.cc](../src/relay/transforms/pipeline.cc) 没有 `infer_type` pass entry，`optimize_default` 也不会运行类型推断。
 
-[src/api/compiler.cc](../src/api/compiler.cc) 当前流程是：
+[src/compiler/compiler.cc](../src/compiler/compiler.cc) 当前流程是：
 
 ```text
 RunRelayPassPipeline
@@ -488,9 +493,9 @@ OW = ceil_mode ? floor((numerator_w + stride_w - 1) / stride_w) + 1
 
 修改：
 
-- [include/base/expr.h](../include/base/expr.h)
-- [src/base/expr.cc](../src/base/expr.cc)
-- [include/relay/relay.h](../include/relay/relay.h)
+- [include/kxc/ir/expr.h](../include/kxc/ir/expr.h)
+- [src/ir/expr.cc](../src/ir/expr.cc)
+- [include/kxc/relay/relay.h](../include/kxc/relay/relay.h)
 - [src/relay/relay.cc](../src/relay/relay.cc)
 
 新增能力：
@@ -509,7 +514,7 @@ OW = ceil_mode ? floor((numerator_w + stride_w - 1) / stride_w) + 1
 
 修改：
 
-- [include/relay/op_attr_types.h](../include/relay/op_attr_types.h)
+- [include/kxc/relay/op_attr_types.h](../include/kxc/relay/op_attr_types.h)
 
 新增：
 
@@ -576,10 +581,10 @@ NormalizePadding(values)
 
 修改：
 
-- [include/relay/transforms/pipeline.h](../include/relay/transforms/pipeline.h)
+- [include/kxc/relay/transforms/pipeline.h](../include/kxc/relay/transforms/pipeline.h)
 - [src/relay/transforms/pipeline.cc](../src/relay/transforms/pipeline.cc)
-- [src/api/compiler.cc](../src/api/compiler.cc)
-- [src/relay/backend/lower.cc](../src/relay/backend/lower.cc)
+- [src/compiler/compiler.cc](../src/compiler/compiler.cc)
+- [src/compiler/lowering/relay_to_tir.cc](../src/compiler/lowering/relay_to_tir.cc)
 - [CMakeLists.txt](../CMakeLists.txt)
 
 Pipeline：

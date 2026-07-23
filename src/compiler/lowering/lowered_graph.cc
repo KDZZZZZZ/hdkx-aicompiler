@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "../internal/te_to_tir.h"
+#include "kxc/compiler/capability.h"
 #include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/transforms/infer_type.h"
 
@@ -191,6 +192,33 @@ Array<te::Tensor> InvokeCurrentCall(const CallNode* call,
     return outputs;
 }
 
+void ValidateLoweringOutputs(const ValueGraph& graph,
+                             const CompilationUnit& unit,
+                             const Array<te::Tensor>& outputs) {
+    if (outputs.size() != unit.output_value_ids.size()) {
+        throw std::invalid_argument(
+            "Unit TE outputs do not match stable output value ids");
+    }
+    for (size_t output_index = 0; output_index < outputs.size(); ++output_index) {
+        const ValueInfo& value =
+            GetValue(graph, unit.output_value_ids[output_index]);
+        const auto* expected = value.checked_type.As<TensorTypeNode>();
+        const te::Tensor& actual = outputs[output_index];
+        if (!expected || actual->dtype != TIRDataType(expected) ||
+            actual->shape.size() != expected->shape.size()) {
+            throw std::invalid_argument(
+                "Operator lowering output dtype/rank does not match checked_type");
+        }
+        for (size_t dimension = 0; dimension < expected->shape.size(); ++dimension) {
+            const auto* extent = actual->shape[dimension].As<tir::IntImmNode>();
+            if (!extent || extent->value != expected->shape[dimension]) {
+                throw std::invalid_argument(
+                    "Operator lowering output shape does not match checked_type");
+            }
+        }
+    }
+}
+
 bool ReadIntAttr(const tir::PrimFunc& function, const char* key,
                  int64_t* value) {
     const String attr_key(key);
@@ -255,23 +283,25 @@ relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
 
     const Array<te::Tensor> outputs =
         InvokeCurrentCall(call, spec, logical_inputs, unit.call.checked_type());
-    if (outputs.size() != unit.output_value_ids.size()) {
-        throw std::invalid_argument(
-            "Unit TE outputs do not match stable output value ids");
-    }
+    ValidateLoweringOutputs(graph, unit, outputs);
     return relay::internal::LowerTensorGraphToTIR(
         abi_inputs, constants, outputs,
         relay::internal::PrimFuncIdentity{
             unit.symbol, unit.unit_id, String(spec.name), spec.schema_version,
-            unit.structural_hash});
+            String(unit.semantic_key.digest())});
 }
 
-LoweredGraph LowerGraph(Function function, Device device) {
+LoweredGraph LowerGraph(Function function, Device device, Target target,
+                        String pipeline_fingerprint) {
     if (!function.defined() || !device.defined()) {
         throw std::invalid_argument(
             "LowerGraph requires a defined Function and Device");
     }
-    function = relay::InferTypePass(function);
+    if (!target.defined()) target = BuildTarget(device);
+    CapabilityVerifier::RequireEligible(CapabilityRequest{
+        function, target, "graph", std::string(pipeline_fingerprint),
+        CapabilityBoundary::kPrePartition, CapabilityMode::kStaticExact,
+        true});
     LoweredGraph result;
     result.partitioned =
         PartitionValueGraph(BuildValueGraph(function));
@@ -286,7 +316,7 @@ LoweredGraph LowerGraph(Function function, Device device) {
                              unit.symbol,
                              String(op->name + "@v" +
                                     std::to_string(op->spec.schema_version)),
-                             unit.structural_hash,
+                             unit.semantic_key,
                              lowered});
         for (const auto& binding : lowered.constants()) {
             if (result.constants.count(binding->key) &&
@@ -331,7 +361,7 @@ void ValidateLoweredGraph(const LoweredGraph& graph) {
         int64_t unit_id = -1;
         if (primitive.unit_id != unit.unit_id ||
             !(primitive.symbol == unit.symbol) ||
-            !(primitive.structural_hash == unit.structural_hash)) {
+            primitive.semantic_key != unit.semantic_key) {
             throw std::invalid_argument(
                 "Lowered primitive record drifted from its CompilationUnit");
         }
@@ -351,7 +381,7 @@ void ValidateLoweredGraph(const LoweredGraph& graph) {
                 std::string(actual_operator_identity));
         }
         if (!(ReadStringAttr(function, "kxc.structural_hash") ==
-              unit.structural_hash)) {
+              String(unit.semantic_key.digest()))) {
             throw std::invalid_argument("PrimFunc structural hash metadata mismatch");
         }
     }
@@ -362,6 +392,9 @@ void ValidateLoweredGraph(const LoweredGraph& graph) {
 namespace kxc::relay {
 
 Array<LoweredFunction> LowerOperatorCallsToTIR(Function function) {
+    // Compatibility entry: production Compiler executes InferType through its
+    // audited NormalizedPipeline before calling LowerGraph.
+    function = InferTypePass(std::move(function));
     const api::internal::LoweredGraph graph =
         api::internal::LowerGraph(std::move(function), Device::CPU());
     Array<LoweredFunction> result;

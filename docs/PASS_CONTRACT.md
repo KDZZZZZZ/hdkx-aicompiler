@@ -14,6 +14,9 @@ scheduled. It does not define or store rewrite algorithms.
   `tir_schedule`.
 - `opt_level`: minimum opt level associated with the pass metadata.
 - `implementation_key`: stable FFI-style implementation binding key.
+- `required_invariants`, `produced_invariants`: production invariant ledger.
+- `declarative_only_invariants`: declared metadata with no executable proof;
+  these names cannot satisfy a production precondition.
 - `deterministic`, `idempotent`, `thread_safe`, `target_dependent`: behavioral
   claims that tests and contract checks can validate.
 
@@ -27,8 +30,16 @@ The implementation key must point to an existing transform entry such as
 - Duplicate identities fail validation.
 - Relay passes cannot use `prim_func` scope.
 - TIR passes cannot use `graph` scope.
-- Pipeline entry points validate dialect, scope, phase, and implementation
-  binding before executing a pass.
+- Pipeline entry points validate dialect, scope, phase, implementation
+  binding, and invariant classification before executing a pass.
+- Invariant/analysis lists contain unique, non-empty names. A declarative-only
+  name must also appear in that pass's required or produced declarations.
+- Every production precondition and every invariant recorded as proven must
+  have an executable dialect-specific validator. Unsupported produced metadata
+  must be marked declarative-only and is never added to the proven set.
+- The executor validates the initial proven set and the complete proven set
+  after every `NormalizedPipeline` step. Currently the executable registry
+  proves Relay `checked_type`; no TIR invariant name is accepted as proven.
 - `PassSpec` never owns function objects. Pipeline files keep local function
   bindings and map them through `implementation_key`.
 
@@ -60,9 +71,10 @@ TIR `optimize_default`:
 7. `vectorize_loop`
 8. `remove_no_op`
 
-`bind_cuda_threads` remains registered and callable as a target-dependent
-`tir_schedule` pass, but the compiler still invokes CUDA binding explicitly at
-the existing scheduling boundary.
+`bind_cuda_threads` is registered as a target-dependent `tir_schedule` pass.
+The normalized TIR compiler pipeline selects and executes it explicitly; its
+step and `cuda_thread_binding` target requirement participate in canonical
+pipeline identity.
 
 ## Machine Contract
 
@@ -76,9 +88,9 @@ metadata and default order. `python/tools/check_pass_contract.py` cross-checks:
 
 Common conservative declarations live in `pass_defaults`; each pass entry is
 merged over those defaults before required-field validation. A missing field in
-both places is a contract error. This keeps empty invariant/analysis sets and
-the default `thread_safe=false` policy explicit without duplicating them in
-every entry.
+both places is a contract error. This keeps empty invariant/analysis and
+`declarative_only_invariants` sets, plus the default `thread_safe=false` policy,
+explicit without duplicating them in every entry.
 
 Adding a pass requires adding or updating contract metadata before adding it to a
 default pipeline. Adding a pass implementation does not automatically make it a
