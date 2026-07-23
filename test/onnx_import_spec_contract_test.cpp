@@ -93,7 +93,8 @@ void WriteFixture(const TemporaryDirectory& directory, const std::string& input_
 }
 
 void WriteGatherFixture(const TemporaryDirectory& directory,
-                        const std::string& output_shape) {
+                        const std::string& output_shape,
+                        const std::string& attrs = R"json({"axis": 1})json") {
     const std::string json = R"json({
   "format": "kxc.onnx_import.v1",
   "function": {
@@ -105,7 +106,7 @@ void WriteGatherFixture(const TemporaryDirectory& directory,
       {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
     ],
     "nodes": [
-      {"name": "gather", "op_name": "gather", "inputs": ["data", "indices"], "outputs": ["out"], "attrs": {"axis": 1}}
+      {"name": "gather", "op_name": "gather", "inputs": ["data", "indices"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
     ]
   },
   "params": [],
@@ -157,7 +158,8 @@ void WriteSliceFixture(const TemporaryDirectory& directory, const std::string& o
 
 void WriteWhereFixture(const TemporaryDirectory& directory,
                        const std::string& output_shape,
-                       const std::string& branch_dtype = "float32") {
+                       const std::string& branch_dtype = "float32",
+                       const std::string& attrs = R"json({})json") {
     const std::string json = R"json({
   "format": "kxc.onnx_import.v1",
   "function": {
@@ -170,7 +172,7 @@ void WriteWhereFixture(const TemporaryDirectory& directory,
       {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": ")json" + branch_dtype + R"json("}
     ],
     "nodes": [
-      {"name": "where", "op_name": "where", "inputs": ["condition", "x", "y"], "outputs": ["out"], "attrs": {}}
+      {"name": "where", "op_name": "where", "inputs": ["condition", "x", "y"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
     ]
   },
   "params": [],
@@ -295,6 +297,20 @@ bool TestValidStaticGather() {
     return true;
 }
 
+bool TestGatherAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WriteGatherFixture(directory, "[2, 5, 6, 4]",
+                       R"json({"axis": 1, "unknown": 0})json");
+
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "Gather reifier must reject attrs outside the exact canonical set");
+    return true;
+}
+
 bool TestGatherDeclaredOutputMismatchIsRejected() {
     TemporaryDirectory directory;
     WriteGatherFixture(directory, "[2, 5, 4]");
@@ -388,6 +404,19 @@ bool TestValidStaticWhere() {
     TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
                            {2, 3}, "float32"),
                "reified Where output should use joint broadcast shape and x/y dtype");
+    return true;
+}
+
+bool TestWhereAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WriteWhereFixture(directory, "[2, 3]", "float32", R"json({"axis": 0})json");
+
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "Where reifier must reject all noncanonical attrs");
     return true;
 }
 
@@ -505,6 +534,7 @@ int main() {
         {"exact_transformer_operator_slice_reifier", TestExactTransformerOperatorSliceReifier},
         {"valid_static_matmul_softmax_transpose", TestValidStaticMatMulSoftmaxTranspose},
         {"valid_static_gather", TestValidStaticGather},
+        {"gather_strict_attrs", TestGatherAttrsAreStrict},
         {"gather_declared_output_mismatch", TestGatherDeclaredOutputMismatchIsRejected},
         {"valid_static_concatenate", TestValidStaticConcatenate},
         {"concatenate_declared_output_mismatch", TestConcatenateDeclaredOutputMismatchIsRejected},
@@ -513,6 +543,7 @@ int main() {
         {"slice_declared_output_mismatch", TestSliceDeclaredOutputMismatchIsRejected},
         {"slice_strict_attrs", TestSliceAttrsAreStrict},
         {"valid_static_where", TestValidStaticWhere},
+        {"where_strict_attrs", TestWhereAttrsAreStrict},
         {"where_declared_output_mismatch", TestWhereDeclaredOutputMismatchIsRejected},
         {"where_unsupported_branch_dtype", TestWhereUnsupportedBranchDTypeIsRejected},
         {"valid_static_layer_norm", TestValidStaticLayerNorm},

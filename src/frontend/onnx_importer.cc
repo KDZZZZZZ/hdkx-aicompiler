@@ -436,7 +436,13 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
             ReadString(Field(attrs, "layout", "pool attrs"), "pool attrs.layout"),
             ReadBool(Field(attrs, "ceil_mode", "pool attrs"), "pool attrs.ceil_mode")));
     }
-    if (op_name == "add" || op_name == "matmul" || op_name == "where") {
+    if (op_name == "where") {
+        if (!attrs.o.empty()) {
+            throw std::runtime_error("Where import attrs must be empty");
+        }
+        return ObjectRef();
+    }
+    if (op_name == "add" || op_name == "matmul") {
         return ObjectRef();
     }
     if (op_name == "softmax") {
@@ -461,8 +467,12 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
                                     "transpose attrs.perm"))));
     }
     if (op_name == "gather") {
+        const std::string ctx = "gather attrs";
+        if (attrs.o.size() != 1 || !OptionalField(attrs, "axis")) {
+            throw std::runtime_error("Gather import attrs must contain exactly axis");
+        }
         return ObjectRef(relay::GatherAttrs::Create(
-            ReadInt(Field(attrs, "axis", "gather attrs"), "gather attrs.axis")));
+            ReadInt(Field(attrs, "axis", ctx), ctx + ".axis")));
     }
     if (op_name == "slice") {
         const std::string ctx = "slice attrs";
