@@ -20,6 +20,8 @@ option(KXC_ENABLE_CONTROL_RUNTIME
   "Enable experimental static-exact CPU control runtime execution" OFF)
 option(KXC_ENABLE_SHAPE_PRODUCTION_EXACT
   "Enable the production exact Relay/compiler/shape adapter" OFF)
+option(KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE
+  "Enable the experimental restricted symbolic Shape decision adapter" OFF)
 option(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
   "Enable default-off experimental adapter for a production compiler path" OFF)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build the diagnostic ResNet18 IR dump tool" OFF)
@@ -58,6 +60,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/identity.h
   include/kxc/compiler/pipeline.h
   include/kxc/compiler/shape_exact.h
+  include/kxc/compiler/restricted_symbolic_shape.h
   include/kxc/compiler/lowering/relay_to_tir.h
   include/kxc/distributed/ccl_backend.h
   include/kxc/distributed/dref.h
@@ -479,6 +482,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/pipeline_resolver.cc
   src/compiler/compiler.cc
   src/compiler/shape_exact.cc
+  src/compiler/restricted_symbolic_shape.cc
   src/compiler/graph/partition.cc
   src/compiler/graph/value_graph.cc
   src/compiler/kernel_abi_builder.cc
@@ -523,6 +527,7 @@ function(kxc_configure_module_obj target)
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
+    KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
 endfunction()
 
@@ -706,6 +711,7 @@ function(kxc_add_runtime_exe target source_file)
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
+    KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
@@ -857,6 +863,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
   kxc_add_runtime_exe(shape_production_exact_test test/shape_production_exact_test.cpp)
+  kxc_add_runtime_exe(restricted_symbolic_shape_test test/restricted_symbolic_shape_test.cpp)
   kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
   kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
   if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
@@ -866,6 +873,13 @@ if(KXC_BUILD_PASS_TESTS)
   if(BUILD_TESTING)
     add_test(NAME shape_production_exact_test COMMAND shape_production_exact_test)
     set_tests_properties(shape_production_exact_test PROPERTIES LABELS "shape-production;cpu")
+    add_test(NAME restricted_symbolic_shape_test COMMAND restricted_symbolic_shape_test)
+    set_tests_properties(restricted_symbolic_shape_test PROPERTIES LABELS "shape-restricted-symbolic;cpu")
+    add_custom_target(run_restricted_symbolic_shape_test
+      COMMAND "$<TARGET_FILE:restricted_symbolic_shape_test>"
+      DEPENDS restricted_symbolic_shape_test
+      USES_TERMINAL
+      COMMENT "Run restricted symbolic Shape decision adapter test")
     add_custom_target(run_shape_production_exact_test
       COMMAND "$<TARGET_FILE:shape_production_exact_test>"
       DEPENDS shape_production_exact_test

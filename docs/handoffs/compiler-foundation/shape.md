@@ -198,9 +198,59 @@ ctest --test-dir out/build/shape-production-off --output-on-failure -R shape_pro
 
 当前硬 blocker 仍是 Relay `Array<int64_t>`/TE `IntImm` concrete-only shape representation；没有 production bucket/polymorphic claim，也没有 dynamic shape/output claim。
 
-## 4. W1 Shape contract 测试证据
+## 4. W3 restricted symbolic decision minting（default-OFF）
 
-### 4.1 分阶段 focused tests
+W3 只增加 installed experimental-v1 `kxc::api::experimental::restricted_symbolic_shape::v1`
+control-plane adapter（`include/kxc/compiler/restricted_symbolic_shape.h`）。它必须同时启用
+`KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON` 和
+`KXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON`；前者默认 `OFF`，关闭时 `Prepare` fail closed。
+
+- `Prepare` 先通过 W2 exact adapter deep-freeze concrete representative，再只接受 fixed-rank
+  tree 中的 `relu`/`nn_relu`、`sqrt` 和 equal-shape `add`/`mul`，以及显式输入轴 symbol overlay。
+  常量、broadcast、alias、control flow、legacy negative extent 和不一致 frozen unit 均拒绝。
+- `MintExact`、`MintBucket` 和 `MintPolymorphic` 只 mint/rebuild validated immutable decision
+  authority 和 request snapshots。bucket/polymorphic 同时验证 complete
+  logical/physical/valid boundary、axis names、guard/tail 或 allowlisted versioned proof；没有
+  dynamic allocation、artifact compilation/cache access、guarded executable plan 或 dynamic
+  `RuntimeSession` path。
+- `RestrictedDispatchDecision` 不公开可写 authority；request accessor 都从 trusted
+  template/profile state 重建。`ChangedUnitIndices` 只比较可比较 unit 的 semantic artifact/
+  boundary identity，刻意排除 graph-local routing 与 profile/oracle identity，不能当 cache lookup。
+
+本机 W3 evidence（Debug、CPU、LLVM/CUDA `OFF`）：
+
+```bash
+# Gate OFF: default-off adapter must fail closed.
+cmake -S . -B out/shape-w3-off -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
+  -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=OFF \
+  -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=OFF \
+  -DKXC_BUILD_PASS_TESTS=ON -DKXC_BUILD_CODEGEN_TESTS=OFF
+cmake --build out/shape-w3-off --target run_restricted_symbolic_shape_test --parallel 2
+ctest --test-dir out/shape-w3-off --output-on-failure -R '^restricted_symbolic_shape_test$'
+
+# Gate ON: restricted adapter plus every existing Shape target.
+cmake -S . -B out/shape-w3-on -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
+  -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON \
+  -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON \
+  -DKXC_BUILD_PASS_TESTS=ON -DKXC_BUILD_CODEGEN_TESTS=OFF
+cmake --build out/shape-w3-on --target \
+  run_shape_system_test run_shape_specialization_test run_shape_guarded_specialization_test \
+  run_shape_production_exact_test run_restricted_symbolic_shape_test --parallel 2
+ctest --test-dir out/shape-w3-on --output-on-failure --no-tests=error \
+  -R '^(shape_production_exact_test|restricted_symbolic_shape_test)$'
+cmake --build out/shape-w3-on --target check_public_headers check_include_layers --parallel 2
+```
+
+结果：gate-OFF CTest **1/1** passed；gate-ON 三个 foundation Shape executables 报告
+**4 + 3 + 2** groups passed，production exact reports **4** groups passed，两个 registered
+Shape CTests **2/2** passed；public headers **100** compiled，include layers **254** files scanned。
+LLVM/CUDA 均明确关闭，未作 LLVM/CUDA or guarded-execution claim。
+
+## 5. W1 Shape contract 测试证据
+
+### 5.1 分阶段 focused tests
 
 CPU-only、LLVM/CUDA disabled：
 
@@ -229,7 +279,7 @@ cmake --build out/shape-phase1 --target \
 
 覆盖的关键负例包括：`-1`/负维、常量和 binding-time overflow、derived stride/physical byte overflow、未知 layout、zero/overlap/noncanonical stride、未绑定/矛盾 constraint、显式 gated SameRank/LayoutCompatible、非法 broadcast/range/divisibility、logical/physical/valid 越界、same key/different full template oracle、f32/f16、device kind/id、target/backend/ABI miss、非 exact profile、larger exact artifact 误复用、consumer-before-producer、bucket 无 guard/tail/pad/crop、capacity 过小、错误 physical stride、polymorphic 域外/整除失败/缺 proof/runtime scalar/错误 ordinal。guarded resolver 边界另覆盖 forged call order/locator、input/output sequence、rank、noncanonical stride、physical byte overflow、dtype、device kind/id、target、backend、backend ABI、guard canonical、完整 artifact payload 和缺失 request；全部拒绝且不污染 coordinator 状态。
 
-### 4.2 ASan + UBSan
+### 5.2 ASan + UBSan
 
 ```bash
 cmake -S . -B out/shape-sanitize -G Ninja \
@@ -247,7 +297,7 @@ cmake --build out/shape-sanitize --target \
 
 另以 `-Wall -Wextra -Wpedantic -Werror` 构建并运行三个 Shape tests，全部通过。
 
-### 4.3 现有静态路径回归
+### 5.3 现有静态路径回归
 
 在 `out/shape-regression`（CPU-only、LLVM/CUDA disabled）构建并运行：
 
@@ -266,7 +316,7 @@ cmake --build out/shape-sanitize --target \
 
 本机 Python 缺少 ONNX/Numpy，因此 CMake 按既有逻辑跳过 `onnx_importer_test`；遵守约束，未安装或下载依赖。
 
-## 5. 历史 W1 提交与 W2 工作树状态
+## 6. 历史 W1 提交与 W2 工作树状态
 
 W1 按 exact-first 顺序形成原子提交：
 
@@ -280,9 +330,9 @@ W1 按 exact-first 顺序形成原子提交：
 
 本节 W2 production exact 以单一 atomic feature commit 交付；最终 commit SHA 由本次交接报告记录。未 push、未 merge，也未修改其他 worktree。
 
-## 6. 跨轨硬阻塞
+## 7. 跨轨硬阻塞
 
-### 6.1 Core / Track 01
+### 7.1 Core / Track 01
 
 W2 exact 已消费下列 Core facilities；symbolic/multi-profile 扩展仍必须维持这些边界：
 
@@ -295,7 +345,7 @@ W2 exact 已消费下列 Core facilities；symbolic/multi-profile 扩展仍必�
 
 W2 adapter 不写 fake artifact：它只通过 production primitive cache 交易并保留真实 pin。
 
-### 6.2 Relay / Frontend
+### 7.2 Relay / Frontend
 
 生产 symbolic path 仍被以下事实阻塞：
 
@@ -306,7 +356,7 @@ W2 adapter 不写 fake artifact：它只通过 production primitive cache 交易
 
 集成前必须提供 preserve/bind/reject 的版本化 frontend/type adapter，并对每个 allowlisted op 建立 type relation、ShapeProgram 和 lowering 的同源规则或 concrete differential test。不能把 unknown non-batch dim 填 `1` 后写入新 key。
 
-### 6.3 Adaptive / Track 03
+### 7.3 Adaptive / Track 03
 
 当前 coordinator 只是 deterministic synchronous fake。生产 shape-aware dispatch 需要 Track 03 提供：
 
@@ -318,7 +368,7 @@ W2 adapter 不写 fake artifact：它只通过 production primitive cache 交易
 
 Track 03 接入不得改变本轨 exact applicability，也不得将 cache miss 或 larger capacity 变成 fallback。
 
-### 6.4 Runtime / Codegen / Track 05
+### 7.4 Runtime / Codegen / Track 05
 
 bucket 真正执行之前必须具备：
 
@@ -341,7 +391,7 @@ ShapeEvalTask -> AllocateTask -> KernelTask
 
 当前 `ShapeProgram::Evaluate` 已能纯计算可确定 output contract，但本轨没有越权修改 runtime task/allocator。data-dependent/ragged output 继续拒绝。
 
-## 7. 建议集成顺序
+## 8. 建议集成顺序
 
 1. **先接 Core M1 DTO。** 用正式 capability/pipeline/unit/artifact/dispatch key 替换 `compiler_foundation_v1` fake 字段；保留 full canonical equality 测试。
 2. **接 frontend/Relay preserve-bind-reject adapter。** 新 symbolic 路径不得产生 `-1`；旧静态构造保持兼容。
@@ -352,7 +402,7 @@ ShapeEvalTask -> AllocateTask -> KernelTask
 7. **最后开放 polymorphic。** 等 runtime extent ABI 与 codegen guard 同时冻结后，映射 `PolymorphicPolicy`；域外 dispatch 必须在 launch 前拒绝。
 8. **dynamic output 最后。** 仅将可确定 ShapeProgram 结果交给正式 ShapeEval/Allocate task；ragged/data-dependent 另立协议。
 
-## 8. 交接判定
+## 9. 交接判定
 
 本工作树提供可复审的 experimental-v1 Shape contract，并提供 **default-OFF、concrete-only W2 production exact adapter**。adapter 是 production compiler/cache/module/plan/pin 的窄桥，但 installed experimental headers 仍不承诺 source/binary ABI compatibility，也不构成 stable public v1 或完整 dynamic Shape 完成声明。
 
