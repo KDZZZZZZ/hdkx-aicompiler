@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace kxc::api::adaptive {
 
@@ -405,6 +406,138 @@ public:
 private:
     class State;
     std::unique_ptr<State> state_;
+};
+
+using Generation = std::uint64_t;
+
+/*! \brief Generation-bound strong reference used as the RCU read snapshot. */
+class ArtifactLease final {
+public:
+    ArtifactLease() = default;
+    bool valid() const noexcept { return artifact_ != nullptr; }
+    Generation generation() const noexcept { return generation_; }
+    const std::shared_ptr<const KernelArtifact>& artifact() const noexcept {
+        return artifact_;
+    }
+
+private:
+    ArtifactLease(Generation generation,
+                  std::shared_ptr<const KernelArtifact> artifact);
+    Generation generation_{0};
+    std::shared_ptr<const KernelArtifact> artifact_;
+    friend class KernelSlot;
+};
+
+enum class PublicationMode : std::uint8_t {
+    kStable = 0,
+    kCanary = 1,
+};
+
+struct CanaryPolicy final {
+    std::uint16_t basis_points{0};
+};
+
+struct RoutingContext final {
+    bool allow_canary{false};
+    std::string stable_request_key;
+};
+
+struct PublishResult final {
+    bool published{false};
+    Generation generation{0};
+    Generation predecessor_generation{0};
+    std::string diagnostic;
+};
+
+struct SlotActionResult final {
+    bool changed{false};
+    Generation generation{0};
+    Generation predecessor_generation{0};
+    std::string diagnostic;
+};
+
+struct KernelSlotSnapshot final {
+    KernelSlotSnapshot(KernelSlotKey slot_key_value,
+                       PlanAbiFingerprint required_abi_value)
+        : slot_key(std::move(slot_key_value)),
+          required_abi(std::move(required_abi_value)) {}
+
+    KernelSlotKey slot_key;
+    PlanAbiFingerprint required_abi;
+    Generation last_generation{0};
+    std::size_t record_count{0};
+    std::size_t stable_dispatches{0};
+    std::size_t canary_dispatches{0};
+};
+
+/*! \brief Exact dispatch publication point with immutable generations. */
+class KernelSlot final {
+public:
+    KernelSlot(KernelSlotKey slot_key,
+               PlanAbiFingerprint required_abi,
+               AdaptiveObserver observer = {});
+    ~KernelSlot();
+
+    KernelSlot(const KernelSlot&) = delete;
+    KernelSlot& operator=(const KernelSlot&) = delete;
+
+    PublishResult Publish(std::shared_ptr<const KernelArtifact> candidate,
+                          PublicationMode mode = PublicationMode::kStable,
+                          CanaryPolicy canary = {});
+    ArtifactLease Acquire(const DispatchKey& dispatch_key,
+                          const PlanAbiFingerprint& required_abi,
+                          RoutingContext routing = {}) const;
+    SlotActionResult PromoteCanary(const DispatchKey& dispatch_key,
+                                   Generation generation,
+                                   std::string health_evidence);
+    SlotActionResult WithdrawCanary(const DispatchKey& dispatch_key,
+                                    Generation generation,
+                                    std::string reason);
+    SlotActionResult Rollback(const DispatchKey& dispatch_key,
+                              Generation generation,
+                              std::string reason);
+    KernelSlotSnapshot Snapshot() const;
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+};
+
+/*! \brief Typed frozen plan payload; a real adapter may wrap module + plan. */
+class PlanExecutable {
+public:
+    virtual ~PlanExecutable() = default;
+    virtual bool IsReady() const noexcept = 0;
+    virtual std::string DebugName() const = 0;
+};
+
+/*! \brief Immutable plan variant retaining every selected artifact lease. */
+class FrozenPlanVariant final {
+public:
+    FrozenPlanVariant(PlanVariantKey key,
+                      std::vector<ArtifactLease> leases,
+                      std::shared_ptr<const PlanExecutable> executable);
+
+    const PlanVariantKey& key() const noexcept { return key_; }
+    const std::vector<ArtifactLease>& leases() const noexcept {
+        return leases_;
+    }
+    const std::shared_ptr<const PlanExecutable>& executable() const noexcept {
+        return executable_;
+    }
+
+private:
+    PlanVariantKey key_;
+    std::vector<ArtifactLease> leases_;
+    std::shared_ptr<const PlanExecutable> executable_;
+};
+
+/*! \brief Integration seam validated first with a deterministic fake assembler. */
+class ExactPlanAssembler {
+public:
+    virtual ~ExactPlanAssembler() = default;
+    virtual std::shared_ptr<const FrozenPlanVariant> Assemble(
+        PlanVariantKey key, std::vector<ArtifactLease> leases) = 0;
 };
 
 }  // namespace kxc::api::adaptive

@@ -422,6 +422,7 @@ set(KXC_RUNTIME_EXECUTABLE_SOURCES
 set(KXC_COMPILER_SOURCES
     src/compiler/adaptive/compile_coordinator.cc
     src/compiler/adaptive/contracts.cc
+    src/compiler/adaptive/kernel_slot.cc
     src/compiler/cache/primitive_cache.cc
     src/compiler/compile_config.cc
   src/compiler/compile_state.cc
@@ -735,6 +736,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
   kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
+  kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
   kxc_add_runtime_exe(object_test test/object_test.cpp)
   kxc_add_runtime_exe(packed_func_test test/packed_func_test.cpp)
   kxc_add_runtime_exe(registry_test test/registry_test.cpp)
