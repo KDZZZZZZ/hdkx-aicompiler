@@ -123,6 +123,12 @@ public:
                   "cudaMemcpyAsync");
     }
 
+    // 等待包括非阻塞 stream 在内的设备全部既有工作完成。
+    void DeviceSync(const Device& device) override {
+        SetDevice(device);
+        CheckCUDA(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+    }
+
     // 创建不与默认流隐式同步的非阻塞 CUDA stream，并由 DeviceStream 独占销毁。
     StreamHandle CreateStream(const Device& device) override {
         SetDevice(device);
@@ -270,6 +276,8 @@ public:
     // 禁止通过未编译的 CUDA 后端异步复制。
     void CopyDataAsync(const Device&, const void*, size_t, const Device&, void*,
                        size_t, size_t, StreamHandle) override { Disabled(); }
+    // 禁止同步未编译的 CUDA 后端。
+    void DeviceSync(const Device&) override { Disabled(); }
     // 禁止创建 CUDA stream。
     StreamHandle CreateStream(const Device&) override { Disabled(); }
     // 禁止释放不存在的 CUDA stream。

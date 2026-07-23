@@ -78,6 +78,8 @@ public:
                                void* to, size_t to_offset, size_t nbytes,
                                StreamHandle stream) = 0;
 
+    /*! \brief 等待设备上所有已提交工作完成；CPU 后端为校验后的无操作。 */
+    virtual void DeviceSync(const Device& device) = 0;
     /*! \brief 创建、销毁和同步后端 stream；空句柄表示默认 stream。 */
     virtual StreamHandle CreateStream(const Device& device) = 0;
     /*! \brief 释放 CreateStream 创建的非默认 stream。 */
@@ -134,6 +136,8 @@ void DeviceZero(const Device& device, void* ptr, size_t offset, size_t nbytes);
 void DeviceCopySync(const Device& from_device, const void* from, size_t from_offset,
                     const Device& to_device, void* to, size_t to_offset,
                     size_t nbytes);
+/*! \brief 等待指定设备上所有先前提交的异步工作完成。 */
+void DeviceSynchronize(const Device& device);
 
 /*! \brief 设备能力查询以及面向工具的枚举/JSON 接口。 */
 DeviceAttributes CollectDeviceAttributes(const Device& device);

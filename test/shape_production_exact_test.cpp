@@ -92,6 +92,47 @@ kxc::Function PassThroughGraph() {
     return kxc::Function({input}, input);
 }
 
+struct MutableAddGraph final {
+    kxc::Var x;
+    kxc::Var y;
+    kxc::Call call;
+    kxc::Function function;
+};
+
+MutableAddGraph AddGraphWithHandles() {
+    const kxc::TensorType type({4}, "float32");
+    kxc::Var x("x", type);
+    kxc::Var y("y", type);
+    kxc::Call call(kxc::relay::Op::Get("add"), {x, y});
+    return {x, y, call, kxc::Function({x, y}, call)};
+}
+
+struct MutableTransposeGraph final {
+    kxc::TensorType type;
+    kxc::Var input;
+    kxc::relay::TransposeAttrs attrs;
+    kxc::Call call;
+    kxc::Function function;
+};
+
+MutableTransposeGraph TransposeGraphWithHandles() {
+    kxc::TensorType type({2, 3}, "float32");
+    kxc::Var input("input", type);
+    kxc::relay::TransposeAttrs attrs =
+        kxc::relay::TransposeAttrs::Create({1, 0});
+    kxc::Call call(kxc::relay::Op::Get("transpose"), {input}, attrs);
+    return {type, input, attrs, call, kxc::Function({input}, call)};
+}
+
+kxc::runtime::NDArray FloatMatrix(
+    const std::vector<float>& values, kxc::Array<int64_t> shape) {
+    kxc::runtime::NDArray result = kxc::runtime::NDArray::Empty(
+        std::move(shape), kxc::runtime::DataTypeFromString("float32"),
+        kxc::Device::CPU());
+    result.CopyFromBytes(values.data(), values.size() * sizeof(float));
+    return result;
+}
+
 bool TestGateAndPreparation() {
     using shape_exact::ProductionExactShapeAdapter;
 #if !KXC_ENABLE_SHAPE_PRODUCTION_EXACT
@@ -129,10 +170,62 @@ bool TestGateAndPreparation() {
 #endif
 }
 
-bool TestPreparedConstantSnapshot() {
+bool TestCallerRelayIsolation() {
 #if !KXC_ENABLE_SHAPE_PRODUCTION_EXACT
     return true;
 #else
+    using shape_exact::ProductionExactShapeAdapter;
+    MutableTransposeGraph source = TransposeGraphWithHandles();
+    CHECK(!source.function.checked_type().defined() &&
+              !source.call.checked_type().defined() &&
+              !source.input.checked_type().defined(),
+          "caller graph must begin untyped for the isolation attack");
+    const auto prepared = ProductionExactShapeAdapter::PrepareGraphTemplate(
+        source.function, Config());
+    CHECK(!source.function.checked_type().defined() &&
+              !source.call.checked_type().defined() &&
+              !source.input.checked_type().defined(),
+          "PrepareGraphTemplate must not type-mutate caller-owned Relay nodes");
+    const std::string frozen_key =
+        prepared.graph_template().key().CanonicalBytes();
+
+    auto* call = const_cast<kxc::CallNode*>(source.call.operator->());
+    call->op = kxc::relay::Op::Get("sqrt");
+    auto* attrs = const_cast<kxc::relay::TransposeAttrsNode*>(
+        source.attrs.operator->());
+    attrs->perm[0] = 0;
+    attrs->perm[1] = 1;
+    auto* variable = const_cast<kxc::VarNode*>(source.input.operator->());
+    variable->type_annotation = kxc::TensorType({7}, "int32");
+    kxc::SetCheckedType(source.input, kxc::TensorType({7}, "int32"));
+    auto* function = const_cast<kxc::FunctionNode*>(
+        source.function.operator->());
+    function->body = source.input;
+    kxc::SetCheckedType(source.function,
+                        kxc::TensorType({7}, "int32"));
+    CHECK(prepared.graph_template().key().CanonicalBytes() == frozen_key,
+          "caller mutation must not alter prepared template identity");
+
+    const auto oracle = ProductionExactShapeAdapter::InstantiateExactProfile(
+        prepared, kxc::shape::experimental::v1::BindingSet());
+#if !KXC_USE_LLVM
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const auto before = kxc::api::internal::GetPrimitiveCacheStats();
+    CHECK(Throws([&] {
+              (void)ProductionExactShapeAdapter::AssembleExactPlan(
+                  prepared, oracle);
+          }),
+          "LLVM-off assembly must still fail at the backend boundary");
+    const auto after = kxc::api::internal::GetPrimitiveCacheStats();
+    CHECK(before.entries == after.entries && before.misses == after.misses &&
+              before.failures == after.failures,
+          "post-prepare caller mutation must not reach or poison the cache");
+#endif
+    return true;
+#endif
+}
+
+bool TestPreparedConstantSnapshot() {
     const auto payload = FloatArray({1, 1, 1, 1});
     const kxc::Function typed = kxc::relay::InferTypePass(
         ConstantGraphWithPayload(payload));
@@ -153,7 +246,6 @@ bool TestPreparedConstantSnapshot() {
     CHECK(actual == std::vector<float>({1, 1, 1, 1}),
           "prepared graph must deep-freeze constant payload bytes");
     return true;
-#endif
 }
 
 bool TestNegativesBeforeCache() {
@@ -251,6 +343,100 @@ bool TestNegativesBeforeCache() {
 }
 
 #if KXC_USE_LLVM && KXC_ENABLE_SHAPE_PRODUCTION_EXACT
+bool TestLLVMRelayMutationCannotPoisonCache() {
+    using shape_exact::ProductionExactShapeAdapter;
+    MutableAddGraph attacked_source = AddGraphWithHandles();
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const auto attacked_prepared =
+        ProductionExactShapeAdapter::PrepareGraphTemplate(
+            attacked_source.function, Config());
+    const auto attacked_oracle =
+        ProductionExactShapeAdapter::InstantiateExactProfile(
+            attacked_prepared, kxc::shape::experimental::v1::BindingSet());
+    auto* attacked_call = const_cast<kxc::CallNode*>(
+        attacked_source.call.operator->());
+    attacked_call->op = kxc::relay::Op::Get("mul");
+    const kxc::relay::Op& registered_add = kxc::relay::Op::Get("add");
+    const kxc::VirtualDevice saved_op_device =
+        registered_add.virtual_device();
+    registered_add.set_virtual_device(
+        kxc::VirtualDevice::ForDevice(kxc::Device::CUDA()));
+    shape_exact::ExactPlanVariant attacked;
+    try {
+        attacked = ProductionExactShapeAdapter::AssembleExactPlan(
+            attacked_prepared, attacked_oracle);
+    } catch (...) {
+        registered_add.set_virtual_device(saved_op_device);
+        throw;
+    }
+    registered_add.set_virtual_device(saved_op_device);
+    const auto after_attacked =
+        kxc::api::internal::GetPrimitiveCacheStats();
+
+    MutableAddGraph clean_source = AddGraphWithHandles();
+    const auto clean_prepared =
+        ProductionExactShapeAdapter::PrepareGraphTemplate(
+            clean_source.function, Config());
+    const auto clean_oracle =
+        ProductionExactShapeAdapter::InstantiateExactProfile(
+            clean_prepared, kxc::shape::experimental::v1::BindingSet());
+    const auto clean = ProductionExactShapeAdapter::AssembleExactPlan(
+        clean_prepared, clean_oracle);
+    const auto after_clean = kxc::api::internal::GetPrimitiveCacheStats();
+    CHECK(after_attacked.misses == 1 && after_clean.misses == 1 &&
+              after_clean.hits >= after_attacked.hits + 1 &&
+              attacked.artifact_pins()[0].handle().record().artifact_key ==
+                  clean.artifact_pins()[0].handle().record().artifact_key,
+          "mutated caller Call must neither change code nor publish new code under the old key");
+
+    const kxc::Array<kxc::runtime::NDArray> inputs{
+        FloatArray({2, 3, 4, 5}), FloatArray({3, 4, 5, 6})};
+    const shape_exact::ExactPlanVariant* variants[]{&attacked, &clean};
+    for (const auto* variant : variants) {
+        kxc::runtime::RuntimeSession session(variant->module(),
+                                             variant->plan());
+        const auto outputs = session.Run(inputs);
+        std::vector<float> actual(4);
+        outputs[0].CopyToBytes(actual.data(), actual.size() * sizeof(float));
+        CHECK(actual == std::vector<float>({5, 7, 9, 11}),
+              "old add semantic key must always execute add, never caller-mutated mul");
+    }
+    return true;
+}
+
+bool TestLLVMRelayAttrsTypesAndBodySnapshot() {
+    using shape_exact::ProductionExactShapeAdapter;
+    MutableTransposeGraph source = TransposeGraphWithHandles();
+    const auto prepared = ProductionExactShapeAdapter::PrepareGraphTemplate(
+        source.function, Config());
+    const auto oracle = ProductionExactShapeAdapter::InstantiateExactProfile(
+        prepared, kxc::shape::experimental::v1::BindingSet());
+
+    auto* attrs = const_cast<kxc::relay::TransposeAttrsNode*>(
+        source.attrs.operator->());
+    attrs->perm[0] = 0;
+    attrs->perm[1] = 1;
+    auto* variable = const_cast<kxc::VarNode*>(source.input.operator->());
+    variable->type_annotation = kxc::TensorType({7}, "int32");
+    kxc::SetCheckedType(source.input, kxc::TensorType({7}, "int32"));
+    auto* function = const_cast<kxc::FunctionNode*>(
+        source.function.operator->());
+    function->body = source.input;
+    kxc::SetCheckedType(source.function,
+                        kxc::TensorType({7}, "int32"));
+
+    const auto variant = ProductionExactShapeAdapter::AssembleExactPlan(
+        prepared, oracle);
+    kxc::runtime::RuntimeSession session(variant.module(), variant.plan());
+    const auto outputs = session.Run(
+        {FloatMatrix({1, 2, 3, 4, 5, 6}, {2, 3})});
+    std::vector<float> actual(6);
+    outputs[0].CopyToBytes(actual.data(), actual.size() * sizeof(float));
+    CHECK(actual == std::vector<float>({1, 4, 2, 5, 3, 6}),
+          "assembly must lower the frozen transpose attrs/types/body snapshot");
+    return true;
+}
+
 bool TestLLVMExactCacheRuntimeAndLifecycle() {
     using shape_exact::ProductionExactShapeAdapter;
     const auto inputs = kxc::Array<kxc::runtime::NDArray>{
@@ -429,10 +615,13 @@ bool TestLLVMExactCacheRuntimeAndLifecycle() {
 int main() {
     std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"gate_and_preparation", TestGateAndPreparation},
+        {"caller_relay_isolation", TestCallerRelayIsolation},
         {"prepared_constant_snapshot", TestPreparedConstantSnapshot},
         {"negatives_before_cache", TestNegativesBeforeCache},
     };
 #if KXC_USE_LLVM && KXC_ENABLE_SHAPE_PRODUCTION_EXACT
+    tests.push_back({"llvm_relay_mutation_cache_safety", TestLLVMRelayMutationCannotPoisonCache});
+    tests.push_back({"llvm_relay_attrs_types_body_snapshot", TestLLVMRelayAttrsTypesAndBodySnapshot});
     tests.push_back({"llvm_exact_cache_runtime_lifecycle", TestLLVMExactCacheRuntimeAndLifecycle});
 #endif
     int failed = 0;

@@ -5,6 +5,8 @@
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/support/object_registration.h"
 
+#include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -13,6 +15,7 @@
 
 #include "internal/compiled_module_node.h"
 #include "internal/kernel_argument_validation.h"
+#include "kxc/runtime/device_api.h"
 
 namespace kxc::api {
 
@@ -24,18 +27,23 @@ Device TargetDevice(const Target& target) {
     return Device(target->device_type, target->device_id);
 }
 
-Map<String, runtime::NDArray> CopyConstantHandles(
-    const Map<String, runtime::NDArray>& source) {
-    Map<String, runtime::NDArray> result;
-    for (const auto& item : source) result.Set(item.first, item.second);
+runtime::NDArray CloneConstantPayload(const runtime::NDArray& source,
+                                      size_t alignment) {
+    runtime::NDArray result = runtime::NDArray::Empty(
+        source.shape(), source.dtype(), source.device(), alignment);
+    result.CopyFrom(source);
     return result;
 }
 
 Map<String, runtime::NDArray> CloneConstantPayloads(
-    const Map<String, runtime::NDArray>& source) {
+    const Map<String, runtime::NDArray>& source,
+    const std::unordered_map<std::string, size_t>& alignments = {}) {
     Map<String, runtime::NDArray> result;
     for (const auto& item : source) {
-        result.Set(item.first, item.second.CopyTo(item.second.device()));
+        const auto alignment = alignments.find(std::string(item.first));
+        const size_t required = alignment == alignments.end()
+            ? item.second.storage()->alignment : alignment->second;
+        result.Set(item.first, CloneConstantPayload(item.second, required));
     }
     return result;
 }
@@ -84,9 +92,11 @@ bool SameConstantContract(const codegen::KernelArgSpec& lhs,
     return true;
 }
 
-void ValidateConstants(const std::vector<internal::CompiledModuleEntry>& entries,
-                       const Map<String, runtime::NDArray>& constants) {
+std::unordered_map<std::string, size_t> ValidateConstants(
+    const std::vector<internal::CompiledModuleEntry>& entries,
+    const Map<String, runtime::NDArray>& constants) {
     std::unordered_map<std::string, codegen::KernelArgSpec> required_specs;
+    std::unordered_map<std::string, size_t> required_alignments;
     for (const auto& entry : entries) {
         for (const auto& spec : entry.signature.arguments()) {
             if (spec->role != codegen::KernelArgRole::kConstant) continue;
@@ -98,6 +108,14 @@ void ValidateConstants(const std::vector<internal::CompiledModuleEntry>& entries
                     "CompiledModule constant '" + key +
                     "' has conflicting signatures across entries");
             }
+            if (spec->alignment > std::numeric_limits<size_t>::max()) {
+                throw std::invalid_argument(
+                    "CompiledModule constant '" + key +
+                    "' alignment exceeds the host size type");
+            }
+            auto& alignment = required_alignments[key];
+            alignment = std::max(
+                alignment, static_cast<size_t>(spec->alignment));
         }
     }
     for (const auto& item : required_specs) {
@@ -112,6 +130,7 @@ void ValidateConstants(const std::vector<internal::CompiledModuleEntry>& entries
         throw std::invalid_argument(
             "CompiledModule constant table contains unexpected keys");
     }
+    return required_alignments;
 }
 
 const CompiledModuleNode* CheckedNode(const CompiledModule& module) {
@@ -222,10 +241,29 @@ CompiledModule internal::BuildCompiledModule(
                 "CompiledModule contains duplicate symbol '" + symbol + "'");
         }
     }
-    ValidateConstants(entries, constants);
+    const auto constant_alignments = ValidateConstants(entries, constants);
+    Map<String, runtime::NDArray> owned_constants;
+    try {
+        // No source stream/completion enters this boundary.  Drain CUDA's
+        // nonblocking producer streams before taking the synchronous snapshot;
+        // zero-byte constants require no backend interaction.
+        if (target_device.device_type() == kCUDA) {
+            for (const auto& item : constants) {
+                if (item.second.NBytes() != 0) {
+                    DeviceSynchronize(target_device);
+                    break;
+                }
+            }
+        }
+        owned_constants = CloneConstantPayloads(constants, constant_alignments);
+    } catch (const std::exception& error) {
+        throw std::invalid_argument(
+            std::string("CompiledModule failed to snapshot constants: ") +
+            error.what());
+    }
 
     return CompiledModule(ObjectRef(new CompiledModuleNode(
-        std::move(target), std::move(entries), CopyConstantHandles(constants),
+        std::move(target), std::move(entries), std::move(owned_constants),
         std::move(profile_context))));
 }
 

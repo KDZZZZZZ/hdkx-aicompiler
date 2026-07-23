@@ -2,6 +2,7 @@
  * \brief 验证 CompiledModule 的 ObjectRef 生命周期和 NDArray 启动门禁。
  */
 
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -406,9 +407,117 @@ bool TestConstantIdentityCheck() {
         "fixture_kernel", arguments,
         kxc::DeviceStream::Default(kxc::Device::CPU()));
     TEST_CHECK(fixture.launcher->calls == 1 &&
-                   fixture.launcher->last_arguments[1].get() ==
-                       fixture.constant.get(),
+                   fixture.launcher->last_arguments[1].get() !=
+                       fixture.constant.get() &&
+                   fixture.launcher->last_arguments[1].get() !=
+                       arguments[1].get(),
                "equal public snapshot must validate but launch the module-owned binding");
+    return true;
+}
+
+// BuildCompiledModule 必须同步复制逻辑 payload，并为模块自有副本重新建立对齐。
+bool TestBuildOwnsConstantPayloads() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    const String key("relay.constant.offset");
+    KernelArgSpec constant_spec("weight", KernelArgRole::kConstant, Float32(),
+                                {3}, cpu, 64, false, key);
+    KernelSignature signature(
+        "owned_constant",
+        {constant_spec,
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3},
+                       cpu, 64, true)});
+    auto launcher = std::make_shared<RecordingLauncher>();
+
+    runtime::NDArray backing = runtime::NDArray::Empty(
+        {4}, Float32(), cpu, 64);
+    const std::vector<float> initial{99, 1, 2, 3};
+    backing.CopyFromBytes(initial.data(), initial.size() * sizeof(float));
+    runtime::NDArray source =
+        backing.CreateView({3}, {1}, sizeof(float));
+    Map<String, runtime::NDArray> constants;
+    constants.Set(key, source);
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu), {MakeEntry(signature, launcher)}, constants);
+
+    const std::vector<float> overwritten{9, 9, 9, 9};
+    backing.CopyFromBytes(overwritten.data(),
+                          overwritten.size() * sizeof(float));
+    const runtime::NDArray snapshot = module.constants().at(key);
+    std::vector<float> retained(3);
+    snapshot.CopyToBytes(retained.data(), retained.size() * sizeof(float));
+    TEST_CHECK(retained == std::vector<float>({1, 2, 3}) &&
+                   snapshot.get() != source.get() &&
+                   snapshot.storage().get() != source.storage().get() &&
+                   snapshot->byte_offset == 0 &&
+                   snapshot.storage()->alignment >= 64 &&
+                   reinterpret_cast<uintptr_t>(snapshot.storage().data()) % 64 == 0,
+               "module must own an aligned offset-normalized payload snapshot");
+
+    runtime::NDArray output =
+        runtime::NDArray::Empty({3}, Float32(), cpu, 64);
+    module.Launch(signature->symbol, {snapshot, output},
+                  DeviceStream::Default(cpu));
+    std::vector<float> launched(3);
+    launcher->last_arguments[0].CopyToBytes(
+        launched.data(), launched.size() * sizeof(float));
+    TEST_CHECK(launcher->calls == 1 && launched == retained &&
+                   launcher->last_arguments[0].get() != source.get() &&
+                   launcher->last_arguments[0].get() != snapshot.get(),
+               "Launch must inject the immutable module-owned payload");
+
+    const String empty_key("relay.constant.empty");
+    KernelSignature empty_signature(
+        "owned_empty_constant",
+        {KernelArgSpec("empty", KernelArgRole::kConstant, Float32(), {0},
+                       cpu, 64, false, empty_key),
+         KernelArgSpec("empty_out", KernelArgRole::kOutput, Float32(), {0},
+                       cpu, 64, true)});
+    runtime::NDArray empty_source =
+        runtime::NDArray::Empty({0}, Float32(), cpu);
+    Map<String, runtime::NDArray> empty_constants;
+    empty_constants.Set(empty_key, empty_source);
+    auto empty_launcher = std::make_shared<RecordingLauncher>();
+    api::CompiledModule empty_module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu), {MakeEntry(empty_signature, empty_launcher)},
+        empty_constants);
+    const runtime::NDArray empty_snapshot =
+        empty_module.constants().at(empty_key);
+    TEST_CHECK(empty_snapshot.NBytes() == 0 &&
+                   empty_snapshot.storage().data() == nullptr &&
+                   empty_snapshot.storage().get() !=
+                       empty_source.storage().get() &&
+                   empty_snapshot.storage()->alignment >= 64,
+               "zero-byte constants must still have module-owned metadata/storage");
+    empty_module.Launch(
+        empty_signature->symbol,
+        {empty_snapshot, runtime::NDArray::Empty({0}, Float32(), cpu, 64)},
+        DeviceStream::Default(cpu));
+    TEST_CHECK(empty_launcher->calls == 1,
+               "zero-byte module-owned constants must remain launchable");
+
+    runtime::NDArray non_contiguous =
+        runtime::NDArray::Zeros({2, 2}, Float32(), cpu);
+    auto* non_contiguous_node = const_cast<runtime::NDArrayNode*>(
+        non_contiguous.As<runtime::NDArrayNode>());
+    non_contiguous_node->strides_storage = {3, 1};
+    const String bad_key("relay.constant.non_contiguous");
+    KernelSignature bad_signature(
+        "bad_constant_layout",
+        {KernelArgSpec("bad", KernelArgRole::kConstant, Float32(), {2, 2},
+                       cpu, 4, false, bad_key),
+         KernelArgSpec("out", KernelArgRole::kOutput, Float32(), {2, 2},
+                       cpu, 4, true)});
+    Map<String, runtime::NDArray> bad_constants;
+    bad_constants.Set(bad_key, non_contiguous);
+    auto bad_launcher = std::make_shared<RecordingLauncher>();
+    TEST_CHECK(Throws([&] {
+                   (void)api::internal::BuildCompiledModule(
+                       BuildTarget(cpu),
+                       {MakeEntry(bad_signature, bad_launcher)}, bad_constants);
+               }),
+               "module build must fail closed on non-contiguous constants");
     return true;
 }
 
@@ -506,10 +615,14 @@ bool TestSharedConstantsAcrossEntries() {
         "constant_entry_a",
         {shared, KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3},
                                cpu, 1, true)});
+    KernelArgSpec shared_aligned(
+        "weight", KernelArgRole::kConstant, Float32(), {3}, cpu, 64,
+        false, "relay.constant.shared");
     KernelSignature second(
         "constant_entry_b",
-        {shared, KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3},
-                               cpu, 1, true)});
+        {shared_aligned,
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3},
+                       cpu, 1, true)});
     runtime::NDArray constant = runtime::NDArray::Zeros({3}, Float32(), cpu);
     Map<String, runtime::NDArray> constants;
     constants.Set(String("relay.constant.shared"), constant);
@@ -520,13 +633,18 @@ bool TestSharedConstantsAcrossEntries() {
         {MakeEntry(first, first_launcher), MakeEntry(second, second_launcher)},
         constants);
 
-    TEST_CHECK(module.constants().size() == 1,
-               "shared constant keys should be deduplicated in the module table");
+    const runtime::NDArray shared_snapshot = module.constants().at(
+        String("relay.constant.shared"));
+    TEST_CHECK(module.constants().size() == 1 &&
+                   shared_snapshot.storage()->alignment >= 64,
+               "shared constants must be deduplicated at their maximum alignment");
     module.Launch("constant_entry_a",
-                  {constant, runtime::NDArray::Zeros({3}, Float32(), cpu)},
+                  {shared_snapshot,
+                   runtime::NDArray::Zeros({3}, Float32(), cpu)},
                   DeviceStream::Default(cpu));
     module.Launch("constant_entry_b",
-                  {constant, runtime::NDArray::Zeros({3}, Float32(), cpu)},
+                  {shared_snapshot,
+                   runtime::NDArray::Zeros({3}, Float32(), cpu)},
                   DeviceStream::Default(cpu));
     TEST_CHECK(first_launcher->calls == 1 && second_launcher->calls == 1,
                "both entries should launch with the shared module constant");
@@ -573,6 +691,7 @@ int main() {
         {"layout_range_and_alignment_checks", TestLayoutRangeAndAlignmentChecks},
         {"aligned_offset_and_zero_size", TestAlignedOffsetAndZeroSize},
         {"constant_identity_check", TestConstantIdentityCheck},
+        {"build_owns_constant_payloads", TestBuildOwnsConstantPayloads},
         {"multi_entry_symbol_dispatch_and_accessors",
          TestMultiEntrySymbolDispatchAndAccessors},
         {"unknown_duplicate_and_mismatched_symbol_dispatch",

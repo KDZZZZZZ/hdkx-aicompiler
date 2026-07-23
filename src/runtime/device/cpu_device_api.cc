@@ -140,6 +140,9 @@ public:
         CopyDataSync(from, from_ptr, from_offset, to, to_ptr, to_offset, nbytes);
     }
 
+    // CPU 操作同步完成；设备级同步只需校验设备身份。
+    void DeviceSync(const Device& device) override { ValidateCPU(device); }
+
     // CPU 工作同步完成，创建 stream 返回代表完成态的空句柄。
     StreamHandle CreateStream(const Device& device) override {
         ValidateCPU(device);
