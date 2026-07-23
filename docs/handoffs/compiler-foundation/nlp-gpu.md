@@ -11,13 +11,15 @@
 本轨完成了以下工作：
 
 1. 建立不依赖 ONNX、NumPy、LLVM 或 CUDA 的确定性 CPU reference、fixture、workload manifest、能力矩阵和负向 gate。
-2. ONNX unresolved/symbolic dim 默认拒绝；只有调用方显式传入正数 `default_batch` 时才能绑定 axis 0，非 batch unresolved dim 永远不填 `1`。
-3. Relay softmax 改为 `max -> subtract -> exp -> sum -> divide`，LLVM 数值测试加入极大正负 logits 和非有限值检查。
-4. `matmul` 扩展为 rank >= 2，并按 ONNX/NumPy 规则广播 leading batch dimensions；不兼容 K、batch 或 rank < 2 明确失败。
-5. ONNX importer 增加静态 `MatMul`、`Softmax`、`Transpose` 映射；Softmax 默认 axis 按 opset `<13: 1`、`>=13: -1` 处理。
-6. 增加 exact-static causal prefill 和 token=1 external-K/V decode 的 LLVM/`RuntimeSession` 数值测试代码。
-7. 在真实 CUDA 设备上验证现有 add/relu 路径，同时验证 softmax/batched-matmul 必须在 `BindCudaThreads` reduction gate 失败，未伪造 CUDA attention 支持。
-8. KV cache 只提供 reference/mock append/page/capacity trace；没有向现有 runtime 注入错误的 alias、valid-extent 或 capacity 语义。
+2. ONNX unknown rank 与 unresolved/symbolic dim 默认拒绝；只有调用方显式传入正数 `default_batch` 时才能绑定 axis 0，非 batch unresolved dim 永远不填 `1`。
+3. C++ import-spec reifier 校验非负静态 shape，并在构图后用 Relay 类型推导核对每个声明 output 的 shape/dtype。
+4. Relay softmax 改为 `max -> subtract -> exp -> sum -> divide`，LLVM 数值测试加入极大正负 logits 和非有限值检查。
+5. `matmul` 扩展为 rank >= 2，并按 ONNX/NumPy 规则广播 leading batch dimensions；不兼容 K、batch 或 rank < 2 明确失败。
+6. ONNX importer 增加静态 `MatMul`、`Softmax`、`Transpose` 映射；Softmax 默认 axis 按 opset `<13: 1`、`>=13: -1` 处理。
+7. 两条 lowering 路径在生成 TIR 前拒绝负 extent；Relay 仍可表示 unknown extent，但不能冒充 executable dynamic shape。
+8. 增加 exact-static causal prefill 和 token=1 external-K/V decode 的 LLVM/`RuntimeSession` 数值测试代码。
+9. 在真实 CUDA 设备上验证现有 add/relu 路径，同时验证 softmax/batched-matmul 必须在 `BindCudaThreads` reduction gate 失败，未伪造 CUDA attention 支持。
+10. KV cache 只提供 reference/mock append/page/capacity trace；没有向现有 runtime 注入错误的 alias、valid-extent 或 capacity 语义。
 
 机器可读事实源：
 
@@ -32,9 +34,9 @@
 
 | 能力 | Frontend / Relay / lowering | CPU reference / LLVM | CUDA | 结论与 gate |
 |---|---|---|---|---|
-| stable softmax | ONNX static axis、Relay 和 max-subtraction lowering 已实现 | CPU reference validated；LLVM 极值测试已实现但本机未运行 | unsupported | 仅 unmasked static softmax；all-masked 语义未冻结，必须拒绝 |
-| masked/all-masked softmax | 无正式 mask/select 或 all-masked contract | 负例 validated | reduction 与 mask 均 unsupported | 不定义“全零”等临时替代语义 |
-| batched matmul | ONNX import、rank >= 2 type/broadcast/lowering 已实现 | LLVM batch-broadcast 数值测试已实现但本机未运行 | reduction/nested-loop unsupported | rank < 2、K 不匹配、batch 不可广播均 fail closed |
+| stable softmax | ONNX static axis、Relay 和 max-subtraction lowering 已实现 | finite-logit CPU reference validated；LLVM 极值测试已实现但本机未运行 | unsupported | 仅 unmasked static softmax；非有限/all-masked 表示没有执行语义，验收 gate 保持关闭 |
+| masked/all-masked softmax | 无正式 mask/select 或 all-masked contract | checker 验证该 fixture 不得开放，不是 Relay 执行结果 | reduction 与 mask 均 unsupported | 不定义“全零”等临时替代语义，也不声称现有 Relay 会运行时拒绝 `-inf` 行 |
+| batched matmul | ONNX 只做结构映射；Relay type check 和 lowering 实现 rank >= 2 及 batch broadcast | LLVM batch-broadcast 数值测试已实现但本机未运行 | reduction/nested-loop unsupported | rank < 2、K 不匹配、batch 不可广播在 Relay type 阶段 fail closed |
 | embedding/gather | contracted，未实现 | 未实现 | 未实现 | ONNX `Gather` 仍拒绝；OOB policy 未冻结 |
 | mask/select | 未实现；exact slice 只把有限 additive mask 作为输入并复用 `add` | 仅 CPU causal finite-mask reference | 未实现 | 不等同于 `Where`、padding valid extent 或 all-masked 支持 |
 | normalization | contracted，未实现正式 norm op | 未实现 | 未实现 | epsilon、axis、accumulation dtype 尚无完整证据 |
@@ -64,10 +66,11 @@
 
 ### 2.2 Shape 与 negative gate
 
-- `import_onnx(..., default_batch=None)` 是默认行为：symbolic/unknown dim 立即报错，诊断含 value 名、axis 和可用的 `dim_param`。
+- `import_onnx(..., default_batch=None)` 是默认行为：缺失 shape field 的 unknown rank 以及 symbolic/unknown dim 立即报错；合法显式零维 shape 仍表示 scalar。
 - 显式正数 `default_batch` 只允许绑定 unresolved axis 0；非 batch unresolved dim 即使提供 batch binding 仍拒绝。
-- C++ JSON reifier 只接受非负整数静态 shape；负数/非整数维度拒绝，合法零维保留。
-- all-masked softmax reference 抛出 unsupported，而不是临时定义为全零。
+- C++ JSON reifier 只接受非负整数静态 shape；负数/非整数维度拒绝，合法零维保留；推导出的 output shape/dtype 必须与 JSON 声明一致。
+- C++ API 中 `TensorType` 仍可表示负 extent，但 legacy whole-graph 与 production per-unit lowering 都在生成 TIR 前拒绝；这不是 dynamic shape 实现。
+- all-masked fixture 只在独立 reference checker 中抛 unsupported，作用是阻止验收误开 gate；现有 unmasked Relay softmax 没有 mask 输入，也不宣称会拒绝全 `-inf` 数据。
 - KV reference 分离 logical extent、physical capacity 和 valid extent；以 capacity 作为 valid context 的请求被拒绝。
 - workload fingerprint 改动或不匹配由 checker 拒绝。
 - CUDA softmax/matmul 在 Compiler reduction scheduling gate 拒绝；没有 silent CPU fallback。
@@ -90,7 +93,9 @@ cmake --build out/build/dev-ninja --target check_nlp_gpu_validation
 - exact causal prefill CPU reference；
 - token=1 external-K/V decode CPU reference；
 - KV append/page/capacity trace；
-- unknown/symbolic dim、capacity-as-context、capacity overflow、CUDA reduction 和 fingerprint mismatch 负例。
+- checker-level unknown extent、capacity-as-context、capacity overflow、CUDA capability 状态和 fingerprint mismatch 负例。
+
+这些是 manifest/reference contract checks，不冒充 importer、Relay 或 CUDA 执行证据；实际 frontend/lowering/CUDA 路径分别由后续小节的 C++/device tests 覆盖。
 
 ### 3.2 Contract、架构与头文件
 
@@ -115,7 +120,7 @@ cmake --build out/build/dev-ninja --target \
 cmake --build --preset dev-ninja -j2
 ```
 
-下列 19 个可执行测试通过：
+下列 20 个可执行测试通过：
 
 - `object_test`
 - `packed_func_test`
@@ -127,6 +132,7 @@ cmake --build --preset dev-ninja -j2
 - `executable_plan_test`
 - `graph_partition_test`
 - `infer_type_test`
+- `onnx_import_spec_contract_test`
 - `profile_bundle_test`
 - `compiler_contract_test`
 - `operator_compilation_test`
@@ -137,7 +143,9 @@ cmake --build --preset dev-ninja -j2
 - `cuda_schedule_test`
 - `codegen_cuda_test`
 
-`infer_type_test` 包含 batched matmul 普通 batch、leading-dimension broadcast、rank-2/rank-3 混合，以及 rank、K、batch 不兼容负例；batched lowering 到 TIR 通过。
+`infer_type_test` 包含 batched matmul 普通 batch、leading-dimension broadcast、rank-2/rank-3 混合，以及 rank、K、batch 不兼容负例；batched lowering 到 TIR 通过。它还验证 softmax rank/dtype/axis contract，并验证负 extent 在 whole-graph 和 per-unit lowering 两条路径均被拒绝。
+
+`onnx_import_spec_contract_test` 不依赖 Python ONNX 包，实际运行 C++ reifier，覆盖静态 MatMul→Softmax→Transpose、负 input dimension 和声明 output shape mismatch。
 
 ### 3.4 LLVM
 
@@ -154,16 +162,16 @@ c++ -std=c++17 -Iinclude -Ithird_party/dlpack/include \
 
 结果：**PASS**。这不是 LLVM 数值通过证据，能力矩阵保持 `implemented` 而非 `validated`。
 
-### 3.5 ONNX Python
+### 3.5 ONNX importer
 
-本机缺少预装的 `onnx`、`numpy`、`pytest`，按约束没有安装或联网。因此：
+依赖无关的 C++ import-spec contract test 已通过，见 3.3。本机缺少预装的 `onnx`、`numpy`、`pytest`，按约束没有安装或联网。因此 Python protobuf importer 部分：
 
 - `onnx_importer_test` CMake target 未生成；
 - `test/onnx_importer_py_test.py` 未执行；
 - importer、CLI、测试文件执行 `python3 -m py_compile`：**PASS**；
 - `kxc_frontend_obj` 编译：**PASS**。
 
-新增 Python 测试代码覆盖 symbolic batch 显式绑定、非 batch unresolved 拒绝、合法零维、MatMul/Softmax/Transpose 映射和 Softmax opset 默认 axis；需要具备本地依赖的环境复验后才能升级为 `validated`。
+新增 Python 测试代码覆盖 unknown input/output rank、symbolic batch 显式绑定、非 batch unresolved 拒绝、合法 scalar/零 extent、MatMul/Softmax/Transpose 映射和 Softmax opset 默认 axis；需要具备本地依赖的环境复验后才能升级为 `validated`。
 
 ### 3.6 CUDA
 
@@ -203,8 +211,10 @@ Manifest did not mark CUPTI as available
 | `81499e4` | `fix(relay): stabilize softmax with max subtraction` |
 | `cb0b75f` | `feat(nlp): add exact attention validation slice` |
 | `386cf9d` | `test(nlp): gate unsupported mask semantics` |
+| `dbf8b0e` | `docs(nlp): record validation track handoff` |
+| `0b68754` | `fix(nlp): enforce static execution capability gates` |
 
-本文件所在提交仅记录交接，不改变实现能力。
+本次更新本文件的提交仅同步最终证据，不改变实现能力。
 
 ## 5. 环境与执行限制
 
@@ -227,7 +237,7 @@ Manifest did not mark CUPTI as available
 | 所属轨 | 本轨等待的冻结能力 | 未满足时本轨行为 |
 |---|---|---|
 | 01 core contracts | production capability verifier、统一 target/backend fingerprint | 保持本地 manifest checker；不能将 importer 可构造等同于可执行 |
-| 02 shape | symbolic binding、exact profile、logical/physical/valid extent；后续 bucket applicability | importer 对 unresolved dim fail closed；prefill 只开放 exact-static reference |
+| 02 shape | symbolic binding、exact profile、logical/physical/valid extent；后续 bucket applicability | importer 对 unresolved rank/dim fail closed；Relay unknown extent 可表示但 lowering 拒绝；prefill 只开放 exact-static reference |
 | 03 adaptive | dispatch key、immutable selected generation、singleflight/backpressure | dynamic batching 只保留 gate；不进入 `RuntimeSession`，不 fuzzy fallback |
 | 04 control flow | 仅真实模型需要 If/loop 时消费结构化 control-flow contract | 当前纯 dataflow fixture 不声称 dynamic graph |
 | 05 region/runtime plan | KV capacity/page、alias/effect、lifetime、copy/event task、valid-context metadata | KV cache 只运行 reference/mock trace；不改 `ValueSpec` 或复用 storage 冒充 cache |
