@@ -35,6 +35,7 @@ set(KXC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/include")
 
 set(KXC_PUBLIC_HEADERS
+  include/kxc/compiler/adaptive.h
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
   include/kxc/compiler/lowering/relay_to_tir.h
@@ -417,6 +418,7 @@ set(KXC_RUNTIME_EXECUTABLE_SOURCES
 )
 
 set(KXC_COMPILER_SOURCES
+    src/compiler/adaptive/contracts.cc
     src/compiler/cache/primitive_cache.cc
     src/compiler/compile_config.cc
   src/compiler/compile_state.cc
@@ -727,6 +729,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/kxc")
 
 if(KXC_BUILD_PASS_TESTS)
+  kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
   kxc_add_runtime_exe(object_test test/object_test.cpp)
   kxc_add_runtime_exe(packed_func_test test/packed_func_test.cpp)
   kxc_add_runtime_exe(registry_test test/registry_test.cpp)
