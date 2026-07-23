@@ -562,6 +562,49 @@ bool TestLayerNormInferAndLoweringContract() {
     return true;
 }
 
+bool TestExactTransformerOperatorSliceComposition() {
+    kxc::Var embedding_table("embedding_table", kxc::TensorType({4, 2}, "float32"));
+    kxc::Var token_ids("token_ids", kxc::TensorType({2}, "int64"));
+    kxc::Var condition("condition", kxc::TensorType({2, 1}, "bool"));
+    kxc::Var fallback("fallback", kxc::TensorType({1, 2}, "float32"));
+    kxc::Var scale("scale", kxc::TensorType({2}, "float32"));
+    kxc::Var bias("bias", kxc::TensorType({2}, "float32"));
+
+    kxc::Call embedded(kxc::relay::Op::Get("gather"), {embedding_table, token_ids},
+                       kxc::relay::GatherAttrs::Create(0));
+    kxc::Call normalized(kxc::relay::Op::Get("nn_layer_norm"),
+                         {embedded, scale, bias},
+                         kxc::relay::LayerNormAttrs::Create(-1, 1e-5f, "float32"));
+    kxc::Call selected(kxc::relay::Op::Get("where"),
+                       {condition, normalized, fallback});
+    kxc::Call prefix(kxc::relay::Op::Get("slice"), {selected},
+                     kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1}));
+    kxc::Call sequence(kxc::relay::Op::Get("concatenate"), {prefix, selected},
+                       kxc::relay::ConcatenateAttrs::Create(0));
+    kxc::Call keys(kxc::relay::Op::Get("transpose"), {sequence},
+                   kxc::relay::TransposeAttrs::Create({1, 0}));
+    kxc::Call scores(kxc::relay::Op::Get("matmul"), {sequence, keys});
+    kxc::Call weights(kxc::relay::Op::Get("softmax"), {scores},
+                      kxc::relay::SoftmaxAttrs::Create(-1));
+    kxc::Call context(kxc::relay::Op::Get("matmul"), {weights, sequence});
+    kxc::Function function(
+        {embedding_table, token_ids, condition, fallback, scale, bias}, context);
+
+    kxc::relay::InferTypePass(function);
+    TEST_CHECK(CheckTensor(embedded.checked_type(), {2, 2}, "float32") &&
+                   CheckTensor(normalized.checked_type(), {2, 2}, "float32") &&
+                   CheckTensor(selected.checked_type(), {2, 2}, "float32") &&
+                   CheckTensor(prefix.checked_type(), {1, 2}, "float32") &&
+                   CheckTensor(sequence.checked_type(), {3, 2}, "float32") &&
+                   CheckTensor(context.checked_type(), {3, 2}, "float32"),
+               "exact Transformer operator slice shapes must compose without dynamic claims");
+    TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined(),
+               "exact Transformer operator slice must lower to TIR");
+    TEST_CHECK(kxc::relay::LowerOperatorCallsToTIR(function).size() == 9,
+               "exact Transformer operator slice must preserve nine per-op units");
+    return true;
+}
+
 bool TestSoftmaxInferTypeContract() {
     kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
     kxc::Call scalar_softmax(kxc::relay::Op::Get("softmax"), {scalar},
@@ -734,6 +777,7 @@ int main() {
         {"slice_infer_and_lowering_contract", TestSliceInferAndLoweringContract},
         {"where_infer_and_lowering_contract", TestWhereInferAndLoweringContract},
         {"layer_norm_infer_and_lowering_contract", TestLayerNormInferAndLoweringContract},
+        {"exact_transformer_operator_slice", TestExactTransformerOperatorSliceComposition},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},
         {"negative_extent_lowering_gates", TestNegativeExtentLoweringGates},
         {"mvp_elementwise_lower_to_tir", TestMvpElementwiseLowerToTIR},

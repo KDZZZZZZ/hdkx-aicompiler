@@ -649,6 +649,76 @@ void TestModelCNN() {
     ExpectNear(out, {10, 20});
 }
 
+// 最小 exact-static Transformer operator slice：embedding、norm、select、slice/concat、attention。
+// 该 fixture 不包含 KV cache、dynamic batching 或动态 shape 语义。
+void TestModelExactTransformerOperatorSlice() {
+    kxc::Var embedding_table("embedding_table", kxc::TensorType({4, 2}, "float32"));
+    kxc::Var token_ids("token_ids", kxc::TensorType({2}, "int64"));
+    kxc::Var condition("condition", kxc::TensorType({2, 1}, "bool"));
+    kxc::Var fallback("fallback", kxc::TensorType({1, 2}, "float32"));
+    kxc::Var scale("scale", kxc::TensorType({2}, "float32"));
+    kxc::Var bias("bias", kxc::TensorType({2}, "float32"));
+
+    kxc::Call embedded(kxc::relay::Op::Get("gather"), {embedding_table, token_ids},
+                       kxc::relay::GatherAttrs::Create(0));
+    constexpr float epsilon = 1e-5f;
+    kxc::Call normalized(kxc::relay::Op::Get("nn_layer_norm"), {embedded, scale, bias},
+                         kxc::relay::LayerNormAttrs::Create(-1, epsilon, "float32"));
+    kxc::Call selected(kxc::relay::Op::Get("where"),
+                       {condition, normalized, fallback});
+    kxc::Call prefix(kxc::relay::Op::Get("slice"), {selected},
+                     kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1}));
+    kxc::Call sequence(kxc::relay::Op::Get("concatenate"), {prefix, selected},
+                       kxc::relay::ConcatenateAttrs::Create(0));
+    kxc::Call keys(kxc::relay::Op::Get("transpose"), {sequence},
+                   kxc::relay::TransposeAttrs::Create({1, 0}));
+    kxc::Call scores(kxc::relay::Op::Get("matmul"), {sequence, keys});
+    kxc::Call weights(kxc::relay::Op::Get("softmax"), {scores},
+                      kxc::relay::SoftmaxAttrs::Create(-1));
+    kxc::Call context(kxc::relay::Op::Get("matmul"), {weights, sequence});
+    kxc::Function function(
+        {embedding_table, token_ids, condition, fallback, scale, bias}, context);
+
+    const std::vector<float> table_data = {1, 3, 2, 2, 4, 0, 0, 4};
+    const std::vector<int64_t> token_data = {0, 2};
+    const std::vector<uint8_t> condition_data = {1, 0};
+    const std::vector<float> fallback_data = {0, 0};
+    const std::vector<float> scale_data = {1, 1};
+    const std::vector<float> bias_data = {0, 0};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun(
+        "model_exact_transformer_operator_slice", function,
+        {Input(table_data), Input(token_data), Input(condition_data),
+         Input(fallback_data), Input(scale_data), Input(bias_data), Output(out)});
+
+    const float a = 1.0f / std::sqrt(1.0f + epsilon);
+    const std::vector<float> sequence_data = {-a, a, -a, a, 0, 0};
+    std::vector<float> expected(6, 0.0f);
+    for (size_t row = 0; row < 3; ++row) {
+        float row_max = -std::numeric_limits<float>::infinity();
+        float scores_data[3]{};
+        for (size_t column = 0; column < 3; ++column) {
+            scores_data[column] =
+                sequence_data[row * 2] * sequence_data[column * 2] +
+                sequence_data[row * 2 + 1] * sequence_data[column * 2 + 1];
+            row_max = std::max(row_max, scores_data[column]);
+        }
+        float denominator = 0.0f;
+        float probabilities[3]{};
+        for (size_t column = 0; column < 3; ++column) {
+            probabilities[column] = std::exp(scores_data[column] - row_max);
+            denominator += probabilities[column];
+        }
+        for (size_t column = 0; column < 3; ++column) {
+            probabilities[column] /= denominator;
+            expected[row * 2] += probabilities[column] * sequence_data[column * 2];
+            expected[row * 2 + 1] +=
+                probabilities[column] * sequence_data[column * 2 + 1];
+        }
+    }
+    ExpectNear(out, expected, 3e-4f);
+}
+
 // 精确静态 causal prefill attention：batched MatMul、有限加性 mask、稳定 softmax、batched MatMul。
 void TestModelPrefillExactAttention() {
     kxc::Var query("query", kxc::TensorType({1, 2, 2}, "float32"));
@@ -733,6 +803,7 @@ int main() {
         {"model_add_chain", TestModelAddChain},
         {"model_mlp", TestModelMLP},
         {"model_cnn", TestModelCNN},
+        {"model_exact_transformer_operator_slice", TestModelExactTransformerOperatorSlice},
         {"model_prefill_exact_attention", TestModelPrefillExactAttention},
         {"model_decode_external_kv", TestModelDecodeExternalKV},
     };
