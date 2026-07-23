@@ -289,6 +289,8 @@ private:
             result = If(CloneExpr(node->cond), CloneExpr(node->true_branch),
                         CloneExpr(node->false_branch));
             expressions_.emplace(source.get(), result);
+        } else if (source.As<WhileNode>()) {
+            Reject("While is rejected by the static preparation snapshot; use CompileControlFlowExact");
         } else {
             Reject("unsupported Relay node in preparation snapshot: " +
                    std::string(source->GetTypeKey()));

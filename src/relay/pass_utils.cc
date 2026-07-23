@@ -245,6 +245,9 @@ bool HasSideEffect(const Expr& expr) {
         } else if (const auto* if_node = current.As<IfNode>()) {
             result = visit(if_node->cond) || visit(if_node->true_branch) ||
                      visit(if_node->false_branch);
+        } else if (const auto* while_node = current.As<WhileNode>()) {
+            result = visit(while_node->initial_state) || visit(while_node->condition) ||
+                     visit(while_node->body);
         } else if (const auto* let_node = current.As<LetNode>()) {
             result = visit(let_node->value) || visit(let_node->body);
         } else if (const auto* fn = current.As<FunctionNode>()) {
@@ -309,6 +312,12 @@ size_t CountVarUses(const Expr& expr, const Var& var) {
             visit(if_node->cond);
             visit(if_node->true_branch);
             visit(if_node->false_branch);
+            return;
+        }
+        if (const auto* while_node = current.As<WhileNode>()) {
+            visit(while_node->initial_state);
+            visit(while_node->condition);
+            visit(while_node->body);
             return;
         }
         if (const auto* let_node = current.As<LetNode>()) {
@@ -395,6 +404,22 @@ Expr SubstituteVar(const Expr& expr, const Var& target, const Expr& replacement)
                 }
             }
             return RelayPass::VisitFunction(op, ref);
+        }
+
+        // While state binding only scopes condition and body, not initial_state.
+        Expr VisitWhile(const WhileNode* op, const Expr& ref) override {
+            Expr initial = Mutate(op->initial_state);
+            if (op->loop_var.get() == target_.get()) {
+                if (initial.get() == op->initial_state.get()) return ref;
+                return CopyVirtualDevice(ref, While(initial, op->loop_var, op->condition,
+                                                    op->body, op->max_trip_count));
+            }
+            Expr condition = Mutate(op->condition);
+            Expr body = Mutate(op->body);
+            if (initial.get() == op->initial_state.get() &&
+                condition.get() == op->condition.get() && body.get() == op->body.get()) return ref;
+            return CopyVirtualDevice(ref, While(initial, op->loop_var, condition, body,
+                                                op->max_trip_count));
         }
 
         // let 绑定只遮蔽 body，不遮蔽 value。

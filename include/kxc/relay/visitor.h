@@ -27,6 +27,7 @@ public:
         if (auto* n = expr.As<CallNode>()) return VisitCall(n, expr);
         if (auto* n = expr.As<FunctionNode>()) return VisitFunction(n, expr);
         if (auto* n = expr.As<IfNode>()) return VisitIf(n, expr);
+        if (auto* n = expr.As<WhileNode>()) return VisitWhile(n, expr);
         if (auto* n = expr.As<LetNode>()) return VisitLet(n, expr);
         if (auto* n = expr.As<TupleNode>()) return VisitTuple(n, expr);
         if (auto* n = expr.As<TupleGetItemNode>()) return VisitTupleGetItem(n, expr);
@@ -41,6 +42,7 @@ protected:
     virtual R VisitCall(const CallNode* op, const Expr& ref) { return VisitDefault(ref); }
     virtual R VisitFunction(const FunctionNode* op, const Expr& ref) { return VisitDefault(ref); }
     virtual R VisitIf(const IfNode* op, const Expr& ref) { return VisitDefault(ref); }
+    virtual R VisitWhile(const WhileNode* op, const Expr& ref) { return VisitDefault(ref); }
     virtual R VisitLet(const LetNode* op, const Expr& ref) { return VisitDefault(ref); }
     virtual R VisitTuple(const TupleNode* op, const Expr& ref) { return VisitDefault(ref); }
     virtual R VisitTupleGetItem(const TupleGetItemNode* op, const Expr& ref) { return VisitDefault(ref); }
@@ -65,6 +67,7 @@ protected:
     Expr VisitCall(const CallNode* op, const Expr& ref) override;
     Expr VisitFunction(const FunctionNode* op, const Expr& ref) override;
     Expr VisitIf(const IfNode* op, const Expr& ref) override;
+    Expr VisitWhile(const WhileNode* op, const Expr& ref) override;
     Expr VisitLet(const LetNode* op, const Expr& ref) override;
     Expr VisitTuple(const TupleNode* op, const Expr& ref) override;
     Expr VisitTupleGetItem(const TupleGetItemNode* op, const Expr& ref) override;

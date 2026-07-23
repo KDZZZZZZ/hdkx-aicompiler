@@ -43,6 +43,13 @@ void VisitRelayExpr(const Expr& expr, const std::function<void(const Expr&)>& f,
         VisitRelayExpr(if_node->false_branch, f, visited);
         return;
     }
+    if (const auto* while_node = expr.As<WhileNode>()) {
+        VisitRelayExpr(while_node->initial_state, f, visited);
+        VisitRelayExpr(Expr(ObjectRef(while_node->loop_var)), f, visited);
+        VisitRelayExpr(while_node->condition, f, visited);
+        VisitRelayExpr(while_node->body, f, visited);
+        return;
+    }
     if (const auto* let_node = expr.As<LetNode>()) {
         VisitRelayExpr(Expr(ObjectRef(let_node->var)), f, visited);
         VisitRelayExpr(let_node->value, f, visited);

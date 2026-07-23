@@ -243,6 +243,12 @@ bool CollectCompleteCheckedTypes(
                CollectCompleteCheckedTypes(branch->false_branch, visited,
                                            snapshots);
     }
+    if (const auto* loop = expr.As<WhileNode>()) {
+        return CollectCompleteCheckedTypes(loop->initial_state, visited, snapshots) &&
+               CollectCompleteCheckedTypes(loop->loop_var, visited, snapshots) &&
+               CollectCompleteCheckedTypes(loop->condition, visited, snapshots) &&
+               CollectCompleteCheckedTypes(loop->body, visited, snapshots);
+    }
     if (const auto* let = expr.As<LetNode>()) {
         return CollectCompleteCheckedTypes(let->var, visited, snapshots) &&
                CollectCompleteCheckedTypes(let->value, visited, snapshots) &&

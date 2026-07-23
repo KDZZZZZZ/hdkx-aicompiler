@@ -20,6 +20,7 @@ KXC_OBJECT_DEFINE(FunctionNode)
 KXC_OBJECT_DEFINE(TupleNode)
 KXC_OBJECT_DEFINE(TupleGetItemNode)
 KXC_OBJECT_DEFINE(IfNode)
+KXC_OBJECT_DEFINE(WhileNode)
 KXC_OBJECT_DEFINE(LetNode)
 
 TensorType::TensorType(Array<int64_t> shape, std::string dtype) {
@@ -194,6 +195,21 @@ If::If(Expr cond, Expr true_branch, Expr false_branch) {
 }
 
 const IfNode* If::operator->() const { return static_cast<const IfNode*>(object_); }
+
+While::While(Expr initial_state, Var loop_var, Expr condition, Expr body,
+             std::int64_t max_trip_count) {
+    auto* node = new WhileNode();
+    node->initial_state = std::move(initial_state);
+    node->loop_var = std::move(loop_var);
+    node->condition = std::move(condition);
+    node->body = std::move(body);
+    node->max_trip_count = max_trip_count;
+    SetData(node);
+}
+
+const WhileNode* While::operator->() const {
+    return static_cast<const WhileNode*>(object_);
+}
 
 Let::Let(Var var, Expr value, Expr body) {
     auto* node = new LetNode();
