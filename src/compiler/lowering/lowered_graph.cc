@@ -56,6 +56,8 @@ Array<tir::PrimExpr> TEShape(const TensorTypeNode* type) {
         }
         shape.push_back(tir::IntImm(dimension, tir::DataType::Int(64)));
     }
+    relay::internal::ValidateStaticLoweringTensor(
+        shape, TIRDataType(type), "LowerOperatorCallsToTIR boundary TensorType");
     return shape;
 }
 

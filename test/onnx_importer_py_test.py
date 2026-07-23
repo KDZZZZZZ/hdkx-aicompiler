@@ -780,18 +780,21 @@ def test_layer_normalization_rejects_declared_output_mismatch(output_shape, outp
 
 
 def _slice_model(data_shape=(2, 3), *, starts=(-2,), ends=(99,), axes=(-1,), steps=(1,),
-                 parameter_dtype=TensorProto.INT64, output_shape=(2, 2), output_dtype=TensorProto.FLOAT,
+                 parameter_dtype=TensorProto.INT64, parameter_dtypes=None,
+                 output_shape=(2, 2), output_dtype=TensorProto.FLOAT,
                  opset=13, dynamic_params=False):
     initializer = []
     parameter_inputs = []
+    parameter_dtypes = {} if parameter_dtypes is None else parameter_dtypes
     values = {"starts": starts, "ends": ends, "axes": axes, "steps": steps}
     for name, value in values.items():
         if value is None:
             continue
+        dtype = parameter_dtypes.get(name, parameter_dtype)
         if dynamic_params:
-            parameter_inputs.append(helper.make_tensor_value_info(name, parameter_dtype, [len(value)]))
+            parameter_inputs.append(helper.make_tensor_value_info(name, dtype, [len(value)]))
         else:
-            initializer.append(helper.make_tensor(name, parameter_dtype, [len(value)], list(value)))
+            initializer.append(helper.make_tensor(name, dtype, [len(value)], list(value)))
     node_inputs = ["data", "starts", "ends"]
     if axes is not None:
         node_inputs.append("axes")
@@ -814,6 +817,14 @@ def test_slice_initializer_mapping_clamping_and_int32_int64():
             ("slice", ["data"], {"starts": [-2], "ends": [99], "axes": [-1], "steps": [1]})
         ]
         assert imported.function.outputs[0].shape == [2, 2]
+
+
+def test_slice_rejects_mixed_control_initializer_integer_widths():
+    with pytest.raises(ValueError, match="one consistent int32 or int64 dtype"):
+        import_onnx_model(_slice_model(
+            parameter_dtype=TensorProto.INT32,
+            parameter_dtypes={"ends": TensorProto.INT64},
+        ))
 
 
 def test_slice_omitted_axes_and_steps_are_canonicalized():

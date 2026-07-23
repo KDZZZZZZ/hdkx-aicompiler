@@ -660,6 +660,70 @@ bool TestNegativeExtentLoweringGates() {
     return true;
 }
 
+bool TestStaticLoweringSizeGates() {
+    const auto make_add = [](const std::vector<int64_t>& shape) {
+        kxc::Array<int64_t> relay_shape;
+        for (int64_t extent : shape) relay_shape.push_back(extent);
+        kxc::Var lhs("lhs", kxc::TensorType(relay_shape, "float32"));
+        kxc::Var rhs("rhs", kxc::TensorType(relay_shape, "float32"));
+        return kxc::Function(
+            {lhs, rhs}, kxc::Call(kxc::relay::Op::Get("add"), {lhs, rhs}));
+    };
+    const auto rejected_by_both = [&](const std::vector<int64_t>& shape) {
+        const kxc::Function function = make_add(shape);
+        return ExpectThrow([&] { kxc::relay::LowerToTIR(function); }) &&
+               ExpectThrow([&] { kxc::relay::LowerOperatorCallsToTIR(function); });
+    };
+
+    constexpr int64_t kInt32Max = std::numeric_limits<int32_t>::max();
+    TEST_CHECK(rejected_by_both({kInt32Max + 1}),
+               "all lowering entries must reject an iteration extent above INT32_MAX");
+    TEST_CHECK(rejected_by_both({kInt32Max, kInt32Max, 3}),
+               "all lowering entries must reject row-major product overflow");
+    TEST_CHECK(rejected_by_both({kInt32Max, kInt32Max}),
+               "all lowering entries must reject tensor byte counts above int64/size_t");
+
+    const kxc::Function zero = make_add({0, kInt32Max, kInt32Max});
+    TEST_CHECK(kxc::relay::LowerToTIR(zero)->prim_func.defined() &&
+                   kxc::relay::LowerOperatorCallsToTIR(zero).size() == 1,
+               "zero-element tensors with individually legal extents must remain lowerable");
+
+    kxc::Var flatten_data("flatten_data",
+                          kxc::TensorType({65536, 65536}, "float32"));
+    kxc::Call flatten(kxc::relay::Op::Get("nn_flatten"), {flatten_data},
+                      kxc::relay::FlattenAttrs::Create(0));
+    const kxc::Function flatten_function({flatten_data}, flatten);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(flatten_function); }) &&
+                   ExpectThrow([&] {
+                       kxc::relay::LowerOperatorCallsToTIR(flatten_function);
+                   }),
+               "flattened iteration extents above INT32_MAX must fail closed");
+
+    kxc::Var concat_lhs("concat_lhs", kxc::TensorType({kInt32Max}, "float32"));
+    kxc::Var concat_rhs("concat_rhs", kxc::TensorType({1}, "float32"));
+    kxc::Call concatenate(
+        kxc::relay::Op::Get("concatenate"), {concat_lhs, concat_rhs},
+        kxc::relay::ConcatenateAttrs::Create(0));
+    const kxc::Function concatenate_function({concat_lhs, concat_rhs}, concatenate);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(concatenate_function); }) &&
+                   ExpectThrow([&] {
+                       kxc::relay::LowerOperatorCallsToTIR(concatenate_function);
+                   }),
+               "Concatenate output extents above INT32_MAX must fail closed");
+
+    kxc::Var slice_data("slice_data",
+                        kxc::TensorType({kInt32Max + 1}, "float32"));
+    kxc::Call slice(kxc::relay::Op::Get("slice"), {slice_data},
+                    kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1}));
+    const kxc::Function slice_function({slice_data}, slice);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(slice_function); }) &&
+                   ExpectThrow([&] {
+                       kxc::relay::LowerOperatorCallsToTIR(slice_function);
+                   }),
+               "Slice input extents above INT32_MAX must fail closed");
+    return true;
+}
+
 bool TestMvpElementwiseLowerToTIR() {
     kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
     kxc::Var y("y", kxc::TensorType({3}, "float32"));
@@ -795,6 +859,7 @@ int main() {
         {"exact_transformer_operator_slice", TestExactTransformerOperatorSliceComposition},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},
         {"negative_extent_lowering_gates", TestNegativeExtentLoweringGates},
+        {"static_lowering_size_gates", TestStaticLoweringSizeGates},
         {"mvp_elementwise_lower_to_tir", TestMvpElementwiseLowerToTIR},
         {"mvp_matrix_lower_to_tir", TestMvpMatrixLowerToTIR},
         {"mvp_nn_lower_to_tir", TestMvpNNLowerToTIR},

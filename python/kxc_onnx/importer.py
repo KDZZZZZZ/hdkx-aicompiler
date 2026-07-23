@@ -377,7 +377,9 @@ def _infer_gather_spec(
     return result
 
 
-def _slice_initializer_values(node_name: str, name: str, params: dict[str, ParamTensor]) -> list[int]:
+def _slice_initializer_values(
+    node_name: str, name: str, params: dict[str, ParamTensor]
+) -> tuple[list[int], str]:
     param = params.get(name)
     if param is None:
         raise ValueError(
@@ -391,7 +393,7 @@ def _slice_initializer_values(node_name: str, name: str, params: dict[str, Param
     values = np.frombuffer(param.data, dtype=dtype)
     if values.size != param.shape[0]:
         raise ValueError(f"Slice node '{node_name}' initializer '{name}' byte size is invalid")
-    return [int(value) for value in values]
+    return [int(value) for value in values], param.dtype
 
 
 def _clamp_positive_step_endpoint(endpoint: int, dim: int) -> int:
@@ -404,14 +406,25 @@ def _slice_attrs(node: onnx.NodeProto, params: dict[str, ParamTensor]) -> dict[s
     node_name = node.name or "<unnamed>"
     if node.attribute:
         raise ValueError(f"Slice node '{node_name}' does not support attributes in input form")
-    starts = _slice_initializer_values(node_name, node.input[1], params)
-    ends = _slice_initializer_values(node_name, node.input[2], params)
+    starts, starts_dtype = _slice_initializer_values(node_name, node.input[1], params)
+    ends, ends_dtype = _slice_initializer_values(node_name, node.input[2], params)
+    provided_dtypes = {starts_dtype, ends_dtype}
     if len(starts) != len(ends):
         raise ValueError(f"Slice node '{node_name}' starts and ends lengths must match")
-    axes = (_slice_initializer_values(node_name, node.input[3], params)
-            if len(node.input) >= 4 and node.input[3] else list(range(len(starts))))
-    steps = (_slice_initializer_values(node_name, node.input[4], params)
-             if len(node.input) >= 5 and node.input[4] else [1] * len(starts))
+    if len(node.input) >= 4 and node.input[3]:
+        axes, axes_dtype = _slice_initializer_values(node_name, node.input[3], params)
+        provided_dtypes.add(axes_dtype)
+    else:
+        axes = list(range(len(starts)))
+    if len(node.input) >= 5 and node.input[4]:
+        steps, steps_dtype = _slice_initializer_values(node_name, node.input[4], params)
+        provided_dtypes.add(steps_dtype)
+    else:
+        steps = [1] * len(starts)
+    if len(provided_dtypes) != 1:
+        raise ValueError(
+            f"Slice node '{node_name}' control initializers must use one consistent int32 or int64 dtype"
+        )
     if not starts or len(axes) != len(starts) or len(steps) != len(starts):
         raise ValueError(f"Slice node '{node_name}' starts, ends, axes, and steps must be nonempty and equal length")
     return {"starts": starts, "ends": ends, "axes": axes, "steps": steps}

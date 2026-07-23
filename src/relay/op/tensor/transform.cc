@@ -137,6 +137,29 @@ int64_t StaticExtent(const kxc::tir::PrimExpr& extent, const char* op_name) {
     return immediate->value;
 }
 
+int64_t CheckedStaticProduct(const Array<kxc::tir::PrimExpr>& shape,
+                             size_t begin, size_t end,
+                             const char* op_name) {
+    bool has_zero = false;
+    std::vector<int64_t> extents;
+    extents.reserve(end - begin);
+    for (size_t index = begin; index < end; ++index) {
+        const int64_t extent = StaticExtent(shape[index], op_name);
+        has_zero = has_zero || extent == 0;
+        extents.push_back(extent);
+    }
+    if (has_zero) return 0;
+    int64_t product = 1;
+    for (int64_t extent : extents) {
+        if (product > std::numeric_limits<int64_t>::max() / extent) {
+            throw std::runtime_error(std::string(op_name) +
+                                     " flattened extent product overflows int64");
+        }
+        product *= extent;
+    }
+    return product;
+}
+
 Array<int> NormalizeTransposeAxes(const te::Tensor& input, const Attrs& attrs) {
     const int rank = static_cast<int>(input->shape.size());
     Array<int> axes;
@@ -189,18 +212,22 @@ te::Tensor FlattenCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         throw std::runtime_error("nn_flatten axis out of range");
     }
 
-    kxc::tir::PrimExpr outer = 1;
-    kxc::tir::PrimExpr inner = 1;
     Array<kxc::tir::PrimExpr> outer_dims;
     Array<kxc::tir::PrimExpr> inner_dims;
     for (int i = 0; i < axis; ++i) {
-        outer = outer * inputs[0]->shape[static_cast<size_t>(i)];
         outer_dims.push_back(inputs[0]->shape[static_cast<size_t>(i)]);
     }
     for (int i = axis; i < ndim; ++i) {
-        inner = inner * inputs[0]->shape[static_cast<size_t>(i)];
         inner_dims.push_back(inputs[0]->shape[static_cast<size_t>(i)]);
     }
+    const kxc::tir::PrimExpr outer = kxc::tir::IntImm(
+        CheckedStaticProduct(inputs[0]->shape, 0, static_cast<size_t>(axis),
+                             "nn_flatten"),
+        kxc::tir::DataType::Int(64));
+    const kxc::tir::PrimExpr inner = kxc::tir::IntImm(
+        CheckedStaticProduct(inputs[0]->shape, static_cast<size_t>(axis),
+                             static_cast<size_t>(ndim), "nn_flatten"),
+        kxc::tir::DataType::Int(64));
 
     te::Tensor out = te::compute(
         {outer, inner},
