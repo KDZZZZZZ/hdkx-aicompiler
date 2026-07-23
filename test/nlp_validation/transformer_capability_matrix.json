@@ -3,11 +3,12 @@
   "capabilities": {
     "stable_softmax": {
       "frontend": {
-        "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "status": "implemented",
+        "gate": "static_onnx_axis_import",
+        "reason": "ONNX Softmax imports static axis semantics, including the opset-dependent default.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py"
         ]
       },
       "relay": {
@@ -39,17 +40,18 @@
       "cuda": {
         "status": "unsupported",
         "gate": "cuda_reduction_unsupported",
-        "reason": "CUDA reduction is not locally validated.",
+        "reason": "CUDA Compiler integration validates fail-closed rejection of reduction graphs; no device numeric support is claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/codegen_cuda_test.cpp",
+          "test/cuda_schedule_test.cpp"
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "reference_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "status": "implemented",
+        "gate": "llvm_numeric_test_not_run_local",
+        "reason": "The LLVM numeric test is wired through Compiler and RuntimeSession, but local LLVM is unavailable.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "numeric": {
@@ -139,59 +141,63 @@
     },
     "batched_matmul": {
       "frontend": {
-        "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "status": "implemented",
+        "gate": "static_onnx_rank_ge_2",
+        "reason": "ONNX MatMul imports to Relay matmul for static rank >= 2 tensors.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py"
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "status": "implemented",
+        "gate": "rank_ge_2_batch_broadcast",
+        "reason": "Relay infers ONNX/NumPy leading batch broadcasting and rejects incompatible static K or batch dimensions.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "status": "implemented",
+        "gate": "static_batch_broadcast",
+        "reason": "TOPI matmul lowers static-compatible broadcast batches with a reduction axis.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/te/topi/nn.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "llvm_numeric_test_not_run_local",
+        "reason": "Batched matmul numeric LLVM coverage exists but local LLVM is unavailable, so it is not validated here.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "cuda": {
         "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
+        "gate": "cuda_reduction_unsupported",
+        "reason": "CUDA Compiler integration validates fail-closed rejection of reduction graphs; no device numeric support is claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/codegen_cuda_test.cpp",
+          "test/cuda_schedule_test.cpp"
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "reference_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "status": "implemented",
+        "gate": "llvm_numeric_test_not_run_local",
+        "reason": "The batched numeric test is wired through Compiler and RuntimeSession, but local LLVM is unavailable.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "numeric": {
-        "status": "unsupported",
-        "gate": "no_numeric_gate",
-        "reason": "No numeric fixture in Phase A.",
+        "status": "implemented",
+        "gate": "llvm_numeric_test_not_run_local",
+        "reason": "Static batch-broadcast numeric expectations are encoded in the LLVM test but were not run locally.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "profile": {
@@ -405,49 +411,51 @@
       "frontend": {
         "status": "contracted",
         "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "reason": "Only the exact-static Relay slice is implemented; this is not a general Transformer frontend claim.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "status": "implemented",
+        "gate": "exact_static_causal_attention",
+        "reason": "The exact slice composes batched matmul, finite additive causal mask, and stable softmax.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "status": "implemented",
+        "gate": "exact_static_causal_attention",
+        "reason": "Each exact-static attention operator lowers to TIR.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/infer_type_test.cpp",
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "llvm_numeric_test_not_run_local",
+        "reason": "An exact-static prefill LLVM/runtime numeric test exists but local LLVM is unavailable.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "cuda": {
         "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
+        "gate": "cuda_reduction_unsupported",
+        "reason": "CUDA Compiler integration validates fail-closed rejection of reduction graphs; no device numeric support is claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/codegen_cuda_test.cpp",
+          "test/cuda_schedule_test.cpp"
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "reference_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "status": "implemented",
+        "gate": "exact_static_runtime_slice",
+        "reason": "Compiler and RuntimeSession are wired into the exact-static prefill LLVM numeric test; no dynamic attention runtime claim is made.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "numeric": {
@@ -471,50 +479,52 @@
     "decode_external_kv": {
       "frontend": {
         "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "gate": "external_kv_static_inputs_only",
+        "reason": "Only the exact-static Relay slice with externally supplied K/V is implemented; this is not a KV-cache frontend claim.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "status": "implemented",
+        "gate": "exact_static_external_kv",
+        "reason": "The decode slice accepts query token=1 and externally supplied static K/V tensors.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "status": "implemented",
+        "gate": "exact_static_external_kv",
+        "reason": "The external-K/V attention composition lowers through batched matmul and stable softmax.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/infer_type_test.cpp",
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "llvm_numeric_test_not_run_local",
+        "reason": "An exact-static external-K/V LLVM/runtime numeric test exists but local LLVM is unavailable.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "cuda": {
         "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
+        "gate": "cuda_reduction_unsupported",
+        "reason": "CUDA Compiler integration validates fail-closed rejection of reduction graphs; no device numeric support is claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/codegen_cuda_test.cpp",
+          "test/cuda_schedule_test.cpp"
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "external_kv_reference",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "status": "implemented",
+        "gate": "exact_static_external_kv_runtime",
+        "reason": "Compiler and RuntimeSession are wired into the exact-static external-K/V LLVM numeric test; no cache update or lifetime semantics are claimed.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "numeric": {

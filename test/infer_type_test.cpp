@@ -81,8 +81,42 @@ bool TestMatrixAndDenseOps() {
     kxc::Var batched_b("batched_b", kxc::TensorType({2, 4, 5}, "float32"));
     kxc::Call batched_matmul(kxc::relay::Op::Get("matmul"), {batched_a, batched_b});
     kxc::Function batched_matmul_func({batched_a, batched_b}, batched_matmul);
-    TEST_CHECK(ExpectThrow([&] { kxc::relay::InferTypePass(batched_matmul_func); }),
-               "batched matmul should fail until batched lowering exists");
+    kxc::relay::InferTypePass(batched_matmul_func);
+    TEST_CHECK(CheckTensor(batched_matmul.checked_type(), {2, 3, 5}, "float32"),
+               "batched matmul output shape mismatch");
+
+    kxc::Var broadcast_a("broadcast_a", kxc::TensorType({2, 1, 3, 4}, "float32"));
+    kxc::Var broadcast_b("broadcast_b", kxc::TensorType({1, 7, 4, 5}, "float32"));
+    kxc::Call broadcast_matmul(kxc::relay::Op::Get("matmul"), {broadcast_a, broadcast_b});
+    kxc::Function broadcast_matmul_func({broadcast_a, broadcast_b}, broadcast_matmul);
+    kxc::relay::InferTypePass(broadcast_matmul_func);
+    TEST_CHECK(CheckTensor(broadcast_matmul.checked_type(), {2, 7, 3, 5}, "float32"),
+               "matmul should broadcast leading batch dimensions");
+
+    kxc::Var mixed_b("mixed_b", kxc::TensorType({4, 5}, "float32"));
+    kxc::Call mixed_matmul(kxc::relay::Op::Get("matmul"), {batched_a, mixed_b});
+    kxc::Function mixed_matmul_func({batched_a, mixed_b}, mixed_matmul);
+    kxc::relay::InferTypePass(mixed_matmul_func);
+    TEST_CHECK(CheckTensor(mixed_matmul.checked_type(), {2, 3, 5}, "float32"),
+               "matmul should broadcast a rank-2 rhs across batches");
+
+    kxc::Var bad_k("bad_k", kxc::TensorType({2, 5, 6}, "float32"));
+    kxc::Call invalid_k(kxc::relay::Op::Get("matmul"), {batched_a, bad_k});
+    kxc::Function invalid_k_func({batched_a, bad_k}, invalid_k);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::InferTypePass(invalid_k_func); }),
+               "matmul incompatible reduction dimensions should fail");
+
+    kxc::Var bad_batch("bad_batch", kxc::TensorType({3, 4, 5}, "float32"));
+    kxc::Call invalid_batch(kxc::relay::Op::Get("matmul"), {batched_a, bad_batch});
+    kxc::Function invalid_batch_func({batched_a, bad_batch}, invalid_batch);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::InferTypePass(invalid_batch_func); }),
+               "matmul incompatible batch dimensions should fail");
+
+    kxc::Var rank_one("rank_one", kxc::TensorType({4}, "float32"));
+    kxc::Call invalid_rank(kxc::relay::Op::Get("matmul"), {rank_one, mixed_b});
+    kxc::Function invalid_rank_func({rank_one, mixed_b}, invalid_rank);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::InferTypePass(invalid_rank_func); }),
+               "matmul rank below two should fail");
 
     kxc::Var weight("weight", kxc::TensorType({5, 3}, "float32"));
     kxc::Call dense(kxc::relay::Op::Get("nn_dense"), {a, weight},
@@ -185,6 +219,13 @@ bool TestMvpMatrixLowerToTIR() {
     kxc::Function matmul_func({a, b}, matmul);
     TEST_CHECK(kxc::relay::LowerToTIR(matmul_func)->prim_func.defined(),
                "matmul should lower to TIR");
+
+    kxc::Var batched_a("batched_a", kxc::TensorType({2, 3, 4}, "float32"));
+    kxc::Var batched_b("batched_b", kxc::TensorType({1, 4, 5}, "float32"));
+    kxc::Call batched_matmul(kxc::relay::Op::Get("matmul"), {batched_a, batched_b});
+    kxc::Function batched_matmul_func({batched_a, batched_b}, batched_matmul);
+    TEST_CHECK(kxc::relay::LowerToTIR(batched_matmul_func)->prim_func.defined(),
+               "batched broadcast matmul should lower to TIR");
 
     kxc::Var dense_weight("dense_weight", kxc::TensorType({5, 3}, "float32"));
     kxc::Call dense(kxc::relay::Op::Get("nn_dense"), {a, dense_weight},

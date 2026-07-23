@@ -26,8 +26,8 @@ Tensor leaky_relu(const Tensor& x, double alpha, std::string name = "leaky_relu"
 // Let's assume A: [M, K], B: [N, K] -> Output: [M, N]
 Tensor dense(const Tensor& A, const Tensor& B, const Tensor& bias = Tensor(), std::string name = "dense", std::string tag = kMatMul);
 
-// MatMul (Standard)
-// A: [M, K], B: [K, N] -> Output: [M, N]
+// MatMul (ONNX/NumPy batch broadcasting)
+// A: [..., M, K], B: [..., K, N] -> Output: [..., M, N]
 Tensor matmul(const Tensor& A, const Tensor& B, std::string name = "matmul", std::string tag = kMatMul);
 
 // Conv2D NCHW

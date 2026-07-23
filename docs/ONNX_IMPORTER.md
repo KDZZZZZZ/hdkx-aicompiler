@@ -38,8 +38,11 @@ save_imported_model(
 | `GlobalAveragePool` | `nn_global_avg_pool2d` |
 | `Flatten` | `nn_flatten` |
 | `Gemm` | `nn_gemm` |
+| `MatMul` | `matmul` |
+| `Softmax` | `softmax` |
+| `Transpose` | `transpose` |
 
-`Conv`、`MaxPool`、`Flatten`、`Gemm` 会转换必要 attrs；`Relu`、`Add`、`GlobalAveragePool` 使用简单 attrs。
+`Conv`、`MaxPool`、`Flatten`、`Gemm` 会转换必要 attrs；`Softmax` 转换 `axis`（未显式指定时 opset < 13 为 `1`，否则为 `-1`）；`Transpose` 转换 `perm`（缺失时写为空数组，由 Relay 使用逆序默认）；`Relu`、`Add`、`GlobalAveragePool`、`MatMul` 使用简单 attrs。
 
 ## Shape 与 dtype 行为
 
@@ -132,7 +135,7 @@ CMake 会在 build 目录自动生成 C++ 测试使用的 `resnet18.import.json`
 
 ## 当前限制
 
-- 只覆盖静态 shape MVP，不承诺完整 ONNX opset。
+- 只覆盖静态 shape MVP，不承诺完整 ONNX opset；`MatMul` 支持 rank >= 2 的静态 batch broadcasting，动态维度仍不支持。
 - 不引入 C++ ONNX/protobuf 依赖；ONNX protobuf 解析留在 Python 侧。
 - 不提供动态 shape runtime 语义。
 - 不做 ResNet18 数值执行验收；本阶段验收重点是导入 Relay Function、保留 params 数据、序列化 runtime binding 信息，以及清晰的 unsupported op 错误。

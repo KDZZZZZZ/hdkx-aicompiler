@@ -22,9 +22,25 @@ VALIDATED = {
     ("kv_cache", "numeric"),
 }
 IMPLEMENTED = {
+    ("stable_softmax", "frontend"),
     ("stable_softmax", "relay"),
     ("stable_softmax", "lowering"),
     ("stable_softmax", "llvm"),
+    ("stable_softmax", "runtime"),
+    ("batched_matmul", "frontend"),
+    ("batched_matmul", "relay"),
+    ("batched_matmul", "lowering"),
+    ("batched_matmul", "llvm"),
+    ("batched_matmul", "runtime"),
+    ("batched_matmul", "numeric"),
+    ("prefill_exact", "relay"),
+    ("prefill_exact", "lowering"),
+    ("prefill_exact", "llvm"),
+    ("prefill_exact", "runtime"),
+    ("decode_external_kv", "relay"),
+    ("decode_external_kv", "lowering"),
+    ("decode_external_kv", "llvm"),
+    ("decode_external_kv", "runtime"),
 }
 WORKLOAD_KEYS = {
     "id", "fixture", "kind", "logical_extent", "physical_extent", "valid_extent",
@@ -180,9 +196,11 @@ def validate_matrix(root, matrix):
                 raise ValidationError("matrix.{}.cuda must remain closed".format(capability))
             if layer == "llvm" and record["status"] == "validated":
                 raise ValidationError("matrix.{}.llvm must not claim unrun local validation".format(capability))
-    cuda_softmax = matrix["capabilities"]["stable_softmax"]["cuda"]
-    if cuda_softmax["gate"] != "cuda_reduction_unsupported":
-        raise ValidationError("stable_softmax CUDA reduction gate is not closed")
+    for capability in ("stable_softmax", "batched_matmul", "prefill_exact",
+                       "decode_external_kv"):
+        cuda = matrix["capabilities"][capability]["cuda"]
+        if cuda["gate"] != "cuda_reduction_unsupported":
+            raise ValidationError("{} CUDA reduction gate is not closed".format(capability))
     for layer in ("frontend", "relay", "runtime"):
         dynamic = matrix["capabilities"]["dynamic_batching"][layer]
         if dynamic["status"] != "unsupported" or dynamic["gate"] != "unknown_or_symbolic_dims_rejected":

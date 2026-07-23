@@ -435,8 +435,17 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
             ReadString(Field(attrs, "layout", "pool attrs"), "pool attrs.layout"),
             ReadBool(Field(attrs, "ceil_mode", "pool attrs"), "pool attrs.ceil_mode")));
     }
-    if (op_name == "add") {
+    if (op_name == "add" || op_name == "matmul") {
         return ObjectRef();
+    }
+    if (op_name == "softmax") {
+        return ObjectRef(relay::SoftmaxAttrs::Create(
+            ReadInt(Field(attrs, "axis", "softmax attrs"), "softmax attrs.axis")));
+    }
+    if (op_name == "transpose") {
+        return ObjectRef(relay::TransposeAttrs::Create(
+            ToArray(ReadInt64Vector(Field(attrs, "perm", "transpose attrs"),
+                                    "transpose attrs.perm"))));
     }
     if (op_name == "nn_global_avg_pool2d") {
         return ObjectRef(relay::GlobalAvgPool2DAttrs::Create());

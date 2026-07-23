@@ -291,8 +291,8 @@ Type MatMulInferType(const Attrs& attrs, const Array<Type>& input_types) {
 
     const std::vector<int64_t> a = ShapeVector(lhs);
     const std::vector<int64_t> b = ShapeVector(rhs);
-    if (a.size() != 2 || b.size() != 2) {
-        throw std::runtime_error("matmul currently expects rank-2 inputs");
+    if (a.size() < 2 || b.size() < 2) {
+        throw std::runtime_error("matmul expects rank >= 2 inputs");
     }
     const int64_t k_a = a[a.size() - 1];
     const int64_t k_b = b[b.size() - 2];
@@ -300,7 +300,12 @@ Type MatMulInferType(const Attrs& attrs, const Array<Type>& input_types) {
         throw std::runtime_error("matmul reduction dimension mismatch");
     }
 
-    return MakeTensorType({a[0], b[1]}, lhs->dtype);
+    std::vector<int64_t> a_batch(a.begin(), a.end() - 2);
+    std::vector<int64_t> b_batch(b.begin(), b.end() - 2);
+    std::vector<int64_t> out = BroadcastShape("matmul batch", a_batch, b_batch);
+    out.push_back(a[a.size() - 2]);
+    out.push_back(b[b.size() - 1]);
+    return MakeTensorType(out, lhs->dtype);
 }
 
 // 推导 dense 的批维和 units 输出维度。

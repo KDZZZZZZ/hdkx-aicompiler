@@ -68,18 +68,49 @@ Tensor dense(const Tensor& A, const Tensor& B, const Tensor& bias , std::string 
 }
 
 Tensor matmul(const Tensor& A, const Tensor& B, std::string name , std::string tag ){
-    PrimExpr M = A->shape[0];
-    PrimExpr K = A->shape[1];
-    PrimExpr N = B->shape[1];
-    
-    IterVar k = reduce_axis(0, K, "k");
-    
+    if (!A.defined() || !B.defined() || A->shape.size() < 2 || B->shape.size() < 2) {
+        throw std::runtime_error("topi::matmul expects rank >= 2 tensors");
+    }
+
+    const size_t a_rank = A->shape.size();
+    const size_t b_rank = B->shape.size();
+    const PrimExpr M = A->shape[a_rank - 2];
+    const PrimExpr K = A->shape[a_rank - 1];
+    const PrimExpr rhs_k = B->shape[b_rank - 2];
+    const PrimExpr N = B->shape[b_rank - 1];
+    int64_t lhs_k_value = 0;
+    int64_t rhs_k_value = 0;
+    if (GetConstInt(K, &lhs_k_value) && GetConstInt(rhs_k, &rhs_k_value) &&
+        lhs_k_value != rhs_k_value) {
+        throw std::runtime_error("topi::matmul reduction dimension mismatch");
+    }
+
+    Array<PrimExpr> a_batch;
+    Array<PrimExpr> b_batch;
+    for (size_t i = 0; i + 2 < a_rank; ++i) a_batch.push_back(A->shape[i]);
+    for (size_t i = 0; i + 2 < b_rank; ++i) b_batch.push_back(B->shape[i]);
+    const Array<PrimExpr> batch_shape = detail::InferBroadcastShape(a_batch, b_batch);
+    Array<PrimExpr> output_shape = batch_shape;
+    output_shape.push_back(M);
+    output_shape.push_back(N);
+
+    const IterVar k = reduce_axis(0, K, "k");
     return compute(
-        {M, N},
-        [&](const Array<tir::Var>& indices) {
-            tir::Var i = indices[0];
-            tir::Var j = indices[1];
-            return kxc::te::sum(A(i, k) * B(k, j), {k});
+        output_shape,
+        [A, B, a_batch, b_batch, batch_shape, k](const Array<tir::Var>& indices) {
+            Array<tir::Var> batch_indices;
+            for (size_t i = 0; i + 2 < indices.size(); ++i) {
+                batch_indices.push_back(indices[i]);
+            }
+            Array<PrimExpr> a_indices =
+                detail::GetBroadcastIndices(batch_indices, a_batch, batch_shape);
+            Array<PrimExpr> b_indices =
+                detail::GetBroadcastIndices(batch_indices, b_batch, batch_shape);
+            a_indices.push_back(indices[indices.size() - 2]);
+            a_indices.push_back(k);
+            b_indices.push_back(k);
+            b_indices.push_back(indices[indices.size() - 1]);
+            return kxc::te::sum(A(a_indices) * B(b_indices), {k});
         },
         name,
         tag

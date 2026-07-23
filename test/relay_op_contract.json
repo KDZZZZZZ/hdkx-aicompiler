@@ -100,7 +100,7 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": ["MatMul"]
     },
     "mul": {
       "schema_version": 1,
@@ -294,7 +294,7 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": ["Softmax"]
     },
     "sqrt": {
       "schema_version": 1,
@@ -342,7 +342,7 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": ["Transpose"]
     }
   }
 }

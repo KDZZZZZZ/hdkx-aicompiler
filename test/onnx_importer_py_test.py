@@ -129,6 +129,53 @@ def test_explicit_default_batch_must_be_positive(default_batch):
         import_onnx_model(_model_with_io_shapes(["batch", 3]), default_batch=default_batch)
 
 
+def _static_operator_model(nodes, opset):
+    graph = helper.make_graph(
+        nodes,
+        "static_operator_model",
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [1, 2, 3]),
+         helper.make_tensor_value_info("b", TensorProto.FLOAT, [1, 3, 2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 2])],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6
+    )
+
+
+def test_matmul_softmax_transpose_mapping_and_attrs():
+    model = _static_operator_model(
+        [
+            helper.make_node("MatMul", ["a", "b"], ["scores"], name="matmul"),
+            helper.make_node("Softmax", ["scores"], ["weights"], name="softmax", axis=1),
+            helper.make_node("Transpose", ["weights"], ["out"], name="transpose", perm=[0, 2, 1]),
+        ],
+        opset=13,
+    )
+
+    imported = import_onnx_model(model)
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("matmul", {}),
+        ("softmax", {"axis": 1}),
+        ("transpose", {"perm": [0, 2, 1]}),
+    ]
+
+
+def test_softmax_default_axis_honors_opset_and_transpose_empty_perm():
+    for opset, expected_axis in [(12, 1), (13, -1)]:
+        model = _static_operator_model(
+            [
+                helper.make_node("MatMul", ["a", "b"], ["scores"], name="matmul"),
+                helper.make_node("Softmax", ["scores"], ["weights"], name="softmax"),
+                helper.make_node("Transpose", ["weights"], ["out"], name="transpose"),
+            ],
+            opset=opset,
+        )
+        imported = import_onnx_model(model)
+        assert imported.function.nodes[1].attrs == {"axis": expected_axis}
+        assert imported.function.nodes[2].attrs == {"perm": []}
+
+
 def test_unsupported_op_error_includes_op_type_and_node_name():
     graph = helper.make_graph(
         [

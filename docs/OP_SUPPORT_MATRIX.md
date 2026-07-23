@@ -33,7 +33,7 @@ cmake --build out/build/<llvm-build> --target run_onnx_importer_test
 | `mul` | tensor.math | Y | Y | Y | Y | Relay canonical 名称为 `mul` |
 | `divide` | tensor.math | Y | Y | Y | Y | 支持 broadcast |
 | `sqrt` | tensor.math | Y | Y | Y | Y | LLVM 走 intrinsic |
-| `matmul` | tensor.math | Y | Y | Y | Y | 当前只支持 rank-2 |
+| `matmul` | tensor.math | Y | Y | Y | Y | rank >= 2，按 ONNX/NumPy 广播 leading batch dimensions；CUDA reduction/nested-loop scheduling 不支持 |
 | `nn_dense` | nn | Y | Y | Y | Y | weight 形状为 `[N, K]` |
 | `nn_gemm` | nn | Y | Y | Y | Y | 支持 `transB`，暂不支持 `transA=1` |
 | `nn_relu` | nn | Y | Y | Y | Y | elementwise |

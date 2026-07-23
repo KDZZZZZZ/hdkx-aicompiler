@@ -379,6 +379,35 @@ std::vector<float> CompileAndRunRelay(
     return result;
 }
 
+/*! \brief Compiler 必须在 CUDA 调度阶段拒绝 reduction/nested-loop Relay 图，不能暗示 device 数值支持。 */
+void TestCompilerRejectsReductionGraphs(const kxc::Device& device) {
+    using namespace kxc;
+    const auto expect_rejection = [&device](const Function& function,
+                                            const std::string& name) {
+        std::string diagnostic;
+        try {
+            (void)api::Compiler::Compile(
+                function, api::CompileConfig::Create(BuildTarget(device), 2));
+        } catch (const std::exception& error) {
+            diagnostic = error.what();
+        }
+        Require(diagnostic.find("BindCudaThreads") != std::string::npos,
+                "Compiler CUDA did not reject unsupported " + name +
+                    " at the reduction scheduling gate: " + diagnostic);
+    };
+
+    Var logits("logits", TensorType({1, 2}, "float32"));
+    expect_rejection(
+        Function({logits}, Call(relay::Op::Get("softmax"), {logits},
+                                relay::SoftmaxAttrs::Create(-1))),
+        "softmax reduction");
+
+    Var lhs("lhs", TensorType({1, 2, 2}, "float32"));
+    Var rhs("rhs", TensorType({1, 2, 2}, "float32"));
+    expect_rejection(Function({lhs, rhs}, Call(relay::Op::Get("matmul"), {lhs, rhs})),
+                     "batched matmul reduction");
+}
+
 /*! \brief 验证 CPU Relay Constant 放置到 CUDA 后由 RuntimeSession 自动注入。 */
 void TestCompilerConstant(const kxc::Device& device) {
     using namespace kxc;
@@ -485,6 +514,8 @@ int main(int argc, char** argv) {
         std::cout << "[PASS] runtime_session_constant\n";
         TestCompilerRelu(device);
         std::cout << "[PASS] runtime_session_relu\n";
+        TestCompilerRejectsReductionGraphs(device);
+        std::cout << "[PASS] compiler_rejects_reduction_graphs\n";
     } catch (const std::exception& error) {
         std::cerr << "[FAIL] cuda_runtime: " << error.what() << '\n';
         return 1;

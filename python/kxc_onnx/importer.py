@@ -24,6 +24,9 @@ ONNX_TO_RELAY = {
     "GlobalAveragePool": "nn_global_avg_pool2d",
     "Flatten": "nn_flatten",
     "Gemm": "nn_gemm",
+    "MatMul": "matmul",
+    "Softmax": "softmax",
+    "Transpose": "transpose",
 }
 
 
@@ -68,6 +71,10 @@ def import_onnx_model(
 
     graph = model.graph
     base_dir_path = Path(base_dir) if base_dir is not None else None
+    opset_version = next(
+        (int(opset.version) for opset in model.opset_import if opset.domain in {"", "ai.onnx"}),
+        1,
+    )
 
     params: dict[str, ParamTensor] = {}
     param_order: list[str] = []
@@ -123,7 +130,7 @@ def import_onnx_model(
                 op_name=ONNX_TO_RELAY[node.op_type],
                 inputs=relay_inputs,
                 outputs=relay_outputs,
-                attrs=_convert_attrs(node, params, value_info_by_name),
+                attrs=_convert_attrs(node, params, value_info_by_name, opset_version),
             )
         )
         available_values.update(relay_outputs)
@@ -194,6 +201,7 @@ def _convert_attrs(
     node: onnx.NodeProto,
     params: dict[str, ParamTensor],
     value_info_by_name: dict[str, onnx.ValueInfoProto],
+    opset_version: int,
 ) -> dict[str, Any]:
     attrs = _attrs_by_name(node)
     if node.op_type == "Conv":
@@ -231,7 +239,11 @@ def _convert_attrs(
             "transA": _int_attr(attrs, "transA", 0),
             "transB": _int_attr(attrs, "transB", 0),
         }
-    if node.op_type in {"Relu", "Add", "GlobalAveragePool"}:
+    if node.op_type == "Softmax":
+        return {"axis": _int_attr(attrs, "axis", 1 if opset_version < 13 else -1)}
+    if node.op_type == "Transpose":
+        return {"perm": _list_attr(attrs, "perm", [])}
+    if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
         return {}
     raise UnsupportedONNXOpError(
         f"Unsupported ONNX op '{node.op_type}' in node '{node.name or '<unnamed>'}'"
