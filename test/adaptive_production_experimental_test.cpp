@@ -12,6 +12,7 @@
 #include <future>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -21,6 +22,9 @@
 #include <vector>
 
 #include "kxc/compiler/adaptive_production_experimental.h"
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#include "kxc/compiler/adaptive_hot_swap_v2.h"
+#endif
 #include "kxc/profiling/profiling.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/compiled_module.h"
@@ -1198,6 +1202,149 @@ bool TestStaticExactRuntimeAndSlotBoundaries() {
     return true;
 }
 
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+namespace v2 = kxc::api::adaptive::hot_swap::v2;
+
+class OneShotHealth final : public v2::HealthAuthority {
+public:
+    explicit OneShotHealth(v2::Generation generation) : generation_(generation) {}
+    v2::HealthDecision Evaluate(const v2::GenerationLease&) override {
+        return {generation_, v2::HealthDisposition::kQuarantine, "fixture-health", "one"};
+    }
+    bool VerifyAndConsume(const v2::HealthDecision& decision,
+                          const v2::GenerationLease&) noexcept override {
+        if (consumed_ || decision.generation != generation_) return false;
+        consumed_ = true;
+        return true;
+    }
+private:
+    v2::Generation generation_;
+    bool consumed_{false};
+};
+
+bool TestV2WaitersCacheEvictionAndOverflow() {
+    using namespace production_path;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest request = MakeRequest();
+    auto compiler = std::make_shared<FixtureCompiler>();
+    compiler->compile_gate = std::make_shared<Gate>();
+    v2::Options options;
+    options.worker_count = 1;
+    options.max_queued_flights = 1;
+    options.max_in_flight = 1;
+    options.max_waiters_per_flight = 32;
+    options.max_discoverable_generations = 1;
+    options.max_producer_reported_bytes = 1;
+    options.transient_backoff = std::chrono::seconds(1);
+    v2::AdaptiveHotSwapController controller(compiler, options);
+    v2::CancellationSource cancelled;
+    const auto first = controller.Submit({request});
+    TEST_CHECK(compiler->compile_gate->WaitUntilEntered(), "v2 worker must enter fixture compiler");
+    const auto merged = controller.Submit({request, std::chrono::steady_clock::time_point::max(),
+                                           cancelled.token()});
+    cancelled.Cancel();
+    TEST_CHECK(merged.Wait().failure.category == v2::FailureCategory::kCancelled,
+               "one cancelled waiter must not cancel the shared flight");
+    std::vector<v2::CompileTicket> stress;
+    std::mutex stress_mutex;
+    std::vector<std::thread> submitters;
+    for (int index = 0; index < 12; ++index) {
+        submitters.emplace_back([&] {
+            auto ticket = controller.Submit({request});
+            std::lock_guard<std::mutex> lock(stress_mutex);
+            stress.push_back(std::move(ticket));
+        });
+    }
+    for (auto& thread : submitters) thread.join();
+    compiler->compile_gate->Release();
+    const auto first_result = first.Wait();
+    TEST_CHECK(first_result.ready() && first_result.lease->generation() == 1,
+               "v2 must publish its own first monotonic generation");
+    for (const auto& ticket : stress) {
+        TEST_CHECK(ticket.Wait().ready(), "bounded same-key stress must fan out one flight");
+    }
+    TEST_CHECK(compiler->calls.load() == 1 && controller.SnapshotForTesting().merged_waiters >= 12,
+               "v2 must singleflight bounded same-key waiters");
+    const auto expired = controller.Submit({request, std::chrono::steady_clock::now()});
+    TEST_CHECK(expired.Wait().failure.category == v2::FailureCategory::kTimeout,
+               "expired waiter must fail without changing a shared flight");
+    const auto second = controller.CompileAndPublish({request});
+    TEST_CHECK(second->generation() == 2 && controller.SnapshotForTesting().discoverable_generations == 1,
+               "producer byte/discoverability eviction must retain only the new route");
+    TEST_CHECK(first_result.lease->variant() != nullptr,
+               "eviction must not revoke an external generation lease");
+    TEST_CHECK(controller.Acquire(Execute(request))->generation() == 2,
+               "routing must atomically select the published generation");
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    auto failing = std::make_shared<FixtureCompiler>();
+    failing->failures_remaining.store(1);
+    v2::AdaptiveHotSwapController retries(failing, options);
+    TEST_CHECK(!retries.Submit({request}).Wait().ready(), "adapter failure must be categorized");
+    const int after_failure = failing->calls.load();
+    TEST_CHECK(retries.Submit({request}).Wait().failure.category == v2::FailureCategory::kTransient &&
+               failing->calls.load() == after_failure,
+               "negative cache must suppress retry during TTL");
+    retries.ClearNegativeCacheForTesting();
+    TEST_CHECK(retries.Submit({request}).Wait().ready(), "cache clear must allow deterministic retry");
+
+    v2::Options overflow = options;
+    overflow.initial_generation = std::numeric_limits<v2::Generation>::max();
+    auto overflow_compiler = std::make_shared<FixtureCompiler>();
+    v2::AdaptiveHotSwapController exhausted(overflow_compiler, overflow);
+    TEST_CHECK(exhausted.Submit({request}).Wait().failure.category == v2::FailureCategory::kPermanent,
+               "generation exhaustion must fail closed rather than wrap");
+    return true;
+}
+
+bool TestV2HealthRollbackObserverAndAbi() {
+    using namespace production_path;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest request = MakeRequest();
+    const ProductionRequest successor =
+        MakeRequest(2, 2, 16, 1, SelectedKeys(request));
+    TEST_CHECK(successor.dispatch_key() == request.dispatch_key() &&
+                   successor.plan_abi() == request.plan_abi(),
+               "fixture successor must be exact-route compatible");
+    auto compiler = std::make_shared<FixtureCompiler>();
+    v2::Options options;
+    options.max_discoverable_generations = 4;
+    options.max_producer_reported_bytes = 1024;
+    v2::AdaptiveHotSwapController controller(compiler, options);
+    const auto old_lease = controller.CompileAndPublish({request});
+    const auto current = controller.CompileAndPublish({successor});
+    TEST_CHECK(current->generation() > old_lease->generation(), "generations must be monotonic");
+    v2::Options health_options;
+    health_options.max_discoverable_generations = 4;
+    health_options.max_producer_reported_bytes = 1024;
+    health_options.health_authority = std::make_shared<OneShotHealth>(current->generation());
+    auto health_compiler = std::make_shared<FixtureCompiler>();
+    v2::AdaptiveHotSwapController health(health_compiler, health_options);
+    const auto predecessor = health.CompileAndPublish({request});
+    const auto regressed = health.CompileAndPublish({successor});
+    TEST_CHECK(health.EvaluateHealth(regressed) &&
+               health.Acquire(Execute(request))->generation() == predecessor->generation(),
+               "one-shot accepted quarantine must atomically roll future routing back");
+    TEST_CHECK(!health.EvaluateHealth(regressed), "consumed health evidence must not replay");
+    TEST_CHECK(Throws([&] { (void)controller.Acquire(Execute(MakeRequest(1, 2, 32))); }),
+               "different exact PlanAbi must never route a physical/layout contract replacement");
+
+    bool reentry_rejected = false;
+    v2::AdaptiveHotSwapController* observed = nullptr;
+    v2::Options observed_options;
+    observed_options.max_producer_reported_bytes = 1024;
+    observed_options.observer = [&](const v2::Event&) {
+        reentry_rejected = Throws([&] { (void)observed->SnapshotForTesting(); });
+    };
+    auto observed_compiler = std::make_shared<FixtureCompiler>();
+    v2::AdaptiveHotSwapController observed_controller(observed_compiler, observed_options);
+    observed = &observed_controller;
+    TEST_CHECK(observed_controller.Submit({request}).Wait().ready() && reentry_rejected,
+               "observer reentry must fail fast and remain isolated");
+    return true;
+}
+#endif
+
 #if KXC_USE_LLVM
 bool TestRealCompilerLLVMIntegration() {
     using namespace kxc;
@@ -1250,6 +1397,12 @@ int main() {
         {"static_exact_runtime_slot_boundaries",
          TestStaticExactRuntimeAndSlotBoundaries},
     };
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+    tests.push_back({"v2_waiters_cache_eviction_overflow",
+                     TestV2WaitersCacheEvictionAndOverflow});
+    tests.push_back({"v2_health_rollback_observer_abi",
+                     TestV2HealthRollbackObserverAndAbi});
+#endif
 #if KXC_USE_LLVM
     tests.push_back(
         {"real_compiler_llvm_integration", TestRealCompilerLLVMIntegration});

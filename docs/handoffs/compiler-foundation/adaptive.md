@@ -130,6 +130,53 @@ ctest --test-dir out/adaptive-production-on --output-on-failure \
 设备节点存在，但本轮是 CPU gate，未执行 CUDA publication/pending-event 验证，不能报告为
 CUDA 通过。
 
+## 7. W3 v2 whole-plan lifecycle control plane
+
+Gate：`KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=OFF`；打开它会显式打开其唯一依赖
+`KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION`。公共 API 是
+`kxc::api::adaptive::hot_swap::v2`（`adaptive_hot_swap_v2.h`），实现为
+`src/compiler/adaptive/adaptive_hot_swap_v2.cc`。W3 保留 W2 的
+`ProductionPathCompilerAdapter`/`AdaptiveController` 来调用真实候选 compile、其完整
+static-exact validation，以及 Core primitive-cache pin transaction；W3 不复制这些 proof。
+
+W3 独占 whole-plan queue/retry/generation/routing authority：有界 worker、queue、flight 和
+waiter；same-key singleflight；每个 ticket 自己的 cooperative cancellation/deadline；分类
+negative cache（permanent/unsupported 不过期，transient/timeout 用配置 backoff）；以及不回绕的
+`GenerationLease`。取消或 deadline 只结束该 waiter，不能取消或污染共享 flight；backend hard
+cancel/timeout 仍不是本 API 声称的能力。
+
+发布在 v2 route lock 下执行，只有 W2 candidate 的 exact `DispatchKey` 和
+`PlanAbiFingerprint` 都与 request 相等才可以替换 future routing。该 ABI 包含当前模型表示的
+signature alignment/layout-relevant metadata；因此不同的已表示 physical/layout/workspace ABI
+不能替换。未建模的 stride/workspace/effect 字段没有新增 proof，不能据此宣称全物理布局或
+numeric truth 已被验证。
+
+discoverability eviction 同时按 generation 数与 producer-reported byte 数工作；它只删除
+controller routing/history，外部 `GenerationLease` 和 completion retained variant 继续存活。
+这些 bytes 不是 native/device resident measurement。Health authority 是可选 process-local
+injection seam，`VerifyAndConsume` 是 one-shot authority；接受的 quarantine 原子地将 future
+routing 回退到一个仍可发现的 predecessor。health evidence、resident bytes 和 numeric truth
+均非 W3 自行认证；external authentication/attestation 和 CUDA pending completion 仍不支持。
+Observer 和 health callbacks 均在锁外、异常隔离，并在 callback 窗口拒绝本 controller 的
+reentry。
+
+W3 focused gate：
+
+```bash
+cmake -S . -B out/adaptive-v2-on -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
+  -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=ON
+cmake --build out/adaptive-v2-on --target run_adaptive_hot_swap_v2_tests \
+  check_include_layers check_public_headers
+ctest --test-dir out/adaptive-v2-on --output-on-failure \
+  -L adaptive-hot-swap-v2 -L cpu
+```
+
+The deterministic v2 additions cover cancellation/deadline isolation, same-key bounded stress,
+negative-cache clear/retry, producer-byte generation eviction with an external lease, generation
+exhaustion, one-shot quarantine rollback, observer reentry, and exact ABI non-routing. The v2 test
+reuses the existing W2 fixture so every candidate continues through real production-path validation.
+
 ## 6. 外部门禁/未完成项
 
 1. supported host TSan；

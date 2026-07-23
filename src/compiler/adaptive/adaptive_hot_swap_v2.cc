@@ -1,0 +1,626 @@
+/*! \file adaptive_hot_swap_v2.cc
+ * \brief Bounded v2 whole-plan scheduling and routing authority.
+ */
+
+#include "kxc/compiler/adaptive_hot_swap_v2.h"
+
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+
+#include <algorithm>
+#include <condition_variable>
+#include <deque>
+#include <limits>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace kxc::api::adaptive::hot_swap::v2 {
+namespace {
+
+std::string KeyPart(const std::string& value) {
+    return std::to_string(value.size()) + ":" + value + ";";
+}
+
+std::string FlightKey(const ProductionCompileRequest& request) {
+    return KeyPart(request.artifact_key().canonical_bytes()) +
+           KeyPart(request.dispatch_key().canonical_bytes()) +
+           KeyPart(request.plan_abi().canonical_bytes());
+}
+
+std::string RouteKey(const DispatchKey& dispatch, const PlanAbiFingerprint& abi) {
+    return KeyPart(dispatch.canonical_bytes()) + KeyPart(abi.canonical_bytes());
+}
+
+Failure MakeFailure(FailureCategory category, std::string diagnostic,
+                    std::chrono::milliseconds retry_after = std::chrono::milliseconds{0},
+                    bool retryable = true) {
+    return Failure{category, std::move(diagnostic), retry_after, retryable};
+}
+
+CompileResult Failed(Failure failure) {
+    return CompileResult{nullptr, std::move(failure)};
+}
+
+Failure FailureFromException(const std::exception& error,
+                             const Options& options) {
+    if (const auto* typed = dynamic_cast<const CompileError*>(&error)) {
+        const bool permanent = typed->category() == FailureCategory::kPermanent ||
+                               typed->category() == FailureCategory::kUnsupported;
+        return MakeFailure(typed->category(), typed->what(),
+                           permanent ? std::chrono::milliseconds::max()
+                           : typed->category() == FailureCategory::kTimeout
+                               ? options.timeout_backoff
+                               : options.transient_backoff,
+                           !permanent);
+    }
+    if (dynamic_cast<const std::overflow_error*>(&error)) {
+        return MakeFailure(FailureCategory::kPermanent, error.what(),
+                           std::chrono::milliseconds::max(), false);
+    }
+    if (dynamic_cast<const std::invalid_argument*>(&error)) {
+        return MakeFailure(FailureCategory::kPermanent, error.what(),
+                           std::chrono::milliseconds::max(), false);
+    }
+    return MakeFailure(FailureCategory::kTransient, error.what(),
+                       options.transient_backoff, true);
+}
+
+uint64_t ProducerBytes(const FrozenPlanVariant& variant) {
+    uint64_t total = 0;
+    for (const auto& pin : variant.compiled_graph().artifact_pins) {
+        const uint64_t bytes = pin.handle().record().byte_size;
+        if (bytes > std::numeric_limits<uint64_t>::max() - total) {
+            throw std::overflow_error("adaptive v2 producer byte sum overflow");
+        }
+        total += bytes;
+    }
+    return total;
+}
+
+class CallbackScope final {
+public:
+    explicit CallbackScope(std::atomic<size_t>& count) noexcept : count_(count) {
+        count_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    ~CallbackScope() { count_.fetch_sub(1, std::memory_order_release); }
+    CallbackScope(const CallbackScope&) = delete;
+    CallbackScope& operator=(const CallbackScope&) = delete;
+private:
+    std::atomic<size_t>& count_;
+};
+
+struct RunRetention final {
+    std::shared_ptr<const GenerationLease> lease;
+};
+
+}  // namespace
+
+struct CancellationToken::State final {
+    std::atomic<bool> cancelled{false};
+};
+
+CancellationToken::CancellationToken(std::shared_ptr<State> state)
+    : state_(std::move(state)) {}
+
+bool CancellationToken::cancelled() const noexcept {
+    return state_ && state_->cancelled.load(std::memory_order_acquire);
+}
+
+CancellationSource::CancellationSource()
+    : state_(std::make_shared<CancellationToken::State>()) {}
+
+CancellationToken CancellationSource::token() const noexcept {
+    return CancellationToken(state_);
+}
+
+void CancellationSource::Cancel() noexcept {
+    if (state_) state_->cancelled.store(true, std::memory_order_release);
+}
+
+CompileError::CompileError(FailureCategory category, std::string diagnostic)
+    : std::runtime_error(std::move(diagnostic)), category_(category) {}
+
+FailureCategory CompileError::category() const noexcept { return category_; }
+
+GenerationLease::GenerationLease(Generation generation,
+                                 std::shared_ptr<const FrozenPlanVariant> variant,
+                                 uint64_t producer_reported_bytes)
+    : generation_(generation), variant_(std::move(variant)),
+      producer_reported_bytes_(producer_reported_bytes) {
+    if (generation_ == 0 || !variant_) {
+        throw std::invalid_argument("adaptive v2 lease requires a generation and variant");
+    }
+}
+
+Generation GenerationLease::generation() const noexcept { return generation_; }
+const std::shared_ptr<const FrozenPlanVariant>& GenerationLease::variant() const noexcept {
+    return variant_;
+}
+const DispatchKey& GenerationLease::dispatch_key() const noexcept {
+    return variant_->dispatch_key();
+}
+const PlanAbiFingerprint& GenerationLease::plan_abi() const noexcept {
+    return variant_->plan_abi();
+}
+uint64_t GenerationLease::producer_reported_bytes() const noexcept {
+    return producer_reported_bytes_;
+}
+
+CompileTicket::CompileTicket(std::shared_future<CompileResult> result,
+                             std::chrono::steady_clock::time_point deadline,
+                             CancellationToken cancellation)
+    : result_(std::move(result)), deadline_(deadline),
+      cancellation_(std::move(cancellation)) {}
+
+bool CompileTicket::valid() const noexcept { return result_.valid(); }
+
+CompileResult CompileTicket::Wait() const {
+    if (!result_.valid()) {
+        return Failed(MakeFailure(FailureCategory::kPermanent, "invalid compile ticket", {}, false));
+    }
+    if (cancellation_.cancelled()) {
+        return Failed(MakeFailure(FailureCategory::kCancelled, "waiter cancelled", {}, false));
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline_) {
+        return Failed(MakeFailure(FailureCategory::kTimeout, "waiter deadline expired", {}, true));
+    }
+    if (result_.wait_until(deadline_) != std::future_status::ready) {
+        return Failed(MakeFailure(FailureCategory::kTimeout, "waiter deadline expired", {}, true));
+    }
+    if (cancellation_.cancelled()) {
+        return Failed(MakeFailure(FailureCategory::kCancelled, "waiter cancelled", {}, false));
+    }
+    return result_.get();
+}
+
+std::future_status CompileTicket::WaitFor(std::chrono::milliseconds timeout) const {
+    if (!result_.valid() || cancellation_.cancelled() ||
+        std::chrono::steady_clock::now() >= deadline_) {
+        return std::future_status::timeout;
+    }
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline_ - std::chrono::steady_clock::now());
+    return result_.wait_for(std::min(timeout, remaining));
+}
+
+class AdaptiveHotSwapController::State final
+    : public std::enable_shared_from_this<AdaptiveHotSwapController::State> {
+public:
+    struct Flight final {
+        explicit Flight(ProductionCompileRequest value, std::string key_value,
+                        std::string route_value)
+            : request(std::move(value)), key(std::move(key_value)),
+              route_key(std::move(route_value)), future(promise.get_future().share()) {}
+        ProductionCompileRequest request;
+        std::string key;
+        std::string route_key;
+        std::promise<CompileResult> promise;
+        std::shared_future<CompileResult> future;
+        size_t waiters{1};
+    };
+
+    struct Route final {
+        std::shared_ptr<const GenerationLease> current;
+        std::deque<std::shared_ptr<const GenerationLease>> history;
+        std::unordered_set<std::string> quarantined_artifacts;
+    };
+
+    struct Negative final {
+        Failure failure;
+        std::chrono::steady_clock::time_point expires;
+    };
+
+    State(std::shared_ptr<ProductionPathCompilerAdapter> compiler_value,
+          Options options_value)
+        : options(std::move(options_value)) {
+        if (options.initial_generation == 0 || options.worker_count == 0 ||
+            options.max_queued_flights == 0 || options.max_in_flight == 0 ||
+            options.max_waiters_per_flight == 0 ||
+            options.max_discoverable_generations == 0 ||
+            options.max_producer_reported_bytes == 0) {
+            throw std::invalid_argument("adaptive v2 bounds are invalid");
+        }
+        legacy::AdaptiveControllerOptions legacy_options;
+        legacy_options.max_in_flight_compiles = options.max_in_flight;
+        legacy_options.max_slots = options.max_queued_flights + options.max_in_flight;
+        legacy_options.max_discoverable_generations = std::max<size_t>(
+            2, options.max_discoverable_generations);
+        compiler = std::make_unique<legacy::AdaptiveController>(
+            std::move(compiler_value), std::move(legacy_options));
+        next_generation = options.initial_generation;
+        workers.reserve(options.worker_count);
+        for (size_t index = 0; index < options.worker_count; ++index) {
+            workers.emplace_back([this] { Worker(); });
+        }
+    }
+
+    ~State() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stopping = true;
+        }
+        wake.notify_all();
+        for (auto& worker : workers) {
+            if (worker.joinable()) worker.join();
+        }
+    }
+
+    void RejectReentry() const {
+        if (callbacks.load(std::memory_order_acquire) != 0) {
+            throw std::logic_error("adaptive v2 API called while callback is active");
+        }
+    }
+
+    void Emit(Event event) const noexcept {
+        if (!options.observer) return;
+        try {
+            CallbackScope scope(callbacks);
+            options.observer(event);
+        } catch (...) {
+            // Observability is never routing authority.
+        }
+    }
+
+    void Worker() {
+        for (;;) {
+            std::shared_ptr<Flight> flight;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                wake.wait(lock, [this] { return stopping || !queue.empty(); });
+                if (stopping && queue.empty()) return;
+                flight = queue.front();
+                queue.pop_front();
+                ++active;
+            }
+            Compile(flight);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                --active;
+            }
+            wake.notify_all();
+        }
+    }
+
+    void Finish(const std::shared_ptr<Flight>& flight, CompileResult result,
+                bool cache_failure) {
+        Event event;
+        event.kind = result.ready() ? EventKind::kPublished : EventKind::kRejected;
+        event.dispatch_key_digest = flight->request.dispatch_key().digest();
+        event.plan_abi_digest = flight->request.plan_abi().digest();
+        if (result.ready()) {
+            event.generation = result.lease->generation();
+            event.producer_reported_bytes = result.lease->producer_reported_bytes();
+        } else {
+            event.diagnostic = result.failure.diagnostic;
+            event.retry_after = result.failure.retry_after;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            flights.erase(flight->key);
+            if (cache_failure) {
+                const auto ttl = result.failure.retry_after;
+                if (ttl == std::chrono::milliseconds::max()) {
+                    negative[flight->key] = Negative{result.failure,
+                        std::chrono::steady_clock::time_point::max()};
+                } else if (ttl.count() > 0) {
+                    negative[flight->key] = Negative{result.failure,
+                        std::chrono::steady_clock::now() + ttl};
+                }
+            }
+        }
+        flight->promise.set_value(std::move(result));
+        Emit(std::move(event));
+    }
+
+    void Compile(const std::shared_ptr<Flight>& flight) {
+        try {
+            const auto candidate = compiler->CompileAndPublish(flight->request);
+            if (!candidate || candidate->dispatch_key() != flight->request.dispatch_key() ||
+                candidate->plan_abi() != flight->request.plan_abi()) {
+                throw CompileError(FailureCategory::kPermanent,
+                    "candidate exact dispatch or PlanAbi compatibility mismatch");
+            }
+            const uint64_t bytes = ProducerBytes(*candidate);
+            std::shared_ptr<const GenerationLease> lease;
+            Generation predecessor = 0;
+            std::vector<Event> evictions;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                Route& route = routes[flight->route_key];
+                if (route.quarantined_artifacts.count(
+                        flight->request.artifact_key().canonical_bytes()) != 0) {
+                    throw CompileError(FailureCategory::kPermanent,
+                        "candidate whole-plan identity is quarantined");
+                }
+                if (next_generation == std::numeric_limits<Generation>::max()) {
+                    throw std::overflow_error("adaptive v2 generation space is exhausted");
+                }
+                predecessor = route.current ? route.current->generation() : 0;
+                if (bytes > std::numeric_limits<uint64_t>::max() -
+                                discoverable_bytes) {
+                    throw std::overflow_error(
+                        "adaptive v2 discoverable byte accounting overflow");
+                }
+                lease = std::shared_ptr<const GenerationLease>(
+                    new GenerationLease(next_generation, candidate, bytes));
+                ++next_generation;
+                route.current = lease;
+                route.history.push_back(lease);
+                discoverable.push_back(lease);
+                discoverable_bytes += bytes;
+                EvictLocked(&evictions);
+            }
+            Event published;
+            published.kind = EventKind::kPublished;
+            published.generation = lease->generation();
+            published.predecessor_generation = predecessor;
+            published.producer_reported_bytes = bytes;
+            published.dispatch_key_digest = lease->dispatch_key().digest();
+            published.plan_abi_digest = lease->plan_abi().digest();
+            flight->promise.set_value(CompileResult{lease, {}});
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                flights.erase(flight->key);
+            }
+            Emit(std::move(published));
+            for (auto& event : evictions) Emit(std::move(event));
+        } catch (const std::exception& error) {
+            Finish(flight, Failed(FailureFromException(error, options)), true);
+        } catch (...) {
+            Finish(flight, Failed(MakeFailure(FailureCategory::kTransient,
+                "non-standard compilation failure", options.transient_backoff, true)), true);
+        }
+    }
+
+    void EvictLocked(std::vector<Event>* events) {
+        while (!discoverable.empty() &&
+               (discoverable.size() > options.max_discoverable_generations ||
+                discoverable_bytes > options.max_producer_reported_bytes)) {
+            const auto lease = discoverable.front();
+            discoverable.pop_front();
+            discoverable_bytes -= lease->producer_reported_bytes();
+            const std::string key = RouteKey(lease->dispatch_key(), lease->plan_abi());
+            const auto route = routes.find(key);
+            if (route != routes.end()) {
+                auto& history = route->second.history;
+                history.erase(std::remove(history.begin(), history.end(), lease), history.end());
+                if (route->second.current == lease) {
+                    route->second.current.reset();
+                }
+                if (!route->second.current && history.empty() &&
+                    route->second.quarantined_artifacts.empty()) {
+                    routes.erase(route);
+                }
+            }
+            ++evictions;
+            Event event;
+            event.kind = EventKind::kEvicted;
+            event.generation = lease->generation();
+            event.producer_reported_bytes = lease->producer_reported_bytes();
+            event.dispatch_key_digest = lease->dispatch_key().digest();
+            event.plan_abi_digest = lease->plan_abi().digest();
+            events->push_back(std::move(event));
+        }
+    }
+
+    std::unique_ptr<legacy::AdaptiveController> compiler;
+    const Options options;
+    mutable std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<std::shared_ptr<Flight>> queue;
+    std::unordered_map<std::string, std::shared_ptr<Flight>> flights;
+    std::unordered_map<std::string, Route> routes;
+    std::unordered_map<std::string, Negative> negative;
+    std::deque<std::shared_ptr<const GenerationLease>> discoverable;
+    std::vector<std::thread> workers;
+    mutable std::atomic<size_t> callbacks{0};
+    Generation next_generation{1};
+    size_t active{0};
+    uint64_t discoverable_bytes{0};
+    uint64_t evictions{0};
+    uint64_t merged_waiters{0};
+    uint64_t retry_cached{0};
+    bool stopping{false};
+};
+
+AdaptiveHotSwapController::AdaptiveHotSwapController(
+    std::shared_ptr<ProductionPathCompilerAdapter> compiler, Options options)
+    : state_(std::make_shared<State>(std::move(compiler), std::move(options))) {}
+
+AdaptiveHotSwapController::~AdaptiveHotSwapController() = default;
+
+CompileTicket AdaptiveHotSwapController::Submit(CompileRequest request) {
+    state_->RejectReentry();
+    request.production.Validate();
+    const std::string key = FlightKey(request.production);
+    const std::string route = RouteKey(request.production.dispatch_key(), request.production.plan_abi());
+    std::shared_future<CompileResult> result;
+    Event event;
+    bool emit = false;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        const auto now = std::chrono::steady_clock::now();
+        if (request.cancellation.cancelled()) {
+            std::promise<CompileResult> promise;
+            result = promise.get_future().share();
+            promise.set_value(Failed(MakeFailure(FailureCategory::kCancelled,
+                "waiter cancelled", {}, false)));
+            event.kind = EventKind::kCancelled;
+            emit = true;
+        } else if (now >= request.deadline) {
+            std::promise<CompileResult> promise;
+            result = promise.get_future().share();
+            promise.set_value(Failed(MakeFailure(FailureCategory::kTimeout,
+                "waiter deadline expired", {}, true)));
+            event.kind = EventKind::kCancelled;
+            emit = true;
+        } else if (const auto cached = state_->negative.find(key);
+                   cached != state_->negative.end() && cached->second.expires > now) {
+            std::promise<CompileResult> promise;
+            result = promise.get_future().share();
+            Failure failure = cached->second.failure;
+            if (cached->second.expires != std::chrono::steady_clock::time_point::max()) {
+                failure.retry_after = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    cached->second.expires - now);
+            }
+            promise.set_value(Failed(std::move(failure)));
+            ++state_->retry_cached;
+            event.kind = EventKind::kRetryCached;
+            event.retry_after = cached->second.failure.retry_after;
+            emit = true;
+        } else {
+            state_->negative.erase(key);
+            const auto existing = state_->flights.find(key);
+            if (existing != state_->flights.end()) {
+                if (existing->second->waiters >= state_->options.max_waiters_per_flight) {
+                    std::promise<CompileResult> promise;
+                    result = promise.get_future().share();
+                    promise.set_value(Failed(MakeFailure(FailureCategory::kBackpressure,
+                        "adaptive v2 waiter budget is full", {}, true)));
+                    event.kind = EventKind::kRejected;
+                } else {
+                    ++existing->second->waiters;
+                    ++state_->merged_waiters;
+                    result = existing->second->future;
+                    event.kind = EventKind::kMerged;
+                }
+                emit = true;
+            } else if (state_->queue.size() >= state_->options.max_queued_flights ||
+                       state_->flights.size() >= state_->options.max_in_flight) {
+                std::promise<CompileResult> promise;
+                result = promise.get_future().share();
+                promise.set_value(Failed(MakeFailure(FailureCategory::kBackpressure,
+                    "adaptive v2 queue or in-flight budget is full", {}, true)));
+                event.kind = EventKind::kRejected;
+                emit = true;
+            } else {
+                auto flight = std::make_shared<State::Flight>(
+                    std::move(request.production), key, route);
+                result = flight->future;
+                state_->flights.emplace(key, flight);
+                state_->queue.push_back(std::move(flight));
+                event.kind = EventKind::kQueued;
+                emit = true;
+                state_->wake.notify_one();
+            }
+        }
+    }
+    event.dispatch_key_digest = request.production.dispatch_key().digest();
+    event.plan_abi_digest = request.production.plan_abi().digest();
+    if (emit) state_->Emit(std::move(event));
+    return CompileTicket(std::move(result), request.deadline, std::move(request.cancellation));
+}
+
+std::shared_ptr<const GenerationLease>
+AdaptiveHotSwapController::CompileAndPublish(CompileRequest request) {
+    const CompileResult result = Submit(std::move(request)).Wait();
+    if (result.ready()) return result.lease;
+    throw CompileError(result.failure.category, result.failure.diagnostic);
+}
+
+std::shared_ptr<const GenerationLease>
+AdaptiveHotSwapController::Acquire(const ProductionExecutionRequest& request) const {
+    state_->RejectReentry();
+    request.Validate();
+    std::shared_ptr<const GenerationLease> result;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        const auto route = state_->routes.find(RouteKey(request.dispatch_key(), request.plan_abi()));
+        if (route != state_->routes.end() && route->second.current &&
+            route->second.current->plan_abi() == request.plan_abi() &&
+            route->second.quarantined_artifacts.count(route->second.current->variant()->artifact_lease()
+                .artifact_key().canonical_bytes()) == 0) {
+            result = route->second.current;
+        }
+    }
+    if (!result) throw std::out_of_range("no exact published adaptive v2 generation");
+    return result;
+}
+
+RunAsyncResult AdaptiveHotSwapController::RunAsync(
+    const ProductionExecutionRequest& request,
+    const Array<runtime::NDArray>& inputs, const DeviceStream& stream) const {
+    const auto lease = Acquire(request);
+    runtime::RunAsyncResult result = lease->variant()->session()->RunAsync(inputs, stream);
+    result.completion.RetainDependencies({}, std::make_shared<RunRetention>(RunRetention{lease}));
+    return RunAsyncResult{std::move(result.outputs), std::move(result.completion), lease};
+}
+
+bool AdaptiveHotSwapController::EvaluateHealth(
+    const std::shared_ptr<const GenerationLease>& lease) {
+    state_->RejectReentry();
+    if (!lease || !state_->options.health_authority) return false;
+    HealthDecision decision;
+    bool verified = false;
+    try {
+        CallbackScope scope(state_->callbacks);
+        decision = state_->options.health_authority->Evaluate(*lease);
+        verified = state_->options.health_authority->VerifyAndConsume(decision, *lease);
+    } catch (...) {
+        return false;
+    }
+    Event health;
+    health.kind = EventKind::kHealthDecision;
+    health.generation = lease->generation();
+    health.diagnostic = verified ? decision.evidence_id : "health decision rejected";
+    state_->Emit(std::move(health));
+    if (!verified || decision.generation != lease->generation() ||
+        decision.disposition != HealthDisposition::kQuarantine) {
+        return verified;
+    }
+
+    std::shared_ptr<const GenerationLease> predecessor;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        const auto found = state_->routes.find(RouteKey(lease->dispatch_key(), lease->plan_abi()));
+        if (found == state_->routes.end() || found->second.current != lease) return false;
+        for (auto it = found->second.history.rbegin(); it != found->second.history.rend(); ++it) {
+            if ((*it)->generation() < lease->generation() &&
+                found->second.quarantined_artifacts.count((*it)->variant()->artifact_lease()
+                    .artifact_key().canonical_bytes()) == 0) {
+                predecessor = *it;
+                break;
+            }
+        }
+        if (!predecessor) return false;
+        found->second.quarantined_artifacts.insert(
+            lease->variant()->artifact_lease().artifact_key().canonical_bytes());
+        found->second.current = predecessor;
+    }
+    Event quarantined;
+    quarantined.kind = EventKind::kQuarantined;
+    quarantined.generation = lease->generation();
+    quarantined.predecessor_generation = predecessor->generation();
+    quarantined.diagnostic = decision.evidence_id;
+    state_->Emit(std::move(quarantined));
+    Event rollback;
+    rollback.kind = EventKind::kRolledBack;
+    rollback.generation = predecessor->generation();
+    rollback.predecessor_generation = lease->generation();
+    rollback.diagnostic = decision.evidence_id;
+    state_->Emit(std::move(rollback));
+    return true;
+}
+
+Snapshot AdaptiveHotSwapController::SnapshotForTesting() const {
+    state_->RejectReentry();
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return Snapshot{state_->next_generation, state_->queue.size(), state_->active,
+                    state_->discoverable.size(), state_->discoverable_bytes,
+                    state_->evictions, state_->merged_waiters, state_->retry_cached,
+                    false, false};
+}
+
+void AdaptiveHotSwapController::ClearNegativeCacheForTesting() {
+    state_->RejectReentry();
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->negative.clear();
+}
+
+}  // namespace kxc::api::adaptive::hot_swap::v2
+#endif  // KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
