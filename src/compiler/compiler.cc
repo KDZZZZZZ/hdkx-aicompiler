@@ -27,6 +27,7 @@
 #include "kxc/profiling/profiling.h"
 #include "kxc/relay/pass/print_ir.h"
 #include "kxc/relay/transforms/infer_type.h"
+#include "kxc/relay/transforms/normalize_to_anf.h"
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/tir/pass/print_ir.h"
@@ -284,6 +285,7 @@ CompileResult OptimizeRelay(const CompileResult& input,
     Function optimized = relay::RunRelayPassPipeline(
         typed, Compiler::RelayPassPolicy(config->opt_level));
     optimized = relay::InferTypePass(optimized);
+    optimized = relay::NormalizeToANF(optimized);
     return input.AfterRelayOptimization(std::move(optimized));
 }
 

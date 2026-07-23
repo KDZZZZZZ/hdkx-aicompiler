@@ -69,6 +69,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/relay/transforms/fold_constant.h
   include/kxc/relay/transforms/fold_tuple_get_item.h
   include/kxc/relay/transforms/infer_type.h
+  include/kxc/relay/transforms/normalize_to_anf.h
   include/kxc/relay/transforms/pipeline.h
   include/kxc/relay/transforms/remove_standalone_reshapes.h
   include/kxc/relay/transforms/simplify_expr.h
@@ -366,6 +367,7 @@ set(KXC_RELAY_PASS_SOURCES
   src/relay/transforms/remove_standalone_reshapes.cc
   src/relay/transforms/fold_tuple_get_item.cc
   src/relay/transforms/infer_type.cc
+  src/relay/transforms/normalize_to_anf.cc
   src/relay/transforms/eliminate_common_subexpr.cc
   src/relay/transforms/eliminate_dead_let.cc
   src/relay/transforms/capture_post_dfs_index_in_spans.cc
@@ -419,6 +421,7 @@ set(KXC_RUNTIME_EXECUTABLE_SOURCES
 set(KXC_COMPILER_SOURCES
     src/compiler/cache/primitive_cache.cc
     src/compiler/compile_config.cc
+  src/compiler/control_flow/executable_capability.cc
   src/compiler/compile_state.cc
   src/compiler/compiler.cc
   src/compiler/graph/partition.cc
@@ -736,6 +739,8 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
+  kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
+  kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
