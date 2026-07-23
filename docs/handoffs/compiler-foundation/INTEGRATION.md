@@ -4,21 +4,18 @@
 >
 > **上游源码基线：** `dev@3b95aca188122ff52ebdb2f43d390d21273ff3e2`
 >
-> **W1 集成提交：** `e05d9d7`
+> **W1 固定基线：** `baseline/compiler-foundation-w1@525950a`
 >
-> **状态：** W1 isolated/default-off baseline 已集成；W2 Track05 generation-0 trusted declaration/observability 与 Track04/05 experimental resolved control executor 已集成；其余 production adapters 和跨轨闭环未完成。本页不是 dynamic Shape、production hot swap、production dynamic control flow、完整 Transformer 或 GPU attention 的能力声明。
+> **W2 operator 集成头：** `a72a406`
 >
-> **W2 Track 04/05 experimental 增量：** default-OFF、CPU:0 static-exact
-> `ControlExecutionPlan v1`、typed fixture `CompiledModule` binding adapter 和
-> `ControlRuntimeSession` 不执行 `kernel_ref`，不改变 `Compiler::Compile` 的默认 If
-> 拒绝，也不是 production control backend 或 artifact generator。caller `binding_revision`
-> 只是一项 fixture label，不提供 staleness check、authority lease 或 hot-swap proof；真实
-> Relay/TE resolver 和 authority-issued lease 仍是生产门禁。详见
-> [`control-runtime.md`](control-runtime.md)。
+> **状态：** W2 exact-static/default-OFF adapters 已完成本地集成和 CPU 合同验证；
+> 本页记录的是 `implemented/local-evidence` checkpoint，不是 dynamic Shape、自动生产
+> hot swap、production Relay control flow、完整 Transformer/KV cache 或已验证 CUDA
+> 能力声明。
 
-## 1. 已合并轨道
+## 1. 集成边界
 
-按 GitHub Flow 保留了六个 feature branch 的 merge 边界：
+W1 六条基础轨道均保留独立 feature branch 和 merge 边界：
 
 1. `feature/compiler-foundation-core`
 2. `feature/compiler-foundation-shape`
@@ -27,100 +24,172 @@
 5. `feature/compiler-foundation-runtime-plan`
 6. `feature/compiler-foundation-nlp-gpu`
 
-对应集成结果：
+W2 在固定 W1 基线上按以下边界集成：
 
-- Core capability / normalized pipeline / semantic identity / full-key cache / artifact pin / production singleflight transaction。
-- `kxc::shape::experimental::v1` exact 与 guarded contract/fake；未接生产 Relay/Compiler/Runtime。
-- `kxc::api::experimental::adaptive::v1` static-exact coordinator/slot/lease；未接真实 Compiler/RuntimeSession。
-- Relay ANF、lexical Let、static-exact `ControlPlan` preparation/reference；生产 `Compiler::Compile` 继续拒绝 `If`。
-- default-OFF Region/Task DAG contract、validator、memory planner 和 RuntimeSession task mode；不支持 dynamic Shape、ControlFlow、Library ABI、multi-stream/device。
-- finite-logit exact-static NLP reference、stable softmax、batched matmul、fail-closed ONNX contract；不支持真实 KV cache、完整 Transformer 或 CUDA reduction/attention。
+| 增量 | 集成提交 | 当前能力边界 |
+|---|---|---|
+| Runtime artifact manifest / observability | `f649592` | trusted declaration、结构复验、fallback/observer events 和 retention lease；不提供 provenance/authentication |
+| Resolved control runtime | `01523e8` | default-OFF、CPU:0、static-exact fixture executor；不是 Relay control backend |
+| Exact Shape production adapter | `c0a669e` | frozen Relay/constants、exact concrete profile 和 immutable pins；不支持 symbolic/bucket/fuzzy reuse |
+| Module constant integration fix | `458922d` | module-owned deep copy 与 alignment contract |
+| Adaptive production experiment | `97982ff` | default-OFF compiler/plan adapter、generation slot/lease 和 callback fail-fast；没有自动健康/回滚 authority |
+| Transformer operator slices | `a72a406` | Gather、Where、LayerNorm、Concat、Slice exact-static vertical slices；不是完整 Transformer/decode runtime |
 
-## 2. 主集成修正
+## 2. 保持不变的生产边界
 
-跨分支语义合并额外关闭了以下问题：
+- `RuntimeSession` 仍是静态、强类型 data-plane executor，不 include Compiler、Relay、
+  primitive cache、Shape predictor 或 adaptive policy。
+- production `Compiler::Compile` 仍拒绝 unresolved Relay `If`；resolved control executor
+  不改变该 capability boundary。
+- exact concrete Shape reuse 是当前唯一 production adapter oracle；不存在
+  `cached_dims >= query_dims` 一类 fuzzy compatibility。
+- physical Shape/layout/workspace 改变仍要求新 `PlanVariant`；same-ABI generation 才能
+  使用 slot replacement。
+- Runtime manifest identity/generation/lease 是可信上层声明与可观测性合同，不是
+  provenance、认证或安全凭据。
+- 新增公共 C++ surface 要求源码重新编译，不声明跨版本 precompiled C++ ABI。
 
-- 将 `NormalizeToANF` 注册为 Pass contract，并纳入唯一 `NormalizedPipeline`、canonical identity 和 executable `anf` invariant；没有在 Compiler 外偷偷追加 pass。
-- Core capability verifier 接受经过验证的 lexical `Let`，但继续拒绝 `If`；这与 ANF pipeline 和 ValueGraph 的 Let lowering 一致。
-- 统一 production TE output 的数量、definedness、dtype、rank 与 static shape 验证。
-- 修复 batched matmul 中引用类型 `Array` 的浅拷贝别名：`output_shape` 不再修改 `batch_shape`。
-- batched matmul reduction indices 显式使用 `AsPrimExpr(k)`，不把 `IterVarNode` 冒充 TIR expression。
-- CI 的 CPU matrix 同时覆盖 Region Task DAG `OFF/ON`；`cpu` CTest label 包含 Core、Adaptive、Control、Runtime plan 与 dependency-free ONNX import contract。
+## 3. 主要实现结果
 
-## 3. 已执行的统一验证
+### 3.1 Core contracts / identity / cache
 
-CPU-only、LLVM/CUDA disabled：
+- operator/pass metadata、normalized pipeline、capability verification 和 canonical identity
+  使用统一合同。
+- semantic kernel identity 不包含 graph-local `value_id`。
+- production primitive cache 使用完整 canonical key、immutable artifact pins 和 same-key
+  transaction/singleflight；不存在 fuzzy Shape key reuse。
+- `NormalizeToANF` 是正式 Pass contract；lexical `Let` 可验证，`If` 继续 fail closed。
 
-```bash
-cmake -S . -B out/build/foundation-integration -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DKXC_ENABLE_CUDA=OFF \
-  -DKXC_ENABLE_LLVM=OFF \
-  -DKXC_ENABLE_REGION_TASK_DAG=OFF \
-  -DKXC_BUILD_RESNET18_IR_DUMP=OFF \
-  -DKXC_BUILD_PASS_TESTS=ON \
-  -DKXC_BUILD_CODEGEN_TESTS=OFF
-cmake --build out/build/foundation-integration --parallel 2
-ctest --test-dir out/build/foundation-integration \
-  --output-on-failure --no-tests=error \
-  --label-regex '(^|;)cpu(;|$)'
+### 3.2 Shape / adaptive / control
+
+- exact Shape adapter 将 preparation 与 assembly 分离，并冻结 lowering-relevant
+  Function、attrs、types、inputs 和 constants，避免旧 semantic key 对应新代码。
+- adaptive experiment 冻结完整 config/Target snapshot，校验 ordered call-to-artifact
+  binding、pin signature、metadata、target、launcher 和 ordering；cache clear/eviction 不使
+  已发布 immutable pins 失效。
+- control runtime 执行 resolved Branch/Loop/Phi/backedge，使用 private constant snapshots
+  和 typed module entry adapter；`binding_revision` 仅是 caller fixture label。
+
+### 3.3 Runtime / NLP
+
+- default-OFF Region/Task DAG 提供 validator、memory planner、task executor 和结构化
+  observability；`kTaskStart` 在动作前，`kTaskLaunch` 只表示成功提交。
+- Relay operator contract 从 19 项扩展到 24 项。
+- ONNX Gather 仅映射 initializer-backed、静态 range-validated subset；Relay zero-fill
+  Gather 明确保留为 KXC extension。
+- LayerNorm 对 float32 输入使用 float64 中间 accumulation/mean/variance/sqrt/affine。
+- Shape products、iteration extents、flatten indices 和 byte sizes 使用 checked arithmetic。
+- ONNX protobuf → Python serializer → C++ reifier → LLVM `RuntimeSession` fixture 已注册，
+  但本机因依赖缺失未执行该 E2E。
+
+## 4. 本地统一验证
+
+### 4.1 所有 production/experimental gates OFF
+
+配置摘要：
+
+```text
+KXC_ENABLE_CUDA=OFF
+KXC_ENABLE_LLVM=OFF
+KXC_ENABLE_REGION_TASK_DAG=OFF
+KXC_ENABLE_CONTROL_RUNTIME=OFF
+KXC_ENABLE_SHAPE_PRODUCTION_EXACT=OFF
+KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=OFF
 ```
 
-结果：**38/38 passed**。
+完整 build 和 `ctest -L cpu` 结果：
 
-包含：
+```text
+40/40 passed
+```
 
-- 3 Adaptive tests；
-- 5 Control-flow tests；
-- 3 Runtime-plan tests；
-- Core/compiler/runtime tests；
-- dependency-free ONNX import-spec contract；
-- Relay operator contract；
-- Pass contract；
-- include-layer 和 public-header compile。
+### 4.2 W2 adapters 全部 ON
 
-Shape tests 独立执行：**3/3 targets passed**。
+配置摘要：
 
-NLP checker：**PASS**。
+```text
+KXC_ENABLE_CUDA=OFF
+KXC_ENABLE_LLVM=OFF
+KXC_ENABLE_REGION_TASK_DAG=ON
+KXC_ENABLE_CONTROL_RUNTIME=ON
+KXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
+KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=ON
+```
 
-Region Task DAG `ON` 使用独立 build directory，完整 CPU build 与 **38/38 CPU CTest passed**。
+完整 build 和 `ctest -L cpu` 结果：
 
-机器可读合同：
+```text
+41/41 passed
+```
 
-- Relay operators：**19/19**。
-- Passes：**20/20**；新增 `normalize_to_anf`。
+其中包括：
 
-## 4. 环境限制
+- `shape_production_exact_test`
+- `adaptive_production_experimental_test`
+- `control_runtime_integration_test`
+- `runtime_session_test`
+- `infer_type_test`
+- `operator_compilation_test`
+- `onnx_import_spec_contract_test`
+- Relay/Pass contracts、include layers 和 public headers
 
-本机没有 LLVM package，也没有 Python `onnx` / `numpy` / `pytest`：
+独立机器可读检查：
 
-- 未运行 LLVM codegen/numeric、artifact relocation numeric、exact attention runtime numeric。
-- 未运行依赖 ONNX Python 包的 importer tests。
-- 未下载或安装依赖。
+```text
+Relay operators: 24/24 passed
+Passes:          20/20 passed
+NLP/GPU checker: PASS
+Python py_compile: PASS
+git diff --check: PASS
+ASan/UBSan runtime-plan + adaptive: 5/5 passed
+```
 
-CUDA 真实 device 证据沿用 NLP feature branch 的 elementwise/rejection 记录；本次统一 integration build 明确关闭 CUDA，因此没有新的 CUDA numeric、Compute Sanitizer 或 CUPTI 结论。
+ASan/UBSan 配置构建了 `task_plan_test`、`task_executor_test`、
+`runtime_session_test`、`control_runtime_integration_test` 和
+`adaptive_production_experimental_test`；本次本地执行未发现 sanitizer failure。
 
-## 5. W2 必须完成的跨轨闭环
+## 5. 证据等级
 
-W1 的 mock/fake/DTO 存在不等于总计划完成。W2 至少需要：
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| CPU exact-static production path | `validated` | 本地 OFF/ON 两套完整 CPU CTest |
+| Shape exact production adapter | `implemented/local-evidence` | CPU exact profile；无 symbolic/bucket claim |
+| Adaptive production experiment | `implemented/local-evidence` | default-OFF；无 cancellation/health/rollback authority |
+| Resolved control runtime | `implemented/local-evidence` | fixture-backed CPU:0；production Compiler 仍拒绝 `If` |
+| Runtime manifest/observability | `implemented/local-evidence` | 结构一致性与事件验证；声明不是 provenance |
+| ONNX protobuf → LLVM Runtime E2E | `implemented/source-and-CI-registration` | 本机缺 `onnx`/`numpy` 和 LLVM，等待 CI |
+| CUDA Where/Slice/Concat bounded rank-1 slices | `implemented/local-evidence` | 没有本机 GPU numeric validation |
+| Symbolic/dynamic Shape 与 dynamic output allocation | `unsupported` | W3/W4 工作 |
+| Production automatic hot swap/rollback | `unsupported` | W3/W4 工作 |
+| Production Relay control lowering | `unsupported` | W3/W4 工作 |
+| 完整 Transformer/KV-cache/sampling | `unsupported` | W3/W4 工作 |
 
-1. **Shape production exact path：** 从真实 Relay/type/partition 生成不可变 GraphTemplate；exact profile 只重特化受 Shape 影响 unit；组装真实 static module/plan；RuntimeSession 仍只执行 frozen variant。
-2. **Adaptive production exact path：** Core canonical key、production artifact pin、真实 compiler adapter、selected generation manifest、plan assembler 和 completion lease retention；不得在 Run 内 lookup/compile。
-3. **Control production path：** default-OFF fixture 已为 runtime-only resolved schema、private
-   constant snapshots、typed module-entry adapter、CPU single-stream Branch/Loop/Phi/backedge
-   conservative liveness 与双 oracle提供 experimental evidence；仍需真实 Relay/TE
-   lowering/cache resolver 和 authority-issued generation lease。完成前不称 production
-   backend、artifact generation 或 Relay control compilation。
-4. **Runtime manifest/observability：** Track05 已实现纯 Runtime per-call/task trusted declaration、generation-0 exact ABI/entry/plan structural consistency 复验、结构化 fallback query/observer、task wait/start/launch/allocation/logical-retire/generation 事件和 Async lease retention；Runtime 不 include Compiler，gate 仍默认 OFF，non-zero generation 仍拒绝。公共 Runtime API 接受 caller identity 与 type-erased lease，因此不提供 provenance/authentication；identity↔production `ArtifactPin` 关联仅由当前 Compiler 组装路径建立。仍须补 authoritative Track03 generation lease、LLVM/CUDA numeric、pending CUDA retention 与 Compute Sanitizer，才能考虑默认开启。
-5. **NLP vertical expansion：** Gather/embedding、mask/select、normalization、Slice/Concat 和 KV page/capacity/valid extent；逐项 frontend/type/lowering/backend/runtime/negative evidence。
-6. **Target evidence：** LLVM-enabled CI 真实绿色记录；CUDA reduction/library path 和 device numeric；没有证据时 capability 继续 fail closed。
+## 6. CI 门禁
 
-这些跨轨工作通过新的 W2 feature branches 继续，不直接在 `dev` 或 W1 baseline 上堆叠中间状态。
+CI 配置覆盖：
 
-## 6. W2 branch handoff 索引
+- default-OFF CPU checkpoint；
+- Region Task DAG `OFF/ON` 与 Control Runtime `OFF/ON` 的组合；
+- exact Shape 与 adaptive experiment ON checkpoint；
+- dependency-free NLP capability checker；
+- ASan/UBSan Runtime-plan 与 adaptive experiment；
+- LLVM codegen/numeric、production Compiler→Task-DAG、Shape/adaptive tests；
+- 安装 `onnx`/`numpy` 后的 protobuf importer E2E；
+- Python ONNX importer tests。
 
-- `feature/compiler-foundation-nlp-transformer` 已在隔离分支完成 Gather、Where、
-  LayerNorm、binary Concatenate 与 positive-step Slice 的 exact-static vertical
-  expansion，并提供最小组合 fixture；详见
-  [`nlp-transformer.md`](./nlp-transformer.md)。该状态尚未 merge 到本 W1 integration
-  baseline，且不包含 KV cache、dynamic batching 或 CUDA reduction 支持。
+CI 注册不等于验证完成；只有远端 workflow 绿色后才能把对应 LLVM/ONNX 行升级为
+`validated`。CUDA 仍需要独立硬件/toolchain gate。
+
+## 7. 环境限制与后续工作
+
+本机未安装 LLVM、Python `onnx`/`numpy`，也没有可用 CUDA toolchain/device，因此：
+
+- 未运行 LLVM JIT/numeric 和 production Compiler→Task-DAG E2E；
+- 未运行真实 ONNX protobuf fixture；
+- 未运行 CUDA numeric、pending-retention、Compute Sanitizer 或 CUPTI；
+- 未下载、安装或修改任何系统依赖。
+
+W2 checkpoint 不完成总 W0–W4 计划。W3/W4 仍包括：restricted symbolic Shape、runtime
+Shape propagation、dynamic outputs/allocation、authoritative adaptive generation leases、
+cancellation/negative cache/health/rollback、真实 Relay control lowering、KV cache/decode/
+sampling，以及广 rank CUDA production evidence。

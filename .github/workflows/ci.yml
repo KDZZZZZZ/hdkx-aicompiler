@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+      - dev
+      - "integration/**"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -31,13 +33,27 @@ jobs:
         run: python python/tools/check_relay_op_contract.py --root .
 
   cpu-smoke:
-    name: CPU smoke (task DAG ${{ matrix.region_task_dag }}, control ${{ matrix.control_runtime }})
+    name: CPU smoke (task DAG ${{ matrix.region_task_dag }}, control ${{ matrix.control_runtime }}, adapters ${{ matrix.production_adapters }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        region_task_dag: ["OFF", "ON"]
-        control_runtime: ["OFF", "ON"]
+        include:
+          - region_task_dag: "OFF"
+            control_runtime: "OFF"
+            production_adapters: "OFF"
+          - region_task_dag: "OFF"
+            control_runtime: "OFF"
+            production_adapters: "ON"
+          - region_task_dag: "OFF"
+            control_runtime: "ON"
+            production_adapters: "ON"
+          - region_task_dag: "ON"
+            control_runtime: "OFF"
+            production_adapters: "ON"
+          - region_task_dag: "ON"
+            control_runtime: "ON"
+            production_adapters: "ON"
 
     steps:
       - name: Checkout
@@ -45,41 +61,42 @@ jobs:
 
       - name: Configure CPU-only build
         run: >
-          cmake -S . -B out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
+          cmake -S . -B out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}
           -DCMAKE_BUILD_TYPE=Debug
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=OFF
           -DKXC_ENABLE_REGION_TASK_DAG=${{ matrix.region_task_dag }}
           -DKXC_ENABLE_CONTROL_RUNTIME=${{ matrix.control_runtime }}
-          -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
+          -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=${{ matrix.production_adapters }}
+          -DKXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=${{ matrix.production_adapters }}
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_PASS_TESTS=ON
           -DKXC_BUILD_CODEGEN_TESTS=OFF
 
       - name: Build CPU targets
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}
           --parallel 2
 
       - name: Run runtime plan CTest suite
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}
           --target run_runtime_plan_tests --parallel 2
 
       - name: Check dependency-free NLP reference and capability gate
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}
           --target check_nlp_gpu_validation
 
       - name: Run all CPU foundation CTest checks
         run: >
-          ctest --test-dir out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
+          ctest --test-dir out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}
           --output-on-failure --no-tests=error
           --label-regex '(^|;)cpu(;|$)'
 
       - name: Run experimental shape contract tests
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}
           --parallel 2 --target
           run_shape_system_test
           run_shape_specialization_test
@@ -87,7 +104,7 @@ jobs:
           run_shape_production_exact_test
 
   cpu-asan:
-    name: CPU runtime-plan ASan/UBSan
+    name: CPU runtime-plan/adaptive ASan/UBSan
     runs-on: ubuntu-latest
 
     steps:
@@ -101,25 +118,27 @@ jobs:
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=OFF
           -DKXC_ENABLE_REGION_TASK_DAG=ON
+          -DKXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=ON
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_PASS_TESTS=ON
           -DKXC_BUILD_CODEGEN_TESTS=OFF
           -DCMAKE_CXX_FLAGS_DEBUG="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
-      - name: Build runtime-plan sanitizer targets
+      - name: Build runtime-plan and adaptive sanitizer targets
         run: >
           cmake --build out/build/ci-runtime-asan --parallel 2 --target
           task_plan_test task_executor_test runtime_session_test
+          control_runtime_integration_test adaptive_production_experimental_test
 
-      - name: Run runtime-plan sanitizer suite
+      - name: Run runtime-plan and adaptive sanitizer suite
         env:
           ASAN_OPTIONS: abort_on_error=1:detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: >
           ctest --test-dir out/build/ci-runtime-asan
           --output-on-failure --no-tests=error
-          --label-regex '(^|;)runtime-plan(;|$)'
+          --label-regex '(runtime-plan|adaptive-production-experimental)'
 
   llvm-resnet18:
     name: ResNet18 LLVM compile
@@ -151,6 +170,7 @@ jobs:
           -DKXC_ENABLE_REGION_TASK_DAG=ON
           -DKXC_ENABLE_CONTROL_RUNTIME=OFF
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
+          -DKXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=ON
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_DEBUG_EXAMPLES=OFF
           -DKXC_BUILD_PASS_TESTS=ON
@@ -161,6 +181,7 @@ jobs:
           cmake --build out/build/ci-llvm --parallel 2 --target
           operator_compilation_test codegen_llvm_test op_numeric_llvm_test
           onnx_importer_test runtime_session_test shape_production_exact_test
+          adaptive_production_experimental_test
 
       - name: Run production compiler-to-task-DAG E2E
         run: >
@@ -171,7 +192,7 @@ jobs:
         run: >
           ctest --test-dir out/build/ci-llvm --output-on-failure
           --no-tests=error
-          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test|runtime_session_test|shape_production_exact_test)$'
+          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test|runtime_session_test|shape_production_exact_test|adaptive_production_experimental_test)$'
 
   python-onnx-importer:
     name: Python ONNX importer tests
