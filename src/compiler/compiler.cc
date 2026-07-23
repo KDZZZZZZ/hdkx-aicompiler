@@ -483,6 +483,16 @@ UnitSemanticKey BuildGraphSemanticKey(const Function& function) {
             visit(branch->false_branch);
             return;
         }
+        if (const auto* loop = AsExactExprNode<WhileNode>(expr)) {
+            AppendPipelineIdentityField(&canonical, "node_kind", "while");
+            AppendPipelineIdentityField(&canonical, "max_trip_count",
+                                        std::to_string(loop->max_trip_count));
+            visit(loop->initial_state);
+            visit(loop->loop_var);
+            visit(loop->condition);
+            visit(loop->body);
+            return;
+        }
         if (const auto* let = AsExactExprNode<LetNode>(expr)) {
             AppendPipelineIdentityField(&canonical, "node_kind", "let");
             visit(let->var);

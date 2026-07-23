@@ -119,6 +119,10 @@ private:
         if (const auto* call = expr.As<CallNode>()) {
             return ResolveCall(expr, call);
         }
+        if (expr.As<WhileNode>()) {
+            throw std::invalid_argument(
+                "BuildValueGraph rejects While; required capability=control_flow.loop");
+        }
         if (const auto* let = expr.As<LetNode>()) {
             const std::vector<int64_t> value_ids = Resolve(let->value);
             const auto outer = bound_value_ids_.find(let->var.get());

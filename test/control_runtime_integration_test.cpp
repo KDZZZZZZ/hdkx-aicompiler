@@ -498,6 +498,40 @@ bool TestCompilerDefaultStillRejectsIf() {
     return true;
 }
 
+bool TestRelayWhileCompileGates() {
+    const kxc::TensorType boolean({}, "bool");
+    const kxc::TensorType integer({}, "int64");
+    kxc::Var predicate("while_predicate", boolean);
+    kxc::Var initial("while_initial", integer);
+    kxc::Var increment("while_increment", integer);
+    kxc::Var state("while_state", integer);
+    const kxc::Function function(
+        {predicate, initial, increment},
+        kxc::While(initial, state, predicate,
+                   kxc::Call(kxc::relay::Op::Get("add"), {state, increment}), 1));
+    const auto config =
+        kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
+    const std::string default_error = ErrorText([&] {
+        (void)kxc::api::Compiler::Compile(function, config);
+    });
+    CHECK(default_error.find("missing control_flow.loop") != std::string::npos,
+          "Compiler::Compile must reject Relay While before ValueGraph");
+    const std::string control_error = ErrorText([&] {
+        (void)kxc::api::Compiler::CompileControlFlowExact(function, config);
+    });
+#if !KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+    CHECK(control_error.find("disabled by KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION") !=
+              std::string::npos,
+          "production Relay While API must remain default-OFF");
+#elif !KXC_USE_LLVM
+    CHECK(control_error.find("KXC_ENABLE_LLVM=ON") != std::string::npos,
+          "enabled Relay While API must fail closed without LLVM");
+#else
+    CHECK(control_error.empty(), "enabled Relay While path must resolve real artifacts");
+#endif
+    return true;
+}
+
 bool TestProductionControlFlowGateAndArtifacts() {
     const kxc::TensorType boolean({}, "bool");
     const kxc::TensorType integer({}, "int64");
@@ -1118,6 +1152,7 @@ bool TestAsyncCompletionRetention() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"compiler_default_rejects_if", TestCompilerDefaultStillRejectsIf},
+        {"relay_while_compile_gates", TestRelayWhileCompileGates},
         {"production_control_flow_gate_and_artifacts",
          TestProductionControlFlowGateAndArtifacts},
         {"binding_and_branch_differential", TestBindingAndBranchDifferential},

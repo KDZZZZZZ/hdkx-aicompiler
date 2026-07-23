@@ -51,6 +51,15 @@ void CollectRelayVirtualDevices(
                                    visited_virtual_devices, out_virtual_devices);
         CollectRelayVirtualDevices(if_node->false_branch, visited_exprs,
                                    visited_virtual_devices, out_virtual_devices);
+    } else if (auto* while_node = expr.As<WhileNode>()) {
+        CollectRelayVirtualDevices(while_node->initial_state, visited_exprs,
+                                   visited_virtual_devices, out_virtual_devices);
+        CollectRelayVirtualDevices(Expr(ObjectRef(while_node->loop_var)), visited_exprs,
+                                   visited_virtual_devices, out_virtual_devices);
+        CollectRelayVirtualDevices(while_node->condition, visited_exprs,
+                                   visited_virtual_devices, out_virtual_devices);
+        CollectRelayVirtualDevices(while_node->body, visited_exprs,
+                                   visited_virtual_devices, out_virtual_devices);
     } else if (auto* let_node = expr.As<LetNode>()) {
         CollectRelayVirtualDevices(Expr(ObjectRef(let_node->var)), visited_exprs,
                                    visited_virtual_devices, out_virtual_devices);
@@ -188,6 +197,17 @@ Expr RelayPass::VisitIf(const IfNode* op, const Expr& ref) {
 }
 
 // 递归重写 Let 绑定变量、值与作用域体。
+Expr RelayPass::VisitWhile(const WhileNode* op, const Expr& ref) {
+    const Expr initial = Mutate(op->initial_state);
+    const Var variable = MutateToVar(op->loop_var);
+    const Expr condition = Mutate(op->condition);
+    const Expr body = Mutate(op->body);
+    if (initial.get() == op->initial_state.get() && variable.get() == op->loop_var.get() &&
+        condition.get() == op->condition.get() && body.get() == op->body.get()) return ref;
+    return CopyRelayVirtualDevice(ref,
+        While(initial, variable, condition, body, op->max_trip_count));
+}
+
 Expr RelayPass::VisitLet(const LetNode* op, const Expr& ref) {
     auto new_var = MutateToVar(op->var);
     auto new_value = Mutate(op->value);

@@ -2,13 +2,14 @@
 
 > **W2 更新：** 本页记录 W1 preparation baseline；default-OFF resolved CPU executor、
 > typed `CompiledModule` adapter 与新限制见
-> [`control-runtime.md`](control-runtime.md)。真实 Relay/TE artifact resolver 仍未接入。
+> [`control-runtime.md`](control-runtime.md)。真实 Relay/TE artifact resolver 是
+> `CompileControlFlowExact` 的 default-OFF LLVM-only 路径；本页记录其受限边界。
 >
 > 分支：`feature/compiler-foundation-control-flow`
 >
 > 范围：Track 04，static-exact Shape 控制流语义与 Track 05 frozen mock 边界
 >
-> 状态：Track 04 的 ANF、capability gate、structured `If`/loop DTO、verifier、Relay `If` preparation lowering、deterministic reference executor 已完成；preparation kernel 显式保持 `UnresolvedRelayKernel`，真实 task-DAG/artifact/runtime 接线仍被 Track 01/02/05 的跨轨契约阻塞。
+> 状态：Track 04 的 ANF、capability gate、structured `If`/loop DTO、verifier、Relay `If` 和 bounded `While` preparation lowering、deterministic reference executor 已完成；preparation kernel 显式保持 `UnresolvedRelayKernel`。`CompileControlFlowExact` 仅在显式 gate 和 LLVM 下将每个 region Call 解析为真实 artifact；runtime 仍只消费已解析 schema。
 
 ## 1. 能力边界：三个“动态”不是同一件事
 
@@ -21,6 +22,30 @@
 仓库其他静态 runtime ABI 中的 `kDynamicDimension = -1` 仍只是 legacy input validation sentinel；本轨没有把它当作 dynamic Shape、动态图或控制流能力。
 
 本分支也**没有**实现或声称支持 eager/tracing。`LowerRelayToControlPlan` 只准备冻结的编译 IR，不创建 session、不启动 backend、不做 tracing。
+
+## Relay `While` restricted path
+
+Relay now has `While(initial_state, loop_var, condition, body, max_trip_count)`.
+It is deliberately one lexical carried-state binder, not a general function/recursion
+mechanism.  State is a static `TensorType` or recursively nested `TupleType` of
+Tensor leaves; the bound is mandatory and non-negative.  Evaluation is
+condition-before-body: zero trips are valid, and a true condition after the bound
+raises `loop max_trip_count exhausted` rather than unrolling on the host.
+
+`InferType`, deterministic ANF, virtual-device collection, printer, cloning and
+manual Relay walkers either traverse this scope or reject it explicitly.  The
+restricted control lowering flattens the carried leaves into `LoopSpec` bindings
+`{result, initial, body_argument, backedge}`, creates separate condition/body
+regions, and captures outer values explicitly.  It accepts only static exact,
+pure deterministic non-aliasing registered Calls and CPU scalar-bool conditions;
+control tasks are CPU:0/default-stream.  `Compiler::Compile` remains static
+dataflow and rejects it with `control_flow.loop` before `ValueGraph`.
+
+`Compiler::CompileControlFlowExact` is still default OFF.  When enabled it accepts
+validated bounded loops and resolves every condition/body Call through the normal
+`Compiler::Compile` path, retaining the resulting pins in its typed lease.  LLVM
+is required for its CPU production subset; a non-LLVM build fails closed.  The
+runtime execution plan/session remains Relay-, Compiler-, and cache-free.
 
 ## 2. 已冻结语义
 

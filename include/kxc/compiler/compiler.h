@@ -47,8 +47,8 @@ struct CompiledGraph final {
  *
  * `plan` is runtime-only: it contains resolved module entries, ABI, launch
  * metadata, immutable module constants, and opaque retention leases, but no
- * Relay, TE, cache lookup, or compiler callback.  Relay has If but no Loop
- * node; this API does not claim generic Relay loops or recursion.
+ * Relay, TE, cache lookup, or compiler callback.  The accepted Relay loop is
+ * only bounded While; generic loops and recursion remain unsupported.
  */
 struct CompiledControlFlowGraph final {
     runtime::ControlExecutionPlan plan;
@@ -73,13 +73,13 @@ public:
      */
     static CompiledGraph Compile(Function func, CompileConfig config);
 
-    /*! \brief Explicit default-OFF production path for static CPU Relay If.
+    /*! \brief Explicit default-OFF production path for static CPU Relay control.
      *
-     * Requires KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=ON, CPU:0/default
-     * stream, and real available backend artifacts.  The compiler mints and
+     * Supports static If and bounded condition-before-body While on CPU:0/default
+     * stream with real available backend artifacts.  The compiler mints and
      * retains a process-local typed artifact lease; it is not authentication
      * or external provenance.  Compiler::Compile remains the static-dataflow
-     * API and continues to reject Relay If.
+     * API and continues to reject Relay control flow.
      */
     static CompiledControlFlowGraph CompileControlFlowExact(
         Function func, CompileConfig config);

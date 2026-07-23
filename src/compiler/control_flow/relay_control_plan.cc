@@ -152,6 +152,7 @@ public:
         internal::ExecutableCapabilityOptions options;
         options.version = internal::ExecutableCapabilityOptions::kVersion;
         options.allow_if = true;
+        options.allow_while = true;
         options.allow_tuple_parameters = true;
         options.allow_nested_tuple_call_outputs = true;
         options.allow_device_regions = true;
@@ -448,6 +449,75 @@ private:
         return selected;
     }
 
+    Leaves LowerWhile(const Expr& expr, const WhileNode* while_node,
+                      runtime::RegionId parent, const Env& environment,
+                      const std::string& path) {
+        const Leaves initial = ResolveAtomic(while_node->initial_state, parent,
+                                             environment, path + ".initial_state");
+        const Leaves results = AddLeaves(expr, expr.checked_type(), path);
+        if (initial.empty() || initial.size() != results.size()) {
+            Fail(path, "While state flattening does not match its result type");
+        }
+        runtime::ControlTask task;
+        task.kind = runtime::ControlTaskKind::kLoop;
+        task.outputs = results;
+        task.source_locator = path;
+        AddTask(parent, std::move(task));
+        const std::size_t parent_task_index = Region(parent).tasks.size() - 1;
+
+        const Leaves arguments = AddLeaves(Expr(ObjectRef(while_node->loop_var)),
+                                           while_node->loop_var.checked_type(),
+                                           path + ".loop_var");
+        const runtime::RegionId condition_region = NewRegion(path + ".condition");
+        Env condition_environment = environment;
+        condition_environment[while_node->loop_var.get()] = arguments;
+        const Leaves condition = LowerTerminal(while_node->condition, condition_region,
+                                               &condition_environment, path + ".condition");
+        if (condition.size() != 1 || Value(condition.front()).dtype != "bool" ||
+            !Value(condition.front()).shape.empty() ||
+            Value(condition.front()).device != Device::CPU()) {
+            Fail(path + ".condition", "requires a CPU scalar bool condition");
+        }
+        Region(condition_region).live_outs = condition;
+        for (const runtime::ValueId argument : arguments) MarkRead(condition_region, argument);
+
+        const runtime::RegionId body_region = NewRegion(path + ".body");
+        Env body_environment = environment;
+        body_environment[while_node->loop_var.get()] = arguments;
+        const Leaves backedges = LowerTerminal(while_node->body, body_region,
+                                               &body_environment, path + ".body");
+        if (backedges.size() != results.size()) {
+            Fail(path + ".body", "While body flattening does not match state type");
+        }
+        Region(body_region).live_outs = backedges;
+        for (const runtime::ValueId argument : arguments) MarkRead(body_region, argument);
+
+        runtime::ControlTask& loop = Region(parent).tasks.at(parent_task_index);
+        loop.loop.condition_region = condition_region;
+        loop.loop.body_region = body_region;
+        loop.loop.condition_value = condition.front();
+        loop.loop.max_trip_count = while_node->max_trip_count;
+        for (std::size_t i = 0; i < results.size(); ++i) {
+            loop.loop.carried.push_back({results[i], initial[i], arguments[i], backedges[i]});
+        }
+        const auto append_captures = [this, parent, &loop, &arguments](
+                                         const runtime::ControlRegion& child) {
+            for (const runtime::ValueId capture : child.live_ins) {
+                if (std::find(arguments.begin(), arguments.end(), capture) != arguments.end()) continue;
+                MarkRead(parent, capture);
+                if (std::find(loop.inputs.begin(), loop.inputs.end(), capture) == loop.inputs.end()) {
+                    loop.inputs.push_back(capture);
+                }
+            }
+        };
+        for (const runtime::ValueId value : initial) loop.inputs.push_back(value);
+        append_captures(Region(condition_region));
+        append_captures(Region(body_region));
+        loop.effect.reads = loop.inputs;
+        loop.dependencies = Dependencies(parent, loop.inputs);
+        return results;
+    }
+
     Leaves LowerIf(const Expr& expr, const IfNode* if_node, runtime::RegionId parent,
                    const Env& environment, const std::string& path) {
         const Leaves predicate = ResolveAtomic(if_node->cond, parent, environment,
@@ -508,6 +578,7 @@ private:
         }
         if (const auto* call = expr.As<CallNode>()) return LowerCall(expr, call, region, environment, path);
         if (const auto* if_node = expr.As<IfNode>()) return LowerIf(expr, if_node, region, environment, path);
+        if (const auto* while_node = expr.As<WhileNode>()) return LowerWhile(expr, while_node, region, environment, path);
         if (const auto* tuple = expr.As<TupleNode>()) {
             Leaves values;
             for (std::size_t i = 0; i < tuple->fields.size(); ++i) {

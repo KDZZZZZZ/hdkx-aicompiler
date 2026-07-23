@@ -158,6 +158,20 @@ bool TestRepresentableControlFlowRejectedWithLocator() {
                    },
                    "CapabilityVerifier[compiler_entry]"),
                "Compiler entry must reject unsupported control flow");
+
+    Var state("state", TensorType({4}, "float32"));
+    Function while_function = relay::InferTypePass(
+        Function({cond, lhs}, While(lhs, state, cond, state, 0)));
+    const CapabilityResult while_result = Verify(
+        while_function, BuildTarget(Device::CPU()), 0,
+        CapabilityBoundary::kCompilerEntry, false, "model/while");
+    TEST_CHECK(HasIssue(while_result, "control_flow.loop") &&
+                   ThrowsWith([&] {
+                       (void)Compiler::Compile(
+                           while_function, CompileConfig::Create(
+                               BuildTarget(Device::CPU()), 0));
+                   }, "control_flow.loop"),
+               "Compiler::Compile must reject While before ValueGraph with a stable loop diagnostic");
     return true;
 }
 

@@ -52,6 +52,8 @@ struct CapabilityRequest final {
     CapabilityMode requested_mode{CapabilityMode::kStaticExact};
     bool require_checked_types{false};
     int opt_level{2};
+    // Control IR is opt-in; Compiler::Compile always leaves this false.
+    bool allow_while{false};
 };
 
 /*! \brief Complete fail-closed result; callers must not infer fallback support. */

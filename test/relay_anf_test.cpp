@@ -48,6 +48,10 @@ void CollectCallNames(const kxc::Expr& expr, std::vector<std::string>* names) {
         CollectCallNames(if_node->cond, names);
         CollectCallNames(if_node->true_branch, names);
         CollectCallNames(if_node->false_branch, names);
+    } else if (const auto* while_node = expr.As<kxc::WhileNode>()) {
+        CollectCallNames(while_node->initial_state, names);
+        CollectCallNames(while_node->condition, names);
+        CollectCallNames(while_node->body, names);
     }
 }
 
@@ -121,6 +125,25 @@ bool TestExistingLetAndBranchesStayLexical() {
     return true;
 }
 
+bool TestWhileIsDeterministicAndLexical() {
+    using namespace kxc;
+    const TensorType type({4}, "float32");
+    Var predicate("predicate", TensorType({}, "bool"));
+    Var initial("initial", type), increment("increment", type), state("state", type);
+    Function input({predicate, initial, increment},
+        While(Add(initial, increment), state, predicate, Add(state, increment), 2));
+    input = relay::InferTypePass(input);
+    Function normalized = relay::NormalizeToANF(input);
+    std::string diagnostic;
+    TEST_CHECK(relay::IsANF(normalized, &diagnostic), diagnostic);
+    TEST_CHECK(relay::NormalizeToANF(normalized).get() == normalized.get(),
+               "While ANF normalization must be idempotent by identity");
+    TEST_CHECK(relay::pass::ToText(normalized).find("While(max_trip_count=2, var=state)") !=
+                   std::string::npos,
+               "printer must deterministically include the bounded lexical loop");
+    return true;
+}
+
 bool TestVerifierDiagnostics() {
     using namespace kxc;
     const TensorType type({4}, "float32");
@@ -142,6 +165,7 @@ int main() {
         {"nested_shared_tuple_deterministic_idempotent",
          TestNestedSharedTupleIsDeterministicAndIdempotent},
         {"existing_let_and_branch_lexicality", TestExistingLetAndBranchesStayLexical},
+        {"while_deterministic_lexical", TestWhileIsDeterministicAndLexical},
         {"verifier_diagnostics", TestVerifierDiagnostics},
     };
     for (const auto& test : tests) {

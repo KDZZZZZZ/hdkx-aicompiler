@@ -84,6 +84,11 @@ std::vector<runtime::ValueId> AbiNonOutputs(const runtime::ControlTask& task,
 
 void RequireProductionSubset(const runtime::ControlPlan& plan,
                              const CompileConfig& config) {
+#if !KXC_USE_LLVM
+    (void)plan;
+    (void)config;
+    Fail("requires a build with KXC_ENABLE_LLVM=ON for real CPU artifacts");
+#else
     if (config->target->device_type != kCPU || config->target->device_id != 0 ||
         config->target->kind != "llvm") {
         Fail("requires the available LLVM CPU:0 backend; CUDA and non-default devices are not enabled");
@@ -95,14 +100,12 @@ void RequireProductionSubset(const runtime::ControlPlan& plan,
     }
     for (const auto& region : plan.regions) {
         for (const auto& task : region.tasks) {
-            if (task.kind == runtime::ControlTaskKind::kLoop) {
-                Fail("Relay source has no Loop node; generic Relay Loop/recursion is not supported");
-            }
             if (task.device != Device::CPU() || task.stream != "default") {
                 Fail("requires CPU:0/default stream tasks");
             }
         }
     }
+#endif
 }
 
 struct ResolvedBinding final {

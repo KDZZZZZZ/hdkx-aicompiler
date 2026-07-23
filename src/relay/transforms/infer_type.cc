@@ -171,6 +171,49 @@ protected:
         return true_type;
     }
 
+    // A While binds exactly one carried state for its condition and body.
+    Type VisitWhile(const WhileNode* op, const Expr& ref) override {
+        (void)ref;
+        if (op->max_trip_count < 0) {
+            throw std::runtime_error("While max_trip_count must be non-negative");
+        }
+        const Type initial_type = Visit(op->initial_state);
+        if (!initial_type.As<TensorTypeNode>() && !initial_type.As<TupleTypeNode>()) {
+            throw std::runtime_error("While initial_state must be TensorType or TupleType");
+        }
+        if (!op->loop_var.defined()) {
+            throw std::runtime_error("While requires a defined loop_var");
+        }
+        if (op->loop_var->type_annotation.defined() &&
+            !TypeEqual(op->loop_var->type_annotation, initial_type)) {
+            throw std::runtime_error("While loop_var annotation mismatch for " +
+                                     op->loop_var->vid->name_hint);
+        }
+        const auto saved = var_env_.find(op->loop_var.get());
+        const bool had_saved = saved != var_env_.end();
+        const Type saved_type = had_saved ? saved->second : Type();
+        var_env_[op->loop_var.get()] = initial_type;
+        SetCheckedType(Expr(ObjectRef(op->loop_var)), initial_type);
+        const Type condition_type = Visit(op->condition);
+        const auto* condition_tensor = condition_type.As<TensorTypeNode>();
+        if (!condition_tensor || condition_tensor->dtype != "bool" ||
+            !condition_tensor->shape.empty()) {
+            throw std::runtime_error("While condition must be a scalar bool TensorType");
+        }
+        const Type body_type = Visit(op->body);
+        if (had_saved) {
+            var_env_[op->loop_var.get()] = saved_type;
+        } else {
+            var_env_.erase(op->loop_var.get());
+        }
+        if (!TypeEqual(initial_type, body_type)) {
+            throw std::runtime_error("While body type mismatch: " +
+                                     TypeToString(initial_type) + " vs " +
+                                     TypeToString(body_type));
+        }
+        return initial_type;
+    }
+
     // 推导 let 绑定值、校验注解并扩展变量环境。
     Type VisitLet(const LetNode* op, const Expr& ref) override {
         (void)ref;

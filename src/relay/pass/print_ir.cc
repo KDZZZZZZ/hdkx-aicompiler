@@ -100,6 +100,19 @@ public:
             Print(if_node->false_branch, indent + indent_spaces_ * 2);
             return;
         }
+        if (const auto* while_node = expr.As<WhileNode>()) {
+            os_ << Indent(indent) << "While(max_trip_count="
+                << while_node->max_trip_count << ", var="
+                << while_node->loop_var->vid->name_hint << ")"
+                << CheckedTypeSuffix(expr) << "\n";
+            os_ << Indent(indent + indent_spaces_) << "initial_state:\n";
+            Print(while_node->initial_state, indent + indent_spaces_ * 2);
+            os_ << Indent(indent + indent_spaces_) << "condition:\n";
+            Print(while_node->condition, indent + indent_spaces_ * 2);
+            os_ << Indent(indent + indent_spaces_) << "body:\n";
+            Print(while_node->body, indent + indent_spaces_ * 2);
+            return;
+        }
         if (const auto* let_node = expr.As<LetNode>()) {
             os_ << Indent(indent) << "Let(var=" << let_node->var->vid->name_hint << ")"
                 << CheckedTypeSuffix(expr) << "\n";

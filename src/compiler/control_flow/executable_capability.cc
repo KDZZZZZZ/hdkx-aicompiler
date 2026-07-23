@@ -25,6 +25,7 @@ std::string NodeKind(const Expr& expr) {
     if (expr.As<TupleNode>()) return "Tuple";
     if (expr.As<TupleGetItemNode>()) return "TupleGetItem";
     if (expr.As<IfNode>()) return "If";
+    if (expr.As<WhileNode>()) return "While";
     if (expr.As<LetNode>()) return "Let";
     if (expr.As<relay::OpNode>()) return "Op";
     return "Unknown";
@@ -344,6 +345,41 @@ private:
                 !TypeEqual(expr.checked_type(), if_node->true_branch.checked_type())) {
                 Fail(path, "If", "exact_if_branch_type",
                      "If branches and result must have exactly the same type");
+            }
+            return;
+        }
+        if (const auto* while_node = expr.As<WhileNode>()) {
+            if (!options_.allow_while) {
+                Fail(path, "While", "control_flow.loop",
+                     "static-dataflow executable does not enable While");
+            }
+            if (while_node->max_trip_count < 0 || !while_node->loop_var.defined()) {
+                Fail(path, "While", "bounded_loop",
+                     "While requires a defined binder and non-negative max_trip_count");
+            }
+            Visit(while_node->initial_state, path + ".initial_state");
+            RequireChecked(Expr(ObjectRef(while_node->loop_var)), path + ".loop_var");
+            VerifyType(while_node->loop_var.checked_type(), path + ".loop_var.checked_type");
+            if (!TypeEqual(while_node->initial_state.checked_type(),
+                           while_node->loop_var.checked_type())) {
+                Fail(path + ".loop_var", "Var", "typed_loop_binding",
+                     "loop binder must exactly match initial state");
+            }
+            bindings_[while_node->loop_var.get()] += 1;
+            Visit(while_node->condition, path + ".condition");
+            Visit(while_node->body, path + ".body");
+            auto binding = bindings_.find(while_node->loop_var.get());
+            if (--binding->second == 0) bindings_.erase(binding);
+            const auto* predicate = while_node->condition.checked_type().As<TensorTypeNode>();
+            if (!predicate || predicate->dtype != "bool" || !predicate->shape.empty()) {
+                Fail(path + ".condition", NodeKind(while_node->condition),
+                     "scalar_bool_loop_predicate", "While condition must be CPU scalar bool");
+            }
+            if (!TypeEqual(while_node->initial_state.checked_type(),
+                           while_node->body.checked_type()) ||
+                !TypeEqual(expr.checked_type(), while_node->initial_state.checked_type())) {
+                Fail(path, "While", "exact_loop_state_type",
+                     "initial state, body, and result must have exactly the same type");
             }
             return;
         }

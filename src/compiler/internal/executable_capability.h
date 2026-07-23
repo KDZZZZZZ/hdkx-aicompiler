@@ -17,6 +17,7 @@ struct ExecutableCapabilityOptions {
 
     uint32_t version{kVersion};
     bool allow_if{false};
+    bool allow_while{false};
     bool allow_tuple_parameters{false};
     bool allow_nested_tuple_call_outputs{false};
     bool allow_device_regions{false};

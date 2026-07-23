@@ -123,6 +123,7 @@ std::string RelayNodeKind(const Expr& expr) {
     if (expr.As<TupleNode>()) return "Tuple";
     if (expr.As<TupleGetItemNode>()) return "TupleGetItem";
     if (expr.As<IfNode>()) return "If";
+    if (expr.As<WhileNode>()) return "While";
     if (expr.As<LetNode>()) return "Let";
     if (expr.As<OpNode>()) return "Op";
     return "<unknown>";
