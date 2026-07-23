@@ -49,5 +49,23 @@
       "name": "dev-mingw-cpu",
       "configurePreset": "dev-mingw-cpu"
     }
+  ],
+  "testPresets": [
+    {
+      "name": "dev-ninja-cpu-adaptive",
+      "displayName": "Dev Ninja CPU adaptive tests",
+      "configurePreset": "dev-ninja-cpu",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      },
+      "filter": {
+        "include": {
+          "label": "adaptive"
+        }
+      }
+    }
   ]
 }

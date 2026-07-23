@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.23)
 
 project(hdkx_aicompiler LANGUAGES C CXX)
 
+include(CTest)
+find_package(Threads REQUIRED)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -37,6 +40,7 @@ set(KXC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/include")
 
 set(KXC_PUBLIC_HEADERS
+  include/kxc/compiler/adaptive.h
   include/kxc/compiler/capability.h
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
@@ -433,6 +437,9 @@ set(KXC_RUNTIME_EXECUTABLE_SOURCES
 )
 
 set(KXC_COMPILER_SOURCES
+  src/compiler/adaptive/compile_coordinator.cc
+  src/compiler/adaptive/contracts.cc
+  src/compiler/adaptive/kernel_slot.cc
   src/compiler/cache/primitive_cache.cc
   src/compiler/capability.cc
   src/compiler/compile_config.cc
@@ -566,6 +573,7 @@ kxc_configure_module_obj(kxc_runtime_executable_obj)
 
 add_library(kxc_compiler_obj OBJECT ${KXC_COMPILER_SOURCES})
 kxc_configure_module_obj(kxc_compiler_obj)
+target_link_libraries(kxc_compiler_obj PRIVATE Threads::Threads)
 kxc_enable_cuda(kxc_compiler_obj)
 kxc_enable_llvm(kxc_compiler_obj)
 
@@ -628,7 +636,7 @@ endforeach()
 add_library(kxc_runtime STATIC ${KXC_RUNTIME_OBJECT_FILES})
 add_library(kxc::runtime ALIAS kxc_runtime)
 set_target_properties(kxc_runtime PROPERTIES EXPORT_NAME runtime)
-target_link_libraries(kxc_runtime PUBLIC kxc_public_api)
+target_link_libraries(kxc_runtime PUBLIC kxc_public_api Threads::Threads)
 if(KXC_USE_CUDA)
   target_link_libraries(kxc_runtime PRIVATE ${KXC_CUDA_LIBS})
 endif()
@@ -650,7 +658,7 @@ function(kxc_add_runtime_exe target source_file)
   )
   # Ensure module objects build before linking executables.
   add_dependencies(${target} ${KXC_MODULE_OBJECT_TARGETS})
-  target_link_libraries(${target} PRIVATE kxc_public_api)
+  target_link_libraries(${target} PRIVATE kxc_public_api Threads::Threads)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
     KXC_USE_LLVM=${KXC_USE_LLVM})
@@ -793,6 +801,28 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/kxc")
 
 if(KXC_BUILD_PASS_TESTS)
+  kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
+  kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
+  kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
+  if(BUILD_TESTING)
+    foreach(_kxc_adaptive_test IN ITEMS
+        adaptive_contract_test
+        adaptive_coordinator_test
+        adaptive_kernel_slot_test)
+      add_test(NAME ${_kxc_adaptive_test} COMMAND ${_kxc_adaptive_test})
+      set_tests_properties(${_kxc_adaptive_test} PROPERTIES
+        LABELS "adaptive;cpu")
+    endforeach()
+
+    add_custom_target(run_adaptive_tests
+      COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
+              -L adaptive -L cpu
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+      DEPENDS adaptive_contract_test adaptive_coordinator_test
+              adaptive_kernel_slot_test
+      USES_TERMINAL
+      COMMENT "Run adaptive CPU CTest suite")
+  endif()
   kxc_add_runtime_exe(object_test test/object_test.cpp)
   kxc_add_runtime_exe(packed_func_test test/packed_func_test.cpp)
   kxc_add_runtime_exe(registry_test test/registry_test.cpp)

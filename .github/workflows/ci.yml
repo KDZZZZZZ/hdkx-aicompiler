@@ -65,7 +65,7 @@ jobs:
       - name: Run all CPU/core CTest checks
         run: >
           ctest --test-dir out/build/ci-cpu --output-on-failure
-          --label-regex '(^|;)cpu(;|$)'
+          --no-tests=error --label-regex '(^|;)cpu(;|$)'
 
       - name: Run experimental shape contract tests
         run: >
