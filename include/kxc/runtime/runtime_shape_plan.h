@@ -1,9 +1,9 @@
 /*! \file include/kxc/runtime/runtime_shape_plan.h
- * \brief Default-off, CPU-only dynamic-shape launch contract.
+ * \brief Default-off restricted runtime shape launch contracts.
  *
  * This is deliberately independent of Compiler, Relay, caches, and adaptive
- * runtime APIs.  Its bound launcher is restricted local evidence, not a
- * CompiledModule dynamic-output ABI.
+ * runtime APIs. CPU entries remain trusted local synchronous evidence; CUDA
+ * entries use a separate, explicit completion ABI.
  */
 #pragma once
 
@@ -16,9 +16,13 @@
 #include <string>
 #include <vector>
 
+#include "kxc/runtime/device_stream.h"
+
 namespace kxc::runtime {
 
 using RuntimeShapeExtent = std::uint64_t;
+
+enum class RuntimeShapeExecutionKind { kSynchronousCpu, kCudaAsync };
 
 /*! \brief Immutable checked extent expression. */
 class RuntimeShapeExpr final {
@@ -59,7 +63,6 @@ struct RuntimeShapeInputAxisGuard {
     RuntimeShapeExtent upper{0};
     RuntimeShapeExtent divisible_by{1};
     std::optional<RuntimeShapeExtent> exact;
-    /*! \brief Optional equality to a previously checked input axis. */
     std::optional<RuntimeShapeInputAxisReference> equal_to;
 };
 
@@ -68,13 +71,10 @@ struct RuntimeShapeInputContract {
     std::size_t rank{0};
     std::string device{"CPU:0"};
     std::uint32_t abi_version{1};
-    /*! \brief Immutable axis constraints checked before ShapeEval or allocation. */
     std::vector<RuntimeShapeInputAxisGuard> axis_guards;
-    /*! \brief Require an exact-size, non-null (unless empty) CPU data buffer. */
     bool requires_data{false};
 };
 
-/*! \brief Ordered polymorphic scalar ABI mapped to one runtime input axis. */
 struct RuntimeShapeExtentScalar {
     std::uint32_t ordinal{0};
     std::string name;
@@ -86,7 +86,6 @@ struct RuntimeShapeExtentScalar {
     RuntimeShapeExtent divisible_by{1};
 };
 
-/*! \brief Shape and allocation contract for one dynamic output. */
 struct RuntimeShapeTensorContract {
     std::string dtype;
     std::vector<RuntimeShapeExpr> logical;
@@ -105,10 +104,11 @@ struct RuntimeShapeInput {
     std::string dtype;
     std::string device{"CPU:0"};
     std::uint32_t abi_version{1};
-    /*! \brief Optional caller-owned CPU input storage. */
     const void* data{nullptr};
     std::size_t bytes{0};
     std::shared_ptr<void> owner;
+    /*! \brief Required for CUDA inputs; backing storage must be on input.device. */
+    ::kxc::Storage storage;
 };
 
 struct RuntimeShapeOutput {
@@ -121,10 +121,10 @@ struct RuntimeShapeOutput {
 
 private:
     std::shared_ptr<void> owner_;
+    ::kxc::Storage storage_;
     friend class RuntimeShapeSession;
 };
 
-/*! \brief A deterministic test seam, explicitly fake and not CUDA evidence. */
 class FakeRuntimeShapeCompletion final {
 public:
     static std::shared_ptr<FakeRuntimeShapeCompletion> Pending();
@@ -139,50 +139,51 @@ private:
 };
 
 namespace detail {
-/*! \brief Deterministically fails the next owner transfer; test seam only. */
 void FailNextRuntimeShapeOwnerTransferForTest() noexcept;
 }  // namespace detail
 
 struct RuntimeShapeLaunchArgs {
     const std::vector<RuntimeShapeInput>& inputs;
     const std::vector<RuntimeShapeOutput>& outputs;
-    /*! \brief Evaluated values in the ordered polymorphic scalar ABI. */
     const std::vector<RuntimeShapeExtent>& runtime_extent_values;
-    /*! \brief Canonical full ABI bytes for this synchronous launch. */
     const std::string& exact_abi_fingerprint;
 };
 
 struct RuntimeShapeLaunchResult {
     bool accepted{true};
     std::string failure_reason;
-    /*! \brief Optional deterministic fake completion for retention tests only. */
     std::shared_ptr<FakeRuntimeShapeCompletion> fake_completion;
 };
 
-/*! \brief Trusted local synchronous launcher contract.
- *
- * The launcher is called synchronously while the runtime owns all argument
- * storage. It must not retain argument references and must not submit
- * asynchronous work. It is a trusted local-evidence declaration, not a
- * CompiledModule ABI or an executor fence.
- */
 using RuntimeShapeBoundLauncher =
     std::function<RuntimeShapeLaunchResult(const RuntimeShapeLaunchArgs&)>;
 
-/*! \brief Preselected trusted synchronous entry; not a general CompiledModule ABI. */
+/*! \brief CUDA-only launcher: submission is accepted only with real completion. */
+struct RuntimeShapeCudaLaunchArgs {
+    const std::vector<RuntimeShapeInput>& inputs;
+    const std::vector<RuntimeShapeOutput>& outputs;
+    const std::vector<RuntimeShapeExtent>& runtime_extent_values;
+    const std::string& exact_abi_fingerprint;
+    ::kxc::DeviceStream stream;
+};
+using RuntimeShapeCudaBoundLauncher =
+    std::function<::kxc::AsyncOperation(const RuntimeShapeCudaLaunchArgs&)>;
+
 struct RuntimeShapeReadyEntry {
     std::string module_label;
     std::string entry_symbol;
     std::uint32_t abi_version{1};
     bool ready{false};
-    /*! \brief Full canonical ABI bytes, not a digest. */
     std::string exact_abi_fingerprint;
+    /*! \brief CPU-only synchronous callback; never used for CUDA async entries. */
     RuntimeShapeBoundLauncher launcher;
-    /*! \brief Opaque module-side lifetime owner retained by every result. */
+    /*! \brief CUDA async callback; must return a defined same-device completion. */
+    RuntimeShapeCudaBoundLauncher cuda_launcher;
+    RuntimeShapeExecutionKind execution_kind{RuntimeShapeExecutionKind::kSynchronousCpu};
+    /*! \brief Required CUDA:N identity for kCudaAsync; empty for legacy CPU entries. */
+    std::string device_contract;
     std::shared_ptr<void> module_lease;
-    /*! \brief Selected artifact identity bound into the canonical entry ABI. */
     std::string artifact_identity;
-    /*! \brief Exact canonical bucket tail-policy identity; empty for non-buckets. */
     std::string tail_policy_identity;
 };
 
@@ -191,26 +192,26 @@ struct RuntimeShapePlanSpec {
     std::uint32_t abi_version{kAbiVersion};
     std::vector<RuntimeShapeInputContract> inputs;
     std::vector<RuntimeShapeTensorContract> outputs;
-    /*! \brief Ordered scalar ABI for polymorphic plans; empty otherwise. */
     std::vector<RuntimeShapeExtentScalar> runtime_extent_abi;
     RuntimeShapeReadyEntry entry;
     std::size_t run_byte_budget{0};
 };
 
-/*! \brief Frozen immutable shape plan with no mutable per-run state. */
 class RuntimeShapePlan final {
 public:
     static constexpr std::uint32_t kAbiVersion = RuntimeShapePlanSpec::kAbiVersion;
     RuntimeShapePlan() = default;
     explicit RuntimeShapePlan(RuntimeShapePlanSpec spec);
 
-    /*! \brief Deterministic full canonical ABI bytes for a trusted entry binding. */
+    /*! \brief Full canonical ABI. Legacy CPU calls retain their v1 bytes. */
     static std::string ExactAbiFingerprint(
         const std::vector<RuntimeShapeInputContract>& inputs,
         const std::vector<RuntimeShapeTensorContract>& outputs,
         const std::vector<RuntimeShapeExtentScalar>& runtime_extent_abi = {},
         const std::string& artifact_identity = {},
-        const std::string& tail_policy_identity = {});
+        const std::string& tail_policy_identity = {},
+        RuntimeShapeExecutionKind execution_kind = RuntimeShapeExecutionKind::kSynchronousCpu,
+        const std::string& device_contract = {});
 
     bool defined() const noexcept;
     void Validate() const;

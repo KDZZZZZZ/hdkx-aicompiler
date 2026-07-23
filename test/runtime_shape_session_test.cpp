@@ -142,8 +142,11 @@ bool TestPlanContractsAndExactAbiMismatch() {
         return RuntimeShapeLaunchResult{};
     }, 8));
     const auto over_budget = budget.Run({Input(3)});  // 6 float32 elements.
-    CHECK(!over_budget.ok() && !Has(over_budget, RuntimeShapeEventKind::kAllocate),
-          "budget failure precedes allocation and launch");
+    CHECK(!over_budget.ok() &&
+          over_budget.failure_kind() == RuntimeShapeFailureKind::kResourceExhausted &&
+          over_budget.outputs().empty() && over_budget.retained_device_bytes() == 0 &&
+          !Has(over_budget, RuntimeShapeEventKind::kAllocate),
+          "typed budget failure precedes allocation and publishes no storage");
     RuntimeShapeSession max_bytes(MakePlan([](const RuntimeShapeLaunchArgs&) {
         return RuntimeShapeLaunchResult{};
     }, 4096, 8));
@@ -222,6 +225,15 @@ bool TestScalarAbiAndRequiredInputData() {
     wrong_bytes.bytes -= sizeof(float);
     CHECK(!RuntimeShapeSession(RuntimeShapePlan(spec)).Run({wrong_bytes}).ok(),
           "required input byte size fails before ShapeEval");
+    RuntimeShapeInput guard_miss = valid;
+    guard_miss.shape[0] = 5;
+    guard_miss.bytes = 5 * sizeof(float);
+    const auto missed = RuntimeShapeSession(RuntimeShapePlan(spec)).Run({guard_miss});
+    CHECK(!missed.ok() &&
+          missed.failure_kind() == RuntimeShapeFailureKind::kApplicabilityMiss &&
+          missed.outputs().empty() && missed.retained_device_bytes() == 0 &&
+          !Has(missed, RuntimeShapeEventKind::kAllocate),
+          "typed guard miss precedes allocation and publishes no storage");
     RuntimeShapePlanSpec gap = spec;
     gap.runtime_extent_abi[0].ordinal = 1;
     gap.entry.exact_abi_fingerprint = RuntimeShapePlan::ExactAbiFingerprint(
