@@ -155,6 +155,31 @@ bool TestRejectReductionAndWriteConflict() {
     return true;
 }
 
+// Indirect Load indices are gather-like accesses and must be rejected independently of op names.
+bool TestRejectIndirectGatherLoad() {
+    using namespace kxc;
+    using namespace kxc::tir;
+    const DataType i64 = DataType::Int(64);
+    const DataType f32 = DataType::Float(32);
+    tir::Var data("data", f32);
+    tir::Var indices("indices", i64);
+    tir::Var out("out", f32);
+    tir::Var i("i", i64);
+    Stmt body = For(i, IntImm(0, i64), IntImm(8, i64), ForType::Serial,
+                    Store(out, Load(data, Load(indices, i)), i));
+    Map<tir::Var, Buffer> buffers;
+    for (const auto& parameter : Array<tir::Var>{data, indices, out}) {
+        buffers.Set(parameter, Buffer(parameter, parameter->dtype, {IntImm(8, i64)}, {},
+                                      IntImm(0, i64), parameter->name_hint, 4, 0));
+    }
+    TEST_CHECK(Throws([&] {
+                   BindCudaThreads(PrimFunc({data, indices, out}, body, buffers, {}),
+                                   MakeCudaTarget());
+               }),
+               "rank-1 indirect gather load should be rejected");
+    return true;
+}
+
 // 动态工作量、缺失 capability、CPU target 和非法 thread index 都必须明确失败。
 bool TestRejectInvalidContracts() {
     using namespace kxc;
@@ -223,6 +248,7 @@ int main() {
         {"elementwise_schedule", TestElementwiseSchedule},
         {"relu_pipeline_registration", TestReluPipelineRegistration},
         {"reject_reduction_and_conflict", TestRejectReductionAndWriteConflict},
+        {"reject_indirect_gather_load", TestRejectIndirectGatherLoad},
         {"reject_invalid_contracts", TestRejectInvalidContracts},
         {"reject_allocation_and_launch_overflow",
          TestRejectAllocationAndLaunchOverflow},

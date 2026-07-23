@@ -324,6 +324,20 @@ public:
     static TransposeAttrs Create(Array<int64_t> perm);
 };
 
+/*! \brief gather 的数据轴属性。 */
+class GatherAttrsNode : public BaseAttrsNode {
+public:
+    int axis = 0;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class GatherAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(GatherAttrs, GatherAttrsNode)
+
+public:
+    static GatherAttrs Create(int axis = 0);
+};
+
 KXC_DEFINE_SIMPLE_ATTRS(ReluAttrs)
 KXC_DEFINE_SIMPLE_ATTRS(GlobalAvgPool2DAttrs)
 

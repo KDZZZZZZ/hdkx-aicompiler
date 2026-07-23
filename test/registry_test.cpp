@@ -73,6 +73,18 @@ bool TestRelayOperatorRegistryLookupAndSpecs() {
     TEST_CHECK(ExpectThrow([&] { kxc::relay::Op::Get("unknown.namespaced_op"); }),
                "namespaced missing op lookup should also throw");
 
+    const kxc::relay::Op& gather = kxc::relay::Op::Get("gather");
+    TEST_CHECK(gather->name == "gather" &&
+                   gather.spec().attrs_type_key == "GatherAttrs",
+               "gather should expose its canonical attrs contract");
+    TEST_CHECK(kxc::Registry::Global().Get("kxc.relay.op._make.gather").defined(),
+               "gather canonical FFI helper should be registered");
+    const std::string gather_attrs = kxc::relay::SerializeAttrs(
+        kxc::relay::GatherAttrs::Create(-1));
+    TEST_CHECK(Contains(gather_attrs, "GatherAttrsNode") &&
+                   Contains(gather_attrs, "axis"),
+               "gather attrs serialization should include the canonical axis");
+
     const kxc::relay::Op& copy = kxc::relay::Op::Get("device.copy");
     TEST_CHECK(copy.has_spec(), "explicitly registered control op should expose metadata");
     TEST_CHECK(copy.spec().effect == kxc::relay::OperatorEffectKind::kDeviceCommunication,

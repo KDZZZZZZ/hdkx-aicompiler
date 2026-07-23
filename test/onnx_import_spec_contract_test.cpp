@@ -90,6 +90,29 @@ void WriteFixture(const TemporaryDirectory& directory, const std::string& input_
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+void WriteGatherFixture(const TemporaryDirectory& directory,
+                        const std::string& output_shape) {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "data", "shape": [2, 3, 4], "dtype": "float32"},
+      {"name": "indices", "shape": [5, 6], "dtype": "int64"}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "gather", "op_name": "gather", "inputs": ["data", "indices"], "outputs": ["out"], "attrs": {"axis": 1}}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
 bool TestValidStaticMatMulSoftmaxTranspose() {
     TemporaryDirectory directory;
     WriteFixture(directory, "[2, 2, 3]", "[2, 4, 2]");
@@ -101,6 +124,33 @@ bool TestValidStaticMatMulSoftmaxTranspose() {
     TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
                            {2, 4, 2}, "float32"),
                "reified output should preserve broadcast shape and inferred dtype");
+    return true;
+}
+
+bool TestValidStaticGather() {
+    TemporaryDirectory directory;
+    WriteGatherFixture(directory, "[2, 5, 6, 4]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Gather import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 5, 6, 4}, "float32"),
+               "reified Gather output should insert indices shape at axis");
+    return true;
+}
+
+bool TestGatherDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteGatherFixture(directory, "[2, 5, 4]");
+
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "declared Gather output shape must match inferred output");
     return true;
 }
 
@@ -148,6 +198,8 @@ bool TestDeclaredOutputDTypeMismatchIsRejected() {
 int main() {
     const std::vector<std::pair<std::string, bool (*)()>> tests = {
         {"valid_static_matmul_softmax_transpose", TestValidStaticMatMulSoftmaxTranspose},
+        {"valid_static_gather", TestValidStaticGather},
+        {"gather_declared_output_mismatch", TestGatherDeclaredOutputMismatchIsRejected},
         {"negative_input_dimension", TestNegativeInputDimensionIsRejected},
         {"declared_output_shape_mismatch", TestDeclaredOutputShapeMismatchIsRejected},
         {"declared_output_dtype_mismatch", TestDeclaredOutputDTypeMismatchIsRejected},

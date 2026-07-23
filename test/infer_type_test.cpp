@@ -189,6 +189,56 @@ bool TestTransformAndReduceOps() {
     return true;
 }
 
+bool TestGatherInferAndLoweringContract() {
+    kxc::Var data("data", kxc::TensorType({2, 3, 4}, "float32"));
+    kxc::Var indices("indices", kxc::TensorType({5, 6}, "int64"));
+    kxc::Call axis_one(kxc::relay::Op::Get("gather"), {data, indices},
+                       kxc::relay::GatherAttrs::Create(1));
+    kxc::Function func({data, indices}, axis_one);
+    kxc::relay::InferTypePass(func);
+    TEST_CHECK(CheckTensor(axis_one.checked_type(), {2, 5, 6, 4}, "float32"),
+               "gather must insert indices shape at axis");
+    TEST_CHECK(kxc::relay::LowerToTIR(func)->prim_func.defined(),
+               "static gather should lower to TIR");
+
+    kxc::Call negative_axis(kxc::relay::Op::Get("gather"), {data, indices},
+                            kxc::relay::GatherAttrs::Create(-1));
+    kxc::Function negative_axis_func({data, indices}, negative_axis);
+    kxc::relay::InferTypePass(negative_axis_func);
+    TEST_CHECK(CheckTensor(negative_axis.checked_type(), {2, 3, 5, 6}, "float32"),
+               "gather must normalize negative axis");
+
+    kxc::Var bad_indices("bad_indices", kxc::TensorType({1}, "float32"));
+    kxc::Call invalid_dtype(kxc::relay::Op::Get("gather"), {data, bad_indices},
+                            kxc::relay::GatherAttrs::Create(0));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data, bad_indices}, invalid_dtype));
+               }),
+               "gather non-integer indices should fail");
+    kxc::Call invalid_axis(kxc::relay::Op::Get("gather"), {data, indices},
+                           kxc::relay::GatherAttrs::Create(3));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data, indices}, invalid_axis));
+               }),
+               "gather axis outside data rank should fail");
+    kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
+    kxc::Call invalid_rank(kxc::relay::Op::Get("gather"), {scalar, indices},
+                           kxc::relay::GatherAttrs::Create(0));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({scalar, indices}, invalid_rank));
+               }),
+               "gather rank-zero data should fail");
+    kxc::Var huge("huge", kxc::TensorType({2147483648LL}, "float32"));
+    kxc::Var i32("i32", kxc::TensorType({1}, "int32"));
+    kxc::Call overflow(kxc::relay::Op::Get("gather"), {huge, i32},
+                       kxc::relay::GatherAttrs::Create(0));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({huge, i32}, overflow));
+               }),
+               "gather int32 indices must reject axis extent above INT32_MAX");
+    return true;
+}
+
 bool TestSoftmaxInferTypeContract() {
     kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
     kxc::Call scalar_softmax(kxc::relay::Op::Get("softmax"), {scalar},
@@ -356,6 +406,7 @@ int main() {
         {"matrix_and_dense_ops", TestMatrixAndDenseOps},
         {"conv_and_pool_ops", TestConvAndPoolOps},
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
+        {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},
         {"negative_extent_lowering_gates", TestNegativeExtentLoweringGates},
         {"mvp_elementwise_lower_to_tir", TestMvpElementwiseLowerToTIR},

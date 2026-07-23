@@ -268,6 +268,54 @@ def test_matmul_rejects_declared_output_mismatch():
         )
 
 
+def _gather_model(data_shape, indices_shape, *, axis=0, indices_dtype=TensorProto.INT64,
+                  output_shape=(1,), output_dtype=TensorProto.FLOAT):
+    graph = helper.make_graph(
+        [helper.make_node("Gather", ["data", "indices"], ["out"], name="gather", axis=axis)],
+        "gather_test",
+        [helper.make_tensor_value_info("data", TensorProto.FLOAT, data_shape),
+         helper.make_tensor_value_info("indices", indices_dtype, indices_shape)],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6
+    )
+
+
+def test_gather_mapping_and_inferred_output_contract():
+    imported = import_onnx_model(
+        _gather_model([2, 3, 4], [5, 6], axis=1, output_shape=[2, 5, 6, 4])
+    )
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("gather", {"axis": 1}),
+    ]
+    assert imported.function.outputs[0].shape == [2, 5, 6, 4]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_gather_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(
+            _gather_model([2, 3, 4], [5, 6], axis=1, output_shape=[2, 5, 4])
+        )
+
+
+@pytest.mark.parametrize(
+    ("data_shape", "indices_dtype", "axis", "message"),
+    [
+        ([], TensorProto.INT64, 0, "data rank >= 1"),
+        ([2, 3], TensorProto.FLOAT, 0, "int32 or int64 indices"),
+        ([2, 3], TensorProto.INT64, 2, "axis 2 is out of range"),
+    ],
+)
+def test_gather_rejects_invalid_static_contract(data_shape, indices_dtype, axis, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(
+            _gather_model(data_shape, [1], axis=axis, indices_dtype=indices_dtype)
+        )
+
+
 def test_matmul_softmax_transpose_mapping_and_attrs():
     model = _static_operator_model(
         [

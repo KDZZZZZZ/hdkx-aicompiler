@@ -5,6 +5,7 @@
 #include "kxc/relay/type_infer.h"
 
 #include <algorithm>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -554,6 +555,38 @@ Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types) {
         }
         seen[static_cast<size_t>(normalized)] = true;
         out.push_back(data->shape[static_cast<size_t>(normalized)]);
+    }
+    return MakeTensorType(out, data->dtype);
+}
+
+// 按 ONNX Gather 规则替换 data.axis，并验证静态索引类型边界。
+Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("gather", input_types, 2);
+    const auto* data = RequireTensor("gather", input_types[0], "data");
+    const auto* indices = RequireTensor("gather", input_types[1], "indices");
+    if (data->shape.empty()) {
+        throw std::runtime_error("gather requires data rank >= 1");
+    }
+    if (indices->dtype != "int32" && indices->dtype != "int64") {
+        throw std::runtime_error("gather indices dtype must be int32 or int64");
+    }
+    const auto* gather_attrs = attrs.As<GatherAttrsNode>();
+    if (!gather_attrs) {
+        throw std::runtime_error("gather requires GatherAttrs");
+    }
+    const int axis = NormalizeAxis("gather", gather_attrs->axis,
+                                   static_cast<int>(data->shape.size()));
+    const int64_t extent = data->shape[static_cast<size_t>(axis)];
+    if (indices->dtype == "int32" && IsKnown(extent) &&
+        extent > std::numeric_limits<int32_t>::max()) {
+        throw std::runtime_error("gather int32 indices cannot address axis extent > INT32_MAX");
+    }
+    std::vector<int64_t> out;
+    out.reserve(data->shape.size() + indices->shape.size() - 1);
+    for (int i = 0; i < axis; ++i) out.push_back(data->shape[static_cast<size_t>(i)]);
+    for (int64_t dim : indices->shape) out.push_back(dim);
+    for (size_t i = static_cast<size_t>(axis) + 1; i < data->shape.size(); ++i) {
+        out.push_back(data->shape[i]);
     }
     return MakeTensorType(out, data->dtype);
 }

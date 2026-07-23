@@ -27,6 +27,7 @@ ONNX_TO_RELAY = {
     "MatMul": "matmul",
     "Softmax": "softmax",
     "Transpose": "transpose",
+    "Gather": "gather",
 }
 
 
@@ -95,9 +96,9 @@ def import_onnx_model(
         value_info.name: value_info
         for value_info in list(graph.input) + list(graph.output) + list(graph.value_info)
     }
-    matmul_output_declarations: dict[str, list[onnx.ValueInfoProto]] = {}
+    output_declarations: dict[str, list[onnx.ValueInfoProto]] = {}
     for value_info in list(graph.output) + list(graph.value_info):
-        matmul_output_declarations.setdefault(value_info.name, []).append(value_info)
+        output_declarations.setdefault(value_info.name, []).append(value_info)
 
     inputs = [
         _tensor_spec_from_value_info(value_info, default_batch)
@@ -108,7 +109,7 @@ def import_onnx_model(
 
     nodes: list[RelayNodeSpec] = []
     input_specs = {spec.name: spec for spec in inputs}
-    inferred_matmul_specs: dict[str, TensorSpec] = {}
+    inferred_static_specs: dict[str, TensorSpec] = {}
     available_values = {x.name for x in inputs} | set(params)
     for node in graph.node:
         if node.op_type not in ONNX_TO_RELAY:
@@ -122,14 +123,14 @@ def import_onnx_model(
             )
 
         if node.op_type == "MatMul":
-            inferred_matmul_specs[node.output[0]] = _infer_matmul_spec(
-                node,
-                input_specs,
-                params,
-                inferred_matmul_specs,
-                value_info_by_name,
-                matmul_output_declarations,
-                default_batch,
+            inferred_static_specs[node.output[0]] = _infer_matmul_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
+        if node.op_type == "Gather":
+            inferred_static_specs[node.output[0]] = _infer_gather_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
             )
 
         missing = [name for name in node.input if name and name not in available_values]
@@ -158,11 +159,63 @@ def import_onnx_model(
     )
 
 
+def _resolve_static_input(
+    op_type: str,
+    node_name: str,
+    name: str,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    default_batch: int | None,
+) -> TensorSpec:
+    if name in inferred_specs:
+        return inferred_specs[name]
+    if name in params:
+        param = params[name]
+        return TensorSpec(name=name, shape=param.shape, dtype=param.dtype)
+    if name in input_specs:
+        return input_specs[name]
+    value_info = value_info_by_name.get(name)
+    if value_info is None:
+        raise ValueError(
+            f"{op_type} node '{node_name}' input '{name}' metadata is absent or unresolved"
+        )
+    try:
+        return _tensor_spec_from_value_info(value_info, default_batch)
+    except ValueError as error:
+        raise ValueError(
+            f"{op_type} node '{node_name}' input '{name}' metadata is unresolved: {error}"
+        ) from error
+
+
+def _validate_declared_output(
+    op_type: str,
+    node_name: str,
+    result: TensorSpec,
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> None:
+    for declared in output_declarations.get(result.name, []):
+        try:
+            declared_spec = _tensor_spec_from_value_info(declared, default_batch)
+        except ValueError as error:
+            raise ValueError(
+                f"{op_type} node '{node_name}' output '{result.name}' metadata is unresolved: {error}"
+            ) from error
+        if declared_spec.shape != result.shape or declared_spec.dtype != result.dtype:
+            raise ValueError(
+                f"{op_type} node '{node_name}' output '{result.name}' declaration "
+                f"{declared_spec.shape}/{declared_spec.dtype} does not match inferred "
+                f"{result.shape}/{result.dtype}"
+            )
+
+
 def _infer_matmul_spec(
     node: onnx.NodeProto,
     input_specs: dict[str, TensorSpec],
     params: dict[str, ParamTensor],
-    inferred_matmul_specs: dict[str, TensorSpec],
+    inferred_specs: dict[str, TensorSpec],
     value_info_by_name: dict[str, onnx.ValueInfoProto],
     output_declarations: dict[str, list[onnx.ValueInfoProto]],
     default_batch: int | None,
@@ -171,27 +224,11 @@ def _infer_matmul_spec(
     if len(node.input) != 2 or not all(node.input):
         raise ValueError(f"MatMul node '{node_name}' requires exactly two non-empty inputs")
 
-    def resolve(name: str) -> TensorSpec:
-        if name in inferred_matmul_specs:
-            return inferred_matmul_specs[name]
-        if name in params:
-            param = params[name]
-            return TensorSpec(name=name, shape=param.shape, dtype=param.dtype)
-        if name in input_specs:
-            return input_specs[name]
-        value_info = value_info_by_name.get(name)
-        if value_info is None:
-            raise ValueError(
-                f"MatMul node '{node_name}' input '{name}' metadata is absent or unresolved"
-            )
-        try:
-            return _tensor_spec_from_value_info(value_info, default_batch)
-        except ValueError as error:
-            raise ValueError(
-                f"MatMul node '{node_name}' input '{name}' metadata is unresolved: {error}"
-            ) from error
-
-    left, right = (resolve(name) for name in node.input)
+    left, right = (
+        _resolve_static_input("MatMul", node_name, name, input_specs, params,
+                              inferred_specs, value_info_by_name, default_batch)
+        for name in node.input
+    )
     if len(left.shape) < 2 or len(right.shape) < 2:
         raise ValueError(f"MatMul node '{node_name}' requires both inputs to have rank >= 2")
     if left.dtype != right.dtype:
@@ -221,19 +258,48 @@ def _infer_matmul_spec(
         dtype=left.dtype,
     )
 
-    for declared in output_declarations.get(result.name, []):
-        try:
-            declared_spec = _tensor_spec_from_value_info(declared, default_batch)
-        except ValueError as error:
-            raise ValueError(
-                f"MatMul node '{node_name}' output '{result.name}' metadata is unresolved: {error}"
-            ) from error
-        if declared_spec.shape != result.shape or declared_spec.dtype != result.dtype:
-            raise ValueError(
-                f"MatMul node '{node_name}' output '{result.name}' declaration "
-                f"{declared_spec.shape}/{declared_spec.dtype} does not match inferred "
-                f"{result.shape}/{result.dtype}"
-            )
+    _validate_declared_output("MatMul", node_name, result, output_declarations, default_batch)
+    return result
+
+
+def _infer_gather_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(f"Gather node '{node_name}' requires exactly two non-empty inputs")
+    data, indices = (
+        _resolve_static_input("Gather", node_name, name, input_specs, params,
+                              inferred_specs, value_info_by_name, default_batch)
+        for name in node.input
+    )
+    if not data.shape:
+        raise ValueError(f"Gather node '{node_name}' requires data rank >= 1")
+    if indices.dtype not in {"int32", "int64"}:
+        raise ValueError(
+            f"Gather node '{node_name}' requires int32 or int64 indices; got {indices.dtype}"
+        )
+    axis = _int_attr(_attrs_by_name(node), "axis", 0)
+    if axis < 0:
+        axis += len(data.shape)
+    if axis < 0 or axis >= len(data.shape):
+        raise ValueError(f"Gather node '{node_name}' axis {axis} is out of range")
+    if indices.dtype == "int32" and data.shape[axis] > np.iinfo(np.int32).max:
+        raise ValueError(
+            f"Gather node '{node_name}' int32 indices cannot address axis extent > INT32_MAX"
+        )
+    result = TensorSpec(
+        name=node.output[0],
+        shape=data.shape[:axis] + indices.shape + data.shape[axis + 1 :],
+        dtype=data.dtype,
+    )
+    _validate_declared_output("Gather", node_name, result, output_declarations, default_batch)
     return result
 
 
@@ -349,6 +415,8 @@ def _convert_attrs(
         return {"axis": _int_attr(attrs, "axis", -1)}
     if node.op_type == "Transpose":
         return {"perm": _list_attr(attrs, "perm", [])}
+    if node.op_type == "Gather":
+        return {"axis": _int_attr(attrs, "axis", 0)}
     if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
         return {}
     raise UnsupportedONNXOpError(

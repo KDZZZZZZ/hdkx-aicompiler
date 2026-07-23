@@ -54,6 +54,72 @@ void CollectIndependentWrites(const Stmt& stmt, const Var& loop_var,
         "BindCudaThreads only supports straight-line elementwise Store bodies");
 }
 
+// True when an expression contains any TIR Load, including through arithmetic or Select.
+bool ContainsLoad(const PrimExpr& expr) {
+    if (!expr.defined()) return false;
+    if (expr.As<LoadNode>()) return true;
+    if (const auto* binary = expr.As<BinaryOpNode>()) {
+        return ContainsLoad(binary->a) || ContainsLoad(binary->b);
+    }
+    if (const auto* select = expr.As<SelectNode>()) {
+        return ContainsLoad(select->condition) || ContainsLoad(select->true_value) ||
+               ContainsLoad(select->false_value);
+    }
+    if (const auto* call = expr.As<CallNode>()) {
+        for (const auto& argument : call->args) {
+            if (ContainsLoad(argument)) return true;
+        }
+        return false;
+    }
+    if (const auto* not_expr = expr.As<NotNode>()) return ContainsLoad(not_expr->value);
+    return false;
+}
+
+// Generic indirect-load detector: CUDA's first schedule only admits direct indexing.
+bool HasIndirectLoad(const PrimExpr& expr) {
+    if (!expr.defined()) return false;
+    if (const auto* load = expr.As<LoadNode>()) {
+        return ContainsLoad(load->index) || HasIndirectLoad(load->index) ||
+               HasIndirectLoad(load->predicate);
+    }
+    if (const auto* binary = expr.As<BinaryOpNode>()) {
+        return HasIndirectLoad(binary->a) || HasIndirectLoad(binary->b);
+    }
+    if (const auto* select = expr.As<SelectNode>()) {
+        return HasIndirectLoad(select->condition) || HasIndirectLoad(select->true_value) ||
+               HasIndirectLoad(select->false_value);
+    }
+    if (const auto* call = expr.As<CallNode>()) {
+        for (const auto& argument : call->args) {
+            if (HasIndirectLoad(argument)) return true;
+        }
+        return false;
+    }
+    if (const auto* not_expr = expr.As<NotNode>()) return HasIndirectLoad(not_expr->value);
+    return false;
+}
+
+void RejectIndirectLoads(const Stmt& stmt) {
+    if (const auto* store = stmt.As<StoreNode>()) {
+        if (HasIndirectLoad(store->value) || HasIndirectLoad(store->predicate)) {
+            throw std::invalid_argument(
+                "BindCudaThreads rejects indirect Load index expressions");
+        }
+        return;
+    }
+    if (const auto* let_stmt = stmt.As<LetStmtNode>()) {
+        if (HasIndirectLoad(let_stmt->value)) {
+            throw std::invalid_argument(
+                "BindCudaThreads rejects indirect Load index expressions");
+        }
+        RejectIndirectLoads(let_stmt->body);
+        return;
+    }
+    if (const auto* sequence = stmt.As<SeqStmtNode>()) {
+        for (const auto& child : sequence->seq) RejectIndirectLoads(child);
+    }
+}
+
 // 检查表达式是否读取某个被并行写入的 buffer，保守拒绝潜在跨线程 RAW 竞争。
 class WrittenBufferReadDetector : public TIRExprFunctor<bool> {
 public:
@@ -276,6 +342,7 @@ CudaScheduleResult BindCudaThreads(const PrimFunc& function, const Target& targe
         throw std::invalid_argument("BindCudaThreads requires at least one Store");
     }
     RejectReadAfterWrite(loop->body, writes);
+    RejectIndirectLoads(loop->body);
 
     const int64_t block_size =
         std::min<int64_t>(256, target->attrs.max_threads_per_block);

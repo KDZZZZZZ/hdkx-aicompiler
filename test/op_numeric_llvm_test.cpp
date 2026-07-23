@@ -13,6 +13,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -416,6 +417,36 @@ void TestSoftmax() {
     ExpectNear(out, expected);
 }
 
+// 验证 Gather 的正负合法索引、越界零填充和 INT64_MIN 防溢出语义。
+void TestGather() {
+    kxc::Var data("data", kxc::TensorType({4}, "float32"));
+    kxc::Var indices("indices", kxc::TensorType({5}, "int64"));
+    kxc::Call call(kxc::relay::Op::Get("gather"), {data, indices},
+                   kxc::relay::GatherAttrs::Create(0));
+    kxc::Function func({data, indices}, call);
+
+    std::vector<float> data_buf = {10, 20, 30, 40};
+    std::vector<int64_t> indices_buf = {0, -1, 4, -5,
+                                        std::numeric_limits<int64_t>::min()};
+    std::vector<float> out(5, 0.0f);
+    CompileAndRun("gather", func, {Input(data_buf), Input(indices_buf), Output(out)});
+    ExpectNear(out, {10, 40, 0, 0, 0});
+
+    kxc::Var empty_data("empty_data", kxc::TensorType({0}, "float32"));
+    kxc::Var empty_indices("empty_indices", kxc::TensorType({3}, "int64"));
+    kxc::Call empty_call(kxc::relay::Op::Get("gather"),
+                         {empty_data, empty_indices},
+                         kxc::relay::GatherAttrs::Create(0));
+    kxc::Function empty_func({empty_data, empty_indices}, empty_call);
+    std::vector<float> empty_data_buf;
+    std::vector<int64_t> empty_indices_buf = {0, -1,
+                                              std::numeric_limits<int64_t>::min()};
+    std::vector<float> empty_out(3, 1.0f);
+    CompileAndRun("gather_zero_axis_extent", empty_func,
+                  {Input(empty_data_buf), Input(empty_indices_buf), Output(empty_out)});
+    ExpectNear(empty_out, {0, 0, 0});
+}
+
 // 验证 Cast 的目标 dtype 与数值转换。
 void TestCast() {
     kxc::Var data("data", kxc::TensorType({4}, "float32"));
@@ -569,6 +600,7 @@ int main() {
         {"transpose", TestTranspose},
         {"reduce_mean", TestReduceMean},
         {"softmax", TestSoftmax},
+        {"gather", TestGather},
         {"cast", TestCast},
         {"model_add_chain", TestModelAddChain},
         {"model_mlp", TestModelMLP},

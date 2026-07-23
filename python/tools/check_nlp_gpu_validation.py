@@ -39,6 +39,12 @@ IMPLEMENTED = {
     ("batched_matmul", "llvm"),
     ("batched_matmul", "runtime"),
     ("batched_matmul", "numeric"),
+    ("embedding_gather", "frontend"),
+    ("embedding_gather", "relay"),
+    ("embedding_gather", "lowering"),
+    ("embedding_gather", "llvm"),
+    ("embedding_gather", "runtime"),
+    ("embedding_gather", "numeric"),
     ("prefill_exact", "relay"),
     ("prefill_exact", "lowering"),
     ("prefill_exact", "llvm"),
@@ -207,6 +213,10 @@ def validate_matrix(root, matrix):
         cuda = matrix["capabilities"][capability]["cuda"]
         if cuda["gate"] != "cuda_reduction_unsupported":
             raise ValidationError("{} CUDA reduction gate is not closed".format(capability))
+    gather_cuda = matrix["capabilities"]["embedding_gather"]["cuda"]
+    if (gather_cuda["status"] != "unsupported" or
+            gather_cuda["gate"] != "cuda_indirect_load_schedule_unsupported"):
+        raise ValidationError("embedding_gather CUDA indirect-load gate is open or inaccurate")
     for layer, gate in DYNAMIC_BATCHING_GATES.items():
         dynamic = matrix["capabilities"]["dynamic_batching"][layer]
         if dynamic["status"] != "unsupported" or dynamic["gate"] != gate:

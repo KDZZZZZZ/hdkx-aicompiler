@@ -223,6 +223,69 @@ te::Tensor CastCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         "cast", te::topi::cast(inputs[0], DTypeFromCastCode(cast_attrs->to), "T_cast"));
 }
 
+kxc::tir::PrimExpr TypedZero(kxc::tir::DataType dtype) {
+    if (dtype.code == 2) {
+        return kxc::tir::FloatImm(0.0, dtype);
+    }
+    return kxc::tir::IntImm(0, dtype);
+}
+
+te::Tensor GatherCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                         const kxc::Type& out_type) {
+    RequireInputCount("gather", inputs, 2);
+    const auto* output_type = RequireTensorOutput("gather", out_type);
+    const auto* gather_attrs = attrs.As<GatherAttrsNode>();
+    if (!gather_attrs) {
+        throw std::runtime_error("gather expects GatherAttrs");
+    }
+    const int data_rank = static_cast<int>(inputs[0]->shape.size());
+    int axis = gather_attrs->axis;
+    if (axis < 0) axis += data_rank;
+    if (data_rank < 1 || axis < 0 || axis >= data_rank) {
+        throw std::runtime_error("gather axis out of range");
+    }
+    const kxc::tir::DataType index_dtype = inputs[1]->dtype;
+    if (index_dtype.code != 0 || (index_dtype.bits != 32 && index_dtype.bits != 64)) {
+        throw std::runtime_error("gather indices dtype must be int32 or int64");
+    }
+    const auto* extent = inputs[0]->shape[static_cast<size_t>(axis)].As<kxc::tir::IntImmNode>();
+    if (!extent || extent->value < 0) {
+        throw std::runtime_error("gather lowering requires static non-negative axis extent");
+    }
+    const kxc::tir::PrimExpr axis_extent = kxc::tir::IntImm(extent->value, index_dtype);
+    const kxc::tir::PrimExpr zero_index = kxc::tir::IntImm(0, index_dtype);
+    const kxc::tir::PrimExpr negative_extent = kxc::tir::IntImm(-extent->value, index_dtype);
+    const size_t indices_rank = inputs[1]->shape.size();
+    return RequireDefined("gather", te::compute(
+        ShapeFromTensorType(output_type, "gather"),
+        [data = inputs[0], indices = inputs[1], axis, indices_rank, axis_extent,
+         zero_index, negative_extent](const Array<kxc::tir::Var>& output_indices) {
+            Array<kxc::tir::PrimExpr> index_coordinates;
+            for (size_t i = 0; i < indices_rank; ++i) {
+                index_coordinates.push_back(output_indices[static_cast<size_t>(axis) + i]);
+            }
+            const kxc::tir::PrimExpr index = indices(index_coordinates);
+            const kxc::tir::PrimExpr is_negative = index < zero_index;
+            const kxc::tir::PrimExpr valid_negative =
+                is_negative && !(index < negative_extent);
+            const kxc::tir::PrimExpr valid_nonnegative =
+                !is_negative && index < axis_extent;
+            const kxc::tir::PrimExpr valid = valid_negative || valid_nonnegative;
+            Array<kxc::tir::PrimExpr> data_coordinates;
+            for (int i = 0; i < axis; ++i) data_coordinates.push_back(output_indices[i]);
+            // The addition is reached only by the valid-negative Select branch.
+            data_coordinates.push_back(kxc::tir::Select(
+                valid_negative, index + axis_extent, index));
+            for (size_t i = static_cast<size_t>(axis) + indices_rank;
+                 i < output_indices.size(); ++i) {
+                data_coordinates.push_back(output_indices[i]);
+            }
+            // Select is lowered lazily; invalid indices never form a TIR Load.
+            return kxc::tir::Select(valid, data(data_coordinates), TypedZero(data->dtype));
+        },
+        "T_gather"));
+}
+
 KXC_REGISTER_OP(nn_flatten)
     .describe(R"doc(Flatten input tensor into a 2D tensor.)doc")
     .set_num_inputs(1)
@@ -254,6 +317,15 @@ KXC_REGISTER_OP(cast)
     .set_attr<std::string>("TAttrs", "CastAttrs")
     .set_attr<FInferType>("FInferType", CastInferType)
     .set_attr<FRelayToTE>("FRelayToTE", CastCompute);
+
+KXC_REGISTER_OP(gather)
+    .describe(R"doc(Gather slices along an axis; invalid runtime indices produce typed zero.)doc")
+    .set_num_inputs(2)
+    .add_argument("data", "Tensor", "The source tensor.")
+    .add_argument("indices", "Tensor", "int32 or int64 gather indices.")
+    .set_attr<std::string>("TAttrs", "GatherAttrs")
+    .set_attr<FInferType>("FInferType", GatherInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", GatherCompute);
 
 }  // namespace relay
 }  // namespace kxc

@@ -356,6 +356,24 @@ bool TestCudaReductionScheduleRejectedBeforeBackend() {
     return true;
 }
 
+bool TestCudaGatherScheduleRejectedBeforeBackend() {
+    using namespace kxc;
+    using namespace kxc::api;
+    Var data("data", TensorType({4}, "float32"));
+    Var indices("indices", TensorType({3}, "int64"));
+    Function gather(
+        {data, indices}, Call(relay::Op::Get("gather"), {data, indices},
+                              relay::GatherAttrs::Create(0)));
+    const CapabilityResult result = Verify(gather, FakeCudaTarget(), 3);
+    TEST_CHECK(!result.supported &&
+                   result.status == CapabilityStatus::kEligibleButNotExecutable &&
+                   HasIssue(result, "target_schedule") &&
+                   result.Diagnostic().find("indirect Load") != std::string::npos,
+               "CUDA gather must fail closed at the generic indirect-load schedule gate: " +
+                   result.Diagnostic());
+    return true;
+}
+
 bool TestPrePartitionBoundaryCannotBeBypassed() {
     using namespace kxc;
     Var cond("cond", TensorType({}, "bool"));
@@ -417,6 +435,7 @@ int main() {
         {"custom_binding_mismatch", TestCustomBindingMismatchRejectedBySharedLowering},
         {"backend_cuda_target", TestBackendAndCudaTargetFactsAreStructured},
         {"cuda_reduction_schedule", TestCudaReductionScheduleRejectedBeforeBackend},
+        {"cuda_gather_schedule", TestCudaGatherScheduleRejectedBeforeBackend},
         {"pre_partition_not_bypassed", TestPrePartitionBoundaryCannotBeBypassed},
         {"supported_implies_compile", TestSupportedImpliesProductionCompileSuccess},
     };

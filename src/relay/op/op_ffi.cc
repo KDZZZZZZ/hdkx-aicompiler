@@ -75,6 +75,11 @@ Call MakeTranspose(Expr data, Array<int64_t> axes) {
     return Call(GetOp("transpose"), {data}, TransposeAttrs::Create(std::move(axes)));
 }
 
+// 构造 Gather 调用。
+Call MakeGather(Expr data, Expr indices, int axis) {
+    return Call(GetOp("gather"), {data, indices}, GatherAttrs::Create(axis));
+}
+
 // 构造二维卷积调用及完整布局属性。
 Call MakeNNConv2D(Expr data, Expr weight, Array<int64_t> strides,
                   Array<int64_t> padding, Array<int64_t> dilation, int groups,
@@ -146,6 +151,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_mean").set_body(ToPackedFunc(Make
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape").set_body(ToPackedFunc(MakeReshape));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.softmax").set_body(ToPackedFunc(MakeSoftmax));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.transpose").set_body(ToPackedFunc(MakeTranspose));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.gather").set_body(ToPackedFunc(MakeGather));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_conv2d").set_body(ToPackedFunc(MakeNNConv2D));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_dense").set_body(ToPackedFunc(MakeNNDense));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_relu").set_body(ToPackedFunc(MakeNNRelu));

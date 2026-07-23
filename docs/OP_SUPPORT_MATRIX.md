@@ -16,7 +16,7 @@
 
 ## 当前 contract 范围
 
-下列 19 个算子已列入 Relay contract checker。此表只声明 checker 范围，**不是**
+下列 20 个算子已列入 Relay contract checker。此表只声明 checker 范围，**不是**
 production support 的肯定结论；production approval 保持 pending，直到下方 closure
 项目完成。
 
@@ -38,6 +38,7 @@ production support 的肯定结论；production approval 保持 pending，直到
 | `nn_flatten` | tensor.transform | declared | pending |
 | `reshape` | tensor.transform | declared | pending |
 | `transpose` | tensor.transform | declared | pending |
+| `gather` | tensor.transform | declared | pending |
 | `cast` | tensor.transform | declared | pending |
 | `reduce_mean` | tensor.reduce | declared | pending |
 | `softmax` | nn | declared | pending |
@@ -47,7 +48,7 @@ production support 的肯定结论；production approval 保持 pending，直到
 - `nn_gemm` 的 `transA != 0`：type relation 可表达，但 production TE lowering 明确拒绝；capability 返回 `eligible_but_not_executable`，不得标 supported。
 - function tuple parameter：当前 value graph ABI 只接受 `TensorType` parameters；tuple outputs/flat multi-output 不等于 tuple parameter support。
 - LLVM/CUDA backend 未编入当前构建：结构可 eligible，但 `supported=false`。
-- CUDA Target 必须有可用 device、compute capability 与 launch limits；O3 reduction 不能通过当前保守 `bind_cuda_threads` schedule，因此在 backend 前返回 target-schedule rejection。
+- CUDA Target 必须有可用 device、compute capability 与 launch limits；O3 reduction 不能通过当前保守 `bind_cuda_threads` schedule，因此在 backend 前返回 target-schedule rejection。Gather 的间接 `Load` 索引同样由通用 schedule gate 在 backend 前拒绝。
 - custom lowering 的 tensor 数量、dtype、rank 或 shape 与 checked type 不一致时，由 production per-unit lowering 与 capability 同源拒绝。
 
 ## Required CI evidence
@@ -78,6 +79,7 @@ approval 仍按 target 单独判断。NLP 轨新增的实现边界同样不改�
 - `matmul` 的 type/TE contract 已扩展为 rank >= 2，并按 ONNX/NumPy 规则广播 leading batch dimensions；LLVM 数值测试源码存在，但本机尚无 LLVM 绿色记录，CUDA reduction/nested-loop schedule 仍拒绝。
 - `softmax` 使用 max-subtraction 改善有限 logits 的数值稳定性；masked/all-masked 和非有限输入策略仍未支持，CUDA reduction schedule 仍拒绝。
 - ONNX opset < 13 Softmax 的 trailing-flatten 语义不能直接映射为当前 Relay 单轴 softmax，因此 importer fail closed。
+- `gather` 的静态 type/TE contract 支持 int32/int64 indices 和 axis 归一化；ONNX 有效索引域为 `[-extent, extent - 1]`。KXC 对该域外的运行时索引作确定性的 typed zero-fill 扩展；LLVM numeric coverage 已接入但本机未运行，CUDA 通用间接-Load gate 保持拒绝。
 
 - [x] per-unit executable capability 正反例（含真实 lowering/schedule/backend proof）
 - [x] normalized production pipeline、executable invariant 与 public static-exact transaction/pin adapter

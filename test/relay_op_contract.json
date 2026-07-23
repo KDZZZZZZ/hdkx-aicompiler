@@ -88,6 +88,24 @@
       "tests": true,
       "onnx_ops": []
     },
+    "gather": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 2,
+      "attrs": "GatherAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Gather"
+      ]
+    },
     "matmul": {
       "schema_version": 1,
       "category": "tensor.math",

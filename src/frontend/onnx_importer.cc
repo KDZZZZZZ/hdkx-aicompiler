@@ -448,6 +448,10 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
             ToArray(ReadInt64Vector(Field(attrs, "perm", "transpose attrs"),
                                     "transpose attrs.perm"))));
     }
+    if (op_name == "gather") {
+        return ObjectRef(relay::GatherAttrs::Create(
+            ReadInt(Field(attrs, "axis", "gather attrs"), "gather attrs.axis")));
+    }
     if (op_name == "nn_global_avg_pool2d") {
         return ObjectRef(relay::GlobalAvgPool2DAttrs::Create());
     }
