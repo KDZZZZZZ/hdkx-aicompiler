@@ -76,6 +76,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/relay/type_infer.h
   include/kxc/relay/visitor.h
   include/kxc/runtime/compiled_module.h
+  include/kxc/runtime/control_plan.h
   include/kxc/runtime/device.h
   include/kxc/runtime/device_api.h
   include/kxc/runtime/device_info.h
@@ -300,6 +301,7 @@ set(KXC_IR_SOURCES
 )
 
 set(KXC_RUNTIME_CORE_SOURCES
+  src/runtime/control_plan.cc
   src/runtime/device.cc
   src/runtime/device_api.cc
   src/runtime/device_stream.cc
@@ -738,6 +740,8 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(device_info_test test/device_info_test.cpp)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
+  kxc_add_runtime_exe(control_plan_test test/control_plan_test.cpp)
+  kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
