@@ -1,228 +1,338 @@
-# Compiler Foundation 集成交接
+# Compiler Foundation Integration Handoff
 
-> **集成分支：** `integration/compiler-foundation`
+> **Local checkpoint:** W3 restricted adapters integrated and locally reviewed
 >
-> **上游源码基线：** `dev@3b95aca188122ff52ebdb2f43d390d21273ff3e2`
+> **Base:** `7157ca6` (`ci(compiler): close W2 integration checkpoint`)
 >
-> **W1 固定基线：** `baseline/compiler-foundation-w1@525950a`
+> **Current feature merge head:** `00f3f3c` (`merge: integrate adaptive generation authority`)
 >
-> **W2 operator 集成头：** `a72a406`
+> **Remote state:** W2 refs are published; this W3 checkpoint is local until an explicit publish decision
 >
-> **状态：** W2 exact-static/default-OFF adapters 已完成本地集成和 CPU 合同验证；
-> 本页记录的是 `implemented/local-evidence` checkpoint，不是 dynamic Shape、自动生产
-> hot swap、production Relay control flow、完整 Transformer/KV cache 或已验证 CUDA
-> 能力声明。
+> **Scope:** restricted/default-OFF W3 capability slices, not completion of the W0–W4 roadmap
 
-## 1. 集成边界
+This handoff is the integration authority for the Compiler Foundation work. The
+track-specific handoffs remain useful implementation detail, but capability and
+evidence claims must not exceed this document.
 
-W1 六条基础轨道均保留独立 feature branch 和 merge 边界：
+## 1. Non-negotiable boundaries
 
-1. `feature/compiler-foundation-core`
-2. `feature/compiler-foundation-shape`
-3. `feature/compiler-foundation-adaptive`
-4. `feature/compiler-foundation-control-flow`
-5. `feature/compiler-foundation-runtime-plan`
-6. `feature/compiler-foundation-nlp-gpu`
+The W3 integrations do not weaken the static data-plane architecture:
 
-W2 在固定 W1 基线上按以下边界集成：
+- `RuntimeSession` remains a static, strongly typed executor. It does not own
+  Relay, Compiler, primitive-cache, Shape-specialization, adaptive-policy, or
+  background-compilation dependencies.
+- Restricted dynamic Shape executes through the separate
+  `RuntimeShapePlan` / `RuntimeShapeSession` path.
+- Adaptive compilation and generation selection stay in an upper control
+  plane. A selected same-ABI generation may be replaced, but a physical
+  Shape/layout/workspace ABI change still requires a new `PlanVariant`.
+- Default `Compiler::Compile()` remains fail closed for Relay `If` and `While`.
+  The real control-artifact path is the separate gated
+  `CompileControlFlowExact()` API.
+- Exact reuse is still the oracle. Bucket or polymorphic reuse requires an
+  immutable decision, an explicit guard, tail-safety proof, and exact artifact
+  binding; dimension inequality alone is never reuse authority.
+- Logical Shape, physical capacity/profile, and valid extent remain separate
+  contracts.
+- Graph-local locators such as `value_id` are not semantic artifact identity.
+- Manifest, generation, validation-receipt, and lease values are trusted
+  process-local declarations. They are not provenance, authentication, or
+  remote security credentials.
+- All new W3 feature gates are OFF by default.
 
-| 增量 | 集成提交 | 当前能力边界 |
-|---|---|---|
-| Runtime artifact manifest / observability | `f649592` | trusted declaration、结构复验、fallback/observer events 和 retention lease；不提供 provenance/authentication |
-| Resolved control runtime | `01523e8` | default-OFF、CPU:0、static-exact fixture executor；不是 Relay control backend |
-| Exact Shape production adapter | `c0a669e` | frozen Relay/constants、exact concrete profile 和 immutable pins；不支持 symbolic/bucket/fuzzy reuse |
-| Module constant integration fix | `458922d` | module-owned deep copy 与 alignment contract |
-| Adaptive production experiment | `97982ff` | default-OFF compiler/plan adapter、generation slot/lease 和 callback fail-fast；没有自动健康/回滚 authority |
-| Transformer operator slices | `a72a406` | Gather、Where、LayerNorm、Concat、Slice exact-static vertical slices；不是完整 Transformer/decode runtime |
+## 2. Integrated W3 changes
 
-## 2. 保持不变的生产边界
-
-- `RuntimeSession` 仍是静态、强类型 data-plane executor，不 include Compiler、Relay、
-  primitive cache、Shape predictor 或 adaptive policy。
-- production `Compiler::Compile` 仍拒绝 unresolved Relay `If`；resolved control executor
-  不改变该 capability boundary。
-- exact concrete Shape reuse 是当前唯一 production adapter oracle；不存在
-  `cached_dims >= query_dims` 一类 fuzzy compatibility。
-- physical Shape/layout/workspace 改变仍要求新 `PlanVariant`；same-ABI generation 才能
-  使用 slot replacement。
-- Runtime manifest identity/generation/lease 是可信上层声明与可观测性合同，不是
-  provenance、认证或安全凭据。
-- 新增公共 C++ surface 要求源码重新编译，不声明跨版本 precompiled C++ ABI。
-
-## 3. 主要实现结果
-
-### 3.1 Core contracts / identity / cache
-
-- operator/pass metadata、normalized pipeline、capability verification 和 canonical identity
-  使用统一合同。
-- semantic kernel identity 不包含 graph-local `value_id`。
-- production primitive cache 使用完整 canonical key、immutable artifact pins 和 same-key
-  transaction/singleflight；不存在 fuzzy Shape key reuse。
-- `NormalizeToANF` 是正式 Pass contract；lexical `Let` 可验证，`If` 继续 fail closed。
-
-### 3.2 Shape / adaptive / control
-
-- exact Shape adapter 将 preparation 与 assembly 分离，并冻结 lowering-relevant
-  Function、attrs、types、inputs 和 constants，避免旧 semantic key 对应新代码。
-- adaptive experiment 冻结完整 config/Target snapshot，校验 ordered call-to-artifact
-  binding、pin signature、metadata、target、launcher 和 ordering；cache clear/eviction 不使
-  已发布 immutable pins 失效。
-- control runtime 执行 resolved Branch/Loop/Phi/backedge，使用 private constant snapshots
-  和 typed module entry adapter；`binding_revision` 仅是 caller fixture label。
-
-### 3.3 Runtime / NLP
-
-- default-OFF Region/Task DAG 提供 validator、memory planner、task executor 和结构化
-  observability；`kTaskStart` 在动作前，`kTaskLaunch` 只表示成功提交。
-- Relay operator contract 从 19 项扩展到 24 项。
-- ONNX Gather 仅映射 initializer-backed、静态 range-validated subset；Relay zero-fill
-  Gather 明确保留为 KXC extension。
-- LayerNorm 对 float32 输入使用 float64 中间 accumulation/mean/variance/sqrt/affine。
-- Shape products、iteration extents、flatten indices 和 byte sizes 使用 checked arithmetic。
-- ONNX protobuf → Python serializer → C++ reifier → LLVM `RuntimeSession` fixture 已注册，
-  但本机因依赖缺失未执行该 E2E。
-
-## 4. 本地统一验证
-
-### 4.1 所有 production/experimental gates OFF
-
-配置摘要：
+First-parent integration history after the W2 checkpoint:
 
 ```text
-KXC_ENABLE_CUDA=OFF
-KXC_ENABLE_LLVM=OFF
-KXC_ENABLE_REGION_TASK_DAG=OFF
-KXC_ENABLE_CONTROL_RUNTIME=OFF
-KXC_ENABLE_SHAPE_PRODUCTION_EXACT=OFF
-KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=OFF
-KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=OFF
+7721d9f merge: integrate restricted symbolic shape authority
+55f9846 merge: integrate runtime shape task slice
+eb40c6e merge: integrate adaptive hot swap authority v2
+c49a9a5 merge: integrate gated Relay control artifact path
+3b323a6 merge: bound adaptive v2 metadata authority
+cb4b15c merge: integrate restricted shape runtime bridge
+ef866a9 merge: register restricted Shape LLVM E2E
+bb919da merge: integrate bounded Relay While path
+b2ec7cd merge: integrate CUDA-safe runtime shape completion
+00f3f3c merge: integrate adaptive generation authority
 ```
 
-完整 build 和 `ctest -L cpu` 结果：
+### 2.1 Restricted symbolic Shape and Shape-to-runtime bridge
+
+Implemented:
+
+- Fixed-rank symbolic overlays for the approved `relu`, `sqrt`, `add`, and
+  `mul` subset.
+- Immutable exact, bucket, and polymorphic decisions with explicit guards,
+  valid extents, tail proof, semantic bindings, artifact identity, and
+  unit-granular invalidation.
+- A frozen runtime-only bridge with complete ABI fingerprinting, input-axis
+  guards, polymorphic extent-scalar ABI, and local CPU numerical callbacks.
+- Distinct physical plans for exact and bucket variants.
+- Conditional LLVM test registration that compiles real static ReLU variants,
+  checks exact and padded/cropped bucket results, and rejects a guard miss
+  before launch.
+
+Evidence limit:
+
+- The bridge is trusted local runtime evidence, not a generic dynamic-output
+  `CompiledModule` ABI.
+- The LLVM E2E is implemented and CI-registered but not locally executed in
+  this environment because LLVM is unavailable.
+- This is not a general symbolic constraint solver, ragged Shape system,
+  arbitrary broadcast proof, or arbitrary runtime Shape function framework.
+
+### 2.2 Dynamic allocation and asynchronous CUDA completion
+
+Implemented:
+
+- `RuntimeShapePlan` / `RuntimeShapeSession` evaluate checked `ShapeExpr`
+  programs before allocation and launch.
+- Runtime byte budgets, checked byte arithmetic, OOM/fallback events, zero
+  extents, exact physical allocation accounting, and concurrent
+  `PlanVariant` isolation.
+- CPU remains a trusted synchronous callback path.
+- A separately gated CUDA path requires one exact CUDA device and a
+  caller-supplied matching stream.
+- CUDA callbacks may only enqueue work synchronously. After callback return,
+  the runtime creates and records the completion event on that stream. This
+  makes completion provenance runtime-owned rather than callback-forgeable.
+- Result/completion ownership retains input and output storage, plan, caller
+  state, and module leases until the runtime-owned event proves completion.
+- Submission/record/wait failures use typed categories; ambiguous post-submit
+  failures synchronize or conservatively retain/quarantine state rather than
+  publishing unsafe reclamation.
+- `retained_device_bytes()` reports exact storage capacity owned by this
+  result. It is not global GPU-memory or allocator-cache accounting.
+
+Local CUDA evidence:
+
+- `runtime_shape_cuda_async_test`: **3/3 cases passed** on
+  **NVIDIA GeForce GTX 1650**, driver **580.159.03**.
+- The test covers deterministic pending-event retention, post-callback failure,
+  launch submission failure, event-record failure, recovery, and final lease
+  release.
+
+Evidence limit:
+
+- This proves the restricted RuntimeShape completion/lifetime protocol on one
+  local GPU. It does not prove CUDA compiler/codegen numerical correctness,
+  broad-rank execution, multi-GPU behavior, stream capture, performance, or
+  production GPU CI.
+- `compute-sanitizer` is unavailable locally, so memcheck/racecheck evidence is
+  not claimed.
+- The restricted runtime still does not integrate generic dynamic outputs into
+  the ordinary `CompiledModule`/static-memory-plan ABI.
+
+### 2.3 Adaptive generation authority and same-ABI replacement
+
+Implemented behind `KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2`:
+
+- Callable/runtime Plan ABI v4 is separated from the selected artifact
+  identity.
+- W2 candidate preparation is prepare-only; v2 owns the single transactional
+  publish point.
+- Authority issues opaque generation leases bound to route, selected artifact,
+  callable ABI, validation receipt, and producer-reported bytes.
+- Different launchers/artifacts/provenance records can replace one another
+  under the same callable ABI; physical Plan ABI changes remain disallowed.
+- Generation numbers are monotonic and nonwrapping. Old generation leases keep
+  old artifacts alive for in-flight executions.
+- Bounded worker pool, bounded singleflight, per-waiter cancellation/deadline,
+  negative cache/retry state, admission-before-publication, producer-byte
+  budget eviction, quarantine/rollback, observer isolation, callback
+  re-entry rejection, and bounded route/tombstone/history metadata.
+- Commit/cancel linearization and serialized health-consumption prevent stale
+  compilation or health reports from reviving superseded selections.
+- Repeated replacement, cancellation, retry, failure, quarantine, and eviction
+  paths have focused concurrency stress coverage.
+
+Evidence limit:
+
+- Cancellation controls waiters and unscheduled/scheduler work. It does not
+  promise hard interruption of an arbitrary backend compiler.
+- Retry is bounded policy state but remains caller/request driven; no
+  autonomous distributed retry service is claimed.
+- Health, authority, byte accounting, and generation leases are process-local
+  trusted contracts, not remote consensus or authenticated provenance.
+- A local TSan binary was built, but the host TSan runtime aborted before the
+  test with `FATAL: ThreadSanitizer: unexpected memory mapping`. Therefore no
+  local TSan race-clean claim is made. A dedicated GitHub Actions TSan job is
+  registered as the external gate.
+
+### 2.4 Real restricted Relay `If` and bounded `While`
+
+Implemented behind `KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION`:
+
+- Relay now has an explicit, deterministically printed `While` node with
+  mandatory nonnegative `max_trip_count` and exact static carried-state type.
+- Registration, visitors/mutators, type inference, ANF normalization, manual
+  Relay walkers, capability checks, semantic identity, and control-plan
+  lowering understand the node.
+- `While` lowers to exact `LoopSpec` carried-value contracts: initial value,
+  body argument, backedge, and result must have one exact static value
+  contract. Tuple-carried state is flattened deterministically.
+- Conditions are CPU scalar booleans; execution is CPU:0/default-stream only.
+- `If` and `While` kernel tasks are resolved through real per-kernel
+  `Compiler::Compile()` in the gated production route, with typed process-local
+  artifact leases.
+- Zero-, one-, and multi-trip behavior, tuple-carried state, nested control,
+  max-trip failure, artifact retention, and generation-overflow rejection are
+  covered.
+- Default `Compiler::Compile(If/While)` remains fail closed.
+
+Evidence limit:
+
+- Local LLVM-OFF tests validate Relay construction, typing, ANF, exact
+  control-plan contracts, capability gates, reference/runtime semantics, and
+  fail-closed production behavior. Real LLVM condition/body numerical
+  execution is CI-registered but not locally validated.
+- The node is a restricted bounded `While`, not arbitrary recursion, break or
+  continue, ONNX Loop import, mutable loop state, dynamic-Shape loop-carried
+  values, multi-device control, or general loop optimization.
+- Runtime retention is conservative; loop-aware allocation reuse/liveness
+  optimization is not claimed.
+
+## 3. Feature gates
+
+All remain OFF unless explicitly enabled:
 
 ```text
-40/40 passed
+KXC_ENABLE_SHAPE_PRODUCTION_EXACT
+KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE
+KXC_ENABLE_RUNTIME_SHAPE_TASKS
+KXC_ENABLE_RUNTIME_SHAPE_CUDA
+KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE
+KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
+KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+KXC_ENABLE_CONTROL_RUNTIME
+KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+KXC_ENABLE_REGION_TASK_DAG
 ```
 
-### 4.2 W2 adapters 全部 ON
+Important dependencies:
 
-配置摘要：
+- restricted Shape runtime bridge requires production-exact Shape, restricted
+  symbolic Shape, and runtime Shape tasks;
+- RuntimeShape CUDA requires runtime Shape tasks and a compiled CUDA backend;
+- enabling adaptive v2 causes CMake to explicitly enable the experimental
+  adaptive production adapter on which it depends;
+- Relay control-artifact compilation is independently gated; constructing and
+  executing the resulting plan through `ControlRuntimeSession` additionally
+  requires the control-runtime gate;
+- the default-OFF configuration must continue to compile and reject unavailable
+  capability paths deterministically.
+
+## 4. Local verification evidence
+
+The following results were reproduced on the combined W3 integration tree:
+
+| Configuration | Result | Evidence tier |
+|---|---:|---|
+| LLVM OFF, CUDA OFF, W3 gates OFF, CPU label | **43/43 passed** | validated locally |
+| LLVM OFF, CUDA OFF, W3 gates ON, CPU label | **47/47 passed** | validated locally |
+| GCC 13.3 ASan+UBSan, 11 focused W3 tests | **11/11 passed** | validated locally |
+| RuntimeShape CUDA local hardware suite | **3/3 passed** | validated locally on one GPU |
+| Relay operator contract | **24/24** | validated locally |
+| Pass contract | **20/20** | validated locally |
+| Adaptive v2 repeated stress | **50/50 invocations passed** | validated locally |
+| Adaptive v2 TSan | host runtime aborted before test | not validated; CI registered |
+| Restricted Shape LLVM JIT E2E | target/source registered | implemented/source-and-CI-registration |
+| Relay control LLVM E2E | target/source registered | implemented/source-and-CI-registration |
+| ONNX importer tests | dependencies unavailable | not locally validated |
+| Compute Sanitizer | tool unavailable | not validated |
+
+The ASan+UBSan focused set is:
 
 ```text
-KXC_ENABLE_CUDA=OFF
-KXC_ENABLE_LLVM=OFF
-KXC_ENABLE_REGION_TASK_DAG=ON
-KXC_ENABLE_CONTROL_RUNTIME=ON
-KXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
-KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=ON
+shape_production_exact_test
+restricted_symbolic_shape_test
+restricted_shape_runtime_bridge_test
+runtime_shape_session_test
+task_plan_test
+task_executor_test
+runtime_session_test
+relay_control_plan_test
+control_runtime_integration_test
+adaptive_production_experimental_test
+adaptive_hot_swap_v2_test
 ```
 
-完整 build 和 `ctest -L cpu` 结果：
+Local environment constraints observed during configuration:
 
 ```text
-41/41 passed
+GCC/G++ 13.3.0
+Python3 with onnx and numpy was not found; skipping onnx_importer_test target.
+LLVM unavailable locally.
+compute-sanitizer unavailable locally.
 ```
 
-其中包括：
+## 5. CI registration
 
-- `shape_production_exact_test`
-- `adaptive_production_experimental_test`
-- `control_runtime_integration_test`
-- `runtime_session_test`
-- `infer_type_test`
-- `operator_compilation_test`
-- `onnx_import_spec_contract_test`
-- Relay/Pass contracts、include layers 和 public headers
+`.github/workflows/ci.yml` now registers:
 
-独立机器可读检查：
+- CPU matrix states that name and configure W2/W3 adapters explicitly;
+- default-OFF and W3-ON CPU paths;
+- an exact 11-target ASan+UBSan W3 suite;
+- a dedicated adaptive-v2 TSan job;
+- LLVM build/run registration for restricted Shape JIT and production Relay
+  control artifacts, including bounded `While`;
+- the existing ONNX job, which provisions its Python dependencies before
+  configuring and running the importer test.
 
-```text
-Relay operators: 24/24 passed
-Passes:          20/20 passed
-NLP/GPU checker: PASS
-Python py_compile: PASS
-git diff --check: PASS
-ASan/UBSan runtime-plan + adaptive: 5/5 passed
-```
+CI registration is not validation. At the time of this W3 checkpoint, the
+externally observed repository-owned GitHub workflow state was
+`disabled_manually`; this work does not re-enable it. LLVM, ONNX, TSan, and
+remote CPU status may be upgraded only after authorized green runs.
+No GPU-hosted GitHub runner is registered by this checkpoint.
 
-ASan/UBSan 配置构建了 `task_plan_test`、`task_executor_test`、
-`runtime_session_test`、`control_runtime_integration_test` 和
-`adaptive_production_experimental_test`；本次本地执行未发现 sanitizer failure。
+## 6. Capability status
 
-## 5. 证据等级
+| Capability | Status at this checkpoint |
+|---|---|
+| Static exact ValueGraph/CompiledModule/RuntimeSession path | validated baseline |
+| Restricted symbolic overlay and exact guard authority | implemented/local-evidence |
+| Restricted Shape-to-Runtime CPU bridge | implemented/local-evidence |
+| Runtime Shape allocation on CPU | implemented/local-evidence |
+| RuntimeShape CUDA completion and retention | implemented/local single-GPU evidence |
+| Generic dynamic-output `CompiledModule` ABI | unsupported |
+| General symbolic/ragged/broadcast solver | unsupported |
+| Same-callable-ABI adaptive artifact replacement | implemented/local-evidence, experimental |
+| Distributed/authenticated adaptive authority | unsupported |
+| Backend-independent hard compiler cancellation | unsupported |
+| Relay exact `If` and bounded static `While` control plans | implemented/local-evidence |
+| LLVM numerical execution of W3 Shape/control paths | implemented/source-and-CI-registration |
+| General loops/recursion/dynamic carried Shape | unsupported |
+| Full Transformer/KV-cache/decode/sampling | unsupported |
+| Broad CUDA numerical/race/performance production support | unsupported |
 
-| 能力 | 状态 | 说明 |
-|---|---|---|
-| CPU exact-static production path | `validated` | 本地 OFF/ON 两套完整 CPU CTest |
-| Shape exact production adapter | `implemented/local-evidence` | CPU exact profile；无 symbolic/bucket claim |
-| Restricted symbolic Shape W3 control plane | `implemented/local-evidence` | default-OFF; deep-frozen exact representative with explicit input-axis overlay; mints exact/bucket/polymorphic requests only, never guarded execution or artifact compilation/cache authority |
-| Adaptive production experiment | `implemented/local-evidence` | default-OFF；无 cancellation/health/rollback authority |
-| Resolved control runtime | `implemented/local-evidence` | fixture-backed CPU:0；production Compiler 仍拒绝 `If` |
-| Runtime manifest/observability | `implemented/local-evidence` | 结构一致性与事件验证；声明不是 provenance |
-| ONNX protobuf → LLVM Runtime E2E | `implemented/source-and-CI-registration` | 本机缺 `onnx`/`numpy` 和 LLVM，等待 CI |
-| CUDA Where/Slice/Concat bounded rank-1 slices | `implemented/local-evidence` | 没有本机 GPU numeric validation |
-| Symbolic/dynamic Shape 与 dynamic output allocation | `unsupported` | W3/W4 工作 |
-| Production automatic hot swap/rollback | `unsupported` | W3/W4 工作 |
-| Production Relay control lowering | `unsupported` | W3/W4 工作 |
-| 完整 Transformer/KV-cache/sampling | `unsupported` | W3/W4 工作 |
+## 7. Remaining W4 work
 
-## 6. CI 门禁
+Do not promote this restricted W3 checkpoint as the final dynamic compiler
+architecture. Remaining work includes:
 
-CI 配置覆盖：
+1. A general dynamic-output `CompiledModule` calling convention and integration
+   with production memory planning.
+2. Broader symbolic constraints, Shape functions, broadcast semantics, and
+   specialization-policy evidence.
+3. Backend-specific hard cancellation where safely supported and, if needed,
+   durable/distributed generation authority.
+4. General control-flow lowering, frontend loop import, dynamic loop-carried
+   values, and loop-aware memory reuse.
+5. Full Transformer/KV-cache/decode/sampling workloads.
+6. CUDA codegen/numerical coverage, Compute Sanitizer, race/lifetime tests,
+   broad-rank correctness, multi-stream/multi-device behavior, and performance
+   gates on supported hardware.
+7. Authorized remote CI runs and an explicit integration/publish decision.
 
-- default-OFF CPU checkpoint；
-- Region Task DAG `OFF/ON` 与 Control Runtime `OFF/ON` 的组合；
-- exact Shape 与 adaptive experiment ON checkpoint；
-- dependency-free NLP capability checker；
-- ASan/UBSan Runtime-plan 与 adaptive experiment；
-- LLVM codegen/numeric、production Compiler→Task-DAG、Shape/adaptive tests；
-- 安装 `onnx`/`numpy` 后的 protobuf importer E2E；
-- Python ONNX importer tests。
+## 8. Branch and publication policy
 
-CI 注册不等于验证完成；只有远端 workflow 绿色后才能把对应 LLVM/ONNX 行升级为
-`validated`。CUDA 仍需要独立硬件/toolchain gate。
-
-## 7. 环境限制与后续工作
-
-本机未安装 LLVM、Python `onnx`/`numpy`，也没有可用 CUDA toolchain/device，因此：
-
-- 未运行 LLVM JIT/numeric 和 production Compiler→Task-DAG E2E；
-- 未运行真实 ONNX protobuf fixture；
-- 未运行 CUDA numeric、pending-retention、Compute Sanitizer 或 CUPTI；
-- 未下载、安装或修改任何系统依赖。
-
-### 7.1 W3 restricted symbolic Shape checkpoint
-
-The default-OFF W3 adapter is minting-only. Its enabled CPU configuration is exactly:
-
-```text
-KXC_ENABLE_CUDA=OFF
-KXC_ENABLE_LLVM=OFF
-KXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
-KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON
-KXC_BUILD_PASS_TESTS=ON
-KXC_BUILD_CODEGEN_TESTS=OFF
-```
-
-It first deep-freezes a W2 exact representative and then accepts only fixed-rank trees of
-`relu`/`nn_relu`, `sqrt`, and equal-shape `add`/`mul` with explicit input-axis bindings.
-`MintExact`, `MintBucket`, and `MintPolymorphic` return validated opaque decision/request
-snapshots; they do not compile or cache artifacts, allocate dynamic buffers, assemble an
-executable guarded plan, or create a dynamic `RuntimeSession` path. Bucket/polymorphic
-minting validates complete logical/physical/valid boundaries (including axis names), guards,
-tails, and versioned allowlisted proofs. Request accessors rebuild from trusted frozen state;
-`ChangedUnitIndices` compares only comparable per-unit semantic boundary identity, never a
-cache key or graph-local routing identity.
-
-Gate-OFF `restricted_symbolic_shape_test` passed **1/1**. Under the enabled configuration,
-all five existing Shape targets passed: foundation Shape groups **4 + 3 + 2**, production
-exact groups **4**, and registered Shape CTests **2/2**. `check_public_headers` compiled
-**100** headers and `check_include_layers` scanned **254** files. LLVM/CUDA were off; no
-LLVM/CUDA or guarded-execution claim follows from this checkpoint. Dynamic Shape propagation,
-dynamic outputs/allocation, authoritative adaptive generation leases, and all production
-guarded execution remain unsupported.
-
-W2 checkpoint does not complete the overall W0–W4 plan. W3/W4 still include runtime
-Shape propagation、dynamic outputs/allocation、authoritative adaptive generation leases、
-cancellation/negative cache/health/rollback、真实 Relay control lowering、KV cache/decode/
-sampling，以及广 rank CUDA production evidence。
+- `origin/dev` remains unchanged at `3b95aca`.
+- Published W2 refs remain at `7157ca6`:
+  - `origin/integration/compiler-foundation`
+  - `origin/baseline/compiler-foundation-w2`
+- Do not force-update an immutable baseline.
+- Publishing a W3 integration head and creating an immutable W3 baseline
+  require a separate explicit decision.
+- Merging the integration line into `dev` remains a repository-review decision;
+  this handoff does not authorize it.
