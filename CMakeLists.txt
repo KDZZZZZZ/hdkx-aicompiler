@@ -660,6 +660,14 @@ if(KXC_BUILD_RESNET18_IR_DUMP)
 endif()
 
 if(Python3_Interpreter_FOUND)
+  add_custom_target(check_nlp_gpu_validation
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_nlp_gpu_validation.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    USES_TERMINAL
+    COMMENT "Check deterministic NLP/GPU Phase A validation"
+  )
   add_custom_target(check_relay_op_contract
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_relay_op_contract.py"

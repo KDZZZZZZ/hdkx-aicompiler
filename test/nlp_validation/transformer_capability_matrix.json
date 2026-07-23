@@ -1,0 +1,736 @@
+{
+  "schema_version": 1,
+  "capabilities": {
+    "stable_softmax": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; it does not claim current Relay numerical stability.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_reduction_unsupported",
+        "reason": "CUDA reduction is not locally validated.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "contracted",
+        "gate": "reference_only",
+        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "python_reference",
+        "reason": "Deterministic CPU reference max-subtraction passes; this does not claim current Relay numerical stability.",
+        "evidence": [
+          "test/nlp_validation/deterministic_fixtures.json",
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "masked_softmax_all_masked": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_reduction_unsupported",
+        "reason": "CUDA reduction is not locally validated.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "contracted",
+        "gate": "reference_only",
+        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "unsupported",
+        "gate": "all_masked_contract_unsupported",
+        "reason": "All-masked behavior lacks a validation contract, so numeric validation is unsupported.",
+        "evidence": [
+          "test/nlp_validation/deterministic_fixtures.json",
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "batched_matmul": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_not_validated",
+        "reason": "No local CUDA validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "contracted",
+        "gate": "reference_only",
+        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "unsupported",
+        "gate": "no_numeric_gate",
+        "reason": "No numeric fixture in Phase A.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "embedding_gather": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_not_validated",
+        "reason": "No local CUDA validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "contracted",
+        "gate": "reference_only",
+        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "unsupported",
+        "gate": "no_numeric_gate",
+        "reason": "No numeric fixture in Phase A.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "normalization": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_not_validated",
+        "reason": "No local CUDA validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "contracted",
+        "gate": "reference_only",
+        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "unsupported",
+        "gate": "no_numeric_gate",
+        "reason": "No numeric fixture in Phase A.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "slice_concat": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_not_validated",
+        "reason": "No local CUDA validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "contracted",
+        "gate": "reference_only",
+        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "unsupported",
+        "gate": "no_numeric_gate",
+        "reason": "No numeric fixture in Phase A.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "prefill_exact": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_not_validated",
+        "reason": "No local CUDA validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "contracted",
+        "gate": "reference_only",
+        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "cpu_reference",
+        "reason": "Deterministic causal attention reference passes.",
+        "evidence": [
+          "test/nlp_validation/deterministic_fixtures.json",
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "decode_external_kv": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_not_validated",
+        "reason": "No local CUDA validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "contracted",
+        "gate": "external_kv_reference",
+        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "external_kv_reference",
+        "reason": "Deterministic external-KV reference passes.",
+        "evidence": [
+          "test/nlp_validation/deterministic_fixtures.json",
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "kv_cache": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_not_validated",
+        "reason": "No local CUDA validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "contracted",
+        "gate": "valid_extent_only",
+        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "valid_extent_only",
+        "reason": "Deterministic append/page/capacity trace passes.",
+        "evidence": [
+          "test/nlp_validation/deterministic_fixtures.json",
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "dynamic_batching": {
+      "frontend": {
+        "status": "unsupported",
+        "gate": "unknown_or_symbolic_dims_rejected",
+        "reason": "Dynamic dimensions are deliberately rejected.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "unsupported",
+        "gate": "unknown_or_symbolic_dims_rejected",
+        "reason": "Dynamic dimensions are deliberately rejected.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "lowering": {
+        "status": "unsupported",
+        "gate": "no_codegen_gate",
+        "reason": "No lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_not_validated",
+        "reason": "No local CUDA validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "unsupported",
+        "gate": "unknown_or_symbolic_dims_rejected",
+        "reason": "Runtime dynamic batching is not enabled.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "numeric": {
+        "status": "unsupported",
+        "gate": "no_numeric_gate",
+        "reason": "No numeric fixture in Phase A.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    },
+    "copy_event": {
+      "frontend": {
+        "status": "contracted",
+        "gate": "static_shapes_only",
+        "reason": "Phase A validation contract only; not an implementation claim.",
+        "evidence": [
+          "python/tools/check_nlp_gpu_validation.py"
+        ]
+      },
+      "relay": {
+        "status": "contracted",
+        "gate": "phase_a_contract_only",
+        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "lowering": {
+        "status": "contracted",
+        "gate": "no_codegen_gate",
+        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "llvm": {
+        "status": "unsupported",
+        "gate": "llvm_not_validated",
+        "reason": "No local LLVM validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "cuda_not_validated",
+        "reason": "No local CUDA validation is claimed.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "runtime": {
+        "status": "unsupported",
+        "gate": "copy_event_not_enabled",
+        "reason": "No runtime copy/event implementation claim.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "numeric": {
+        "status": "unsupported",
+        "gate": "no_numeric_gate",
+        "reason": "No numeric fixture in Phase A.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      },
+      "profile": {
+        "status": "unsupported",
+        "gate": "not_profiled",
+        "reason": "No profiling was run.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json"
+        ]
+      }
+    }
+  }
+}
