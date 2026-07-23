@@ -31,12 +31,13 @@ jobs:
         run: python python/tools/check_relay_op_contract.py --root .
 
   cpu-smoke:
-    name: CPU CMake smoke tests (task DAG gate ${{ matrix.region_task_dag }})
+    name: CPU smoke (task DAG ${{ matrix.region_task_dag }}, control ${{ matrix.control_runtime }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         region_task_dag: ["OFF", "ON"]
+        control_runtime: ["OFF", "ON"]
 
     steps:
       - name: Checkout
@@ -44,39 +45,40 @@ jobs:
 
       - name: Configure CPU-only build
         run: >
-          cmake -S . -B out/build/ci-cpu-${{ matrix.region_task_dag }}
+          cmake -S . -B out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
           -DCMAKE_BUILD_TYPE=Debug
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=OFF
           -DKXC_ENABLE_REGION_TASK_DAG=${{ matrix.region_task_dag }}
+          -DKXC_ENABLE_CONTROL_RUNTIME=${{ matrix.control_runtime }}
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_PASS_TESTS=ON
           -DKXC_BUILD_CODEGEN_TESTS=OFF
 
       - name: Build CPU targets
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
           --parallel 2
 
       - name: Run runtime plan CTest suite
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
           --target run_runtime_plan_tests --parallel 2
 
       - name: Check dependency-free NLP reference and capability gate
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
           --target check_nlp_gpu_validation
 
       - name: Run all CPU foundation CTest checks
         run: >
-          ctest --test-dir out/build/ci-cpu-${{ matrix.region_task_dag }}
+          ctest --test-dir out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
           --output-on-failure --no-tests=error
           --label-regex '(^|;)cpu(;|$)'
 
       - name: Run experimental shape contract tests
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}
           --parallel 2 --target
           run_shape_system_test
           run_shape_specialization_test

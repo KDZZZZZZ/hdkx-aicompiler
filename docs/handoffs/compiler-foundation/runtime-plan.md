@@ -1,5 +1,9 @@
 # Compiler Foundation：Region / ExecutionPlan / Runtime 交接
 
+> **W2 更新：** 本页记录 W1 acyclic task-DAG baseline；控制流没有被塞入
+> `FrozenTaskPlan v1`，而是由独立 default-OFF `ControlExecutionPlan v1`/
+> `ControlRuntimeSession` 接入，见 [`control-runtime.md`](control-runtime.md)。
+>
 > **分支：** `feature/compiler-foundation-runtime-plan`
 > **状态：** W1 静态 exact 基线已完成；生产 feature gate 默认关闭
 > **范围：** frozen Region/task-DAG DTO、validator、dependency-aware memory planner、deterministic fake executor，以及单设备/单 stream 的 feature-gated `RuntimeSession` 执行

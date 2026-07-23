@@ -206,6 +206,10 @@ void NDArray::CopyFromBytes(const void* source, size_t nbytes) const {
     if (nbytes != 0 && source == nullptr) {
         throw std::invalid_argument("non-empty copy requires source");
     }
+    storage().ValidateRange(operator->()->byte_offset, nbytes);
+    if (nbytes != 0 && storage().data() == nullptr) {
+        throw std::invalid_argument("non-empty NDArray requires storage data");
+    }
     DeviceCopySync(Device::CPU(), source, 0, device(), storage().data(),
                    operator->()->byte_offset, nbytes);
 }
@@ -215,6 +219,10 @@ void NDArray::CopyToBytes(void* destination, size_t nbytes) const {
     if (nbytes != NBytes()) throw std::invalid_argument("NDArray byte size mismatch");
     if (nbytes != 0 && destination == nullptr) {
         throw std::invalid_argument("non-empty copy requires destination");
+    }
+    storage().ValidateRange(operator->()->byte_offset, nbytes);
+    if (nbytes != 0 && storage().data() == nullptr) {
+        throw std::invalid_argument("non-empty NDArray requires storage data");
     }
     DeviceCopySync(device(), storage().data(), operator->()->byte_offset,
                    Device::CPU(), destination, 0, nbytes);

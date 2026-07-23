@@ -7,6 +7,12 @@
 > **W1 集成提交：** `e05d9d7`
 >
 > **状态：** W1 isolated/default-off baseline 已集成；W2 production adapters 和跨轨闭环尚未完成。本页不是 dynamic Shape、hot swap、dynamic control flow、Transformer 或 GPU attention 的生产能力声明。
+>
+> **W2 Track 04/05 增量：** 已新增 default-OFF、CPU:0 static-exact
+> `ControlExecutionPlan v1`、typed `CompiledModule` binding adapter 和
+> `ControlRuntimeSession`。它不执行 `kernel_ref`，不改变 `Compiler::Compile` 的默认 If
+> 拒绝；真实 Relay/TE artifact resolver 和 authority-issued generation lease 仍是生产门禁。
+> 详见 [`control-runtime.md`](control-runtime.md)。
 
 ## 1. 已合并轨道
 
@@ -98,7 +104,7 @@ W1 的 mock/fake/DTO 存在不等于总计划完成。W2 至少需要：
 
 1. **Shape production exact path：** 从真实 Relay/type/partition 生成不可变 GraphTemplate；exact profile 只重特化受 Shape 影响 unit；组装真实 static module/plan；RuntimeSession 仍只执行 frozen variant。
 2. **Adaptive production exact path：** Core canonical key、production artifact pin、真实 compiler adapter、selected generation manifest、plan assembler 和 completion lease retention；不得在 Run 内 lookup/compile。
-3. **Control production path：** unresolved Relay kernel 解析为 immutable artifact，ControlPlan 映射到 runtime-only task/control schema；单 stream branch/loop/Phi/backedge liveness 与双 oracle 验证。
+3. **Control production path：** runtime-only resolved schema、typed module-entry adapter、CPU single-stream Branch/Loop/Phi/backedge conservative liveness 与双 oracle 已在 default-OFF gate 下完成；仍需真实 Relay/TE lowering/cache resolver 和 authority-issued generation lease，完成前不称 production Relay control compilation。
 4. **Runtime manifest/observability：** selected artifact identity/generation、fallback reason、task wait/launch/allocation/retire；打开默认 gate 前补 LLVM/CUDA numeric、pending CUDA retention 和 sanitizer。
 5. **NLP vertical expansion：** Gather/embedding、mask/select、normalization、Slice/Concat 和 KV page/capacity/valid extent；逐项 frontend/type/lowering/backend/runtime/negative evidence。
 6. **Target evidence：** LLVM-enabled CI 真实绿色记录；CUDA reduction/library path 和 device numeric；没有证据时 capability 继续 fail closed。
