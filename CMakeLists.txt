@@ -90,6 +90,10 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/ndarray.h
   include/kxc/runtime/session.h
   include/kxc/runtime/storage.h
+  include/kxc/shape/fakes/compiler_foundation_v1.h
+  include/kxc/shape/guarded_specialization.h
+  include/kxc/shape/shape.h
+  include/kxc/shape/specialization.h
   include/kxc/support/arena.h
   include/kxc/support/container.h
   include/kxc/support/detail/array_inl.h
@@ -146,7 +150,7 @@ target_link_libraries(kxc_public_api INTERFACE kxc_dlpack)
 set(KXC_PUBLIC_MODULE_TARGETS "")
 foreach(_kxc_public_module IN ITEMS
     support ffi runtime profiling target pass ir tir te relay distributed
-    frontend compiler)
+    frontend compiler shape)
   set(_kxc_module_headers "")
   foreach(_kxc_header IN LISTS KXC_PUBLIC_HEADERS)
     if(_kxc_header MATCHES "^include/kxc/${_kxc_public_module}/")
@@ -292,6 +296,12 @@ set(KXC_SUPPORT_SOURCES
   src/support/object.cc
   src/support/type_registry.cc
   src/support/string.cc
+)
+
+set(KXC_SHAPE_SOURCES
+  src/shape/shape.cc
+  src/shape/specialization.cc
+  src/shape/guarded_specialization.cc
 )
 
 set(KXC_FFI_SOURCES
@@ -485,6 +495,9 @@ endfunction()
 add_library(kxc_support_obj OBJECT ${KXC_SUPPORT_SOURCES})
 kxc_configure_module_obj(kxc_support_obj)
 
+add_library(kxc_shape_obj OBJECT ${KXC_SHAPE_SOURCES})
+kxc_configure_module_obj(kxc_shape_obj)
+
 add_library(kxc_ffi_obj OBJECT ${KXC_FFI_SOURCES})
 kxc_configure_module_obj(kxc_ffi_obj)
 
@@ -560,6 +573,7 @@ add_library(kxc_runtime_session_obj OBJECT ${KXC_RUNTIME_SESSION_SOURCES})
 kxc_configure_module_obj(kxc_runtime_session_obj)
 
 set(KXC_MODULE_OBJECT_TARGETS
+  kxc_shape_obj
   kxc_support_obj
   kxc_ffi_obj
   kxc_ir_obj
@@ -656,6 +670,48 @@ function(kxc_add_runtime_exe target source_file)
   endif()
 endfunction()
 
+
+add_executable(shape_system_test
+  test/shape_system_test.cpp
+  $<TARGET_OBJECTS:kxc_shape_obj>)
+add_dependencies(shape_system_test kxc_shape_obj)
+target_link_libraries(shape_system_test PRIVATE kxc_shape_api)
+if(MSVC)
+  target_compile_options(shape_system_test PRIVATE /utf-8 /EHsc)
+endif()
+add_custom_target(run_shape_system_test
+  COMMAND "$<TARGET_FILE:shape_system_test>"
+  DEPENDS shape_system_test
+  USES_TERMINAL
+  COMMENT "Run shape_system_test")
+
+add_executable(shape_specialization_test
+  test/shape_specialization_test.cpp
+  $<TARGET_OBJECTS:kxc_shape_obj>)
+add_dependencies(shape_specialization_test kxc_shape_obj)
+target_link_libraries(shape_specialization_test PRIVATE kxc_shape_api)
+if(MSVC)
+  target_compile_options(shape_specialization_test PRIVATE /utf-8 /EHsc)
+endif()
+add_custom_target(run_shape_specialization_test
+  COMMAND "$<TARGET_FILE:shape_specialization_test>"
+  DEPENDS shape_specialization_test
+  USES_TERMINAL
+  COMMENT "Run shape_specialization_test")
+
+add_executable(shape_guarded_specialization_test
+  test/shape_guarded_specialization_test.cpp
+  $<TARGET_OBJECTS:kxc_shape_obj>)
+add_dependencies(shape_guarded_specialization_test kxc_shape_obj)
+target_link_libraries(shape_guarded_specialization_test PRIVATE kxc_shape_api)
+if(MSVC)
+  target_compile_options(shape_guarded_specialization_test PRIVATE /utf-8 /EHsc)
+endif()
+add_custom_target(run_shape_guarded_specialization_test
+  COMMAND "$<TARGET_FILE:shape_guarded_specialization_test>"
+  DEPENDS shape_guarded_specialization_test
+  USES_TERMINAL
+  COMMENT "Run shape_guarded_specialization_test")
 
 if(KXC_BUILD_RESNET18_IR_DUMP)
   kxc_add_runtime_exe(resnet18_ir_dump test/resnet18_ir_dump.cpp)

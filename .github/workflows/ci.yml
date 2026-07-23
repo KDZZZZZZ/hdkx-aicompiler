@@ -67,6 +67,13 @@ jobs:
           ctest --test-dir out/build/ci-cpu --output-on-failure
           --label-regex '(^|;)cpu(;|$)'
 
+      - name: Run experimental shape contract tests
+        run: >
+          cmake --build out/build/ci-cpu --parallel 2 --target
+          run_shape_system_test
+          run_shape_specialization_test
+          run_shape_guarded_specialization_test
+
   llvm-resnet18:
     name: ResNet18 LLVM compile
     runs-on: ubuntu-latest
