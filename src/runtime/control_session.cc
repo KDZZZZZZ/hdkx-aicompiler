@@ -337,10 +337,25 @@ void ExecuteRegion(const ControlExecutionRegion& region, const PlanIndex& index,
 
 }  // namespace
 
+struct ControlRuntimeSession::ConstantState final {
+    std::unordered_map<ControlExecutionValueId, NDArray> values;
+};
+
 ControlRuntimeSession::ControlRuntimeSession(ControlExecutionPlan plan)
     : plan_(std::move(plan)) {
 #if KXC_ENABLE_CONTROL_RUNTIME
     plan_.Validate();
+    const PlanIndex index = Index(plan_);
+    auto constants = std::make_shared<ConstantState>();
+    std::unordered_set<ControlExecutionRegionId> visited;
+    CollectConstantBindings(Region(index, plan_.spec().entry_region), index,
+                            &constants->values, &visited);
+    for (const auto value_id : plan_.spec().constant_values) {
+        if (!constants->values.count(value_id)) {
+            Fail("validated constant has no module binding");
+        }
+    }
+    constants_ = std::move(constants);
 #else
     throw std::runtime_error(
         "ControlRuntimeSession is disabled by KXC_ENABLE_CONTROL_RUNTIME");
@@ -379,13 +394,9 @@ ControlRunAsyncResult ControlRuntimeSession::RunAsync(const Array<NDArray>& inpu
         ValidateArray(Value(index, value_id), inputs[i], "input[" + std::to_string(i) + "]");
         state->Bind(value_id, inputs[i]);
     }
-    std::unordered_map<ControlExecutionValueId, NDArray> constants;
-    std::unordered_set<ControlExecutionRegionId> visited;
-    CollectConstantBindings(Region(index, spec.entry_region), index, &constants, &visited);
+    if (!constants_) Fail("session constant cache is unavailable");
     for (const auto value_id : spec.constant_values) {
-        const auto payload = constants.find(value_id);
-        if (payload == constants.end()) Fail("validated constant has no module binding");
-        state->Bind(value_id, payload->second);
+        state->Bind(value_id, constants_->values.at(value_id));
     }
     std::unordered_set<ControlExecutionRegionId> preflight_visited;
     PreflightRegion(Region(index, spec.entry_region), index, *state,

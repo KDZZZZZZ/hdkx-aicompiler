@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -26,7 +27,11 @@ struct ControlRunAsyncResult : ControlRunResult {
     AsyncOperation completion;
 };
 
-/*! \brief A fixed-plan static executor; it has no compiler-side dependencies. */
+/*! \brief A fixed-plan static executor; it has no compiler-side dependencies.
+ *
+ * Module snapshots are copied once while constructing the session, including
+ * unselected branches, then shared by every run; no branch constant is copied
+ * per run. */
 class ControlRuntimeSession final {
 public:
     explicit ControlRuntimeSession(ControlExecutionPlan plan);
@@ -37,7 +42,9 @@ public:
     const ControlExecutionPlan& plan() const noexcept;
 
 private:
+    struct ConstantState;
     ControlExecutionPlan plan_;
+    std::shared_ptr<const ConstantState> constants_;
 };
 
 }  // namespace kxc::runtime

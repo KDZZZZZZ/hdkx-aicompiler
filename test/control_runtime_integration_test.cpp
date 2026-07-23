@@ -15,12 +15,19 @@
 
 #include "kxc/compiler/compiler.h"
 #include "kxc/compiler/control_flow.h"
+#include "kxc/relay/op.h"
 #include "kxc/runtime/control_session.h"
 #include "support/control_plan_reference_executor.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 
 #ifndef KXC_ENABLE_CONTROL_RUNTIME
 #define KXC_ENABLE_CONTROL_RUNTIME 0
+#endif
+#ifndef KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+#define KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION 0
+#endif
+#ifndef KXC_USE_LLVM
+#define KXC_USE_LLVM 0
 #endif
 
 namespace {
@@ -211,6 +218,28 @@ ControlPlan SharedConstantBranchPlan() {
     return plan;
 }
 
+ControlPlan ModuleLocalConstantBranchPlan() {
+    ControlPlan plan = BranchPlan();
+    plan.values.push_back(I64(5));
+    plan.values.push_back(I64(6));
+    plan.constant_values = {5, 6};
+    plan.regions[0].live_ins = {0, 1, 5, 6};
+    plan.regions[0].effect = Reads({0, 1, 5, 6});
+    plan.regions[0].tasks[0].inputs = {0, 1, 5, 6};
+    plan.regions[0].tasks[0].effect = Reads({0, 1, 5, 6});
+    plan.regions[1].live_ins = {1, 5};
+    plan.regions[1].effect = Reads({1, 5});
+    plan.regions[1].tasks[0].inputs = {1, 5};
+    plan.regions[1].tasks[0].argument_values = {1, 5};
+    plan.regions[1].tasks[0].effect = Reads({1, 5});
+    plan.regions[2].live_ins = {1, 6};
+    plan.regions[2].effect = Reads({1, 6});
+    plan.regions[2].tasks[0].inputs = {1, 6};
+    plan.regions[2].tasks[0].argument_values = {1, 6};
+    plan.regions[2].tasks[0].effect = Reads({1, 6});
+    return plan;
+}
+
 ControlPlan RepeatedOperandPlan() {
     ControlPlan plan;
     plan.values = {I64(0), I64(1)};
@@ -238,7 +267,7 @@ ControlPlan AliasedInputsPlan() {
     return plan;
 }
 
-enum class ScalarOp { kThen, kElse, kCondition, kStep, kSum, kConstantOrder };
+enum class ScalarOp { kThen, kElse, kCondition, kStep, kSum, kDouble, kConstantOrder };
 
 class ScalarLauncher final : public kxc::codegen::KernelLauncher {
 public:
@@ -262,6 +291,7 @@ public:
             case ScalarOp::kCondition: WriteBool(output, first < 3); break;
             case ScalarOp::kStep: WriteI64(output, first + 1); break;
             case ScalarOp::kSum: WriteI64(output, first + ReadI64(arguments[1])); break;
+            case ScalarOp::kDouble: WriteI64(output, first * 2); break;
             case ScalarOp::kConstantOrder:
                 WriteI64(output, first + 10 * ReadI64(arguments[1]) +
                                      ReadI64(arguments[2]));
@@ -468,6 +498,58 @@ bool TestCompilerDefaultStillRejectsIf() {
     return true;
 }
 
+bool TestProductionControlFlowGateAndArtifacts() {
+    const kxc::TensorType boolean({}, "bool");
+    const kxc::TensorType integer({}, "int64");
+    kxc::Var predicate("production_predicate", boolean);
+    kxc::Var lhs("production_lhs", integer);
+    kxc::Var rhs("production_rhs", integer);
+    const kxc::Function function(
+        {predicate, lhs, rhs},
+        kxc::If(predicate,
+                kxc::Call(kxc::relay::Op::Get("add"), {lhs, rhs}),
+                kxc::Call(kxc::relay::Op::Get("mul"), {lhs, rhs})));
+    const auto config =
+        kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
+    const std::string error = ErrorText([&] {
+        (void)kxc::api::Compiler::CompileControlFlowExact(function, config);
+    });
+#if !KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+    CHECK(error.find("disabled by KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION") !=
+              std::string::npos,
+          "production Relay If API must remain default-OFF");
+#elif !KXC_USE_LLVM
+    CHECK(error.find("KXC_ENABLE_LLVM=ON") != std::string::npos,
+          "enabled production API must fail closed without a real LLVM backend");
+#else
+    CHECK(error.empty(), "enabled production API must resolve real compiler artifacts");
+    const auto compiled = kxc::api::Compiler::CompileControlFlowExact(
+        function, config);
+    CHECK(!compiled.artifact_pins.empty() && compiled.artifact_lease &&
+              compiled.artifact_lease->generation() != 0,
+          "resolved production plan must retain real pins in a compiler-minted lease");
+    for (const auto& region : compiled.plan.regions()) {
+        for (const auto& task : region.tasks) {
+            if (task.kind != ControlExecutionTaskKind::kKernel) continue;
+            CHECK(task.kernel.binding_revision() == 0,
+                  "production bindings must not use fixture revisions");
+        }
+    }
+#if KXC_ENABLE_CONTROL_RUNTIME
+    ControlRuntimeSession session(compiled.plan);
+    const ControlRunResult yes =
+        session.Run({ScalarBool(true), ScalarI64(2), ScalarI64(3)});
+    const ControlRunResult no =
+        session.Run({ScalarBool(false), ScalarI64(2), ScalarI64(3)});
+    CHECK(yes.outputs.size() == 1 && no.outputs.size() == 1 &&
+              ReadI64(yes.outputs[0]) == 5 && ReadI64(no.outputs[0]) == 6 &&
+              yes.events != no.events,
+          "real true/false compiler artifacts must execute distinct Relay If branches");
+#endif
+#endif
+    return true;
+}
+
 bool TestBindingAndBranchDifferential() {
     BranchFixture fixture;
     const ControlPlan original = BranchPlan();
@@ -602,13 +684,12 @@ bool TestLoopDifferentialAndBound() {
 }
 
 bool TestReadOnlyInputAliasingAndAbiOrder() {
-    Fixture sum = MakeFixture("sum_entry", ScalarOp::kSum,
+    Fixture sum = MakeFixture("sum_entry", ScalarOp::kDouble,
                               {kxc::codegen::KernelArgRole::kInput,
-                               kxc::codegen::KernelArgRole::kInput,
                                kxc::codegen::KernelArgRole::kOutput});
     const ControlExecutionPlan repeated = kxc::api::BindControlPlanForRuntime(
         RepeatedOperandPlan(),
-        {{40, sum.module, "sum_entry", 11, {0, 0}}});
+        {{40, sum.module, "sum_entry", 11, {0}}});
     Fixture aliased = MakeFixture("alias_entry", ScalarOp::kSum,
                                   {kxc::codegen::KernelArgRole::kInput,
                                    kxc::codegen::KernelArgRole::kInput,
@@ -626,10 +707,8 @@ bool TestReadOnlyInputAliasingAndAbiOrder() {
     CHECK(repeated_result.outputs.size() == 1 &&
               ReadI64(repeated_result.outputs[0]) == 12 &&
               sum.launcher->calls == 1 &&
-              sum.launcher->last_arguments.size() == 3 &&
-              sum.launcher->last_arguments[0].get() ==
-                  sum.launcher->last_arguments[1].get(),
-          "duplicate logical operands must retain ordered duplicate ABI arguments");
+              sum.launcher->last_arguments.size() == 2,
+          "duplicate logical operands must collapse to one physical ABI input");
 
     const NDArray shared = ScalarI64(6);
     ControlRuntimeSession alias_session(aliased_inputs);
@@ -814,6 +893,21 @@ bool TestSharedConstantAlignmentAcrossRegions() {
     CHECK(ReadI64(regions[1].tasks[0].kernel.Constant("constant.shared")) == 2 &&
               ReadI64(regions[2].tasks[0].kernel.Constant("constant.shared")) == 2,
           "module constants and returned copies must not mutate private snapshots");
+
+    Fixture local_then = MakeSharedConstantFixture("local_then", 64, 2);
+    Fixture local_else = MakeSharedConstantFixture("local_else", 32, 3);
+    const ControlExecutionPlan module_local = kxc::api::BindControlPlanForRuntime(
+        ModuleLocalConstantBranchPlan(),
+        {{21, local_then.module, "local_then", 24, {1, 5}},
+         {22, local_else.module, "local_else", 25, {1, 6}}});
+#if KXC_ENABLE_CONTROL_RUNTIME
+    const ControlRunResult local_true = ControlRuntimeSession(module_local).Run(
+        {ScalarBool(true), ScalarI64(5)});
+    const ControlRunResult local_false = ControlRuntimeSession(module_local).Run(
+        {ScalarBool(false), ScalarI64(5)});
+    CHECK(ReadI64(local_true.outputs[0]) == 7 && ReadI64(local_false.outputs[0]) == 8,
+          "same module-local key may bind different logical constants by task");
+#endif
 
 #if KXC_ENABLE_CONTROL_RUNTIME
     ControlRuntimeSession session(bound);
@@ -1024,6 +1118,8 @@ bool TestAsyncCompletionRetention() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"compiler_default_rejects_if", TestCompilerDefaultStillRejectsIf},
+        {"production_control_flow_gate_and_artifacts",
+         TestProductionControlFlowGateAndArtifacts},
         {"binding_and_branch_differential", TestBindingAndBranchDifferential},
         {"loop_differential_and_bound", TestLoopDifferentialAndBound},
         {"read_only_input_aliasing_and_abi_order",

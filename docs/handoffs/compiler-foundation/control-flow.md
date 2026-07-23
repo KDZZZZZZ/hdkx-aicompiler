@@ -260,3 +260,90 @@ focused suite 为 **5/5 passed**。随后逐个执行 23 个已构建测试程�
 10. **另立 eager/tracing frontend 工作。** 若未来需要 tracing，adapter 必须输出完整 guards/effect/alias/shape bindings；一次已走路径不得推广为本轨 structured control-flow 支持。
 
 完成上述 1–7 且集成 contract suite 通过之前，只能声明“static-exact ControlPlan preparation/reference semantics”，不能声明生产动态控制流 runtime 已支持。
+
+## 8. W3 restricted real-artifact Relay `If` path
+
+W3 adds an explicit, **default-OFF** bridge for the deliberately narrow case
+where the existing real compiler can produce CPU artifacts for every frozen
+branch Call:
+
+```text
+Relay Function with If
+  -> InferType / ANF / static-exact ControlPlan v2
+  -> compiler-private { task id -> frozen Relay Function(Call) } sidecar
+  -> Compiler::Compile(one If-free Call Function) for every kernel task
+  -> resolved ControlExecutionPlan v1
+```
+
+Public surface and build registration:
+
+- `KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=OFF` is propagated to library and
+  runtime-test translation units.  `Compiler::CompileControlFlowExact` is
+  declared in the already-installed `kxc/compiler/compiler.h`; its supporting
+  binding contract remains in the already-installed
+  `kxc/compiler/control_flow.h` and resolved runtime contract in the
+  already-installed `kxc/runtime/control_execution_plan.h`.  All three headers
+  are present in `KXC_PUBLIC_HEADERS`.
+- `Compiler::Compile` is unchanged and continues to reject Relay `If` through
+  the static-dataflow capability gate.  The new API is the only opt-in entry.
+- The lowerer sidecar is `src/compiler/control_flow/internal_lowering.h`, is
+  not installed, and preserves the original Relay Call/Op/attrs/constants and
+  lexical operands.  The resolver never parses `kernel_ref`; it uses task id
+  only to find that private payload and calls the real `Compiler::Compile` for
+  each branch kernel.  A missing sidecar entry fails closed.
+- The resolver accepts only CPU:0/default-stream, static-exact plans and a
+  nonzero caller-supplied generation plus nonempty lease id.  A production
+  binding has `binding_revision == 0`, carries that authority metadata, and
+  carries an opaque strong pin vector.  Fixture revision bindings and
+  production authority bindings are mutually exclusive.  `BoundControlKernel`
+  stores the opaque keepalive in its immutable state, so copies of the resolved
+  plan retain the selected artifacts through cache clear and asynchronous
+  completion ownership.  The generation/lease remain observability/control
+  metadata; runtime does not authenticate or use them to select an artifact.
+- Binding remains exact: task-id mapping, selected module entry, ABI
+  non-output order (live inputs followed by constants), signature roles and
+  output order are checked by `BindControlPlanForRuntime`.  Wrong entry/ABI,
+  branch task mismatch, malformed constants/artifacts, or a malformed private
+  sidecar fail before execution.  Existing control-runtime tests also retain
+  private constant snapshots and completion state across owner destruction.
+
+Supported Relay control syntax is still **only `If`** (including nested `If`
+when every selected Call is in the restricted subset).  Captured live-ins and
+constants are represented by the existing lowerer/ABI contract.  Relay has no
+`Loop` node: W3 makes no generic Relay loop, recursion, unrolling, or JIT-loop
+claim.  The plan-level fixture executor continues to test zero/one/multiple
+trips independently of Relay syntax.
+
+### W3 local evidence and limit
+
+On this machine, both builds used `KXC_ENABLE_CUDA=OFF` and
+`KXC_ENABLE_LLVM=OFF`, with control runtime enabled:
+
+```bash
+cmake -S . -B /tmp/kxc-control-w3-off \
+  -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
+  -DKXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=OFF \
+  -DKXC_ENABLE_CONTROL_RUNTIME=ON \
+  -DKXC_BUILD_CODEGEN_TESTS=OFF -DKXC_BUILD_PASS_TESTS=ON
+cmake --build /tmp/kxc-control-w3-off --target run_control_flow_tests -j2
+
+cmake -S . -B /tmp/kxc-control-w3-on \
+  -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
+  -DKXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=ON \
+  -DKXC_ENABLE_CONTROL_RUNTIME=ON \
+  -DKXC_BUILD_CODEGEN_TESTS=OFF -DKXC_BUILD_PASS_TESTS=ON
+cmake --build /tmp/kxc-control-w3-on --target run_control_flow_tests -j2
+```
+
+Both gate configurations passed the six control-flow tests:
+`relay_anf_test`, `executable_capability_test`, `control_plan_test`,
+`control_plan_reference_executor_test`, `relay_control_plan_test`, and
+`control_runtime_integration_test`.  The latter proves default-off rejection,
+fail-closed enabled-without-LLVM behavior, default `Compiler::Compile(If)`
+rejection, fixture branch/loop ABI and branch mismatch negatives, malformed
+artifact data, private constants, and async lifetime.  LLVM was unavailable,
+so this is dependency-free artifact/lifetime evidence only: it is **not** real
+numeric LLVM JIT validation of the positive gated path.  Such validation must
+cover true/false and nested `If`, constants/live-in capture, malformed sidecar,
+wrong artifact data, cache clear, and async completion before claiming a real
+backend result.

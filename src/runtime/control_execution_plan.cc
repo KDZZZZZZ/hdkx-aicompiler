@@ -171,7 +171,6 @@ struct State final {
                        std::pair<ControlExecutionRegionId, ControlExecutionRegionId>>
         body_argument_regions;
     std::unordered_map<ControlExecutionValueId, NDArray> constant_payloads;
-    std::unordered_map<std::string, ControlExecutionValueId> constant_values_by_key;
     std::unordered_set<ControlExecutionRegionId> active;
     std::unordered_set<ControlExecutionRegionId> visited;
 };
@@ -302,11 +301,6 @@ void ValidateKernel(State& state, const ControlExecutionTask& task) {
                 if (existing != state.constant_payloads.end() &&
                     !SamePayload(existing->second, payload)) {
                     Fail("one logical constant has different bound payloads");
-                }
-                const std::string key = std::string(argument->constant_key);
-                const auto reverse = state.constant_values_by_key.emplace(key, value_id);
-                if (!reverse.second && reverse.first->second != value_id) {
-                    Fail("one module constant key maps to different logical values");
                 }
                 state.constant_payloads[value_id] = payload;
                 break;
@@ -495,13 +489,15 @@ struct BoundControlKernel::State final {
     State(api::CompiledModule module, codegen::KernelSignature signature,
           codegen::KernelLaunchMetadata metadata,
           codegen::CompiledKernel executable, Map<String, NDArray> constants,
-          std::uint64_t binding_revision)
+          std::uint64_t binding_revision,
+          std::shared_ptr<const void> production_lease)
         : module(std::move(module)),
           signature(std::move(signature)),
           metadata(std::move(metadata)),
           executable(std::move(executable)),
           constants(std::move(constants)),
-          binding_revision(binding_revision) {}
+          binding_revision(binding_revision),
+          production_lease(std::move(production_lease)) {}
 
     api::CompiledModule module;
     codegen::KernelSignature signature;
@@ -509,15 +505,20 @@ struct BoundControlKernel::State final {
     codegen::CompiledKernel executable;
     Map<String, NDArray> constants;
     const std::uint64_t binding_revision{0};
+    // Keeps compiler-owned immutable pins alive without exposing compiler API.
+    const std::shared_ptr<const void> production_lease;
 };
 
 BoundControlKernel::BoundControlKernel(api::CompiledModule module,
                                        String entry_symbol,
-                                       std::uint64_t binding_revision) {
+                                       std::uint64_t binding_revision,
+                                       std::shared_ptr<const void> production_lease) {
+    const bool production = static_cast<bool>(production_lease);
     if (!module.defined() || !module.IsReady() || entry_symbol == "" ||
-        binding_revision == 0 || !module.HasFunction(entry_symbol)) {
+        !module.HasFunction(entry_symbol) ||
+        (production == (binding_revision != 0))) {
         throw std::invalid_argument(
-            "BoundControlKernel requires a ready fixture module entry and binding_revision > 0");
+            "BoundControlKernel requires a ready module entry and exactly one fixture revision or retained production lease");
     }
     const auto* node = module.As<api::CompiledModuleNode>();
     const auto entry = node->entries_.find(std::string(entry_symbol));
@@ -536,12 +537,14 @@ BoundControlKernel::BoundControlKernel(api::CompiledModule module,
     Map<String, NDArray> constants = SnapshotCpuConstants(module, signature);
     state_ = std::make_shared<State>(
         std::move(module), signature, metadata, executable,
-        std::move(constants), binding_revision);
+        std::move(constants), binding_revision, std::move(production_lease));
     Validate();
 }
 
 void BoundControlKernel::Validate() const {
-    if (!state_ || state_->binding_revision == 0 || !state_->module.defined() ||
+    if (!state_ ||
+        (state_->binding_revision == 0 && !state_->production_lease) ||
+        !state_->module.defined() ||
         !state_->executable.defined() || !state_->executable.IsReady() ||
         state_->executable.signature().get() != state_->signature.get() ||
         state_->executable.launch_metadata().get() != state_->metadata.get()) {
