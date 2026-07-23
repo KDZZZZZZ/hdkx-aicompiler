@@ -46,7 +46,7 @@ cmake --build out/build/<llvm-build> --target run_onnx_importer_test
 | `transpose` | tensor.transform | Y | Y | Y | Y | 支持负轴归一化 |
 | `cast` | tensor.transform | Y | Y | Y | Y | LLVM 直接生成 cast 指令 |
 | `reduce_mean` | tensor.reduce | Y | Y | Y | Y | 静态 reduction shape |
-| `softmax` | nn | Y | Y | Y | Y | 当前实现为 exp/sum/div |
+| `softmax` | nn | Y | Y | Y | Y | 使用 max-subtraction；LLVM 测试覆盖极大正负 logits。masked/all-masked 语义未支持 |
 
 ## 非 MVP helper 规则
 

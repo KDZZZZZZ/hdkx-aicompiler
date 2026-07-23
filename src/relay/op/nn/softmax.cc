@@ -5,6 +5,7 @@
 #include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/op_macros.h"
 #include "kxc/relay/type_infer.h"
+#include "kxc/te/topi/broadcast.h"
 #include "kxc/te/topi/elemwise.h"
 #include "kxc/te/topi/reduction.h"
 
@@ -54,7 +55,10 @@ te::Tensor SoftmaxCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     const int axis = NormalizeAxis("softmax", softmax_attrs ? softmax_attrs->axis : -1, rank);
     Array<int> reduce_axis = {axis};
 
-    te::Tensor exp_out = te::topi::exp(inputs[0], "T_softmax_exp");
+    te::Tensor max_out = te::topi::max(inputs[0], reduce_axis, true, "T_softmax_max");
+    te::Tensor shifted =
+        te::topi::subtract(inputs[0], max_out, "T_softmax_shifted");
+    te::Tensor exp_out = te::topi::exp(shifted, "T_softmax_exp");
     te::Tensor sum_out = te::topi::sum(exp_out, reduce_axis, true, "T_softmax_sum");
     return te::compute(
         inputs[0]->shape,

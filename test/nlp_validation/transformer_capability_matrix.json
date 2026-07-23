@@ -11,27 +11,29 @@
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; it does not claim current Relay numerical stability.",
+        "status": "implemented",
+        "gate": "static_unmasked_only",
+        "reason": "Relay softmax is registered for static floating-point tensors; masked/all-masked semantics remain unsupported.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/op/nn/softmax.cc",
+          "test/relay_op_contract.json"
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "status": "implemented",
+        "gate": "max_subtraction_static",
+        "reason": "TE lowering computes max, subtracts it, then performs exp/sum/div for a static axis.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/op/nn/softmax.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "llvm_extreme_test_not_run_local",
+        "reason": "LLVM extreme-logit numeric coverage exists, but local LLVM is unavailable so this session does not mark it validated.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/op_numeric_llvm_test.cpp"
         ]
       },
       "cuda": {

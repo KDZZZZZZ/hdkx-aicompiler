@@ -21,6 +21,11 @@ VALIDATED = {
     ("decode_external_kv", "numeric"),
     ("kv_cache", "numeric"),
 }
+IMPLEMENTED = {
+    ("stable_softmax", "relay"),
+    ("stable_softmax", "lowering"),
+    ("stable_softmax", "llvm"),
+}
 WORKLOAD_KEYS = {
     "id", "fixture", "kind", "logical_extent", "physical_extent", "valid_extent",
     "seed", "tolerance", "expected_gate", "model_revision", "target", "driver",
@@ -161,6 +166,9 @@ def validate_matrix(root, matrix):
             if (capability, layer) in VALIDATED:
                 if record["status"] != "validated":
                     raise ValidationError("matrix.{}.{} must retain its reference validation".format(capability, layer))
+            elif (capability, layer) in IMPLEMENTED:
+                if record["status"] != "implemented":
+                    raise ValidationError("matrix.{}.{} must retain its implementation gate".format(capability, layer))
             elif record["status"] in {"implemented", "validated"}:
                 raise ValidationError("matrix.{}.{} opens an unvalidated gate".format(capability, layer))
             if not isinstance(record["gate"], str) or not record["gate"]:
@@ -168,8 +176,10 @@ def validate_matrix(root, matrix):
             if not isinstance(record["reason"], str) or not record["reason"]:
                 raise ValidationError("matrix.{}.{} reason is invalid".format(capability, layer))
             check_evidence(root, record["evidence"], "matrix.{}.{}".format(capability, layer))
-            if layer in {"llvm", "cuda"} and record["status"] != "unsupported":
-                raise ValidationError("matrix.{}.{} must not claim local backend validation".format(capability, layer))
+            if layer == "cuda" and record["status"] != "unsupported":
+                raise ValidationError("matrix.{}.cuda must remain closed".format(capability))
+            if layer == "llvm" and record["status"] == "validated":
+                raise ValidationError("matrix.{}.llvm must not claim unrun local validation".format(capability))
     cuda_softmax = matrix["capabilities"]["stable_softmax"]["cuda"]
     if cuda_softmax["gate"] != "cuda_reduction_unsupported":
         raise ValidationError("stable_softmax CUDA reduction gate is not closed")

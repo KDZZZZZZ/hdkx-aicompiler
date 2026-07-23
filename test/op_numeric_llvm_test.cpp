@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -35,6 +36,9 @@ void ExpectNear(const std::vector<float>& actual, const std::vector<float>& expe
                 float tolerance = 1e-4f) {
     Check(actual.size() == expected.size(), "result size mismatch");
     for (size_t i = 0; i < actual.size(); ++i) {
+        if (!std::isfinite(actual[i]) || !std::isfinite(expected[i])) {
+            throw std::runtime_error("non-finite value at " + std::to_string(i));
+        }
         const float diff = std::fabs(actual[i] - expected[i]);
         if (diff > tolerance) {
             throw std::runtime_error("value mismatch at " + std::to_string(i) +
@@ -371,25 +375,28 @@ void TestReduceMean() {
     ExpectNear(out, {2.0f, 5.0f});
 }
 
-// 验证 Softmax 的归一化轴和数值稳定性。
+// 验证 Softmax 通过 max-subtraction 在极大正负 logits 下保持有限。
 void TestSoftmax() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("softmax"), {data},
-                   kxc::relay::SoftmaxAttrs::Create(1));
+                   kxc::relay::SoftmaxAttrs::Create(-1));
     kxc::Function func({data}, call);
 
-    std::vector<float> data_buf = {1, 2, 3, 1, 3, 5};
+    std::vector<float> data_buf = {1000, 1001, 999, -1000, -999, -1001};
     std::vector<float> out(6, 0.0f);
     CompileAndRun("softmax", func, {Input(data_buf), Output(out)});
 
     std::vector<float> expected(6, 0.0f);
     for (size_t row = 0; row < 2; ++row) {
-        float denom = 0.0f;
+        const auto begin = data_buf.begin() + static_cast<std::ptrdiff_t>(row * 3);
+        const float max_value = *std::max_element(begin, begin + 3);
+        float denominator = 0.0f;
         for (size_t col = 0; col < 3; ++col) {
-            denom += std::exp(data_buf[row * 3 + col]);
+            denominator += std::exp(data_buf[row * 3 + col] - max_value);
         }
         for (size_t col = 0; col < 3; ++col) {
-            expected[row * 3 + col] = std::exp(data_buf[row * 3 + col]) / denom;
+            expected[row * 3 + col] =
+                std::exp(data_buf[row * 3 + col] - max_value) / denominator;
         }
     }
     ExpectNear(out, expected);
