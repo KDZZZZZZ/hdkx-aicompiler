@@ -39,6 +39,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
   include/kxc/compiler/identity.h
+  include/kxc/compiler/pipeline.h
   include/kxc/compiler/lowering/relay_to_tir.h
   include/kxc/distributed/ccl_backend.h
   include/kxc/distributed/dref.h
@@ -424,6 +425,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/compile_config.cc
   src/compiler/compile_state.cc
   src/compiler/identity.cc
+  src/compiler/pipeline_resolver.cc
   src/compiler/compiler.cc
   src/compiler/graph/partition.cc
   src/compiler/graph/value_graph.cc
@@ -736,6 +738,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(registry_test test/registry_test.cpp)
   kxc_add_runtime_exe(type_registration_test test/type_registration_test.cpp)
   kxc_add_runtime_exe(pass_pipeline_test test/pass_pipeline_test.cpp)
+  kxc_add_runtime_exe(pipeline_resolver_test test/pipeline_resolver_test.cpp)
   kxc_add_runtime_exe(device_info_test test/device_info_test.cpp)
   kxc_add_runtime_exe(device_runtime_test test/device_runtime_test.cpp)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)

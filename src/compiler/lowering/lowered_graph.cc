@@ -267,7 +267,8 @@ relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
             String(unit.semantic_key.digest())});
 }
 
-LoweredGraph LowerGraph(Function function, Device device, Target target) {
+LoweredGraph LowerGraph(Function function, Device device, Target target,
+                        String pipeline_fingerprint) {
     if (!function.defined() || !device.defined()) {
         throw std::invalid_argument(
             "LowerGraph requires a defined Function and Device");
@@ -275,8 +276,9 @@ LoweredGraph LowerGraph(Function function, Device device, Target target) {
     function = relay::InferTypePass(function);
     if (!target.defined()) target = BuildTarget(device);
     CapabilityVerifier::Require(CapabilityRequest{
-        function, target, "graph", "", CapabilityBoundary::kPrePartition,
-        CapabilityMode::kStaticExact, true});
+        function, target, "graph", std::string(pipeline_fingerprint),
+        CapabilityBoundary::kPrePartition, CapabilityMode::kStaticExact,
+        true});
     LoweredGraph result;
     result.partitioned =
         PartitionValueGraph(BuildValueGraph(function));

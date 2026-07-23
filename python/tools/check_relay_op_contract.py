@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from generate_relay_op_contract import render as render_generated_contract
+
 
 REGISTER_RE = re.compile(
     r"KXC_REGISTER_OP\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)"
@@ -642,6 +644,23 @@ def analyze(
 
     rows: list[dict[str, Any]] = []
     global_issues: list[str] = []
+
+    generated_path = root / "src" / "relay" / "generated" / "relay_op_contract.inc"
+    expected_generated = render_generated_contract(contract)
+    if (not generated_path.exists() or
+            generated_path.read_text(encoding="utf-8") != expected_generated):
+        global_issues.append(
+            "generated OperatorSpec source is stale; run "
+            "python/tools/generate_relay_op_contract.py"
+        )
+    registry_text = read_text(root / "src" / "relay" / "op_registry.cc")
+    if "op_contract_generated::Spec" not in registry_text:
+        global_issues.append("operator registry bypasses generated OperatorSpec metadata")
+    if "InferCategoryFromName" in registry_text or "FillLegacyDefaults" in registry_text:
+        global_issues.append("operator registry still infers or defaults critical contract fields")
+    documentation = contract.get("documentation")
+    if not isinstance(documentation, str) or not (root / documentation).is_file():
+        global_issues.append("operator contract documentation anchor is missing or invalid")
 
     for op in sorted(op_names):
         expected = expected_ops.get(op)

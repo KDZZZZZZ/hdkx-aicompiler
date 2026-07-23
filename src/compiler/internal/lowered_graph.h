@@ -30,7 +30,8 @@ relay::LoweredFunction LowerCompilationUnit(
     const ValueGraph& graph, const CompilationUnit& unit);
 LoweredGraph LowerGraph(Function function,
                         Device device = Device::CPU(),
-                        Target target = Target());
+                        Target target = Target(),
+                        String pipeline_fingerprint = String());
 void ValidateLoweredGraph(const LoweredGraph& graph);
 
 }  // namespace kxc::api::internal

@@ -53,6 +53,56 @@
       "unroll_loop",
       "vectorize_loop",
       "remove_no_op"
+    ],
+    "relay.compiler.o0": [],
+    "relay.compiler.o1": [
+      "fold_tuple_get_item",
+      "fold_constant",
+      "simplify_expr"
+    ],
+    "relay.compiler.o2": [
+      "fold_tuple_get_item",
+      "fold_constant",
+      "simplify_expr",
+      "canonicalize_cast",
+      "remove_standalone_reshapes",
+      "eliminate_dead_let"
+    ],
+    "relay.compiler.o3": [
+      "fold_tuple_get_item",
+      "fold_constant",
+      "simplify_expr",
+      "canonicalize_cast",
+      "remove_standalone_reshapes",
+      "eliminate_dead_let"
+    ],
+    "tir.compiler.o0": [],
+    "tir.compiler.o1": [
+      "fold_constant",
+      "simplify_expr"
+    ],
+    "tir.compiler.o2": [
+      "fold_constant",
+      "simplify_expr",
+      "force_narrow_index_to_i32",
+      "convert_for_loops_serial"
+    ],
+    "tir.compiler.cpu.o3": [
+      "fold_constant",
+      "simplify_expr",
+      "force_narrow_index_to_i32",
+      "convert_for_loops_serial",
+      "loop_partition",
+      "unroll_loop",
+      "vectorize_loop",
+      "remove_no_op"
+    ],
+    "tir.compiler.cuda.o3": [
+      "fold_constant",
+      "simplify_expr",
+      "force_narrow_index_to_i32",
+      "remove_no_op",
+      "bind_cuda_threads"
     ]
   },
   "passes": {
@@ -175,7 +225,9 @@
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false,
-      "produced_invariants": ["checked_type"]
+      "produced_invariants": [
+        "checked_type"
+      ]
     },
     "tir.fold_constant": {
       "name": "fold_constant",
@@ -285,5 +337,6 @@
       "idempotent": false,
       "target_dependent": true
     }
-  }
+  },
+  "documentation": "docs/PASS_CONTRACT.md"
 }

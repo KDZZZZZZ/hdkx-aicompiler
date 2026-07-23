@@ -28,6 +28,7 @@
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/remove_standalone_reshapes.h"
 #include "kxc/relay/transforms/simplify_expr.h"
+#include "../../pass/generated/pass_contract.inc"
 
 namespace kxc {
 namespace relay {
@@ -37,11 +38,8 @@ namespace {
 using RelayPassFunc = std::function<Function(const Function&)>;
 
 struct RelayPassBinding {
-    const char* name;
     const char* implementation_key;
     RelayPassFunc function;
-    bool in_default_pipeline;
-    bool idempotent;
 };
 
 std::string SanitizeArtifactName(const std::string& pass_name) {
@@ -62,46 +60,22 @@ Function RunSinglePass(const Function& func, const std::string& pass_name);
 
 const std::vector<RelayPassBinding>& GetRelayPassBindings() {
     static const std::vector<RelayPassBinding> bindings = {
-        {"fold_tuple_get_item", "kxc.relay.transform.fold_tuple_get_item", FoldTupleGetItemPass,
-         true, true},
-        {"fold_constant", "kxc.relay.transform.fold_constant", FoldConstantPass, true, true},
-        {"simplify_expr", "kxc.relay.transform.simplify_expr", SimplifyExprPass, true, true},
-        {"canonicalize_cast", "kxc.relay.transform.canonicalize_cast", CanonicalizeCastPass, true,
-         true},
-        {"remove_standalone_reshapes", "kxc.relay.transform.remove_standalone_reshapes",
-         RemoveStandaloneReshapesPass, true, true},
-        {"eliminate_common_subexpr", "kxc.relay.transform.eliminate_common_subexpr",
-         EliminateCommonSubexprPass, false, true},
-        {"eliminate_dead_let", "kxc.relay.transform.eliminate_dead_let", EliminateDeadLetPass,
-         true, true},
-        {"annotate_memory_scope", "kxc.relay.transform.annotate_memory_scope",
-         AnnotateMemoryScopePass, true, true},
-        {"capture_post_dfs_index_in_spans",
-         "kxc.relay.transform.capture_post_dfs_index_in_spans",
-         CapturePostDfsIndexInSpansPass, true, true},
-        {"infer_type", "kxc.relay.transform.infer_type", InferTypePass, true, true},
+        {"kxc.relay.transform.fold_tuple_get_item", FoldTupleGetItemPass},
+        {"kxc.relay.transform.fold_constant", FoldConstantPass},
+        {"kxc.relay.transform.simplify_expr", SimplifyExprPass},
+        {"kxc.relay.transform.canonicalize_cast", CanonicalizeCastPass},
+        {"kxc.relay.transform.remove_standalone_reshapes",
+         RemoveStandaloneReshapesPass},
+        {"kxc.relay.transform.eliminate_common_subexpr",
+         EliminateCommonSubexprPass},
+        {"kxc.relay.transform.eliminate_dead_let", EliminateDeadLetPass},
+        {"kxc.relay.transform.annotate_memory_scope",
+         AnnotateMemoryScopePass},
+        {"kxc.relay.transform.capture_post_dfs_index_in_spans",
+         CapturePostDfsIndexInSpansPass},
+        {"kxc.relay.transform.infer_type", InferTypePass},
     };
     return bindings;
-}
-
-PassSpec MakeRelayPassSpec(const RelayPassBinding& binding) {
-    PassSpec spec;
-    spec.name = String(binding.name);
-    spec.schema_version = 1;
-    spec.dialect = IRDialect::kRelay;
-    spec.scope = PassScope::kGraph;
-    spec.phase = String("relay_optimize");
-    spec.opt_level = binding.in_default_pipeline ? 1 : 3;
-    spec.produced_invariants = binding.name == std::string("infer_type")
-                                   ? Array<String>{String("checked_type")}
-                                   : Array<String>{};
-    spec.may_change_ir = true;
-    spec.deterministic = true;
-    spec.idempotent = binding.idempotent;
-    spec.thread_safe = false;
-    spec.target_dependent = false;
-    spec.implementation_key = String(binding.implementation_key);
-    return spec;
 }
 
 const std::unordered_map<std::string, RelayPassFunc>& GetRelayImplementationTable() {
@@ -118,21 +92,17 @@ const std::unordered_map<std::string, RelayPassFunc>& GetRelayImplementationTabl
 void EnsureRelayPassSpecsRegistered() {
     static std::once_flag once;
     std::call_once(once, [] {
-        Array<PassSpec> specs;
-        for (const RelayPassBinding& binding : GetRelayPassBindings()) {
-            PassSpec spec = MakeRelayPassSpec(binding);
-            specs.push_back(spec);
-            PassRegistry::Global().Register(std::move(spec));
+        Array<PassSpec> specs =
+            pass_contract_generated::Specs(IRDialect::kRelay);
+        for (const PassSpec& spec : specs) {
+            PassRegistry::Global().Register(spec);
         }
         ValidatePassSpecs(specs);
     });
 }
 
 Array<String> GetDefaultPassOrder() {
-    return {String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"),
-            String("canonicalize_cast"), String("remove_standalone_reshapes"),
-            String("eliminate_dead_let"), String("annotate_memory_scope"),
-            String("capture_post_dfs_index_in_spans"), String("infer_type")};
+    return pass_contract_generated::Pipeline("relay.optimize_default");
 }
 
 Function RunInstrumentedPass(const Function& func, const std::string& pass_name) {
@@ -231,11 +201,13 @@ Array<String> RelayDefaultPassOrder() {
 
 Array<PassSpec> RelayRegisteredPassSpecs() {
     EnsureRelayPassSpecsRegistered();
-    std::vector<PassSpec> specs;
-    for (const RelayPassBinding& binding : GetRelayPassBindings()) {
-        specs.push_back(PassRegistry::Global().Get(IRDialect::kRelay, String(binding.name)));
+    Array<PassSpec> specs;
+    for (const PassSpec& generated :
+         pass_contract_generated::Specs(IRDialect::kRelay)) {
+        specs.push_back(PassRegistry::Global().Get(IRDialect::kRelay,
+                                                   generated.name));
     }
-    return Array<PassSpec>(std::move(specs));
+    return specs;
 }
 
 KXC_REGISTER_GLOBAL("kxc.relay.transform.run_pipeline")

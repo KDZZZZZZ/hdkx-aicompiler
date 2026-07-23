@@ -23,6 +23,7 @@
 #include "internal/primitive_cache.h"
 #include "../runtime/internal/compiled_module_node.h"
 #include "kxc/compiler/capability.h"
+#include "kxc/compiler/pipeline.h"
 #include "../runtime/internal/memory_plan.h"
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
@@ -271,10 +272,32 @@ Map<String, runtime::NDArray> PlaceConstants(
     return result;
 }
 
+NormalizedPipeline ResolveRelayPipeline(const CompileConfig& config) {
+    PipelineRequest request;
+    request.dialect = IRDialect::kRelay;
+    request.requested_scope = PassScope::kGraph;
+    request.target = config->target;
+    request.opt_level = config->opt_level;
+    request.named_pipeline = String("compiler");
+    request.initial_invariants = {String("checked_type")};
+    return PipelineResolver::Resolve(request);
+}
+
+NormalizedPipeline ResolveTIRPipeline(const CompileConfig& config) {
+    PipelineRequest request;
+    request.dialect = IRDialect::kTIR;
+    request.requested_scope = PassScope::kPrimFunc;
+    request.target = config->target;
+    request.opt_level = config->opt_level;
+    request.named_pipeline = String("compiler");
+    return PipelineResolver::Resolve(request);
+}
+
 CompileResult ValidateInput(Function function, const CompileConfig& config) {
     config.Validate();
+    const NormalizedPipeline pipeline = ResolveRelayPipeline(config);
     CapabilityVerifier::Require(CapabilityRequest{
-        function, config->target, "graph", "",
+        function, config->target, "graph", std::string(pipeline.fingerprint),
         CapabilityBoundary::kCompilerEntry, CapabilityMode::kStaticExact,
         false});
     return CompileResult::Validate(config->target, std::move(function));
@@ -282,21 +305,24 @@ CompileResult ValidateInput(Function function, const CompileConfig& config) {
 
 CompileResult OptimizeRelay(const CompileResult& input,
                             const CompileConfig& config) {
+    const NormalizedPipeline pipeline = ResolveRelayPipeline(config);
     Function typed = relay::InferTypePass(input.validated_relay());
     Function optimized = relay::RunRelayPassPipeline(
-        typed, Compiler::RelayPassPolicy(config->opt_level));
+        typed, pipeline.ordered_passes);
     optimized = relay::InferTypePass(optimized);
     CapabilityVerifier::Require(CapabilityRequest{
-        optimized, input.target(), "graph", "",
+        optimized, input.target(), "graph", std::string(pipeline.fingerprint),
         CapabilityBoundary::kPostGraphPass, CapabilityMode::kStaticExact,
         true});
     return input.AfterRelayOptimization(std::move(optimized));
 }
 
-CompileResult LowerOperators(const CompileResult& input) {
+CompileResult LowerOperators(const CompileResult& input,
+                             const CompileConfig& config) {
     const Device device(input.target()->device_type, input.target()->device_id);
-    internal::LoweredGraph lowered =
-        internal::LowerGraph(input.optimized_relay(), device, input.target());
+    const NormalizedPipeline pipeline = ResolveRelayPipeline(config);
+    internal::LoweredGraph lowered = internal::LowerGraph(
+        input.optimized_relay(), device, input.target(), pipeline.fingerprint);
     std::vector<PrimitiveCompileState> primitives;
     primitives.reserve(lowered.primitives.size());
     for (const internal::LoweredPrimitive& source : lowered.primitives) {
@@ -315,23 +341,13 @@ CompileResult LowerOperators(const CompileResult& input) {
 
 CompileResult OptimizeTIR(const CompileResult& input,
                           const CompileConfig& config) {
-    Array<String> passes =
-        Compiler::TIRPassPolicy(config->opt_level, input.target());
-    if (passes.empty()) {
-        passes = {String("fold_constant"), String("simplify_expr")};
-    }
+    const NormalizedPipeline pipeline = ResolveTIRPipeline(config);
     std::vector<tir::PrimFunc> optimized;
     for (const PrimitiveCompileState& primitive : input.primitives()) {
         optimized.push_back(RunPrimitiveStage(
             "optimize_tir", primitive, [&] {
-                tir::PrimFunc result =
-                    RunTIRPassPipeline(primitive.tir, passes);
-#if KXC_USE_CUDA
-                if (input.target()->kind == "cuda" &&
-                    input.target()->device_type == kCUDA) {
-                    result = tir::BindCudaThreads(result, input.target()).prim_func();
-                }
-#endif
+                tir::PrimFunc result = RunTIRPassPipeline(
+                    primitive.tir, pipeline.ordered_passes);
                 return AttachTIRDiagnosticHash(result);
             }));
     }
@@ -349,17 +365,11 @@ const char* BackendVersion(const Target& target) {
 }
 
 std::string CurrentPipelineFingerprint(const CompileConfig& config) {
-    std::ostringstream out;
-    out << "compiler-pipeline-v1|opt=" << config->opt_level << "|relay=";
-    for (const String& pass : Compiler::RelayPassPolicy(config->opt_level)) {
-        out << std::string(pass) << ',';
-    }
-    out << "|tir=";
-    for (const String& pass :
-         Compiler::TIRPassPolicy(config->opt_level, config->target)) {
-        out << std::string(pass) << ',';
-    }
-    return out.str();
+    const NormalizedPipeline relay_pipeline = ResolveRelayPipeline(config);
+    const NormalizedPipeline tir_pipeline = ResolveTIRPipeline(config);
+    return "compiler-pipeline-v2|relay=" +
+           std::string(relay_pipeline.fingerprint) + "|tir=" +
+           std::string(tir_pipeline.fingerprint);
 }
 
 bool SameDType(DLDataType lhs, DLDataType rhs) {
@@ -655,7 +665,8 @@ CompiledGraph CompilePipeline(Function function, CompileConfig config) {
         "validate", config, [&] { return ValidateInput(function, config); });
     result = RunStage("optimize_relay", config,
                       [&] { return OptimizeRelay(result, config); });
-    result = RunStage("lower", config, [&] { return LowerOperators(result); });
+    result = RunStage("lower", config,
+                      [&] { return LowerOperators(result, config); });
     result = RunStage("optimize_tir", config,
                       [&] { return OptimizeTIR(result, config); });
     result = RunStage("build_signature", config,
@@ -674,48 +685,35 @@ CompiledGraph CompilePipeline(Function function, CompileConfig config) {
 }  // namespace
 
 Array<String> Compiler::RelayPassPolicy(int opt_level) {
-    if (opt_level < 0 || opt_level > 3) {
-        throw std::invalid_argument(
-            "Relay pass policy requires opt_level 0..3");
-    }
-    if (opt_level == 0) return {};
-    if (opt_level == 1) {
-        return {String("fold_tuple_get_item"), String("fold_constant"),
-                String("simplify_expr")};
-    }
-    return {String("fold_tuple_get_item"), String("fold_constant"),
-            String("simplify_expr"), String("canonicalize_cast"),
-            String("remove_standalone_reshapes"),
-            String("eliminate_dead_let")};
+    auto* policy_target_node = new TargetNode();
+    policy_target_node->kind = "llvm";
+    policy_target_node->device_type = kCPU;
+    policy_target_node->device_id = 0;
+    PipelineRequest request;
+    request.dialect = IRDialect::kRelay;
+    request.requested_scope = PassScope::kGraph;
+    request.target = Target(ObjectRef(policy_target_node));
+    request.opt_level = opt_level;
+    request.named_pipeline = String("compiler");
+    request.initial_invariants = {String("checked_type")};
+    return PipelineResolver::Resolve(request).ordered_passes;
 }
 
 Array<String> Compiler::TIRPassPolicy(int opt_level, const Target& target) {
-    if (opt_level < 0 || opt_level > 3) {
-        throw std::invalid_argument(
-            "TIR pass policy requires opt_level 0..3");
+    PipelineRequest request;
+    request.dialect = IRDialect::kTIR;
+    request.requested_scope = PassScope::kPrimFunc;
+    request.target = target;
+    request.opt_level = opt_level;
+    request.named_pipeline = String("compiler");
+    Array<String> compatibility;
+    for (const String& pass :
+         PipelineResolver::Resolve(request).ordered_passes) {
+        if (std::string(pass) != "bind_cuda_threads") {
+            compatibility.push_back(pass);
+        }
     }
-    if (!target.defined() || !target.As<TargetNode>()) {
-        throw std::invalid_argument(
-            "TIR pass policy requires a defined Target");
-    }
-    if (opt_level == 0) return {};
-    if (opt_level == 1) {
-        return {String("fold_constant"), String("simplify_expr")};
-    }
-    if (opt_level == 2) {
-        return {String("fold_constant"), String("simplify_expr"),
-                String("force_narrow_index_to_i32"),
-                String("convert_for_loops_serial")};
-    }
-    if (target->kind == "cuda" && target->device_type == kCUDA) {
-        return {String("fold_constant"), String("simplify_expr"),
-                String("force_narrow_index_to_i32"), String("remove_no_op")};
-    }
-    return {String("fold_constant"), String("simplify_expr"),
-            String("force_narrow_index_to_i32"),
-            String("convert_for_loops_serial"), String("loop_partition"),
-            String("unroll_loop"), String("vectorize_loop"),
-            String("remove_no_op")};
+    return compatibility;
 }
 
 CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
