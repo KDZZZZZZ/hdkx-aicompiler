@@ -105,6 +105,7 @@ struct ArtifactCacheStats final {
     uint64_t merged_waiters{0};
     uint64_t failures{0};
     uint64_t rejections{0};
+    /*! \brief External refs to discoverable entries; excludes evicted pins. */
     uint64_t active_pins{0};
 };
 

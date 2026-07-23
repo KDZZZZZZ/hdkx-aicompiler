@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -25,6 +26,7 @@ struct PrimitiveFlight final {
     std::mutex mutex;
     std::condition_variable ready;
     uint64_t ticket_id{0};
+    uint64_t publish_stamp{0};
     uint64_t merged_waiters{0};
     bool completed{false};
     PrimitiveArtifactPin pin;
@@ -131,20 +133,36 @@ void BoundFailures(PrimitiveCache* cache) {
     }
 }
 
+bool EvictOldestReadyArtifact(PrimitiveCache* cache) {
+    const auto oldest = std::min_element(
+        cache->entries.begin(), cache->entries.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.second.stamp < rhs.second.stamp;
+        });
+    if (oldest == cache->entries.end()) return false;
+    cache->accounted_bytes -=
+        oldest->second.artifact->entry.accounted_bytes;
+    cache->entries.erase(oldest);
+    ++cache->evictions;
+    return true;
+}
+
 void EvictReadyArtifacts(PrimitiveCache* cache) {
     while (cache->entries.size() > cache->limits.max_entries ||
            cache->accounted_bytes > cache->limits.max_accounted_bytes) {
-        const auto oldest = std::min_element(
-            cache->entries.begin(), cache->entries.end(),
-            [](const auto& lhs, const auto& rhs) {
-                return lhs.second.stamp < rhs.second.stamp;
-            });
-        if (oldest == cache->entries.end()) break;
-        cache->accounted_bytes -=
-            oldest->second.artifact->entry.accounted_bytes;
-        cache->entries.erase(oldest);
-        ++cache->evictions;
+        if (!EvictOldestReadyArtifact(cache)) break;
     }
+}
+
+bool MakeRoomForReadyArtifact(PrimitiveCache* cache, uint64_t bytes) {
+    if (bytes > cache->limits.max_accounted_bytes) return false;
+    const uint64_t remaining = cache->limits.max_accounted_bytes - bytes;
+    while (cache->entries.size() >= cache->limits.max_entries ||
+           cache->accounted_bytes > remaining) {
+        if (!EvictOldestReadyArtifact(cache)) break;
+    }
+    return cache->entries.size() < cache->limits.max_entries &&
+           cache->accounted_bytes <= remaining;
 }
 
 void AppendTargetField(std::string* canonical, const std::string& name,
@@ -153,14 +171,14 @@ void AppendTargetField(std::string* canonical, const std::string& name,
                   std::to_string(value.size()) + ":" + value + ";";
 }
 
-std::string TargetFingerprint(const Target& target) {
+std::string TargetFingerprintImpl(const Target& target) {
     if (!target.defined() || !target.As<TargetNode>()) {
         throw std::invalid_argument(
             "primitive artifact identity requires a defined Target");
     }
     const TargetNode* node = target.operator->();
     std::string out;
-    AppendTargetField(&out, "kind", "target-v1");
+    AppendTargetField(&out, "kind", "target-v2");
     AppendTargetField(&out, "target_kind", node->kind);
     AppendTargetField(&out, "device_type",
                       std::to_string(static_cast<int>(node->device_type)));
@@ -168,6 +186,11 @@ std::string TargetFingerprint(const Target& target) {
     AppendTargetField(&out, "exists", std::to_string(node->attrs.exists));
     AppendTargetField(&out, "device_name", node->attrs.device_name);
     AppendTargetField(&out, "arch", node->attrs.arch);
+    AppendTargetField(&out, "compute_version",
+                      node->attrs.compute_version);
+    AppendTargetField(
+        &out, "shared_mem_block",
+        std::to_string(node->attrs.max_shared_memory_per_block));
     AppendTargetField(&out, "max_clock_khz",
                       std::to_string(node->attrs.max_clock_rate_khz));
     AppendTargetField(&out, "max_registers_block",
@@ -215,6 +238,10 @@ PrimitiveFailureRecord FailureWithRemaining(
 }
 
 }  // namespace
+
+std::string BuildTargetCapabilityFingerprint(const Target& target) {
+    return TargetFingerprintImpl(target);
+}
 
 PrimitiveArtifactPin::PrimitiveArtifactPin(
     std::shared_ptr<const PrimitiveArtifact> artifact)
@@ -279,7 +306,7 @@ ArtifactKey BuildPrimitiveArtifactKey(
         throw std::invalid_argument(
             "primitive artifact key requires semantics, pipeline, schedule, and backend");
     }
-    return ArtifactKey(semantic_key, TargetFingerprint(target),
+    return ArtifactKey(semantic_key, BuildTargetCapabilityFingerprint(target),
                        pipeline_fingerprint, kKernelABIVersion,
                        schedule_version, backend_version);
 }
@@ -323,6 +350,14 @@ PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey& key) {
     lease.key_ = key;
     const auto ready = cache.entries.find(canonical);
     if (ready != cache.entries.end()) {
+        if (cache.next_stamp == std::numeric_limits<uint64_t>::max()) {
+            ++cache.rejections;
+            lease.access_ = PrimitiveCacheAccess::kRejected;
+            lease.failure_ = PrimitiveFailureRecord{
+                PrimitiveFailureCategory::kBackpressure,
+                "primitive cache LRU stamp space is exhausted", 0};
+            return lease;
+        }
         ready->second.stamp = cache.next_stamp++;
         ++cache.hits;
         lease.access_ = PrimitiveCacheAccess::kHit;
@@ -354,11 +389,21 @@ PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey& key) {
             "bounded in-flight compile budget is saturated", 0};
         return lease;
     }
+    if (cache.next_ticket_id == std::numeric_limits<uint64_t>::max() ||
+        cache.next_stamp == std::numeric_limits<uint64_t>::max()) {
+        ++cache.rejections;
+        lease.access_ = PrimitiveCacheAccess::kRejected;
+        lease.failure_ = PrimitiveFailureRecord{
+            PrimitiveFailureCategory::kBackpressure,
+            "primitive cache ticket/stamp space is exhausted", 0};
+        return lease;
+    }
 
     ++cache.misses;
     lease.access_ = PrimitiveCacheAccess::kOwner;
     lease.flight_ = std::make_shared<PrimitiveFlight>();
     lease.flight_->ticket_id = cache.next_ticket_id++;
+    lease.flight_->publish_stamp = cache.next_stamp++;
     cache.in_flight.emplace(canonical, lease.flight_);
     return lease;
 }
@@ -411,12 +456,20 @@ PrimitiveArtifactPin PublishPrimitiveCacheLease(
             throw std::logic_error(
                 "primitive singleflight owner is stale or already completed");
         }
+        if (MakeRoomForReadyArtifact(
+                &cache, artifact->entry.accounted_bytes)) {
+            cache.entries.emplace(
+                canonical,
+                CacheRecord{artifact, lease.flight_->publish_stamp});
+            // MakeRoom proved this addition cannot overflow the byte budget.
+            cache.accounted_bytes += artifact->entry.accounted_bytes;
+        } else {
+            // The returned pin remains valid, but this oversized artifact is
+            // intentionally not discoverable in the bounded cache.
+            ++cache.evictions;
+        }
         cache.in_flight.erase(active);
         cache.failures.erase(canonical);
-        cache.accounted_bytes += artifact->entry.accounted_bytes;
-        cache.entries.emplace(
-            canonical, CacheRecord{artifact, cache.next_stamp++});
-        EvictReadyArtifacts(&cache);
     }
     {
         std::lock_guard<std::mutex> lock(lease.flight_->mutex);
@@ -447,11 +500,15 @@ void FailPrimitiveCacheLease(
             return;
         }
         cache.in_flight.erase(active);
-        cache.failures.insert_or_assign(
-            canonical,
-            FailureEntry{failure, Clock::now() + retry_after,
-                         cache.next_stamp++});
-        BoundFailures(&cache);
+        // Counter exhaustion fails closed: complete this flight but do not
+        // create a wrapped/ambiguous negative-cache record.
+        if (cache.next_stamp != std::numeric_limits<uint64_t>::max()) {
+            cache.failures.insert_or_assign(
+                canonical,
+                FailureEntry{failure, Clock::now() + retry_after,
+                             cache.next_stamp++});
+            BoundFailures(&cache);
+        }
     }
     {
         std::lock_guard<std::mutex> lock(lease.flight_->mutex);

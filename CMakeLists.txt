@@ -16,6 +16,8 @@ option(KXC_ENABLE_CUDA "Enable CUDA support when toolkit is available" ON)
 option(KXC_ENABLE_LLVM "Enable LLVM backend for codegen" ON)
 option(KXC_ENABLE_REGION_TASK_DAG
   "Enable experimental RuntimeSession execution of frozen Region task DAGs" OFF)
+option(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
+  "Enable default-off experimental adapter for a production compiler path" OFF)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build the diagnostic ResNet18 IR dump tool" OFF)
 option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
@@ -43,6 +45,7 @@ set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/inclu
 
 set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/adaptive.h
+  include/kxc/compiler/adaptive_production_experimental.h
   include/kxc/compiler/capability.h
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
@@ -188,6 +191,9 @@ foreach(_kxc_public_module IN ITEMS
   target_link_libraries(kxc_public_api INTERFACE ${_kxc_module_target})
   list(APPEND KXC_PUBLIC_MODULE_TARGETS ${_kxc_module_target})
 endforeach()
+
+target_compile_definitions(kxc_compiler_api INTERFACE
+  KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
 
 if(KXC_ENABLE_CUDA)
   find_package(CUDAToolkit QUIET)
@@ -474,6 +480,11 @@ set(KXC_RUNTIME_SESSION_SOURCES
   src/runtime/session.cc
 )
 
+if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
+  list(APPEND KXC_COMPILER_SOURCES
+    src/compiler/adaptive/production_path_experimental.cc)
+endif()
+
 set(KXC_CODEGEN_LLVM_SOURCES "")
 if(KXC_USE_LLVM)
   set(KXC_CODEGEN_LLVM_SOURCES
@@ -496,7 +507,8 @@ function(kxc_configure_module_obj target)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
     KXC_USE_LLVM=${KXC_USE_LLVM}
-    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>)
+    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
+    KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
 endfunction()
 
 function(kxc_enable_cuda target)
@@ -676,7 +688,8 @@ function(kxc_add_runtime_exe target source_file)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
     KXC_USE_LLVM=${KXC_USE_LLVM}
-    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>)
+    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
+    KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>)
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
   endif()
@@ -789,6 +802,7 @@ if(Python3_Interpreter_FOUND)
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
             --compile
             --compiler "${CMAKE_CXX_COMPILER}"
+            --define "KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     USES_TERMINAL
     COMMENT "Check and compile public headers"
@@ -827,6 +841,10 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
   kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
   kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
+  if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
+    kxc_add_runtime_exe(adaptive_production_experimental_test
+      test/adaptive_production_experimental_test.cpp)
+  endif()
   if(BUILD_TESTING)
     foreach(_kxc_adaptive_test IN ITEMS
         adaptive_contract_test
@@ -836,6 +854,19 @@ if(KXC_BUILD_PASS_TESTS)
       set_tests_properties(${_kxc_adaptive_test} PROPERTIES
         LABELS "adaptive;cpu")
     endforeach()
+    if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
+      add_test(NAME adaptive_production_experimental_test
+        COMMAND "$<TARGET_FILE:adaptive_production_experimental_test>")
+      set_tests_properties(adaptive_production_experimental_test PROPERTIES
+        LABELS "adaptive;adaptive-production-experimental;cpu")
+      add_custom_target(run_adaptive_production_experimental_tests
+        COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
+                -L adaptive-production-experimental -L cpu
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        DEPENDS adaptive_production_experimental_test
+        USES_TERMINAL
+        COMMENT "Run experimental production-path adaptive CPU CTest suite")
+    endif()
 
     add_custom_target(run_adaptive_tests
       COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
@@ -845,6 +876,10 @@ if(KXC_BUILD_PASS_TESTS)
               adaptive_kernel_slot_test
       USES_TERMINAL
       COMMENT "Run adaptive CPU CTest suite")
+    if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
+      add_dependencies(run_adaptive_tests
+        adaptive_production_experimental_test)
+    endif()
   endif()
   kxc_add_runtime_exe(object_test test/object_test.cpp)
   kxc_add_runtime_exe(packed_func_test test/packed_func_test.cpp)
@@ -1157,7 +1192,8 @@ if(Python3_Interpreter_FOUND)
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_public_headers.py"
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
             --compile
-            --compiler "${CMAKE_CXX_COMPILER}")
+            --compiler "${CMAKE_CXX_COMPILER}"
+            --define "KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>")
   set_tests_properties(relay_op_contract pass_contract include_layers public_headers
     PROPERTIES LABELS "cpu;contract")
 endif()

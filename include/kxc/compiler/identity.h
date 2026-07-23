@@ -4,12 +4,19 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
 
+namespace kxc::runtime {
+class ExecutablePlan;
+}
+
 namespace kxc::api {
+
+class CompiledModule;
 
 /*! \brief Plan-local graph value locator; never a semantic cache key. */
 struct GraphValueLocator final {
@@ -63,6 +70,17 @@ private:
     std::string digest_;
 };
 
+/*! \brief One ordered plan-call to immutable primitive artifact mapping. */
+struct OrderedArtifactIdentity final {
+    size_t call_index{0};
+    std::string link_symbol;
+    ArtifactKey artifact_key;
+
+    std::string CanonicalBytes() const;
+    bool operator==(const OrderedArtifactIdentity& other) const noexcept;
+    bool operator!=(const OrderedArtifactIdentity& other) const noexcept;
+};
+
 /*! \brief Shape/layout applicability identity, separate from primitive semantics. */
 class DispatchKey final {
 public:
@@ -76,11 +94,47 @@ public:
     const std::string& canonical_bytes() const noexcept;
     const std::string& digest() const noexcept;
     bool operator==(const DispatchKey& other) const noexcept;
+    bool operator!=(const DispatchKey& other) const noexcept;
 
 private:
     std::string canonical_bytes_;
     std::string digest_;
 };
+
+/*! \brief Opaque, versioned static-exact ABI identity derived from a real plan. */
+class PlanAbiFingerprint final {
+public:
+    PlanAbiFingerprint() = default;
+
+    bool defined() const noexcept;
+    const std::string& canonical_bytes() const noexcept;
+    const std::string& digest() const noexcept;
+    bool operator==(const PlanAbiFingerprint& other) const noexcept;
+    bool operator!=(const PlanAbiFingerprint& other) const noexcept;
+
+private:
+    explicit PlanAbiFingerprint(std::string canonical_bytes,
+                                std::string index_digest = {});
+
+    std::string canonical_bytes_;
+    std::string digest_;
+
+    friend PlanAbiFingerprint BuildPlanAbiFingerprint(
+        const CompiledModule& module,
+        const runtime::ExecutablePlan& plan,
+        const std::vector<OrderedArtifactIdentity>& ordered_artifacts);
+};
+
+/*! \brief Canonicalizes module, plan, and ordered primitive artifact contracts. */
+PlanAbiFingerprint BuildPlanAbiFingerprint(
+    const CompiledModule& module,
+    const runtime::ExecutablePlan& plan,
+    const std::vector<OrderedArtifactIdentity>& ordered_artifacts);
+
+/*! \brief Builds exact input applicability from a graph artifact family and plan. */
+DispatchKey BuildStaticExactDispatchKey(
+    const ArtifactKey& graph_artifact_key,
+    const runtime::ExecutablePlan& plan);
 
 /*! \brief Frozen graph/profile/artifact-generation and memory-plan identity. */
 class PlanVariantKey final {
