@@ -214,6 +214,8 @@ Manifest did not mark CUPTI as available
 | `386cf9d` | `test(nlp): gate unsupported mask semantics` |
 | `dbf8b0e` | `docs(nlp): record validation track handoff` |
 | `0b68754` | `fix(nlp): enforce static execution capability gates` |
+| `8cad311` | `docs(nlp): clarify final capability evidence` |
+| `c95da8c` | `fix(onnx): validate static MatMul contracts` |
 
 本次更新本文件的提交仅同步最终证据，不改变实现能力。
 
