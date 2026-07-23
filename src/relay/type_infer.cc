@@ -590,11 +590,15 @@ Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
 Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("softmax", input_types, 1);
     const auto* data = RequireTensor("softmax", input_types[0], "data");
-    const auto* softmax_attrs = attrs.As<SoftmaxAttrsNode>();
-    if (!data->shape.empty()) {
-        NormalizeAxis("softmax", softmax_attrs ? softmax_attrs->axis : -1,
-                      static_cast<int>(data->shape.size()));
+    if (data->shape.empty()) {
+        throw std::runtime_error("softmax requires rank at least 1");
     }
+    if (data->dtype != "float32" && data->dtype != "float64") {
+        throw std::runtime_error("softmax requires float32 or float64 input");
+    }
+    const auto* softmax_attrs = attrs.As<SoftmaxAttrsNode>();
+    NormalizeAxis("softmax", softmax_attrs ? softmax_attrs->axis : -1,
+                  static_cast<int>(data->shape.size()));
     return input_types[0];
 }
 

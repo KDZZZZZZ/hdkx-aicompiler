@@ -48,7 +48,8 @@ save_imported_model(
 
 该 importer 按静态 shape MVP fail-closed 地处理 ONNX value info：
 
-- 已知 `dim_value` 会按整数保留，包括 `0`。
+- 已知 `dim_value` 会按整数保留，包括 `0`；显式但零维的 shape field 表示合法 scalar。
+- 缺少 `tensor_type.shape` 的 unknown rank 会拒绝导入，并给出 tensor/value 名称和 rank context。
 - symbolic 或 unknown 维度默认会拒绝导入，并在错误中给出 tensor/value 名称、axis 和（适用时）`dim_param`。
 - 仅当调用方显式传入正数 `default_batch`（CLI 为 `--batch N`）时，未解析的 axis 0 才会绑定为该 batch 值；所有非 batch 未解析维度仍会拒绝。
 - C++ JSON reifier 同样只接受非负整数静态 shape，拒绝负数或非整数维度；它不支持 symbol runtime 语义。
@@ -106,7 +107,7 @@ kxc::frontend::ImportedONNXModel imported =
 - `param_order`：稳定参数顺序。
 - `input_names` / `output_names`：runtime binding 元数据。
 
-C++ loader 会按 spec 构建 `Var`、`Constant(runtime::NDArray)` 和 `Call(Op::Get(...), args, attrs)`，并保留 initializer 真实 bytes。
+C++ loader 会按 spec 构建 `Var`、`Constant(runtime::NDArray)` 和 `Call(Op::Get(...), args, attrs)`，并保留 initializer 真实 bytes。构图后它会运行 Relay 类型推导，并要求每个推导出的输出 tensor shape/dtype 与 JSON 声明完全一致。
 
 ## 错误信息
 

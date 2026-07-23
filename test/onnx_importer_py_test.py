@@ -92,6 +92,48 @@ def test_known_zero_dimension_is_preserved():
     assert imported.function.outputs[0].shape == [0, 3]
 
 
+def _unknown_rank_value_info(name):
+    value_info = onnx.ValueInfoProto()
+    value_info.name = name
+    value_info.type.tensor_type.elem_type = TensorProto.FLOAT
+    return value_info
+
+
+def _model_with_value_infos(input_value_info, output_value_info):
+    graph = helper.make_graph([], "rank_test", [input_value_info], [output_value_info])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 11)], ir_version=6)
+
+
+def test_unknown_input_rank_is_rejected_with_value_context():
+    model = _model_with_value_infos(
+        _unknown_rank_value_info("input"),
+        helper.make_tensor_value_info("output", TensorProto.FLOAT, [1]),
+    )
+
+    with pytest.raises(ValueError, match=r"Unresolved ONNX rank.*tensor 'input'.*no shape field"):
+        import_onnx_model(model)
+
+
+def test_unknown_output_rank_is_rejected_with_value_context():
+    model = _model_with_value_infos(
+        helper.make_tensor_value_info("input", TensorProto.FLOAT, [1]),
+        _unknown_rank_value_info("output"),
+    )
+
+    with pytest.raises(ValueError, match=r"Unresolved ONNX rank.*tensor 'output'.*no shape field"):
+        import_onnx_model(model)
+
+
+def test_scalar_shape_field_is_preserved():
+    model = _model_with_io_shapes([])
+
+    assert model.graph.input[0].type.tensor_type.HasField("shape")
+    assert model.graph.output[0].type.tensor_type.HasField("shape")
+    imported = import_onnx_model(model)
+    assert imported.function.inputs[0].shape == []
+    assert imported.function.outputs[0].shape == []
+
+
 def test_symbolic_batch_requires_explicit_binding():
     model = _model_with_io_shapes(["batch", 3])
 

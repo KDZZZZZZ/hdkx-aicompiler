@@ -189,6 +189,46 @@ bool TestTransformAndReduceOps() {
     return true;
 }
 
+bool TestSoftmaxInferTypeContract() {
+    kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
+    kxc::Call scalar_softmax(kxc::relay::Op::Get("softmax"), {scalar},
+                             kxc::relay::SoftmaxAttrs::Create(0));
+    kxc::Function scalar_func({scalar}, scalar_softmax);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::InferTypePass(scalar_func); }),
+               "softmax rank-0 input should fail type inference");
+
+    kxc::Var integer("integer", kxc::TensorType({2, 3}, "int32"));
+    kxc::Call integer_softmax(kxc::relay::Op::Get("softmax"), {integer},
+                              kxc::relay::SoftmaxAttrs::Create(-1));
+    kxc::Function integer_func({integer}, integer_softmax);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::InferTypePass(integer_func); }),
+               "softmax non-floating input should fail type inference");
+
+    kxc::Var data("data", kxc::TensorType({2, 3}, "float64"));
+    kxc::Call invalid_axis(kxc::relay::Op::Get("softmax"), {data},
+                           kxc::relay::SoftmaxAttrs::Create(2));
+    kxc::Function invalid_axis_func({data}, invalid_axis);
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::InferTypePass(invalid_axis_func); }),
+               "softmax out-of-range axis should fail type inference");
+    return true;
+}
+
+bool TestNegativeExtentLoweringGates() {
+    kxc::Var x("x", kxc::TensorType({-1, 3}, "float32"));
+    kxc::Var y("y", kxc::TensorType({-1, 3}, "float32"));
+    kxc::Call add(kxc::relay::Op::Get("add"), {x, y});
+    kxc::Function func({x, y}, add);
+
+    kxc::relay::InferTypePass(func);
+    TEST_CHECK(CheckTensor(add.checked_type(), {-1, 3}, "float32"),
+               "negative extent TensorType may type-infer before lowering");
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(func); }),
+               "LowerToTIR must reject negative static extents before producing TIR");
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerOperatorCallsToTIR(func); }),
+               "LowerOperatorCallsToTIR must reject negative static extents before producing TIR");
+    return true;
+}
+
 bool TestMvpElementwiseLowerToTIR() {
     kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
     kxc::Var y("y", kxc::TensorType({3}, "float32"));
@@ -316,6 +356,8 @@ int main() {
         {"matrix_and_dense_ops", TestMatrixAndDenseOps},
         {"conv_and_pool_ops", TestConvAndPoolOps},
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
+        {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},
+        {"negative_extent_lowering_gates", TestNegativeExtentLoweringGates},
         {"mvp_elementwise_lower_to_tir", TestMvpElementwiseLowerToTIR},
         {"mvp_matrix_lower_to_tir", TestMvpMatrixLowerToTIR},
         {"mvp_nn_lower_to_tir", TestMvpNNLowerToTIR},

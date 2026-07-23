@@ -745,6 +745,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(infer_type_test test/infer_type_test.cpp)
+  kxc_add_runtime_exe(onnx_import_spec_contract_test test/onnx_import_spec_contract_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
   kxc_add_runtime_exe(operator_compilation_test test/operator_compilation_test.cpp)
@@ -838,6 +839,13 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS infer_type_test
     USES_TERMINAL
     COMMENT "Run infer_type_test"
+  )
+  add_custom_target(run_onnx_import_spec_contract_test
+    COMMAND "$<TARGET_FILE:onnx_import_spec_contract_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS onnx_import_spec_contract_test
+    USES_TERMINAL
+    COMMENT "Run onnx_import_spec_contract_test"
   )
   add_custom_target(run_compiler_contract_test
     COMMAND "$<TARGET_FILE:compiler_contract_test>"

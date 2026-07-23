@@ -45,7 +45,13 @@ tir::DataType TIRDataType(const TensorTypeNode* type) {
 Array<tir::PrimExpr> TEShape(const TensorTypeNode* type) {
     if (!type) throw std::invalid_argument("Boundary value must have TensorType");
     Array<tir::PrimExpr> shape;
-    for (int64_t dimension : type->shape) {
+    for (size_t axis = 0; axis < type->shape.size(); ++axis) {
+        const int64_t dimension = type->shape[axis];
+        if (dimension < 0) {
+            throw std::invalid_argument(
+                "LowerOperatorCallsToTIR requires non-negative static dimensions; axis " +
+                std::to_string(axis) + " is " + std::to_string(dimension));
+        }
         shape.push_back(tir::IntImm(dimension, tir::DataType::Int(64)));
     }
     return shape;

@@ -146,6 +146,11 @@ def _tensor_spec_from_value_info(
     value_info: onnx.ValueInfoProto, default_batch: int | None
 ) -> TensorSpec:
     tensor_type = value_info.type.tensor_type
+    if not tensor_type.HasField("shape"):
+        raise ValueError(
+            f"Unresolved ONNX rank for tensor '{value_info.name}': "
+            "tensor_type has no shape field"
+        )
     shape: list[int] = []
     for axis, dim in enumerate(tensor_type.shape.dim):
         if dim.HasField("dim_value"):

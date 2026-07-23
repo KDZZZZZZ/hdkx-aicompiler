@@ -21,6 +21,12 @@ VALIDATED = {
     ("decode_external_kv", "numeric"),
     ("kv_cache", "numeric"),
 }
+DYNAMIC_BATCHING_GATES = {
+    "frontend": "unresolved_onnx_rank_or_dims_rejected",
+    "relay": "unknown_extents_representable_not_executable",
+    "lowering": "negative_static_extents_rejected",
+    "runtime": "no_dynamic_execution_plan",
+}
 IMPLEMENTED = {
     ("stable_softmax", "frontend"),
     ("stable_softmax", "relay"),
@@ -201,10 +207,10 @@ def validate_matrix(root, matrix):
         cuda = matrix["capabilities"][capability]["cuda"]
         if cuda["gate"] != "cuda_reduction_unsupported":
             raise ValidationError("{} CUDA reduction gate is not closed".format(capability))
-    for layer in ("frontend", "relay", "runtime"):
+    for layer, gate in DYNAMIC_BATCHING_GATES.items():
         dynamic = matrix["capabilities"]["dynamic_batching"][layer]
-        if dynamic["status"] != "unsupported" or dynamic["gate"] != "unknown_or_symbolic_dims_rejected":
-            raise ValidationError("dynamic batching gate is open at {}".format(layer))
+        if dynamic["status"] != "unsupported" or dynamic["gate"] != gate:
+            raise ValidationError("dynamic batching gate is open or inaccurate at {}".format(layer))
 
 
 def validate_fixture(fixture):

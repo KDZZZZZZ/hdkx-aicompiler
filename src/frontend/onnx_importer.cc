@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "kxc/relay/op.h"
+#include "kxc/relay/transforms/infer_type.h"
 
 namespace kxc {
 namespace frontend {
@@ -562,11 +563,16 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
     }
 
     Array<Expr> output_exprs;
+    std::vector<std::vector<int64_t>> declared_output_shapes;
+    std::vector<std::string> declared_output_dtypes;
     for (size_t i = 0; i < outputs_json.a.size(); ++i) {
         const Json& output = outputs_json.a[i];
         std::string ctx = "function.outputs[" + std::to_string(i) + "]";
         std::string name = ReadString(Field(output, "name", ctx), ctx + ".name");
-        ReadStaticShape(Field(output, "shape", ctx), ctx + ".shape");
+        declared_output_shapes.push_back(
+            ReadStaticShape(Field(output, "shape", ctx), ctx + ".shape"));
+        declared_output_dtypes.push_back(
+            ReadString(Field(output, "dtype", ctx), ctx + ".dtype"));
         auto it = values.find(name);
         if (it == values.end()) {
             throw std::runtime_error("Missing graph output value in ONNX import spec: " + name);
@@ -578,7 +584,21 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         throw std::runtime_error("ONNX import spec has no graph outputs");
     }
     Expr body = output_exprs.size() == 1 ? output_exprs[0] : Expr(Tuple(output_exprs));
-    result.function = Function(function_params, body);
+    result.function = relay::InferTypePass(Function(function_params, body));
+    for (size_t i = 0; i < output_exprs.size(); ++i) {
+        const auto* inferred = output_exprs[i].checked_type().As<TensorTypeNode>();
+        if (!inferred || inferred->dtype != declared_output_dtypes[i] ||
+            inferred->shape.size() != declared_output_shapes[i].size()) {
+            throw std::runtime_error("ONNX import output contract mismatch for '" +
+                                     result.output_names[i] + "'");
+        }
+        for (size_t axis = 0; axis < declared_output_shapes[i].size(); ++axis) {
+            if (inferred->shape[axis] != declared_output_shapes[i][axis]) {
+                throw std::runtime_error("ONNX import output contract mismatch for '" +
+                                         result.output_names[i] + "'");
+            }
+        }
+    }
     return result;
 }
 

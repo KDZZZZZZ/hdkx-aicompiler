@@ -60,7 +60,13 @@ tir::DataType DTypeFromDL(const DLDataType& dl_dtype) {
 // 将 TensorType 的静态维度转换为 TIR shape 表达式。
 Array<tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type) {
     Array<tir::PrimExpr> shape;
-    for (const auto dim : type->shape) {
+    for (size_t axis = 0; axis < type->shape.size(); ++axis) {
+        const int64_t dim = type->shape[axis];
+        if (dim < 0) {
+            throw std::runtime_error(
+                "LowerToTIR requires non-negative static dimensions; axis " +
+                std::to_string(axis) + " is " + std::to_string(dim));
+        }
         shape.push_back(tir::IntImm(dim, tir::DataType::Int(64)));
     }
     return shape;

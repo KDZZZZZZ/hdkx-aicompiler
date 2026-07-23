@@ -142,8 +142,8 @@
     "batched_matmul": {
       "frontend": {
         "status": "implemented",
-        "gate": "static_onnx_rank_ge_2",
-        "reason": "ONNX MatMul imports to Relay matmul for static rank >= 2 tensors.",
+        "gate": "structural_matmul_mapping_requires_relay_type_check",
+        "reason": "ONNX MatMul maps structurally to Relay matmul; Relay type checking, not the frontend, validates rank and static compatibility.",
         "evidence": [
           "python/kxc_onnx/importer.py",
           "test/onnx_importer_py_test.py"
@@ -683,26 +683,30 @@
     "dynamic_batching": {
       "frontend": {
         "status": "unsupported",
-        "gate": "unknown_or_symbolic_dims_rejected",
-        "reason": "Dynamic dimensions are deliberately rejected.",
+        "gate": "unresolved_onnx_rank_or_dims_rejected",
+        "reason": "The frontend rejects unknown ONNX rank and unresolved dimensions, except an explicitly bound axis-0 default batch.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py"
         ]
       },
       "relay": {
         "status": "unsupported",
-        "gate": "unknown_or_symbolic_dims_rejected",
-        "reason": "Dynamic dimensions are deliberately rejected.",
+        "gate": "unknown_extents_representable_not_executable",
+        "reason": "Relay TensorType may represent unresolved extents, but no dynamic execution contract is provided.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "lowering": {
         "status": "unsupported",
-        "gate": "no_codegen_gate",
-        "reason": "No lowering implementation claim.",
+        "gate": "negative_static_extents_rejected",
+        "reason": "Both legacy and per-unit lowering reject negative dimensions before generating TIR.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/compiler/lowering/relay_to_tir.cc",
+          "src/compiler/lowering/lowered_graph.cc",
+          "test/infer_type_test.cpp"
         ]
       },
       "llvm": {
@@ -723,10 +727,11 @@
       },
       "runtime": {
         "status": "unsupported",
-        "gate": "unknown_or_symbolic_dims_rejected",
-        "reason": "Runtime dynamic batching is not enabled.",
+        "gate": "no_dynamic_execution_plan",
+        "reason": "Runtime has no dynamic execution-plan or allocation contract.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "src/runtime/executable_plan.cc",
+          "src/runtime/memory_plan.cc"
         ]
       },
       "numeric": {
