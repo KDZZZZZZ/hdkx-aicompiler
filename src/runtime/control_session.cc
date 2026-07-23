@@ -144,11 +144,14 @@ void CollectConstantBindings(const ControlExecutionRegion& region,
             for (std::size_t i = 0; i < arguments.size(); ++i) {
                 if (arguments[i]->role != codegen::KernelArgRole::kConstant) continue;
                 const auto value_id = task.argument_values[i];
-                const NDArray payload = task.kernel.Constant(arguments[i]->constant_key);
+                const NDArray payload =
+                    task.kernel.Constant(arguments[i]->constant_key);
                 ValidateArray(Value(index, value_id), payload, "constant preflight");
                 const auto previous = constants->find(value_id);
-                if (previous != constants->end() && previous->second.get() != payload.get()) {
-                    Fail("one logical constant has inconsistent module payloads");
+                if (previous != constants->end() &&
+                    !task.kernel.MatchesConstant(
+                        arguments[i]->constant_key, previous->second)) {
+                    Fail("one logical constant has inconsistent fixture payloads");
                 }
                 constants->insert_or_assign(value_id, payload);
             }
@@ -188,9 +191,9 @@ void PreflightRegion(const ControlExecutionRegion& region, const PlanIndex& inde
                     }
                 }
                 if (arguments[i]->role == codegen::KernelArgRole::kConstant &&
-                    found->second.get() !=
-                        task.kernel.Constant(arguments[i]->constant_key).get()) {
-                    Fail("kernel source preflight constant identity does not match ABI");
+                    !task.kernel.MatchesConstant(
+                        arguments[i]->constant_key, found->second)) {
+                    Fail("kernel source preflight constant payload does not match ABI");
                 }
             }
         } else if (task.kind == ControlExecutionTaskKind::kBranch) {

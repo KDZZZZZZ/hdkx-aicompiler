@@ -2,6 +2,7 @@
  * \brief End-to-end binding and CPU execution checks for the control runtime.
  */
 
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -205,6 +206,20 @@ ControlPlan RepeatedOperandPlan() {
     return plan;
 }
 
+ControlPlan AliasedInputsPlan() {
+    ControlPlan plan;
+    plan.values = {I64(0), I64(1), I64(2)};
+    plan.entry_region = 10;
+    plan.region_order = {10};
+    plan.graph_inputs = {0, 1};
+    plan.graph_outputs = {2};
+    plan.regions = {
+        {10, {0, 1}, {2}, {Kernel(60, {0, 1}, {2}, "decoy.alias")},
+         Reads({0, 1}), {}, "entry"},
+    };
+    return plan;
+}
+
 enum class ScalarOp { kThen, kElse, kCondition, kStep, kSum, kConstantOrder };
 
 class ScalarLauncher final : public kxc::codegen::KernelLauncher {
@@ -262,8 +277,9 @@ private:
 
 DLDataType Type(const char* name) { return DataTypeFromString(name); }
 
-NDArray ScalarI64(std::int64_t value) {
-    NDArray result = NDArray::Empty({}, Type("int64"), Device::CPU());
+NDArray ScalarI64(std::int64_t value, std::size_t alignment = 0) {
+    NDArray result =
+        NDArray::Empty({}, Type("int64"), Device::CPU(), alignment);
     result.CopyFromBytes(&value, sizeof(value));
     return result;
 }
@@ -324,15 +340,15 @@ Fixture MakeConstantOrderFixture() {
         KernelArgSpec("input", KernelArgRole::kInput, Type("int64"), {},
                       Device::CPU()),
         KernelArgSpec("constant_a", KernelArgRole::kConstant, Type("int64"),
-                      {}, Device::CPU(), 1, false, "constant.a"),
+                      {}, Device::CPU(), 64, false, "constant.a"),
         KernelArgSpec("constant_b", KernelArgRole::kConstant, Type("int64"),
-                      {}, Device::CPU(), 1, false, "constant.b"),
+                      {}, Device::CPU(), 32, false, "constant.b"),
         KernelArgSpec("output", KernelArgRole::kOutput, Type("int64"), {},
                       Device::CPU(), 1, true),
     };
     Map<String, NDArray> constants;
-    constants.Set("constant.a", ScalarI64(2));
-    constants.Set("constant.b", ScalarI64(3));
+    constants.Set("constant.a", ScalarI64(2, 64));
+    constants.Set("constant.b", ScalarI64(3, 32));
     auto launcher = std::make_shared<ScalarLauncher>(ScalarOp::kConstantOrder);
     return {MakeModule("constant_order_entry", arguments, launcher, constants),
             std::move(launcher)};
@@ -544,23 +560,55 @@ bool TestLoopDifferentialAndBound() {
     return true;
 }
 
-bool TestRepeatedOperandAbiOrder() {
+bool TestReadOnlyInputAliasingAndAbiOrder() {
     Fixture sum = MakeFixture("sum_entry", ScalarOp::kSum,
                               {kxc::codegen::KernelArgRole::kInput,
                                kxc::codegen::KernelArgRole::kInput,
                                kxc::codegen::KernelArgRole::kOutput});
-    const ControlPlan plan = RepeatedOperandPlan();
-    const ControlExecutionPlan bound = kxc::api::BindControlPlanForRuntime(
-        plan, {{40, sum.module, "sum_entry", 11, {0, 0}}});
+    const ControlExecutionPlan repeated = kxc::api::BindControlPlanForRuntime(
+        RepeatedOperandPlan(),
+        {{40, sum.module, "sum_entry", 11, {0, 0}}});
+    Fixture aliased = MakeFixture("alias_entry", ScalarOp::kSum,
+                                  {kxc::codegen::KernelArgRole::kInput,
+                                   kxc::codegen::KernelArgRole::kInput,
+                                   kxc::codegen::KernelArgRole::kOutput});
+    const ControlExecutionPlan aliased_inputs =
+        kxc::api::BindControlPlanForRuntime(
+            AliasedInputsPlan(),
+            {{60, aliased.module, "alias_entry", 12, {0, 1}}});
+    CHECK(aliased_inputs.spec().effect_model ==
+              ControlExecutionEffectModel::kPureFreshKernelOutputsV1,
+          "effect model must not claim physical no-alias semantics");
 #if KXC_ENABLE_CONTROL_RUNTIME
-    const ControlRunResult result = ControlRuntimeSession(bound).Run({ScalarI64(6)});
-    CHECK(result.outputs.size() == 1 && ReadI64(result.outputs[0]) == 12 && sum.launcher->calls == 1 &&
+    const ControlRunResult repeated_result =
+        ControlRuntimeSession(repeated).Run({ScalarI64(6)});
+    CHECK(repeated_result.outputs.size() == 1 &&
+              ReadI64(repeated_result.outputs[0]) == 12 &&
+              sum.launcher->calls == 1 &&
               sum.launcher->last_arguments.size() == 3 &&
-              sum.launcher->last_arguments[0].get() == sum.launcher->last_arguments[1].get(),
+              sum.launcher->last_arguments[0].get() ==
+                  sum.launcher->last_arguments[1].get(),
           "duplicate logical operands must retain ordered duplicate ABI arguments");
+
+    const NDArray shared = ScalarI64(6);
+    ControlRuntimeSession alias_session(aliased_inputs);
+    const ControlRunResult first = alias_session.Run({shared, shared});
+    const ControlRunResult second = alias_session.Run({shared, shared});
+    CHECK(first.outputs.size() == 1 && second.outputs.size() == 1 &&
+              ReadI64(first.outputs[0]) == 12 &&
+              ReadI64(second.outputs[0]) == 12 &&
+              aliased.launcher->calls == 2 &&
+              aliased.launcher->last_arguments[0].get() ==
+                  aliased.launcher->last_arguments[1].get() &&
+              first.outputs[0].storage().get() != shared.storage().get() &&
+              first.outputs[0].storage().get() !=
+                  second.outputs[0].storage().get(),
+          "read-only logical inputs may alias while every kernel output is fresh");
 #else
-    CHECK(Throws([&] { ControlRuntimeSession disabled(bound); }) && sum.launcher->calls == 0,
-          "disabled runtime must reject repeated-operand plan without launch");
+    CHECK(Throws([&] { ControlRuntimeSession disabled(repeated); }) &&
+              Throws([&] { ControlRuntimeSession disabled(aliased_inputs); }) &&
+              sum.launcher->calls == 0 && aliased.launcher->calls == 0,
+          "disabled runtime must reject alias fixtures without launch");
 #endif
     return true;
 }
@@ -572,6 +620,26 @@ bool TestConstantAbiOrderAndResolvedValidation() {
         41, fixture.module, "constant_order_entry", 12, {0, 1, 2}};
     const ControlExecutionPlan bound =
         kxc::api::BindControlPlanForRuntime(plan, {exact});
+    const BoundControlKernel& bound_kernel =
+        bound.spec().regions[0].tasks[0].kernel;
+    CHECK(bound_kernel.binding_revision() == 12,
+          "binding revision must preserve only the caller fixture label");
+
+    NDArray original_constant = fixture.module.constants().at("constant.a");
+    const std::int64_t changed_original = 100;
+    original_constant.CopyFromBytes(&changed_original, sizeof(changed_original));
+    NDArray returned_constant = bound_kernel.Constant("constant.a");
+    CHECK(ReadI64(returned_constant) == 2 &&
+              returned_constant.device() == Device::CPU() &&
+              returned_constant.NBytes() == sizeof(std::int64_t) &&
+              reinterpret_cast<std::uintptr_t>(
+                  returned_constant.storage().data()) % 64 == 0,
+          "binding must preserve an aligned private CPU constant snapshot");
+    const std::int64_t changed_return = 200;
+    returned_constant.CopyFromBytes(&changed_return, sizeof(changed_return));
+    CHECK(ReadI64(bound_kernel.Constant("constant.a")) == 2,
+          "mutating a returned constant copy must not alter the private snapshot");
+
     auto swapped = exact;
     swapped.abi_non_output_value_ids = {0, 2, 1};
     CHECK(Throws([&] {
@@ -617,6 +685,30 @@ bool TestConstantAbiOrderAndResolvedValidation() {
               Throws([&] { (void)ControlExecutionPlan(duplicate_outputs); }) &&
               two_output.launcher->calls == 0,
           "resolved kernel ABI must preserve exact output order and uniqueness");
+
+    using kxc::codegen::KernelArgRole;
+    using kxc::codegen::KernelArgSpec;
+    Array<KernelArgSpec> zero_arguments{
+        KernelArgSpec("empty", KernelArgRole::kConstant, Type("int64"),
+                      {0}, Device::CPU(), 128, false, "constant.empty"),
+        KernelArgSpec("output", KernelArgRole::kOutput, Type("int64"),
+                      {0}, Device::CPU(), 128, true),
+    };
+    Map<String, NDArray> zero_constants;
+    zero_constants.Set(
+        "constant.empty",
+        NDArray::Empty({0}, Type("int64"), Device::CPU(), 128));
+    auto zero_launcher = std::make_shared<ScalarLauncher>(ScalarOp::kThen);
+    BoundControlKernel zero_bound(
+        MakeModule("zero_constant_entry", zero_arguments, zero_launcher,
+                   zero_constants),
+        "zero_constant_entry", 19);
+    const NDArray empty_copy = zero_bound.Constant("constant.empty");
+    CHECK(empty_copy.device() == Device::CPU() && empty_copy.NBytes() == 0 &&
+              empty_copy.storage().data() == nullptr &&
+              zero_bound.binding_revision() == 19 &&
+              zero_launcher->calls == 0,
+          "zero-byte CPU constants must bind and deep-copy without dereference");
 #if KXC_ENABLE_CONTROL_RUNTIME
     const ControlRunResult result =
         ControlRuntimeSession(bound).Run({ScalarI64(5)});
@@ -649,10 +741,10 @@ bool TestBindingAndValidationNegatives() {
     non_kernel.push_back({20, fixture.then_kernel.module, "then_entry", 12, {1}});
     CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, non_kernel); }),
           "non-kernel binding must fail");
-    auto zero_generation = bindings;
-    zero_generation[0].generation = 0;
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, zero_generation); }),
-          "generation zero must fail");
+    auto zero_revision = bindings;
+    zero_revision[0].binding_revision = 0;
+    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, zero_revision); }),
+          "binding_revision zero must fail");
     auto wrong_abi = bindings;
     wrong_abi[0].abi_non_output_value_ids = {0};
     CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, wrong_abi); }),
@@ -801,7 +893,7 @@ bool TestAsyncCompletionRetention() {
     completion.Wait();
     completion = kxc::AsyncOperation();
     CHECK(selected_launcher.expired() && unselected_launcher.expired(),
-          "releasing completion must release retained artifacts without an ownership cycle");
+          "releasing completion must release retained fixture launchers without an ownership cycle");
 #else
     BranchFixture fixture;
     const ControlExecutionPlan resolved =
@@ -820,7 +912,8 @@ int main() {
         {"compiler_default_rejects_if", TestCompilerDefaultStillRejectsIf},
         {"binding_and_branch_differential", TestBindingAndBranchDifferential},
         {"loop_differential_and_bound", TestLoopDifferentialAndBound},
-        {"repeated_operand_abi_order", TestRepeatedOperandAbiOrder},
+        {"read_only_input_aliasing_and_abi_order",
+         TestReadOnlyInputAliasingAndAbiOrder},
         {"constant_abi_order_and_resolved_validation",
          TestConstantAbiOrderAndResolvedValidation},
         {"binding_and_validation_negatives", TestBindingAndValidationNegatives},

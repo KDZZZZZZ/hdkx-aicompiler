@@ -84,6 +84,78 @@ bool SameContract(const ControlExecutionValueSpec& lhs,
            lhs.device == rhs.device;
 }
 
+bool SamePayload(const NDArray& lhs, const NDArray& rhs) {
+    if (!lhs.defined() || !rhs.defined() ||
+        !api::SameDType(lhs.dtype(), rhs.dtype()) ||
+        lhs.device() != rhs.device()) {
+        return false;
+    }
+    const Array<std::int64_t> lhs_shape = lhs.shape();
+    const Array<std::int64_t> rhs_shape = rhs.shape();
+    if (lhs_shape.size() != rhs_shape.size()) return false;
+    for (std::size_t i = 0; i < lhs_shape.size(); ++i) {
+        if (lhs_shape[i] != rhs_shape[i]) return false;
+    }
+    const std::size_t nbytes = lhs.NBytes();
+    if (nbytes != rhs.NBytes()) return false;
+    std::vector<std::uint8_t> lhs_bytes(nbytes);
+    std::vector<std::uint8_t> rhs_bytes(nbytes);
+    lhs.CopyToBytes(lhs_bytes.data(), nbytes);
+    rhs.CopyToBytes(rhs_bytes.data(), nbytes);
+    return lhs_bytes == rhs_bytes;
+}
+
+std::size_t CheckedAlignment(const codegen::KernelArgSpec& argument) {
+    if (argument->alignment > std::numeric_limits<std::size_t>::max()) {
+        Fail("kernel constant alignment exceeds host size_t");
+    }
+    return static_cast<std::size_t>(argument->alignment);
+}
+
+std::size_t ConstantAlignment(const codegen::KernelSignature& signature,
+                              const String& key) {
+    for (const auto& argument : signature.arguments()) {
+        if (argument->role == codegen::KernelArgRole::kConstant &&
+            argument->constant_key == key) {
+            return CheckedAlignment(argument);
+        }
+    }
+    Fail("bound kernel constant key is not present in its signature");
+}
+
+NDArray CopyCpuPayload(const NDArray& source, std::size_t alignment) {
+    if (!source.defined() || source.device() != Device::CPU() ||
+        !source.IsContiguous()) {
+        Fail("constant snapshot requires a contiguous CPU payload");
+    }
+    NDArray snapshot = NDArray::Empty(source.shape(), source.dtype(),
+                                      Device::CPU(), alignment);
+    snapshot.CopyFrom(source);
+    return snapshot;
+}
+
+Map<String, NDArray> SnapshotCpuConstants(
+    const api::CompiledModule& module,
+    const codegen::KernelSignature& signature) {
+    const Map<String, NDArray> source_constants = module.constants();
+    Map<String, NDArray> snapshots;
+    const Array<codegen::KernelArgSpec> arguments = signature.arguments();
+    for (std::size_t i = 0; i < arguments.size(); ++i) {
+        const auto& argument = arguments[i];
+        if (argument->role != codegen::KernelArgRole::kConstant) continue;
+        if (argument->device != Device::CPU() ||
+            !source_constants.count(argument->constant_key)) {
+            Fail("constant snapshot requires a bound CPU fixture payload");
+        }
+        const NDArray& source = source_constants.at(argument->constant_key);
+        api::ValidateKernelArgument(signature, i, argument, source,
+                                    source_constants);
+        snapshots.Set(argument->constant_key,
+                      CopyCpuPayload(source, CheckedAlignment(argument)));
+    }
+    return snapshots;
+}
+
 struct State final {
     explicit State(const ControlExecutionPlanSpec& plan) : plan(plan) {}
 
@@ -214,7 +286,8 @@ void ValidateKernel(State& state, const ControlExecutionTask& task) {
                     Fail("kernel constant ABI must bind a graph constant");
                 }
                 boundary.push_back(value_id);
-                const NDArray payload = task.kernel.Constant(argument->constant_key);
+                const NDArray payload =
+                    task.kernel.Constant(argument->constant_key);
                 ValidateArray(value, payload, "kernel constant binding");
                 if (payload.NBytes() != 0) {
                     const uintptr_t base =
@@ -227,7 +300,7 @@ void ValidateKernel(State& state, const ControlExecutionTask& task) {
                 }
                 const auto existing = state.constant_payloads.find(value_id);
                 if (existing != state.constant_payloads.end() &&
-                    existing->second.get() != payload.get()) {
+                    !SamePayload(existing->second, payload)) {
                     Fail("one logical constant has different bound payloads");
                 }
                 const std::string key = std::string(argument->constant_key);
@@ -422,29 +495,29 @@ struct BoundControlKernel::State final {
     State(api::CompiledModule module, codegen::KernelSignature signature,
           codegen::KernelLaunchMetadata metadata,
           codegen::CompiledKernel executable, Map<String, NDArray> constants,
-          std::uint64_t generation)
+          std::uint64_t binding_revision)
         : module(std::move(module)),
           signature(std::move(signature)),
           metadata(std::move(metadata)),
           executable(std::move(executable)),
           constants(std::move(constants)),
-          generation(generation) {}
+          binding_revision(binding_revision) {}
 
     api::CompiledModule module;
     codegen::KernelSignature signature;
     codegen::KernelLaunchMetadata metadata;
     codegen::CompiledKernel executable;
     Map<String, NDArray> constants;
-    const std::uint64_t generation{0};
+    const std::uint64_t binding_revision{0};
 };
 
 BoundControlKernel::BoundControlKernel(api::CompiledModule module,
                                        String entry_symbol,
-                                       std::uint64_t generation) {
+                                       std::uint64_t binding_revision) {
     if (!module.defined() || !module.IsReady() || entry_symbol == "" ||
-        generation == 0 || !module.HasFunction(entry_symbol)) {
+        binding_revision == 0 || !module.HasFunction(entry_symbol)) {
         throw std::invalid_argument(
-            "BoundControlKernel requires a ready module entry and generation > 0");
+            "BoundControlKernel requires a ready fixture module entry and binding_revision > 0");
     }
     const auto* node = module.As<api::CompiledModuleNode>();
     const auto entry = node->entries_.find(std::string(entry_symbol));
@@ -454,15 +527,21 @@ BoundControlKernel::BoundControlKernel(api::CompiledModule module,
     const codegen::KernelSignature signature = entry->second.signature;
     const codegen::KernelLaunchMetadata metadata = entry->second.launch_metadata;
     const codegen::CompiledKernel executable = entry->second.executable;
-    Map<String, NDArray> constants = module.constants();
+    signature.Validate();
+    metadata.Validate();
+    if (metadata->device != Device::CPU()) {
+        throw std::invalid_argument(
+            "BoundControlKernel fixture binding requires CPU:0 metadata");
+    }
+    Map<String, NDArray> constants = SnapshotCpuConstants(module, signature);
     state_ = std::make_shared<State>(
         std::move(module), signature, metadata, executable,
-        std::move(constants), generation);
+        std::move(constants), binding_revision);
     Validate();
 }
 
 void BoundControlKernel::Validate() const {
-    if (!state_ || state_->generation == 0 || !state_->module.defined() ||
+    if (!state_ || state_->binding_revision == 0 || !state_->module.defined() ||
         !state_->executable.defined() || !state_->executable.IsReady() ||
         state_->executable.signature().get() != state_->signature.get() ||
         state_->executable.launch_metadata().get() != state_->metadata.get()) {
@@ -491,11 +570,28 @@ AsyncOperation BoundControlKernel::Launch(
         throw std::invalid_argument(
             "BoundControlKernel argument count does not match its signature");
     }
+    Array<NDArray> launch_arguments;
     for (std::size_t i = 0; i < arguments.size(); ++i) {
-        api::ValidateKernelArgument(state_->signature, i, arguments[i],
-                                    ordered_arguments[i], state_->constants);
+        const auto& spec = arguments[i];
+        if (spec->role == codegen::KernelArgRole::kConstant) {
+            Map<String, NDArray> supplied;
+            supplied.Set(spec->constant_key, ordered_arguments[i]);
+            api::ValidateKernelArgument(state_->signature, i, spec,
+                                        ordered_arguments[i], supplied);
+            const NDArray& snapshot = state_->constants.at(spec->constant_key);
+            if (!SamePayload(snapshot, ordered_arguments[i])) {
+                throw std::invalid_argument(
+                    "BoundControlKernel constant argument differs from its private snapshot");
+            }
+            launch_arguments.push_back(snapshot);
+        } else {
+            api::ValidateKernelArgument(state_->signature, i, spec,
+                                        ordered_arguments[i], state_->constants);
+            launch_arguments.push_back(ordered_arguments[i]);
+        }
     }
-    AsyncOperation operation = state_->executable.Launch(ordered_arguments, stream);
+    AsyncOperation operation =
+        state_->executable.Launch(launch_arguments, stream);
     if (!operation.defined() || !operation->stream.defined() ||
         operation.device() != stream.device() || !operation->stream.is_default() ||
         operation->completed == (operation->backend_event != nullptr)) {
@@ -526,12 +622,22 @@ NDArray BoundControlKernel::Constant(const String& key) const {
     if (!state_->constants.count(key)) {
         throw std::invalid_argument("BoundControlKernel constant is missing");
     }
-    return state_->constants.at(key);
+    return CopyCpuPayload(state_->constants.at(key),
+                          ConstantAlignment(state_->signature, key));
 }
 
-std::uint64_t BoundControlKernel::generation() const {
+bool BoundControlKernel::MatchesConstant(
+    const String& key, const NDArray& candidate) const {
+    Validate();
+    if (!state_->constants.count(key)) {
+        throw std::invalid_argument("BoundControlKernel constant is missing");
+    }
+    return SamePayload(state_->constants.at(key), candidate);
+}
+
+std::uint64_t BoundControlKernel::binding_revision() const {
     if (!state_) throw std::runtime_error("undefined BoundControlKernel");
-    return state_->generation;
+    return state_->binding_revision;
 }
 
 Device BoundControlKernel::device() const { return launch_metadata()->device; }
@@ -540,8 +646,9 @@ bool BoundControlKernel::defined() const noexcept { return static_cast<bool>(sta
 void VerifyControlExecutionPlan(const ControlExecutionPlanSpec& plan) {
     if (plan.schema_version != ControlExecutionPlanSpec::kSchemaVersion ||
         plan.source_control_plan_version != 2 ||
-        plan.effect_model != ControlExecutionEffectModel::kPureNoAliasV1) {
-        Fail("requires schema v1, ControlPlan v2 provenance, and PureNoAliasV1");
+        plan.effect_model !=
+            ControlExecutionEffectModel::kPureFreshKernelOutputsV1) {
+        Fail("requires schema v1, ControlPlan v2 provenance, and kPureFreshKernelOutputsV1");
     }
     if (plan.values.empty() || plan.regions.empty() || plan.graph_outputs.empty()) {
         Fail("values, regions, and graph outputs are required");

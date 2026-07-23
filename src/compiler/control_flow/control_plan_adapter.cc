@@ -1,5 +1,5 @@
 /*! \file src/compiler/control_flow/control_plan_adapter.cc
- * \brief Explicit artifact binding from ControlPlan v2 to runtime schema v1.
+ * \brief Experimental fixture binding from ControlPlan v2 to runtime schema v1.
  */
 
 #include "kxc/compiler/control_flow.h"
@@ -61,16 +61,16 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
     const runtime::ControlPlan& plan,
     const std::vector<ControlKernelBinding>& bindings) {
     // Validate every preparation invariant before dropping its effect/alias
-    // fields.  Artifact selection still never reads unresolved kernel_ref text.
+    // fields.  Fixture selection still never reads unresolved kernel_ref text.
     plan.ValidateStaticExact();
     std::unordered_set<runtime::ValueId> constant_values(
         plan.constant_values.begin(), plan.constant_values.end());
     std::unordered_map<runtime::TaskId, const ControlKernelBinding*> binding_by_task;
     for (const auto& binding : bindings) {
         if (binding.task_id < 0 || !binding.module.defined() ||
-            binding.entry_symbol == "" || binding.generation == 0 ||
+            binding.entry_symbol == "" || binding.binding_revision == 0 ||
             !binding.module.HasFunction(binding.entry_symbol)) {
-            Fail("each binding requires task id, ready module entry, and generation > 0");
+            Fail("each fixture binding requires task id, ready module entry, and binding_revision > 0");
         }
         if (!binding_by_task.emplace(binding.task_id, &binding).second) {
             Fail("duplicate binding task id");
@@ -80,7 +80,8 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
     runtime::ControlExecutionPlanSpec resolved;
     resolved.schema_version = runtime::ControlExecutionPlanSpec::kSchemaVersion;
     resolved.source_control_plan_version = runtime::ControlPlan::kSchemaVersion;
-    resolved.effect_model = runtime::ControlExecutionEffectModel::kPureNoAliasV1;
+    resolved.effect_model =
+        runtime::ControlExecutionEffectModel::kPureFreshKernelOutputsV1;
     resolved.entry_region = plan.entry_region;
     resolved.region_order = plan.region_order;
     resolved.graph_inputs = plan.graph_inputs;
@@ -116,7 +117,8 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
                     }
                     const ControlKernelBinding& supplied = *found->second;
                     runtime::BoundControlKernel kernel(
-                        supplied.module, supplied.entry_symbol, supplied.generation);
+                        supplied.module, supplied.entry_symbol,
+                        supplied.binding_revision);
                     const Array<codegen::KernelArgSpec> signature = kernel.signature().arguments();
                     std::size_t expected_non_outputs = 0;
                     for (const auto& argument : signature) {

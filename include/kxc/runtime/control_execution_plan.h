@@ -16,20 +16,24 @@ using ControlExecutionValueId = std::int64_t;
 using ControlExecutionRegionId = std::int64_t;
 using ControlExecutionTaskId = std::int64_t;
 
-/*! \brief An entry already bound to one ready module artifact. */
+/*! \brief Experimental entry snapshot bound to one ready fixture module. */
 class BoundControlKernel final {
 public:
     BoundControlKernel() = default;
     BoundControlKernel(api::CompiledModule module, String entry_symbol,
-                       std::uint64_t generation);
+                       std::uint64_t binding_revision);
 
     void Validate() const;
     AsyncOperation Launch(const Array<NDArray>& ordered_arguments,
                           const DeviceStream& stream) const;
     codegen::KernelSignature signature() const;
     codegen::KernelLaunchMetadata launch_metadata() const;
+    /*! \brief Returns an independent deep copy; execution retains a private snapshot. */
     NDArray Constant(const String& key) const;
-    std::uint64_t generation() const;
+    /*! \brief Compares bytes/contracts without exposing the execution snapshot. */
+    bool MatchesConstant(const String& key, const NDArray& candidate) const;
+    /*! \brief Caller label only, with no authority, freshness, or hot-swap proof. */
+    std::uint64_t binding_revision() const;
     Device device() const;
     bool defined() const noexcept;
 
@@ -75,7 +79,13 @@ struct ControlExecutionLoopSpec {
 };
 
 enum class ControlExecutionTaskKind { kKernel, kBranch, kLoop };
-enum class ControlExecutionEffectModel { kPureNoAliasV1 };
+/*! \brief Read-only sources and fresh kernel outputs; not a physical no-alias proof.
+ *
+ * Distinct read-only graph inputs may alias.  The control executor freshly
+ * allocates each kernel output, while Phi and loop forwarding preserve selected
+ * storage.  The executor performs no internal storage reuse.
+ */
+enum class ControlExecutionEffectModel { kPureFreshKernelOutputsV1 };
 
 struct ControlExecutionTask {
     ControlExecutionTaskId id{-1};
@@ -107,7 +117,7 @@ struct ControlExecutionPlanSpec {
     std::int64_t schema_version{kSchemaVersion};
     std::int64_t source_control_plan_version{2};
     ControlExecutionEffectModel effect_model{
-        ControlExecutionEffectModel::kPureNoAliasV1};
+        ControlExecutionEffectModel::kPureFreshKernelOutputsV1};
     std::vector<ControlExecutionValueSpec> values;
     ControlExecutionRegionId entry_region{-1};
     std::vector<ControlExecutionRegionId> region_order;
