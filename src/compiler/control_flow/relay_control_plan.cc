@@ -486,6 +486,7 @@ private:
             const Leaves saved = had_existing ? existing->second : Leaves{};
             (*environment)[let->var.get()] = value;
             const Leaves result = LowerTerminal(let->body, region, environment, path + ".body");
+            ValidateAliasPlacement(expr, result, path);
             if (had_existing) {
                 (*environment)[let->var.get()] = saved;
             } else {

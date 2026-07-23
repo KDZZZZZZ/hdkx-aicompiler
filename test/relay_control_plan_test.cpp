@@ -204,6 +204,19 @@ bool TestStaticAndControlGates() {
                    std::string::npos,
                "placed structural aliases must not erase device identity");
 
+    Var placed_binding("placed_binding", kI64);
+    Let placed_let(placed_binding, Add(structural_x, structural_y),
+                   placed_binding);
+    placed_let.set_virtual_device(
+        kxc::VirtualDevice::ForDevice(kxc::Device::CUDA(1)));
+    const std::string let_placement_error = ErrorText([&] {
+        (void)kxc::api::LowerRelayToControlPlan(
+            Function({structural_x, structural_y}, placed_let));
+    });
+    TEST_CHECK(let_placement_error.find("structural alias placement") !=
+                   std::string::npos,
+               "placed Let aliases must not erase device identity");
+
     const kxc::relay::Op& add = kxc::relay::Op::Get("add");
     auto* add_node = const_cast<kxc::relay::OpNode*>(add.operator->());
     const kxc::relay::OperatorSpec saved_spec = add_node->spec;
