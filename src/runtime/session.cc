@@ -3,6 +3,7 @@
  */
 
 #include "kxc/runtime/session.h"
+#include "kxc/runtime/task_executor.h"
 #include "kxc/support/object_registration.h"
 
 #include <memory>
@@ -30,6 +31,7 @@ struct ValidatedPlanContract final {
 struct RuntimeExecutionState final {
     api::CompiledModule module;
     ExecutablePlan plan;
+    FrozenTaskPlan task_plan;
     std::shared_ptr<internal::ValueTable> values;
     Array<AsyncOperation> prior_operations;
 };
@@ -250,9 +252,201 @@ ValidatedPlanContract ValidateModuleAndPlan(
     return result;
 }
 
+ValidatedPlanContract ValidateModuleAndTaskPlan(
+    const api::CompiledModule& module, const FrozenTaskPlan& plan) {
+    if (!module.defined() || !module.IsReady()) {
+        throw std::invalid_argument(
+            "RuntimeSession requires a defined, ready CompiledModule");
+    }
+    if (!plan.defined()) {
+        throw std::invalid_argument(
+            "RuntimeSession requires a defined FrozenTaskPlan");
+    }
+    plan.Validate();
+    for (const auto& region : plan.regions()) {
+        switch (region->kind) {
+            case RegionKind::kPerCall:
+                break;
+            case RegionKind::kFusion:
+                throw std::invalid_argument(
+                    "RuntimeSession task DAG requires verified fusion provenance");
+            case RegionKind::kLibrary:
+                throw std::invalid_argument(
+                    "RuntimeSession task DAG requires a library descriptor, "
+                    "workspace, stream, and error ABI");
+            case RegionKind::kControlFlow:
+                throw std::invalid_argument(
+                    "RuntimeSession task DAG does not execute control-flow regions");
+        }
+    }
+
+    const Array<String> module_symbols = module.symbols();
+    if (module_symbols.empty()) {
+        throw std::invalid_argument(
+            "RuntimeSession task DAG requires module entries");
+    }
+    std::unordered_set<std::string> expected_symbols;
+    for (const auto& symbol : module_symbols) {
+        expected_symbols.insert(std::string(symbol));
+    }
+
+    const auto values = [&] {
+        std::unordered_map<int64_t, ValueSpec> result;
+        for (const auto& value : plan.values()) {
+            result.emplace(value->value_id, value);
+        }
+        return result;
+    }();
+    const Device device = module.launch_metadata(module_symbols[0])->device;
+    for (const auto& item : values) {
+        if (item.second->device != device) {
+            throw std::invalid_argument(
+                "RuntimeSession task DAG values must match the module device");
+        }
+    }
+
+    ValidatedPlanContract result;
+    result.device = device;
+    std::unordered_map<std::string, int64_t> value_by_constant_key;
+    std::unordered_map<int64_t, uint64_t> allocation_alignment;
+    for (const auto& task : plan.tasks()) {
+        if (task->kind == TaskKind::kAllocate) {
+            allocation_alignment.emplace(task.output_value_ids()[0],
+                                         task->alignment);
+        }
+    }
+    size_t kernel_count = 0;
+    for (const auto& task : plan.tasks()) {
+        if (task->kind == TaskKind::kShapeEval) {
+            throw std::invalid_argument(
+                "RuntimeSession task DAG requires shape-eval integration");
+        }
+        if (task->kind != TaskKind::kKernel) continue;
+        ++kernel_count;
+        const std::string symbol = std::string(task->symbol);
+        const std::string context =
+            "RuntimeSession task[" + std::to_string(task->task_id) +
+            "] '" + symbol + "'";
+        if (task->artifact_generation != 0) {
+            throw std::invalid_argument(
+                context + " requires an unsupported artifact generation");
+        }
+        if (!module.HasFunction(task->symbol) ||
+            expected_symbols.count(symbol) == 0) {
+            throw std::invalid_argument(
+                context + " does not match a module entry");
+        }
+        const codegen::KernelSignature signature = module.signature(task->symbol);
+        const codegen::KernelLaunchMetadata metadata =
+            module.launch_metadata(task->symbol);
+        signature.Validate();
+        metadata.Validate();
+        if (metadata->device != device || task->device != device) {
+            throw std::invalid_argument(
+                context + " targets a different execution device");
+        }
+
+        Array<int64_t> regular_inputs;
+        Array<int64_t> constant_inputs;
+        for (int64_t value_id : task.input_value_ids()) {
+            const ValueSpec& value = FindValue(values, value_id, context);
+            (value->is_constant ? constant_inputs : regular_inputs)
+                .push_back(value_id);
+        }
+        const Array<int64_t> outputs = task.output_value_ids();
+        size_t regular_index = 0;
+        size_t constant_index = 0;
+        size_t output_index = 0;
+        for (const auto& argument : signature.arguments()) {
+            int64_t value_id = -1;
+            switch (argument->role) {
+                case codegen::KernelArgRole::kInput:
+                    if (regular_index >= regular_inputs.size()) {
+                        throw std::invalid_argument(
+                            context + " has fewer inputs than its signature");
+                    }
+                    value_id = regular_inputs[regular_index++];
+                    break;
+                case codegen::KernelArgRole::kConstant:
+                    if (constant_index >= constant_inputs.size()) {
+                        throw std::invalid_argument(
+                            context + " has fewer constants than its signature");
+                    }
+                    value_id = constant_inputs[constant_index++];
+                    break;
+                case codegen::KernelArgRole::kOutput:
+                    if (output_index >= outputs.size()) {
+                        throw std::invalid_argument(
+                            context + " has fewer outputs than its signature");
+                    }
+                    value_id = outputs[output_index++];
+                    break;
+            }
+            const ValueSpec& value = FindValue(values, value_id, context);
+            ValidateValueContract(
+                value, argument,
+                context + " value " + std::to_string(value_id));
+            if (argument->role == codegen::KernelArgRole::kOutput &&
+                allocation_alignment.at(value_id) < argument->alignment) {
+                throw std::invalid_argument(
+                    context + " output allocation alignment is insufficient");
+            }
+            if (argument->role == codegen::KernelArgRole::kConstant) {
+                const std::string key = std::string(argument->constant_key);
+                const auto existing =
+                    result.constant_keys_by_value.find(value_id);
+                if (existing != result.constant_keys_by_value.end() &&
+                    std::string(existing->second) != key) {
+                    throw std::invalid_argument(
+                        context + " maps one constant value to multiple keys");
+                }
+                const auto reverse = value_by_constant_key.emplace(key, value_id);
+                if (!reverse.second && reverse.first->second != value_id) {
+                    throw std::invalid_argument(
+                        context + " maps one constant key to multiple values");
+                }
+                result.constant_keys_by_value[value_id] = argument->constant_key;
+            }
+        }
+        if (regular_index != regular_inputs.size() ||
+            constant_index != constant_inputs.size() ||
+            output_index != outputs.size()) {
+            throw std::invalid_argument(
+                context + " arity does not match its signature");
+        }
+    }
+    if (kernel_count == 0) {
+        throw std::invalid_argument(
+            "RuntimeSession task DAG requires at least one kernel task");
+    }
+
+    const Map<String, NDArray> module_constants = module.constants();
+    const Array<int64_t> constant_ids = plan.constant_value_ids();
+    if (result.constant_keys_by_value.size() != constant_ids.size()) {
+        throw std::invalid_argument(
+            "RuntimeSession task constants do not match the module constant pool");
+    }
+    for (int64_t value_id : constant_ids) {
+        const auto key = result.constant_keys_by_value.find(value_id);
+        if (key == result.constant_keys_by_value.end() ||
+            !module_constants.count(key->second)) {
+            throw std::invalid_argument(
+                "RuntimeSession task constant has no module binding");
+        }
+        ValidateRuntimeValue(
+            FindValue(values, value_id, "RuntimeSession task constant"),
+            module_constants.at(key->second),
+            "RuntimeSession task constant value " + std::to_string(value_id));
+    }
+    return result;
+}
+
 void ValidateStoredSession(const RuntimeSessionNode& node) {
-    const ValidatedPlanContract checked =
-        ValidateModuleAndPlan(node.module, node.plan);
+    const ValidatedPlanContract checked = node.task_plan.defined()
+                                              ? ValidateModuleAndTaskPlan(
+                                                    node.module, node.task_plan)
+                                              : ValidateModuleAndPlan(node.module,
+                                                                      node.plan);
     if (checked.device != node.device ||
         checked.constant_keys_by_value.size() !=
             node.constant_keys_by_value.size()) {
@@ -347,13 +541,218 @@ void ValidateBoundSourceArguments(
     }
 }
 
+FrozenTaskPlan BuildPerCallTaskPlan(const api::CompiledModule& module,
+                                    const ExecutablePlan& plan) {
+    const auto values = IndexValues(plan);
+    std::unordered_map<int64_t, size_t> consumers;
+    for (const auto& call : plan.calls()) {
+        std::unordered_set<int64_t> seen;
+        for (int64_t input : call.input_value_ids()) {
+            if (seen.insert(input).second) ++consumers[input];
+        }
+    }
+    std::unordered_set<int64_t> graph_outputs;
+    for (int64_t output : plan.output_value_ids()) graph_outputs.insert(output);
+
+    Array<ValueSpec> task_values;
+    for (const auto& value : plan.values()) {
+        task_values.push_back(ValueSpec(
+            value->value_id, value->value_id, value.shape(), value->dtype,
+            value->device, value->is_input, value->is_constant,
+            value->is_output, value->is_alias, value->is_async_live));
+    }
+
+    Array<TaskSpec> tasks;
+    Array<RegionSpec> regions;
+    int64_t next_task_id = 0;
+    int64_t previous_kernel = -1;
+    int64_t region_id = 0;
+    for (const auto& call : plan.calls()) {
+        Array<int64_t> region_tasks;
+        Array<int64_t> allocation_tasks;
+        Array<int64_t> allocation_dependencies;
+        if (previous_kernel >= 0) {
+            allocation_dependencies.push_back(previous_kernel);
+        }
+
+        Array<uint64_t> output_alignments;
+        for (const auto& argument : module.signature(call->symbol).arguments()) {
+            if (argument->role == codegen::KernelArgRole::kOutput) {
+                output_alignments.push_back(argument->alignment);
+            }
+        }
+        const Array<int64_t> outputs = call.output_value_ids();
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            const int64_t task_id = next_task_id++;
+            tasks.push_back(TaskSpec(
+                task_id, TaskKind::kAllocate, values.at(outputs[i])->device, {},
+                {outputs[i]}, allocation_dependencies, String(), 0, 0,
+                output_alignments[i]));
+            allocation_tasks.push_back(task_id);
+            region_tasks.push_back(task_id);
+        }
+
+        Array<int64_t> kernel_dependencies = allocation_tasks;
+        if (previous_kernel >= 0) kernel_dependencies.push_back(previous_kernel);
+        const int64_t kernel_task_id = next_task_id++;
+        tasks.push_back(TaskSpec(
+            kernel_task_id, TaskKind::kKernel,
+            module.launch_metadata(call->symbol)->device,
+            call.input_value_ids(), outputs, std::move(kernel_dependencies),
+            call->symbol));
+        region_tasks.push_back(kernel_task_id);
+
+        Array<int64_t> live_ins;
+        Array<int64_t> constants;
+        std::unordered_set<int64_t> seen_live_ins;
+        for (int64_t input : call.input_value_ids()) {
+            if (!seen_live_ins.insert(input).second) continue;
+            live_ins.push_back(input);
+            if (values.at(input)->is_constant) constants.push_back(input);
+        }
+        Array<int64_t> live_outs;
+        for (int64_t output : outputs) {
+            if (consumers[output] != 0 || graph_outputs.count(output)) {
+                live_outs.push_back(output);
+            }
+        }
+        regions.push_back(RegionSpec(
+            region_id++, RegionKind::kPerCall, String(),
+            std::move(region_tasks), std::move(live_ins),
+            std::move(live_outs), std::move(constants),
+            RegionEffect::kOrdered, RegionAlias::kNoAlias));
+        previous_kernel = kernel_task_id;
+    }
+
+    return PlanTaskMemory(FrozenTaskPlan(
+        kFrozenTaskPlanVersion, std::move(task_values), std::move(tasks),
+        std::move(regions), plan.input_value_ids(), plan.constant_value_ids(),
+        plan.output_value_ids()));
+}
+
+Array<NDArray> PrepareTaskArguments(
+    const api::CompiledModule& module, const TaskSpec& task,
+    const std::unordered_map<int64_t, ValueSpec>& values,
+    const std::shared_ptr<internal::ValueTable>& table) {
+    const codegen::KernelSignature signature = module.signature(task->symbol);
+    Array<int64_t> regular_inputs;
+    Array<int64_t> constant_inputs;
+    for (int64_t value_id : task.input_value_ids()) {
+        const ValueSpec& value =
+            FindValue(values, value_id, "RuntimeSession task execution");
+        (value->is_constant ? constant_inputs : regular_inputs)
+            .push_back(value_id);
+    }
+    const Array<int64_t> outputs = task.output_value_ids();
+    size_t regular_index = 0;
+    size_t constant_index = 0;
+    size_t output_index = 0;
+    Array<NDArray> ordered;
+    for (const auto& argument : signature.arguments()) {
+        int64_t value_id = -1;
+        switch (argument->role) {
+            case codegen::KernelArgRole::kInput:
+                value_id = regular_inputs[regular_index++];
+                break;
+            case codegen::KernelArgRole::kConstant:
+                value_id = constant_inputs[constant_index++];
+                break;
+            case codegen::KernelArgRole::kOutput:
+                value_id = outputs[output_index++];
+                if (!table->Contains(value_id)) {
+                    throw std::logic_error(
+                        "RuntimeSession kernel output was not allocated");
+                }
+                break;
+        }
+        ordered.push_back(table->Get(value_id));
+    }
+    return ordered;
+}
+
+void ValidateBoundTaskSources(
+    const api::CompiledModule& module, const FrozenTaskPlan& plan,
+    const std::unordered_map<int64_t, ValueSpec>& values,
+    const std::shared_ptr<internal::ValueTable>& table) {
+    const Map<String, NDArray> constants = module.constants();
+    for (const auto& task : plan.tasks()) {
+        if (task->kind != TaskKind::kKernel) continue;
+        const codegen::KernelSignature signature = module.signature(task->symbol);
+        Array<int64_t> regular_inputs;
+        Array<int64_t> constant_inputs;
+        for (int64_t value_id : task.input_value_ids()) {
+            const ValueSpec& value =
+                FindValue(values, value_id, "RuntimeSession task preflight");
+            (value->is_constant ? constant_inputs : regular_inputs)
+                .push_back(value_id);
+        }
+        size_t regular_index = 0;
+        size_t constant_index = 0;
+        const Array<codegen::KernelArgSpec> arguments = signature.arguments();
+        for (size_t argument_index = 0; argument_index < arguments.size();
+             ++argument_index) {
+            const auto& argument = arguments[argument_index];
+            if (argument->role == codegen::KernelArgRole::kOutput) continue;
+            const int64_t value_id =
+                argument->role == codegen::KernelArgRole::kConstant
+                    ? constant_inputs[constant_index++]
+                    : regular_inputs[regular_index++];
+            if (!table->Contains(value_id)) continue;
+            api::ValidateKernelArgument(signature, argument_index, argument,
+                                        table->Get(value_id), constants);
+        }
+    }
+}
+
 }  // namespace
 
-RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan) {
+RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan)
+    : RuntimeSession(std::move(module), std::move(plan),
+                     RuntimeExecutionMode::kPerCall) {}
+
+RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan,
+                               RuntimeExecutionMode mode) {
+    if (mode != RuntimeExecutionMode::kPerCall &&
+        mode != RuntimeExecutionMode::kTaskDAG) {
+        throw std::invalid_argument("RuntimeSession execution mode is invalid");
+    }
     ValidatedPlanContract contract = ValidateModuleAndPlan(module, plan);
+#if KXC_ENABLE_REGION_TASK_DAG
+    if (mode == RuntimeExecutionMode::kTaskDAG) {
+        try {
+            FrozenTaskPlan task_plan = BuildPerCallTaskPlan(module, plan);
+            ValidatedPlanContract task_contract =
+                ValidateModuleAndTaskPlan(module, task_plan);
+            SetData(new RuntimeSessionNode(
+                std::move(module), std::move(task_plan),
+                std::move(task_contract.device),
+                std::move(task_contract.constant_keys_by_value)));
+            return;
+        } catch (const std::invalid_argument&) {
+            // The validated ordered plan is the conservative per-Call fallback.
+        }
+    }
+#else
+    (void)mode;
+#endif
     SetData(new RuntimeSessionNode(
         std::move(module), std::move(plan), std::move(contract.device),
         std::move(contract.constant_keys_by_value)));
+}
+
+RuntimeSession::RuntimeSession(api::CompiledModule module,
+                               FrozenTaskPlan plan) {
+#if KXC_ENABLE_REGION_TASK_DAG
+    ValidatedPlanContract contract = ValidateModuleAndTaskPlan(module, plan);
+    SetData(new RuntimeSessionNode(
+        std::move(module), std::move(plan), std::move(contract.device),
+        std::move(contract.constant_keys_by_value)));
+#else
+    (void)module;
+    (void)plan;
+    throw std::invalid_argument(
+        "RuntimeSession task DAG support is disabled by KXC_ENABLE_REGION_TASK_DAG");
+#endif
 }
 
 RuntimeSession::RuntimeSession(const ObjectRef& ref) : ObjectRef(ref) {
@@ -383,6 +782,105 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
         throw std::invalid_argument(
             "RuntimeSession stream device expected " + node->device.ToString() +
             ", actual " + stream.device().ToString());
+    }
+
+    if (node->task_plan.defined()) {
+        const Array<int64_t> input_ids = node->task_plan.input_value_ids();
+        if (inputs.size() != input_ids.size()) {
+            throw std::invalid_argument(
+                "RuntimeSession input count expected " +
+                std::to_string(input_ids.size()) + ", actual " +
+                std::to_string(inputs.size()));
+        }
+        std::unordered_map<int64_t, ValueSpec> values;
+        for (const auto& value : node->task_plan.values()) {
+            values.emplace(value->value_id, value);
+        }
+        auto table = std::make_shared<internal::ValueTable>();
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            const ValueSpec& spec =
+                FindValue(values, input_ids[i], "RuntimeSession graph input");
+            ValidateRuntimeValue(
+                spec, inputs[i],
+                "RuntimeSession input[" + std::to_string(i) + "]");
+            table->Bind(spec, inputs[i]);
+        }
+
+        const Map<String, NDArray> constants = node->module.constants();
+        for (int64_t value_id : node->task_plan.constant_value_ids()) {
+            const auto key = node->constant_keys_by_value.find(value_id);
+            if (key == node->constant_keys_by_value.end() ||
+                !constants.count(key->second)) {
+                throw std::logic_error(
+                    "RuntimeSession validated task constant binding disappeared");
+            }
+            const ValueSpec& spec =
+                FindValue(values, value_id, "RuntimeSession task constant");
+            table->Bind(spec, constants.at(key->second));
+        }
+        ValidateBoundTaskSources(node->module, node->task_plan, values, table);
+
+        std::unordered_map<int64_t, TaskSpec> tasks;
+        for (const auto& task : node->task_plan.tasks()) {
+            tasks.emplace(task->task_id, task);
+        }
+        Array<AsyncOperation> operations;
+        for (int64_t task_id : node->task_plan.topological_task_ids()) {
+            const TaskSpec& task = tasks.at(task_id);
+            switch (task->kind) {
+                case TaskKind::kAllocate: {
+                    const int64_t value_id = task.output_value_ids()[0];
+                    table->Allocate(
+                        FindValue(values, value_id,
+                                  "RuntimeSession task allocation"),
+                        task->alignment);
+                    break;
+                }
+                case TaskKind::kKernel: {
+                    const Array<NDArray> arguments = PrepareTaskArguments(
+                        node->module, task, values, table);
+                    operations.push_back(
+                        node->module.Launch(task->symbol, arguments, stream));
+                    break;
+                }
+                case TaskKind::kCopy: {
+                    const NDArray source =
+                        table->Get(task.input_value_ids()[0]);
+                    const NDArray destination =
+                        table->Get(task.output_value_ids()[0]);
+                    operations.push_back(
+                        destination.CopyFromAsync(source, stream));
+                    break;
+                }
+                case TaskKind::kEvent:
+                    break;
+                case TaskKind::kSync:
+                    stream.Sync();
+                    break;
+                case TaskKind::kShapeEval:
+                    throw std::logic_error(
+                        "validated RuntimeSession task plan contains ShapeEval");
+            }
+        }
+
+        Array<NDArray> outputs;
+        for (int64_t value_id : node->task_plan.output_value_ids()) {
+            outputs.push_back(table->Get(value_id));
+        }
+        AsyncOperation completion =
+            operations.empty() ? AsyncOperation::Completed(stream)
+                               : operations[operations.size() - 1];
+        Array<AsyncOperation> prior_operations;
+        for (size_t i = 0; i + 1 < operations.size(); ++i) {
+            prior_operations.push_back(operations[i]);
+        }
+        auto state = std::make_shared<RuntimeExecutionState>(
+            RuntimeExecutionState{node->module, ExecutablePlan(),
+                                  node->task_plan, table,
+                                  std::move(prior_operations)});
+        completion.RetainDependencies(table->RetainedStorage(),
+                                      std::move(state));
+        return RunAsyncResult{std::move(outputs), std::move(completion)};
     }
 
     const Array<int64_t> input_ids = node->plan.input_value_ids();
@@ -439,9 +937,14 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
         prior_operations.push_back(operations[i]);
     }
     auto state = std::make_shared<RuntimeExecutionState>(RuntimeExecutionState{
-        node->module, node->plan, table, std::move(prior_operations)});
+        node->module, node->plan, FrozenTaskPlan(), table,
+        std::move(prior_operations)});
     completion.RetainDependencies(table->RetainedStorage(), std::move(state));
     return RunAsyncResult{std::move(outputs), std::move(completion)};
+}
+
+bool RuntimeSession::UsesTaskDAG() const {
+    return operator->()->task_plan.defined();
 }
 
 const RuntimeSessionNode* RuntimeSession::operator->() const {

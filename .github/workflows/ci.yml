@@ -31,45 +31,48 @@ jobs:
         run: python python/tools/check_relay_op_contract.py --root .
 
   cpu-smoke:
-    name: CPU CMake smoke tests
+    name: CPU CMake smoke tests (task DAG gate ${{ matrix.region_task_dag }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        region_task_dag: ["OFF", "ON"]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build g++
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
       - name: Configure CPU-only build
         run: >
-          cmake -S . -B out/build/ci-cpu -G Ninja
+          cmake -S . -B out/build/ci-cpu-${{ matrix.region_task_dag }}
           -DCMAKE_BUILD_TYPE=Debug
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=OFF
+          -DKXC_ENABLE_REGION_TASK_DAG=${{ matrix.region_task_dag }}
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
-          -DKXC_BUILD_DEBUG_EXAMPLES=OFF
           -DKXC_BUILD_PASS_TESTS=ON
           -DKXC_BUILD_CODEGEN_TESTS=OFF
 
       - name: Build CPU targets
-        run: cmake --build out/build/ci-cpu --parallel 2
+        run: >
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}
+          --parallel 2
+
+      - name: Run runtime plan CTest suite
+        run: >
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}
+          --target run_runtime_plan_tests --parallel 2
 
       - name: Run all CPU foundation CTest checks
         run: >
-          ctest --test-dir out/build/ci-cpu --output-on-failure
-          --no-tests=error --label-regex '(^|;)cpu(;|$)'
+          ctest --test-dir out/build/ci-cpu-${{ matrix.region_task_dag }}
+          --output-on-failure --no-tests=error
+          --label-regex '(^|;)cpu(;|$)'
 
       - name: Run experimental shape contract tests
         run: >
-          cmake --build out/build/ci-cpu --parallel 2 --target
+          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}
+          --parallel 2 --target
           run_shape_system_test
           run_shape_specialization_test
           run_shape_guarded_specialization_test

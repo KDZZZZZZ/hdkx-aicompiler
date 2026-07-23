@@ -14,6 +14,8 @@ enable_testing()
 
 option(KXC_ENABLE_CUDA "Enable CUDA support when toolkit is available" ON)
 option(KXC_ENABLE_LLVM "Enable LLVM backend for codegen" ON)
+option(KXC_ENABLE_REGION_TASK_DAG
+  "Enable experimental RuntimeSession execution of frozen Region task DAGs" OFF)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build the diagnostic ResNet18 IR dump tool" OFF)
 option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
@@ -97,6 +99,8 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/ndarray.h
   include/kxc/runtime/session.h
   include/kxc/runtime/storage.h
+  include/kxc/runtime/task_executor.h
+  include/kxc/runtime/task_plan.h
   include/kxc/shape/fakes/compiler_foundation_v1.h
   include/kxc/shape/guarded_specialization.h
   include/kxc/shape/shape.h
@@ -326,8 +330,10 @@ set(KXC_RUNTIME_CORE_SOURCES
   src/runtime/device.cc
   src/runtime/device_api.cc
   src/runtime/device_stream.cc
-    src/runtime/executable_plan.cc
-    src/runtime/memory_plan.cc
+  src/runtime/executable_plan.cc
+  src/runtime/memory_plan.cc
+  src/runtime/task_executor.cc
+  src/runtime/task_plan.cc
   src/runtime/storage.cc
   src/runtime/ndarray.cc
   src/runtime/device/cpu_device_api.cc
@@ -489,7 +495,8 @@ function(kxc_configure_module_obj target)
   target_link_libraries(${target} PRIVATE kxc_public_api)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
-    KXC_USE_LLVM=${KXC_USE_LLVM})
+    KXC_USE_LLVM=${KXC_USE_LLVM}
+    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>)
 endfunction()
 
 function(kxc_enable_cuda target)
@@ -668,7 +675,8 @@ function(kxc_add_runtime_exe target source_file)
   target_link_libraries(${target} PRIVATE kxc_public_api Threads::Threads)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}
-    KXC_USE_LLVM=${KXC_USE_LLVM})
+    KXC_USE_LLVM=${KXC_USE_LLVM}
+    KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>)
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
   endif()
@@ -841,6 +849,8 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(executable_plan_test test/executable_plan_test.cpp)
   kxc_add_runtime_exe(control_plan_test test/control_plan_test.cpp)
   kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
+  kxc_add_runtime_exe(task_plan_test test/task_plan_test.cpp)
+  kxc_add_runtime_exe(task_executor_test test/task_executor_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
@@ -879,6 +889,15 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS ${KXC_CONTROL_FLOW_TESTS}
     USES_TERMINAL
     COMMENT "Run control-flow CTest suite")
+
+  foreach(_kxc_runtime_plan_test IN ITEMS
+      task_plan_test task_executor_test runtime_session_test)
+    add_test(NAME ${_kxc_runtime_plan_test}
+      COMMAND "$<TARGET_FILE:${_kxc_runtime_plan_test}>")
+    set_tests_properties(${_kxc_runtime_plan_test} PROPERTIES
+      LABELS "runtime-plan;cpu;core"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+  endforeach()
 
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")
@@ -952,6 +971,22 @@ if(KXC_BUILD_PASS_TESTS)
     COMMENT "Run device_runtime_test"
   )
 
+  add_custom_target(run_task_plan_test
+    COMMAND "$<TARGET_FILE:task_plan_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS task_plan_test
+    USES_TERMINAL
+    COMMENT "Run task_plan_test"
+  )
+
+  add_custom_target(run_task_executor_test
+    COMMAND "$<TARGET_FILE:task_executor_test>"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    DEPENDS task_executor_test
+    USES_TERMINAL
+    COMMENT "Run task_executor_test"
+  )
+
   add_custom_target(run_profile_bundle_test
     COMMAND "$<TARGET_FILE:profile_bundle_test>"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
@@ -993,6 +1028,13 @@ if(KXC_BUILD_PASS_TESTS)
     DEPENDS runtime_session_test
     USES_TERMINAL
     COMMENT "Run runtime_session_test"
+  )
+  add_custom_target(run_runtime_plan_tests
+    COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L runtime-plan
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    DEPENDS task_plan_test task_executor_test runtime_session_test
+    USES_TERMINAL
+    COMMENT "Run runtime plan CTest suite"
   )
   add_custom_target(run_cuda_schedule_test
     COMMAND "$<TARGET_FILE:cuda_schedule_test>"
@@ -1066,7 +1108,7 @@ foreach(_kxc_cpu_core_test IN ITEMS
     compiler_contract_test compiler_capability_test compiler_identity_test
     compiler_foundation_contract_test operator_compilation_test primitive_cache_test
     compiler_extension_contract_test kernel_signature_test compiled_module_test
-    runtime_session_test cuda_schedule_test)
+    cuda_schedule_test)
   # cuda_schedule_test exercises CPU-only scheduling contracts with synthetic
   # Target snapshots; it neither requires nor launches CUDA hardware.
   kxc_add_ctest_if_target(${_kxc_cpu_core_test} "cpu;core")
