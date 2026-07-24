@@ -287,8 +287,9 @@ private:
     void VerifyBoundVar(const Expr& expr, const VarNode* var,
                         const std::string& path) const {
         if (bindings_.count(expr.get()) == 0) {
-            Fail(path, "Var", "lexically_bound_var", "free variable '" +
-                 var->vid->name_hint + "'");
+            Fail(path, "Var", "lexically_bound_var",
+                 "free or unbound variables include '" +
+                     var->vid->name_hint + "'");
         }
     }
 
