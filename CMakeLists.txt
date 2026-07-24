@@ -892,9 +892,9 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
 
 if(KXC_BUILD_PASS_TESTS)
   add_library(kxc_adaptive_v1_test_obj OBJECT
-    src/compiler/adaptive/compile_coordinator.cc
-    src/compiler/adaptive/contracts.cc
-    src/compiler/adaptive/kernel_slot.cc)
+    test/support/adaptive_v1_compile_coordinator.cc
+    test/support/adaptive_v1_contracts.cc
+    test/support/adaptive_v1_kernel_slot.cc)
   kxc_configure_module_obj(kxc_adaptive_v1_test_obj)
 
   kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)

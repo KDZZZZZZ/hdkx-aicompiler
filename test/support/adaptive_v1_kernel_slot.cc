@@ -1,8 +1,8 @@
-/*! \file src/compiler/adaptive/kernel_slot.cc
+/*! \file test/support/adaptive_v1_kernel_slot.cc
  * \brief Experimental immutable generation publication and RCU leases.
  */
 
-#include "../../../test/support/adaptive_v1.h"
+#include "adaptive_v1.h"
 
 #include <limits>
 #include <map>

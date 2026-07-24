@@ -1,8 +1,8 @@
-/*! \file src/compiler/adaptive/contracts.cc
+/*! \file test/support/adaptive_v1_contracts.cc
  * \brief Implements static-exact adaptive identity and artifact contracts.
  */
 
-#include "../../../test/support/adaptive_v1.h"
+#include "adaptive_v1.h"
 
 #include <stdexcept>
 #include <utility>

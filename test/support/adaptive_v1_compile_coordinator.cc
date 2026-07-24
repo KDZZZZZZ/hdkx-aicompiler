@@ -1,8 +1,8 @@
-/*! \file src/compiler/adaptive/compile_coordinator.cc
+/*! \file test/support/adaptive_v1_compile_coordinator.cc
  * \brief Bounded singleflight coordinator for static-exact compilation.
  */
 
-#include "../../../test/support/adaptive_v1.h"
+#include "adaptive_v1.h"
 
 #include <algorithm>
 #include <atomic>
