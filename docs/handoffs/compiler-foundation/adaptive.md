@@ -26,9 +26,7 @@ ctest --test-dir out/adaptive-v2-on --output-on-failure \
 ```
 
 The adaptive headers remain source-tree experiments and are not installed or
-exported SDK API. Test inspection/reset hooks are source-private under
-`src/compiler/test-only`; no test-only lifecycle controls are published in the
-experimental headers.
+exported SDK API.
 
 No claim is made for backend hard cancellation, authentication/attestation,
 numeric health truth, native/device-resident byte accounting, CUDA pending

@@ -47,9 +47,6 @@
 // 发布条件：DispatchKey + PlanAbiFingerprint 均匹配才可换 future routing
 // =============================================================================
 namespace kxc::api::adaptive::hot_swap::v2 {
-namespace test_only {
-class AdaptiveHotSwapTestAccess;
-}
 namespace preparation = experimental::production_path;
 using ProductionCompileRequest = preparation::ProductionCompileRequest;
 using ProductionExecutionRequest = preparation::ProductionExecutionRequest;
@@ -278,7 +275,6 @@ public:
     // Evaluate + VerifyAndConsume；过时/已消费返回 false
     bool EvaluateHealth(const std::shared_ptr<const GenerationLease>& lease);
 private:
-    friend class test_only::AdaptiveHotSwapTestAccess;
     class State; std::shared_ptr<State> state_;
 };
 }  // namespace kxc::api::adaptive::hot_swap::v2
