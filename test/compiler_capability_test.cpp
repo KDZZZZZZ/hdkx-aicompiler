@@ -445,7 +445,7 @@ bool TestSupportedImpliesProductionCompileSuccess() {
         try {
             const CompiledGraph compiled = Compiler::Compile(
                 function, CompileConfig::Create(target, 2));
-            TEST_CHECK(compiled.module.defined() && !compiled.artifact_pins.empty(),
+            TEST_CHECK(compiled.module().defined() && !compiled.artifact_pins().empty(),
                        "supported row must return executable production artifacts");
         } catch (const std::exception& error) {
             std::cerr << "supported row failed to compile: " << error.what() << "\n";

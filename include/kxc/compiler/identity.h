@@ -90,6 +90,7 @@ public:
 
     bool defined() const noexcept;
     const UnitSemanticKey& unit_semantic_key() const noexcept;
+    const std::string& target_capability_fingerprint() const noexcept;
     const std::string& canonical_bytes() const noexcept;
     const std::string& digest() const noexcept;
 
@@ -99,6 +100,7 @@ public:
 
 private:
     UnitSemanticKey unit_semantic_key_;
+    std::string target_capability_fingerprint_;
     std::string canonical_bytes_;
     std::string digest_;
 };

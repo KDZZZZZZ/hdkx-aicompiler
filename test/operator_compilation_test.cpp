@@ -486,19 +486,20 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
         api::internal::GetPrimitiveCacheStats();
     api::ProductionArtifactCacheAdapter adapter;
     bool public_pins_are_production_backed =
-        first.artifact_pins.size() == 2 && second.artifact_pins.size() == 2;
-    for (const api::ArtifactPin& pin : second.artifact_pins) {
+        first.artifact_pins().size() == 2 && second.artifact_pins().size() == 2;
+    for (const api::ArtifactPin& pin : second.artifact_pins()) {
         public_pins_are_production_backed =
             public_pins_are_production_backed && pin.defined() &&
             adapter.Lookup(pin.handle().record().artifact_key).kind ==
                 api::ArtifactLookupKind::kHit;
     }
-    bool compiler_declaration_matches_pins = second.variant.defined() &&
-        second.variant.manifest().retention_lease() != nullptr &&
-        second.variant.manifest().bindings().size() ==
-            second.artifact_pins.size();
+    const runtime::PlanVariant second_variant = second.plan_variant();
+    bool compiler_declaration_matches_pins = second_variant.defined() &&
+        second_variant.manifest().retention_lease() != nullptr &&
+        second_variant.manifest().bindings().size() ==
+            second.artifact_pins().size();
     if (compiler_declaration_matches_pins) {
-        const auto bindings = second.variant.manifest().bindings();
+        const auto bindings = second_variant.manifest().bindings();
         for (size_t index = 0; index < bindings.size(); ++index) {
             compiler_declaration_matches_pins =
                 compiler_declaration_matches_pins &&
@@ -506,14 +507,14 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
                 bindings[index]->invocation_id ==
                     static_cast<int64_t>(index) &&
                 bindings[index]->artifact_identity ==
-                    second.artifact_pins[index]
+                    second.artifact_pins()[index]
                         .handle()
                         .record()
                         .artifact_key.canonical_bytes();
         }
     }
-    TEST_CHECK(first.module.entry_count() == 2 &&
-                   second.module.entry_count() == 2 &&
+    TEST_CHECK(first.module().entry_count() == 2 &&
+                   second.module().entry_count() == 2 &&
                    public_pins_are_production_backed &&
                    compiler_declaration_matches_pins &&
                    after_first.misses == 2 && after_first.hits == 0 &&
@@ -538,9 +539,10 @@ bool TestProductionCompileVariantRuntimeE2E() {
         api::CompiledGraph compiled = api::Compiler::Compile(
             chain.function,
             api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
-        pin_count = compiled.artifact_pins.size();
+        pin_count = compiled.artifact_pins().size();
+        const runtime::PlanVariant variant = compiled.plan_variant();
         const runtime::SelectedArtifactManifest declaration =
-            compiled.variant.manifest();
+            variant.manifest();
         retained_production_lease = declaration.retention_lease();
         const Array<runtime::SelectedArtifactBinding> bindings =
             declaration.bindings();
@@ -551,7 +553,7 @@ bool TestProductionCompileVariantRuntimeE2E() {
                    "Compiler must assemble a production-backed declaration and lease");
         for (size_t index = 0; index < pin_count; ++index) {
             const std::string identity =
-                compiled.artifact_pins[index]
+                compiled.artifact_pins()[index]
                     .handle()
                     .record()
                     .artifact_key.canonical_bytes();
@@ -564,7 +566,7 @@ bool TestProductionCompileVariantRuntimeE2E() {
             expected_identities.push_back(identity);
         }
 
-        session.emplace(compiled.module, compiled.variant,
+        session.emplace(compiled.module(), variant,
                         runtime::RuntimeExecutionMode::kTaskDAG);
 #if KXC_ENABLE_REGION_TASK_DAG
         const bool selection_ok =
@@ -611,6 +613,29 @@ bool TestProductionCompileVariantRuntimeE2E() {
     return true;
 }
 
+
+bool TestPlanVariantRetainsSoleGraphPinOwner() {
+    using namespace kxc;
+    api::internal::ClearPrimitiveCacheForTesting();
+    runtime::PlanVariant variant;
+    std::weak_ptr<const void> lease;
+    {
+        const GraphFixture fixture = MakeFixtures()[0];
+        const api::CompiledGraph graph = api::Compiler::Compile(
+            fixture.function,
+            api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+        variant = graph.plan_variant();
+        lease = variant.manifest().retention_lease();
+    }
+    api::internal::ClearPrimitiveCacheForTesting();
+    TEST_CHECK(!lease.expired(),
+               "PlanVariant must retain the graph's sole pin owner");
+    variant = runtime::PlanVariant();
+    TEST_CHECK(lease.expired(),
+               "releasing PlanVariant must release the sole pin owner");
+    return true;
+}
+
 bool TestPrimitiveCacheReusesRenumberedUnit() {
     using namespace kxc;
     api::internal::ClearPrimitiveCacheForTesting();
@@ -634,11 +659,11 @@ bool TestPrimitiveCacheReusesRenumberedUnit() {
     const auto reused = api::Compiler::Compile(shifted, config);
     const api::internal::PrimitiveCacheStats after_reused =
         api::internal::GetPrimitiveCacheStats();
-    runtime::RuntimeSession session(reused.module, reused.plan);
+    runtime::RuntimeSession session(reused.module(), reused.plan());
     const Array<runtime::NDArray> outputs = session.Run(
         {FilledTensor(2.0f), FilledTensor(3.0f), FilledTensor(4.0f)});
-    TEST_CHECK(direct.module.entry_count() == 1 &&
-                   reused.module.entry_count() == 2 && outputs.size() == 2 &&
+    TEST_CHECK(direct.module().entry_count() == 1 &&
+                   reused.module().entry_count() == 2 && outputs.size() == 2 &&
                    TensorEquals(outputs[0], 8.0f) &&
                    TensorEquals(outputs[1], 5.0f) &&
                    after_direct.misses == 1 && after_direct.hits == 0 &&
@@ -672,6 +697,8 @@ int main() {
          TestPrimitiveCacheUsesFullStableIdentity},
         {"production_compile_variant_runtime_e2e",
          TestProductionCompileVariantRuntimeE2E},
+        {"plan_variant_retains_sole_graph_pin_owner",
+         TestPlanVariantRetainsSoleGraphPinOwner},
         {"primitive_cache_reuses_renumbered_unit",
          TestPrimitiveCacheReusesRenumberedUnit},
 #endif

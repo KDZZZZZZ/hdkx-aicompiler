@@ -154,11 +154,11 @@ public:
 
 private:
     ArtifactLease(uint64_t generation, PlanVariantKey selection_plan_key,
-                  std::vector<ArtifactPin> pins);
+                  CompiledGraph graph);
 
     uint64_t generation_{0};
     PlanVariantKey selection_plan_key_;
-    std::vector<ArtifactPin> pins_;
+    CompiledGraph graph_;
     friend class AdaptiveController;
     friend std::shared_ptr<const FrozenPlanVariant> FreezePreparedCandidate(
         uint64_t, DispatchKey, PlanAbiFingerprint,

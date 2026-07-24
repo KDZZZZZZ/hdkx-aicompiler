@@ -19,7 +19,6 @@
 #include "../internal/primitive_cache.h"
 #include "../../runtime/internal/compiled_module_node.h"
 #include "../../runtime/internal/memory_plan.h"
-#include "kxc/support/hash.h"
 
 namespace kxc::api::adaptive::experimental::production_path {
 namespace {
@@ -99,63 +98,6 @@ CompileConfig CloneCompileConfig(const CompileConfig& source) {
     return snapshot;
 }
 
-codegen::CodeGenBackend ExpectedBackend(const CompileConfig& config) {
-    if (config->target->kind == "llvm" &&
-        config->target->device_type == kCPU) {
-        return codegen::CodeGenBackend::kLLVM;
-    }
-    if (config->target->kind == "cuda" &&
-        config->target->device_type == kCUDA) {
-        return codegen::CodeGenBackend::kCUDA;
-    }
-    throw std::invalid_argument(
-        "adaptive compile request has no supported target/backend contract");
-}
-
-bool SameArtifactRecord(const ArtifactRecord& lhs,
-                        const ArtifactRecord& rhs) {
-    return lhs.artifact_key == rhs.artifact_key &&
-           lhs.executable_token == rhs.executable_token &&
-           lhs.signature_digest == rhs.signature_digest &&
-           lhs.launch_metadata_digest == rhs.launch_metadata_digest &&
-           lhs.provenance == rhs.provenance &&
-           lhs.byte_size == rhs.byte_size &&
-           lhs.validation_record == rhs.validation_record;
-}
-
-bool SameCachedPrimitive(const internal::CachedPrimitive& lhs,
-                         const internal::CachedPrimitive& rhs) {
-    return lhs.signature.CanonicalBytes() == rhs.signature.CanonicalBytes() &&
-           lhs.launch_metadata.CanonicalBytes() == rhs.launch_metadata.CanonicalBytes() &&
-           lhs.kernel.signature().CanonicalBytes() ==
-               rhs.kernel.signature().CanonicalBytes() &&
-           lhs.kernel.launch_metadata().CanonicalBytes() ==
-               rhs.kernel.launch_metadata().CanonicalBytes() &&
-           lhs.kernel->launcher == rhs.kernel->launcher &&
-           lhs.accounted_bytes == rhs.accounted_bytes &&
-           lhs.provenance == rhs.provenance &&
-           lhs.validation_record == rhs.validation_record;
-}
-
-void ValidatePublicRecord(
-    const ArtifactRecord& record,
-    const internal::PrimitiveArtifactPin& production_pin) {
-    const internal::CachedPrimitive& cached = production_pin.artifact();
-    if (record.artifact_key != production_pin.key() ||
-        record.executable_token !=
-            "primitive-v1:" + production_pin.key().canonical_bytes() ||
-        record.signature_digest !=
-            support::HashText(cached.signature.CanonicalBytes()) ||
-        record.launch_metadata_digest !=
-            support::HashText(cached.launch_metadata.CanonicalBytes()) ||
-        record.provenance != cached.provenance ||
-        record.byte_size != cached.accounted_bytes ||
-        record.validation_record != cached.validation_record) {
-        throw std::invalid_argument(
-            "adaptive public ArtifactPin record differs from its pinned cache artifact");
-    }
-}
-
 struct VerifiedGraphArtifacts final {
     std::vector<OrderedArtifactIdentity> identities;
     std::vector<ArtifactPin> pins;
@@ -164,121 +106,32 @@ struct VerifiedGraphArtifacts final {
 VerifiedGraphArtifacts VerifyGraphArtifacts(
     const CompiledGraph& graph, const CompileConfig& config,
     const GraphSemanticKey& graph_semantic_key) {
-    if (!graph.module.defined() || !graph.module.IsReady()) {
-        throw std::invalid_argument(
-            "adaptive candidate CompiledModule is not ready");
+    if (!graph.defined() || graph.graph_semantic_key() != graph_semantic_key ||
+        internal::BuildTargetCapabilityFingerprint(ModuleTarget(graph.module())) !=
+            internal::BuildTargetCapabilityFingerprint(config->target)) {
+        throw std::invalid_argument("adaptive candidate differs from its request");
     }
-    if (!graph.plan.defined()) {
-        throw std::invalid_argument(
-            "adaptive candidate ExecutablePlan is undefined");
+    const Array<runtime::KernelCall> calls = graph.plan().calls();
+    const auto& pins = graph.artifact_pins();
+    if (calls.empty()) {
+        throw std::invalid_argument("adaptive candidate requires ordered plan calls");
     }
-    graph.plan.Validate();
-    if (!graph.graph_semantic_key.defined() ||
-        graph.graph_semantic_key != graph_semantic_key) {
-        throw std::invalid_argument(
-            "adaptive candidate GraphSemanticKey differs from the request");
-    }
-    if (internal::BuildTargetCapabilityFingerprint(
-            ModuleTarget(graph.module)) !=
-        internal::BuildTargetCapabilityFingerprint(config->target)) {
-        throw std::invalid_argument(
-            "adaptive candidate target capability contract differs");
-    }
-
-    const Array<runtime::KernelCall> calls = graph.plan.calls();
-    if (calls.empty() || graph.module.entry_count() != calls.size() ||
-        graph.artifact_pins.size() != calls.size() ||
-        graph.artifact_plan_bindings.size() != calls.size()) {
-        throw std::invalid_argument(
-            "adaptive candidate requires one module entry and production pin "
-            "per ordered plan call");
-    }
-
     VerifiedGraphArtifacts verified;
     verified.identities.reserve(calls.size());
     verified.pins.reserve(calls.size());
-    const Device target_device(config->target->device_type,
-                               config->target->device_id);
-    const codegen::CodeGenBackend backend = ExpectedBackend(config);
-    const auto* module_node = graph.module.As<CompiledModuleNode>();
     for (size_t index = 0; index < calls.size(); ++index) {
-        const runtime::KernelCall& call = calls[index];
-        const ArtifactPlanBinding& binding =
-            graph.artifact_plan_bindings[index];
-        if (!graph.artifact_pins[index].defined() ||
-            !binding.artifact_pin.defined() ||
-            binding.call_index != index ||
-            binding.link_symbol.value != std::string(call->symbol) ||
-            !SameArtifactRecord(
-                binding.artifact_pin.handle().record(),
-                graph.artifact_pins[index].handle().record())) {
-            throw std::invalid_argument(
-                "adaptive artifact binding does not match its ordered plan call");
-        }
-        (void)binding.link_symbol.CanonicalBytes();
-        const internal::PrimitiveArtifactPin binding_pin =
-            internal::ProductionArtifactAccess::Pin(binding.artifact_pin);
-        const internal::PrimitiveArtifactPin retained_pin =
-            internal::ProductionArtifactAccess::Pin(
-                graph.artifact_pins[index]);
-        ValidatePublicRecord(binding.artifact_pin.handle().record(),
-                             binding_pin);
-        ValidatePublicRecord(graph.artifact_pins[index].handle().record(),
-                             retained_pin);
-        if (retained_pin.key() != binding_pin.key() ||
-            !SameCachedPrimitive(retained_pin.artifact(),
-                                 binding_pin.artifact())) {
-            throw std::invalid_argument(
-                "adaptive binding must own the same primitive cache artifact");
-        }
-
-        if (!graph.module.HasFunction(call->symbol)) {
-            throw std::invalid_argument(
-                "adaptive candidate plan call has no module entry");
-        }
-        const codegen::KernelSignature signature =
-            graph.module.signature(call->symbol);
-        const codegen::KernelLaunchMetadata metadata =
-            graph.module.launch_metadata(call->symbol);
-        signature.Validate();
-        metadata.Validate();
-        const auto module_entry =
-            module_node->entries_.find(std::string(call->symbol));
-        const internal::CachedPrimitive& cached = retained_pin.artifact();
-        const std::string signature_bytes = signature.CanonicalBytes();
-        const std::string metadata_bytes = metadata.CanonicalBytes();
-        if (module_entry == module_node->entries_.end() ||
-            !cached.kernel.IsReady() ||
-            cached.kernel->launcher !=
-                module_entry->second.executable->launcher ||
-            cached.signature.CanonicalBytes() != signature_bytes ||
-            cached.kernel.signature().CanonicalBytes() != signature_bytes ||
-            cached.launch_metadata.CanonicalBytes() != metadata_bytes ||
-            cached.kernel.launch_metadata().CanonicalBytes() != metadata_bytes ||
-            std::string(signature->symbol) != std::string(call->symbol) ||
-            metadata->device != target_device || metadata->backend != backend ||
-            binding.signature_digest !=
-                support::HashText(signature_bytes) ||
-            binding.launch_metadata_digest !=
-                support::HashText(metadata_bytes)) {
-            throw std::invalid_argument(
-                "adaptive pinned signature/launch/target/launcher contract differs "
-                "from its module entry");
-        }
+        const auto pin = internal::ProductionArtifactAccess::Pin(pins[index]);
+        const auto signature = graph.module().signature(calls[index]->symbol);
         for (const auto& argument : signature.arguments()) {
             RequireStaticShape(argument.shape(), "adaptive KernelSignature");
         }
         verified.identities.push_back(OrderedArtifactIdentity{
-            index, std::string(call->symbol), retained_pin.key()});
-        verified.pins.push_back(graph.artifact_pins[index]);
+            index, std::string(calls[index]->symbol), pin.key()});
+        verified.pins.push_back(pins[index]);
     }
-    for (const auto& value : graph.plan.values()) {
+    for (const auto& value : graph.plan().values()) {
         RequireStaticShape(value.shape(), "adaptive ExecutablePlan");
     }
-
-    // RuntimeSession remains a consumer and validates represented cross-object,
-    // constant, target, and memory contracts. It never selects a generation.
-    (void)runtime::RuntimeSession(graph.module, graph.plan);
     return verified;
 }
 
@@ -323,7 +176,7 @@ public:
         }
         const ShapeProfileKey candidate_profile =
             BuildStaticExactShapeProfileKey(
-                request.graph_semantic_key(), graph.plan);
+                request.graph_semantic_key(), graph.plan());
         if (candidate_profile != request.shape_profile_key() ||
             BuildStaticExactDispatchKey(request.graph_semantic_key(),
                                         candidate_profile) !=
@@ -331,7 +184,7 @@ public:
             throw std::invalid_argument(
                 "adaptive candidate dispatch differs from the exact request");
         }
-        if (BuildPlanAbiFingerprint(graph.module, graph.plan,
+        if (BuildPlanAbiFingerprint(graph.module(), graph.plan(),
                                     candidate.identities) !=
             request.plan_abi()) {
             throw std::invalid_argument(
@@ -374,7 +227,7 @@ AdaptiveControllerEvent EventFor(
     event.kind = kind;
     event.generation = variant.generation();
     event.graph_semantic_key_digest =
-        variant.compiled_graph().graph_semantic_key.digest();
+        variant.compiled_graph().graph_semantic_key().digest();
     event.selection_plan_key_digest =
         variant.artifact_lease().selection_plan_key().digest();
     event.dispatch_key_digest = variant.dispatch_key().digest();
@@ -401,11 +254,11 @@ ProductionCompileRequest::ProductionCompileRequest(
     ordered_artifacts_ = baseline.identities;
     verified_artifact_pins_ = baseline.pins;
     shape_profile_key_ = BuildStaticExactShapeProfileKey(
-        graph_semantic_key_, expected_contract.plan);
+        graph_semantic_key_, expected_contract.plan());
     dispatch_key_ = BuildStaticExactDispatchKey(
         graph_semantic_key_, shape_profile_key_);
     plan_abi_ = BuildPlanAbiFingerprint(
-        expected_contract.module, expected_contract.plan,
+        expected_contract.module(), expected_contract.plan(),
         ordered_artifacts_);
     Validate();
 }
@@ -482,7 +335,7 @@ std::shared_ptr<const PreparedCandidate> PrepareCandidate(
         graph, request.config(), request.graph_semantic_key());
     ProductionValidationAuthority::Validate(request, graph);
     auto session = std::make_shared<const runtime::RuntimeSession>(
-        graph.module, graph.plan);
+        graph.module(), graph.plan());
     const PlanVariantKey selection_plan_key = BuildSelectionPlanKey(
         request, verified.identities);
     return std::shared_ptr<const PreparedCandidate>(new PreparedCandidate(
@@ -542,12 +395,13 @@ void ProductionExecutionRequest::Validate() const {
 
 ArtifactLease::ArtifactLease(uint64_t generation,
                              PlanVariantKey selection_plan_key,
-                             std::vector<ArtifactPin> pins)
+                             CompiledGraph graph)
     : generation_(generation),
       selection_plan_key_(std::move(selection_plan_key)),
-      pins_(std::move(pins)) {
-    if (generation_ == 0 || !selection_plan_key_.defined() || pins_.empty() ||
-        std::any_of(pins_.begin(), pins_.end(),
+      graph_(std::move(graph)) {
+    if (generation_ == 0 || !selection_plan_key_.defined() || !graph_.defined() ||
+        graph_.artifact_pins().empty() ||
+        std::any_of(graph_.artifact_pins().begin(), graph_.artifact_pins().end(),
                     [](const ArtifactPin& pin) { return !pin.defined(); })) {
         throw std::invalid_argument(
             "adaptive ArtifactLease requires a generation and complete pins");
@@ -555,7 +409,8 @@ ArtifactLease::ArtifactLease(uint64_t generation,
 }
 
 bool ArtifactLease::valid() const noexcept {
-    return generation_ != 0 && selection_plan_key_.defined() && !pins_.empty();
+    return generation_ != 0 && selection_plan_key_.defined() && graph_.defined() &&
+           !graph_.artifact_pins().empty();
 }
 
 uint64_t ArtifactLease::generation() const noexcept {
@@ -568,7 +423,7 @@ ArtifactLease::selection_plan_key() const noexcept {
 }
 
 const std::vector<ArtifactPin>& ArtifactLease::pins() const noexcept {
-    return pins_;
+    return graph_.artifact_pins();
 }
 
 FrozenPlanVariant::FrozenPlanVariant(
@@ -634,11 +489,11 @@ std::shared_ptr<const FrozenPlanVariant> FreezePreparedCandidate(
             identity.artifact_key, generation});
     }
     PlanVariantKey key = BuildPlanVariantKey(
-        candidate->compiled_graph().graph_semantic_key,
+        candidate->compiled_graph().graph_semantic_key(),
         candidate->selection_plan_key().shape_profile_key(),
         artifacts, runtime::internal::kStaticMemoryPlanVersion);
     ArtifactLease pins(generation, candidate->selection_plan_key(),
-                       candidate->compiled_graph().artifact_pins);
+                       candidate->compiled_graph());
     return std::shared_ptr<const FrozenPlanVariant>(new FrozenPlanVariant(
         generation, std::move(key), std::move(dispatch_key), std::move(plan_abi),
         std::move(pins), candidate->compiled_graph(), candidate->session()));

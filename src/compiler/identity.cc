@@ -431,12 +431,13 @@ PrimitiveArtifactKey::PrimitiveArtifactKey(
     std::string schedule_version,
     std::string backend_version,
     std::string index_digest)
-    : unit_semantic_key_(std::move(unit_semantic_key)) {
+    : unit_semantic_key_(std::move(unit_semantic_key)),
+      target_capability_fingerprint_(std::move(target_capability_fingerprint)) {
     if (!unit_semantic_key_.defined()) {
         throw std::invalid_argument(
             "artifact identity requires a unit semantic key");
     }
-    RequireNonEmpty(target_capability_fingerprint, "target fingerprint");
+    RequireNonEmpty(target_capability_fingerprint_, "target fingerprint");
     RequireNonEmpty(pipeline_fingerprint, "pipeline fingerprint");
     RequireNonEmpty(schedule_version, "schedule version");
     RequireNonEmpty(backend_version, "backend version");
@@ -448,7 +449,7 @@ PrimitiveArtifactKey::PrimitiveArtifactKey(
     AppendField(&canonical_bytes_, "unit_semantic",
                 unit_semantic_key_.canonical_bytes());
     AppendField(&canonical_bytes_, "target",
-                target_capability_fingerprint);
+                target_capability_fingerprint_);
     AppendField(&canonical_bytes_, "pipeline", pipeline_fingerprint);
     AppendField(&canonical_bytes_, "abi", std::to_string(abi_version));
     AppendField(&canonical_bytes_, "schedule", schedule_version);
@@ -463,6 +464,10 @@ bool PrimitiveArtifactKey::defined() const noexcept {
 
 const UnitSemanticKey& PrimitiveArtifactKey::unit_semantic_key() const noexcept {
     return unit_semantic_key_;
+}
+
+const std::string& PrimitiveArtifactKey::target_capability_fingerprint() const noexcept {
+    return target_capability_fingerprint_;
 }
 
 const std::string& PrimitiveArtifactKey::canonical_bytes() const noexcept {

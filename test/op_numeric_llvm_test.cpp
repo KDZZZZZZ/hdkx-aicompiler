@@ -126,16 +126,16 @@ void CompileAndRun(const std::string& op_name, kxc::Function func,
     auto config = kxc::api::CompileConfig::Create(
         kxc::BuildTarget(kxc::Device::CPU()), 0);
     auto compiled = kxc::api::Compiler::Compile(func, config);
-    Check(compiled.module.IsReady(), op_name + " LLVM module should be ready");
-    const auto values = compiled.plan.values();
+    Check(compiled.module().IsReady(), op_name + " LLVM module should be ready");
+    const auto values = compiled.plan().values();
     const auto find_value = [&](int64_t value_id) {
         for (const auto& value : values) {
             if (value->value_id == value_id) return value;
         }
         throw std::runtime_error(op_name + " plan references an unknown value");
     };
-    const auto input_ids = compiled.plan.input_value_ids();
-    const auto output_ids = compiled.plan.output_value_ids();
+    const auto input_ids = compiled.plan().input_value_ids();
+    const auto output_ids = compiled.plan().output_value_ids();
     Check(input_ids.size() + output_ids.size() == host_arguments.size(),
           op_name + " host argument count does not match graph ABI");
 
@@ -151,7 +151,7 @@ void CompileAndRun(const std::string& op_name, kxc::Function func,
         if (host.before_launch) host.before_launch(array);
         inputs.push_back(std::move(array));
     }
-    kxc::runtime::RuntimeSession session(compiled.module, compiled.plan);
+    kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
     const auto outputs = session.Run(inputs);
     Check(outputs.size() == output_ids.size(),
           op_name + " runtime output count does not match graph ABI");

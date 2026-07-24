@@ -30,6 +30,7 @@
 #include "../runtime/internal/memory_plan.h"
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/runtime/session.h"
 #include "kxc/support/hash.h"
 #include "kxc/relay/pass/print_ir.h"
 #include "kxc/relay/visitor.h"
@@ -49,6 +50,140 @@
 #endif
 
 namespace kxc::api {
+
+struct CompiledGraph::State final {
+    CompiledModule module;
+    runtime::ExecutablePlan plan;
+    std::shared_ptr<const std::vector<ArtifactPin>> artifact_pins;
+    GraphSemanticKey graph_semantic_key;
+};
+
+namespace {
+
+void ValidateCompiledGraphCandidate(
+    const CompiledModule& module, const runtime::ExecutablePlan& plan,
+    const std::vector<ArtifactPin>& pins,
+    const GraphSemanticKey& graph_semantic_key) {
+    if (!module.defined() || !module.IsReady() || !plan.defined() ||
+        !graph_semantic_key.defined()) {
+        throw std::invalid_argument("CompiledGraph requires defined ready module, plan, and graph key");
+    }
+    plan.Validate();
+    const auto* module_node = module.As<CompiledModuleNode>();
+    const auto* target = module_node ? module_node->target_.As<TargetNode>() : nullptr;
+    if (!target) {
+        throw std::invalid_argument("CompiledGraph requires a valid module target");
+    }
+    const std::string module_target_capability_fingerprint =
+        internal::BuildTargetCapabilityFingerprint(module_node->target_);
+    const codegen::CodeGenBackend expected_backend =
+        target->kind == "llvm" && target->device_type == kCPU
+            ? codegen::CodeGenBackend::kLLVM
+            : target->kind == "cuda" && target->device_type == kCUDA
+                  ? codegen::CodeGenBackend::kCUDA
+                  : throw std::invalid_argument(
+                        "CompiledGraph requires a supported target/backend");
+    const Array<runtime::KernelCall> calls = plan.calls();
+    if (module.entry_count() != calls.size() || pins.size() != calls.size()) {
+        throw std::invalid_argument("CompiledGraph requires one module entry and pin per plan call");
+    }
+    // Reuse the runtime's existing module/plan ABI validator transiently.  It
+    // retains no pins and is discarded before the immutable graph is published.
+    (void)runtime::RuntimeSession(module, plan);
+    std::unordered_set<std::string> call_symbols;
+    for (size_t index = 0; index < calls.size(); ++index) {
+        const runtime::KernelCall& call = calls[index];
+        if (!call_symbols.emplace(std::string(call->symbol)).second ||
+            !pins[index].defined() || !module.HasFunction(call->symbol)) {
+            throw std::invalid_argument("CompiledGraph plan call lacks its defined module entry or pin");
+        }
+        const internal::PrimitiveArtifactPin pin =
+            internal::ProductionArtifactAccess::Pin(pins[index]);
+        const internal::CachedPrimitive& cached = pin.artifact();
+        const ArtifactRecord& record = pins[index].handle().record();
+        const auto entry = module_node->entries_.find(std::string(call->symbol));
+        const codegen::KernelSignature signature = module.signature(call->symbol);
+        const codegen::KernelLaunchMetadata metadata = module.launch_metadata(call->symbol);
+        signature.Validate();
+        metadata.Validate();
+        const std::string signature_bytes = signature.CanonicalBytes();
+        const std::string metadata_bytes = metadata.CanonicalBytes();
+        if (entry == module_node->entries_.end() || !cached.kernel.IsReady() ||
+            std::string(signature->symbol) != std::string(call->symbol) ||
+            record.artifact_key != pin.key() ||
+            record.executable_token != "primitive-v1:" + pin.key().canonical_bytes() ||
+            record.signature_digest != support::HashText(cached.signature.CanonicalBytes()) ||
+            record.launch_metadata_digest != support::HashText(cached.launch_metadata.CanonicalBytes()) ||
+            record.provenance != cached.provenance ||
+            record.byte_size != cached.accounted_bytes ||
+            record.validation_record != cached.validation_record ||
+            pin.key().target_capability_fingerprint() !=
+                module_target_capability_fingerprint ||
+            cached.signature.CanonicalBytes() != signature_bytes ||
+            cached.kernel.signature().CanonicalBytes() != signature_bytes ||
+            entry->second.signature.CanonicalBytes() != signature_bytes ||
+            cached.launch_metadata.CanonicalBytes() != metadata_bytes ||
+            cached.kernel.launch_metadata().CanonicalBytes() != metadata_bytes ||
+            entry->second.launch_metadata.CanonicalBytes() != metadata_bytes ||
+            entry->second.executable.signature().CanonicalBytes() != signature_bytes ||
+            entry->second.executable.launch_metadata().CanonicalBytes() != metadata_bytes ||
+            cached.kernel->launcher != entry->second.executable->launcher ||
+            metadata->device.device_type() != target->device_type ||
+            metadata->device.device_id() != target->device_id ||
+            metadata->backend != expected_backend) {
+            throw std::invalid_argument("CompiledGraph pin, module, and target contracts differ");
+        }
+    }
+}
+
+}  // namespace
+
+CompiledGraph::CompiledGraph(std::shared_ptr<const State> state)
+    : state_(std::move(state)) {}
+
+CompiledGraph CompiledGraph::Create(CompiledModule module,
+                                    runtime::ExecutablePlan plan,
+                                    std::vector<ArtifactPin> artifact_pins,
+                                    GraphSemanticKey graph_semantic_key) {
+    ValidateCompiledGraphCandidate(module, plan, artifact_pins, graph_semantic_key);
+    auto state = std::make_shared<State>(State{
+        std::move(module), std::move(plan),
+        std::make_shared<const std::vector<ArtifactPin>>(std::move(artifact_pins)),
+        std::move(graph_semantic_key)});
+    return CompiledGraph(std::move(state));
+}
+
+bool CompiledGraph::defined() const noexcept { return static_cast<bool>(state_); }
+const CompiledModule& CompiledGraph::module() const {
+    if (!state_) throw std::logic_error("CompiledGraph is undefined");
+    return state_->module;
+}
+const runtime::ExecutablePlan& CompiledGraph::plan() const {
+    if (!state_) throw std::logic_error("CompiledGraph is undefined");
+    return state_->plan;
+}
+const std::vector<ArtifactPin>& CompiledGraph::artifact_pins() const {
+    if (!state_) throw std::logic_error("CompiledGraph is undefined");
+    return *state_->artifact_pins;
+}
+const GraphSemanticKey& CompiledGraph::graph_semantic_key() const {
+    if (!state_) throw std::logic_error("CompiledGraph is undefined");
+    return state_->graph_semantic_key;
+}
+runtime::PlanVariant CompiledGraph::plan_variant() const {
+    if (!state_) throw std::logic_error("CompiledGraph is undefined");
+    Array<runtime::ArtifactSelection> selections;
+    const Array<runtime::KernelCall> calls = state_->plan.calls();
+    for (size_t index = 0; index < calls.size(); ++index) {
+        selections.push_back(runtime::ArtifactSelection{
+            static_cast<int64_t>(index),
+            String((*state_->artifact_pins)[index].handle().record().artifact_key.canonical_bytes()),
+            0});
+    }
+    return runtime::MakePlanVariant(state_->module, state_->plan, selections,
+                                    state_->artifact_pins);
+}
+
 namespace {
 
 void AppendPipelineIdentityField(std::string* canonical,
@@ -687,40 +822,11 @@ CompiledModule AssembleModule(
         std::move(profile_context));
 }
 
-runtime::PlanVariant AssemblePlanVariant(
-    const CompiledModule& module, const runtime::ExecutablePlan& plan,
-    const std::vector<ArtifactPin>& pins) {
-    const Array<runtime::KernelCall> calls = plan.calls();
-    if (pins.size() != calls.size()) {
-        throw std::logic_error(
-            "selected artifact pins do not match ordered plan calls");
-    }
-    Array<runtime::ArtifactSelection> selections;
-    for (size_t index = 0; index < pins.size(); ++index) {
-        if (!pins[index].defined()) {
-            throw std::logic_error(
-                "selected artifact manifest cannot retain an undefined pin");
-        }
-        selections.push_back(runtime::ArtifactSelection{
-            static_cast<int64_t>(index),
-            String(pins[index]
-                       .handle()
-                       .record()
-                       .artifact_key.canonical_bytes()),
-            0});
-    }
-    // Compiler is the authority that associates this declaration with pins;
-    // Runtime only observes it and keeps the type-erased lease alive.
-    const auto retention_lease =
-        std::make_shared<const std::vector<ArtifactPin>>(pins);
-    return runtime::MakePlanVariant(module, plan, selections,
-                                    retention_lease);
-}
-
 CompiledGraph CompilePipeline(
     Function function, CompileConfig config,
     const internal::CompilerExecutionContract& contract) {
     config.Validate();
+    const GraphSemanticKey graph_semantic_key = BuildGraphSemanticKey(function);
     auto profile_context = MaybeCreateProfileContext(config);
     const std::string run_id =
         profile_context ? profile_context->NextRunId("compile") : "";
@@ -753,31 +859,11 @@ CompiledGraph CompilePipeline(
     CompiledModule module = AssembleModule(result, profile_context);
     runtime::ExecutablePlan plan = result.plan();
     std::vector<ArtifactPin> artifact_pins = result.artifact_pins();
-    runtime::PlanVariant variant =
-        AssemblePlanVariant(module, plan, artifact_pins);
     AddResultFields(&assemble_span, result);
     if (profile_context) profile_context->Flush();
-    std::vector<ArtifactPlanBinding> bindings;
-    bindings.reserve(artifact_pins.size());
-    const Array<runtime::KernelCall> calls = plan.calls();
-    const std::vector<PrimitiveCompileState> primitives = result.primitives();
-    if (calls.size() != artifact_pins.size() ||
-        primitives.size() != artifact_pins.size()) {
-        throw std::logic_error(
-            "Compiler produced different plan-call and artifact-pin counts");
-    }
-    for (size_t index = 0; index < artifact_pins.size(); ++index) {
-        bindings.push_back(ArtifactPlanBinding{
-            index,
-            LinkSymbol{std::string(calls[index]->symbol)},
-            artifact_pins[index],
-            support::HashText(primitives[index].signature->CanonicalBytes()),
-            support::HashText(
-                primitives[index].launch_metadata->CanonicalBytes())});
-    }
-    return CompiledGraph{std::move(module), std::move(plan),
-                         std::move(artifact_pins), std::move(variant),
-                         std::move(bindings), GraphSemanticKey()};
+    return CompiledGraph::Create(std::move(module), std::move(plan),
+                                 std::move(artifact_pins),
+                                 graph_semantic_key);
 }
 
 }  // namespace
@@ -958,31 +1044,11 @@ CompiledGraph internal::FinishCompilerGraph(
     CompiledModule module = AssembleModule(result, profile_context);
     runtime::ExecutablePlan plan = result.plan();
     std::vector<ArtifactPin> artifact_pins = result.artifact_pins();
-    runtime::PlanVariant variant =
-        AssemblePlanVariant(module, plan, artifact_pins);
-    std::vector<ArtifactPlanBinding> bindings;
-    bindings.reserve(artifact_pins.size());
-    const Array<runtime::KernelCall> calls = plan.calls();
-    const std::vector<PrimitiveCompileState> primitives = result.primitives();
-    if (calls.size() != artifact_pins.size() ||
-        primitives.size() != artifact_pins.size()) {
-        throw std::logic_error(
-            "Compiler produced different plan-call and artifact-pin counts");
-    }
-    for (size_t index = 0; index < artifact_pins.size(); ++index) {
-        bindings.push_back(ArtifactPlanBinding{
-            index,
-            LinkSymbol{std::string(calls[index]->symbol)},
-            artifact_pins[index],
-            support::HashText(primitives[index].signature->CanonicalBytes()),
-            support::HashText(
-                primitives[index].launch_metadata->CanonicalBytes())});
-    }
     AddResultFields(&assemble_span, result);
     if (profile_context) profile_context->Flush();
-    return CompiledGraph{std::move(module), std::move(plan),
-                         std::move(artifact_pins), std::move(variant),
-                         std::move(bindings), prepared.graph_semantic_key};
+    return CompiledGraph::Create(std::move(module), std::move(plan),
+                                 std::move(artifact_pins),
+                                 prepared.graph_semantic_key);
 }
 
 Array<String> Compiler::RelayPassPolicy(int opt_level) {
@@ -1034,13 +1100,8 @@ GraphSemanticKey Compiler::BuildGraphSemanticKey(
 }
 
 CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
-    const GraphSemanticKey graph_semantic_key =
-        BuildGraphSemanticKey(function);
     const internal::CompilerExecutionContract contract =
         internal::ResolveCompilerExecutionContract(config);
-    CompiledGraph result =
-        CompilePipeline(std::move(function), std::move(config), contract);
-    result.graph_semantic_key = graph_semantic_key;
-    return result;
+    return CompilePipeline(std::move(function), std::move(config), contract);
 }
 }  // namespace kxc::api

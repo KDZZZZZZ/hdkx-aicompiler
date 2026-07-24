@@ -516,11 +516,11 @@ void TestCompilerLLVM() {
         FloatArray({4}, {1, 2, 3, 4}),
         FloatArray({4}),
     };
-    Require(compiled.plan.calls().size() == 1 &&
-                compiled.module.entry_count() == 1,
+    Require(compiled.plan().calls().size() == 1 &&
+                compiled.module().entry_count() == 1,
             "single Relay add must compile to one explicit entry");
-    auto result = compiled.module.Invoke(
-        compiled.plan.calls()[0]->symbol, {arguments[0], arguments[1]},
+    auto result = compiled.module().Invoke(
+        compiled.plan().calls()[0]->symbol, {arguments[0], arguments[1]},
         DeviceStream::Default(Device::CPU()));
     result.operation.Wait();
     ExpectNear(ReadFloats(result.outputs[0].storage), {101, 202, 303, 404});
@@ -535,13 +535,13 @@ void TestCompilerIntermediateAllocate() {
     Function function({x, y}, Call(relay::Op::Get("add"), {first, y}));
     api::CompiledGraph compiled = api::Compiler::Compile(
         function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
-    runtime::RuntimeSession session(compiled.module, compiled.plan);
+    runtime::RuntimeSession session(compiled.module(), compiled.plan());
     Array<runtime::NDArray> outputs = session.Run({
         FloatArray({4}, {1, 2, 3, 4}),
         FloatArray({4}, {10, 20, 30, 40}),
     });
-    Require(compiled.module.entry_count() == 2 &&
-                compiled.plan.calls().size() == 2 && outputs.size() == 1,
+    Require(compiled.module().entry_count() == 2 &&
+                compiled.plan().calls().size() == 2 && outputs.size() == 1,
             "two Relay calls must compile and execute as two entries");
     ExpectNear(ReadFloats(outputs[0]), {21, 42, 63, 84});
 }
@@ -554,7 +554,7 @@ void TestRuntimeSessionLLVM() {
     Function function({x, y}, Call(relay::Op::Get("add"), {x, y}));
     api::CompiledGraph compiled = api::Compiler::Compile(
         function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
-    runtime::RuntimeSession session(compiled.module, compiled.plan);
+    runtime::RuntimeSession session(compiled.module(), compiled.plan());
     Array<runtime::NDArray> inputs{
         FloatArray({4}, {100, 200, 300, 400}),
         FloatArray({4}, {1, 2, 3, 4}),
@@ -584,7 +584,7 @@ void TestRuntimeSessionLLVMConstant() {
         {x}, Call(relay::Op::Get("add"), {x, Constant(constant_data)}));
     api::CompiledGraph compiled = api::Compiler::Compile(
         function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
-    runtime::RuntimeSession session(compiled.module, compiled.plan);
+    runtime::RuntimeSession session(compiled.module(), compiled.plan());
     Array<runtime::NDArray> outputs =
         session.Run({FloatArray({4}, {1, 2, 3, 4})});
     Require(outputs.size() == 1,

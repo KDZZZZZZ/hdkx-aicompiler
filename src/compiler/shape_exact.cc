@@ -574,14 +574,14 @@ void VerifyVariant(
     const shape::ExactOracle& oracle, const CompiledGraph& compiled) {
     const auto& partitioned = prepared.graph.partitioned;
     if (requests.size() != partitioned.units.size() ||
-        compiled.plan.calls().size() != requests.size() ||
-        compiled.artifact_pins.size() != requests.size() ||
-        compiled.module.entry_count() != requests.size() ||
-        compiled.plan.values().size() != partitioned.value_graph.values.size()) {
+        compiled.plan().calls().size() != requests.size() ||
+        compiled.artifact_pins().size() != requests.size() ||
+        compiled.module().entry_count() != requests.size() ||
+        compiled.plan().values().size() != partitioned.value_graph.values.size()) {
         Reject("compiled module/plan/pin cardinality does not match exact requests");
     }
-    for (size_t i = 0; i < compiled.plan.values().size(); ++i) {
-        const runtime::ValueSpec& value = compiled.plan.values()[i];
+    for (size_t i = 0; i < compiled.plan().values().size(); ++i) {
+        const runtime::ValueSpec& value = compiled.plan().values()[i];
         const auto& source = partitioned.value_graph.values[i];
         const auto& exact = ProfileValue(oracle, ValueName(source.value_id));
         const auto* expected_type = source.checked_type.As<TensorTypeNode>();
@@ -638,13 +638,13 @@ void VerifyVariant(
                 Reject("exact request output contract drifted");
             }
         }
-        const runtime::KernelCall& call = compiled.plan.calls()[i];
-        if (!(call->symbol == unit.symbol) || !compiled.module.HasFunction(call->symbol) ||
+        const runtime::KernelCall& call = compiled.plan().calls()[i];
+        if (!(call->symbol == unit.symbol) || !compiled.module().HasFunction(call->symbol) ||
             !SameIds(call.input_value_ids(), unit.input_value_ids) ||
             !SameIds(call.output_value_ids(), unit.output_value_ids)) {
             Reject("compiled plan routing does not match prepared partition");
         }
-        const codegen::KernelSignature signature = compiled.module.signature(call->symbol);
+        const codegen::KernelSignature signature = compiled.module().signature(call->symbol);
         const Array<codegen::KernelArgSpec> args = signature.arguments();
         if (args.size() != unit.input_value_ids.size() + unit.output_value_ids.size()) {
             Reject("compiled signature arity does not match exact request");
@@ -666,7 +666,7 @@ void VerifyVariant(
                       value.checked_type.As<TensorTypeNode>(),
                       config->target);
         }
-        const codegen::KernelLaunchMetadata metadata = compiled.module.launch_metadata(call->symbol);
+        const codegen::KernelLaunchMetadata metadata = compiled.module().launch_metadata(call->symbol);
         if (metadata->device.device_type() != config->target->device_type ||
             metadata->device.device_id() != config->target->device_id ||
             (config->target->kind == "llvm" && metadata->backend != codegen::CodeGenBackend::kLLVM) ||
@@ -677,7 +677,7 @@ void VerifyVariant(
             internal::BuildPrimitiveArtifactKey(
             unit.semantic_key, config->target, contract.canonical_bytes,
             contract.schedule_version.c_str(), contract.backend_version.c_str());
-        const ArtifactPin& public_pin = compiled.artifact_pins[i];
+        const ArtifactPin& public_pin = compiled.artifact_pins()[i];
         if (!public_pin.defined()) {
             Reject("production artifact pin is undefined");
         }
@@ -714,11 +714,9 @@ struct PreparedGraphTemplate::Impl final {
 };
 
 struct ExactPlanVariant::Impl final {
-    CompiledModule module;
-    runtime::ExecutablePlan plan;
+    CompiledGraph graph;
     ShapeProfileKey profile;
     PlanVariantKey key;
-    std::vector<ArtifactPin> pins;
 };
 
 PreparedGraphTemplate::PreparedGraphTemplate() = default;
@@ -746,11 +744,11 @@ ExactPlanVariant::ExactPlanVariant(const ExactPlanVariant&) = default;
 ExactPlanVariant& ExactPlanVariant::operator=(const ExactPlanVariant&) = default;
 ExactPlanVariant::ExactPlanVariant(ExactPlanVariant&&) noexcept = default;
 ExactPlanVariant& ExactPlanVariant::operator=(ExactPlanVariant&&) noexcept = default;
-const CompiledModule& ExactPlanVariant::module() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->module; }
-const runtime::ExecutablePlan& ExactPlanVariant::plan() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->plan; }
+const CompiledModule& ExactPlanVariant::module() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->graph.module(); }
+const runtime::ExecutablePlan& ExactPlanVariant::plan() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->graph.plan(); }
 const ShapeProfileKey& ExactPlanVariant::shape_profile_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->profile; }
 const PlanVariantKey& ExactPlanVariant::plan_variant_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->key; }
-const std::vector<ArtifactPin>& ExactPlanVariant::artifact_pins() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->pins; }
+const std::vector<ArtifactPin>& ExactPlanVariant::artifact_pins() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->graph.artifact_pins(); }
 
 bool ProductionExactShapeAdapter::IsEnabled() noexcept {
 #if KXC_ENABLE_SHAPE_PRODUCTION_EXACT
@@ -814,20 +812,19 @@ ExactPlanVariant ProductionExactShapeAdapter::AssembleExactPlan(
                   prepared.impl_->prepared, prepared.impl_->config,
                   prepared.impl_->contract, oracle, compiled);
     std::vector<OrderedArtifactSelectionIdentity> selections;
-    selections.reserve(compiled.plan.calls().size());
-    for (size_t i = 0; i < compiled.plan.calls().size(); ++i) {
+    selections.reserve(compiled.plan().calls().size());
+    for (size_t i = 0; i < compiled.plan().calls().size(); ++i) {
         const ArtifactRecord& record =
-            compiled.artifact_pins[i].handle().record();
+            compiled.artifact_pins()[i].handle().record();
         selections.push_back(OrderedArtifactSelectionIdentity{
-            i, std::string(compiled.plan.calls()[i]->symbol),
+            i, std::string(compiled.plan().calls()[i]->symbol),
             record.artifact_key, 0});
     }
     auto impl = std::make_shared<ExactPlanVariant::Impl>(ExactPlanVariant::Impl{
-        compiled.module, compiled.plan, oracle.profile().key(),
+        std::move(compiled), oracle.profile().key(),
         BuildPlanVariantKey(
             prepared.impl_->graph.key(), oracle.profile().key(),
-            selections, runtime::internal::kStaticMemoryPlanVersion),
-        compiled.artifact_pins});
+            selections, runtime::internal::kStaticMemoryPlanVersion)});
     return ExactPlanVariant(std::move(impl));
 }
 

@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 #include "kxc/compiler/compile_config.h"
@@ -20,28 +21,33 @@
 namespace kxc {
 namespace api {
 
-/*! \brief Ordered production artifact ownership for one immutable plan call. */
-struct ArtifactPlanBinding final {
-    size_t call_index{0};
-    LinkSymbol link_symbol;
-    ArtifactPin artifact_pin;
-    std::string signature_digest;
-    std::string launch_metadata_digest;
+/*! \brief Immutable validated compiler output. Plan order is pin order. */
+class CompiledGraph final {
+public:
+    CompiledGraph() = default;
+
+    /*! \brief Validates a complete candidate before publishing immutable state. */
+    static CompiledGraph Create(CompiledModule module,
+                                runtime::ExecutablePlan plan,
+                                std::vector<ArtifactPin> artifact_pins,
+                                GraphSemanticKey graph_semantic_key);
+
+    bool defined() const noexcept;
+    const CompiledModule& module() const;
+    const runtime::ExecutablePlan& plan() const;
+    const std::vector<ArtifactPin>& artifact_pins() const;
+    const GraphSemanticKey& graph_semantic_key() const;
+    /*! \brief Runtime manifest derived from plan order; generation is always zero. */
+    runtime::PlanVariant plan_variant() const;
+
+private:
+    struct State;
+    explicit CompiledGraph(std::shared_ptr<const State> state);
+    std::shared_ptr<const State> state_;
 };
 
-struct CompiledGraph final {
-    CompiledModule module;
-    runtime::ExecutablePlan plan;
-    // Compiler::Compile populates this with production-backed cache pins.
-    std::vector<ArtifactPin> artifact_pins;
-    // Compiler declares pin identities and retains those pins in the lease.
-    // Runtime observes the declaration but cannot authenticate its provenance.
-    runtime::PlanVariant variant;
-    // Ordered call-to-artifact pins; no per-unit relinking is exposed.
-    std::vector<ArtifactPlanBinding> artifact_plan_bindings;
-    // Canonical Relay graph semantics; target and compiler policy are excluded.
-    GraphSemanticKey graph_semantic_key;
-};
+static_assert(std::is_copy_constructible_v<CompiledGraph>);
+static_assert(std::is_copy_assignable_v<CompiledGraph>);
 
 /*! \brief Gated, resolved static-exact control-flow artifact set.
  *

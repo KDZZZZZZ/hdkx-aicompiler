@@ -237,6 +237,8 @@ struct GraphOptions final {
     uint64_t primitive_byte_size{1};
     std::string primitive_provenance{"adaptive-production-path-fixture"};
     std::vector<std::shared_ptr<const kxc::codegen::KernelLauncher>> launchers;
+    bool reverse_pins{false};
+    bool unbacked_public_pin{false};
 };
 
 kxc::api::CompiledGraph MakeGraph(
@@ -251,10 +253,8 @@ kxc::api::CompiledGraph MakeGraph(
 
     std::vector<api::internal::CompiledModuleEntry> entries;
     std::vector<api::ArtifactPin> pins;
-    std::vector<api::ArtifactPlanBinding> bindings;
     entries.reserve(primitive_keys.size());
     pins.reserve(primitive_keys.size());
-    bindings.reserve(primitive_keys.size());
     for (size_t index = 0; index < primitive_keys.size(); ++index) {
         const int64_t input_extent = index == 0 ? options.input_extent : 2;
         KernelSignature signature(
@@ -280,19 +280,19 @@ kxc::api::CompiledGraph MakeGraph(
         entries.push_back(api::internal::CompiledModuleEntry{
             tir::PrimFunc(), signature, metadata, module_kernel});
         pins.push_back(pin);
-        bindings.push_back(api::ArtifactPlanBinding{
-            index, api::LinkSymbol{Symbol(index)}, pin,
-            support::HashText(signature.CanonicalBytes()),
-            support::HashText(metadata.CanonicalBytes())});
     }
-
+    if (options.reverse_pins && pins.size() >= 2) {
+        std::swap(pins[0], pins[1]);
+    }
+    if (options.unbacked_public_pin) {
+        pins.front() = api::ArtifactPin(
+            api::ArtifactHandle(pins.front().handle().record()));
+    }
     api::CompiledModule module = api::internal::BuildCompiledModule(
         BuildTarget(Device::CPU()), std::move(entries), {});
-    return api::CompiledGraph{
-        std::move(module),
-        MakePlan(primitive_keys.size(), options.input_extent),
-        std::move(pins), runtime::PlanVariant(), std::move(bindings),
-        graph_semantic_key};
+    return api::CompiledGraph::Create(
+        std::move(module), MakePlan(primitive_keys.size(), options.input_extent),
+        std::move(pins), graph_semantic_key);
 }
 
 ProductionRequest MakeRequestFromConfig(
@@ -356,7 +356,7 @@ enum class Attack {
     kWrongSignature,
     kWrongMetadata,
     kWrongOrder,
-    kCorruptBinding,
+    kUnbackedPublicPin,
 };
 
 class FixtureCompiler final : public production_path::ProductionPathCompilerAdapter {
@@ -402,23 +402,16 @@ public:
             options.primitive_byte_size = candidate_primitive_byte_size;
             options.primitive_provenance = candidate_primitive_provenance;
             options.launchers = launchers;
+            options.reverse_pins = attack == Attack::kWrongOrder;
+            options.unbacked_public_pin = attack == Attack::kUnbackedPublicPin;
             kxc::api::CompiledGraph graph =
                 MakeGraph(request.graph_semantic_key(), keys,
                           std::move(options));
-            if (attack == Attack::kWrongOrder &&
-                graph.artifact_pins.size() >= 2) {
-                std::swap(graph.artifact_pins[0], graph.artifact_pins[1]);
-                std::swap(graph.artifact_plan_bindings[0],
-                          graph.artifact_plan_bindings[1]);
-            }
-            if (attack == Attack::kCorruptBinding) {
-                graph.artifact_plan_bindings[0].signature_digest = "foreign";
-            }
             {
                 std::lock_guard<std::mutex> lock(launcher_mutex);
                 last_launcher = std::dynamic_pointer_cast<const FixtureLauncher>(
                     kxc::api::internal::ProductionArtifactAccess::Pin(
-                        graph.artifact_pins[0]).artifact().kernel->launcher);
+                        graph.artifact_pins()[0]).artifact().kernel->launcher);
             }
             active.fetch_sub(1, std::memory_order_acq_rel);
             return graph;
@@ -534,7 +527,7 @@ bool TestArtifactAuthorityRejectsAttacks() {
     const std::vector<std::pair<Attack, const char*>> attacks = {
         {Attack::kWrongSignature, "same launcher with wrong signature"},
         {Attack::kWrongMetadata, "same launcher with wrong launch metadata"},
-        {Attack::kCorruptBinding, "forged binding digest"},
+        {Attack::kUnbackedPublicPin, "unbacked public pin"},
     };
     for (const auto& [attack, description] : attacks) {
         kxc::api::internal::ClearPrimitiveCacheForTesting();
@@ -562,6 +555,20 @@ bool TestArtifactAuthorityRejectsAttacks() {
                "a distinct selection may replace an ABI-compatible callable");
 
     kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const ProductionRequest target_request = MakeRequest();
+    const kxc::api::PrimitiveArtifactKey foreign_target_key(
+        kxc::api::UnitSemanticKey("adaptive-fixture-foreign-target-v1"),
+        "foreign-target-capability", "adaptive-fixture-pipeline-v1", 1,
+        "adaptive-fixture-schedule-v1", "adaptive-fixture-backend-v1");
+    TEST_CHECK(foreign_target_key.target_capability_fingerprint() ==
+                   "foreign-target-capability" &&
+                   Throws([&] {
+                       (void)MakeGraph(target_request.graph_semantic_key(),
+                                       {foreign_target_key});
+                   }),
+               "factory must reject a pin whose target capability differs from its module");
+
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest ordered = MakeRequest(1, 2, 16, 2);
     auto compiler = std::make_shared<FixtureCompiler>();
     compiler->attack = Attack::kWrongOrder;
@@ -570,6 +577,27 @@ bool TestArtifactAuthorityRejectsAttacks() {
                    (void)controller.CompileAndPublish(ordered);
                }),
                "wrong ordered call-to-artifact mapping must fail closed");
+    return true;
+}
+
+bool TestPlanVariantRetainsGraphPinOwner() {
+    using namespace production_path;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    kxc::runtime::PlanVariant variant;
+    std::weak_ptr<const void> lease;
+    {
+        const ProductionRequest request = MakeRequest();
+        const kxc::api::CompiledGraph graph = MakeGraph(
+            request.graph_semantic_key(), SelectedKeys(request));
+        variant = graph.plan_variant();
+        lease = variant.manifest().retention_lease();
+    }
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    TEST_CHECK(!lease.expired(),
+               "PlanVariant must retain the sole graph pin owner");
+    variant = kxc::runtime::PlanVariant();
+    TEST_CHECK(lease.expired(),
+               "dropping PlanVariant must release the sole graph pin owner");
     return true;
 }
 
@@ -1873,7 +1901,12 @@ bool TestV2TransactionalCancellationAndGlobalBounds() {
     v2::Options global_options;
     global_options.worker_count = 1;
     global_options.max_routes = 1;
-    global_options.max_route_metadata_bytes = 4096;
+    const auto framed_size = [](const std::string& value) {
+        return value.size() + std::to_string(value.size()).size() + 2U;
+    };
+    global_options.max_route_metadata_bytes =
+        framed_size(base.dispatch_key().canonical_bytes()) +
+        framed_size(base.plan_abi().canonical_bytes()) + 64U;
     global_options.observer = [&](const v2::Event& event) {
         if (event.kind == v2::EventKind::kRouteSaturated) ++route_events;
     };
@@ -1946,8 +1979,8 @@ bool TestRealCompilerLLVMIntegration() {
          runtime::NDArray::Zeros({2}, Float32(), Device::CPU())},
         DeviceStream::Default(Device::CPU()));
     result.completion.Wait();
-    TEST_CHECK(variant->compiled_graph().artifact_plan_bindings.size() ==
-                   variant->compiled_graph().plan.calls().size() &&
+    TEST_CHECK(variant->compiled_graph().artifact_pins().size() ==
+                   variant->compiled_graph().plan().calls().size() &&
                    result.outputs.size() == 1,
                "real Compiler output must pass the production-path structural gate");
     return true;
@@ -1961,6 +1994,7 @@ int main() {
         {"same_key_singleflight_graph_identity",
          TestSameKeySingleflightAndGraphIdentity},
         {"artifact_authority_attacks", TestArtifactAuthorityRejectsAttacks},
+        {"plan_variant_retains_graph_pin_owner", TestPlanVariantRetainsGraphPinOwner},
         {"config_snapshot_unknown_relay",
          TestConfigSnapshotAndUnknownRelayFailClosed},
         {"cross_thread_observer_window_fail_fast",

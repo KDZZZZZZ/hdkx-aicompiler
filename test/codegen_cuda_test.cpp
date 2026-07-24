@@ -333,8 +333,8 @@ std::vector<float> CompileAndRunRelay(
     {
         api::CompiledGraph compiled = api::Compiler::Compile(
             function, api::CompileConfig::Create(BuildTarget(device), 3));
-        runtime::RuntimeSession session(compiled.module, compiled.plan);
-        const Array<runtime::ValueSpec> value_specs = compiled.plan.values();
+        runtime::RuntimeSession session(compiled.module(), compiled.plan());
+        const Array<runtime::ValueSpec> value_specs = compiled.plan().values();
         const auto find_value = [&](int64_t value_id) {
             for (const auto& value : value_specs) {
                 if (value->value_id == value_id) return value;
@@ -347,7 +347,7 @@ std::vector<float> CompileAndRunRelay(
         Array<runtime::NDArray> host_inputs;
         Array<AsyncOperation> uploads;
         size_t input_index = 0;
-        for (int64_t value_id : compiled.plan.input_value_ids()) {
+        for (int64_t value_id : compiled.plan().input_value_ids()) {
             const runtime::ValueSpec spec = find_value(value_id);
             Require(input_index < inputs.size(),
                     "Compiler CUDA plan has too many inputs");

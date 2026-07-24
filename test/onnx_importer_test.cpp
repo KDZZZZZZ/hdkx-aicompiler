@@ -198,7 +198,7 @@ bool TestRunExactTransformerProtobufLLVM() {
     const auto compiled = kxc::api::Compiler::Compile(
         prepared, kxc::api::CompileConfig::Create(
                       kxc::BuildTarget(kxc::Device::CPU()), 1));
-    TEST_CHECK(compiled.module.IsReady() && compiled.plan.calls().size() == 9,
+    TEST_CHECK(compiled.module().IsReady() && compiled.plan().calls().size() == 9,
                "protobuf Transformer fixture must compile to nine LLVM units");
 
     const std::vector<float> table_values = {1, 3, 2, 2, 4, 0, 0, 4};
@@ -206,7 +206,7 @@ bool TestRunExactTransformerProtobufLLVM() {
         {4, 2}, kxc::runtime::DataTypeFromString("float32"),
         kxc::Device::CPU());
     table.CopyFromBytes(table_values.data(), table.NBytes());
-    kxc::runtime::RuntimeSession session(compiled.module, compiled.plan);
+    kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
     const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({table});
     TEST_CHECK(outputs.size() == 1 && ShapeEquals(outputs[0], {3, 2}),
                "protobuf Transformer RuntimeSession output shape mismatch");
@@ -259,10 +259,10 @@ bool TestCompileResNet18ToLLVM() {
         kxc::BuildTarget(kxc::Device::CPU()), 1);
     config->opt_level = ResNet18OptLevel();
     auto compiled = kxc::api::Compiler::Compile(prepared, config);
-    TEST_CHECK(compiled.module.IsReady(),
+    TEST_CHECK(compiled.module().IsReady(),
                "ResNet18 should compile to a ready LLVM module");
-    TEST_CHECK(compiled.module.entry_count() == compiled.plan.calls().size() &&
-                   compiled.module.entry_count() > 1,
+    TEST_CHECK(compiled.module().entry_count() == compiled.plan().calls().size() &&
+                   compiled.module().entry_count() > 1,
                "ResNet18 should compile to one entry per operator call");
     return true;
 #else
@@ -287,9 +287,9 @@ bool TestRunCompiledResNet18LLVM() {
         kxc::BuildTarget(kxc::Device::CPU()), 1);
     config->opt_level = ResNet18OptLevel();
     auto compiled = kxc::api::Compiler::Compile(prepared, config);
-    TEST_CHECK(compiled.module.IsReady(), "ResNet18 should compile before execution");
+    TEST_CHECK(compiled.module().IsReady(), "ResNet18 should compile before execution");
     const kxc::Map<kxc::String, kxc::runtime::NDArray> constants =
-        compiled.module.constants();
+        compiled.module().constants();
     TEST_CHECK(constants.size() == imported.params.size(),
                "compiled module constant count should match loaded ONNX initializers");
 
@@ -300,11 +300,11 @@ bool TestRunCompiledResNet18LLVM() {
     FillResNet18Input(input);
 
     std::cout << "[INFO] running compiled resnet18 LLVM kernel with "
-              << compiled.plan.calls().size() << " kernel calls\n";
+              << compiled.plan().calls().size() << " kernel calls\n";
     std::cout.flush();
 
     const auto start = std::chrono::steady_clock::now();
-    kxc::runtime::RuntimeSession session(compiled.module, compiled.plan);
+    kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
     const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({input});
     const auto end = std::chrono::steady_clock::now();
     TEST_CHECK(outputs.size() == 1,

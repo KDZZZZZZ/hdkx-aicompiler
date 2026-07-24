@@ -53,7 +53,7 @@ int main() {
 #if KXC_USE_LLVM
     // LLVM 构建额外经过真实 Compiler，锁定七个显式阶段都进入同一 bundle。
     api::CompiledGraph compiled = api::Compiler::Compile(func, config);
-    if (!compiled.module.IsReady() || !compiled.plan.defined()) {
+    if (!compiled.module().IsReady() || !compiled.plan().defined()) {
         std::cerr << "Compiler profiling fixture did not produce a ready module\n";
         return 1;
     }

@@ -17,6 +17,7 @@
 #include "internal_lowering.h"
 #include "production_control_flow_test.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 
 namespace kxc::api {
 
@@ -177,20 +178,20 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
             // This is the unchanged real Compiler path on an If-free branch
             // fragment, therefore it uses normal lowering, codegen, cache, and pins.
             CompiledGraph compiled = Compiler::Compile(frozen->second, config);
-            if (!compiled.module.IsReady() || compiled.artifact_pins.size() != 1 ||
-                compiled.artifact_plan_bindings.size() != 1 ||
-                !compiled.artifact_pins.front().defined()) {
+            const auto& pins = compiled.artifact_pins();
+            const auto& calls = compiled.plan().calls();
+            if (!compiled.module().IsReady() || pins.size() != 1 ||
+                calls.size() != 1 || !pins.front().defined() ||
+                !compiled.module().HasFunction(calls[0]->symbol)) {
                 Fail("branch Call must resolve to exactly one real immutable compiler artifact");
             }
-            const ArtifactPlanBinding& artifact = compiled.artifact_plan_bindings.front();
-            if (!artifact.artifact_pin.defined() ||
-                !compiled.module.HasFunction(String(artifact.link_symbol.value))) {
-                Fail("real branch artifact lacks its selected module entry");
-            }
+            const auto signature = compiled.module().signature(calls[0]->symbol);
+            const auto metadata = compiled.module().launch_metadata(calls[0]->symbol);
             resolved.push_back(ResolvedBinding{
-                task.id, std::move(compiled.module), String(artifact.link_symbol.value),
-                AbiNonOutputs(task, lowered.plan), artifact.artifact_pin,
-                artifact.signature_digest, artifact.launch_metadata_digest});
+                task.id, compiled.module(), calls[0]->symbol,
+                AbiNonOutputs(task, lowered.plan), pins.front(),
+                support::HashText(signature.CanonicalBytes()),
+                support::HashText(metadata.CanonicalBytes())});
         }
     }
     if (resolved.empty()) {
