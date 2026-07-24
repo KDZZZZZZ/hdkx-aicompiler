@@ -36,7 +36,7 @@ jobs:
         run: python python/tools/check_relay_op_contract.py --root .
 
   cpu-smoke:
-    name: CPU smoke (task DAG ${{ matrix.region_task_dag }}, control ${{ matrix.control_runtime }}, W2 ${{ matrix.production_adapters }}, W3 ${{ matrix.w3_adapters }})
+    name: CPU smoke (task DAG ${{ matrix.region_task_dag }}, control ${{ matrix.control_runtime }}, W2 ${{ matrix.production_adapters }}, W3 ${{ matrix.w3_adapters }}, dynamic ABI ${{ matrix.dynamic_module_abi }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -46,22 +46,32 @@ jobs:
             control_runtime: "OFF"
             production_adapters: "OFF"
             w3_adapters: "OFF"
+            dynamic_module_abi: "OFF"
+          - region_task_dag: "OFF"
+            control_runtime: "OFF"
+            production_adapters: "OFF"
+            w3_adapters: "OFF"
+            dynamic_module_abi: "ON"
           - region_task_dag: "OFF"
             control_runtime: "OFF"
             production_adapters: "ON"
             w3_adapters: "OFF"
+            dynamic_module_abi: "ON"
           - region_task_dag: "OFF"
             control_runtime: "ON"
             production_adapters: "ON"
             w3_adapters: "ON"
+            dynamic_module_abi: "OFF"
           - region_task_dag: "ON"
             control_runtime: "OFF"
             production_adapters: "ON"
             w3_adapters: "ON"
+            dynamic_module_abi: "ON"
           - region_task_dag: "ON"
             control_runtime: "ON"
             production_adapters: "ON"
             w3_adapters: "ON"
+            dynamic_module_abi: "OFF"
 
     steps:
       - name: Checkout
@@ -78,7 +88,7 @@ jobs:
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=${{ matrix.production_adapters }}
           -DKXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=${{ matrix.production_adapters }}
           -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=${{ matrix.w3_adapters }}
-          -DKXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=${{ matrix.w3_adapters }}
+          -DKXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=${{ matrix.dynamic_module_abi }}
           -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=${{ matrix.w3_adapters }}
           -DKXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=${{ matrix.w3_adapters }}
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF

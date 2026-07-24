@@ -577,6 +577,10 @@ AsyncOperation InvokeOrderedModuleEntry(const api::CompiledModule& module,
                                         const String& symbol,
                                         const Array<NDArray>& ordered,
                                         const DeviceStream& stream) {
+    const api::ModuleInvocationContract contract = module.invocation_contract(symbol);
+    if (!contract.IsConstantShape() || !contract.runtime_extent_scalars().empty()) {
+        throw std::logic_error("RuntimeSession fails closed until dynamic graph memory planning exists");
+    }
     Array<NDArray> inputs;
     Array<NDArray> outputs;
     const Array<codegen::KernelArgSpec> signature = module.signature(symbol).arguments();
