@@ -168,6 +168,13 @@ ValidatedPlanContract ValidateModuleAndPlan(
             throw std::invalid_argument(
                 context + " targets a different execution device");
         }
+        const api::ModuleInvocationContract contract =
+            module.invocation_contract(call->symbol);
+        if (!contract.IsConstantShape() ||
+            !contract.runtime_extent_scalars().empty()) {
+            throw std::invalid_argument(
+                context + " requires unsupported nonstatic/scalar module invocation ABI");
+        }
 
         Array<int64_t> regular_inputs;
         Array<int64_t> constant_inputs;
@@ -436,6 +443,13 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
             throw std::invalid_argument(
                 context + " targets a different execution device");
         }
+        const api::ModuleInvocationContract contract =
+            module.invocation_contract(task->symbol);
+        if (!contract.IsConstantShape() ||
+            !contract.runtime_extent_scalars().empty()) {
+            throw std::invalid_argument(
+                context + " requires unsupported nonstatic/scalar module invocation ABI");
+        }
 
         Array<int64_t> regular_inputs;
         Array<int64_t> constant_inputs;
@@ -571,6 +585,28 @@ void ValidateStoredSession(const RuntimeSessionNode& node) {
                 "RuntimeSession stored constant mapping is inconsistent");
         }
     }
+}
+
+AsyncOperation InvokeOrderedModuleEntry(const api::CompiledModule& module,
+                                        const String& symbol,
+                                        const Array<NDArray>& ordered,
+                                        const DeviceStream& stream) {
+    const api::ModuleInvocationContract contract = module.invocation_contract(symbol);
+    if (!contract.IsConstantShape() || !contract.runtime_extent_scalars().empty()) {
+        throw std::logic_error("RuntimeSession fails closed until dynamic graph memory planning exists");
+    }
+    Array<NDArray> inputs;
+    Array<NDArray> outputs;
+    const Array<codegen::KernelArgSpec> signature = module.signature(symbol).arguments();
+    if (ordered.size() != signature.size()) {
+        throw std::logic_error("RuntimeSession ordered arguments do not match module ABI");
+    }
+    for (size_t i = 0; i < signature.size(); ++i) {
+        if (signature[i]->role == codegen::KernelArgRole::kInput) inputs.push_back(ordered[i]);
+        if (signature[i]->role == codegen::KernelArgRole::kOutput) outputs.push_back(ordered[i]);
+    }
+    return api::internal::InvokeCompiledModuleWithOutputs(
+        module, symbol, inputs, outputs, stream);
 }
 
 Array<NDArray> PrepareCallArguments(
@@ -1146,8 +1182,8 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
                     case TaskKind::kKernel: {
                         const Array<NDArray> arguments = PrepareTaskArguments(
                             node->module, task, values, table);
-                        operations.push_back(node->module.Launch(
-                            task->symbol, arguments, stream));
+                        operations.push_back(InvokeOrderedModuleEntry(
+                            node->module, task->symbol, arguments, stream));
                         break;
                     }
                     case TaskKind::kCopy: {
@@ -1229,8 +1265,8 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
     for (const auto& call : calls) {
         Array<NDArray> arguments =
             PrepareCallArguments(node->module, call, values, table);
-        operations.push_back(
-            node->module.Launch(call->symbol, arguments, stream));
+        operations.push_back(InvokeOrderedModuleEntry(
+            node->module, call->symbol, arguments, stream));
     }
 
     Array<NDArray> outputs;

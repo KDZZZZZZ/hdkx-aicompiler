@@ -519,11 +519,11 @@ void TestCompilerLLVM() {
     Require(compiled.plan.calls().size() == 1 &&
                 compiled.module.entry_count() == 1,
             "single Relay add must compile to one explicit entry");
-    compiled.module
-        .Launch(compiled.plan.calls()[0]->symbol, arguments,
-                DeviceStream::Default(Device::CPU()))
-        .Wait();
-    ExpectNear(ReadFloats(arguments[2]), {101, 202, 303, 404});
+    auto result = compiled.module.Invoke(
+        compiled.plan.calls()[0]->symbol, {arguments[0], arguments[1]},
+        DeviceStream::Default(Device::CPU()));
+    result.operation.Wait();
+    ExpectNear(ReadFloats(result.outputs[0].storage), {101, 202, 303, 404});
 }
 
 // 两级 Relay 计算验证 LLVM Allocate 中间存储仍保持正确。

@@ -96,6 +96,8 @@ struct SymbolicBoundaryContract {
   int64_t alignment;
   std::string memory_scope;
   TensorAbiDescriptor abi;
+  // Empty means unnamed axes; otherwise this must match dimensions rank.
+  std::vector<std::optional<std::string>> axis_names{};
 };
 
 struct PolymorphicUnitProof {

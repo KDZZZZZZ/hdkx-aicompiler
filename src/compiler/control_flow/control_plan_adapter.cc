@@ -4,11 +4,14 @@
 
 #include "kxc/compiler/control_flow.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+
+#include "kxc/profiling/profiling.h"
 
 namespace kxc::api {
 namespace {
@@ -21,13 +24,14 @@ std::vector<runtime::ValueId> AbiOrderedArguments(
     const std::vector<runtime::ValueId>& logical_arguments,
     const std::unordered_set<runtime::ValueId>& constants) {
     std::vector<runtime::ValueId> result;
+    std::unordered_set<runtime::ValueId> seen;
     result.reserve(logical_arguments.size());
     for (const auto value : logical_arguments) {
-        if (!constants.count(value)) result.push_back(value);
+        if (seen.insert(value).second) result.push_back(value);
     }
-    for (const auto value : logical_arguments) {
-        if (constants.count(value)) result.push_back(value);
-    }
+    std::stable_partition(result.begin(), result.end(), [&constants](const auto value) {
+        return !constants.count(value);
+    });
     return result;
 }
 
@@ -67,10 +71,12 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
         plan.constant_values.begin(), plan.constant_values.end());
     std::unordered_map<runtime::TaskId, const ControlKernelBinding*> binding_by_task;
     for (const auto& binding : bindings) {
+        const bool production = static_cast<bool>(binding.production_lease);
         if (binding.task_id < 0 || !binding.module.defined() ||
-            binding.entry_symbol == "" || binding.binding_revision == 0 ||
-            !binding.module.HasFunction(binding.entry_symbol)) {
-            Fail("each fixture binding requires task id, ready module entry, and binding_revision > 0");
+            binding.entry_symbol == "" ||
+            !binding.module.HasFunction(binding.entry_symbol) ||
+            (production == (binding.binding_revision != 0))) {
+            Fail("each binding requires task id, ready module entry, and exactly one fixture revision or compiler-minted production lease");
         }
         if (!binding_by_task.emplace(binding.task_id, &binding).second) {
             Fail("duplicate binding task id");
@@ -116,9 +122,21 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
                         Fail("missing kernel task binding for task " + std::to_string(task.id));
                     }
                     const ControlKernelBinding& supplied = *found->second;
+                    const codegen::KernelSignature declared_signature =
+                        supplied.module.signature(supplied.entry_symbol);
+                    const codegen::KernelLaunchMetadata declared_metadata =
+                        supplied.module.launch_metadata(supplied.entry_symbol);
+                    if (supplied.production_lease &&
+                        !supplied.production_lease->Covers(
+                            task.id, supplied.entry_symbol,
+                            profiling::HashText(declared_signature.ToString()),
+                            profiling::HashText(declared_metadata.ToString()))) {
+                        Fail("production lease does not cover the selected task/module artifact");
+                    }
                     runtime::BoundControlKernel kernel(
                         supplied.module, supplied.entry_symbol,
-                        supplied.binding_revision);
+                        supplied.binding_revision,
+                        std::static_pointer_cast<const void>(supplied.production_lease));
                     const Array<codegen::KernelArgSpec> signature = kernel.signature().arguments();
                     std::size_t expected_non_outputs = 0;
                     for (const auto& argument : signature) {

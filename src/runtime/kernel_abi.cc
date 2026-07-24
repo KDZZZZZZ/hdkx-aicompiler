@@ -185,10 +185,11 @@ void KernelArgSpec::Validate() const {
         if (dimension < kDynamicDimension) {
             throw std::invalid_argument("KernelArgSpec shape contains an invalid dimension");
         }
-        // 常量和输出需要在启动前分配或绑定，当前没有 shape function 时不能动态。
-        if (dimension == kDynamicDimension && node->role != KernelArgRole::kInput) {
-            throw std::invalid_argument(
-                "Only input arguments may contain dynamic dimensions");
+        // Dynamic outputs are admitted only when BuildCompiledModule receives a
+        // matching ModuleInvocationContract; the module boundary rejects an
+        // uncontracted physical ABI before allocation or launch.
+        if (dimension == kDynamicDimension && node->role == KernelArgRole::kConstant) {
+            throw std::invalid_argument("Constant arguments may not be dynamic");
         }
     }
 

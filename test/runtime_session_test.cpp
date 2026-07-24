@@ -8,6 +8,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -935,45 +936,56 @@ bool TestInputDeviceValidationBeforeAllocation() {
     return true;
 }
 
-/*! \brief 动态输入维接受实际非负 shape，输出仍按静态签名分配。 */
-bool TestDynamicInput() {
+/*! \brief RuntimeSession has no dynamic graph memory plan and rejects it at construction. */
+bool TestNonstaticAndScalarContractsRejectedAtConstruction() {
     using namespace kxc;
+    using namespace kxc::api;
     using namespace kxc::codegen;
-    KernelSignature signature(
+    const Device cpu = Device::CPU();
+    KernelSignature dynamic_signature(
         "dynamic_session",
-        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {-1, 4},
-                       Device::CPU()),
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {-1, 4}, cpu),
          KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3, 4},
-                       Device::CPU(), 1, true)});
-    auto launcher = std::make_shared<RecordingLauncher>();
-    api::CompiledModule module = MakeModule(signature, {}, launcher);
-    runtime::ExecutablePlan plan = MakePlan(signature);
-    runtime::NDArray input =
-        runtime::NDArray::Zeros({3, 4}, Float32(), Device::CPU());
-    runtime::RuntimeSession session(module, plan);
-    Array<runtime::NDArray> outputs = session.Run({input});
-    TEST_CHECK(outputs.size() == 1 &&
-                   SameShape(outputs[0].shape(), {3, 4}) &&
-                   launcher->calls == 1,
-               "legacy per-Call dynamic input should retain its baseline behavior");
+                       cpu, 1, true)});
+    auto dynamic_launcher = std::make_shared<RecordingLauncher>();
+    const api::CompiledModule dynamic_module =
+        MakeModule(dynamic_signature, {}, dynamic_launcher);
+    TEST_CHECK(Throws([&] {
+                   (void)runtime::RuntimeSession(
+                       dynamic_module, MakePlan(dynamic_signature));
+               }) && dynamic_launcher->calls == 0,
+               "RuntimeSession must reject a nonstatic contract before execution");
 
-    runtime::RuntimeSession requested_task_dag(
-        module, plan, runtime::RuntimeExecutionMode::kTaskDAG);
-    const Array<runtime::NDArray> fallback_outputs =
-        requested_task_dag.Run({input});
-    const runtime::FallbackReason expected_dynamic =
-#if KXC_ENABLE_REGION_TASK_DAG
-        runtime::FallbackReason::kUnsupportedDynamicInput;
-#else
-        runtime::FallbackReason::kFeatureDisabled;
-#endif
-    TEST_CHECK(!requested_task_dag.UsesTaskDAG() &&
-                   requested_task_dag.TaskDAGSelection().fallback_reason ==
-                       expected_dynamic &&
-                   fallback_outputs.size() == 1 &&
-                   SameShape(fallback_outputs[0].shape(), {3, 4}) &&
-                   launcher->calls == 2,
-               "dynamic dimensions must never enter the static-exact task DAG");
+    const DLDataType u64{kDLUInt, 64, 1};
+    KernelSignature scalar_signature(
+        "scalar_session",
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {-1}, cpu, 8),
+         KernelArgSpec("extent", KernelArgRole::kInput, u64, {1}, cpu, 8),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {-1}, cpu,
+                       8, true)});
+    ModuleInputContract input{Float32(), cpu, 1,
+                              {{0, 0, 4, 1, std::nullopt, std::nullopt}}};
+    const auto twice = ModuleShapeExpr::Mul(ModuleShapeExpr::InputAxis(0, 0),
+                                             ModuleShapeExpr::Const(2));
+    ModuleTensorContract output;
+    output.dtype = Float32(); output.device = cpu; output.logical = {twice};
+    output.physical = {twice}; output.valid = {twice}; output.alignment = 8;
+    output.max_bytes = 32;
+    auto contract = std::make_shared<ModuleInvocationContract>(
+        std::vector<ModuleInputContract>{input},
+        std::vector<ModuleTensorContract>{output},
+        std::vector<ModuleRuntimeExtentScalar>{{twice, u64, cpu, 8}});
+    auto scalar_launcher = std::make_shared<RecordingLauncher>();
+    const KernelLaunchMetadata metadata(cpu, CodeGenBackend::kLLVM);
+    const api::CompiledModule scalar_module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu), {{tir::PrimFunc(), scalar_signature, metadata,
+                            CompiledKernel(scalar_signature, metadata, scalar_launcher),
+                            std::move(contract)}}, {});
+    TEST_CHECK(Throws([&] {
+                   (void)runtime::RuntimeSession(
+                       scalar_module, MakePlan(scalar_signature));
+               }) && scalar_launcher->calls == 0,
+               "RuntimeSession must reject scalar ABI generation before execution");
     return true;
 }
 
@@ -1259,7 +1271,8 @@ int main() {
         {"stream_validation", TestStreamValidation},
         {"input_device_validation_before_allocation",
          TestInputDeviceValidationBeforeAllocation},
-        {"dynamic_input", TestDynamicInput},
+        {"nonstatic_and_scalar_contracts_rejected_at_construction",
+         TestNonstaticAndScalarContractsRejectedAtConstruction},
         {"zero_input_and_multiple_outputs", TestZeroInputAndMultipleOutputs},
         {"concurrent_argument_assembly", TestConcurrentArgumentAssembly},
         {"multi_entry_plan_execution", TestMultiEntryPlanExecution},

@@ -72,8 +72,6 @@ void AppendIds(std::string* out, const std::string& name,
 
 std::string ValueCanonical(const ValueSpec& value) {
     std::string result;
-    AppendField(&result, "value_id", std::to_string(value->value_id));
-    AppendField(&result, "storage_id", std::to_string(value->storage_id));
     AppendField(&result, "dtype_code", std::to_string(value->dtype.code));
     AppendField(&result, "dtype_bits", std::to_string(value->dtype.bits));
     AppendField(&result, "dtype_lanes", std::to_string(value->dtype.lanes));
@@ -132,6 +130,8 @@ std::string ModuleEntryCanonical(
     std::string result;
     AppendField(&result, "entry_symbol", Text(symbol));
     AppendField(&result, "signature", signature.ToString());
+    AppendField(&result, "module_invocation_abi",
+                module.invocation_contract(symbol).CanonicalBytes());
     AppendField(&result, "launch", launch.ToString());
     for (int64_t value_id : inputs) {
         const auto found = values.find(value_id);

@@ -179,11 +179,10 @@ bool TestInvalidArgumentSpecs() {
                                  Device::CPU());
                }),
                "dimension below the dynamic sentinel should fail");
-    TEST_CHECK(Throws([] {
-                   KernelArgSpec("out", KernelArgRole::kOutput, Float32(), {-1},
+    KernelArgSpec dynamic_output("out", KernelArgRole::kOutput, Float32(), {-1},
                                  Device::CPU(), 4, true);
-               }),
-               "dynamic output without a shape function should fail");
+    TEST_CHECK(dynamic_output.shape()[0] == kDynamicDimension,
+               "physical dynamic output must be representable for a module contract");
     TEST_CHECK(Throws([] {
                    KernelArgSpec("weight", KernelArgRole::kConstant, Float32(), {1},
                                  Device::CPU());

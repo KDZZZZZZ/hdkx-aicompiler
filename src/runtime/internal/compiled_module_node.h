@@ -21,6 +21,8 @@ struct CompiledModuleEntry final {
     codegen::KernelSignature signature;
     codegen::KernelLaunchMetadata launch_metadata;
     codegen::CompiledKernel executable;
+    /*! Empty means BuildCompiledModule creates the static specialization. */
+    std::shared_ptr<const ModuleInvocationContract> invocation_contract;
 };
 
 }  // namespace internal
@@ -59,6 +61,13 @@ CompiledModule BuildCompiledModule(
 /*! \brief Internal immutable borrow; public constants() returns deep copies. */
 const Map<String, runtime::NDArray>& BorrowCompiledModuleConstants(
     const CompiledModule& module);
+
+/*! Internal preallocated-output hook used by RuntimeSession/control paths. */
+AsyncOperation InvokeCompiledModuleWithOutputs(
+    const CompiledModule& module, const String& symbol,
+    const Array<runtime::NDArray>& data_inputs,
+    const Array<runtime::NDArray>& outputs, const DeviceStream& stream,
+    std::size_t run_byte_budget = 0);
 
 }  // namespace internal
 }  // namespace kxc::api

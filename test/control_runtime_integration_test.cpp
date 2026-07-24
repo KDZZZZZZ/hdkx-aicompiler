@@ -2,11 +2,13 @@
  * \brief End-to-end binding and CPU execution checks for the control runtime.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -15,12 +17,20 @@
 
 #include "kxc/compiler/compiler.h"
 #include "kxc/compiler/control_flow.h"
+#include "kxc/relay/op.h"
 #include "kxc/runtime/control_session.h"
 #include "support/control_plan_reference_executor.h"
+#include "../src/compiler/control_flow/production_control_flow_test.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 
 #ifndef KXC_ENABLE_CONTROL_RUNTIME
 #define KXC_ENABLE_CONTROL_RUNTIME 0
+#endif
+#ifndef KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+#define KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION 0
+#endif
+#ifndef KXC_USE_LLVM
+#define KXC_USE_LLVM 0
 #endif
 
 namespace {
@@ -211,6 +221,28 @@ ControlPlan SharedConstantBranchPlan() {
     return plan;
 }
 
+ControlPlan ModuleLocalConstantBranchPlan() {
+    ControlPlan plan = BranchPlan();
+    plan.values.push_back(I64(5));
+    plan.values.push_back(I64(6));
+    plan.constant_values = {5, 6};
+    plan.regions[0].live_ins = {0, 1, 5, 6};
+    plan.regions[0].effect = Reads({0, 1, 5, 6});
+    plan.regions[0].tasks[0].inputs = {0, 1, 5, 6};
+    plan.regions[0].tasks[0].effect = Reads({0, 1, 5, 6});
+    plan.regions[1].live_ins = {1, 5};
+    plan.regions[1].effect = Reads({1, 5});
+    plan.regions[1].tasks[0].inputs = {1, 5};
+    plan.regions[1].tasks[0].argument_values = {1, 5};
+    plan.regions[1].tasks[0].effect = Reads({1, 5});
+    plan.regions[2].live_ins = {1, 6};
+    plan.regions[2].effect = Reads({1, 6});
+    plan.regions[2].tasks[0].inputs = {1, 6};
+    plan.regions[2].tasks[0].argument_values = {1, 6};
+    plan.regions[2].tasks[0].effect = Reads({1, 6});
+    return plan;
+}
+
 ControlPlan RepeatedOperandPlan() {
     ControlPlan plan;
     plan.values = {I64(0), I64(1)};
@@ -238,7 +270,7 @@ ControlPlan AliasedInputsPlan() {
     return plan;
 }
 
-enum class ScalarOp { kThen, kElse, kCondition, kStep, kSum, kConstantOrder };
+enum class ScalarOp { kThen, kElse, kCondition, kStep, kSum, kDouble, kConstantOrder };
 
 class ScalarLauncher final : public kxc::codegen::KernelLauncher {
 public:
@@ -262,6 +294,7 @@ public:
             case ScalarOp::kCondition: WriteBool(output, first < 3); break;
             case ScalarOp::kStep: WriteI64(output, first + 1); break;
             case ScalarOp::kSum: WriteI64(output, first + ReadI64(arguments[1])); break;
+            case ScalarOp::kDouble: WriteI64(output, first * 2); break;
             case ScalarOp::kConstantOrder:
                 WriteI64(output, first + 10 * ReadI64(arguments[1]) +
                                      ReadI64(arguments[2]));
@@ -449,6 +482,26 @@ FakeKernelCallback ReferenceKernel() {
     };
 }
 
+bool TestLeaseGenerationDoesNotWrap() {
+    using kxc::api::internal::MintControlFlowLeaseGenerationForTest;
+    using kxc::api::internal::SetControlFlowLeaseGenerationForTest;
+    SetControlFlowLeaseGenerationForTest(
+        std::numeric_limits<std::uint64_t>::max() - 1);
+    const std::uint64_t generation = MintControlFlowLeaseGenerationForTest();
+    const std::string first_failure = ErrorText([] {
+        (void)MintControlFlowLeaseGenerationForTest();
+    });
+    const std::string second_failure = ErrorText([] {
+        (void)MintControlFlowLeaseGenerationForTest();
+    });
+    SetControlFlowLeaseGenerationForTest(0);
+    CHECK(generation == std::numeric_limits<std::uint64_t>::max() &&
+              first_failure.find("generation overflowed") != std::string::npos &&
+              second_failure.find("generation overflowed") != std::string::npos,
+          "the terminal lease generation must be issued once and then fail closed without reuse");
+    return true;
+}
+
 bool TestCompilerDefaultStillRejectsIf() {
     const kxc::TensorType boolean({}, "bool");
     const kxc::TensorType integer({}, "int64");
@@ -465,6 +518,199 @@ bool TestCompilerDefaultStillRejectsIf() {
     CHECK(error.find("mode=static_exact") != std::string::npos &&
               error.find("missing control_flow.if") != std::string::npos,
           "Compiler::Compile must keep the default Relay If rejection");
+    return true;
+}
+
+bool TestRelayWhileCompileGates() {
+    const kxc::TensorType boolean({}, "bool");
+    const kxc::TensorType integer({}, "int64");
+    kxc::Var predicate("while_predicate", boolean);
+    kxc::Var initial("while_initial", integer);
+    kxc::Var increment("while_increment", integer);
+    kxc::Var state("while_state", integer);
+    const kxc::Function function(
+        {predicate, initial, increment},
+        kxc::While(initial, state, predicate,
+                   kxc::Call(kxc::relay::Op::Get("add"), {state, increment}), 1));
+    const auto config =
+        kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
+    const std::string default_error = ErrorText([&] {
+        (void)kxc::api::Compiler::Compile(function, config);
+    });
+    CHECK(default_error.find("missing control_flow.loop") != std::string::npos,
+          "Compiler::Compile must reject Relay While before ValueGraph");
+    const std::string control_error = ErrorText([&] {
+        (void)kxc::api::Compiler::CompileControlFlowExact(function, config);
+    });
+#if !KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+    CHECK(control_error.find("disabled by KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION") !=
+              std::string::npos,
+          "production Relay While API must remain default-OFF");
+#elif !KXC_USE_LLVM
+    CHECK(control_error.find("KXC_ENABLE_LLVM=ON") != std::string::npos,
+          "enabled Relay While API must fail closed without LLVM");
+#else
+    CHECK(control_error.empty(), "enabled Relay While path must resolve real artifacts");
+#endif
+    return true;
+}
+
+bool TestProductionRelayWhileNumericE2E() {
+#if KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION && KXC_USE_LLVM && KXC_ENABLE_CONTROL_RUNTIME
+    const kxc::TensorType boolean({}, "bool");
+    const kxc::TensorType integer({}, "int64");
+    kxc::Var first("while_first", boolean), second("while_second", boolean);
+    kxc::Var third("while_third", boolean), tail("while_tail", boolean);
+    kxc::Var value("while_value", integer), increment("while_increment", integer);
+    kxc::Var state("while_state");
+    const auto make_loop = [&](std::int64_t max_trip_count) {
+        const kxc::Expr initial = kxc::Tuple(
+            {first, second, third, tail, value});
+        const kxc::Expr condition = kxc::TupleGetItem(state, 0);
+        const kxc::Expr body = kxc::Tuple(
+            {kxc::TupleGetItem(state, 1), kxc::TupleGetItem(state, 2),
+             kxc::TupleGetItem(state, 3), tail,
+             kxc::Call(kxc::relay::Op::Get("add"),
+                       {kxc::TupleGetItem(state, 4), increment})});
+        return kxc::Function({first, second, third, tail, value, increment},
+                             kxc::While(initial, state, condition, body,
+                                        max_trip_count));
+    };
+    const auto config =
+        kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
+    std::weak_ptr<const kxc::api::ControlFlowArtifactLease> lease;
+    ControlRunAsyncResult asynchronous;
+    {
+        auto compiled = kxc::api::Compiler::CompileControlFlowExact(make_loop(3), config);
+        CHECK(!compiled.artifact_pins.empty() && compiled.artifact_lease,
+              "real Relay While must retain the compiled body artifact pin");
+        lease = compiled.artifact_lease;
+        const auto expected_events = [&compiled](std::int64_t trips) {
+            const auto& spec = compiled.plan.spec();
+            const auto& entry = spec.regions[0];
+            const auto& loop = entry.tasks[0];
+            std::vector<std::string> events;
+            for (const auto input : loop.inputs) {
+                events.push_back("read:" + std::to_string(loop.id) + ":" +
+                                 std::to_string(input));
+            }
+            events.push_back("task:" + std::to_string(loop.id));
+            const auto body = std::find_if(
+                spec.regions.begin(), spec.regions.end(),
+                [&loop](const auto& region) { return region.id == loop.loop.body_region; });
+            for (std::int64_t iteration = 0; iteration < trips; ++iteration) {
+                events.push_back("loop:" + std::to_string(loop.id) + ":iteration:" +
+                                 std::to_string(iteration));
+                for (const auto& task : body->tasks) {
+                    for (const auto input : task.inputs) {
+                        events.push_back("read:" + std::to_string(task.id) + ":" +
+                                         std::to_string(input));
+                    }
+                    events.push_back("task:" + std::to_string(task.id));
+                    for (const auto output : task.outputs) {
+                        events.push_back("write:" + std::to_string(task.id) + ":" +
+                                         std::to_string(output));
+                    }
+                }
+            }
+            for (const auto output : loop.outputs) {
+                events.push_back("write:" + std::to_string(loop.id) + ":" +
+                                 std::to_string(output));
+            }
+            return events;
+        };
+        ControlRuntimeSession session(compiled.plan);
+        const auto run = [&](bool one, bool two, bool three,
+                             std::int64_t expected_value,
+                             std::int64_t expected_trips) {
+            const ControlRunResult result = session.Run(
+                {ScalarBool(one), ScalarBool(two), ScalarBool(three), ScalarBool(false),
+                 ScalarI64(7), ScalarI64(1)});
+            return result.outputs.size() == 5 && ReadI64(result.outputs[4]) == expected_value &&
+                   result.loop_iterations.size() == 1 &&
+                   result.loop_iterations[0].iterations == expected_trips &&
+                   result.events == expected_events(expected_trips);
+        };
+        CHECK(run(false, false, false, 7, 0) && run(true, false, false, 8, 1) &&
+                  run(true, true, true, 10, 3),
+              "one real Relay While must execute exact zero, one, and multiple numeric trips");
+        asynchronous = session.RunAsync(
+            {ScalarBool(true), ScalarBool(true), ScalarBool(true), ScalarBool(false),
+             ScalarI64(7), ScalarI64(1)}, DeviceStream::Default(Device::CPU()));
+    }
+    CHECK(!lease.expired(),
+          "RunAsync completion must retain the compiler-minted artifact lease after owners die");
+    asynchronous.completion.Wait();
+    CHECK(asynchronous.outputs.size() == 5 && ReadI64(asynchronous.outputs[4]) == 10 &&
+              asynchronous.loop_iterations.size() == 1 &&
+              asynchronous.loop_iterations[0].iterations == 3,
+          "async real Relay While must retain numeric outputs and iteration accounting");
+    asynchronous = ControlRunAsyncResult{};
+    CHECK(lease.expired(),
+          "releasing RunAsync completion must release the retained production artifact lease");
+
+    const auto exhausted = kxc::api::Compiler::CompileControlFlowExact(make_loop(1), config);
+    CHECK(ErrorText([&] {
+              (void)ControlRuntimeSession(exhausted.plan).Run(
+                  {ScalarBool(true), ScalarBool(true), ScalarBool(false), ScalarBool(false),
+                   ScalarI64(7), ScalarI64(1)});
+          }).find("max_trip_count") != std::string::npos,
+          "a true real Relay While condition beyond the bound must stop with max-trip exhaustion");
+#else
+    // Numeric Relay While execution requires the explicit production, LLVM, and runtime gates.
+#endif
+    return true;
+}
+
+bool TestProductionControlFlowGateAndArtifacts() {
+    const kxc::TensorType boolean({}, "bool");
+    const kxc::TensorType integer({}, "int64");
+    kxc::Var predicate("production_predicate", boolean);
+    kxc::Var lhs("production_lhs", integer);
+    kxc::Var rhs("production_rhs", integer);
+    const kxc::Function function(
+        {predicate, lhs, rhs},
+        kxc::If(predicate,
+                kxc::Call(kxc::relay::Op::Get("add"), {lhs, rhs}),
+                kxc::Call(kxc::relay::Op::Get("mul"), {lhs, rhs})));
+    const auto config =
+        kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
+    const std::string error = ErrorText([&] {
+        (void)kxc::api::Compiler::CompileControlFlowExact(function, config);
+    });
+#if !KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+    CHECK(error.find("disabled by KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION") !=
+              std::string::npos,
+          "production Relay If API must remain default-OFF");
+#elif !KXC_USE_LLVM
+    CHECK(error.find("KXC_ENABLE_LLVM=ON") != std::string::npos,
+          "enabled production API must fail closed without a real LLVM backend");
+#else
+    CHECK(error.empty(), "enabled production API must resolve real compiler artifacts");
+    const auto compiled = kxc::api::Compiler::CompileControlFlowExact(
+        function, config);
+    CHECK(!compiled.artifact_pins.empty() && compiled.artifact_lease &&
+              compiled.artifact_lease->generation() != 0,
+          "resolved production plan must retain real pins in a compiler-minted lease");
+    for (const auto& region : compiled.plan.regions()) {
+        for (const auto& task : region.tasks) {
+            if (task.kind != ControlExecutionTaskKind::kKernel) continue;
+            CHECK(task.kernel.binding_revision() == 0,
+                  "production bindings must not use fixture revisions");
+        }
+    }
+#if KXC_ENABLE_CONTROL_RUNTIME
+    ControlRuntimeSession session(compiled.plan);
+    const ControlRunResult yes =
+        session.Run({ScalarBool(true), ScalarI64(2), ScalarI64(3)});
+    const ControlRunResult no =
+        session.Run({ScalarBool(false), ScalarI64(2), ScalarI64(3)});
+    CHECK(yes.outputs.size() == 1 && no.outputs.size() == 1 &&
+              ReadI64(yes.outputs[0]) == 5 && ReadI64(no.outputs[0]) == 6 &&
+              yes.events != no.events,
+          "real true/false compiler artifacts must execute distinct Relay If branches");
+#endif
+#endif
     return true;
 }
 
@@ -602,13 +848,12 @@ bool TestLoopDifferentialAndBound() {
 }
 
 bool TestReadOnlyInputAliasingAndAbiOrder() {
-    Fixture sum = MakeFixture("sum_entry", ScalarOp::kSum,
+    Fixture sum = MakeFixture("sum_entry", ScalarOp::kDouble,
                               {kxc::codegen::KernelArgRole::kInput,
-                               kxc::codegen::KernelArgRole::kInput,
                                kxc::codegen::KernelArgRole::kOutput});
     const ControlExecutionPlan repeated = kxc::api::BindControlPlanForRuntime(
         RepeatedOperandPlan(),
-        {{40, sum.module, "sum_entry", 11, {0, 0}}});
+        {{40, sum.module, "sum_entry", 11, {0}}});
     Fixture aliased = MakeFixture("alias_entry", ScalarOp::kSum,
                                   {kxc::codegen::KernelArgRole::kInput,
                                    kxc::codegen::KernelArgRole::kInput,
@@ -626,10 +871,8 @@ bool TestReadOnlyInputAliasingAndAbiOrder() {
     CHECK(repeated_result.outputs.size() == 1 &&
               ReadI64(repeated_result.outputs[0]) == 12 &&
               sum.launcher->calls == 1 &&
-              sum.launcher->last_arguments.size() == 3 &&
-              sum.launcher->last_arguments[0].get() ==
-                  sum.launcher->last_arguments[1].get(),
-          "duplicate logical operands must retain ordered duplicate ABI arguments");
+              sum.launcher->last_arguments.size() == 2,
+          "duplicate logical operands must collapse to one physical ABI input");
 
     const NDArray shared = ScalarI64(6);
     ControlRuntimeSession alias_session(aliased_inputs);
@@ -814,6 +1057,21 @@ bool TestSharedConstantAlignmentAcrossRegions() {
     CHECK(ReadI64(regions[1].tasks[0].kernel.Constant("constant.shared")) == 2 &&
               ReadI64(regions[2].tasks[0].kernel.Constant("constant.shared")) == 2,
           "module constants and returned copies must not mutate private snapshots");
+
+    Fixture local_then = MakeSharedConstantFixture("local_then", 64, 2);
+    Fixture local_else = MakeSharedConstantFixture("local_else", 32, 3);
+    const ControlExecutionPlan module_local = kxc::api::BindControlPlanForRuntime(
+        ModuleLocalConstantBranchPlan(),
+        {{21, local_then.module, "local_then", 24, {1, 5}},
+         {22, local_else.module, "local_else", 25, {1, 6}}});
+#if KXC_ENABLE_CONTROL_RUNTIME
+    const ControlRunResult local_true = ControlRuntimeSession(module_local).Run(
+        {ScalarBool(true), ScalarI64(5)});
+    const ControlRunResult local_false = ControlRuntimeSession(module_local).Run(
+        {ScalarBool(false), ScalarI64(5)});
+    CHECK(ReadI64(local_true.outputs[0]) == 7 && ReadI64(local_false.outputs[0]) == 8,
+          "same module-local key may bind different logical constants by task");
+#endif
 
 #if KXC_ENABLE_CONTROL_RUNTIME
     ControlRuntimeSession session(bound);
@@ -1023,7 +1281,12 @@ bool TestAsyncCompletionRetention() {
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
+        {"lease_generation_does_not_wrap", TestLeaseGenerationDoesNotWrap},
         {"compiler_default_rejects_if", TestCompilerDefaultStillRejectsIf},
+        {"relay_while_compile_gates", TestRelayWhileCompileGates},
+        {"production_relay_while_numeric_e2e", TestProductionRelayWhileNumericE2E},
+        {"production_control_flow_gate_and_artifacts",
+         TestProductionControlFlowGateAndArtifacts},
         {"binding_and_branch_differential", TestBindingAndBranchDifferential},
         {"loop_differential_and_bound", TestLoopDifferentialAndBound},
         {"read_only_input_aliasing_and_abi_order",

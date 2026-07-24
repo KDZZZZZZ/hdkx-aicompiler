@@ -403,7 +403,14 @@ protected:
         return output;
     }
 
-    // 第一阶段执行计划暂不支持控制流，明确拒绝 If。
+    // 第一阶段执行计划暂不支持控制流，明确拒绝 If/While。
+    int VisitWhile(const WhileNode* op, const Expr& ref) override {
+        (void)op;
+        (void)ref;
+        throw std::runtime_error(
+            "LowerRelayToExecPlanPass does not support WhileNode in phase-1");
+    }
+
     int VisitIf(const IfNode* op, const Expr& ref) override {
         (void)op;
         (void)ref;

@@ -208,6 +208,26 @@ public:
     const IfNode* operator->() const;
 };
 
+/*! \brief Bounded condition-before-body loop with one lexical carried-state binder. */
+class WhileNode : public RelayNode {
+public:
+    Expr initial_state;
+    Var loop_var;
+    Expr condition;
+    Expr body;
+    std::int64_t max_trip_count{-1};
+
+    KXC_OBJECT_DECLARE
+};
+
+class While : public Relay {
+public:
+    using Relay::Relay;
+    While(Expr initial_state, Var loop_var, Expr condition, Expr body,
+          std::int64_t max_trip_count);
+    const WhileNode* operator->() const;
+};
+
 class LetNode : public RelayNode {
 public:
     Var var;

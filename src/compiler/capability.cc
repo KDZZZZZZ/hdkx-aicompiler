@@ -27,6 +27,12 @@
 namespace kxc::api {
 namespace {
 
+Device Placement(const Expr& expr) {
+    const auto* relay_node = dynamic_cast<const RelayNode*>(expr.get());
+    if (!relay_node || !relay_node->virtual_device_.defined()) return Device::CPU();
+    return relay_node->virtual_device_->device;
+}
+
 class Verifier final {
 public:
     Verifier(const CapabilityRequest& request, bool prove_execution)
@@ -306,6 +312,57 @@ private:
             }
             CheckType(expr.checked_type(), locator, "TupleGetItem",
                       request_.require_checked_types);
+            return;
+        }
+        if (const auto* while_node = expr.As<WhileNode>()) {
+            if (!request_.allow_while) {
+                AddIssue(locator, "While", "control_flow.loop",
+                         "While is representable Relay IR but disabled for this executable boundary");
+                return;
+            }
+            if (while_node->max_trip_count < 0 || !while_node->loop_var.defined()) {
+                AddIssue(locator, "While", "bounded_loop",
+                         "While requires a defined binder and non-negative max_trip_count");
+                return;
+            }
+            Visit(while_node->initial_state, locator + "/initial_state");
+            const Type binder_type = while_node->loop_var.checked_type().defined()
+                                         ? while_node->loop_var.checked_type()
+                                         : while_node->loop_var->type_annotation;
+            CheckType(binder_type, locator + "/loop_var", "Var", true);
+            if (while_node->initial_state.checked_type().defined() && binder_type.defined() &&
+                !TypeEqual(while_node->initial_state.checked_type(), binder_type)) {
+                AddIssue(locator + "/loop_var", "Var", "typed_loop_binding",
+                         "loop binder type does not match initial state");
+            }
+            const Device state_device = Placement(while_node->initial_state);
+            if (Placement(Expr(ObjectRef(while_node->loop_var))) != state_device ||
+                Placement(while_node->body) != state_device ||
+                Placement(expr) != state_device) {
+                AddIssue(locator, "While", "exact_loop_state_placement",
+                         "While initial state, binder, body, and result must have one exact device placement");
+            }
+            if (Placement(while_node->condition) != Device::CPU()) {
+                AddIssue(locator + "/condition", "While",
+                         "cpu_loop_condition_placement",
+                         "While condition must be placed on CPU:0");
+            }
+            const bool already_bound = bound_vars_.count(while_node->loop_var.get()) != 0;
+            bound_vars_.insert(while_node->loop_var.get());
+            Visit(while_node->condition, locator + "/condition");
+            Visit(while_node->body, locator + "/body");
+            if (!already_bound) bound_vars_.erase(while_node->loop_var.get());
+            const auto* predicate = while_node->condition.checked_type().As<TensorTypeNode>();
+            if (!predicate || predicate->dtype != "bool" || !predicate->shape.empty()) {
+                AddIssue(locator + "/condition", "While", "scalar_bool_loop_predicate",
+                         "While condition must be a scalar bool TensorType");
+            }
+            if (!TypeEqual(while_node->initial_state.checked_type(),
+                           while_node->body.checked_type()) ||
+                !TypeEqual(expr.checked_type(), while_node->initial_state.checked_type())) {
+                AddIssue(locator, "While", "exact_loop_state_type",
+                         "initial state, body, and result must exactly match");
+            }
             return;
         }
         if (expr.As<IfNode>()) {

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -147,6 +148,51 @@ const internal::CompiledModuleEntry& FindEntry(
     throw std::out_of_range("CompiledModule has no function '" + wanted + "'");
 }
 
+std::shared_ptr<const ModuleInvocationContract> StaticContract(
+    const codegen::KernelSignature& signature) {
+    std::vector<ModuleInputContract> inputs;
+    std::vector<ModuleTensorContract> outputs;
+    for (const auto& arg : signature.arguments()) {
+        if (arg->role == codegen::KernelArgRole::kInput) {
+            ModuleInputContract input{arg->dtype, arg->device, arg.shape().size(), {}};
+            const Array<int64_t> shape = arg.shape();
+            for (size_t i = 0; i < shape.size(); ++i) {
+                if (shape[i] != codegen::kDynamicDimension) {
+                    input.axis_guards.push_back(ModuleAxisGuard{
+                        i, static_cast<ModuleExtent>(shape[i]),
+                        static_cast<ModuleExtent>(shape[i]), 1,
+                        static_cast<ModuleExtent>(shape[i]), std::nullopt});
+                }
+            }
+            inputs.push_back(std::move(input));
+        } else if (arg->role == codegen::KernelArgRole::kOutput) {
+            ModuleTensorContract output;
+            output.dtype = arg->dtype; output.device = arg->device;
+            output.alignment = static_cast<size_t>(arg->alignment);
+            size_t elements = 1;
+            for (int64_t extent : arg.shape()) {
+                if (extent == codegen::kDynamicDimension) {
+                    throw std::invalid_argument("dynamic KernelSignature output requires an explicit module invocation contract");
+                }
+                if (extent != 0 && elements > std::numeric_limits<size_t>::max() /
+                    static_cast<size_t>(extent)) {
+                    throw std::invalid_argument("static KernelSignature output element count overflows size_t");
+                }
+                elements *= static_cast<size_t>(extent);
+                const ModuleShapeExpr expr = ModuleShapeExpr::Const(static_cast<ModuleExtent>(extent));
+                output.logical.push_back(expr); output.physical.push_back(expr); output.valid.push_back(expr);
+            }
+            const size_t item_bytes = static_cast<size_t>(arg->dtype.bits / 8) * arg->dtype.lanes;
+            if (item_bytes != 0 && elements > std::numeric_limits<size_t>::max() / item_bytes) {
+                throw std::invalid_argument("static KernelSignature output byte count overflows size_t");
+            }
+            output.max_bytes = elements * item_bytes;
+            outputs.push_back(std::move(output));
+        }
+    }
+    return std::make_shared<ModuleInvocationContract>(std::move(inputs), std::move(outputs));
+}
+
 void ValidateEntry(const internal::CompiledModuleEntry& entry,
                    const Device& target_device) {
     if (!entry.signature.defined() || !entry.launch_metadata.defined()) {
@@ -167,6 +213,10 @@ void ValidateEntry(const internal::CompiledModuleEntry& entry,
         throw std::invalid_argument(
             "CompiledModule executable contract does not match module metadata");
     }
+    if (!entry.invocation_contract) {
+        throw std::invalid_argument("CompiledModule entry has no invocation contract");
+    }
+    entry.invocation_contract->Validate(entry.signature);
     for (const auto& spec : entry.signature.arguments()) {
         if (spec->device != target_device) {
             throw std::invalid_argument(
@@ -233,7 +283,8 @@ CompiledModule internal::BuildCompiledModule(
     }
     const Device target_device = TargetDevice(target);
     std::unordered_set<std::string> symbols;
-    for (const auto& entry : entries) {
+    for (auto& entry : entries) {
+        if (!entry.invocation_contract) entry.invocation_contract = StaticContract(entry.signature);
         ValidateEntry(entry, target_device);
         const std::string symbol = std::string(entry.signature->symbol);
         if (!symbols.insert(symbol).second) {
@@ -275,13 +326,69 @@ CompiledModule::CompiledModule(const ObjectRef& ref) : ObjectRef(ref) {
     }
 }
 
-AsyncOperation CompiledModule::Launch(
-    const String& symbol,
-    const Array<runtime::NDArray>& ordered_arguments,
-    const DeviceStream& stream) const {
-    const auto* node = CheckedNode(*this);
-    return LaunchEntry(FindEntry(node, symbol), node->constants_,
-                       ordered_arguments, stream);
+namespace {
+std::vector<ModuleExtent> Evaluate(const std::vector<ModuleShapeExpr>& expressions,
+                                   const std::vector<std::vector<ModuleExtent>>& inputs) {
+    std::vector<ModuleExtent> result; result.reserve(expressions.size());
+    for (const auto& expression : expressions) result.push_back(expression.Evaluate(inputs));
+    return result;
+}
+size_t CheckedBytes(const std::vector<ModuleExtent>& shape, DLDataType dtype) {
+    ModuleExtent elements = 1;
+    for (ModuleExtent extent : shape) { if (extent && elements > std::numeric_limits<ModuleExtent>::max() / extent) throw ModuleInvocationError(ModuleInvocationFailureKind::kResource, "module output element count overflow"); elements *= extent; }
+    const ModuleExtent item = static_cast<ModuleExtent>(dtype.bits / 8) * dtype.lanes;
+    if (item && elements > std::numeric_limits<size_t>::max() / item) throw ModuleInvocationError(ModuleInvocationFailureKind::kResource, "module output byte count overflow");
+    return static_cast<size_t>(elements * item);
+}
+Array<int64_t> ToShape(const std::vector<ModuleExtent>& shape) { Array<int64_t> result; for (ModuleExtent extent : shape) { if (extent > static_cast<ModuleExtent>(std::numeric_limits<int64_t>::max())) throw ModuleInvocationError(ModuleInvocationFailureKind::kResource, "module output extent exceeds NDArray range"); result.push_back(static_cast<int64_t>(extent)); } return result; }
+struct ResolvedOutput { std::vector<ModuleExtent> logical, physical, valid; size_t bytes{0}; };
+struct ResolvedInvocation { std::vector<std::vector<ModuleExtent>> dimensions; std::vector<ResolvedOutput> outputs; std::vector<ModuleExtent> scalars; };
+
+ResolvedInvocation ResolveInvocation(const internal::CompiledModuleEntry& entry, const Map<String, runtime::NDArray>& constants, const Array<runtime::NDArray>& inputs, const DeviceStream& stream, size_t requested_budget) {
+    const ModuleInvocationContract& contract=*entry.invocation_contract;
+#if !KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
+    if (!contract.IsConstantShape()) throw ModuleInvocationError(ModuleInvocationFailureKind::kDisabled, "dynamic compiled-module invocation ABI is disabled");
+#endif
+    if (!stream.defined() || stream.device()!=entry.launch_metadata->device) throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract, "module invocation stream is undefined or on the wrong device");
+    if (inputs.size()!=contract.inputs().size()) throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract, "module invocation input count does not match contract");
+    const auto args=entry.signature.arguments(); ResolvedInvocation result; result.dimensions.reserve(inputs.size()); size_t caller=0;
+    for(size_t slot=0;slot<args.size();++slot) { const auto& arg=args[slot]; if(arg->role==codegen::KernelArgRole::kInput && caller<inputs.size()) { try { ValidateKernelArgument(entry.signature,slot,arg,inputs[caller],constants); } catch(const std::exception& e) { throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract,e.what()); } const auto& spec=contract.inputs()[caller]; std::vector<ModuleExtent> shape; for(auto extent:inputs[caller].shape()) shape.push_back(static_cast<ModuleExtent>(extent)); for(const auto& guard:spec.axis_guards) { const auto value=shape[guard.axis]; if(value<guard.lower||value>guard.upper||value%guard.divisible_by||(guard.exact&&value!=*guard.exact)||(guard.equal_to&&value!=result.dimensions[guard.equal_to->input_index][guard.equal_to->axis])) throw ModuleInvocationError(ModuleInvocationFailureKind::kGuard,"module invocation input guard rejected before allocation"); } result.dimensions.push_back(std::move(shape)); ++caller; } else if(arg->role==codegen::KernelArgRole::kConstant) { try { ValidateKernelArgument(entry.signature,slot,arg,constants.at(arg->constant_key),constants); } catch(const std::exception& e) { throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract,e.what()); } } }
+    size_t total=0; result.outputs.reserve(contract.outputs().size());
+    for(const auto& tensor:contract.outputs()) { ResolvedOutput output{Evaluate(tensor.logical,result.dimensions),Evaluate(tensor.physical,result.dimensions),Evaluate(tensor.valid,result.dimensions)}; if(output.logical.size()!=output.physical.size()||output.valid.size()!=output.logical.size()) throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract,"module output ranks differ"); for(size_t d=0;d<output.logical.size();++d) if(output.valid[d]>output.logical[d]||output.logical[d]>output.physical[d]) throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract,"module output requires valid <= logical <= physical"); output.bytes=CheckedBytes(output.physical,tensor.dtype); if(output.bytes>tensor.max_bytes||output.bytes>std::numeric_limits<size_t>::max()-total) throw ModuleInvocationError(ModuleInvocationFailureKind::kResource,"module output byte limit exceeded"); total+=output.bytes; result.outputs.push_back(std::move(output)); }
+    const size_t limit=requested_budget?requested_budget:contract.run_byte_budget(); if(limit&&total>limit) throw ModuleInvocationError(ModuleInvocationFailureKind::kResource,"module invocation run byte budget exceeded");
+    result.scalars.reserve(contract.runtime_extent_scalars().size()); for(const auto& scalar:contract.runtime_extent_scalars()) result.scalars.push_back(scalar.expression.Evaluate(result.dimensions));
+    return result;
+}
+void ValidatePreallocated(const internal::CompiledModuleEntry& entry, const Map<String, runtime::NDArray>& constants, const Array<runtime::NDArray>& outputs, const ResolvedInvocation& resolved) {
+    const auto& contract=*entry.invocation_contract; if(outputs.size()!=resolved.outputs.size()) throw ModuleInvocationError(ModuleInvocationFailureKind::kPreallocatedMismatch,"preallocated module output count does not match contract"); const auto args=entry.signature.arguments(); size_t output=0;
+    for(size_t slot=0;slot<args.size();++slot) if(args[slot]->role==codegen::KernelArgRole::kOutput) { try { ValidateKernelArgument(entry.signature,slot,args[slot],outputs[output],constants); } catch(const std::exception& e) { throw ModuleInvocationError(ModuleInvocationFailureKind::kPreallocatedMismatch,e.what()); } const auto& shape=outputs[output].shape(); const auto& expected=resolved.outputs[output].physical; if(shape.size()!=expected.size()) throw ModuleInvocationError(ModuleInvocationFailureKind::kPreallocatedMismatch,"preallocated output rank differs from resolved physical extent"); for(size_t d=0;d<shape.size();++d) if(shape[d]<0||static_cast<ModuleExtent>(shape[d])!=expected[d]) throw ModuleInvocationError(ModuleInvocationFailureKind::kPreallocatedMismatch,"preallocated output physical shape differs from resolved contract"); ++output; }
+}
+struct Quarantine { AsyncOperation operation; Array<Storage> storage; std::shared_ptr<CompiledModule> module; };
+[[noreturn]] void FailedPostLaunch(AsyncOperation operation, Array<Storage> storage, std::shared_ptr<CompiledModule> module, const std::string& message) {
+    try { if(operation.defined() && operation->stream.defined()) operation.Wait(); } catch (...) { (void)new Quarantine{std::move(operation),std::move(storage),std::move(module)}; }
+    throw ModuleInvocationError(ModuleInvocationFailureKind::kLaunch,message);
+}
+AsyncOperation LaunchResolved(const CompiledModule& module, const internal::CompiledModuleEntry& entry, const Map<String, runtime::NDArray>& constants, const Array<runtime::NDArray>& inputs, const Array<runtime::NDArray>& outputs, const DeviceStream& stream, const ResolvedInvocation& resolved) {
+    Array<runtime::NDArray> scalar_buffers; const auto& descriptors=entry.invocation_contract->runtime_extent_scalars();
+    for(size_t i=0;i<descriptors.size();++i) { if(descriptors[i].dtype.code!=kDLUInt||descriptors[i].dtype.bits!=64||descriptors[i].dtype.lanes!=1) throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract,"runtime extent scalar dtype must be uint64"); auto scalar=runtime::NDArray::Empty({1},descriptors[i].dtype,descriptors[i].device,descriptors[i].alignment); scalar.CopyFromBytes(&resolved.scalars[i],sizeof(ModuleExtent)); scalar_buffers.push_back(std::move(scalar)); }
+    Array<runtime::NDArray> ordered; size_t input=0, scalar=0, output=0; for(const auto& arg:entry.signature.arguments()) { if(arg->role==codegen::KernelArgRole::kInput) ordered.push_back(input<inputs.size()?inputs[input++]:scalar_buffers[scalar++]); else if(arg->role==codegen::KernelArgRole::kOutput) ordered.push_back(outputs[output++]); else ordered.push_back(constants.at(arg->constant_key)); }
+    AsyncOperation operation; try { operation=LaunchEntry(entry,constants,ordered,stream); if(!operation.defined()||!operation->stream.defined()||operation.device()!=stream.device()||operation->completed==(operation->backend_event!=nullptr)) FailedPostLaunch(std::move(operation),{},std::make_shared<CompiledModule>(module),"kernel returned an invalid completion"); Array<Storage> retained; for(const auto& value:ordered) retained.push_back(value.storage()); try { operation.RetainDependencies(retained,std::make_shared<CompiledModule>(module)); } catch(...) { FailedPostLaunch(std::move(operation),std::move(retained),std::make_shared<CompiledModule>(module),"failed to retain launched module dependencies"); } } catch(const ModuleInvocationError&) { throw; } catch(const std::exception& e) { throw ModuleInvocationError(ModuleInvocationFailureKind::kLaunch,e.what()); } return operation;
+}
+}  // namespace
+
+AsyncOperation internal::InvokeCompiledModuleWithOutputs(const CompiledModule& module, const String& symbol, const Array<runtime::NDArray>& data_inputs, const Array<runtime::NDArray>& outputs, const DeviceStream& stream, std::size_t budget) {
+    const auto* node=CheckedNode(module); const auto& entry=FindEntry(node,symbol); const auto resolved=ResolveInvocation(entry,node->constants_,data_inputs,stream,budget); ValidatePreallocated(entry,node->constants_,outputs,resolved); return LaunchResolved(module,entry,node->constants_,data_inputs,outputs,stream,resolved);
+}
+
+ModuleInvocationResult CompiledModule::Invoke(const String& symbol, const Array<runtime::NDArray>& data_inputs, const DeviceStream& stream, std::size_t budget) const {
+    const auto* node=CheckedNode(*this); const auto& entry=FindEntry(node,symbol); const auto resolved=ResolveInvocation(entry,node->constants_,data_inputs,stream,budget);
+    Array<runtime::NDArray> outputs; std::vector<ModuleInvocationOutput> descriptors; descriptors.reserve(resolved.outputs.size());
+    for(size_t i=0;i<resolved.outputs.size();++i) { const auto& tensor=entry.invocation_contract->outputs()[i]; const auto& output=resolved.outputs[i]; outputs.push_back(runtime::NDArray::Empty(ToShape(output.physical),tensor.dtype,tensor.device,tensor.alignment)); descriptors.push_back(ModuleInvocationOutput{outputs[outputs.size()-1],output.logical,output.physical,output.valid}); }
+    AsyncOperation operation=LaunchResolved(*this,entry,node->constants_,data_inputs,outputs,stream,resolved); return ModuleInvocationResult{std::move(descriptors),std::move(operation)};
+}
+
+ModuleInvocationContract CompiledModule::invocation_contract(const String& symbol) const {
+    return *FindEntry(CheckedNode(*this), symbol).invocation_contract;
 }
 
 codegen::KernelSignature CompiledModule::signature(const String& symbol) const {

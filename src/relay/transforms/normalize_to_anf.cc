@@ -42,6 +42,7 @@ std::string NodeKind(const Expr& expr) {
     if (expr.As<TupleNode>()) return "Tuple";
     if (expr.As<TupleGetItemNode>()) return "TupleGetItem";
     if (expr.As<IfNode>()) return "If";
+    if (expr.As<WhileNode>()) return "While";
     if (expr.As<LetNode>()) return "Let";
     if (expr.As<OpNode>()) return "Op";
     return "unknown";
@@ -126,6 +127,21 @@ private:
         if (const auto* get_item = expr.As<TupleGetItemNode>()) {
             return CheckAtomic(get_item->tuple, path + ".tuple");
         }
+        if (const auto* while_node = expr.As<WhileNode>()) {
+            if (while_node->max_trip_count < 0 || !while_node->loop_var.defined() ||
+                !CheckAtomic(while_node->initial_state, path + ".initial_state") ||
+                !while_node->loop_var.checked_type().defined() ||
+                !TypeEqual(while_node->loop_var.checked_type(),
+                           while_node->initial_state.checked_type())) {
+                return Fail(path, "While requires a typed non-negative state binder");
+            }
+            bindings_[while_node->loop_var.get()] += 1;
+            const bool result = CheckTerminal(while_node->condition, path + ".condition") &&
+                                CheckTerminal(while_node->body, path + ".body");
+            auto binding = bindings_.find(while_node->loop_var.get());
+            if (--binding->second == 0) bindings_.erase(binding);
+            return result;
+        }
         if (const auto* tuple = expr.As<TupleNode>()) {
             for (size_t i = 0; i < tuple->fields.size(); ++i) {
                 if (!CheckAtomic(tuple->fields[i], path + ".fields[" +
@@ -205,6 +221,11 @@ private:
             CollectNames(if_node->cond);
             CollectNames(if_node->true_branch);
             CollectNames(if_node->false_branch);
+        } else if (const auto* while_node = expr.As<WhileNode>()) {
+            CollectNames(while_node->initial_state);
+            CollectNames(Expr(ObjectRef(while_node->loop_var)));
+            CollectNames(while_node->condition);
+            CollectNames(while_node->body);
         } else if (const auto* let = expr.As<LetNode>()) {
             CollectNames(Expr(ObjectRef(let->var)));
             CollectNames(let->value);
@@ -303,6 +324,17 @@ private:
                     return continuation(CopyMetadata(expr, TupleGetItem(tuple, get_item->index)));
                 });
         }
+        if (const auto* while_node = expr.As<WhileNode>()) {
+            return NormalizeToAtom(while_node->initial_state,
+                [this, expr, while_node, continuation](const Expr& initial) {
+                    const Expr normalized = CopyMetadata(
+                        expr, While(initial, while_node->loop_var,
+                                    NormalizeBranch(while_node->condition),
+                                    NormalizeBranch(while_node->body),
+                                    while_node->max_trip_count));
+                    return continuation(normalized);
+                });
+        }
         if (const auto* tuple = expr.As<TupleNode>()) {
             return NormalizeAtoms(tuple->fields, 0, {}, [expr, continuation](const Array<Expr>& fields) {
                 return continuation(CopyMetadata(expr, Tuple(fields)));
@@ -374,6 +406,11 @@ void RequireTyped(const Expr& expr, const std::string& path) {
         RequireTyped(if_node->cond, path + ".cond");
         RequireTyped(if_node->true_branch, path + ".true_branch");
         RequireTyped(if_node->false_branch, path + ".false_branch");
+    } else if (const auto* while_node = expr.As<WhileNode>()) {
+        RequireTyped(while_node->initial_state, path + ".initial_state");
+        RequireTyped(Expr(ObjectRef(while_node->loop_var)), path + ".loop_var");
+        RequireTyped(while_node->condition, path + ".condition");
+        RequireTyped(while_node->body, path + ".body");
     } else if (const auto* let = expr.As<LetNode>()) {
         RequireTyped(Expr(ObjectRef(let->var)), path + ".var");
         RequireTyped(let->value, path + ".value");

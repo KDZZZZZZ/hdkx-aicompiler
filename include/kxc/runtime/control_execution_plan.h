@@ -16,12 +16,13 @@ using ControlExecutionValueId = std::int64_t;
 using ControlExecutionRegionId = std::int64_t;
 using ControlExecutionTaskId = std::int64_t;
 
-/*! \brief Experimental entry snapshot bound to one ready fixture module. */
+/*! \brief Experimental entry snapshot bound to one ready module artifact. */
 class BoundControlKernel final {
 public:
     BoundControlKernel() = default;
     BoundControlKernel(api::CompiledModule module, String entry_symbol,
-                       std::uint64_t binding_revision);
+                       std::uint64_t binding_revision,
+                       std::shared_ptr<const void> production_lease = {});
 
     void Validate() const;
     AsyncOperation Launch(const Array<NDArray>& ordered_arguments,
@@ -32,7 +33,7 @@ public:
     NDArray Constant(const String& key) const;
     /*! \brief Compares bytes/contracts without exposing the execution snapshot. */
     bool MatchesConstant(const String& key, const NDArray& candidate) const;
-    /*! \brief Caller label only, with no authority, freshness, or hot-swap proof. */
+    /*! \brief Fixture-only caller label, with no authority, freshness, or hot-swap proof. */
     std::uint64_t binding_revision() const;
     Device device() const;
     bool defined() const noexcept;
@@ -92,7 +93,7 @@ struct ControlExecutionTask {
     ControlExecutionTaskKind kind{ControlExecutionTaskKind::kKernel};
     /*! \brief Unique task boundary values, unlike argument_values. */
     std::vector<ControlExecutionValueId> inputs;
-    /*! \brief Full ABI-order value ids, including outputs; duplicates matter. */
+    /*! \brief Physical ABI-order value ids, including outputs; unique per role. */
     std::vector<ControlExecutionValueId> argument_values;
     std::vector<ControlExecutionValueId> outputs;
     std::vector<ControlExecutionTaskId> dependencies;

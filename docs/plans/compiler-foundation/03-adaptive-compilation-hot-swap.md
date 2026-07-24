@@ -17,9 +17,10 @@ canary 和 token 语义。W2 新增的是一个 **production-path experimental a
 ```text
 caller-immutable Function + deep-frozen CompileConfig + verified typed baseline
   -> graph ArtifactKey + exact DispatchKey
-  -> ordered primitive ArtifactKey/call mapping + artifact-bound Plan ABI
+  -> ordered primitive ArtifactKey/call mapping + callable/runtime Plan ABI
   -> real Compiler::Compile or injected ProductionPathCompilerAdapter
   -> structural validation against immutable production-cache pins
+  -> derived selected-whole-plan identity + opaque authority lease
   -> frozen whole-plan generation + RuntimeSession + completion retention
 ```
 
@@ -61,27 +62,28 @@ identity 后继续，也不得进入 compiler adapter 或 publish。
 1. 每个 ordered `ExecutablePlan::KernelCall` 恰有一个 `ArtifactPlanBinding` 和一个
    production-backed `ArtifactPin`；
 2. `call_index`、link symbol 和 ordered position 完整一致；
-3. pin 的完整 primitive `ArtifactKey` 与 baseline 对应项逐项相等；whole-graph key 不能
-   冒充 primitive key；
+3. whole-graph request key 不能冒充 primitive key；candidate 可在完整 typed contract
+   成立时选择不同的 immutable primitive `ArtifactKey`，不要求与 baseline 逐项相等；
 4. public `ArtifactRecord` 的 key、signature/launch digest、provenance、accounted bytes 和
    validation record 与内部 immutable `CachedPrimitive` 全值一致；
 5. pinned signature、launch metadata、target/backend、compiled-kernel contract 和 launcher
    与 module entry 全值一致；
-6. candidate 的 pinned `CachedPrimitive` 与 baseline pin 全值一致，包括 launcher shared
-   object identity。同 launcher/不同 key、同 key/不同 signature 或 metadata、错序都拒绝。
+6. 错序、同 key/不同 signature 或 metadata 都拒绝；同 launcher/不同合法 selected key
+   不是 selection proof，也不应被拒绝。
 
-`OrderedArtifactIdentity(call_index, link_symbol, primitive ArtifactKey)` 同时进入
-`PlanAbiFingerprint` 和 `PlanVariantKey`，所以 call/artifact 次序变化不能只靠相同 module
-symbol 或 hash 掩盖。相等性始终比较 canonical bytes；digest 只用于观测/索引。
+`PlanAbiFingerprint v4` 只覆盖 callable/runtime compatibility：target、value contract、dtype/
+device、static shape/flags、ordered calls、signature、launch metadata 与 constants。它不含
+selected artifacts、generation、receipt、graph-local value/storage locator。不同 selected
+artifacts 可以具有相同 ABI；ordered `OrderedArtifactIdentity` 改为派生 whole-plan selection
+identity，并进入 `PlanVariantKey`、lease 和 quarantine。相等性始终比较 canonical bytes；digest
+只用于观测/索引。
 
 实际 executable payload（例如 JIT/native module bytes）目前没有统一可序列化表示。因此
-当前 proof 仅是 **immutable process-local cache ArtifactKey + launcher shared-object identity +
-完整 typed contract equality**。它不是 cryptographic code provenance、remote attestation，
-也不证明数值正确性。
+当前 proof 仅是 **immutable process-local primitive keys + exact ordered mapping + launcher
+object identity + complete typed contract equality**。它不是 cryptographic code provenance、remote
+attestation，也不证明数值正确性。
 
-Plan ABI 只承诺覆盖当前数据模型实际表示的 target、value/storage id、dtype/device、静态
-shape/flags、ordered calls、signature、launch metadata、constants 和 selected artifact
-mapping。未建模的 physical layout/stride/workspace/effect/error contract 不得宣称已被证明。
+未建模的 physical layout/stride/workspace/effect/error contract 不得宣称已被证明。
 
 ## 3. controller/observer 语义
 
@@ -151,3 +153,10 @@ cache clear 后 launch、completion retention、static-exact runtime/slot 边界
 LLVM integration test 仅在 `KXC_USE_LLVM` 时编译执行；CUDA/pending-event/TSan/真实 resident
 bytes/部署层 health authority 必须在具备对应工具和硬件的外部 gate 验证。本机不可用时不得
 报告为通过。
+
+### Public C++ compatibility
+
+This is not a binary-compatible public API evolution. `PreparedCandidate`/authority declarations
+and the `PlanAbiFingerprint v4` byte contract changed; all consumers must source-recompile with
+matching headers and library. Do not link pre-change C++ objects/binaries with this library. The
+contract version is a data-format marker only, not an ABI promise.

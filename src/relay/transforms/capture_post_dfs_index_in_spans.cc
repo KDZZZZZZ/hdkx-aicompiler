@@ -41,6 +41,13 @@ std::vector<Expr> GetChildren(const Expr& expr) {
         children.push_back(if_node->false_branch);
         return children;
     }
+    if (const auto* while_node = expr.As<WhileNode>()) {
+        children.push_back(while_node->initial_state);
+        children.push_back(Expr(ObjectRef(while_node->loop_var)));
+        children.push_back(while_node->condition);
+        children.push_back(while_node->body);
+        return children;
+    }
     if (const auto* let_node = expr.As<LetNode>()) {
         children.push_back(Expr(ObjectRef(let_node->var)));
         children.push_back(let_node->value);

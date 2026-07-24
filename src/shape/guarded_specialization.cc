@@ -117,6 +117,11 @@ std::string SymbolicBoundaryString(const SymbolicBoundaryContract& boundary) {
   std::string result("symbolic-boundary.v1");
   AppendU64(&result, boundary.dimensions.size());
   for (const DimExpr& dimension : boundary.dimensions) AppendField(&result, dimension.CanonicalString());
+  AppendU64(&result, boundary.axis_names.size());
+  for (const auto& axis_name : boundary.axis_names) {
+    AppendU64(&result, axis_name.has_value() ? 1 : 0);
+    if (axis_name) AppendField(&result, *axis_name);
+  }
   AppendField(&result, boundary.layout);
   AppendU64(&result, static_cast<uint64_t>(boundary.alignment));
   AppendField(&result, boundary.memory_scope);
@@ -324,7 +329,9 @@ void VerifyPolymorphicPolicy(const GraphTemplate& graph_template, const ExactOra
   for (const std::string& name : names) {
     const NamedTensorContract& expected = TemplateValue(graph_template, name);
     const SymbolicBoundaryContract& actual = SymbolicBoundary(policy, name);
-    if (actual.dimensions != expected.contract.logical().dimensions() || actual.layout != expected.contract.physical().layout() ||
+    if (actual.dimensions != expected.contract.logical().dimensions() ||
+        actual.axis_names != expected.contract.logical().axis_names() ||
+        actual.layout != expected.contract.physical().layout() ||
         actual.alignment != expected.contract.physical().alignment() ||
         actual.memory_scope != expected.contract.physical().memory_scope() ||
         !(actual.abi == expected.contract.abi())) {
@@ -503,6 +510,7 @@ PolymorphicPolicy::PolymorphicPolicy(uint32_t policy_version, ApplicabilityGuard
     CheckName(boundary.memory_scope, "polymorphic memory scope");
     if (boundary.alignment <= 0 ||
         (boundary.alignment & (boundary.alignment - 1)) != 0 ||
+        (!boundary.axis_names.empty() && boundary.axis_names.size() != boundary.dimensions.size()) ||
         (i != 0 && boundaries_[i - 1].name == boundary.name)) {
       Invalid("invalid polymorphic boundary");
     }
