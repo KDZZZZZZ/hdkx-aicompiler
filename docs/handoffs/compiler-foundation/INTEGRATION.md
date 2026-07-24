@@ -30,11 +30,12 @@ discard its bound symbol, signature, contract, or constants.
 
 The default is OFF (`KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI`).  Static contracts
 remain executable with the gate OFF; nonconstant contracts fail before
-allocation or launch.  W4-1 supports input-shape-derived extents and zero
-extents only.  It does not support data-dependent/ragged shapes, scalar or
-workspace codegen, arbitrary tail transforms, generic symbolic Relay lowering,
+allocation or launch.  W4-1 supports input-shape-derived extents, zero extents,
+and an explicit module-generated `uint64[1]` extent-scalar buffer ABI.  It does
+not support data-dependent/ragged shapes, workspace codegen, arbitrary tail
+transforms, generic symbolic Relay lowering, compiler-emitted scalar contracts,
 or dynamic graph memory planning.  Rank-zero static tensors remain valid
-static ABI values; this is not runtime-scalar code generation.
+static ABI values and are distinct from generated extent-scalar buffers.
 
 ### Backend evidence
 
@@ -48,13 +49,36 @@ loads the generated scalar and uses that load as its loop bound while writing
 This checkout has no local LLVM toolchain, so this is **source plus explicit CI
 registration only**, not local LLVM execution evidence.
 
-CUDA has no additional W4 public-Invoke evidence in this change: local CUDA
-tooling/hardware is unavailable, and existing CUDA tests are not claimed as
+CUDA has no additional W4 public-Invoke evidence in this change.  The local W3
+CUDA machine evidence applied to the deleted callback runtime and is not
+reused as evidence for this ABI; existing CUDA tests are not claimed as W4
 dynamic-module coverage.  No callback completion is used by the module ABI.
+
+### Local verification
+
+The combined W4-1 branch was rebuilt after the final scalar-ABI preflight fix:
+
+| Configuration | Result | Evidence tier |
+|---|---:|---|
+| LLVM OFF, CUDA OFF, dynamic ABI OFF, CPU label | **41/41 passed** | validated locally |
+| LLVM OFF, CUDA OFF, dynamic ABI ON, CPU label | **41/41 passed** | validated locally |
+| ASan+UBSan: module/session/control focused set | **3/3 passed** | validated locally |
+| Relay operator contract | **24/24 passed** | validated locally |
+| Pass contract | **20/20 passed** | validated locally |
+| NLP reference/capability checker | **PASS** | validated locally |
+| Include-layer/public-header/YAML/diff checks | **PASS** | validated locally |
+| Real LLVM dynamic scalar E2E | source and CI registered | not executed locally |
+| W4 CUDA public-Invoke E2E | absent | unsupported evidence |
+
+Legacy RuntimeShape/bridge cache variables now fail CMake configuration with a
+migration diagnostic.  No live legacy API symbol remains under `include/`,
+`src/`, or `test/`.
 
 Generic Relay emission, dynamic graph memory planning, bucket/polymorphic
 execution, ragged/data-dependent outputs, and data-dependent output allocation
-remain unsupported.
+remain unsupported.  An uncertain post-launch completion failure is retained
+for process lifetime rather than risking early release; this is a safety
+quarantine, not bounded failure recovery or normal memory accounting.
 
 Public C++ API additions require recompilation; no ABI compatibility is
 claimed.
