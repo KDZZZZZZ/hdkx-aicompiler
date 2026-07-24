@@ -56,14 +56,6 @@ bool ThrowsWithMessage(const std::function<void()>& fn, const std::string& expec
     return false;
 }
 
-// 检查 Pass 策略是否包含指定名称，避免测试依赖容器内部表示。
-bool ContainsPass(const kxc::Array<kxc::String>& passes, const char* name) {
-    for (const auto& pass : passes) {
-        if (std::string(pass) == name) return true;
-    }
-    return false;
-}
-
 // 从 PrimFunc attrs 读取 lowering 写入的整数契约，缺失或类型错误均视为测试失败。
 bool ReadIntAttr(const kxc::tir::PrimFunc& function, const char* key, int64_t* value) {
     const kxc::String attr_key(key);
@@ -226,44 +218,6 @@ bool TestCompilerTargetDispatch() {
                                  "KXC_ENABLE_CUDA=ON"),
                "CUDA-disabled target should report the required build feature");
 #endif
-    return true;
-}
-
-// opt_level 必须映射到稳定策略，且 CUDA O3 不得运行会破坏绑定前置结构的循环 Pass。
-bool TestCompilerPassPolicies() {
-    using namespace kxc;
-    const Array<String> relay0 = api::Compiler::RelayPassPolicy(0);
-    const Array<String> relay1 = api::Compiler::RelayPassPolicy(1);
-    const Array<String> relay2 = api::Compiler::RelayPassPolicy(2);
-    const Array<String> relay3 = api::Compiler::RelayPassPolicy(3);
-    TEST_CHECK(relay0.empty() && relay1.size() == 3 && relay2.size() == 6 &&
-                   relay3.size() == 6,
-               "Relay opt_level policy changed unexpectedly");
-    TEST_CHECK(!ContainsPass(relay3, "eliminate_common_subexpr") &&
-                   !ContainsPass(relay3, "annotate_memory_scope") &&
-                   !ContainsPass(relay3, "capture_post_dfs_index_in_spans") &&
-                   !ContainsPass(relay3, "infer_type"),
-               "Relay O3 should exclude unsafe CSE, annotation passes and duplicate InferType");
-
-    const Target cpu = BuildTarget(Device::CPU());
-    const Target cuda = MakeContractTarget("cuda", kCUDA, 0, true);
-    const Array<String> tir0 = api::Compiler::TIRPassPolicy(0, cpu);
-    const Array<String> tir1 = api::Compiler::TIRPassPolicy(1, cpu);
-    const Array<String> tir2 = api::Compiler::TIRPassPolicy(2, cpu);
-    const Array<String> tir3 = api::Compiler::TIRPassPolicy(3, cpu);
-    const Array<String> cuda3 = api::Compiler::TIRPassPolicy(3, cuda);
-    TEST_CHECK(tir0.empty() && tir1.size() == 2 && tir2.size() == 4 &&
-                   tir3.size() == 8,
-               "TIR opt_level policy changed unexpectedly");
-    TEST_CHECK(cuda3.size() == 4 && ContainsPass(cuda3, "remove_no_op") &&
-                   !ContainsPass(cuda3, "convert_for_loops_serial") &&
-                   !ContainsPass(cuda3, "loop_partition") &&
-                   !ContainsPass(cuda3, "unroll_loop") &&
-                   !ContainsPass(cuda3, "vectorize_loop"),
-               "CUDA O3 should preserve the serial loop expected by BindCudaThreads");
-    TEST_CHECK(Throws([] { api::Compiler::RelayPassPolicy(-1); }) &&
-                   Throws([&] { api::Compiler::TIRPassPolicy(4, cpu); }),
-               "pass policy should reject an invalid opt_level");
     return true;
 }
 
@@ -668,7 +622,6 @@ int main() {
         {"invalid_function_rejected", TestInvalidFunctionRejected},
         {"compile_config_validation", TestCompileConfigValidation},
         {"compiler_target_dispatch", TestCompilerTargetDispatch},
-        {"compiler_pass_policies", TestCompilerPassPolicies},
         {"pass_context_target_merge", TestPassContextTargetMerge},
         {"input_constant_output_order", TestInputConstantOutputOrder},
         {"constant_binding_identity", TestConstantBindingIdentity},

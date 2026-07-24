@@ -100,18 +100,6 @@ public:
     /*! \brief Builds whole-graph Relay semantics without target/compiler policy. */
     static GraphSemanticKey BuildGraphSemanticKey(const Function& func);
 
-    /*! \brief Compatibility view of Relay optimization passes only.
-     *
-     * Production pre/post InferType steps are present in PipelineResolver's
-     * NormalizedPipeline and intentionally omitted from this legacy view.
-     */
-    static Array<String> RelayPassPolicy(int opt_level);
-    /*! \brief Compatibility view of TIR optimization passes only.
-     *
-     * Production target scheduling remains visible only in the normalized
-     * execution plan consumed by PipelineExecutor.
-     */
-    static Array<String> TIRPassPolicy(int opt_level, const Target& target);
 };
 
 }  // namespace api

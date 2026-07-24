@@ -30,7 +30,7 @@
 | 事实 | 证据 | 本轨结论 |
 |---|---|---|
 | `OperatorSpec` 已包含 arity、attrs、type relation、effect、alias、lowering kind/key | `include/kxc/relay/op.h` | 可以作为 schema 收敛的输入，但 JSON、注册/default 与文档仍可能多源漂移。 |
-| `PassSpec` 已声明 dialect、scope、phase、invariant/analysis 与 implementation key | `include/kxc/pass/pass.h` | metadata 方向正确，但生产 policy 仍由 `Compiler::RelayPassPolicy`/`TIRPassPolicy` 等位置维护。 |
+| `PassSpec` 已声明 dialect、scope、phase、invariant/analysis 与 implementation key | `include/kxc/pass/pass.h` | metadata 方向正确；生产顺序由 `PipelineResolver` 的 `NormalizedPipeline` 唯一维护。 |
 | `Compiler::Compile` 输出 module + runtime-neutral plan | `include/kxc/compiler/compiler.h` | 必须保留 runtime 不反向依赖 compiler 的边界。 |
 | plan 的 `ValueSpec` 保存 value/storage id、静态 shape、dtype/device；`KernelCall` 以 symbol + value ids 连线 | `include/kxc/runtime/executable_plan.h` | value id 是 graph locator，不能升级为跨图 kernel identity。 |
 | `kDynamicDimension = -1` 仅标注动态输入，动态 output 被拒绝 | `include/kxc/runtime/kernel_abi.h` | sentinel 是 legacy ABI 验证适配，不是本轨的 shape 语义。 |
@@ -156,7 +156,7 @@ M1 的冻结原则是“窄而可替换”：每个 mock/fake 只实现表中的
 1. **建立事实基线与 capability matrix。** 从现有 operator/pass contract、production compiler path、lowering 入口和 runtime session 整理 supported/unsupported capability；把 `If`、`Let`、dynamic output、unknown symbolic dim 和不支持 target 的拒绝路径写成稳定诊断要求。
 2. **定义并接入 capability verifier。** 在 compiler 入口、graph pass 后、partition 前调用同一 verifier；错误包含 graph/unit locator、节点、目标和缺失 capability。先覆盖现有 static exact 主链，不扩大支持集合。
 3. **选择 schema 单源并构建迁移 checker。** 指定 `ContractSource`，使 operator/pass metadata、binding key、default pipeline 和文档锚点可生成或严格核验；移除关键字段的名称推断/default 填充依赖。
-4. **实现 `PipelineResolver` 的纯解析阶段。** 用 `PipelineRequest` 生成 deterministic `NormalizedPipeline`、fingerprint 与 invariant transition；`Compiler::*PassPolicy` 和默认 pass order 改为兼容入口或删除重复事实源。
+4. **实现 `PipelineResolver` 的纯解析阶段。** 用 `PipelineRequest` 生成 deterministic `NormalizedPipeline`、fingerprint 与 invariant transition；删除重复的 pass-order 事实源。
 5. **拆分 identity。** 从 partition canonical serialization 中删除 graph-local value id、unit id、symbol、span 等非语义字段；新增 locator/key 的显式序列化与完整等价比较；确定 artifact symbol/重定位策略。
 6. **改造 ready artifact cache。** lookup 直接产生 `ArtifactPin`，编译状态持有 pin/handle，不再以 hit bool 后二次 peek；以 bytes、引用状态、重编译成本替代纯 256-entry LRU 作为目标策略。
 7. **冻结 request state 与 observer。** 接入或先以 adapter 暴露 ticket、failure、retry、queue/budget、merge、pin/evict 事件；生产 singleflight 可在 03 落地，但接口与 fake 先通过测试。

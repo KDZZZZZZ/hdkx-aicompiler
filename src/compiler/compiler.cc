@@ -1051,45 +1051,6 @@ CompiledGraph internal::FinishCompilerGraph(
                                  prepared.graph_semantic_key);
 }
 
-Array<String> Compiler::RelayPassPolicy(int opt_level) {
-    auto* policy_target_node = new TargetNode();
-    policy_target_node->kind = "llvm";
-    policy_target_node->device_type = kCPU;
-    policy_target_node->device_id = 0;
-    PipelineRequest request;
-    request.dialect = IRDialect::kRelay;
-    request.requested_scope = PassScope::kGraph;
-    request.target = Target(ObjectRef(policy_target_node));
-    request.opt_level = opt_level;
-    request.named_pipeline = String("compiler");
-    Array<String> compatibility;
-    for (const String& pass :
-         PipelineResolver::Resolve(request).ordered_passes) {
-        const std::string name(pass);
-        if (name != "infer_type" && name != "normalize_to_anf") {
-            compatibility.push_back(pass);
-        }
-    }
-    return compatibility;
-}
-
-Array<String> Compiler::TIRPassPolicy(int opt_level, const Target& target) {
-    PipelineRequest request;
-    request.dialect = IRDialect::kTIR;
-    request.requested_scope = PassScope::kPrimFunc;
-    request.target = target;
-    request.opt_level = opt_level;
-    request.named_pipeline = String("compiler");
-    Array<String> compatibility;
-    for (const String& pass :
-         PipelineResolver::Resolve(request).ordered_passes) {
-        if (std::string(pass) != "bind_cuda_threads") {
-            compatibility.push_back(pass);
-        }
-    }
-    return compatibility;
-}
-
 GraphSemanticKey Compiler::BuildGraphSemanticKey(
     const Function& function) {
     if (!function.defined()) {

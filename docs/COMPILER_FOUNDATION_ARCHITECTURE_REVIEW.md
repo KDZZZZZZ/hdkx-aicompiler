@@ -134,7 +134,7 @@ Compiler / Relay / TE / TIR / Codegen  --->  CompiledModule + ExecutablePlan
 | 高 | Transformer 与 CUDA 还没有可作为架构验收的端到端能力 | 正式 Relay 仅 19 op，`matmul` 仅 rank-2；ONNX 仅 7 类；CUDA 证据集中于有限逐元素路径 | 不能用简单静态图成功推断 NLP、高吞吐 GPU 或动态执行基座已经成熟 | 将 batched matmul/attention-mask/KV-capacity 作为 shape/runtime 验收模型；具体 op/backend 仍按独立 support matrix 推进。 |
 | 高 | frontend、shape 推导和 TE compute 的公式需同源 | `src/relay/type_infer.cc` 与 `include/kxc/te/topi/` 分层；`docs/ARCHITECTURE_STATUS.md` 记录 conv/pool 等语义限制 | shape 正确但实际 kernel buffer/index 不一致；动态化时问题放大 | 引入共享 shape rule/shape program，type relation 与 lowering 都调用同一规范公式。 |
 | 高 | 当前 `ValueSpec` 只有 shape/dtype/device，缺 layout/physical capacity/valid extent | `include/kxc/runtime/executable_plan.h` | 无法证明 bucket 大 buffer 对小 logical input 的正确性；无法描述 padded NLP tensor | 扩展为 logical/physical/valid extent + layout/alignment/workspace contract。 |
-| 高 | Operator contract 与 Pass pipeline 都存在多权威来源 | operator JSON + C++ registration/default inference；Pass JSON + binding table + `GetDefaultPassOrder` + `Compiler::*PassPolicy` | checker 能发现部分漂移，但实现、default 与生产编译策略仍可能不一致；名字推断 category 会掩盖遗漏 | contract metadata 单源生成或严格显式化；由统一 `PipelineResolver` 生成 normalized configuration，生产编译不再维护第二套 pass 列表。 |
+| 高 | Operator contract 与 Pass pipeline 都存在多权威来源 | operator JSON + C++ registration/default inference；Pass JSON + binding table + resolver execution | checker 能发现部分漂移，但实现、default 与生产编译策略仍可能不一致；名字推断 category 会掩盖遗漏 | contract metadata 单源生成或严格显式化；由统一 `PipelineResolver` 生成 normalized configuration，生产编译不再维护第二套 pass 列表。 |
 | 高 | `PassSpec` 的 invariant/analysis/target 字段多数仍是描述性元数据 | `src/relay/transforms/pipeline.cc` 主要校验 dialect/scope/phase/implementation，只有 `infer_type` 特判 produced invariant | Pass 看似有安全契约，实际 scheduler 不执行前后置条件；未来 unit/module Pass 容易误调度 | 引入 analysis/invariant state，在 pass 前后执行 required/produced/preserved/invalidated 与 target capability 校验。 |
 | 中 | cache 仅进程内、256 条 LRU，缺观测到的 compile request 生命周期 | `src/compiler/cache/primitive_cache.cc` | 不能控制并发 miss、负缓存、取消、过期和跨 variant 发布；按条数也不能反映 LLVM/CUDA module 内存 | cache 继续只存 immutable artifact；coordinator 单独管理 in-flight/failure/backoff，按代码/模块字节和引用状态淘汰。 |
 | 中 | OperatorSpec 默认值和 category 名字推断弱化 contract-first | `src/relay/op_registry.cc::InferCategoryFromName`、`FillLegacyDefaults` | 新类别/NLP op 可能得到错误 metadata，遗漏字段被默认值掩盖 | 新 schema 必须显式；JSON 作为源生成 metadata，或 C++ spec 导出 JSON，不能继续两边手写并依赖名字启发式。 |
@@ -173,7 +173,7 @@ Compiler / Relay / TE / TIR / Codegen  --->  CompiledModule + ExecutablePlan
 
 7. **把 `PassSpec` 当成已经生效的 Pass Manager：修正。**
 
-   当前 metadata 方向正确，但生产 runner 尚未普遍执行 required/produced invariants、analysis preserve/invalidate 和 target capability；`optimize_default` 与 `Compiler::*PassPolicy` 也是两套顺序来源。对外应称其为“Pass contract + pipeline binding”，直到统一 resolver 和 invariant state 真正落地。
+   当前 metadata 方向正确，但生产 runner 尚未普遍执行 required/produced invariants、analysis preserve/invalidate 和 target capability。对外应称其为“Pass contract + pipeline binding”，直到 invariant state 真正落地。
 
 8. **依赖 op 名字推断 schema/category 或用默认值补完整契约：修正。**
 
@@ -372,7 +372,7 @@ Issue #14 的目标应定义为“候选 variant 在不影响 in-flight executio
 ### 10.1 Pass
 
 1. 以 `contracts/pass_contract.json` 或等价 schema 为唯一 pipeline metadata 来源；binding table 只绑定 `implementation_key -> function`，不再复制 opt/default/idempotence 等字段。
-2. 新增 `PipelineResolver(normalized CompilerConfiguration)`，统一解析 opt level、target capability、用户 enable/disable 和 named pipeline；`Compiler::RelayPassPolicy`、`Compiler::TIRPassPolicy` 与 `GetDefaultPassOrder` 不再分别维护生产顺序。
+2. `PipelineResolver(normalized CompilerConfiguration)` 统一解析 opt level、target capability、用户 enable/disable 和 named pipeline；其 `NormalizedPipeline` 是生产顺序的唯一权威。
 3. runner 维护显式 invariant/analysis state，在每个 Pass 前后执行 required/produced/preserved/invalidated、scope、phase 和 target capability 校验，而不是只验证名称与 implementation binding。
 4. graph Pass 继续只在 partition 前运行；修改 shape/dtype/attrs 的 Pass 必须使 checked type/shape analysis 失效并重建，符合 `docs/COMPILER_EXTENSION_CONTRACT.md`。
 5. partition 后新增显式 **unit-scope Relay normalization** 与 **PrimFunc shape/schedule Pass**；不得通过“普通 graph Pass”跨 unit 读取 producer。ABI-changing Pass 必须在 signature freeze 前完成。
