@@ -20,11 +20,16 @@ DEFINE_CALL = re.compile(r'^\s*KXC_OBJECT_DEFINE(?:_WITH_KEY)?\s*\(')
 REGISTER_CALL = re.compile(r'^\s*KXC_REGISTER_(?:GLOBAL|OP)\s*\(')
 
 
-def manifest(cmake: str) -> set[str]:
-    match = re.search(r'set\(KXC_PUBLIC_HEADERS\s+(.*?)\n\)', cmake, re.S)
+def manifest(cmake: str, variable: str) -> set[str]:
+    match = re.search(rf'set\({re.escape(variable)}\s+(.*?)\n\)', cmake, re.S)
     if not match:
         return set()
-    return {token for token in re.findall(r'include/kxc/[A-Za-z0-9_./-]+\.h', match.group(1))}
+    return {
+        token
+        for token in re.findall(
+            r'include/kxc/[A-Za-z0-9_./-]+\.h', match.group(1)
+        )
+    }
 
 
 def compile_headers(
@@ -64,16 +69,27 @@ def main() -> int:
     root = args.root.resolve()
     headers = sorted((root / "include" / "kxc").rglob("*.h"))
     cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
-    declared = manifest(cmake)
+    installed = manifest(cmake, "KXC_PUBLIC_HEADERS")
+    experimental = manifest(cmake, "KXC_EXPERIMENTAL_HEADERS")
+    declared = installed | experimental
     actual = {path.relative_to(root).as_posix() for path in headers}
     failures: list[str] = []
 
+    overlap = sorted(installed & experimental)
     missing = sorted(actual - declared)
     stale = sorted(declared - actual)
+    if overlap:
+        failures.append(
+            "Headers cannot be both installed and experimental: "
+            + ", ".join(overlap)
+        )
     if missing:
-        failures.append("Headers missing from KXC_PUBLIC_HEADERS: " + ", ".join(missing))
+        failures.append(
+            "Headers missing from installed/experimental manifests: "
+            + ", ".join(missing)
+        )
     if stale:
-        failures.append("Stale KXC_PUBLIC_HEADERS entries: " + ", ".join(stale))
+        failures.append("Stale header manifest entries: " + ", ".join(stale))
 
     for path in headers:
         for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -96,7 +112,11 @@ def main() -> int:
         print("\n\n".join(failures))
         return 1
     suffix = " and compiled" if args.compile else ""
-    print(f"Public-header check passed ({len(headers)} headers{suffix}).")
+    print(
+        "Header-manifest check passed "
+        f"({len(installed)} installed, {len(experimental)} non-installed "
+        f"experimental headers{suffix})."
+    )
     return 0
 
 

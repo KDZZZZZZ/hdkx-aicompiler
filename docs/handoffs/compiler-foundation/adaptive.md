@@ -5,8 +5,10 @@
 ## Preparation seam
 
 `kxc::api::adaptive::experimental::production_path` is preparation only. Its
-public contracts are `ProductionCompileRequest`, `ProductionExecutionRequest`,
+repository contracts are `ProductionCompileRequest`, `ProductionExecutionRequest`,
 `ProductionPathCompilerAdapter`, `PreparedCandidate`, and `PrepareCandidate`.
+The adaptive headers are source-tree experiments in `KXC_EXPERIMENTAL_HEADERS`;
+they are not installed/exported SDK API and carry no compatibility promise.
 The request snapshots `CompileConfig`/`Target`, derives exact graph, dispatch,
 and Plan ABI identities, and retains the verified baseline pins. Preparation
 rejects malformed Relay graphs, dynamic shapes, wrong call mapping, ABI changes,

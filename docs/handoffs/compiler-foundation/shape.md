@@ -2,7 +2,10 @@
 
 ## Current status
 
-The installed experimental Shape surface has two independent, narrow pieces:
+The repository-only experimental Shape surface has two independent, narrow
+pieces. These headers are listed in `KXC_EXPERIMENTAL_HEADERS` for source-tree
+checks but are deliberately absent from install/export package targets; they
+carry no source or binary compatibility promise.
 
 - `shape_specialization.h` supplies `GraphTemplate`, exact profiles, exact
   requests, and `ChangedUnitIndices` inputs. It does not compile or execute.
@@ -19,7 +22,7 @@ symbolic Relay graph.
 
 ## Deleted and unsupported
 
-The guarded bucket/polymorphic contract universe was deleted: its public header,
+The guarded bucket/polymorphic contract universe was deleted: its contract header,
 implementation, deterministic fake resolver/plan types, focused test, and CMake
 and CTest registration no longer exist. There is no bucket or polymorphic
 policy, profile, request, dispatch kind, alias, compatibility shim, or generic

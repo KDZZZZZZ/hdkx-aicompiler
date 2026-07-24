@@ -69,9 +69,9 @@ endif()
 set(KXC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/include")
 
+# Installed/exported SDK headers. Repository experiments are tracked separately
+# below so a source build can test them without publishing them as package API.
 set(KXC_PUBLIC_HEADERS
-  include/kxc/compiler/adaptive_hot_swap_v2.h
-  include/kxc/compiler/adaptive_production_experimental.h
   include/kxc/compiler/capability.h
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
@@ -79,9 +79,6 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/artifact.h
   include/kxc/compiler/identity.h
   include/kxc/compiler/pipeline.h
-  include/kxc/compiler/shape_exact.h
-  include/kxc/compiler/shape_specialization.h
-  include/kxc/compiler/restricted_symbolic_shape.h
 
   include/kxc/compiler/lowering/relay_to_tir.h
   include/kxc/distributed/ccl_backend.h
@@ -137,7 +134,6 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/storage.h
   include/kxc/runtime/task_executor.h
   include/kxc/runtime/task_plan.h
-  include/kxc/shape/shape.h
   include/kxc/support/arena.h
   include/kxc/support/canonical.h
   include/kxc/support/container.h
@@ -174,6 +170,15 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/tir/visitor.h
 )
 
+set(KXC_EXPERIMENTAL_HEADERS
+  include/kxc/compiler/adaptive_hot_swap_v2.h
+  include/kxc/compiler/adaptive_production_experimental.h
+  include/kxc/compiler/restricted_symbolic_shape.h
+  include/kxc/compiler/shape_exact.h
+  include/kxc/compiler/shape_specialization.h
+  include/kxc/shape/shape.h
+)
+
 add_library(kxc_dlpack INTERFACE)
 add_library(kxc::dlpack ALIAS kxc_dlpack)
 set_target_properties(kxc_dlpack PROPERTIES EXPORT_NAME dlpack)
@@ -196,7 +201,7 @@ target_link_libraries(kxc_public_api INTERFACE kxc_dlpack)
 set(KXC_PUBLIC_MODULE_TARGETS "")
 foreach(_kxc_public_module IN ITEMS
     support ffi runtime profiling target pass ir tir te relay distributed
-    frontend compiler shape)
+    frontend compiler)
   set(_kxc_module_headers "")
   foreach(_kxc_header IN LISTS KXC_PUBLIC_HEADERS)
     if(_kxc_header MATCHES "^include/kxc/${_kxc_public_module}/")
@@ -223,13 +228,8 @@ foreach(_kxc_public_module IN ITEMS
   target_link_libraries(kxc_public_api INTERFACE ${_kxc_module_target})
   list(APPEND KXC_PUBLIC_MODULE_TARGETS ${_kxc_module_target})
 endforeach()
-target_link_libraries(kxc_compiler_api INTERFACE kxc_shape_api)
 target_compile_definitions(kxc_runtime_api INTERFACE
   KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>)
-
-target_compile_definitions(kxc_compiler_api INTERFACE
-  KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>
-  KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2}>)
 
 if(KXC_ENABLE_CUDA)
   find_package(CUDAToolkit QUIET)
@@ -768,7 +768,7 @@ add_executable(shape_system_test
   test/shape_system_test.cpp
   $<TARGET_OBJECTS:kxc_shape_obj>)
 add_dependencies(shape_system_test kxc_shape_obj)
-target_link_libraries(shape_system_test PRIVATE kxc_shape_api)
+target_link_libraries(shape_system_test PRIVATE kxc_public_api)
 if(MSVC)
   target_compile_options(shape_system_test PRIVATE /utf-8 /EHsc)
 endif()

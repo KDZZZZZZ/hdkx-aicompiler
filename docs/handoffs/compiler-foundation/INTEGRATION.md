@@ -89,4 +89,6 @@ retained for process lifetime rather than risking early release; this is a
 safety quarantine, not bounded failure recovery or normal memory accounting.
 
 Public C++ API additions require recompilation; no ABI compatibility is
-claimed.
+claimed. The default-off Shape and Adaptive control-plane headers are tracked
+separately in `KXC_EXPERIMENTAL_HEADERS` for repository tests and are not part
+of installed/exported package API.
