@@ -116,15 +116,6 @@ jobs:
           --output-on-failure --no-tests=error
           --label-regex '(^|;)cpu(;|$)'
 
-      - name: Run experimental shape contract tests
-        run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
-          --parallel 2 --target
-          run_shape_system_test
-          run_shape_specialization_test
-          run_shape_guarded_specialization_test
-          run_shape_production_exact_test
-          run_restricted_symbolic_shape_test
 
   cpu-asan:
     name: CPU W3 runtime/adaptive/control ASan/UBSan

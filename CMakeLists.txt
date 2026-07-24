@@ -29,6 +29,11 @@ option(KXC_ENABLE_SHAPE_PRODUCTION_EXACT
   "Enable the production exact Relay/compiler/shape adapter" OFF)
 option(KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE
   "Enable the experimental restricted symbolic Shape decision adapter" OFF)
+if(KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE AND NOT KXC_ENABLE_SHAPE_PRODUCTION_EXACT)
+  message(STATUS "Restricted symbolic Shape requires the production exact adapter; enabling it")
+  set(KXC_ENABLE_SHAPE_PRODUCTION_EXACT ON CACHE BOOL
+    "Enable the production exact Relay/compiler/shape adapter" FORCE)
+endif()
 
 option(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
   "Enable default-off experimental adapter for a production compiler path" OFF)
@@ -775,6 +780,8 @@ add_custom_target(run_shape_system_test
 
 kxc_add_runtime_exe(shape_specialization_test
   test/shape_specialization_test.cpp)
+target_sources(shape_specialization_test PRIVATE
+  test/support/shape_specialization_fakes.cc)
 add_custom_target(run_shape_specialization_test
   COMMAND "$<TARGET_FILE:shape_specialization_test>"
   DEPENDS shape_specialization_test
@@ -783,6 +790,8 @@ add_custom_target(run_shape_specialization_test
 
 kxc_add_runtime_exe(shape_guarded_specialization_test
   test/shape_guarded_specialization_test.cpp)
+target_sources(shape_guarded_specialization_test PRIVATE
+  test/support/guarded_shape_specialization_fakes.cc)
 add_custom_target(run_shape_guarded_specialization_test
   COMMAND "$<TARGET_FILE:shape_guarded_specialization_test>"
   DEPENDS shape_guarded_specialization_test
@@ -908,10 +917,6 @@ if(KXC_BUILD_PASS_TESTS)
       test/adaptive_production_experimental_test.cpp)
   endif()
   if(BUILD_TESTING)
-    add_test(NAME shape_production_exact_test COMMAND shape_production_exact_test)
-    set_tests_properties(shape_production_exact_test PROPERTIES LABELS "shape-production;cpu")
-    add_test(NAME restricted_symbolic_shape_test COMMAND restricted_symbolic_shape_test)
-    set_tests_properties(restricted_symbolic_shape_test PROPERTIES LABELS "shape-restricted-symbolic;cpu")
     add_custom_target(run_restricted_symbolic_shape_test
       COMMAND "$<TARGET_FILE:restricted_symbolic_shape_test>"
       DEPENDS restricted_symbolic_shape_test
@@ -1297,6 +1302,12 @@ function(kxc_add_ctest_if_target target labels)
     set_tests_properties(${target} PROPERTIES LABELS "${labels}")
   endif()
 endfunction()
+
+kxc_add_ctest_if_target(shape_system_test "shape;cpu")
+kxc_add_ctest_if_target(shape_specialization_test "shape;cpu")
+kxc_add_ctest_if_target(shape_guarded_specialization_test "shape;cpu")
+kxc_add_ctest_if_target(shape_production_exact_test "shape;shape-production;cpu")
+kxc_add_ctest_if_target(restricted_symbolic_shape_test "shape;shape-restricted-symbolic;cpu")
 
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test
