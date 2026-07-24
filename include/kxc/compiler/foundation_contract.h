@@ -40,7 +40,7 @@ enum class CacheEventKind { kHit, kMiss, kStore, kEvict, kPin, kFailure };
 
 /*! \brief Immutable, validated ready-artifact description for fakes and adapters. */
 struct ArtifactRecord final {
-    ArtifactKey artifact_key;
+    PrimitiveArtifactKey artifact_key;
     std::string executable_token;
     std::string signature_digest;
     std::string launch_metadata_digest;
@@ -136,7 +136,7 @@ struct CancellationToken final {
 };
 
 struct CompileRequest final {
-    ArtifactKey artifact_key;
+    PrimitiveArtifactKey artifact_key;
     std::optional<DispatchKey> dispatch_key;
     CompilePriority priority{CompilePriority::kNormal};
     CompileBudgetClass budget_class{CompileBudgetClass::kGlobal};
@@ -200,7 +200,7 @@ private:
 class ProductionArtifactCacheAdapter final {
 public:
     ProductionCompileOwnership ownership() const noexcept;
-    ArtifactLookup Lookup(const ArtifactKey& key) const;
+    ArtifactLookup Lookup(const PrimitiveArtifactKey& key) const;
     ProductionCompileTransaction Acquire(const CompileRequest& request) const;
     CompileOutcome Wait(const ProductionCompileTransaction& transaction) const;
     CompileOutcome Wait(const ProductionCompileTransaction& transaction,

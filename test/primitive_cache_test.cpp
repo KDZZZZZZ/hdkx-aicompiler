@@ -48,16 +48,17 @@ public:
     }
 };
 
-kxc::api::ArtifactKey MakeKey(const std::string& unit,
+kxc::api::PrimitiveArtifactKey MakeKey(const std::string& unit,
                               const std::string& digest = {}) {
-    return kxc::api::ArtifactKey(
+    return kxc::api::PrimitiveArtifactKey(
         kxc::api::UnitSemanticKey("unit=" + unit, digest),
         "target=cpu-test-v1", "pipeline=test-v1", 1,
         "schedule=test-v1", "backend=fake-v1", digest);
 }
 
 kxc::api::CompileRequest MakeRequest(
-    const kxc::api::ArtifactKey& key, const std::string& cancellation_id) {
+    const kxc::api::PrimitiveArtifactKey& key,
+    const std::string& cancellation_id) {
     kxc::api::CompileRequest request;
     request.artifact_key = key;
     request.request_origin = "primitive-cache-test";
@@ -119,7 +120,7 @@ bool TestProductionAdapterPinSurvivesEviction() {
     using namespace kxc::api::internal;
     Reset(PrimitiveCacheLimits{1, 64, 8, 8});
     const ProductionArtifactCacheAdapter adapter;
-    const ArtifactKey first_key = MakeKey("adapter-first");
+    const PrimitiveArtifactKey first_key = MakeKey("adapter-first");
     const ProductionCompileTransaction first =
         adapter.Acquire(MakeRequest(first_key, "adapter-first"));
     TEST_CHECK(first.owns_compile(),
@@ -146,7 +147,7 @@ bool TestProductionAdapterPinSurvivesEviction() {
                    after_hit.in_flight == 0,
                "adapter lookup must expose a complete pin without cache mutation");
 
-    const ArtifactKey second_key = MakeKey("adapter-second");
+    const PrimitiveArtifactKey second_key = MakeKey("adapter-second");
     const ProductionCompileTransaction second =
         adapter.Acquire(MakeRequest(second_key, "adapter-second"));
     (void)adapter.Publish(
@@ -188,7 +189,7 @@ bool TestPublicProductionSameKeyMergeAndCancellation() {
                        CompilePolicyLayer::kAdaptiveCoordinator,
                "Core and adaptive policy ownership must be explicit");
 
-    const ArtifactKey key = MakeKey("public-merge");
+    const PrimitiveArtifactKey key = MakeKey("public-merge");
     const CompileRequest owner_request = MakeRequest(key, "owner");
     const CompileRequest waiter_request = MakeRequest(key, "waiter");
     const ProductionCompileTransaction owner = adapter.Acquire(owner_request);
@@ -226,7 +227,7 @@ bool TestPublicProductionFailureRetryAndBackpressure() {
     using namespace kxc::api::internal;
     Reset(PrimitiveCacheLimits{8, 1024, 1, 8});
     const ProductionArtifactCacheAdapter adapter;
-    const ArtifactKey failure_key = MakeKey("public-failure");
+    const PrimitiveArtifactKey failure_key = MakeKey("public-failure");
     const ProductionCompileTransaction owner =
         adapter.Acquire(MakeRequest(failure_key, "failure-owner"));
     const ProductionCompileTransaction waiter =
@@ -290,7 +291,8 @@ bool TestPublicProductionFailureRetryAndBackpressure() {
         retry, CompileFailure{CompileFailureCategory::kCancelled, 0,
                               "test cleanup"});
 
-    const ArtifactKey cancel_key = MakeKey("public-owner-cancel");
+    const PrimitiveArtifactKey cancel_key =
+        MakeKey("public-owner-cancel");
     const ProductionCompileTransaction cancel_owner =
         adapter.Acquire(MakeRequest(cancel_key, "cancel-owner"));
     const ProductionCompileTransaction cancel_waiter =
@@ -313,7 +315,7 @@ bool TestPublicProductionConcurrentSingleflight() {
     Reset(PrimitiveCacheLimits{16, 1024, 16, 16});
     constexpr int kThreads = 8;
     const ProductionArtifactCacheAdapter adapter;
-    const ArtifactKey key = MakeKey("public-concurrent");
+    const PrimitiveArtifactKey key = MakeKey("public-concurrent");
     std::atomic<int> acquired{0};
     std::atomic<int> owners{0};
     std::atomic<int> failures{0};
@@ -363,7 +365,8 @@ bool TestPublicTransactionTerminalRaceAndAbandonment() {
     using namespace kxc::api::internal;
     Reset(PrimitiveCacheLimits{8, 1024, 1, 8});
     const ProductionArtifactCacheAdapter adapter;
-    const ArtifactKey race_key = MakeKey("public-terminal-race");
+    const PrimitiveArtifactKey race_key =
+        MakeKey("public-terminal-race");
     const ProductionCompileTransaction owner =
         adapter.Acquire(MakeRequest(race_key, "race-owner"));
     const ProductionCompileTransaction owner_copy = owner;
@@ -402,7 +405,8 @@ bool TestPublicTransactionTerminalRaceAndAbandonment() {
     ForgetPrimitiveFailureForTesting(race_key);
     ProductionCompileTransaction abandoned_waiter;
     {
-        const ArtifactKey abandoned_key = MakeKey("public-abandoned");
+        const PrimitiveArtifactKey abandoned_key =
+            MakeKey("public-abandoned");
         const ProductionCompileTransaction abandoned_owner =
             adapter.Acquire(MakeRequest(abandoned_key, "abandoned-owner"));
         abandoned_waiter =

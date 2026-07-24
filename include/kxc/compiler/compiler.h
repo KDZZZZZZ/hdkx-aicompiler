@@ -39,8 +39,8 @@ struct CompiledGraph final {
     runtime::PlanVariant variant;
     // Ordered call-to-artifact pins; no per-unit relinking is exposed.
     std::vector<ArtifactPlanBinding> artifact_plan_bindings;
-    // Canonical whole-graph + target + normalized compiler contract identity.
-    ArtifactKey graph_artifact_key;
+    // Canonical Relay graph semantics; target and compiler policy are excluded.
+    GraphSemanticKey graph_semantic_key;
 };
 
 /*! \brief Gated, resolved static-exact control-flow artifact set.
@@ -84,9 +84,8 @@ public:
     static CompiledControlFlowGraph CompileControlFlowExact(
         Function func, CompileConfig config);
 
-    /*! \brief Builds the canonical whole-graph compile identity used by adapters. */
-    static ArtifactKey BuildGraphArtifactKey(const Function& func,
-                                             const CompileConfig& config);
+    /*! \brief Builds whole-graph Relay semantics without target/compiler policy. */
+    static GraphSemanticKey BuildGraphSemanticKey(const Function& func);
 
     /*! \brief Compatibility view of Relay optimization passes only.
      *

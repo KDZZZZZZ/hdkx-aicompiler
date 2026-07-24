@@ -6,6 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -100,12 +101,12 @@ bool TestDigestCollisionUsesCanonicalEquality() {
     TEST_CHECK(first.digest() == second.digest() && first != second,
                "digest is only an index; full canonical bytes decide equality");
 
-    const ArtifactKey first_artifact(first, "cpu-v1", "relay-tir-o2", 1,
-                                     "schedule-v1", "llvm-v1",
-                                     "artifact-collision");
-    const ArtifactKey second_artifact(second, "cpu-v1", "relay-tir-o2", 1,
-                                      "schedule-v1", "llvm-v1",
-                                      "artifact-collision");
+    const PrimitiveArtifactKey first_artifact(
+        first, "cpu-v1", "relay-tir-o2", 1, "schedule-v1", "llvm-v1",
+        "artifact-collision");
+    const PrimitiveArtifactKey second_artifact(
+        second, "cpu-v1", "relay-tir-o2", 1, "schedule-v1", "llvm-v1",
+        "artifact-collision");
     TEST_CHECK(first_artifact.digest() == second_artifact.digest() &&
                    first_artifact != second_artifact,
                "artifact lookup must compare complete canonical keys");
@@ -115,28 +116,28 @@ bool TestDigestCollisionUsesCanonicalEquality() {
 bool TestEveryArtifactSemanticFieldCausesSafeMiss() {
     using namespace kxc::api;
     const UnitSemanticKey unit("unit-a");
-    const ArtifactKey baseline(unit, "cpu-v1", "pipeline-a", 1,
-                               "schedule-a", "backend-a");
-    const std::vector<ArtifactKey> changed = {
-        ArtifactKey(UnitSemanticKey("unit-b"), "cpu-v1", "pipeline-a", 1,
-                    "schedule-a", "backend-a"),
-        ArtifactKey(unit, "cuda-v1", "pipeline-a", 1, "schedule-a",
-                    "backend-a"),
-        ArtifactKey(unit, "cpu-v1", "pipeline-b", 1, "schedule-a",
-                    "backend-a"),
-        ArtifactKey(unit, "cpu-v1", "pipeline-a", 2, "schedule-a",
-                    "backend-a"),
-        ArtifactKey(unit, "cpu-v1", "pipeline-a", 1, "schedule-b",
-                    "backend-a"),
-        ArtifactKey(unit, "cpu-v1", "pipeline-a", 1, "schedule-a",
-                    "backend-b"),
+    const PrimitiveArtifactKey baseline(
+        unit, "cpu-v1", "pipeline-a", 1, "schedule-a", "backend-a");
+    const std::vector<PrimitiveArtifactKey> changed = {
+        PrimitiveArtifactKey(UnitSemanticKey("unit-b"), "cpu-v1",
+                             "pipeline-a", 1, "schedule-a", "backend-a"),
+        PrimitiveArtifactKey(unit, "cuda-v1", "pipeline-a", 1,
+                             "schedule-a", "backend-a"),
+        PrimitiveArtifactKey(unit, "cpu-v1", "pipeline-b", 1,
+                             "schedule-a", "backend-a"),
+        PrimitiveArtifactKey(unit, "cpu-v1", "pipeline-a", 2,
+                             "schedule-a", "backend-a"),
+        PrimitiveArtifactKey(unit, "cpu-v1", "pipeline-a", 1,
+                             "schedule-b", "backend-a"),
+        PrimitiveArtifactKey(unit, "cpu-v1", "pipeline-a", 1,
+                             "schedule-a", "backend-b"),
     };
-    for (const ArtifactKey& candidate : changed) {
+    for (const PrimitiveArtifactKey& candidate : changed) {
         TEST_CHECK(candidate != baseline,
                    "unit/target/pipeline/ABI/schedule/backend change must miss");
     }
-    const ArtifactKey same(unit, "cpu-v1", "pipeline-a", 1,
-                           "schedule-a", "backend-a");
+    const PrimitiveArtifactKey same(
+        unit, "cpu-v1", "pipeline-a", 1, "schedule-a", "backend-a");
     TEST_CHECK(same == baseline && same.digest() == baseline.digest(),
                "identical canonical artifact fields must be deterministic");
     return true;
@@ -144,6 +145,14 @@ bool TestEveryArtifactSemanticFieldCausesSafeMiss() {
 
 bool TestDispatchAndPlanVariantRemainSeparate() {
     using namespace kxc::api;
+    const kxc::Var input(
+        "input", kxc::TensorType({4}, "float32"));
+    const GraphSemanticKey graph = Compiler::BuildGraphSemanticKey(
+        kxc::Function(
+            {input}, kxc::Call(kxc::relay::Op::Get("nn_relu"), {input})));
+    const ShapeProfileKey profile = BuildShapeProfileKey(
+        graph, "logical=[4];physical=[4];valid=[4]", "bindings=[]",
+        "exact-v1", 1);
     const DispatchKey exact("unit-a/cpu", "shape=[4];layout=contiguous",
                             "exact-v1");
     const DispatchKey bucket("unit-a/cpu", "shape=[1..8];valid=[4]",
@@ -151,24 +160,36 @@ bool TestDispatchAndPlanVariantRemainSeparate() {
     TEST_CHECK(exact.defined() && bucket.defined() && !(exact == bucket),
                "dispatch applicability must not collapse into primitive semantics");
 
-    const PlanVariantKey first("graph-template-a", {{"artifact-a", 0}},
-                               "shape=[4]", "memory-plan-v1");
-    const PlanVariantKey next_generation(
-        "graph-template-a", {{"artifact-a", 1}}, "shape=[4]",
-        "memory-plan-v1");
+    const PrimitiveArtifactKey artifact(
+        UnitSemanticKey("unit-a"), "cpu-v1", "pipeline-v1", 1,
+        "schedule-v1", "backend-v1");
+    const PlanVariantKey first = BuildPlanVariantKey(
+        graph, profile, {{0, "unit_0", artifact, 0}}, "memory-plan-v1");
+    const PlanVariantKey next_generation = BuildPlanVariantKey(
+        graph, profile, {{0, "unit_0", artifact, 1}}, "memory-plan-v1");
     TEST_CHECK(first.defined() && next_generation.defined() &&
                    !(first == next_generation),
                "selected immutable generation is part of plan variant identity");
     TEST_CHECK(Throws([] {
-                   (void)PlanVariantKey("graph", {}, "shape=[4]", "memory-v1");
+                   const kxc::Var value(
+                       "value", kxc::TensorType({4}, "float32"));
+                   const GraphSemanticKey graph_key =
+                       Compiler::BuildGraphSemanticKey(kxc::Function(
+                           {value}, kxc::Call(
+                               kxc::relay::Op::Get("nn_relu"), {value})));
+                   const ShapeProfileKey shape_key = BuildShapeProfileKey(
+                       graph_key, "shape=[4]", "bindings=[]", "exact", 1);
+                   (void)BuildPlanVariantKey(
+                       graph_key, shape_key, {}, "memory-v1");
                }),
                "a frozen plan variant requires selected artifacts");
+    static_assert(!std::is_same_v<GraphSemanticKey, UnitSemanticKey>);
+    static_assert(!std::is_same_v<PrimitiveArtifactKey, PlanVariantKey>);
     return true;
 }
 
 bool TestGraphSemanticIdentityRejectsUndefinedExprs() {
     using namespace kxc;
-    const api::CompileConfig config = CpuConfig();
     const Expr leaf = relay::Op::Get("nn_relu");
     const Var binder("value", TensorType({2}, "float32"));
     const std::vector<std::pair<const char*, Function>> malformed = {
@@ -189,8 +210,7 @@ bool TestGraphSemanticIdentityRejectsUndefinedExprs() {
     };
     for (const auto& [position, graph] : malformed) {
         TEST_CHECK(Throws([&] {
-                       (void)api::Compiler::BuildGraphArtifactKey(graph,
-                                                                  config);
+                       (void)api::Compiler::BuildGraphSemanticKey(graph);
                    }),
                    std::string("undefined ") + position +
                        " must not produce a graph artifact key");
@@ -200,21 +220,19 @@ bool TestGraphSemanticIdentityRejectsUndefinedExprs() {
 
 bool TestGraphSemanticIdentityUsesExactNodeWhitelist() {
     using namespace kxc;
-    const api::CompileConfig config = CpuConfig();
     Var input("input", TensorType({2}, "float32"));
     const Function normal(
         {input}, Call(relay::Op::Get("nn_relu"), {input}));
-    TEST_CHECK(api::Compiler::BuildGraphArtifactKey(normal, config).defined(),
+    TEST_CHECK(api::Compiler::BuildGraphSemanticKey(normal).defined(),
                "a supported exact Call node must produce an identity");
     TEST_CHECK(Throws([&] {
-                   (void)api::Compiler::BuildGraphArtifactKey(
-                       MakeDerivedCallFunction<DerivedCallNode>(), config);
+                   (void)api::Compiler::BuildGraphSemanticKey(
+                       MakeDerivedCallFunction<DerivedCallNode>());
                }) &&
                    Throws([&] {
-                       (void)api::Compiler::BuildGraphArtifactKey(
+                       (void)api::Compiler::BuildGraphSemanticKey(
                            MakeDerivedCallFunction<
-                               UnregisteredDerivedCallNode>(),
-                           config);
+                               UnregisteredDerivedCallNode>());
                    }),
                "registered and unregistered derived Calls must fail closed");
 
@@ -227,12 +245,11 @@ bool TestGraphSemanticIdentityUsesExactNodeWhitelist() {
     derived_function->hidden_semantics = "must-not-be-omitted";
     const Function derived_root{ObjectRef(derived_function)};
     TEST_CHECK(Throws([&] {
-                   (void)api::Compiler::BuildGraphArtifactKey(disguised,
-                                                              config);
+                   (void)api::Compiler::BuildGraphSemanticKey(disguised);
                }) &&
                    Throws([&] {
-                       (void)api::Compiler::BuildGraphArtifactKey(derived_root,
-                                                                  config);
+                       (void)api::Compiler::BuildGraphSemanticKey(
+                           derived_root);
                    }),
                "the graph root must be an exact Function node");
     return true;

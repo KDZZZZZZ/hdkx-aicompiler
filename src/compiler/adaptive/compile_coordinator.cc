@@ -2,7 +2,7 @@
  * \brief Bounded singleflight coordinator for static-exact compilation.
  */
 
-#include "kxc/compiler/adaptive.h"
+#include "../../../test/support/adaptive_v1.h"
 
 #include <algorithm>
 #include <atomic>

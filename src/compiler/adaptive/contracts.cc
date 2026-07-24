@@ -2,7 +2,7 @@
  * \brief Implements static-exact adaptive identity and artifact contracts.
  */
 
-#include "kxc/compiler/adaptive.h"
+#include "../../../test/support/adaptive_v1.h"
 
 #include <stdexcept>
 #include <utility>

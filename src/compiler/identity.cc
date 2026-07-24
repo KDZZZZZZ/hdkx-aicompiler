@@ -5,14 +5,18 @@
 #include "kxc/compiler/identity.h"
 
 #include <algorithm>
+#include <functional>
 #include <stdexcept>
 #include <string>
+#include <typeinfo>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "../runtime/internal/compiled_module_node.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/relay/op.h"
+#include "kxc/relay/relay.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
 
@@ -36,6 +40,39 @@ std::string Digest(const std::string& canonical,
                    std::string index_digest) {
     return index_digest.empty() ? profiling::HashText(canonical)
                                 : std::move(index_digest);
+}
+
+bool ContainsLegacyDynamicDimension(const std::string& applicability) {
+    bool inside_shape = false;
+    for (size_t index = 0; index < applicability.size(); ++index) {
+        const char current = applicability[index];
+        if (current == '[') {
+            inside_shape = true;
+            continue;
+        }
+        if (current == ']') {
+            inside_shape = false;
+            continue;
+        }
+        if (!inside_shape || current != '-' ||
+            index + 1 >= applicability.size() ||
+            applicability[index + 1] != '1') {
+            continue;
+        }
+
+        const bool begins_dimension =
+            index == 0 || applicability[index - 1] == '[' ||
+            applicability[index - 1] == ',' ||
+            applicability[index - 1] == ' ';
+        const size_t end = index + 2;
+        const bool ends_dimension =
+            end == applicability.size() || applicability[end] == ']' ||
+            applicability[end] == ',' || applicability[end] == ' ';
+        if (begins_dimension && ends_dimension) {
+            return true;
+        }
+    }
+    return applicability.find("dimension=2:-1;") != std::string::npos;
 }
 
 template <typename T>
@@ -138,7 +175,201 @@ void AppendArrayContract(std::string* out, const runtime::NDArray& value) {
     AppendField(out, "constant_bytes", bytes);
 }
 
+template <typename Node>
+const Node* AsExactExprNode(const Expr& expr) noexcept {
+    if (!expr.defined() || expr.get()->GetTypeId() != Node::_type_index ||
+        typeid(*expr.get()) != typeid(Node)) {
+        return nullptr;
+    }
+    return expr.As<Node>();
+}
+
+std::string StaticExactInputProfileCanonical(
+    const runtime::ExecutablePlan& plan) {
+    plan.Validate();
+    std::unordered_map<int64_t, runtime::ValueSpec> values;
+    for (const auto& value : plan.values()) {
+        values.emplace(value->value_id, value);
+    }
+    std::string profile;
+    AppendField(&profile, "kind", "static-exact-input-profile-v2");
+    for (int64_t value_id : plan.input_value_ids()) {
+        const auto found = values.find(value_id);
+        if (found == values.end()) {
+            throw std::invalid_argument(
+                "static-exact profile references an unknown graph input");
+        }
+        AppendValueContract(&profile, found->second);
+        AppendField(&profile, "layout", "contiguous");
+        AppendField(&profile, "valid_extent", "equals-logical-shape");
+    }
+    return profile;
+}
+
 }  // namespace
+
+GraphSemanticKey::GraphSemanticKey(std::string canonical_bytes,
+                                   std::string index_digest)
+    : canonical_bytes_(std::move(canonical_bytes)) {
+    RequireNonEmpty(canonical_bytes_, "graph semantic canonical bytes");
+    digest_ = Digest(canonical_bytes_, std::move(index_digest));
+}
+
+bool GraphSemanticKey::defined() const noexcept {
+    return !canonical_bytes_.empty() && !digest_.empty();
+}
+
+const std::string& GraphSemanticKey::canonical_bytes() const noexcept {
+    return canonical_bytes_;
+}
+
+const std::string& GraphSemanticKey::digest() const noexcept {
+    return digest_;
+}
+
+bool GraphSemanticKey::operator==(
+    const GraphSemanticKey& other) const noexcept {
+    return canonical_bytes_ == other.canonical_bytes_;
+}
+
+bool GraphSemanticKey::operator!=(
+    const GraphSemanticKey& other) const noexcept {
+    return !(*this == other);
+}
+
+bool GraphSemanticKey::operator<(
+    const GraphSemanticKey& other) const noexcept {
+    return canonical_bytes_ < other.canonical_bytes_;
+}
+
+GraphSemanticKey BuildGraphSemanticKey(const Function& function) {
+    if (!AsExactExprNode<FunctionNode>(function)) {
+        throw std::invalid_argument(
+            "graph semantic identity requires an exact Function node");
+    }
+    std::string canonical;
+    AppendField(&canonical, "kind", "graph-semantic-key-v3");
+    std::unordered_map<const Object*, size_t> node_ids;
+    std::function<void(const Expr&)> visit = [&](const Expr& expr) {
+        if (!expr.defined()) {
+            throw std::invalid_argument(
+                "graph semantic identity has an undefined Relay Expr");
+        }
+        const auto existing = node_ids.find(expr.get());
+        if (existing != node_ids.end()) {
+            AppendField(&canonical, "node_ref",
+                        std::to_string(existing->second));
+            return;
+        }
+        const size_t node_id = node_ids.size();
+        node_ids.emplace(expr.get(), node_id);
+        AppendField(&canonical, "node_id", std::to_string(node_id));
+        if (const auto* relay_node =
+                dynamic_cast<const RelayNode*>(expr.get())) {
+            if (relay_node->virtual_device_.defined()) {
+                AppendField(&canonical, "virtual_device",
+                            relay_node->virtual_device_.ToString());
+            }
+        }
+        if (const auto* constant = AsExactExprNode<ConstantNode>(expr)) {
+            AppendField(&canonical, "node_kind", "constant");
+            if (!constant->data.defined()) {
+                throw std::invalid_argument(
+                    "graph semantic identity has an undefined Constant");
+            }
+            const DLDataType dtype = constant->data.dtype();
+            AppendInteger(&canonical, "constant_dtype_code", dtype.code);
+            AppendInteger(&canonical, "constant_dtype_bits", dtype.bits);
+            AppendInteger(&canonical, "constant_dtype_lanes", dtype.lanes);
+            for (int64_t dimension : constant->data.shape()) {
+                AppendInteger(&canonical, "constant_dimension", dimension);
+            }
+            AppendField(&canonical, "constant_device",
+                        constant->data.device().ToString());
+            std::string bytes(constant->data.NBytes(), '\0');
+            if (!bytes.empty()) {
+                constant->data.CopyToBytes(bytes.data(), bytes.size());
+            }
+            AppendField(&canonical, "constant_bytes", bytes);
+            return;
+        }
+        if (const auto* variable = AsExactExprNode<VarNode>(expr)) {
+            AppendField(&canonical, "node_kind", "var");
+            AppendField(&canonical, "type_annotation",
+                        TypeToString(variable->type_annotation));
+            return;
+        }
+        if (const auto* op = AsExactExprNode<relay::OpNode>(expr)) {
+            AppendField(&canonical, "node_kind", "op");
+            AppendField(&canonical, "op_name", op->name);
+            AppendField(&canonical, "op_spec",
+                        op->has_spec
+                            ? relay::SerializeOperatorSpec(op->spec)
+                            : "<unspecified>");
+            return;
+        }
+        if (const auto* call = AsExactExprNode<CallNode>(expr)) {
+            AppendField(&canonical, "node_kind", "call");
+            AppendField(
+                &canonical, "call_attrs",
+                call->attrs.defined()
+                    ? relay::SerializeAttrs(relay::Attrs(call->attrs))
+                    : "<none>");
+            visit(call->op);
+            for (const Expr& argument : call->args) visit(argument);
+            return;
+        }
+        if (const auto* function_node =
+                AsExactExprNode<FunctionNode>(expr)) {
+            AppendField(&canonical, "node_kind", "function");
+            for (const Var& parameter : function_node->params) {
+                visit(parameter);
+            }
+            visit(function_node->body);
+            return;
+        }
+        if (const auto* branch = AsExactExprNode<IfNode>(expr)) {
+            AppendField(&canonical, "node_kind", "if");
+            visit(branch->cond);
+            visit(branch->true_branch);
+            visit(branch->false_branch);
+            return;
+        }
+        if (const auto* loop = AsExactExprNode<WhileNode>(expr)) {
+            AppendField(&canonical, "node_kind", "while");
+            AppendInteger(&canonical, "max_trip_count",
+                          loop->max_trip_count);
+            visit(loop->initial_state);
+            visit(loop->loop_var);
+            visit(loop->condition);
+            visit(loop->body);
+            return;
+        }
+        if (const auto* let = AsExactExprNode<LetNode>(expr)) {
+            AppendField(&canonical, "node_kind", "let");
+            visit(let->var);
+            visit(let->value);
+            visit(let->body);
+            return;
+        }
+        if (const auto* tuple = AsExactExprNode<TupleNode>(expr)) {
+            AppendField(&canonical, "node_kind", "tuple");
+            for (const Expr& field : tuple->fields) visit(field);
+            return;
+        }
+        if (const auto* item = AsExactExprNode<TupleGetItemNode>(expr)) {
+            AppendField(&canonical, "node_kind", "tuple_get");
+            AppendInteger(&canonical, "tuple_index", item->index);
+            visit(item->tuple);
+            return;
+        }
+        throw std::invalid_argument(
+            "graph semantic identity does not support Relay node type '" +
+            std::string(expr.get()->GetTypeKey()) + "'");
+    };
+    visit(function);
+    return GraphSemanticKey(std::move(canonical));
+}
 
 std::string GraphValueLocator::CanonicalBytes() const {
     RequireNonEmpty(graph_revision, "graph revision");
@@ -197,12 +428,17 @@ bool UnitSemanticKey::operator!=(const UnitSemanticKey& other) const noexcept {
     return !(*this == other);
 }
 
-ArtifactKey::ArtifactKey(UnitSemanticKey unit_semantic_key,
-                         std::string target_capability_fingerprint,
-                         std::string pipeline_fingerprint, int abi_version,
-                         std::string schedule_version,
-                         std::string backend_version,
-                         std::string index_digest)
+bool UnitSemanticKey::operator<(const UnitSemanticKey& other) const noexcept {
+    return canonical_bytes_ < other.canonical_bytes_;
+}
+
+PrimitiveArtifactKey::PrimitiveArtifactKey(
+    UnitSemanticKey unit_semantic_key,
+    std::string target_capability_fingerprint,
+    std::string pipeline_fingerprint, int abi_version,
+    std::string schedule_version,
+    std::string backend_version,
+    std::string index_digest)
     : unit_semantic_key_(std::move(unit_semantic_key)) {
     if (!unit_semantic_key_.defined()) {
         throw std::invalid_argument(
@@ -216,7 +452,7 @@ ArtifactKey::ArtifactKey(UnitSemanticKey unit_semantic_key,
         throw std::invalid_argument(
             "artifact identity requires a positive ABI version");
     }
-    AppendField(&canonical_bytes_, "kind", "artifact-key-v1");
+    AppendField(&canonical_bytes_, "kind", "primitive-artifact-key-v2");
     AppendField(&canonical_bytes_, "unit_semantic",
                 unit_semantic_key_.canonical_bytes());
     AppendField(&canonical_bytes_, "target",
@@ -228,33 +464,42 @@ ArtifactKey::ArtifactKey(UnitSemanticKey unit_semantic_key,
     digest_ = Digest(canonical_bytes_, std::move(index_digest));
 }
 
-bool ArtifactKey::defined() const noexcept {
+bool PrimitiveArtifactKey::defined() const noexcept {
     return unit_semantic_key_.defined() && !canonical_bytes_.empty() &&
            !digest_.empty();
 }
 
-const UnitSemanticKey& ArtifactKey::unit_semantic_key() const noexcept {
+const UnitSemanticKey& PrimitiveArtifactKey::unit_semantic_key() const noexcept {
     return unit_semantic_key_;
 }
 
-const std::string& ArtifactKey::canonical_bytes() const noexcept {
+const std::string& PrimitiveArtifactKey::canonical_bytes() const noexcept {
     return canonical_bytes_;
 }
 
-const std::string& ArtifactKey::digest() const noexcept { return digest_; }
+const std::string& PrimitiveArtifactKey::digest() const noexcept {
+    return digest_;
+}
 
-bool ArtifactKey::operator==(const ArtifactKey& other) const noexcept {
+bool PrimitiveArtifactKey::operator==(
+    const PrimitiveArtifactKey& other) const noexcept {
     return canonical_bytes_ == other.canonical_bytes_;
 }
 
-bool ArtifactKey::operator!=(const ArtifactKey& other) const noexcept {
+bool PrimitiveArtifactKey::operator!=(
+    const PrimitiveArtifactKey& other) const noexcept {
     return !(*this == other);
+}
+
+bool PrimitiveArtifactKey::operator<(
+    const PrimitiveArtifactKey& other) const noexcept {
+    return canonical_bytes_ < other.canonical_bytes_;
 }
 
 std::string OrderedArtifactIdentity::CanonicalBytes() const {
     if (!artifact_key.defined()) {
         throw std::invalid_argument(
-            "ordered artifact identity requires a primitive ArtifactKey");
+            "ordered artifact identity requires a PrimitiveArtifactKey");
     }
     RequireNonEmpty(link_symbol, "ordered artifact link symbol");
     std::string canonical;
@@ -276,6 +521,88 @@ bool OrderedArtifactIdentity::operator!=(
     return !(*this == other);
 }
 
+ShapeProfileKey::ShapeProfileKey(GraphSemanticKey graph_semantic_key,
+                                 std::string canonical_bytes,
+                                 std::string index_digest)
+    : graph_semantic_key_(std::move(graph_semantic_key)),
+      canonical_bytes_(std::move(canonical_bytes)) {
+    if (!graph_semantic_key_.defined()) {
+        throw std::invalid_argument(
+            "shape profile identity requires graph semantics");
+    }
+    RequireNonEmpty(canonical_bytes_, "shape profile canonical bytes");
+    digest_ = Digest(canonical_bytes_, std::move(index_digest));
+}
+
+bool ShapeProfileKey::defined() const noexcept {
+    return graph_semantic_key_.defined() && !canonical_bytes_.empty() &&
+           !digest_.empty();
+}
+
+const GraphSemanticKey& ShapeProfileKey::graph_semantic_key() const noexcept {
+    return graph_semantic_key_;
+}
+
+const std::string& ShapeProfileKey::canonical_bytes() const noexcept {
+    return canonical_bytes_;
+}
+
+const std::string& ShapeProfileKey::digest() const noexcept {
+    return digest_;
+}
+
+bool ShapeProfileKey::operator==(
+    const ShapeProfileKey& other) const noexcept {
+    return canonical_bytes_ == other.canonical_bytes_;
+}
+
+bool ShapeProfileKey::operator!=(
+    const ShapeProfileKey& other) const noexcept {
+    return !(*this == other);
+}
+
+bool ShapeProfileKey::operator<(
+    const ShapeProfileKey& other) const noexcept {
+    return canonical_bytes_ < other.canonical_bytes_;
+}
+
+ShapeProfileKey BuildShapeProfileKey(
+    const GraphSemanticKey& graph_semantic_key,
+    const std::string& shape_program_canonical,
+    const std::string& bindings_canonical,
+    const std::string& specialization_policy,
+    uint32_t shape_abi_version) {
+    if (!graph_semantic_key.defined()) {
+        throw std::invalid_argument(
+            "shape profile requires graph semantics");
+    }
+    RequireNonEmpty(shape_program_canonical, "shape program canonical bytes");
+    RequireNonEmpty(bindings_canonical, "shape bindings canonical bytes");
+    RequireNonEmpty(specialization_policy, "shape specialization policy");
+    if (shape_abi_version == 0) {
+        throw std::invalid_argument(
+            "shape profile requires a positive ABI version");
+    }
+    std::string canonical;
+    AppendField(&canonical, "kind", "shape-profile-key-v2");
+    AppendField(&canonical, "graph_semantic",
+                graph_semantic_key.canonical_bytes());
+    AppendField(&canonical, "shape_program", shape_program_canonical);
+    AppendField(&canonical, "bindings", bindings_canonical);
+    AppendField(&canonical, "policy", specialization_policy);
+    AppendInteger(&canonical, "shape_abi", shape_abi_version);
+    return ShapeProfileKey(graph_semantic_key, std::move(canonical));
+}
+
+ShapeProfileKey BuildStaticExactShapeProfileKey(
+    const GraphSemanticKey& graph_semantic_key,
+    const runtime::ExecutablePlan& plan) {
+    const std::string profile = StaticExactInputProfileCanonical(plan);
+    return BuildShapeProfileKey(
+        graph_semantic_key, profile, "static-exact-no-symbolic-bindings",
+        "static-exact-plan-v2", 1);
+}
+
 DispatchKey::DispatchKey(std::string artifact_family,
                          std::string shape_layout_valid_extent,
                          std::string variant_policy_version,
@@ -283,7 +610,7 @@ DispatchKey::DispatchKey(std::string artifact_family,
     RequireNonEmpty(artifact_family, "artifact family");
     RequireNonEmpty(shape_layout_valid_extent,
                     "shape/layout/valid-extent contract");
-    if (shape_layout_valid_extent.find("-1") != std::string::npos) {
+    if (ContainsLegacyDynamicDimension(shape_layout_valid_extent)) {
         throw std::invalid_argument(
             "dispatch identity cannot use legacy -1 as shape applicability");
     }
@@ -313,6 +640,10 @@ bool DispatchKey::operator==(const DispatchKey& other) const noexcept {
 
 bool DispatchKey::operator!=(const DispatchKey& other) const noexcept {
     return !(*this == other);
+}
+
+bool DispatchKey::operator<(const DispatchKey& other) const noexcept {
+    return canonical_bytes_ < other.canonical_bytes_;
 }
 
 PlanAbiFingerprint::PlanAbiFingerprint(std::string canonical_bytes,
@@ -432,62 +763,99 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
 }
 
 DispatchKey BuildStaticExactDispatchKey(
-    const ArtifactKey& graph_artifact_key,
-    const runtime::ExecutablePlan& plan) {
-    if (!graph_artifact_key.defined()) {
+    const GraphSemanticKey& graph_semantic_key,
+    const ShapeProfileKey& shape_profile_key) {
+    if (!graph_semantic_key.defined()) {
         throw std::invalid_argument(
-            "static-exact dispatch requires a graph ArtifactKey");
+            "static-exact dispatch requires graph semantics");
     }
-    plan.Validate();
-    std::unordered_map<int64_t, runtime::ValueSpec> values;
-    for (const auto& value : plan.values()) {
-        values.emplace(value->value_id, value);
-    }
-    std::string profile;
-    AppendField(&profile, "kind", "static-exact-input-profile-v1");
-    for (int64_t value_id : plan.input_value_ids()) {
-        const auto found = values.find(value_id);
-        if (found == values.end()) {
-            throw std::invalid_argument(
-                "static-exact dispatch references an unknown graph input");
-        }
-        AppendValueContract(&profile, found->second);
-        AppendField(&profile, "layout", "contiguous");
-        AppendField(&profile, "valid_extent", "equals-logical-shape");
+    if (!shape_profile_key.defined() ||
+        shape_profile_key.graph_semantic_key() != graph_semantic_key) {
+        throw std::invalid_argument(
+            "static-exact dispatch requires a profile for its graph");
     }
     return DispatchKey(
-        graph_artifact_key.unit_semantic_key().canonical_bytes(),
-        std::move(profile), "static-exact-plan-v1");
+        graph_semantic_key.canonical_bytes(),
+        shape_profile_key.canonical_bytes(), "static-exact-plan-v2");
 }
 
-PlanVariantKey::PlanVariantKey(
-    std::string graph_template_revision,
-    std::vector<std::pair<std::string, uint64_t>> artifact_generations,
-    std::string concrete_profile, std::string memory_plan_version,
-    std::string index_digest) {
-    RequireNonEmpty(graph_template_revision, "graph template revision");
-    RequireNonEmpty(concrete_profile, "concrete profile");
-    RequireNonEmpty(memory_plan_version, "memory plan version");
-    if (artifact_generations.empty()) {
+std::string OrderedArtifactSelectionIdentity::CanonicalBytes() const {
+    if (!artifact_key.defined()) {
         throw std::invalid_argument(
-            "plan variant identity requires selected artifact generations");
+            "ordered selection requires a primitive artifact key");
     }
-    AppendField(&canonical_bytes_, "kind", "plan-variant-key-v1");
-    AppendField(&canonical_bytes_, "graph_template",
-                graph_template_revision);
-    for (const auto& artifact : artifact_generations) {
-        RequireNonEmpty(artifact.first, "selected artifact identity");
-        AppendField(&canonical_bytes_, "artifact", artifact.first);
-        AppendField(&canonical_bytes_, "generation",
-                    std::to_string(artifact.second));
+    RequireNonEmpty(link_symbol, "ordered selection link symbol");
+    std::string canonical;
+    AppendField(&canonical, "kind", "ordered-primitive-selection-v1");
+    AppendInteger(&canonical, "call_index", call_index);
+    AppendField(&canonical, "link_symbol", link_symbol);
+    AppendField(&canonical, "primitive_artifact",
+                artifact_key.canonical_bytes());
+    AppendInteger(&canonical, "generation", generation);
+    return canonical;
+}
+
+PlanVariantKey::PlanVariantKey(GraphSemanticKey graph_semantic_key,
+                               ShapeProfileKey shape_profile_key,
+                               std::string canonical_bytes,
+                               std::string index_digest)
+    : graph_semantic_key_(std::move(graph_semantic_key)),
+      shape_profile_key_(std::move(shape_profile_key)),
+      canonical_bytes_(std::move(canonical_bytes)) {
+    if (!graph_semantic_key_.defined() || !shape_profile_key_.defined() ||
+        shape_profile_key_.graph_semantic_key() != graph_semantic_key_) {
+        throw std::invalid_argument(
+            "plan variant requires matching graph and shape identities");
     }
-    AppendField(&canonical_bytes_, "profile", concrete_profile);
-    AppendField(&canonical_bytes_, "memory_plan", memory_plan_version);
+    RequireNonEmpty(canonical_bytes_, "plan variant canonical bytes");
     digest_ = Digest(canonical_bytes_, std::move(index_digest));
 }
 
+PlanVariantKey BuildPlanVariantKey(
+    const GraphSemanticKey& graph_semantic_key,
+    const ShapeProfileKey& shape_profile_key,
+    const std::vector<OrderedArtifactSelectionIdentity>& ordered_artifacts,
+    const std::string& memory_plan_version) {
+    if (!graph_semantic_key.defined() || !shape_profile_key.defined() ||
+        shape_profile_key.graph_semantic_key() != graph_semantic_key) {
+        throw std::invalid_argument(
+            "plan variant requires matching graph and shape identities");
+    }
+    RequireNonEmpty(memory_plan_version, "memory plan version");
+    if (ordered_artifacts.empty()) {
+        throw std::invalid_argument(
+            "plan variant identity requires selected artifact generations");
+    }
+    std::string canonical;
+    AppendField(&canonical, "kind", "plan-variant-key-v2");
+    AppendField(&canonical, "graph_semantic",
+                graph_semantic_key.canonical_bytes());
+    AppendField(&canonical, "shape_profile",
+                shape_profile_key.canonical_bytes());
+    for (size_t index = 0; index < ordered_artifacts.size(); ++index) {
+        if (ordered_artifacts[index].call_index != index) {
+            throw std::invalid_argument(
+                "plan variant artifact selections must be ordered");
+        }
+        AppendField(&canonical, "selection",
+                    ordered_artifacts[index].CanonicalBytes());
+    }
+    AppendField(&canonical, "memory_plan", memory_plan_version);
+    return PlanVariantKey(graph_semantic_key, shape_profile_key,
+                          std::move(canonical));
+}
+
 bool PlanVariantKey::defined() const noexcept {
-    return !canonical_bytes_.empty() && !digest_.empty();
+    return graph_semantic_key_.defined() && shape_profile_key_.defined() &&
+           !canonical_bytes_.empty() && !digest_.empty();
+}
+
+const GraphSemanticKey& PlanVariantKey::graph_semantic_key() const noexcept {
+    return graph_semantic_key_;
+}
+
+const ShapeProfileKey& PlanVariantKey::shape_profile_key() const noexcept {
+    return shape_profile_key_;
 }
 
 const std::string& PlanVariantKey::canonical_bytes() const noexcept {
@@ -498,6 +866,14 @@ const std::string& PlanVariantKey::digest() const noexcept { return digest_; }
 
 bool PlanVariantKey::operator==(const PlanVariantKey& other) const noexcept {
     return canonical_bytes_ == other.canonical_bytes_;
+}
+
+bool PlanVariantKey::operator!=(const PlanVariantKey& other) const noexcept {
+    return !(*this == other);
+}
+
+bool PlanVariantKey::operator<(const PlanVariantKey& other) const noexcept {
+    return canonical_bytes_ < other.canonical_bytes_;
 }
 
 }  // namespace kxc::api

@@ -78,7 +78,7 @@ private:
 
 class FakeArtifactStore final {
 public:
-    ArtifactLookup Lookup(const ArtifactKey& key) {
+    ArtifactLookup Lookup(const PrimitiveArtifactKey& key) {
         const auto found = ready_.find(key.canonical_bytes());
         if (found == ready_.end()) {
             events_.push_back(CacheObserverEvent{
@@ -115,7 +115,7 @@ public:
             record.byte_size, static_cast<uint64_t>(ready_.size()), 0, 0, ""});
     }
 
-    void Evict(const ArtifactKey& key) {
+    void Evict(const PrimitiveArtifactKey& key) {
         const auto found = ready_.find(key.canonical_bytes());
         if (found == ready_.end()) return;
         const uint64_t bytes = found->second.record().byte_size;

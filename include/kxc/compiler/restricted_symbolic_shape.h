@@ -1,11 +1,8 @@
 /*! \file include/kxc/compiler/restricted_symbolic_shape.h
  * \brief Default-off W3 restricted symbolic Shape control plane.
  *
- * This experimental-v1 surface mints validated shape dispatch decisions.  It
- * deliberately does not allocate dynamic buffers, compile/cache artifacts,
- * execute guarded plans, or lower control flow. RuntimeSession remains the
- * static-exact execution boundary. Enabling this adapter also requires the
- * default-off exact representative gate.
+ * Mints validated dispatch decisions only. Does not allocate, compile/cache,
+ * execute, or lower control flow. Requires the exact representative gate.
  */
 #pragma once
 
@@ -15,39 +12,62 @@
 #include <string>
 #include <vector>
 
+#include "kxc/compiler/guarded_shape_specialization.h"
 #include "kxc/compiler/shape_exact.h"
-#include "kxc/shape/guarded_specialization.h"
 
+// =============================================================================
+// 轨 02 W3 — 受限符号 Shape 控制面（default-OFF）
+// -----------------------------------------------------------------------------
+// 只铸造 dispatch 决策（exact / bucket / polymorphic 契约），不执行。
+// 典型用法：
+//   auto prep = RestrictedSymbolicShapeAdapter::Prepare(fn, cfg, {
+//       InputAxisSymbol{0, 0, "N", 1, 1024, 1}});
+//   auto d = RestrictedSymbolicShapeAdapter::MintExact(prep, bindings);
+//   // d.exact_requests() → 交给后续 compiler/cache（本 API 不调用它们）
+//   auto changed = RestrictedSymbolicShapeAdapter::ChangedUnitIndices(prev, d);
+// CMake：KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE（且依赖 exact gate）
+// 子集：固定 rank relu/sqrt、等形 add/mul；广播/控制流/常量等 fail closed
+// =============================================================================
 namespace kxc::api::experimental::restricted_symbolic_shape::v1 {
+
+namespace specialization =
+    kxc::api::experimental::shape_specialization::v1;
 
 inline constexpr uint32_t kRestrictedSymbolicShapeVersion = 1;
 
+// ---------------------------------------------------------------------------
+// InputAxisSymbol — 输入轴 ↔ 符号 + range/divisibility
+// 用法：Prepare 时声明；Mint* 时 BindingSet 必须满足这些约束
+// ---------------------------------------------------------------------------
 struct InputAxisSymbol final {
-    size_t parameter_index{0};
-    size_t axis{0};
-    std::string symbol;
+    size_t parameter_index{0};  // 函数第几个参数
+    size_t axis{0};             // 该参数第几轴
+    std::string symbol;         // BindingSet 中的符号名
     int64_t lower{0};
     int64_t upper{0};
     int64_t divisible_by{1};
 };
 
+// exact：可走 production exact 特化；bucket/polymorphic：仅 guarded 契约（无 launch）
 enum class DispatchKind { kExact, kBucket, kPolymorphic };
 
+// ---------------------------------------------------------------------------
+// RestrictedDispatchDecision — 不可变决策快照
+// 用法：读 kind()；按 kind 取 exact_oracle/exact_requests 或 guarded_*
+// 改返回的 vector 不影响内部 authority（每次重建快照）
+// ---------------------------------------------------------------------------
 class RestrictedDispatchDecision final {
 public:
     [[nodiscard]] DispatchKind kind() const noexcept;
-    // These snapshots are rebuilt from the private, trusted template/profile
-    // state. Mutating a returned request cannot alter decision authority.
-    [[nodiscard]] const shape::experimental::v1::ExactOracle& exact_oracle() const;
-    [[nodiscard]] std::vector<shape::experimental::v1::UnitSpecializationRequest> exact_requests() const;
-    [[nodiscard]] std::vector<shape::experimental::v1::GuardedUnitSpecializationRequest> guarded_requests() const;
-    /*! \brief Immutable validated snapshots; null when this is an exact decision. */
-    [[nodiscard]] const shape::experimental::v1::GraphTemplate& graph_template() const;
-    [[nodiscard]] const shape::experimental::v1::GuardedShapeProfile* guarded_profile() const;
-    [[nodiscard]] const shape::experimental::v1::BucketPolicy* bucket_policy() const;
-    [[nodiscard]] const shape::experimental::v1::PolymorphicPolicy* polymorphic_policy() const;
+    [[nodiscard]] const specialization::ExactOracle& exact_oracle() const;
+    [[nodiscard]] std::vector<specialization::UnitSpecializationRequest> exact_requests() const;
+    [[nodiscard]] std::vector<specialization::GuardedUnitSpecializationRequest> guarded_requests() const;
+    [[nodiscard]] const specialization::GraphTemplate& graph_template() const;
+    // exact 决策时以下指针为空
+    [[nodiscard]] const specialization::GuardedShapeProfile* guarded_profile() const;
+    [[nodiscard]] const specialization::BucketPolicy* bucket_policy() const;
+    [[nodiscard]] const specialization::PolymorphicPolicy* polymorphic_policy() const;
 
-    // Declared only to support the private pimpl; no state is public.
     struct Impl;
 
 private:
@@ -57,6 +77,10 @@ private:
     friend class RestrictedSymbolicShapeAdapter;
 };
 
+// ---------------------------------------------------------------------------
+// PreparedRestrictedSymbolicTemplate — Prepare 的产物
+// 用法：持有 graph_template / 轴符号 / exact representative（仅 static fallback）
+// ---------------------------------------------------------------------------
 class PreparedRestrictedSymbolicTemplate final {
 public:
     PreparedRestrictedSymbolicTemplate();
@@ -66,10 +90,9 @@ public:
     PreparedRestrictedSymbolicTemplate(PreparedRestrictedSymbolicTemplate&&) noexcept;
     PreparedRestrictedSymbolicTemplate& operator=(PreparedRestrictedSymbolicTemplate&&) noexcept;
 
-    const shape::experimental::v1::GraphTemplate& graph_template() const;
+    const specialization::GraphTemplate& graph_template() const;
     const std::vector<InputAxisSymbol>& input_axis_symbols() const;
-    // The frozen representative is retained solely for static-exact fallback;
-    // it is never a dynamic RuntimeSession plan.
+    // 不是动态 RuntimeSession plan
     const kxc::api::experimental::shape_exact::v1::PreparedGraphTemplate& representative() const;
 
 private:
@@ -79,35 +102,32 @@ private:
     friend class RestrictedSymbolicShapeAdapter;
 };
 
+// ---------------------------------------------------------------------------
+// RestrictedSymbolicShapeAdapter — Prepare + Mint* + 差分
+// ---------------------------------------------------------------------------
 class RestrictedSymbolicShapeAdapter final {
 public:
     static bool IsEnabled() noexcept;
 
-    // Deep-freezes the representative through the exact adapter, then exposes
-    // only fixed-rank relu/sqrt and equal-shape add/mul formulas. Constants,
-    // broadcasts, aliases, control flow, and unsupported Relay structure fail closed.
+    // 深冻结代表；不支持的 Relay 结构直接失败
     static PreparedRestrictedSymbolicTemplate Prepare(
         Function representative, CompileConfig config,
         std::vector<InputAxisSymbol> input_axis_symbols);
 
-    // These mint complete requests before any lowering/cache authority is
-    // touched. A guard miss, stale template, or invalid tail proof throws.
+    // 在 lowering/cache 之前铸造完整请求；guard miss / 非法 proof → 抛错
     static RestrictedDispatchDecision MintExact(
         const PreparedRestrictedSymbolicTemplate& prepared,
-        const shape::experimental::v1::BindingSet& bindings);
+        const specialization::BindingSet& bindings);
     static RestrictedDispatchDecision MintBucket(
         const PreparedRestrictedSymbolicTemplate& prepared,
-        const shape::experimental::v1::BindingSet& bindings,
-        const shape::experimental::v1::BucketPolicy& policy);
+        const specialization::BindingSet& bindings,
+        const specialization::BucketPolicy& policy);
     static RestrictedDispatchDecision MintPolymorphic(
         const PreparedRestrictedSymbolicTemplate& prepared,
-        const shape::experimental::v1::BindingSet& bindings,
-        const shape::experimental::v1::PolymorphicPolicy& policy);
+        const specialization::BindingSet& bindings,
+        const specialization::PolymorphicPolicy& policy);
 
-    // Returns precisely the units whose complete semantic artifact/boundary
-    // identity changed. Graph-local routing and profile/oracle identity are
-    // intentionally excluded; incomparable unit semantic contexts reject.
-    // This is never a cache comparison.
+    // 语义 artifact/边界变化的 unit 下标；不是 cache 比较
     static std::vector<size_t> ChangedUnitIndices(
         const RestrictedDispatchDecision& previous,
         const RestrictedDispatchDecision& next);

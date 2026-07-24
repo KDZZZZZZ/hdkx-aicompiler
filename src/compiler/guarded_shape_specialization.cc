@@ -1,13 +1,13 @@
-#include "kxc/shape/fakes/compiler_foundation_v1.h"
+#include "kxc/compiler/guarded_shape_specialization.h"
+#include "../../test/support/shape_compiler_foundation_fakes.h"
 
 #include <algorithm>
-#include <limits>
 #include <set>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
 
-namespace kxc::shape::experimental::v1 {
+namespace kxc::api::experimental::shape_specialization::v1 {
 namespace {
 
 [[noreturn]] void Invalid(const std::string& message) {
@@ -52,7 +52,7 @@ std::vector<std::string> SortedSymbols(std::vector<std::string> symbols) {
 std::string TailString(const TailContract& tail) {
   std::string result("tail.v1");
   AppendU64(&result, tail.ordered_unit_index);
-  AppendField(&result, tail.unit_semantic_key.CanonicalBytes());
+  AppendField(&result, tail.unit_semantic_key.canonical_bytes());
   AppendU64(&result, tail.staging_pad ? 1 : 0);
   AppendU64(&result, tail.mask ? 1 : 0);
   AppendU64(&result, tail.predicate ? 1 : 0);
@@ -62,7 +62,7 @@ std::string TailString(const TailContract& tail) {
 
 std::string TailArtifactString(const TailContract& tail) {
   std::string result("tail-artifact.v1");
-  AppendField(&result, tail.unit_semantic_key.CanonicalBytes());
+  AppendField(&result, tail.unit_semantic_key.canonical_bytes());
   AppendU64(&result, tail.staging_pad ? 1 : 0);
   AppendU64(&result, tail.mask ? 1 : 0);
   AppendU64(&result, tail.predicate ? 1 : 0);
@@ -70,51 +70,15 @@ std::string TailArtifactString(const TailContract& tail) {
   return result;
 }
 
-std::vector<int64_t> RowMajorStrides(const std::vector<int64_t>& physical) {
-  std::vector<int64_t> strides(physical.size(), 1);
-  int64_t stride = 1;
-  for (size_t index = physical.size(); index > 0; --index) {
-    strides[index - 1] = stride;
-    if (physical[index - 1] != 0 &&
-        stride > std::numeric_limits<int64_t>::max() / physical[index - 1]) {
-      Invalid("bucket row-major stride overflow");
-    }
-    stride *= physical[index - 1];
-  }
-  return strides;
-}
-
-void VerifyPhysicalByteExtent(const std::vector<int64_t>& physical,
-                              const TensorAbiDescriptor& abi) {
-  int64_t element_count = 1;
-  for (const int64_t extent : physical) {
-    if (extent != 0 && element_count > std::numeric_limits<int64_t>::max() / extent) {
-      Invalid("bucket physical element count overflow");
-    }
-    element_count *= extent;
-  }
-  if (element_count != 0 &&
-      element_count > std::numeric_limits<int64_t>::max() /
-                          static_cast<int64_t>(abi.element_bytes())) {
-    Invalid("bucket physical byte extent overflow");
-  }
-}
-
 std::string BucketBoundaryString(const BucketValueBoundary& boundary) {
-  std::string result("bucket-boundary.v1");
+  std::string result("bucket-boundary.v2");
   AppendU64(&result, boundary.physical.size());
   for (int64_t extent : boundary.physical) AppendU64(&result, static_cast<uint64_t>(extent));
-  AppendU64(&result, boundary.strides.size());
-  for (int64_t stride : boundary.strides) AppendU64(&result, static_cast<uint64_t>(stride));
-  AppendField(&result, boundary.layout);
-  AppendU64(&result, static_cast<uint64_t>(boundary.alignment));
-  AppendField(&result, boundary.memory_scope);
-  AppendField(&result, boundary.abi.CanonicalBytes());
   return result;
 }
 
 std::string SymbolicBoundaryString(const SymbolicBoundaryContract& boundary) {
-  std::string result("symbolic-boundary.v1");
+  std::string result("symbolic-boundary.v2");
   AppendU64(&result, boundary.dimensions.size());
   for (const DimExpr& dimension : boundary.dimensions) AppendField(&result, dimension.CanonicalString());
   AppendU64(&result, boundary.axis_names.size());
@@ -122,10 +86,6 @@ std::string SymbolicBoundaryString(const SymbolicBoundaryContract& boundary) {
     AppendU64(&result, axis_name.has_value() ? 1 : 0);
     if (axis_name) AppendField(&result, *axis_name);
   }
-  AppendField(&result, boundary.layout);
-  AppendU64(&result, static_cast<uint64_t>(boundary.alignment));
-  AppendField(&result, boundary.memory_scope);
-  AppendField(&result, boundary.abi.CanonicalBytes());
   return result;
 }
 
@@ -170,15 +130,16 @@ const NamedTensorContract& TemplateValue(const GraphTemplate& graph_template, co
 
 void VerifyOracleFirst(const GraphTemplate& graph_template, const ExactOracle& oracle) {
   graph_template.Verify();
-  const ShapeProfileKey& key = oracle.profile().key();
-  if (!(key.graph_template() == graph_template.key()) ||
-      !(key.graph_template_content() == graph_template.content_key()) ||
-      key.policy_id() != "exact" || key.shape_abi_version() != kShapeAbiVersion) {
+  const ExactShapeProfile& profile = oracle.profile();
+  if (profile.key().graph_semantic_key() != graph_template.key() ||
+      profile.policy_id() != "exact" ||
+      profile.shape_abi_version() != kShapeProfileAbiVersion) {
     Invalid("exact oracle is not minted for this graph template");
   }
   // Re-evaluate the request so a copied oracle cannot be paired with a different binding.
-  const ExactOracle differential = InstantiateExactProfile(graph_template, key.bindings());
-  if (!(differential.profile().key() == key) ||
+  const ExactOracle differential =
+      InstantiateExactProfile(graph_template, profile.bindings());
+  if (!(differential.profile().key() == profile.key()) ||
       differential.profile().values().size() != oracle.profile().values().size()) {
     Invalid("exact oracle request does not match the graph template");
   }
@@ -243,7 +204,8 @@ void VerifyTails(const GraphTemplate& graph_template, const BucketPolicy& policy
 
 void VerifyBucketPolicy(const GraphTemplate& graph_template, const ExactOracle& oracle,
                         const BucketPolicy& policy) {
-  VerifyGuardForTemplate(policy.guard(), graph_template, oracle.profile().key().bindings());
+  VerifyGuardForTemplate(policy.guard(), graph_template,
+                         oracle.profile().bindings());
   const std::vector<std::string> names = AllValueNames(graph_template);
   std::vector<std::string> provided;
   for (const auto& boundary : policy.boundaries()) provided.push_back(boundary.name);
@@ -253,20 +215,9 @@ void VerifyBucketPolicy(const GraphTemplate& graph_template, const ExactOracle& 
     const ConcreteTensorShapeContract& exact = ExactValue(oracle, name).contract;
     const BucketValueBoundary& boundary = BucketBoundary(policy, name);
     CheckName(boundary.name, "bucket value name");
-    CheckName(boundary.layout, "bucket layout");
-    CheckName(boundary.memory_scope, "bucket memory scope");
-    if (boundary.alignment <= 0 || (boundary.alignment & (boundary.alignment - 1)) != 0 ||
-        boundary.physical.size() != exact.logical.size() ||
-        boundary.strides.size() != exact.logical.size() ||
-        boundary.layout != exact.layout || boundary.alignment != exact.alignment ||
-        boundary.memory_scope != exact.memory_scope || !(boundary.abi == exact.abi)) {
-      Invalid("bucket boundary has incompatible rank or layout");
+    if (boundary.physical.size() != exact.logical.size()) {
+      Invalid("bucket boundary has incompatible rank");
     }
-    if (boundary.layout == "contiguous.row_major" &&
-        boundary.strides != RowMajorStrides(boundary.physical)) {
-      Invalid("bucket boundary has invalid contiguous row-major strides");
-    }
-    VerifyPhysicalByteExtent(boundary.physical, boundary.abi);
     for (size_t axis = 0; axis < boundary.physical.size(); ++axis) {
       if (boundary.physical[axis] < exact.logical[axis]) {
         Invalid("bucket physical capacity is smaller than exact logical extent");
@@ -285,10 +236,8 @@ bool ScalarMatches(const RuntimeExtentScalar& scalar, const BindingSet& bindings
 
 void VerifyPolymorphicPolicy(const GraphTemplate& graph_template, const ExactOracle& oracle,
                              const PolymorphicPolicy& policy) {
-  VerifyGuardForTemplate(policy.guard(), graph_template, oracle.profile().key().bindings());
-  if (!(policy.target_backend_abi() == graph_template.key().target_backend_abi())) {
-    Invalid("polymorphic target/backend ABI does not match graph template");
-  }
+  VerifyGuardForTemplate(policy.guard(), graph_template,
+                         oracle.profile().bindings());
   if (policy.allowlist_proofs().size() != graph_template.ordered_units().size()) {
     Invalid("polymorphic policy requires an allowlist proof for every ordered unit");
   }
@@ -315,7 +264,7 @@ void VerifyPolymorphicPolicy(const GraphTemplate& graph_template, const ExactOra
     if (scalar.ordinal != index || scalar.name.empty() || scalar.symbol.empty() || scalar.lower < 0 ||
         scalar.upper < scalar.lower || scalar.divisible_by <= 0 || !scalar_names.insert(scalar.name).second ||
         !scalar_symbols.insert(scalar.symbol).second || !guard_covers_symbol ||
-        !ScalarMatches(scalar, oracle.profile().key().bindings())) {
+        !ScalarMatches(scalar, oracle.profile().bindings())) {
       Invalid("runtime extent ABI has omitted, reordered, unbound, or out-of-domain scalar");
     }
   }
@@ -330,12 +279,8 @@ void VerifyPolymorphicPolicy(const GraphTemplate& graph_template, const ExactOra
     const NamedTensorContract& expected = TemplateValue(graph_template, name);
     const SymbolicBoundaryContract& actual = SymbolicBoundary(policy, name);
     if (actual.dimensions != expected.contract.logical().dimensions() ||
-        actual.axis_names != expected.contract.logical().axis_names() ||
-        actual.layout != expected.contract.physical().layout() ||
-        actual.alignment != expected.contract.physical().alignment() ||
-        actual.memory_scope != expected.contract.physical().memory_scope() ||
-        !(actual.abi == expected.contract.abi())) {
-      Invalid("polymorphic symbolic boundary has incompatible rank or layout");
+        actual.axis_names != expected.contract.logical().axis_names()) {
+      Invalid("polymorphic symbolic boundary is incompatible");
     }
   }
 }
@@ -343,12 +288,9 @@ void VerifyPolymorphicPolicy(const GraphTemplate& graph_template, const ExactOra
 std::string BucketPayload(const GraphTemplate& graph_template, const GuardedShapeProfile& profile,
                           const UnitSkeleton& unit, size_t index) {
   const BucketPolicy& policy = *profile.bucket_policy();
-  std::string bytes("kxc.shape.guarded-bucket-artifact.v1");
-  AppendField(&bytes, unit.semantic_key.CanonicalBytes());
-  AppendU64(&bytes, kShapeAbiVersion);
-  AppendField(&bytes, graph_template.key().pipeline_fingerprint());
-  AppendField(&bytes, graph_template.key().capability_fingerprint());
-  AppendField(&bytes, graph_template.key().target_backend_abi().CanonicalBytes());
+  std::string bytes("kxc.compiler.shape.bucket-specialization.v2");
+  AppendField(&bytes, unit.semantic_key.canonical_bytes());
+  AppendU64(&bytes, kShapeProfileAbiVersion);
   AppendField(&bytes, policy.bucket_id());
   AppendU64(&bytes, policy.policy_version());
   AppendField(&bytes, policy.guard().CanonicalString());
@@ -368,15 +310,11 @@ std::string BucketPayload(const GraphTemplate& graph_template, const GuardedShap
 std::string PolymorphicPayload(const GraphTemplate& graph_template, const GuardedShapeProfile& profile,
                                const UnitSkeleton& unit, size_t index) {
   const PolymorphicPolicy& policy = *profile.polymorphic_policy();
-  std::string bytes("kxc.shape.guarded-polymorphic-artifact.v1");
-  AppendField(&bytes, unit.semantic_key.CanonicalBytes());
-  AppendU64(&bytes, kShapeAbiVersion);
-  AppendField(&bytes, graph_template.key().pipeline_fingerprint());
-  AppendField(&bytes, graph_template.key().capability_fingerprint());
-  AppendField(&bytes, graph_template.key().target_backend_abi().CanonicalBytes());
+  std::string bytes("kxc.compiler.shape.polymorphic-specialization.v2");
+  AppendField(&bytes, unit.semantic_key.canonical_bytes());
+  AppendU64(&bytes, kShapeProfileAbiVersion);
   AppendU64(&bytes, policy.policy_version());
   AppendField(&bytes, policy.guard().CanonicalString());
-  AppendField(&bytes, policy.target_backend_abi().CanonicalBytes());
   AppendU64(&bytes, policy.workspace_upper_bound());
   AppendField(&bytes, policy.allowlist_proofs()[index].proof);
   AppendU64(&bytes, policy.runtime_extent_abi().size());
@@ -452,15 +390,8 @@ BucketPolicy::BucketPolicy(std::string bucket_id, uint32_t policy_version, Appli
   for (size_t index = 0; index < boundaries_.size(); ++index) {
     const auto& boundary = boundaries_[index];
     CheckName(boundary.name, "bucket value name");
-    CheckName(boundary.layout, "bucket layout");
-    CheckName(boundary.memory_scope, "bucket memory scope");
-    if (boundary.strides.size() != boundary.physical.size() ||
-        std::any_of(boundary.physical.begin(), boundary.physical.end(),
-                    [](int64_t extent) { return extent < 0; }) ||
-        std::any_of(boundary.strides.begin(), boundary.strides.end(),
-                    [](int64_t stride) { return stride < 0; }) ||
-        boundary.alignment <= 0 ||
-        (boundary.alignment & (boundary.alignment - 1)) != 0 ||
+    if (std::any_of(boundary.physical.begin(), boundary.physical.end(),
+                     [](int64_t extent) { return extent < 0; }) ||
         (index != 0 && boundaries_[index - 1].name == boundary.name)) {
       Invalid("invalid bucket boundary");
     }
@@ -494,11 +425,10 @@ PolymorphicPolicy::PolymorphicPolicy(uint32_t policy_version, ApplicabilityGuard
                                      std::vector<PolymorphicUnitProof> allowlist_proofs,
                                      std::vector<RuntimeExtentScalar> runtime_extent_abi,
                                      std::vector<SymbolicBoundaryContract> boundaries,
-                                     TargetBackendAbiDescriptor target_backend_abi,
                                      uint64_t workspace_upper_bound)
     : policy_version_(policy_version), guard_(std::move(guard)), allowlist_proofs_(std::move(allowlist_proofs)),
       runtime_extent_abi_(std::move(runtime_extent_abi)), boundaries_(std::move(boundaries)),
-      target_backend_abi_(std::move(target_backend_abi)), workspace_upper_bound_(workspace_upper_bound) {
+      workspace_upper_bound_(workspace_upper_bound) {
   if (policy_version_ == 0 || allowlist_proofs_.empty() || runtime_extent_abi_.empty() || boundaries_.empty()) {
     Invalid("polymorphic policy requires version, allowlist, runtime ABI, and boundaries");
   }
@@ -506,11 +436,8 @@ PolymorphicPolicy::PolymorphicPolicy(uint32_t policy_version, ApplicabilityGuard
   for (size_t i = 0; i < boundaries_.size(); ++i) {
     const auto& boundary = boundaries_[i];
     CheckName(boundary.name, "polymorphic boundary name");
-    CheckName(boundary.layout, "polymorphic layout");
-    CheckName(boundary.memory_scope, "polymorphic memory scope");
-    if (boundary.alignment <= 0 ||
-        (boundary.alignment & (boundary.alignment - 1)) != 0 ||
-        (!boundary.axis_names.empty() && boundary.axis_names.size() != boundary.dimensions.size()) ||
+    if ((!boundary.axis_names.empty() &&
+         boundary.axis_names.size() != boundary.dimensions.size()) ||
         (i != 0 && boundaries_[i - 1].name == boundary.name)) {
       Invalid("invalid polymorphic boundary");
     }
@@ -521,9 +448,6 @@ const ApplicabilityGuard& PolymorphicPolicy::guard() const noexcept { return gua
 const std::vector<PolymorphicUnitProof>& PolymorphicPolicy::allowlist_proofs() const noexcept { return allowlist_proofs_; }
 const std::vector<RuntimeExtentScalar>& PolymorphicPolicy::runtime_extent_abi() const noexcept { return runtime_extent_abi_; }
 const std::vector<SymbolicBoundaryContract>& PolymorphicPolicy::boundaries() const noexcept { return boundaries_; }
-const TargetBackendAbiDescriptor& PolymorphicPolicy::target_backend_abi() const noexcept {
-  return target_backend_abi_;
-}
 uint64_t PolymorphicPolicy::workspace_upper_bound() const noexcept { return workspace_upper_bound_; }
 std::string PolymorphicPolicy::CanonicalString() const {
   std::string bytes("kxc.shape.polymorphic-policy.v1");
@@ -532,7 +456,7 @@ std::string PolymorphicPolicy::CanonicalString() const {
   AppendU64(&bytes, allowlist_proofs_.size());
   for (const auto& proof : allowlist_proofs_) {
     AppendU64(&bytes, proof.ordered_unit_index);
-    AppendField(&bytes, proof.unit_semantic_key.CanonicalBytes());
+    AppendField(&bytes, proof.unit_semantic_key.canonical_bytes());
     AppendField(&bytes, proof.proof);
   }
   AppendU64(&bytes, runtime_extent_abi_.size());
@@ -544,21 +468,28 @@ std::string PolymorphicPolicy::CanonicalString() const {
     AppendField(&bytes, boundary.name);
     AppendField(&bytes, SymbolicBoundaryString(boundary));
   }
-  AppendField(&bytes, target_backend_abi_.CanonicalBytes());
   AppendU64(&bytes, workspace_upper_bound_);
   return "PolymorphicPolicy(" + Hex(bytes) + ")";
 }
 
 GuardedShapeProfile::GuardedShapeProfile(GuardedProfileKind kind, ShapeProfileKey key,
-                                         ShapeProfileKey exact_oracle_key, ApplicabilityGuard guard,
+                                         ShapeProfileKey exact_oracle_key,
+                                         BindingSet bindings,
+                                         ApplicabilityGuard guard,
                                          std::vector<GuardedValueContract> values,
                                          std::optional<BucketPolicy> bucket_policy,
                                          std::optional<PolymorphicPolicy> polymorphic_policy)
-    : kind_(kind), key_(std::move(key)), exact_oracle_key_(std::move(exact_oracle_key)), guard_(std::move(guard)),
-      values_(std::move(values)), bucket_policy_(std::move(bucket_policy)), polymorphic_policy_(std::move(polymorphic_policy)) {}
+    : kind_(kind), key_(std::move(key)),
+      exact_oracle_key_(std::move(exact_oracle_key)),
+      bindings_(std::move(bindings)), guard_(std::move(guard)),
+      values_(std::move(values)), bucket_policy_(std::move(bucket_policy)),
+      polymorphic_policy_(std::move(polymorphic_policy)) {}
 GuardedProfileKind GuardedShapeProfile::kind() const noexcept { return kind_; }
 const ShapeProfileKey& GuardedShapeProfile::key() const noexcept { return key_; }
 const ShapeProfileKey& GuardedShapeProfile::exact_oracle_key() const noexcept { return exact_oracle_key_; }
+const BindingSet& GuardedShapeProfile::bindings() const noexcept {
+  return bindings_;
+}
 const ApplicabilityGuard& GuardedShapeProfile::guard() const noexcept { return guard_; }
 const std::vector<GuardedValueContract>& GuardedShapeProfile::values() const noexcept { return values_; }
 const GuardedValueContract& GuardedShapeProfile::Value(const std::string& name) const {
@@ -578,14 +509,16 @@ GuardedShapeProfile BuildBucketProfile(const GraphTemplate& graph_template, cons
     ConcreteTensorShapeContract contract = ExactValue(oracle, name).contract;
     const BucketValueBoundary& boundary = BucketBoundary(policy, name);
     contract.physical = boundary.physical;
-    contract.strides = boundary.strides;
     values.push_back(GuardedValueContract{name, std::move(contract)});
   }
-  return GuardedShapeProfile(GuardedProfileKind::kBucket,
-      ShapeProfileKey(graph_template.key(), graph_template.content_key(),
-                      oracle.profile().key().bindings(),
-                      "bucket:" + policy.bucket_id() + ":" + std::to_string(policy.policy_version()), kShapeAbiVersion),
-      oracle.profile().key(), policy.guard(), std::move(values), policy, std::nullopt);
+  return GuardedShapeProfile(
+      GuardedProfileKind::kBucket,
+      BuildShapeProfileKey(
+          graph_template.key(), graph_template.CanonicalBytes(),
+          oracle.profile().bindings().CanonicalString(),
+          "bucket|" + policy.CanonicalString(), kShapeProfileAbiVersion),
+      oracle.profile().key(), oracle.profile().bindings(), policy.guard(),
+      std::move(values), policy, std::nullopt);
 }
 
 GuardedShapeProfile BuildPolymorphicProfile(const GraphTemplate& graph_template, const ExactOracle& oracle,
@@ -596,36 +529,22 @@ GuardedShapeProfile BuildPolymorphicProfile(const GraphTemplate& graph_template,
   for (const std::string& name : AllValueNames(graph_template)) {
     values.push_back(GuardedValueContract{name, ExactValue(oracle, name).contract});
   }
-  return GuardedShapeProfile(GuardedProfileKind::kPolymorphic,
-      ShapeProfileKey(graph_template.key(), graph_template.content_key(),
-                      oracle.profile().key().bindings(),
-                      "polymorphic:" + std::to_string(policy.policy_version()), kShapeAbiVersion),
-      oracle.profile().key(), policy.guard(), std::move(values), std::nullopt, policy);
-}
-
-GuardedArtifactKey::GuardedArtifactKey(GuardedProfileKind kind, UnitSemanticKey unit_semantic_key,
-                                       std::string canonical_payload)
-    : kind_(kind), unit_semantic_key_(std::move(unit_semantic_key)), canonical_payload_(std::move(canonical_payload)) {
-  if (canonical_payload_.empty()) Invalid("guarded artifact payload must not be empty");
-}
-GuardedProfileKind GuardedArtifactKey::kind() const noexcept { return kind_; }
-const UnitSemanticKey& GuardedArtifactKey::unit_semantic_key() const noexcept { return unit_semantic_key_; }
-std::string GuardedArtifactKey::CanonicalBytes() const { return canonical_payload_; }
-std::string GuardedArtifactKey::CanonicalString() const { return "GuardedArtifactKey(" + Hex(canonical_payload_) + ")"; }
-bool GuardedArtifactKey::operator==(const GuardedArtifactKey& other) const noexcept {
-  return kind_ == other.kind_ && unit_semantic_key_ == other.unit_semantic_key_ && canonical_payload_ == other.canonical_payload_;
+  return GuardedShapeProfile(
+      GuardedProfileKind::kPolymorphic,
+      BuildShapeProfileKey(
+          graph_template.key(), graph_template.CanonicalBytes(),
+          oracle.profile().bindings().CanonicalString(),
+          "polymorphic|" + policy.CanonicalString(), kShapeProfileAbiVersion),
+      oracle.profile().key(), oracle.profile().bindings(), policy.guard(),
+      std::move(values), std::nullopt, policy);
 }
 
 std::vector<GuardedUnitSpecializationRequest> MakeGuardedSpecializationRequests(
     const GraphTemplate& graph_template, const GuardedShapeProfile& profile) {
   graph_template.Verify();
-  if (!(profile.key().graph_template() == graph_template.key()) ||
-      !(profile.key().graph_template_content() == graph_template.content_key()) ||
-      !(profile.exact_oracle_key().graph_template() == graph_template.key()) ||
-      !(profile.exact_oracle_key().graph_template_content() == graph_template.content_key()) ||
-      profile.key().shape_abi_version() != kShapeAbiVersion || profile.exact_oracle_key().policy_id() != "exact" ||
-      !(profile.key().bindings() == profile.exact_oracle_key().bindings()) ||
-      !profile.guard().Matches(graph_template, profile.exact_oracle_key().bindings())) {
+  if (profile.key().graph_semantic_key() != graph_template.key() ||
+      profile.exact_oracle_key().graph_semantic_key() != graph_template.key() ||
+      !profile.guard().Matches(graph_template, profile.bindings())) {
     Invalid("guarded profile does not retain a matching exact request and guard");
   }
   if ((profile.kind() == GuardedProfileKind::kBucket && profile.bucket_policy() == nullptr) ||
@@ -644,50 +563,32 @@ std::vector<GuardedUnitSpecializationRequest> MakeGuardedSpecializationRequests(
         : PolymorphicPayload(graph_template, profile, unit, index);
     requests.push_back(GuardedUnitSpecializationRequest{index, unit.call_locator, profile.key(),
         profile.exact_oracle_key(), profile.kind(), profile.guard().CanonicalString(),
-        GuardedArtifactKey(profile.kind(), unit.semantic_key, payload), std::move(inputs), std::move(outputs)});
+        payload, unit.semantic_key, std::move(inputs), std::move(outputs)});
   }
   return requests;
 }
 
-GuardedPlanVariantKey::GuardedPlanVariantKey(GraphTemplateKey graph_template_key,
-                                             ShapeProfileKey shape_profile_key,
-                                             std::vector<std::string> ordered_call_identities)
-    : graph_template_key_(std::move(graph_template_key)), shape_profile_key_(std::move(shape_profile_key)),
-      ordered_call_identities_(std::move(ordered_call_identities)) {
-  if (!(shape_profile_key_.graph_template() == graph_template_key_) || ordered_call_identities_.empty()) {
-    Invalid("guarded plan key has incompatible profile or empty call sequence");
-  }
-  for (const std::string& identity : ordered_call_identities_) CheckName(identity, "guarded plan call identity");
-}
-std::string GuardedPlanVariantKey::CanonicalString() const {
-  std::string bytes("kxc.shape.guarded-plan.v1");
-  AppendField(&bytes, graph_template_key_.CanonicalBytes());
-  AppendField(&bytes, shape_profile_key_.CanonicalBytes());
-  AppendU64(&bytes, ordered_call_identities_.size());
-  for (const std::string& identity : ordered_call_identities_) AppendField(&bytes, identity);
-  return "GuardedPlanVariantKey(" + Hex(bytes) + ")";
-}
-bool GuardedPlanVariantKey::operator==(const GuardedPlanVariantKey& other) const noexcept {
-  return graph_template_key_ == other.graph_template_key_ && shape_profile_key_ == other.shape_profile_key_ &&
-         ordered_call_identities_ == other.ordered_call_identities_;
-}
+}  // namespace kxc::api::experimental::shape_specialization::v1
 
-}  // namespace kxc::shape::experimental::v1
-
-namespace kxc::shape::experimental::v1::fakes::compiler_foundation_v1 {
+namespace kxc::api::experimental::shape_specialization::v1::fakes::
+    compiler_foundation_v1 {
 namespace {
 
 [[noreturn]] void Invalid(const std::string& message) {
   throw std::invalid_argument("guarded shape specialization fake v1: " + message);
 }
 
-std::string EntrySymbol(const GuardedArtifactKey& key) {
-  std::string bytes = key.CanonicalBytes();
-  static constexpr char kDigits[] = "0123456789abcdef";
-  std::string hex;
-  hex.reserve(bytes.size() * 2);
-  for (unsigned char byte : bytes) { hex.push_back(kDigits[byte >> 4U]); hex.push_back(kDigits[byte & 0xfU]); }
-  return "guarded_fake_v1_entry_" + hex;
+PrimitiveArtifactKey PrimitiveKey(
+    const GuardedUnitSpecializationRequest& request) {
+  return PrimitiveArtifactKey(
+      request.unit_semantic_key, "test-only-target",
+      request.specialization_canonical,
+      1, "test-only-guarded-schedule-v1",
+      "test-only-guarded-backend-v1");
+}
+
+std::string EntrySymbol(const PrimitiveArtifactKey& key) {
+  return "guarded_fake_v1_entry_" + key.digest();
 }
 
 void VerifyRequest(const GuardedUnitSpecializationRequest& request,
@@ -706,28 +607,35 @@ void VerifyRequest(const GuardedUnitSpecializationRequest& request,
   if (request.guard_canonical != expected.guard_canonical) {
     Invalid("request guard does not match the canonical profile guard");
   }
+  if (request.specialization_canonical !=
+          expected.specialization_canonical ||
+      request.unit_semantic_key != expected.unit_semantic_key) {
+    Invalid("request specialization does not match the template and policy");
+  }
   if (request.ordered_inputs != expected.ordered_inputs) {
     Invalid("request ordered input concrete contracts do not match the guarded profile");
   }
   if (request.ordered_outputs != expected.ordered_outputs) {
     Invalid("request ordered output concrete contracts do not match the guarded profile");
   }
-  if (!(request.artifact_key == expected.artifact_key)) {
-    Invalid("request guarded artifact key payload does not match the template and policy");
-  }
 }
 
 }  // namespace
 
 GuardedFakeSelectedArtifact::GuardedFakeSelectedArtifact(const GuardedUnitSpecializationRequest& request,
+                                                         PrimitiveArtifactKey artifact_key,
                                                          std::string entry_symbol)
-    : request_(request), entry_symbol_(std::move(entry_symbol)) {}
+    : request_(request), artifact_key_(std::move(artifact_key)),
+      entry_symbol_(std::move(entry_symbol)) {}
 size_t GuardedFakeSelectedArtifact::ordered_call_index() const noexcept { return request_.ordered_call_index; }
 const ShapeProfileKey& GuardedFakeSelectedArtifact::shape_profile_key() const noexcept { return request_.shape_profile_key; }
 const ShapeProfileKey& GuardedFakeSelectedArtifact::exact_oracle_key() const noexcept { return request_.exact_oracle_key; }
 GuardedProfileKind GuardedFakeSelectedArtifact::kind() const noexcept { return request_.kind; }
 const std::string& GuardedFakeSelectedArtifact::guard_canonical() const noexcept { return request_.guard_canonical; }
-const GuardedArtifactKey& GuardedFakeSelectedArtifact::artifact_key() const noexcept { return request_.artifact_key; }
+const PrimitiveArtifactKey&
+GuardedFakeSelectedArtifact::artifact_key() const noexcept {
+  return artifact_key_;
+}
 const std::string& GuardedFakeSelectedArtifact::entry_symbol() const noexcept { return entry_symbol_; }
 uint64_t GuardedFakeSelectedArtifact::generation() const noexcept { return 0; }
 
@@ -745,21 +653,27 @@ std::vector<GuardedFakeSelectedArtifact> GuardedDeterministicMockCoordinator::Re
   std::vector<GuardedFakeSelectedArtifact> result;
   result.reserve(expected.size());
   for (const auto& request : expected) {
-    if (std::find(unique_artifacts_.begin(), unique_artifacts_.end(), request.artifact_key) == unique_artifacts_.end()) {
-      unique_artifacts_.push_back(request.artifact_key);
+    const PrimitiveArtifactKey artifact_key = PrimitiveKey(request);
+    if (std::find(unique_artifacts_.begin(), unique_artifacts_.end(),
+                  artifact_key) == unique_artifacts_.end()) {
+      unique_artifacts_.push_back(artifact_key);
     }
-    result.push_back(GuardedFakeSelectedArtifact(request, EntrySymbol(request.artifact_key)));
+    result.push_back(
+        GuardedFakeSelectedArtifact(request, artifact_key,
+                                    EntrySymbol(artifact_key)));
   }
   return result;
 }
 size_t GuardedDeterministicMockCoordinator::unique_resolve_count() const noexcept { return unique_artifacts_.size(); }
 
-GuardedFakeFrozenPlan::GuardedFakeFrozenPlan(GuardedPlanVariantKey key, GuardedShapeProfile profile,
+GuardedFakeFrozenPlan::GuardedFakeFrozenPlan(PlanVariantKey key, GuardedShapeProfile profile,
                                              std::vector<GuardedFakeFrozenPlanCall> ordered_calls,
                                              std::vector<GuardedFakeSelectedArtifact> retained_artifacts)
     : key_(std::move(key)), profile_(std::move(profile)), ordered_calls_(std::move(ordered_calls)),
       retained_artifacts_(std::move(retained_artifacts)) {}
-const GuardedPlanVariantKey& GuardedFakeFrozenPlan::key() const noexcept { return key_; }
+const PlanVariantKey& GuardedFakeFrozenPlan::key() const noexcept {
+  return key_;
+}
 const GuardedShapeProfile& GuardedFakeFrozenPlan::profile() const noexcept { return profile_; }
 const std::vector<GuardedFakeFrozenPlanCall>& GuardedFakeFrozenPlan::ordered_calls() const noexcept { return ordered_calls_; }
 const std::vector<GuardedFakeSelectedArtifact>& GuardedFakeFrozenPlan::retained_artifacts() const noexcept { return retained_artifacts_; }
@@ -770,13 +684,14 @@ GuardedFakeFrozenPlan GuardedDeterministicMockPlanAssembler::Assemble(
   const auto expected = MakeGuardedSpecializationRequests(graph_template, profile);
   if (expected.size() != selected_artifacts.size()) Invalid("missing or extra selected guarded artifact");
   std::vector<GuardedFakeFrozenPlanCall> calls;
-  std::vector<std::string> identities;
+  std::vector<OrderedArtifactSelectionIdentity> selections;
   for (size_t index = 0; index < expected.size(); ++index) {
     const auto& request = expected[index];
     const auto& selected = selected_artifacts[index];
     if (selected.ordered_call_index() != index || !(selected.shape_profile_key() == request.shape_profile_key) ||
         !(selected.exact_oracle_key() == request.exact_oracle_key) || selected.kind() != request.kind ||
-        selected.guard_canonical() != request.guard_canonical || !(selected.artifact_key() == request.artifact_key) ||
+        selected.guard_canonical() != request.guard_canonical ||
+        !(selected.artifact_key() == PrimitiveKey(request)) ||
         selected.generation() != 0) {
       Invalid("selected artifact does not match ordered guarded request");
     }
@@ -787,11 +702,14 @@ GuardedFakeFrozenPlan GuardedDeterministicMockPlanAssembler::Assemble(
     for (const std::string& name : unit.output_value_names) call.outputs.push_back(profile.Value(name));
     if (profile.kind() == GuardedProfileKind::kBucket) call.tail_contract = profile.bucket_policy()->tail_contracts()[index];
     else call.runtime_extent_abi = profile.polymorphic_policy()->runtime_extent_abi();
-    identities.push_back(unit.call_locator.value() + "|" + selected.entry_symbol() + "|0");
+    selections.push_back(OrderedArtifactSelectionIdentity{
+        index, selected.entry_symbol(), selected.artifact_key(), 0});
     calls.push_back(std::move(call));
   }
-  return GuardedFakeFrozenPlan(GuardedPlanVariantKey(graph_template.key(), profile.key(), std::move(identities)),
-                               profile, std::move(calls), selected_artifacts);
+  return GuardedFakeFrozenPlan(
+      BuildPlanVariantKey(graph_template.key(), profile.key(), selections,
+                          "test-only-guarded-memory-plan-v1"),
+      profile, std::move(calls), selected_artifacts);
 }
 
-}  // namespace kxc::shape::experimental::v1::fakes::compiler_foundation_v1
+}  // namespace kxc::api::experimental::shape_specialization::v1::fakes::compiler_foundation_v1

@@ -178,7 +178,8 @@ ProductionCompileOwnership ProductionArtifactCacheAdapter::ownership() const noe
     return {};
 }
 
-ArtifactLookup ProductionArtifactCacheAdapter::Lookup(const ArtifactKey& key) const {
+ArtifactLookup ProductionArtifactCacheAdapter::Lookup(
+    const PrimitiveArtifactKey& key) const {
     const internal::PrimitiveArtifactPin pin = internal::LookupPrimitiveCache(key);
     if (!pin.defined()) return {};
     return ArtifactLookup{ArtifactLookupKind::kHit, internal::ToArtifactPin(pin)};

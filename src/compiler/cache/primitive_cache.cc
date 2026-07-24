@@ -19,7 +19,7 @@
 namespace kxc::api::internal {
 
 struct PrimitiveArtifact final {
-    ArtifactKey key;
+    PrimitiveArtifactKey key;
     CachedPrimitive entry;
 };
 
@@ -71,10 +71,10 @@ PrimitiveCache& Cache() {
     return cache;
 }
 
-std::string KeyBytes(const ArtifactKey& key) {
+std::string KeyBytes(const PrimitiveArtifactKey& key) {
     if (!key.defined()) {
         throw std::invalid_argument(
-            "primitive artifact cache requires a complete ArtifactKey");
+            "primitive artifact cache requires a complete PrimitiveArtifactKey");
     }
     return key.canonical_bytes();
 }
@@ -191,7 +191,7 @@ bool PrimitiveArtifactPin::defined() const noexcept {
     return artifact_ != nullptr;
 }
 
-const ArtifactKey& PrimitiveArtifactPin::key() const {
+const PrimitiveArtifactKey& PrimitiveArtifactPin::key() const {
     if (!artifact_) throw std::logic_error("primitive artifact pin is undefined");
     return artifact_->key;
 }
@@ -205,7 +205,7 @@ PrimitiveCacheAccess PrimitiveCacheLease::access() const noexcept {
     return access_;
 }
 
-const ArtifactKey& PrimitiveCacheLease::key() const {
+const PrimitiveArtifactKey& PrimitiveCacheLease::key() const {
     if (!key_.defined()) throw std::logic_error("primitive cache lease has no key");
     return key_;
 }
@@ -236,7 +236,7 @@ uint64_t PrimitiveCacheLease::merged_waiter_count() const {
     return flight_->merged_waiters;
 }
 
-ArtifactKey BuildPrimitiveArtifactKey(
+PrimitiveArtifactKey BuildPrimitiveArtifactKey(
     const UnitSemanticKey& semantic_key, const Target& target,
     const std::string& pipeline_fingerprint, const char* schedule_version,
     const char* backend_version) {
@@ -246,12 +246,12 @@ ArtifactKey BuildPrimitiveArtifactKey(
         throw std::invalid_argument(
             "primitive artifact key requires semantics, pipeline, schedule, and backend");
     }
-    return ArtifactKey(semantic_key, CanonicalTargetSnapshot(target),
-                       pipeline_fingerprint, kKernelABIVersion,
-                       schedule_version, backend_version);
+    return PrimitiveArtifactKey(
+        semantic_key, CanonicalTargetSnapshot(target), pipeline_fingerprint,
+        kKernelABIVersion, schedule_version, backend_version);
 }
 
-PrimitiveArtifactPin LookupPrimitiveCache(const ArtifactKey& key) {
+PrimitiveArtifactPin LookupPrimitiveCache(const PrimitiveArtifactKey& key) {
     const std::string canonical = KeyBytes(key);
     PrimitiveCache& cache = Cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
@@ -279,7 +279,8 @@ ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin) {
                        std::make_shared<PrimitiveArtifactPin>(pin));
 }
 
-PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey& key) {
+PrimitiveCacheLease AcquirePrimitiveCache(
+    const PrimitiveArtifactKey& key) {
     const std::string canonical = KeyBytes(key);
     PrimitiveCache& cache = Cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
@@ -497,7 +498,7 @@ void SetPrimitiveCacheLimitsForTesting(PrimitiveCacheLimits limits) {
     BoundFailures(&cache);
 }
 
-void ForgetPrimitiveFailureForTesting(const ArtifactKey& key) {
+void ForgetPrimitiveFailureForTesting(const PrimitiveArtifactKey& key) {
     PrimitiveCache& cache = Cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
     cache.failures.erase(KeyBytes(key));

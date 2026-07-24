@@ -33,28 +33,6 @@ std::string Field(std::string_view value) {
   return std::to_string(value.size()) + ":" + std::string(value);
 }
 
-void AppendU64(std::string* bytes, uint64_t value) {
-  for (int shift = 0; shift != 64; shift += 8) {
-    bytes->push_back(static_cast<char>((value >> shift) & 0xffU));
-  }
-}
-
-void AppendField(std::string* bytes, std::string_view value) {
-  AppendU64(bytes, value.size());
-  bytes->append(value.data(), value.size());
-}
-
-std::string Hex(const std::string& bytes) {
-  static constexpr char kDigits[] = "0123456789abcdef";
-  std::string result;
-  result.reserve(bytes.size() * 2);
-  for (unsigned char byte : bytes) {
-    result.push_back(kDigits[byte >> 4U]);
-    result.push_back(kDigits[byte & 0xfU]);
-  }
-  return result;
-}
-
 void CheckName(const std::string& value, const char* label) {
   if (value.empty()) {
     Invalid(std::string(label) + " must not be empty");
@@ -67,121 +45,7 @@ std::vector<std::string> SortedUnique(std::vector<std::string> values) {
   return values;
 }
 
-uint64_t EncodeDataType(DataType value) {
-  switch (value) {
-    case DataType::kFloat16: return 1;
-    case DataType::kFloat32: return 2;
-  }
-  Invalid("unsupported tensor dtype");
-}
-
-uint64_t EncodeDeviceKind(DeviceKind value) {
-  switch (value) {
-    case DeviceKind::kCpu: return 1;
-    case DeviceKind::kCuda: return 2;
-  }
-  Invalid("unsupported device kind");
-}
-
-uint64_t EncodeTargetKind(TargetKind value) {
-  switch (value) {
-    case TargetKind::kX86_64: return 1;
-    case TargetKind::kAArch64: return 2;
-    case TargetKind::kNvptx64: return 3;
-  }
-  Invalid("unsupported target kind");
-}
-
-uint64_t EncodeBackendKind(BackendKind value) {
-  switch (value) {
-    case BackendKind::kNative: return 1;
-    case BackendKind::kLlvm: return 2;
-    case BackendKind::kCuda: return 3;
-  }
-  Invalid("unsupported backend kind");
-}
-
-std::vector<int64_t> CanonicalRowMajorStrides(const std::vector<int64_t>& physical) {
-  std::vector<int64_t> strides(physical.size(), 1);
-  int64_t stride = 1;
-  for (size_t index = physical.size(); index > 0; --index) {
-    strides[index - 1] = stride;
-    stride = CheckedMul(stride, physical[index - 1]);
-  }
-  return strides;
-}
-
 }  // namespace
-
-DeviceDescriptor::DeviceDescriptor(DeviceKind kind, uint32_t id) : kind_(kind), id_(id) {
-  (void)EncodeDeviceKind(kind_);
-}
-DeviceKind DeviceDescriptor::kind() const noexcept { return kind_; }
-uint32_t DeviceDescriptor::id() const noexcept { return id_; }
-std::string DeviceDescriptor::CanonicalBytes() const {
-  std::string bytes("kxc.shape.device.v1");
-  AppendU64(&bytes, EncodeDeviceKind(kind_));
-  AppendU64(&bytes, id_);
-  return bytes;
-}
-bool DeviceDescriptor::operator==(const DeviceDescriptor& other) const noexcept {
-  return kind_ == other.kind_ && id_ == other.id_;
-}
-
-TargetBackendAbiDescriptor::TargetBackendAbiDescriptor(TargetKind target,
-                                                       BackendKind backend,
-                                                       uint32_t abi_version)
-    : target_(target), backend_(backend), abi_version_(abi_version) {
-  (void)EncodeTargetKind(target_);
-  (void)EncodeBackendKind(backend_);
-  if (abi_version_ == 0) Invalid("target/backend ABI version must be nonzero");
-}
-TargetKind TargetBackendAbiDescriptor::target() const noexcept { return target_; }
-BackendKind TargetBackendAbiDescriptor::backend() const noexcept { return backend_; }
-uint32_t TargetBackendAbiDescriptor::abi_version() const noexcept { return abi_version_; }
-std::string TargetBackendAbiDescriptor::CanonicalBytes() const {
-  std::string bytes("kxc.shape.target-backend-abi.v1");
-  AppendU64(&bytes, EncodeTargetKind(target_));
-  AppendU64(&bytes, EncodeBackendKind(backend_));
-  AppendU64(&bytes, abi_version_);
-  return bytes;
-}
-bool TargetBackendAbiDescriptor::operator==(
-    const TargetBackendAbiDescriptor& other) const noexcept {
-  return target_ == other.target_ && backend_ == other.backend_ &&
-         abi_version_ == other.abi_version_;
-}
-
-TensorAbiDescriptor::TensorAbiDescriptor(
-    DataType dtype, DeviceDescriptor device,
-    TargetBackendAbiDescriptor target_backend_abi)
-    : dtype_(dtype), device_(std::move(device)),
-      target_backend_abi_(std::move(target_backend_abi)) {
-  (void)EncodeDataType(dtype_);
-}
-DataType TensorAbiDescriptor::dtype() const noexcept { return dtype_; }
-const DeviceDescriptor& TensorAbiDescriptor::device() const noexcept { return device_; }
-const TargetBackendAbiDescriptor& TensorAbiDescriptor::target_backend_abi() const noexcept {
-  return target_backend_abi_;
-}
-uint32_t TensorAbiDescriptor::element_bytes() const noexcept {
-  switch (dtype_) {
-    case DataType::kFloat16: return 2;
-    case DataType::kFloat32: return 4;
-  }
-  return 0;
-}
-std::string TensorAbiDescriptor::CanonicalBytes() const {
-  std::string bytes("kxc.shape.tensor-abi.v1");
-  AppendU64(&bytes, EncodeDataType(dtype_));
-  AppendField(&bytes, device_.CanonicalBytes());
-  AppendField(&bytes, target_backend_abi_.CanonicalBytes());
-  return bytes;
-}
-bool TensorAbiDescriptor::operator==(const TensorAbiDescriptor& other) const noexcept {
-  return dtype_ == other.dtype_ && device_ == other.device_ &&
-         target_backend_abi_ == other.target_backend_abi_;
-}
 
 struct DimExpr::Node {
   Kind kind;
@@ -676,49 +540,36 @@ LogicalShape::LogicalShape(std::vector<DimExpr> dimensions,
 const std::vector<DimExpr>& LogicalShape::dimensions() const noexcept { return dimensions_; }
 const std::vector<std::optional<std::string>>& LogicalShape::axis_names() const noexcept { return axis_names_; }
 
-PhysicalShape::PhysicalShape(std::vector<DimExpr> capacity,
-                             std::optional<std::vector<DimExpr>> strides,
-                             std::string layout, int64_t alignment, std::string memory_scope)
-    : capacity_(std::move(capacity)), strides_(std::move(strides)), layout_(std::move(layout)),
-      alignment_(alignment), memory_scope_(std::move(memory_scope)) {
-  if (alignment_ <= 0 || (alignment_ & (alignment_ - 1)) != 0) {
-    Invalid("physical alignment must be a positive power of two");
-  }
-  CheckName(layout_, "physical layout");
-  CheckName(memory_scope_, "physical memory scope");
-  if (layout_ != "contiguous.row_major") {
-    Invalid("experimental v1 supports only contiguous.row_major layout");
-  }
-  if (strides_ && strides_->size() != capacity_.size()) Invalid("physical stride rank mismatch");
+PhysicalCapacity::PhysicalCapacity(std::vector<DimExpr> dimensions)
+    : dimensions_(std::move(dimensions)) {}
+
+const std::vector<DimExpr>& PhysicalCapacity::dimensions() const noexcept {
+  return dimensions_;
 }
-const std::vector<DimExpr>& PhysicalShape::capacity() const noexcept { return capacity_; }
-const std::optional<std::vector<DimExpr>>& PhysicalShape::strides() const noexcept { return strides_; }
-const std::string& PhysicalShape::layout() const noexcept { return layout_; }
-int64_t PhysicalShape::alignment() const noexcept { return alignment_; }
-const std::string& PhysicalShape::memory_scope() const noexcept { return memory_scope_; }
 
 ValidExtent::ValidExtent(std::vector<DimExpr> dimensions) : dimensions_(std::move(dimensions)) {}
 const std::vector<DimExpr>& ValidExtent::dimensions() const noexcept { return dimensions_; }
 
 bool ConcreteTensorShapeContract::operator==(const ConcreteTensorShapeContract& other) const noexcept {
   return logical == other.logical && physical == other.physical && valid == other.valid &&
-         strides == other.strides && axis_names == other.axis_names && layout == other.layout &&
-         alignment == other.alignment && memory_scope == other.memory_scope && abi == other.abi;
+         axis_names == other.axis_names;
 }
 
-TensorShapeContract::TensorShapeContract(LogicalShape logical, PhysicalShape physical,
-                                         ValidExtent valid, TensorAbiDescriptor abi)
-    : logical_(std::move(logical)), physical_(std::move(physical)), valid_(std::move(valid)),
-      abi_(std::move(abi)) {
-  if (logical_.dimensions().size() != physical_.capacity().size() ||
+TensorShapeContract::TensorShapeContract(LogicalShape logical,
+                                         PhysicalCapacity physical,
+                                         ValidExtent valid)
+    : logical_(std::move(logical)), physical_(std::move(physical)),
+      valid_(std::move(valid)) {
+  if (logical_.dimensions().size() != physical_.dimensions().size() ||
       logical_.dimensions().size() != valid_.dimensions().size()) {
     Invalid("logical, physical, and valid ranks must match");
   }
 }
 const LogicalShape& TensorShapeContract::logical() const noexcept { return logical_; }
-const PhysicalShape& TensorShapeContract::physical() const noexcept { return physical_; }
+const PhysicalCapacity& TensorShapeContract::physical() const noexcept {
+  return physical_;
+}
 const ValidExtent& TensorShapeContract::valid() const noexcept { return valid_; }
-const TensorAbiDescriptor& TensorShapeContract::abi() const noexcept { return abi_; }
 
 ConcreteTensorShapeContract TensorShapeContract::Evaluate(const BindingSet& bindings) const {
   auto evaluate_dimensions = [&bindings](const std::vector<DimExpr>& dimensions) {
@@ -728,26 +579,16 @@ ConcreteTensorShapeContract TensorShapeContract::Evaluate(const BindingSet& bind
     return values;
   };
   const std::vector<int64_t> logical = evaluate_dimensions(logical_.dimensions());
-  const std::vector<int64_t> physical = evaluate_dimensions(physical_.capacity());
+  const std::vector<int64_t> physical =
+      evaluate_dimensions(physical_.dimensions());
   const std::vector<int64_t> valid = evaluate_dimensions(valid_.dimensions());
   for (size_t i = 0; i < logical.size(); ++i) {
     if (valid[i] > logical[i] || logical[i] > physical[i]) {
       Invalid("valid <= logical <= physical contract violated at axis " + std::to_string(i));
     }
   }
-  const std::vector<int64_t> canonical_strides = CanonicalRowMajorStrides(physical);
-  int64_t element_count = 1;
-  for (const int64_t extent : physical) element_count = CheckedMul(element_count, extent);
-  (void)CheckedMul(element_count, static_cast<int64_t>(abi_.element_bytes()));
-  const std::vector<int64_t> strides = physical_.strides()
-      ? evaluate_dimensions(*physical_.strides())
-      : canonical_strides;
-  if (strides != canonical_strides) {
-    Invalid("contiguous.row_major requires canonical writable strides");
-  }
-  return ConcreteTensorShapeContract{logical, physical, valid, strides,
-                                     logical_.axis_names(), physical_.layout(),
-                                     physical_.alignment(), physical_.memory_scope(), abi_};
+  return ConcreteTensorShapeContract{
+      logical, physical, valid, logical_.axis_names()};
 }
 
 std::vector<std::string> TensorShapeContract::Symbols() const {
@@ -759,111 +600,9 @@ std::vector<std::string> TensorShapeContract::Symbols() const {
     }
   };
   collect(logical_.dimensions());
-  collect(physical_.capacity());
+  collect(physical_.dimensions());
   collect(valid_.dimensions());
-  if (physical_.strides()) collect(*physical_.strides());
   return SortedUnique(std::move(result));
-}
-
-GraphTemplateKey::GraphTemplateKey(uint32_t version,
-                                   std::string graph_semantic_fingerprint,
-                                   std::string pipeline_fingerprint,
-                                   std::string capability_fingerprint,
-                                   std::string partition_fingerprint,
-                                   TargetBackendAbiDescriptor target_backend_abi)
-    : version_(version),
-      graph_semantic_fingerprint_(std::move(graph_semantic_fingerprint)),
-      pipeline_fingerprint_(std::move(pipeline_fingerprint)),
-      capability_fingerprint_(std::move(capability_fingerprint)),
-      partition_fingerprint_(std::move(partition_fingerprint)),
-      target_backend_abi_(std::move(target_backend_abi)) {
-  if (version_ == 0) Invalid("graph template key version must be nonzero");
-  CheckName(graph_semantic_fingerprint_, "graph semantic fingerprint");
-  CheckName(pipeline_fingerprint_, "pipeline fingerprint");
-  CheckName(capability_fingerprint_, "capability fingerprint");
-  CheckName(partition_fingerprint_, "partition fingerprint");
-}
-uint32_t GraphTemplateKey::version() const noexcept { return version_; }
-const std::string& GraphTemplateKey::graph_semantic_fingerprint() const noexcept {
-  return graph_semantic_fingerprint_;
-}
-const std::string& GraphTemplateKey::pipeline_fingerprint() const noexcept {
-  return pipeline_fingerprint_;
-}
-const std::string& GraphTemplateKey::capability_fingerprint() const noexcept {
-  return capability_fingerprint_;
-}
-const std::string& GraphTemplateKey::partition_fingerprint() const noexcept {
-  return partition_fingerprint_;
-}
-const TargetBackendAbiDescriptor& GraphTemplateKey::target_backend_abi() const noexcept {
-  return target_backend_abi_;
-}
-std::string GraphTemplateKey::CanonicalBytes() const {
-  std::string bytes("kxc.shape.graph-template.v1", 27);
-  AppendU64(&bytes, version_);
-  AppendField(&bytes, graph_semantic_fingerprint_);
-  AppendField(&bytes, pipeline_fingerprint_);
-  AppendField(&bytes, capability_fingerprint_);
-  AppendField(&bytes, partition_fingerprint_);
-  AppendField(&bytes, target_backend_abi_.CanonicalBytes());
-  return bytes;
-}
-std::string GraphTemplateKey::CanonicalString() const { return "GraphTemplateKey(" + Hex(CanonicalBytes()) + ")"; }
-bool GraphTemplateKey::operator==(const GraphTemplateKey& other) const noexcept {
-  return version_ == other.version_ &&
-         graph_semantic_fingerprint_ == other.graph_semantic_fingerprint_ &&
-         pipeline_fingerprint_ == other.pipeline_fingerprint_ &&
-         capability_fingerprint_ == other.capability_fingerprint_ &&
-         partition_fingerprint_ == other.partition_fingerprint_ &&
-         target_backend_abi_ == other.target_backend_abi_;
-}
-
-GraphTemplateContentKey::GraphTemplateContentKey(std::string canonical_bytes)
-    : canonical_bytes_(std::move(canonical_bytes)) {
-  if (canonical_bytes_.empty()) Invalid("graph template content key must not be empty");
-}
-const std::string& GraphTemplateContentKey::CanonicalBytes() const noexcept {
-  return canonical_bytes_;
-}
-bool GraphTemplateContentKey::operator==(const GraphTemplateContentKey& other) const noexcept {
-  return canonical_bytes_ == other.canonical_bytes_;
-}
-
-ShapeProfileKey::ShapeProfileKey(GraphTemplateKey graph_template,
-                                 GraphTemplateContentKey graph_template_content,
-                                 BindingSet bindings, std::string policy_id,
-                                 uint32_t shape_abi_version)
-    : graph_template_(std::move(graph_template)),
-      graph_template_content_(std::move(graph_template_content)),
-      bindings_(std::move(bindings)), policy_id_(std::move(policy_id)),
-      shape_abi_version_(shape_abi_version) {
-  CheckName(policy_id_, "shape profile policy id");
-  if (shape_abi_version_ == 0) Invalid("shape ABI version must be nonzero");
-}
-const GraphTemplateKey& ShapeProfileKey::graph_template() const noexcept { return graph_template_; }
-const GraphTemplateContentKey& ShapeProfileKey::graph_template_content() const noexcept {
-  return graph_template_content_;
-}
-const BindingSet& ShapeProfileKey::bindings() const noexcept { return bindings_; }
-const std::string& ShapeProfileKey::policy_id() const noexcept { return policy_id_; }
-uint32_t ShapeProfileKey::shape_abi_version() const noexcept { return shape_abi_version_; }
-std::string ShapeProfileKey::CanonicalBytes() const {
-  std::string bytes("kxc.shape.profile.v1", 20);
-  const std::string graph = graph_template_.CanonicalBytes();
-  AppendField(&bytes, graph);
-  AppendField(&bytes, graph_template_content_.CanonicalBytes());
-  AppendField(&bytes, bindings_.CanonicalString());
-  AppendField(&bytes, policy_id_);
-  AppendU64(&bytes, shape_abi_version_);
-  return bytes;
-}
-std::string ShapeProfileKey::CanonicalString() const { return "ShapeProfileKey(" + Hex(CanonicalBytes()) + ")"; }
-bool ShapeProfileKey::operator==(const ShapeProfileKey& other) const noexcept {
-  return graph_template_ == other.graph_template_ &&
-         graph_template_content_ == other.graph_template_content_ &&
-         bindings_ == other.bindings_ && policy_id_ == other.policy_id_ &&
-         shape_abi_version_ == other.shape_abi_version_;
 }
 
 ShapeProgram::ShapeProgram(std::vector<std::string> declared_symbols,
@@ -951,13 +690,9 @@ std::string ShapeProgram::CanonicalString() const {
       value += axis ? Field(*axis) : "-";
     }
     value += "]";
-    append_dims(contract.physical().capacity());
+    append_dims(contract.physical().dimensions());
     append_dims(contract.valid().dimensions());
-    if (contract.physical().strides()) append_dims(*contract.physical().strides());
-    else value += "derived";
-    value += Field(contract.physical().layout()) + Field(contract.physical().memory_scope()) +
-             std::to_string(contract.physical().alignment()) +
-             Field(contract.abi().CanonicalBytes()) + "}";
+    value += "}";
     return value;
   };
   std::string result = "ShapeProgram(";

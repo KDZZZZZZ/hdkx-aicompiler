@@ -186,7 +186,7 @@ kxc::Function MakeConstantFunction(float value) {
     return Function({}, Constant(std::move(data)));
 }
 
-kxc::api::ArtifactKey MakePrimitiveKey(
+kxc::api::PrimitiveArtifactKey MakePrimitiveKey(
     const kxc::api::CompileConfig& config, size_t index,
     const std::string& suffix = "baseline") {
     return kxc::api::internal::BuildPrimitiveArtifactKey(
@@ -200,7 +200,7 @@ kxc::api::ArtifactKey MakePrimitiveKey(
 }
 
 kxc::api::internal::PrimitiveArtifactPin PinPrimitive(
-    const kxc::api::ArtifactKey& key,
+    const kxc::api::PrimitiveArtifactKey& key,
     const kxc::codegen::KernelSignature& signature,
     const kxc::codegen::KernelLaunchMetadata& metadata,
     std::shared_ptr<const kxc::codegen::KernelLauncher> launcher,
@@ -240,8 +240,8 @@ struct GraphOptions final {
 };
 
 kxc::api::CompiledGraph MakeGraph(
-    const kxc::api::ArtifactKey& graph_artifact,
-    const std::vector<kxc::api::ArtifactKey>& primitive_keys,
+    const kxc::api::GraphSemanticKey& graph_semantic_key,
+    const std::vector<kxc::api::PrimitiveArtifactKey>& primitive_keys,
     GraphOptions options = {}) {
     using namespace kxc;
     using namespace kxc::codegen;
@@ -292,7 +292,7 @@ kxc::api::CompiledGraph MakeGraph(
         std::move(module),
         MakePlan(primitive_keys.size(), options.input_extent),
         std::move(pins), runtime::PlanVariant(), std::move(bindings),
-        graph_artifact};
+        graph_semantic_key};
 }
 
 ProductionRequest MakeRequestFromConfig(
@@ -300,11 +300,11 @@ ProductionRequest MakeRequestFromConfig(
     int64_t expected_input_extent = 2,
     uint64_t expected_output_alignment = 16,
     size_t call_count = 1,
-    std::vector<kxc::api::ArtifactKey> primitive_keys = {},
+    std::vector<kxc::api::PrimitiveArtifactKey> primitive_keys = {},
     std::shared_ptr<FixtureLauncher> baseline_launcher = nullptr) {
     using namespace kxc::api;
-    const ArtifactKey graph_artifact =
-        Compiler::BuildGraphArtifactKey(graph, config);
+    const GraphSemanticKey graph_semantic_key =
+        Compiler::BuildGraphSemanticKey(graph);
     if (primitive_keys.empty()) {
         primitive_keys.reserve(call_count);
         for (size_t index = 0; index < call_count; ++index) {
@@ -320,14 +320,14 @@ ProductionRequest MakeRequestFromConfig(
     options.launchers.assign(primitive_keys.size(),
                              std::move(baseline_launcher));
     const CompiledGraph baseline =
-        MakeGraph(graph_artifact, primitive_keys, std::move(options));
+        MakeGraph(graph_semantic_key, primitive_keys, std::move(options));
     return ProductionRequest(std::move(graph), config, baseline);
 }
 
 ProductionRequest MakeRequest(
     int opt_level = 1, int64_t expected_input_extent = 2,
     uint64_t expected_output_alignment = 16, size_t call_count = 1,
-    std::vector<kxc::api::ArtifactKey> primitive_keys = {},
+    std::vector<kxc::api::PrimitiveArtifactKey> primitive_keys = {},
     std::shared_ptr<FixtureLauncher> baseline_launcher = nullptr) {
     const kxc::Function graph = MakeFunction();
     const kxc::api::CompileConfig config = kxc::api::CompileConfig::Create(
@@ -341,9 +341,9 @@ ExecutionRequest Execute(const ProductionRequest& request) {
     return ExecutionRequest(request.dispatch_key(), request.plan_abi());
 }
 
-std::vector<kxc::api::ArtifactKey> SelectedKeys(
+std::vector<kxc::api::PrimitiveArtifactKey> SelectedKeys(
     const ProductionRequest& request) {
-    std::vector<kxc::api::ArtifactKey> keys;
+    std::vector<kxc::api::PrimitiveArtifactKey> keys;
     for (const auto& artifact : request.ordered_artifacts()) {
         keys.push_back(artifact.artifact_key);
     }
@@ -378,7 +378,8 @@ public:
                 throw std::runtime_error("injected adapter failure");
             }
 
-            std::vector<kxc::api::ArtifactKey> keys = SelectedKeys(request);
+            std::vector<kxc::api::PrimitiveArtifactKey> keys =
+                SelectedKeys(request);
             std::vector<std::shared_ptr<const kxc::codegen::KernelLauncher>>
                 launchers;
             launchers.reserve(request.verified_artifact_pins().size());
@@ -402,7 +403,8 @@ public:
             options.primitive_provenance = candidate_primitive_provenance;
             options.launchers = launchers;
             kxc::api::CompiledGraph graph =
-                MakeGraph(request.artifact_key(), keys, std::move(options));
+                MakeGraph(request.graph_semantic_key(), keys,
+                          std::move(options));
             if (attack == Attack::kWrongOrder &&
                 graph.artifact_pins.size() >= 2) {
                 std::swap(graph.artifact_pins[0], graph.artifact_pins[1]);
@@ -510,19 +512,19 @@ bool TestSameKeySingleflightAndGraphIdentity() {
                    snapshot.merged_compiles == 1 &&
                    snapshot.in_flight_compiles == 0,
                "same-key compilation must singleflight and publish atomically");
-    TEST_CHECK(request.ordered_artifacts()[0].artifact_key !=
-                   request.artifact_key(),
-               "fixture must use a primitive key, never the whole-graph key");
+    TEST_CHECK(request.ordered_artifacts()[0].artifact_key.defined() &&
+                   request.graph_semantic_key().defined() &&
+                   request.shape_profile_key().defined(),
+               "primitive, graph, and shape profile identities must all be typed");
     TEST_CHECK(controller.Acquire(Execute(request)) == first,
                "exact acquire must return the published frozen variant");
-    TEST_CHECK(kxc::api::Compiler::BuildGraphArtifactKey(
-                   MakeAddFunction(), request.config()) !=
-                   request.artifact_key(),
-               "different graphs must not share an artifact identity");
-    TEST_CHECK(kxc::api::Compiler::BuildGraphArtifactKey(
-                   MakeConstantFunction(1.0F), request.config()) !=
-                   kxc::api::Compiler::BuildGraphArtifactKey(
-                       MakeConstantFunction(2.0F), request.config()),
+    TEST_CHECK(kxc::api::Compiler::BuildGraphSemanticKey(
+                   MakeAddFunction()) != request.graph_semantic_key(),
+               "different graphs must not share graph semantics");
+    TEST_CHECK(kxc::api::Compiler::BuildGraphSemanticKey(
+                   MakeConstantFunction(1.0F)) !=
+                   kxc::api::Compiler::BuildGraphSemanticKey(
+                       MakeConstantFunction(2.0F)),
                "graph identity must include constant payload bytes");
     return true;
 }
@@ -640,8 +642,8 @@ bool TestConfigSnapshotAndUnknownRelayFailClosed() {
     const Expr unknown(new RelayNode());
     const Function unknown_graph({}, unknown);
     TEST_CHECK(Throws([&] {
-                   (void)api::Compiler::BuildGraphArtifactKey(
-                       unknown_graph, request.config());
+                   (void)api::Compiler::BuildGraphSemanticKey(
+                       unknown_graph);
                }),
                "unknown Relay semantic identity must fail closed");
     return true;
@@ -802,8 +804,7 @@ bool TestObserverReentryFailsFastAndThrowsAreIsolated() {
     using namespace production_path;
     api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest old_request = MakeRequest(1);
-    const ProductionRequest new_request =
-        MakeRequest(2, 2, 16, 1, SelectedKeys(old_request));
+    const ProductionRequest new_request = MakeRequest(2);
     const ExecutionRequest execution = Execute(old_request);
     auto compiler = std::make_shared<FixtureCompiler>();
     AdaptiveController* controller_ptr = nullptr;
@@ -899,8 +900,8 @@ bool TestMalformedGraphNeverPublishes() {
     auto undefined_compiler = std::make_shared<FixtureCompiler>();
     AdaptiveController undefined_controller(undefined_compiler);
     TEST_CHECK(Throws([&] {
-                   (void)api::Compiler::BuildGraphArtifactKey(
-                       undefined_request.graph(), undefined_request.config());
+                   (void)api::Compiler::BuildGraphSemanticKey(
+                       undefined_request.graph());
                }),
                "an undefined Expr must not produce a graph artifact key");
     TEST_CHECK(Throws([&] {
@@ -919,8 +920,8 @@ bool TestMalformedGraphNeverPublishes() {
     auto derived_compiler = std::make_shared<FixtureCompiler>();
     AdaptiveController derived_controller(derived_compiler);
     TEST_CHECK(Throws([&] {
-                   (void)api::Compiler::BuildGraphArtifactKey(
-                       derived_request.graph(), derived_request.config());
+                   (void)api::Compiler::BuildGraphSemanticKey(
+                       derived_request.graph());
                }),
                "a derived Call must not produce a graph artifact key");
     TEST_CHECK(Throws([&] {
@@ -1058,8 +1059,7 @@ bool TestAdministrativeRollbackAndOldInFlightGeneration() {
     auto gated_launcher = std::make_shared<FixtureLauncher>(launch_gate);
     const ProductionRequest old_request =
         MakeRequest(1, 2, 16, 1, {}, gated_launcher);
-    const ProductionRequest new_request =
-        MakeRequest(2, 2, 16, 1, SelectedKeys(old_request));
+    const ProductionRequest new_request = MakeRequest(2);
     auto compiler = std::make_shared<FixtureCompiler>();
     AdaptiveController controller(compiler);
     const auto old = controller.CompileAndPublish(old_request);
@@ -1331,7 +1331,7 @@ public:
     std::shared_ptr<const v2::GenerationLease> Issue(
         const v2::GenerationAuthorityRequest& request) override {
         ++issues_;
-        last_selection_ = request.selection_artifact;
+        last_selection_ = request.selection_plan;
         last_candidate_ = request.candidate;
         return MakeLease(next_++, request);
     }
@@ -1341,7 +1341,7 @@ public:
     }
 
     size_t issues() const noexcept { return issues_; }
-    const kxc::api::ArtifactKey& last_selection() const noexcept {
+    const kxc::api::PlanVariantKey& last_selection() const noexcept {
         return last_selection_;
     }
     const std::shared_ptr<const production_path::PreparedCandidate>&
@@ -1352,7 +1352,7 @@ public:
 private:
     v2::Generation next_{41};
     size_t issues_{0};
-    kxc::api::ArtifactKey last_selection_;
+    kxc::api::PlanVariantKey last_selection_;
     std::shared_ptr<const production_path::PreparedCandidate> last_candidate_;
 };
 
@@ -1521,8 +1521,7 @@ bool TestV2CriticalAuditFixes() {
     // A rejected oversized successor must leave the predecessor routed.
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest predecessor_request = MakeRequest(1);
-    const ProductionRequest oversized_request =
-        MakeRequest(2, 2, 16, 1, SelectedKeys(predecessor_request));
+    const ProductionRequest oversized_request = MakeRequest(2);
     auto budget_compiler = std::make_shared<FixtureCompiler>();
     v2::Options budget_options;
     budget_options.max_producer_reported_bytes = 1;
@@ -1576,22 +1575,17 @@ bool TestV2BoundedFailureAndQuarantineMetadata() {
     using namespace production_path;
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest base = MakeRequest();
-    const std::vector<kxc::api::ArtifactKey> keys = SelectedKeys(base);
+    const std::vector<kxc::api::PrimitiveArtifactKey> keys =
+        SelectedKeys(base);
     const auto distinct_request = [&](int token) {
         kxc::api::CompileConfig config = kxc::api::CompileConfig::Create(
             kxc::BuildTarget(kxc::Device::CPU()), token % 4);
-        std::vector<kxc::api::ArtifactKey> distinct_keys = keys;
+        std::vector<kxc::api::PrimitiveArtifactKey> distinct_keys = keys;
         distinct_keys[0] = MakePrimitiveKey(
             config, 0, "adaptive-v2-metadata-" + std::to_string(token));
         return MakeRequestFromConfig(
             MakeFunction(), config, 2, 16, 1, std::move(distinct_keys));
     };
-    const auto same_route_request = [&](int opt_level) {
-        const kxc::api::CompileConfig config = kxc::api::CompileConfig::Create(
-            kxc::BuildTarget(kxc::Device::CPU()), opt_level);
-        return MakeRequestFromConfig(MakeFunction(), config, 2, 16, 1, keys);
-    };
-
     std::atomic<uint64_t> negative_evicted_events{0};
     v2::Options transient_options;
     transient_options.worker_count = 1;
@@ -1677,9 +1671,9 @@ bool TestV2BoundedFailureAndQuarantineMetadata() {
     auto quarantine_compiler = std::make_shared<FixtureCompiler>();
     v2::AdaptiveHotSwapController quarantine(quarantine_compiler, quarantine_options);
     const auto healthy = quarantine.CompileAndPublish({base});
-    const ProductionRequest bad_one = same_route_request(0);
-    const ProductionRequest bad_two = same_route_request(2);
-    const ProductionRequest bad_three = same_route_request(3);
+    const ProductionRequest bad_one = distinct_request(100);
+    const ProductionRequest bad_two = distinct_request(101);
+    const ProductionRequest bad_three = distinct_request(102);
     TEST_CHECK(quarantine.EvaluateHealth(quarantine.CompileAndPublish({bad_one})) &&
                    quarantine.Acquire(Execute(base)) == healthy &&
                    quarantine.Submit({bad_one}).Wait().failure.category ==
@@ -1696,7 +1690,7 @@ bool TestV2BoundedFailureAndQuarantineMetadata() {
                    quarantine.Acquire(Execute(base)) == healthy,
                "tombstone saturation must preserve a healthy predecessor and expose exact state");
     const int before_blocked_publish = quarantine_compiler->calls.load();
-    TEST_CHECK(quarantine.Submit({same_route_request(1)}).Wait().failure.category ==
+    TEST_CHECK(quarantine.Submit({distinct_request(103)}).Wait().failure.category ==
                        v2::FailureCategory::kPermanent &&
                    quarantine_compiler->calls.load() == before_blocked_publish + 1,
                "a saturated route must reject further publication rather than forget a quarantine");
@@ -1723,8 +1717,7 @@ bool TestV2HealthRollbackObserverAndAbi() {
     using namespace production_path;
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest request = MakeRequest();
-    const ProductionRequest successor =
-        MakeRequest(2, 2, 16, 1, SelectedKeys(request));
+    const ProductionRequest successor = MakeRequest(2);
     TEST_CHECK(successor.dispatch_key() == request.dispatch_key() &&
                    successor.plan_abi() == request.plan_abi(),
                "fixture successor must be exact-route compatible");
@@ -1798,15 +1791,15 @@ bool TestV2DistinctSelectionAndOpaqueLeaseBinding() {
                    request.plan_abi() == selected->plan_abi() &&
                    baseline->generation() < selected->generation(),
                "same callable ABI may publish distinct selected generations");
-    TEST_CHECK(baseline->selection_artifact_key() != selected->selection_artifact_key() &&
+    TEST_CHECK(baseline->selection_plan_key() != selected->selection_plan_key() &&
                    selected_launcher && selected_launcher != baseline_launcher &&
                    baseline_launcher->launches.load() == 2 &&
                    selected_launcher->launches.load() == 1,
                "N and N+1 must retain and independently execute distinct launchers");
     TEST_CHECK(authority->issues() == 2 && authority->last_candidate() &&
-                   authority->last_selection() == selected->selection_artifact_key() &&
-                   selected->variant()->artifact_lease().artifact_key() ==
-                       selected->selection_artifact_key(),
+                   authority->last_selection() == selected->selection_plan_key() &&
+                   selected->variant()->artifact_lease().selection_plan_key() ==
+                       selected->selection_plan_key(),
                "only the authority may bind the opaque generation lease to its prepared selection");
     return true;
 }
@@ -1815,8 +1808,7 @@ bool TestV2TransactionalCancellationAndGlobalBounds() {
     using namespace production_path;
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest base = MakeRequest();
-    const ProductionRequest successor =
-        MakeRequest(2, 2, 16, 1, SelectedKeys(base));
+    const ProductionRequest successor = MakeRequest(2);
     std::atomic<int> injected{-1};
     v2::Options transactional_options;
     transactional_options.worker_count = 1;
@@ -1908,7 +1900,7 @@ bool TestV2ConcurrentHealthConsumption() {
     using namespace production_path;
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest base = MakeRequest();
-    const ProductionRequest successor = MakeRequest(2, 2, 16, 1, SelectedKeys(base));
+    const ProductionRequest successor = MakeRequest(2);
     v2::Options options;
     options.health_authority = std::make_shared<OneShotHealth>(2);
     options.max_producer_reported_bytes = 1024;

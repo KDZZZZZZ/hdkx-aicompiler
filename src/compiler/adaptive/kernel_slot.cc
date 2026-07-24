@@ -2,7 +2,7 @@
  * \brief Experimental immutable generation publication and RCU leases.
  */
 
-#include "kxc/compiler/adaptive.h"
+#include "../../../test/support/adaptive_v1.h"
 
 #include <limits>
 #include <map>

@@ -33,19 +33,21 @@ bool Throws(const std::function<void()>& fn) {
     return false;
 }
 
-kxc::api::ArtifactKey MakeKey(const std::string& unit) {
-    return kxc::api::ArtifactKey(
+kxc::api::PrimitiveArtifactKey MakeKey(const std::string& unit) {
+    return kxc::api::PrimitiveArtifactKey(
         kxc::api::UnitSemanticKey("unit=" + unit), "target=cpu-v1",
         "pipeline=frozen-v1", 1, "schedule=v1", "backend=fake-v1");
 }
 
-kxc::api::ArtifactHandle MakeArtifact(const kxc::api::ArtifactKey& key) {
+kxc::api::ArtifactHandle MakeArtifact(
+    const kxc::api::PrimitiveArtifactKey& key) {
     return kxc::api::ArtifactHandle(kxc::api::ArtifactRecord{
         key, "fake-executable", "signature-v1", "launch-v1", "fake-test",
         64, "validated"});
 }
 
-kxc::api::CompileRequest MakeRequest(const kxc::api::ArtifactKey& key,
+kxc::api::CompileRequest MakeRequest(
+    const kxc::api::PrimitiveArtifactKey& key,
                                      const std::string& cancellation_id) {
     kxc::api::CompileRequest request;
     request.artifact_key = key;
@@ -59,7 +61,7 @@ kxc::api::CompileRequest MakeRequest(const kxc::api::ArtifactKey& key,
 bool TestImmutableHandleAndEvictionPin() {
     using namespace kxc::api;
     using namespace kxc::api::testing;
-    const ArtifactKey key = MakeKey("pin");
+    const PrimitiveArtifactKey key = MakeKey("pin");
     ArtifactRecord mutable_record{
         key, "original", "signature-v1", "launch-v1", "fake", 32,
         "validated"};
@@ -87,7 +89,7 @@ bool TestCompileRequestSingleflightAndCancellation() {
     using namespace kxc::api::testing;
     FakeArtifactStore store;
     FakeCompileCoordinator coordinator(2);
-    const ArtifactKey key = MakeKey("singleflight");
+    const PrimitiveArtifactKey key = MakeKey("singleflight");
     CompileRequest first_request = MakeRequest(key, "caller-a");
     CompileRequest second_request = MakeRequest(key, "caller-b");
     second_request.priority = CompilePriority::kUrgent;

@@ -65,7 +65,6 @@ set(KXC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/include")
 
 set(KXC_PUBLIC_HEADERS
-  include/kxc/compiler/adaptive.h
   include/kxc/compiler/adaptive_hot_swap_v2.h
   include/kxc/compiler/adaptive_production_experimental.h
   include/kxc/compiler/capability.h
@@ -75,7 +74,9 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/foundation_contract.h
   include/kxc/compiler/identity.h
   include/kxc/compiler/pipeline.h
+  include/kxc/compiler/guarded_shape_specialization.h
   include/kxc/compiler/shape_exact.h
+  include/kxc/compiler/shape_specialization.h
   include/kxc/compiler/restricted_symbolic_shape.h
 
   include/kxc/compiler/lowering/relay_to_tir.h
@@ -132,10 +133,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/storage.h
   include/kxc/runtime/task_executor.h
   include/kxc/runtime/task_plan.h
-  include/kxc/shape/fakes/compiler_foundation_v1.h
-  include/kxc/shape/guarded_specialization.h
   include/kxc/shape/shape.h
-  include/kxc/shape/specialization.h
   include/kxc/support/arena.h
   include/kxc/support/container.h
   include/kxc/support/detail/array_inl.h
@@ -349,8 +347,6 @@ set(KXC_SUPPORT_SOURCES
 
 set(KXC_SHAPE_SOURCES
   src/shape/shape.cc
-  src/shape/specialization.cc
-  src/shape/guarded_specialization.cc
 )
 
 set(KXC_FFI_SOURCES
@@ -489,9 +485,6 @@ set(KXC_RUNTIME_EXECUTABLE_SOURCES
 )
 
 set(KXC_COMPILER_SOURCES
-  src/compiler/adaptive/compile_coordinator.cc
-  src/compiler/adaptive/contracts.cc
-  src/compiler/adaptive/kernel_slot.cc
   src/compiler/cache/primitive_cache.cc
   src/compiler/capability.cc
   src/compiler/compile_config.cc
@@ -504,7 +497,9 @@ set(KXC_COMPILER_SOURCES
   src/compiler/identity.cc
   src/compiler/pipeline_resolver.cc
   src/compiler/compiler.cc
+  src/compiler/guarded_shape_specialization.cc
   src/compiler/shape_exact.cc
+  src/compiler/shape_specialization.cc
   src/compiler/restricted_symbolic_shape.cc
 
   src/compiler/graph/partition.cc
@@ -778,28 +773,16 @@ add_custom_target(run_shape_system_test
   USES_TERMINAL
   COMMENT "Run shape_system_test")
 
-add_executable(shape_specialization_test
-  test/shape_specialization_test.cpp
-  $<TARGET_OBJECTS:kxc_shape_obj>)
-add_dependencies(shape_specialization_test kxc_shape_obj)
-target_link_libraries(shape_specialization_test PRIVATE kxc_shape_api)
-if(MSVC)
-  target_compile_options(shape_specialization_test PRIVATE /utf-8 /EHsc)
-endif()
+kxc_add_runtime_exe(shape_specialization_test
+  test/shape_specialization_test.cpp)
 add_custom_target(run_shape_specialization_test
   COMMAND "$<TARGET_FILE:shape_specialization_test>"
   DEPENDS shape_specialization_test
   USES_TERMINAL
   COMMENT "Run shape_specialization_test")
 
-add_executable(shape_guarded_specialization_test
-  test/shape_guarded_specialization_test.cpp
-  $<TARGET_OBJECTS:kxc_shape_obj>)
-add_dependencies(shape_guarded_specialization_test kxc_shape_obj)
-target_link_libraries(shape_guarded_specialization_test PRIVATE kxc_shape_api)
-if(MSVC)
-  target_compile_options(shape_guarded_specialization_test PRIVATE /utf-8 /EHsc)
-endif()
+kxc_add_runtime_exe(shape_guarded_specialization_test
+  test/shape_guarded_specialization_test.cpp)
 add_custom_target(run_shape_guarded_specialization_test
   COMMAND "$<TARGET_FILE:shape_guarded_specialization_test>"
   DEPENDS shape_guarded_specialization_test
@@ -896,11 +879,26 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/kxc")
 
 if(KXC_BUILD_PASS_TESTS)
+  add_library(kxc_adaptive_v1_test_obj OBJECT
+    src/compiler/adaptive/compile_coordinator.cc
+    src/compiler/adaptive/contracts.cc
+    src/compiler/adaptive/kernel_slot.cc)
+  kxc_configure_module_obj(kxc_adaptive_v1_test_obj)
+
   kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
   kxc_add_runtime_exe(shape_production_exact_test test/shape_production_exact_test.cpp)
   kxc_add_runtime_exe(restricted_symbolic_shape_test test/restricted_symbolic_shape_test.cpp)
   kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
   kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
+  foreach(_kxc_adaptive_v1_test IN ITEMS
+      adaptive_contract_test
+      adaptive_coordinator_test
+      adaptive_kernel_slot_test)
+    target_sources(${_kxc_adaptive_v1_test} PRIVATE
+      $<TARGET_OBJECTS:kxc_adaptive_v1_test_obj>)
+    add_dependencies(${_kxc_adaptive_v1_test}
+      kxc_adaptive_v1_test_obj)
+  endforeach()
   if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
     kxc_add_runtime_exe(adaptive_production_experimental_test
       test/adaptive_production_experimental_test.cpp)

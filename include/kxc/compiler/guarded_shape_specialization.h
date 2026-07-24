@@ -6,12 +6,11 @@
 #include <string>
 #include <vector>
 
-#include "kxc/shape/specialization.h"
+#include "kxc/compiler/shape_specialization.h"
 
-// This installed header exposes only experimental-v1 guarded specialization
-// contracts. It is not a stable kxc::shape API and promises neither source
-// compatibility nor binary ABI compatibility across versions.
-namespace kxc::shape::experimental::v1 {
+// Experimental compiler policy over the authoritative Shape and Identity
+// contracts. It does not define tensor/kernel ABI or identity types.
+namespace kxc::api::experimental::shape_specialization::v1 {
 
 // Versioned contract DTOs only.  They do not allocate, compile, launch, or
 // integrate with RuntimeSession.
@@ -39,11 +38,6 @@ class ApplicabilityGuard {
 struct BucketValueBoundary {
   std::string name;  // Routing only; excluded from artifact identity.
   std::vector<int64_t> physical;
-  std::vector<int64_t> strides;
-  std::string layout;
-  int64_t alignment;
-  std::string memory_scope;
-  TensorAbiDescriptor abi;
 };
 
 struct TailContract {
@@ -92,10 +86,6 @@ struct RuntimeExtentScalar {
 struct SymbolicBoundaryContract {
   std::string name;  // Routing only; excluded from artifact identity.
   std::vector<DimExpr> dimensions;
-  std::string layout;
-  int64_t alignment;
-  std::string memory_scope;
-  TensorAbiDescriptor abi;
   // Empty means unnamed axes; otherwise this must match dimensions rank.
   std::vector<std::optional<std::string>> axis_names{};
 };
@@ -112,7 +102,6 @@ class PolymorphicPolicy {
                     std::vector<PolymorphicUnitProof> allowlist_proofs,
                     std::vector<RuntimeExtentScalar> runtime_extent_abi,
                     std::vector<SymbolicBoundaryContract> boundaries,
-                    TargetBackendAbiDescriptor target_backend_abi,
                     uint64_t workspace_upper_bound);
 
   [[nodiscard]] uint32_t policy_version() const noexcept;
@@ -120,7 +109,6 @@ class PolymorphicPolicy {
   [[nodiscard]] const std::vector<PolymorphicUnitProof>& allowlist_proofs() const noexcept;
   [[nodiscard]] const std::vector<RuntimeExtentScalar>& runtime_extent_abi() const noexcept;
   [[nodiscard]] const std::vector<SymbolicBoundaryContract>& boundaries() const noexcept;
-  [[nodiscard]] const TargetBackendAbiDescriptor& target_backend_abi() const noexcept;
   [[nodiscard]] uint64_t workspace_upper_bound() const noexcept;
   [[nodiscard]] std::string CanonicalString() const;
 
@@ -130,7 +118,6 @@ class PolymorphicPolicy {
   std::vector<PolymorphicUnitProof> allowlist_proofs_;
   std::vector<RuntimeExtentScalar> runtime_extent_abi_;
   std::vector<SymbolicBoundaryContract> boundaries_;
-  TargetBackendAbiDescriptor target_backend_abi_;
   uint64_t workspace_upper_bound_;
 };
 
@@ -144,6 +131,7 @@ class GuardedShapeProfile {
   [[nodiscard]] GuardedProfileKind kind() const noexcept;
   [[nodiscard]] const ShapeProfileKey& key() const noexcept;
   [[nodiscard]] const ShapeProfileKey& exact_oracle_key() const noexcept;
+  [[nodiscard]] const BindingSet& bindings() const noexcept;
   [[nodiscard]] const ApplicabilityGuard& guard() const noexcept;
   [[nodiscard]] const std::vector<GuardedValueContract>& values() const noexcept;
   [[nodiscard]] const GuardedValueContract& Value(const std::string& name) const;
@@ -152,7 +140,8 @@ class GuardedShapeProfile {
 
  private:
   GuardedShapeProfile(GuardedProfileKind kind, ShapeProfileKey key,
-                      ShapeProfileKey exact_oracle_key, ApplicabilityGuard guard,
+                      ShapeProfileKey exact_oracle_key, BindingSet bindings,
+                      ApplicabilityGuard guard,
                       std::vector<GuardedValueContract> values,
                       std::optional<BucketPolicy> bucket_policy,
                       std::optional<PolymorphicPolicy> polymorphic_policy);
@@ -160,6 +149,7 @@ class GuardedShapeProfile {
   GuardedProfileKind kind_;
   ShapeProfileKey key_;
   ShapeProfileKey exact_oracle_key_;
+  BindingSet bindings_;
   ApplicabilityGuard guard_;
   std::vector<GuardedValueContract> values_;
   std::optional<BucketPolicy> bucket_policy_;
@@ -180,26 +170,6 @@ class GuardedShapeProfile {
                                                            const ExactOracle& oracle,
                                                            const PolymorphicPolicy& policy);
 
-class GuardedArtifactKey {
- public:
-  [[nodiscard]] GuardedProfileKind kind() const noexcept;
-  [[nodiscard]] const UnitSemanticKey& unit_semantic_key() const noexcept;
-  [[nodiscard]] std::string CanonicalBytes() const;
-  [[nodiscard]] std::string CanonicalString() const;
-  [[nodiscard]] bool operator==(const GuardedArtifactKey& other) const noexcept;
-
- private:
-  GuardedArtifactKey(GuardedProfileKind kind, UnitSemanticKey unit_semantic_key,
-                     std::string canonical_payload);
-
-  GuardedProfileKind kind_;
-  UnitSemanticKey unit_semantic_key_;
-  std::string canonical_payload_;
-
-  friend std::vector<struct GuardedUnitSpecializationRequest>
-  MakeGuardedSpecializationRequests(const GraphTemplate&, const GuardedShapeProfile&);
-};
-
 struct GuardedUnitSpecializationRequest {
   size_t ordered_call_index;
   GraphLocalCallLocator call_locator;
@@ -207,7 +177,8 @@ struct GuardedUnitSpecializationRequest {
   ShapeProfileKey exact_oracle_key;
   GuardedProfileKind kind;
   std::string guard_canonical;
-  GuardedArtifactKey artifact_key;
+  std::string specialization_canonical;
+  UnitSemanticKey unit_semantic_key;
   std::vector<ConcreteTensorShapeContract> ordered_inputs;
   std::vector<ConcreteTensorShapeContract> ordered_outputs;
 };
@@ -216,17 +187,4 @@ struct GuardedUnitSpecializationRequest {
 MakeGuardedSpecializationRequests(const GraphTemplate& graph_template,
                                   const GuardedShapeProfile& profile);
 
-class GuardedPlanVariantKey {
- public:
-  GuardedPlanVariantKey(GraphTemplateKey graph_template_key, ShapeProfileKey shape_profile_key,
-                        std::vector<std::string> ordered_call_identities);
-  [[nodiscard]] std::string CanonicalString() const;
-  [[nodiscard]] bool operator==(const GuardedPlanVariantKey& other) const noexcept;
-
- private:
-  GraphTemplateKey graph_template_key_;
-  ShapeProfileKey shape_profile_key_;
-  std::vector<std::string> ordered_call_identities_;
-};
-
-}  // namespace kxc::shape::experimental::v1
+}  // namespace kxc::api::experimental::shape_specialization::v1

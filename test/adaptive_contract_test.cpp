@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "kxc/compiler/adaptive.h"
+#include "support/adaptive_v1.h"
 
 namespace {
 

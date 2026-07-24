@@ -1,6 +1,5 @@
 #include "kxc/compiler/shape_exact.h"
 
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -25,7 +24,8 @@
 
 namespace kxc::api::experimental::shape_exact::v1 {
 namespace {
-namespace shape = kxc::shape::experimental::v1;
+namespace shape =
+    kxc::api::experimental::shape_specialization::v1;
 
 [[noreturn]] void Reject(const std::string& message) {
     throw std::invalid_argument("ProductionExactShapeAdapter: " + message);
@@ -315,67 +315,7 @@ void FreezePreparedOperators(internal::PreparedCompilerGraph* prepared) {
     }
 }
 
-shape::TargetBackendAbiDescriptor TargetAbi(const Target& target) {
-    if (!target.defined()) Reject("target is undefined");
-    if (target->kind == "llvm" && target->device_type == kCPU) {
-        const std::string& arch = target->attrs.arch;
-        if (arch == "x86_64") {
-            return {shape::TargetKind::kX86_64, shape::BackendKind::kLlvm,
-                    shape::kShapeAbiVersion};
-        }
-        if (arch == "aarch64") {
-            return {shape::TargetKind::kAArch64, shape::BackendKind::kLlvm,
-                    shape::kShapeAbiVersion};
-        }
-        Reject("unsupported LLVM CPU architecture '" + arch + "'");
-    }
-    if (target->kind == "cuda" && target->device_type == kCUDA) {
-        return {shape::TargetKind::kNvptx64, shape::BackendKind::kCuda,
-                shape::kShapeAbiVersion};
-    }
-    Reject("target/device/backend mismatch");
-}
-
-shape::TensorAbiDescriptor TensorAbi(const TensorTypeNode* type,
-                                     const Target& target) {
-    if (!type) Reject("value is not a tensor");
-    const DLDataType dtype = runtime::DataTypeFromString(type->dtype);
-    shape::DataType shape_dtype;
-    if (dtype.code == kDLFloat && dtype.bits == 16 && dtype.lanes == 1) {
-        shape_dtype = shape::DataType::kFloat16;
-    } else if (dtype.code == kDLFloat && dtype.bits == 32 && dtype.lanes == 1) {
-        shape_dtype = shape::DataType::kFloat32;
-    } else {
-        Reject("shape v1 supports only scalar-lane float16/float32 values");
-    }
-    const shape::DeviceKind device = target->device_type == kCPU
-        ? shape::DeviceKind::kCpu : shape::DeviceKind::kCuda;
-    if ((device == shape::DeviceKind::kCpu && target->kind != "llvm") ||
-        (device == shape::DeviceKind::kCuda && target->kind != "cuda") ||
-        target->device_id < 0) {
-        Reject("value device/target/backend mismatch");
-    }
-    return {shape_dtype, shape::DeviceDescriptor(
-            device, static_cast<uint32_t>(target->device_id)), TargetAbi(target)};
-}
-
-std::vector<int64_t> Strides(const TensorTypeNode* type) {
-    std::vector<int64_t> result(type->shape.size(), 1);
-    int64_t stride = 1;
-    for (size_t i = type->shape.size(); i > 0; --i) {
-        const int64_t extent = type->shape[i - 1];
-        if (extent < 0) Reject("negative or legacy -1 dimension is unsupported");
-        result[i - 1] = stride;
-        if (extent != 0 && stride > std::numeric_limits<int64_t>::max() / extent) {
-            Reject("row-major stride overflow");
-        }
-        stride *= extent;
-    }
-    return result;
-}
-
-shape::TensorShapeContract ValueContract(const internal::ValueInfo& value,
-                                         const Target& target) {
+shape::TensorShapeContract ValueContract(const internal::ValueInfo& value) {
     const auto* type = value.checked_type.As<TensorTypeNode>();
     if (!type) Reject("prepared value has no TensorType");
     std::vector<shape::DimExpr> dimensions;
@@ -384,14 +324,9 @@ shape::TensorShapeContract ValueContract(const internal::ValueInfo& value,
         if (extent < 0) Reject("negative or legacy -1 dimension is unsupported");
         dimensions.push_back(shape::DimExpr::Const(extent));
     }
-    const shape::TensorAbiDescriptor abi = TensorAbi(type, target);
-    std::vector<shape::DimExpr> strides;
-    for (int64_t stride : Strides(type)) strides.push_back(shape::DimExpr::Const(stride));
-    const int64_t alignment = static_cast<int64_t>(abi.element_bytes());
     return {shape::LogicalShape(dimensions),
-            shape::PhysicalShape(dimensions, std::move(strides),
-                "contiguous.row_major", alignment, "global"),
-            shape::ValidExtent(dimensions), abi};
+            shape::PhysicalCapacity(dimensions),
+            shape::ValidExtent(dimensions)};
 }
 
 std::string ValueName(int64_t id) { return "value." + std::to_string(id); }
@@ -469,18 +404,18 @@ std::string GraphCanonical(const internal::PartitionedGraph& partitioned) {
     return result;
 }
 
-shape::GraphTemplate BuildTemplate(const internal::PreparedStaticGraph& prepared,
-                                   const Target& target,
-                                   const internal::CompilerExecutionContract& contract) {
-    if (prepared.partitioned.units.empty()) {
+shape::GraphTemplate BuildTemplate(
+    const internal::PreparedCompilerGraph& prepared) {
+    if (prepared.graph.partitioned.units.empty()) {
         Reject("a production exact plan requires at least one ordinary compute unit");
     }
-    const auto& graph = prepared.partitioned.value_graph;
+    const auto& partitioned = prepared.graph.partitioned;
+    const auto& graph = partitioned.value_graph;
     std::vector<shape::NamedTensorContract> inputs;
     std::vector<shape::NamedTensorContract> outputs;
     for (const auto& value : graph.values) {
         shape::NamedTensorContract named{ValueName(value.value_id),
-                                         ValueContract(value, target)};
+                                         ValueContract(value)};
         if (value.origin == internal::ValueOrigin::kParameter ||
             value.origin == internal::ValueOrigin::kConstant) {
             inputs.push_back(std::move(named));
@@ -489,58 +424,38 @@ shape::GraphTemplate BuildTemplate(const internal::PreparedStaticGraph& prepared
         }
     }
     std::vector<shape::UnitSkeleton> units;
-    units.reserve(prepared.partitioned.units.size());
-    for (const auto& unit : prepared.partitioned.units) {
+    units.reserve(partitioned.units.size());
+    for (const auto& unit : partitioned.units) {
         shape::UnitSkeleton skeleton{shape::GraphLocalCallLocator(
             ValueName(unit.output_value_ids[0])),
-            shape::UnitSemanticKey(shape::kShapeContractVersion,
-                                   unit.semantic_key.canonical_bytes()), {}, {}};
+            unit.semantic_key, {}, {}};
         for (int64_t id : unit.input_value_ids) skeleton.input_value_names.push_back(ValueName(id));
         for (int64_t id : unit.output_value_ids) skeleton.output_value_names.push_back(ValueName(id));
         units.push_back(std::move(skeleton));
     }
-    std::string capability;
-    AppendField(&capability, "kind", "capability.static_exact.v1");
-    AppendField(&capability, "boundaries",
-                "compiler_entry|post_graph_pass|pre_partition");
-    AppendField(&capability, "execution_contract", contract.canonical_bytes);
-    AppendField(&capability, "target_snapshot",
-                internal::CanonicalTargetSnapshot(target));
-    shape::GraphTemplateKey key(
-        shape::kShapeContractVersion, GraphCanonical(prepared.partitioned),
-        contract.canonical_bytes, capability,
-        PartitionCanonical(prepared.partitioned), TargetAbi(target));
-    return shape::GraphTemplate(key, shape::ShapeProgram({}, std::move(inputs),
-                                                         std::move(outputs)),
-                                std::move(units));
+    return shape::GraphTemplate(
+        prepared.graph_semantic_key,
+        shape::ShapeProgram({}, std::move(inputs), std::move(outputs)),
+        std::move(units));
 }
 
-bool ExactContract(const shape::ConcreteTensorShapeContract& contract,
-                   const Target& target) {
-    if (contract.logical != contract.physical || contract.logical != contract.valid ||
-        contract.layout != "contiguous.row_major" || contract.memory_scope != "global" ||
-        contract.alignment != static_cast<int64_t>(contract.abi.element_bytes()) ||
-        !(contract.abi.target_backend_abi() == TargetAbi(target))) {
+bool ExactContract(const shape::ConcreteTensorShapeContract& contract) {
+    if (contract.logical != contract.physical ||
+        contract.logical != contract.valid ||
+        (!contract.axis_names.empty() &&
+         contract.logical.size() != contract.axis_names.size())) {
         return false;
     }
-    std::vector<int64_t> strides(contract.logical.size(), 1);
-    int64_t stride = 1;
-    for (size_t i = contract.logical.size(); i > 0; --i) {
-        if (contract.logical[i - 1] < 0 ||
-            (contract.logical[i - 1] != 0 &&
-             stride > std::numeric_limits<int64_t>::max() / contract.logical[i - 1])) return false;
-        strides[i - 1] = stride;
-        stride *= contract.logical[i - 1];
+    for (int64_t extent : contract.logical) {
+        if (extent < 0) return false;
     }
-    return contract.strides == strides &&
-        ((contract.abi.dtype() == shape::DataType::kFloat16 && contract.abi.element_bytes() == 2) ||
-         (contract.abi.dtype() == shape::DataType::kFloat32 && contract.abi.element_bytes() == 4));
+    return true;
 }
 
 bool SameContract(const shape::ConcreteTensorShapeContract& a,
                   const shape::ConcreteTensorShapeContract& b) {
     return a == b && a.logical == a.physical && a.logical == a.valid &&
-           a.layout == "contiguous.row_major" && a.memory_scope == "global";
+           ExactContract(a);
 }
 
 bool SameIds(const Array<int64_t>& actual, const Array<int64_t>& expected) {
@@ -596,15 +511,15 @@ const shape::ConcreteTensorShapeContract& ProfileValue(
 }
 
 void VerifyOracle(const shape::GraphTemplate& graph, const shape::ExactOracle& oracle) {
-    if (!(oracle.profile().key().graph_template() == graph.key()) ||
-        !(oracle.profile().key().graph_template_content() == graph.content_key()) ||
-        oracle.profile().key().policy_id() != "exact" ||
-        oracle.profile().key().shape_abi_version() != shape::kShapeAbiVersion ||
-        !oracle.profile().key().bindings().bindings().empty()) {
+    if (oracle.profile().key().graph_semantic_key() != graph.key() ||
+        oracle.profile().policy_id() != "exact" ||
+        oracle.profile().shape_abi_version() !=
+            shape::kShapeProfileAbiVersion ||
+        !oracle.profile().bindings().bindings().empty()) {
         Reject("oracle is not the empty exact profile of this prepared template");
     }
     const shape::ExactOracle rebuilt = shape::InstantiateExactProfile(
-        graph, oracle.profile().key().bindings());
+        graph, oracle.profile().bindings());
     if (!(rebuilt.profile().key() == oracle.profile().key()) ||
         rebuilt.profile().values().size() != oracle.profile().values().size()) {
         Reject("oracle content does not exactly match the prepared template");
@@ -618,27 +533,35 @@ void VerifyOracle(const shape::GraphTemplate& graph, const shape::ExactOracle& o
     }
 }
 
+bool SameDType(const DLDataType& left, const DLDataType& right) {
+    return left.code == right.code && left.bits == right.bits &&
+           left.lanes == right.lanes;
+}
+
 void VerifyArg(const codegen::KernelArgSpec& arg, codegen::KernelArgRole role,
-               const shape::ConcreteTensorShapeContract& contract,
-               const Target& target) {
+                const shape::ConcreteTensorShapeContract& contract,
+                const TensorTypeNode* expected_type,
+                const Target& target) {
+    if (!expected_type) Reject("compiled signature source is not a tensor");
     const auto* node = arg.operator->();
-    const DLDataType dtype = node->dtype;
-    const bool f16 = contract.abi.dtype() == shape::DataType::kFloat16;
-    const shape::DeviceKind expected_device = target->device_type == kCPU
-        ? shape::DeviceKind::kCpu : shape::DeviceKind::kCuda;
-    if (!ExactContract(contract, target) ||
-        contract.abi.device().kind() != expected_device ||
-        contract.abi.device().id() != static_cast<uint32_t>(target->device_id) ||
-        node->role != role || dtype.code != kDLFloat || dtype.bits != (f16 ? 16 : 32) ||
-        dtype.lanes != 1 || node->device.device_type() != target->device_type ||
-        node->device.device_id() != target->device_id ||
-        node->alignment != static_cast<uint64_t>(contract.alignment)) {
+    const DLDataType expected_dtype =
+        runtime::DataTypeFromString(expected_type->dtype);
+    if (!ExactContract(contract) || node->role != role ||
+        !SameDType(node->dtype, expected_dtype) ||
+        node->device.device_type() != target->device_type ||
+        node->device.device_id() != target->device_id) {
         Reject("compiled signature ABI does not match exact shape contract");
     }
     const Array<int64_t> shape = arg.shape();
-    if (shape.size() != contract.logical.size()) Reject("compiled signature rank mismatch");
+    if (shape.size() != contract.logical.size() ||
+        shape.size() != expected_type->shape.size()) {
+        Reject("compiled signature rank mismatch");
+    }
     for (size_t i = 0; i < shape.size(); ++i) {
-        if (shape[i] != contract.logical[i]) Reject("compiled signature extent mismatch");
+        if (shape[i] != contract.logical[i] ||
+            shape[i] != expected_type->shape[i]) {
+            Reject("compiled signature extent mismatch");
+        }
     }
 }
 
@@ -661,17 +584,18 @@ void VerifyVariant(
         const runtime::ValueSpec& value = compiled.plan.values()[i];
         const auto& source = partitioned.value_graph.values[i];
         const auto& exact = ProfileValue(oracle, ValueName(source.value_id));
-        const bool f16 = exact.abi.dtype() == shape::DataType::kFloat16;
+        const auto* expected_type = source.checked_type.As<TensorTypeNode>();
+        if (!expected_type) Reject("compiled plan source is not a tensor");
+        const DLDataType expected_dtype =
+            runtime::DataTypeFromString(expected_type->dtype);
         if (value->value_id != source.value_id ||
             value->is_input !=
                 (source.origin == internal::ValueOrigin::kParameter) ||
             value->is_constant !=
                 (source.origin == internal::ValueOrigin::kConstant) ||
             value->is_output != source.is_graph_output ||
-            !ExactContract(exact, config->target) ||
-            value->dtype.code != kDLFloat ||
-            value->dtype.bits != (f16 ? 16 : 32) ||
-            value->dtype.lanes != 1 ||
+            !ExactContract(exact) ||
+            !SameDType(value->dtype, expected_dtype) ||
             value->device.device_type() != config->target->device_type ||
             value->device.device_id() != config->target->device_id ||
             value.shape().size() != exact.logical.size()) {
@@ -690,15 +614,7 @@ void VerifyVariant(
         if (request.ordered_call_index != i ||
             request.call_locator.value() != ValueName(unit.output_value_ids[0]) ||
             !(request.shape_profile_key == oracle.profile().key()) ||
-            request.artifact_key.unit_semantic_key().normalized_unit_fingerprint() !=
-                unit.semantic_key.canonical_bytes() ||
-            request.artifact_key.pipeline_fingerprint() !=
-                contract.canonical_bytes ||
-            request.artifact_key.capability_fingerprint() !=
-                graph.key().capability_fingerprint() ||
-            !(request.artifact_key.target_backend_abi() == TargetAbi(config->target)) ||
-            request.artifact_key.ordered_inputs() != request.ordered_inputs ||
-            request.artifact_key.ordered_outputs() != request.ordered_outputs ||
+            request.unit_semantic_key != unit.semantic_key ||
             !shape::MatchesExactSignatureDigest(
                 request.signature_digest, request.ordered_inputs,
                 request.ordered_outputs) ||
@@ -708,7 +624,7 @@ void VerifyVariant(
         }
         for (size_t j = 0; j < request.ordered_inputs.size(); ++j) {
             const auto& value = request.ordered_inputs[j];
-            if (!ExactContract(value, config->target) ||
+            if (!ExactContract(value) ||
                 !SameContract(value, ProfileValue(
                     oracle, ValueName(unit.input_value_ids[j])))) {
                 Reject("exact request input contract drifted");
@@ -716,7 +632,7 @@ void VerifyVariant(
         }
         for (size_t j = 0; j < request.ordered_outputs.size(); ++j) {
             const auto& value = request.ordered_outputs[j];
-            if (!ExactContract(value, config->target) ||
+            if (!ExactContract(value) ||
                 !SameContract(value, ProfileValue(
                     oracle, ValueName(unit.output_value_ids[j])))) {
                 Reject("exact request output contract drifted");
@@ -737,11 +653,18 @@ void VerifyVariant(
             const auto& value = partitioned.value_graph.values[static_cast<size_t>(unit.input_value_ids[j])];
             VerifyArg(args[j], value.origin == internal::ValueOrigin::kConstant
                           ? codegen::KernelArgRole::kConstant : codegen::KernelArgRole::kInput,
-                      request.ordered_inputs[j], config->target);
+                      request.ordered_inputs[j],
+                      value.checked_type.As<TensorTypeNode>(),
+                      config->target);
         }
         for (size_t j = 0; j < unit.output_value_ids.size(); ++j) {
-            VerifyArg(args[unit.input_value_ids.size() + j], codegen::KernelArgRole::kOutput,
-                      request.ordered_outputs[j], config->target);
+            const auto& value = partitioned.value_graph.values[
+                static_cast<size_t>(unit.output_value_ids[j])];
+            VerifyArg(args[unit.input_value_ids.size() + j],
+                      codegen::KernelArgRole::kOutput,
+                      request.ordered_outputs[j],
+                      value.checked_type.As<TensorTypeNode>(),
+                      config->target);
         }
         const codegen::KernelLaunchMetadata metadata = compiled.module.launch_metadata(call->symbol);
         if (metadata->device.device_type() != config->target->device_type ||
@@ -750,7 +673,8 @@ void VerifyVariant(
             (config->target->kind == "cuda" && metadata->backend != codegen::CodeGenBackend::kCUDA)) {
             Reject("compiled launch metadata does not match target/backend");
         }
-        const ArtifactKey expected = internal::BuildPrimitiveArtifactKey(
+        const PrimitiveArtifactKey expected =
+            internal::BuildPrimitiveArtifactKey(
             unit.semantic_key, config->target, contract.canonical_bytes,
             contract.schedule_version.c_str(), contract.backend_version.c_str());
         const ArtifactPin& public_pin = compiled.artifact_pins[i];
@@ -792,8 +716,8 @@ struct PreparedGraphTemplate::Impl final {
 struct ExactPlanVariant::Impl final {
     CompiledModule module;
     runtime::ExecutablePlan plan;
-    shape::ShapeProfileKey profile;
-    shape::PlanVariantKey key;
+    ShapeProfileKey profile;
+    PlanVariantKey key;
     std::vector<ArtifactPin> pins;
 };
 
@@ -824,8 +748,8 @@ ExactPlanVariant::ExactPlanVariant(ExactPlanVariant&&) noexcept = default;
 ExactPlanVariant& ExactPlanVariant::operator=(ExactPlanVariant&&) noexcept = default;
 const CompiledModule& ExactPlanVariant::module() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->module; }
 const runtime::ExecutablePlan& ExactPlanVariant::plan() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->plan; }
-const shape::ShapeProfileKey& ExactPlanVariant::shape_profile_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->profile; }
-const shape::PlanVariantKey& ExactPlanVariant::plan_variant_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->key; }
+const ShapeProfileKey& ExactPlanVariant::shape_profile_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->profile; }
+const PlanVariantKey& ExactPlanVariant::plan_variant_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->key; }
 const std::vector<ArtifactPin>& ExactPlanVariant::artifact_pins() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->pins; }
 
 bool ProductionExactShapeAdapter::IsEnabled() noexcept {
@@ -859,8 +783,7 @@ PreparedGraphTemplate ProductionExactShapeAdapter::PrepareGraphTemplate(
         prepared.capability_boundary_checks;
     counters.value_graph_builds = prepared.value_graph_builds;
     counters.partitions = prepared.partitions;
-    shape::GraphTemplate graph =
-        BuildTemplate(prepared.graph, clone->target, contract);
+    shape::GraphTemplate graph = BuildTemplate(prepared);
     return PreparedGraphTemplate(
         std::make_shared<PreparedGraphTemplate::Impl>(
             std::move(clone), std::move(contract), std::move(prepared),
@@ -890,36 +813,20 @@ ExactPlanVariant ProductionExactShapeAdapter::AssembleExactPlan(
     VerifyVariant(prepared.impl_->graph, requests,
                   prepared.impl_->prepared, prepared.impl_->config,
                   prepared.impl_->contract, oracle, compiled);
-    const std::string frozen_plan = FrozenPlanCanonical(compiled.plan);
-    std::vector<std::string> identities;
-    identities.reserve(compiled.plan.calls().size());
+    std::vector<OrderedArtifactSelectionIdentity> selections;
+    selections.reserve(compiled.plan.calls().size());
     for (size_t i = 0; i < compiled.plan.calls().size(); ++i) {
         const ArtifactRecord& record =
             compiled.artifact_pins[i].handle().record();
-        std::string identity;
-        AppendField(&identity, "kind", "selected-static-exact-call-v1");
-        AppendField(&identity, "call_locator",
-                    prepared.impl_->graph.ordered_units()[i]
-                        .call_locator.value());
-        AppendField(&identity, "link_symbol",
-                    std::string(compiled.plan.calls()[i]->symbol));
-        AppendField(&identity, "generation", "0");
-        AppendField(&identity, "shape_artifact",
-                    requests[i].artifact_key.CanonicalBytes());
-        AppendField(&identity, "shape_signature",
-                    requests[i].signature_digest.value());
-        AppendField(&identity, "production_artifact",
-                    record.artifact_key.canonical_bytes());
-        AppendField(&identity, "production_signature",
-                    record.signature_digest);
-        AppendField(&identity, "production_launch", record.launch_metadata_digest);
-        if (i == 0) AppendField(&identity, "frozen_plan", frozen_plan);
-        identities.push_back(std::move(identity));
+        selections.push_back(OrderedArtifactSelectionIdentity{
+            i, std::string(compiled.plan.calls()[i]->symbol),
+            record.artifact_key, 0});
     }
     auto impl = std::make_shared<ExactPlanVariant::Impl>(ExactPlanVariant::Impl{
         compiled.module, compiled.plan, oracle.profile().key(),
-        shape::PlanVariantKey(prepared.impl_->graph.key(), oracle.profile().key(),
-                              std::move(identities)),
+        BuildPlanVariantKey(
+            prepared.impl_->graph.key(), oracle.profile().key(),
+            selections, runtime::internal::kStaticMemoryPlanVersion),
         compiled.artifact_pins});
     return ExactPlanVariant(std::move(impl));
 }

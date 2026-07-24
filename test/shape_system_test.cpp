@@ -29,41 +29,25 @@ bool Throws(const std::function<void()>& action) {
 }
 
 namespace shape = kxc::shape::experimental::v1;
-using shape::BackendKind;
 using shape::Binding;
 using shape::BindingSet;
 using shape::Constraint;
-using shape::DataType;
 using shape::DeferredConstraintKind;
-using shape::DeviceDescriptor;
-using shape::DeviceKind;
 using shape::DimExpr;
 using shape::ExactConstraintSolver;
-using shape::GraphTemplateKey;
 using shape::LogicalShape;
 using shape::NamedTensorContract;
-using shape::PhysicalShape;
+using shape::PhysicalCapacity;
 using shape::ShapeProgram;
-using shape::TargetBackendAbiDescriptor;
-using shape::TargetKind;
-using shape::TensorAbiDescriptor;
 using shape::TensorShapeContract;
 using shape::ValidExtent;
 
-TargetBackendAbiDescriptor CpuAbi(BackendKind backend = BackendKind::kLlvm,
-                                  TargetKind target = TargetKind::kX86_64) {
-  return TargetBackendAbiDescriptor(target, backend, 1);
-}
-
-TensorAbiDescriptor F32Cpu(uint32_t device_id = 0) {
-  return TensorAbiDescriptor(DataType::kFloat32,
-                             DeviceDescriptor(DeviceKind::kCpu, device_id), CpuAbi());
-}
-
 TensorShapeContract Contract(std::vector<DimExpr> logical, std::vector<DimExpr> physical,
                              std::vector<DimExpr> valid) {
-  return TensorShapeContract(LogicalShape(std::move(logical)), PhysicalShape(std::move(physical)),
-                             ValidExtent(std::move(valid)), F32Cpu());
+  return TensorShapeContract(
+      LogicalShape(std::move(logical)),
+      PhysicalCapacity(std::move(physical)),
+      ValidExtent(std::move(valid)));
 }
 
 bool TestCanonicalizationAndErrors() {
@@ -122,8 +106,8 @@ bool TestContractsAndProgram() {
   const DimExpr output_extent = DimExpr::Add({n, DimExpr::Const(1)});
   const TensorShapeContract output = TensorShapeContract(
       LogicalShape({output_extent}, {std::optional<std::string>("features")} ),
-      PhysicalShape({DimExpr::Const(8)}, std::nullopt, "contiguous.row_major", 16, "host"),
-      ValidExtent({output_extent}), F32Cpu());
+      PhysicalCapacity({DimExpr::Const(8)}),
+      ValidExtent({output_extent}));
   const ShapeProgram program({"n"}, {NamedTensorContract{"input", input}},
                              {NamedTensorContract{"output", output}},
                              {Constraint::Range(n, 0, 7)});
@@ -136,9 +120,8 @@ bool TestContractsAndProgram() {
         "input logical/physical/valid contracts must remain separate");
   CHECK(evaluated.outputs[0].contract.logical == std::vector<int64_t>({4}) &&
             evaluated.outputs[0].contract.physical == std::vector<int64_t>({8}) &&
-            evaluated.outputs[0].contract.valid == std::vector<int64_t>({4}) &&
-            evaluated.outputs[0].contract.strides == std::vector<int64_t>({1}),
-        "output contract or derived row-major stride is incorrect");
+            evaluated.outputs[0].contract.valid == std::vector<int64_t>({4}),
+        "output logical/physical/valid contract is incorrect");
 
   CHECK(Throws([] {
           (void)Contract({DimExpr::Const(4)}, {DimExpr::Const(3)}, {DimExpr::Const(3)}).Evaluate(BindingSet());
@@ -146,44 +129,6 @@ bool TestContractsAndProgram() {
   CHECK(Throws([] {
           (void)Contract({DimExpr::Const(4)}, {DimExpr::Const(4)}, {DimExpr::Const(5)}).Evaluate(BindingSet());
         }), "valid extent beyond logical extent must fail");
-  CHECK(Throws([] {
-          PhysicalShape({DimExpr::Const(4)}, std::nullopt, "contiguous", 3,
-                        "default");
-        }), "non-power-of-two alignment must fail");
-  CHECK(Throws([] {
-          PhysicalShape({DimExpr::Const(4)}, std::nullopt, "", 1, "default");
-        }), "physical layout must be explicit");
-  CHECK(Throws([] {
-          PhysicalShape({DimExpr::Const(4)}, std::nullopt, "strided", 1, "default");
-        }), "experimental v1 must gate unsupported layouts");
-  CHECK(Throws([&] {
-          const TensorShapeContract zero_stride(
-              LogicalShape({DimExpr::Const(2), DimExpr::Const(2)}),
-              PhysicalShape({DimExpr::Const(2), DimExpr::Const(2)},
-                            std::vector<DimExpr>{DimExpr::Const(0), DimExpr::Const(1)}),
-              ValidExtent({DimExpr::Const(2), DimExpr::Const(2)}), F32Cpu());
-          (void)zero_stride.Evaluate(BindingSet());
-        }), "zero writable stride must fail closed");
-  CHECK(Throws([&] {
-          const TensorShapeContract overlapping(
-              LogicalShape({DimExpr::Const(2), DimExpr::Const(2)}),
-              PhysicalShape({DimExpr::Const(2), DimExpr::Const(2)},
-                            std::vector<DimExpr>{DimExpr::Const(1), DimExpr::Const(1)}),
-              ValidExtent({DimExpr::Const(2), DimExpr::Const(2)}), F32Cpu());
-          (void)overlapping.Evaluate(BindingSet());
-        }), "overlapping writable strides must fail closed");
-  CHECK(Throws([&] {
-          const TensorShapeContract huge(
-              LogicalShape({n, DimExpr::Const(2)}), PhysicalShape({n, DimExpr::Const(2)}),
-              ValidExtent({n, DimExpr::Const(2)}), F32Cpu());
-          (void)huge.Evaluate(BindingSet({Binding{"n", std::numeric_limits<int64_t>::max()}}));
-        }), "binding-time derived stride overflow must fail closed");
-  CHECK(Throws([&] {
-          const TensorShapeContract huge_bytes(
-              LogicalShape({n}), PhysicalShape({n}), ValidExtent({n}), F32Cpu());
-          (void)huge_bytes.Evaluate(BindingSet({Binding{
-              "n", std::numeric_limits<int64_t>::max() / 4 + 1}}));
-        }), "binding-time physical byte extent overflow must fail closed");
   CHECK(Throws([&] { (void)program.Evaluate(BindingSet()); }), "program evaluation must reject underbound symbols");
 
   const DimExpr m = DimExpr::Symbol("m");
@@ -201,32 +146,7 @@ bool TestContractsAndProgram() {
   return true;
 }
 
-bool TestKeysAndNoFuzzyCapacity() {
-  const GraphTemplateKey first(shape::kShapeContractVersion, "a", "bc",
-                               "cpu", "per-call", CpuAbi());
-  const GraphTemplateKey second(shape::kShapeContractVersion, "ab", "c",
-                                "cpu", "per-call", CpuAbi());
-  const GraphTemplateKey other_capability(shape::kShapeContractVersion,
-                                          "a", "bc", "cuda", "per-call", CpuAbi());
-  const GraphTemplateKey other_target(shape::kShapeContractVersion,
-                                      "a", "bc", "cpu", "per-call",
-                                      CpuAbi(BackendKind::kLlvm, TargetKind::kAArch64));
-  const GraphTemplateKey other_backend(shape::kShapeContractVersion,
-                                       "a", "bc", "cpu", "per-call",
-                                       CpuAbi(BackendKind::kNative));
-  CHECK(first.CanonicalBytes() != second.CanonicalBytes(), "key fields need collision-safe boundaries");
-  CHECK(first.CanonicalBytes() != other_capability.CanonicalBytes(),
-        "capability fingerprint must participate in template identity");
-  CHECK(first.CanonicalBytes() != other_target.CanonicalBytes(),
-        "strong target kind must participate in template identity");
-  CHECK(first.CanonicalBytes() != other_backend.CanonicalBytes(),
-        "strong backend kind must participate in template identity");
-  CHECK(Throws([] {
-          GraphTemplateKey(0, "graph", "pipeline", "capability", "partition", CpuAbi());
-        }), "key version zero must fail");
-  CHECK(Throws([] {
-          (void)TargetBackendAbiDescriptor(TargetKind::kX86_64, BackendKind::kLlvm, 0);
-        }), "backend ABI version zero must fail");
+bool TestPolicyGatesAndNoFuzzyCapacity() {
   CHECK(!shape::SupportsConstraint(DeferredConstraintKind::kSameRank) &&
             !shape::SupportsConstraint(DeferredConstraintKind::kLayoutCompatible),
         "deferred rank/layout constraints must report a closed gate");
@@ -248,7 +168,8 @@ int main() {
       {"canonicalization_and_errors", TestCanonicalizationAndErrors},
       {"exact_solver", TestExactSolver},
       {"contracts_and_program", TestContractsAndProgram},
-      {"keys_and_no_fuzzy_capacity", TestKeysAndNoFuzzyCapacity},
+      {"policy_gates_and_no_fuzzy_capacity",
+       TestPolicyGatesAndNoFuzzyCapacity},
   };
   int failures = 0;
   for (const auto& test : tests) {

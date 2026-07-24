@@ -16,7 +16,18 @@
 namespace kxc::api::adaptive::hot_swap::v2 {
 namespace {
 std::string Part(const std::string& x) { return std::to_string(x.size()) + ":" + x + ";"; }
-std::string FlightKey(const ProductionCompileRequest& r) { return Part(r.artifact_key().canonical_bytes()) + Part(r.dispatch_key().canonical_bytes()) + Part(r.plan_abi().canonical_bytes()); }
+std::string FlightKey(const ProductionCompileRequest& request) {
+    std::string key =
+        Part(request.graph_semantic_key().canonical_bytes()) +
+        Part(request.shape_profile_key().canonical_bytes()) +
+        Part(request.dispatch_key().canonical_bytes()) +
+        Part(request.plan_abi().canonical_bytes());
+    for (const OrderedArtifactIdentity& artifact :
+         request.ordered_artifacts()) {
+        key += Part(artifact.CanonicalBytes());
+    }
+    return key;
+}
 std::string RouteKey(const DispatchKey& d, const PlanAbiFingerprint& a) { return Part(d.canonical_bytes()) + Part(a.canonical_bytes()); }
 Failure Fail(FailureCategory c, std::string s, std::chrono::milliseconds retry = {}, bool retryable = true) { return {c, std::move(s), retry, retryable}; }
 CompileResult Failed(Failure f) { return {nullptr, std::move(f)}; }
@@ -106,23 +117,23 @@ FailureCategory CompileError::category() const noexcept { return category_; }
 ValidationReceipt::ValidationReceipt(std::string value) : value_(std::move(value)) { if (value_.empty()) throw std::invalid_argument("validation receipt is empty"); }
 const std::string& ValidationReceipt::value() const noexcept { return value_; }
 ValidationReceipt CandidateValidationAuthority::IssueReceipt(std::string value) { return ValidationReceipt(std::move(value)); }
-GenerationLease::GenerationLease(Generation g, std::shared_ptr<const FrozenPlanVariant> v, DispatchKey r, ArtifactKey a, PlanAbiFingerprint abi, std::string receipt, uint64_t bytes)
-    : generation_(g), variant_(std::move(v)), route_(std::move(r)), selection_artifact_(std::move(a)), plan_abi_(std::move(abi)), validation_receipt_(std::move(receipt)), producer_reported_bytes_(bytes) {
-    if (!generation_ || !variant_ || !route_.defined() || !selection_artifact_.defined() || !plan_abi_.defined() || validation_receipt_.empty()) throw std::invalid_argument("generation authority issued incomplete lease");
+GenerationLease::GenerationLease(Generation g, std::shared_ptr<const FrozenPlanVariant> v, DispatchKey r, PlanVariantKey selection_plan, PlanAbiFingerprint abi, std::string receipt, uint64_t bytes)
+    : generation_(g), variant_(std::move(v)), route_(std::move(r)), selection_plan_(std::move(selection_plan)), plan_abi_(std::move(abi)), validation_receipt_(std::move(receipt)), producer_reported_bytes_(bytes) {
+    if (!generation_ || !variant_ || !route_.defined() || !selection_plan_.defined() || !plan_abi_.defined() || validation_receipt_.empty()) throw std::invalid_argument("generation authority issued incomplete lease");
 }
 std::shared_ptr<const GenerationLease> GenerationAuthority::MakeLease(Generation g, const GenerationAuthorityRequest& r) {
-    if (!r.candidate || r.selection_artifact != r.candidate->selection_artifact_key() ||
+    if (!r.candidate || r.selection_plan != r.candidate->selection_plan_key() ||
         r.candidate->validation_receipt() != r.validation_receipt.value()) {
         throw std::invalid_argument("generation authority request selection or receipt mismatch");
     }
     const auto variant = legacy::FreezePreparedCandidate(g, r.route, r.plan_abi, r.candidate);
-    return std::shared_ptr<const GenerationLease>(new GenerationLease(g, variant, r.route, r.selection_artifact, r.plan_abi, r.validation_receipt.value(), r.producer_reported_bytes));
+    return std::shared_ptr<const GenerationLease>(new GenerationLease(g, variant, r.route, r.selection_plan, r.plan_abi, r.validation_receipt.value(), r.producer_reported_bytes));
 }
 Generation GenerationLease::generation() const noexcept { return generation_; }
 const std::shared_ptr<const FrozenPlanVariant>& GenerationLease::variant() const noexcept { return variant_; }
 const DispatchKey& GenerationLease::dispatch_key() const noexcept { return route_; }
 const PlanAbiFingerprint& GenerationLease::plan_abi() const noexcept { return plan_abi_; }
-const ArtifactKey& GenerationLease::selection_artifact_key() const noexcept { return selection_artifact_; }
+const PlanVariantKey& GenerationLease::selection_plan_key() const noexcept { return selection_plan_; }
 const std::string& GenerationLease::validation_receipt() const noexcept { return validation_receipt_; }
 uint64_t GenerationLease::producer_reported_bytes() const noexcept { return producer_reported_bytes_; }
 CompileTicket::CompileTicket(std::shared_future<CompileResult> r, std::chrono::steady_clock::time_point d, CancellationToken c) : result_(std::move(r)), deadline_(d), cancellation_(std::move(c)) {}
@@ -241,7 +252,7 @@ public:
                 auto staged=routes; auto staged_discoverable=discoverable; uint64_t staged_bytes=discoverable_bytes;
                 Inject(PublicationStage::kRoute); auto route=staged.find(f->route_key); if(route==staged.end()){size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>=options.max_routes){++route_saturations;throw CompileError(FailureCategory::kPermanent,"adaptive v2 global route capacity is fail-closed");} route=staged.emplace(f->route_key,Route{}).first;}
                 if(route->second.compile_blocked)throw CompileError(FailureCategory::kPermanent,"route compilation is fail-closed after tombstone saturation");
-                Inject(PublicationStage::kQuarantine); if(route->second.tombstones.count(candidate->selection_artifact_key().canonical_bytes()))throw CompileError(FailureCategory::kPermanent,"candidate selection identity is quarantined");
+                Inject(PublicationStage::kQuarantine); if(route->second.tombstones.count(candidate->selection_plan_key().canonical_bytes()))throw CompileError(FailureCategory::kPermanent,"candidate selection identity is quarantined");
                 if(bytes>std::numeric_limits<uint64_t>::max()-staged_bytes)throw std::overflow_error("adaptive v2 discoverable byte accounting overflow");
                 Inject(PublicationStage::kAuthority);
                 const Generation predecessor=route->second.current?route->second.current->generation():0;
@@ -261,17 +272,17 @@ public:
                 // publication linearization point. Cancel callbacks take this
                 // same mutex, so either they remove demand first or commit wins.
                 if(!Live(*f)) { FinishUnlockedCancelled(f); return; }
-                GenerationAuthorityRequest authority_request{f->request.dispatch_key(),candidate->selection_artifact_key(),f->request.plan_abi(),receipt,candidate,bytes};
+                GenerationAuthorityRequest authority_request{f->request.dispatch_key(),candidate->selection_plan_key(),f->request.plan_abi(),receipt,candidate,bytes};
                 LockedAuthorityScope issuance(this);
                 lease=generations->Issue(authority_request);
                 const auto& variant = lease ? lease->variant() : std::shared_ptr<const FrozenPlanVariant>{};
                 if(!lease || lease->generation() <= last_committed_generation ||
                    lease->dispatch_key()!=f->request.dispatch_key() || lease->plan_abi()!=f->request.plan_abi() ||
-                   lease->selection_artifact_key()!=candidate->selection_artifact_key() ||
+                   lease->selection_plan_key()!=candidate->selection_plan_key() ||
                    lease->validation_receipt()!=receipt.value() || lease->producer_reported_bytes()!=bytes ||
                    !variant || variant->generation()!=lease->generation() ||
                    variant->dispatch_key()!=lease->dispatch_key() || variant->plan_abi()!=lease->plan_abi() ||
-                   variant->artifact_lease().artifact_key()!=lease->selection_artifact_key() ||
+                   variant->artifact_lease().selection_plan_key()!=lease->selection_plan_key() ||
                    variant->session()!=candidate->session()) throw CompileError(FailureCategory::kPermanent,"generation authority issued mismatched lease");
                 // No-throw handoff only: reserved vector assignments/erase/swap.
                 route->second.current=lease;route->second.history.push_back(lease);staged_discoverable.push_back(lease);staged_bytes+=bytes;Evict(&staged,&staged_discoverable,&staged_bytes,&evictions);
@@ -291,7 +302,7 @@ CompileTicket AdaptiveHotSwapController::Submit(CompileRequest request) {
     state_->RejectReentry();request.production.Validate();const std::string key=FlightKey(request.production),route=RouteKey(request.production.dispatch_key(),request.production.plan_abi());std::shared_future<CompileResult> future;Event event;{std::lock_guard<std::mutex> lock(state_->mutex);const auto now=std::chrono::steady_clock::now();auto immediate=[&](Failure f,EventKind k){std::promise<CompileResult> p;future=p.get_future().share();p.set_value(Failed(std::move(f)));event.kind=k;};if(request.cancellation.cancelled())immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);else if(now>=request.deadline)immediate(Fail(FailureCategory::kTimeout,"waiter deadline expired",{},true),EventKind::kCancelled);else if(auto it=state_->negative.find(key);it!=state_->negative.end()&&it->second.expires>now){immediate(it->second.failure,EventKind::kRetryCached);++state_->retries;}else {if(state_->negative.count(key))state_->EraseNegative(key);if(state_->negative_blocked)immediate(Fail(FailureCategory::kPermanent,"adaptive v2 permanent negative-cache capacity is fail-closed",{},false),EventKind::kRejected);else if(auto it=state_->flights.find(key);it!=state_->flights.end()){if(it->second->waiters.size()>=state_->options.max_waiters_per_flight)immediate(Fail(FailureCategory::kBackpressure,"adaptive v2 waiter budget is full",{},true),EventKind::kRejected);else if(state_->AddWaiter(it->second,request.cancellation,request.deadline)){future=it->second->future;++state_->merged;event.kind=EventKind::kMerged;}else immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);}else if(state_->queue.size()>=state_->options.max_queued_flights||state_->flights.size()>=state_->options.max_in_flight)immediate(Fail(FailureCategory::kBackpressure,"adaptive v2 queue or in-flight budget is full",{},true),EventKind::kRejected);else{auto f=std::make_shared<State::Flight>(request.production,key,route);if(state_->AddWaiter(f,request.cancellation,request.deadline)){future=f->future;state_->flights.emplace(key,f);state_->queue.push_back(std::move(f));event.kind=EventKind::kQueued;state_->wake.notify_one();}else immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);}}}event.dispatch_key_digest=request.production.dispatch_key().digest();event.plan_abi_digest=request.production.plan_abi().digest();state_->Emit(std::move(event));return CompileTicket(std::move(future),request.deadline,std::move(request.cancellation));
 }
 std::shared_ptr<const GenerationLease> AdaptiveHotSwapController::CompileAndPublish(CompileRequest r){auto result=Submit(std::move(r)).Wait();if(result.ready())return result.lease;throw CompileError(result.failure.category,result.failure.diagnostic);}
-std::shared_ptr<const GenerationLease> AdaptiveHotSwapController::Acquire(const ProductionExecutionRequest& r) const {state_->RejectReentry();r.Validate();std::shared_ptr<const GenerationLease> out;{std::lock_guard<std::mutex> lock(state_->mutex);auto it=state_->routes.find(RouteKey(r.dispatch_key(),r.plan_abi()));if(it!=state_->routes.end()&&it->second.current&&it->second.current->plan_abi()==r.plan_abi()&&!it->second.tombstones.count(it->second.current->selection_artifact_key().canonical_bytes()))out=it->second.current;}if(!out)throw std::out_of_range("no exact published adaptive v2 generation");return out;}
+std::shared_ptr<const GenerationLease> AdaptiveHotSwapController::Acquire(const ProductionExecutionRequest& r) const {state_->RejectReentry();r.Validate();std::shared_ptr<const GenerationLease> out;{std::lock_guard<std::mutex> lock(state_->mutex);auto it=state_->routes.find(RouteKey(r.dispatch_key(),r.plan_abi()));if(it!=state_->routes.end()&&it->second.current&&it->second.current->plan_abi()==r.plan_abi()&&!it->second.tombstones.count(it->second.current->selection_plan_key().canonical_bytes()))out=it->second.current;}if(!out)throw std::out_of_range("no exact published adaptive v2 generation");return out;}
 RunAsyncResult AdaptiveHotSwapController::RunAsync(const ProductionExecutionRequest& r,const Array<runtime::NDArray>& inputs,const DeviceStream& stream) const {auto lease=Acquire(r);auto result=lease->variant()->session()->RunAsync(inputs,stream);result.completion.RetainDependencies({},std::make_shared<RunRetention>(RunRetention{lease}));return {std::move(result.outputs),std::move(result.completion),std::move(lease)};}
 bool AdaptiveHotSwapController::EvaluateHealth(
     const std::shared_ptr<const GenerationLease>& lease) {
@@ -330,7 +341,7 @@ bool AdaptiveHotSwapController::EvaluateHealth(
                      it != found->second.history.rend(); ++it) {
                     if ((*it)->generation() < lease->generation() &&
                         found->second.tombstones.count(
-                            (*it)->selection_artifact_key().canonical_bytes()) == 0) {
+                            (*it)->selection_plan_key().canonical_bytes()) == 0) {
                         predecessor = *it;
                         break;
                     }
@@ -340,7 +351,7 @@ bool AdaptiveHotSwapController::EvaluateHealth(
                 auto& route = staged.find(RouteKey(
                     lease->dispatch_key(), lease->plan_abi()))->second;
                 const std::string artifact =
-                    lease->selection_artifact_key().canonical_bytes();
+                    lease->selection_plan_key().canonical_bytes();
                 size_t route_count;
                 uint64_t route_bytes;
                 size_t tombstone_count;

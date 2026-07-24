@@ -1,7 +1,6 @@
 #include "kxc/compiler/restricted_symbolic_shape.h"
 
 #include <algorithm>
-#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -16,7 +15,8 @@
 #endif
 
 namespace kxc::api::experimental::restricted_symbolic_shape::v1 {
-namespace shape = kxc::shape::experimental::v1;
+namespace shape =
+    kxc::api::experimental::shape_specialization::v1;
 
 struct RestrictedDispatchDecision::Impl final {
     DispatchKind kind;
@@ -38,39 +38,18 @@ void RequireEnabled() {
 #endif
 }
 
-std::vector<int64_t> RowMajor(const std::vector<int64_t>& shape) {
-    std::vector<int64_t> strides(shape.size(), 1);
-    int64_t stride = 1;
-    for (size_t i = shape.size(); i > 0; --i) {
-        if (shape[i - 1] < 0 || (shape[i - 1] != 0 &&
-            stride > std::numeric_limits<int64_t>::max() / shape[i - 1])) {
-            Reject("invalid or overflowing concrete extent");
-        }
-        strides[i - 1] = stride;
-        stride *= shape[i - 1];
-    }
-    return strides;
-}
-
 bool ValidContract(const shape::ConcreteTensorShapeContract& value) {
     if (value.logical.size() != value.physical.size() ||
         value.logical.size() != value.valid.size() ||
-        value.logical.size() != value.strides.size() ||
-        (!value.axis_names.empty() && value.axis_names.size() != value.logical.size()) ||
-        value.alignment <= 0 ||
-        value.layout != "contiguous.row_major" || value.memory_scope != "global") {
+        (!value.axis_names.empty() &&
+         value.axis_names.size() != value.logical.size())) {
         return false;
     }
     for (size_t i = 0; i < value.logical.size(); ++i) {
         if (value.logical[i] < 0 || value.physical[i] < value.logical[i] ||
             value.valid[i] < 0 || value.valid[i] > value.logical[i]) return false;
     }
-    try {
-        return value.strides == RowMajor(value.physical) &&
-               value.alignment == static_cast<int64_t>(value.abi.element_bytes());
-    } catch (const std::exception&) {
-        return false;
-    }
+    return true;
 }
 
 void VerifyContracts(const std::vector<shape::UnitSpecializationRequest>& requests) {
@@ -186,17 +165,10 @@ shape::NamedTensorContract Overlay(const shape::NamedTensorContract& source,
     const auto found = shapes.find(Dimensions(source));
     const std::vector<shape::DimExpr>& dimensions = found == shapes.end()
         ? source.contract.logical().dimensions() : found->second;
-    std::vector<shape::DimExpr> strides(dimensions.size(), shape::DimExpr::Const(1));
-    shape::DimExpr stride = shape::DimExpr::Const(1);
-    for (size_t i = dimensions.size(); i > 0; --i) {
-        strides[i - 1] = stride;
-        stride = shape::DimExpr::Mul({stride, dimensions[i - 1]});
-    }
     return {source.name, shape::TensorShapeContract(
         shape::LogicalShape(dimensions, source.contract.logical().axis_names()),
-        shape::PhysicalShape(dimensions, std::move(strides), source.contract.physical().layout(),
-                             source.contract.physical().alignment(), source.contract.physical().memory_scope()),
-        shape::ValidExtent(dimensions), source.contract.abi())};
+        shape::PhysicalCapacity(dimensions),
+        shape::ValidExtent(dimensions))};
 }
 
 void VerifyBindings(const shape::GraphTemplate& graph, const shape::BindingSet& bindings) {
@@ -227,7 +199,7 @@ std::vector<shape::GuardedUnitSpecializationRequest> RebuildGuarded(
     const auto expected = decision.kind == DispatchKind::kBucket
         ? shape::GuardedProfileKind::kBucket : shape::GuardedProfileKind::kPolymorphic;
     for (const auto& request : requests) {
-        if (request.kind != expected || request.artifact_key.kind() != expected ||
+        if (request.kind != expected ||
             !(request.exact_oracle_key == decision.exact_oracle.profile().key())) {
             Reject("guarded request is detached from decision authority");
         }
@@ -244,13 +216,15 @@ void VerifyDecision(const RestrictedDispatchDecision::Impl& decision) {
 }
 
 std::string ExactUnitBoundaryIdentity(const shape::UnitSpecializationRequest& request) {
-    // KernelArtifactKey canonically covers the unit semantic key and complete
-    // ordered boundary contracts, but deliberately excludes routing/profile keys.
-    return "restricted.exact-unit-boundary.v1" + request.artifact_key.CanonicalBytes();
+    return "restricted.exact-unit-boundary.v2|" +
+           request.unit_semantic_key.canonical_bytes() + "|" +
+           request.signature_digest.value();
 }
 
 std::string GuardedUnitBoundaryIdentity(const shape::GuardedUnitSpecializationRequest& request) {
-    return "restricted.guarded-unit-boundary.v1" + request.artifact_key.CanonicalBytes();
+    return "restricted.guarded-unit-boundary.v2|" +
+           request.unit_semantic_key.canonical_bytes() + "|" +
+           request.specialization_canonical;
 }
 
 std::string ProofToken(const std::string& operation) {
@@ -486,11 +460,11 @@ std::vector<size_t> RestrictedSymbolicShapeAdapter::ChangedUnitIndices(
     std::vector<size_t> changed;
     for (size_t i = 0; i < previous_exact.size(); ++i) {
         const auto& previous_semantic = previous.kind() == DispatchKind::kExact
-            ? previous_exact[i].artifact_key.unit_semantic_key()
-            : previous_guarded[i].artifact_key.unit_semantic_key();
+            ? previous_exact[i].unit_semantic_key
+            : previous_guarded[i].unit_semantic_key;
         const auto& next_semantic = next.kind() == DispatchKind::kExact
-            ? next_exact[i].artifact_key.unit_semantic_key()
-            : next_guarded[i].artifact_key.unit_semantic_key();
+            ? next_exact[i].unit_semantic_key
+            : next_guarded[i].unit_semantic_key;
         if (!(previous_semantic == next_semantic)) Reject("decision unit semantic contexts are incomparable");
         const std::string left = previous.kind() == DispatchKind::kExact
             ? ExactUnitBoundaryIdentity(previous_exact[i])

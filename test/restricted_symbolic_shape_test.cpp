@@ -12,7 +12,8 @@
 
 namespace {
 namespace restricted = kxc::api::experimental::restricted_symbolic_shape::v1;
-namespace shape = kxc::shape::experimental::v1;
+namespace shape =
+    kxc::api::experimental::shape_specialization::v1;
 
 #define CHECK(x, m) do { if (!(x)) { std::cerr << "[FAIL] " << __FUNCTION__ << ": " << m << "\n"; return false; } } while (0)
 
@@ -83,8 +84,7 @@ shape::BucketPolicy Bucket(const restricted::PreparedRestrictedSymbolicTemplate&
         const auto& contract = exact.exact_oracle().profile().Value(name).contract;
         std::vector<int64_t> physical = contract.logical;
         if (padded) physical[0] = 8;
-        boundaries.push_back({name, physical, padded ? std::vector<int64_t>{1} : contract.strides,
-                              contract.layout, contract.alignment, contract.memory_scope, contract.abi});
+        boundaries.push_back({name, physical});
     }
     std::vector<shape::TailContract> tails;
     for (size_t index = 0; index < prepared.graph_template().ordered_units().size(); ++index) {
@@ -101,14 +101,10 @@ shape::PolymorphicPolicy Polymorphic(const restricted::PreparedRestrictedSymboli
     std::vector<shape::SymbolicBoundaryContract> boundaries;
     for (const auto& value : prepared.graph_template().shape_program().inputs()) {
         boundaries.push_back({value.name, value.contract.logical().dimensions(),
-            value.contract.physical().layout(), value.contract.physical().alignment(),
-            value.contract.physical().memory_scope(), value.contract.abi(),
             value.contract.logical().axis_names()});
     }
     for (const auto& value : prepared.graph_template().shape_program().outputs()) {
         boundaries.push_back({value.name, value.contract.logical().dimensions(),
-            value.contract.physical().layout(), value.contract.physical().alignment(),
-            value.contract.physical().memory_scope(), value.contract.abi(),
             value.contract.logical().axis_names()});
     }
     std::vector<shape::PolymorphicUnitProof> allowlist;
@@ -116,8 +112,7 @@ shape::PolymorphicPolicy Polymorphic(const restricted::PreparedRestrictedSymboli
         allowlist.push_back({index, prepared.graph_template().ordered_units()[index].semantic_key, proofs[index]});
     }
     return shape::PolymorphicPolicy(1, Guard(), std::move(allowlist),
-        {{0, "n_extent", "n", 1, 8, 1}}, std::move(boundaries),
-        prepared.graph_template().key().target_backend_abi(), 0);
+        {{0, "n_extent", "n", 1, 8, 1}}, std::move(boundaries), 0);
 }
 
 bool TestGateAndRestrictedSlice() {

@@ -4,12 +4,11 @@
 #include <string>
 #include <vector>
 
-#include "kxc/shape/guarded_specialization.h"
+#include "kxc/compiler/guarded_shape_specialization.h"
 
-// This installed header exposes only an experimental-v1 deterministic test
-// contract. It is not a Compiler/Runtime/cache API and promises neither source
-// compatibility nor binary ABI compatibility across versions.
-namespace kxc::shape::experimental::v1::fakes::compiler_foundation_v1 {
+// Test-only deterministic seam. It is never installed as public API.
+namespace kxc::api::experimental::shape_specialization::v1::fakes::
+    compiler_foundation_v1 {
 
 inline constexpr uint32_t kContractVersion = 1;
 
@@ -17,7 +16,7 @@ class FakeSelectedArtifact {
  public:
   [[nodiscard]] size_t ordered_call_index() const noexcept;
   [[nodiscard]] const ShapeProfileKey& shape_profile_key() const noexcept;
-  [[nodiscard]] const KernelArtifactKey& artifact_key() const noexcept;
+  [[nodiscard]] const PrimitiveArtifactKey& artifact_key() const noexcept;
   [[nodiscard]] const UnitSignatureDigest& signature_digest() const noexcept;
   [[nodiscard]] const std::string& entry_symbol() const noexcept;
   [[nodiscard]] uint64_t generation() const noexcept;
@@ -25,13 +24,13 @@ class FakeSelectedArtifact {
  private:
   FakeSelectedArtifact(size_t ordered_call_index,
                        ShapeProfileKey shape_profile_key,
-                       KernelArtifactKey artifact_key,
+                       PrimitiveArtifactKey artifact_key,
                        UnitSignatureDigest signature_digest,
                        std::string entry_symbol);
 
   size_t ordered_call_index_;
   ShapeProfileKey shape_profile_key_;
-  KernelArtifactKey artifact_key_;
+  PrimitiveArtifactKey artifact_key_;
   UnitSignatureDigest signature_digest_;
   std::string entry_symbol_;
 
@@ -53,7 +52,7 @@ class DeterministicMockCoordinator {
 
  private:
   struct UniqueArtifact {
-    KernelArtifactKey artifact_key;
+    PrimitiveArtifactKey artifact_key;
     UnitSignatureDigest signature_digest;
     std::string entry_symbol;
   };
@@ -104,14 +103,16 @@ class GuardedFakeSelectedArtifact {
   [[nodiscard]] const ShapeProfileKey& exact_oracle_key() const noexcept;
   [[nodiscard]] GuardedProfileKind kind() const noexcept;
   [[nodiscard]] const std::string& guard_canonical() const noexcept;
-  [[nodiscard]] const GuardedArtifactKey& artifact_key() const noexcept;
+  [[nodiscard]] const PrimitiveArtifactKey& artifact_key() const noexcept;
   [[nodiscard]] const std::string& entry_symbol() const noexcept;
   [[nodiscard]] uint64_t generation() const noexcept;
 
  private:
   GuardedFakeSelectedArtifact(const GuardedUnitSpecializationRequest& request,
+                              PrimitiveArtifactKey artifact_key,
                               std::string entry_symbol);
   GuardedUnitSpecializationRequest request_;
+  PrimitiveArtifactKey artifact_key_;
   std::string entry_symbol_;
   friend class GuardedDeterministicMockCoordinator;
 };
@@ -124,7 +125,7 @@ class GuardedDeterministicMockCoordinator {
   [[nodiscard]] size_t unique_resolve_count() const noexcept;
 
  private:
-  std::vector<GuardedArtifactKey> unique_artifacts_;
+  std::vector<PrimitiveArtifactKey> unique_artifacts_;
 };
 
 struct GuardedFakeFrozenPlanCall {
@@ -140,16 +141,16 @@ struct GuardedFakeFrozenPlanCall {
 
 class GuardedFakeFrozenPlan {
  public:
-  [[nodiscard]] const GuardedPlanVariantKey& key() const noexcept;
+  [[nodiscard]] const PlanVariantKey& key() const noexcept;
   [[nodiscard]] const GuardedShapeProfile& profile() const noexcept;
   [[nodiscard]] const std::vector<GuardedFakeFrozenPlanCall>& ordered_calls() const noexcept;
   [[nodiscard]] const std::vector<GuardedFakeSelectedArtifact>& retained_artifacts() const noexcept;
 
  private:
-  GuardedFakeFrozenPlan(GuardedPlanVariantKey key, GuardedShapeProfile profile,
+  GuardedFakeFrozenPlan(PlanVariantKey key, GuardedShapeProfile profile,
                         std::vector<GuardedFakeFrozenPlanCall> ordered_calls,
                         std::vector<GuardedFakeSelectedArtifact> retained_artifacts);
-  GuardedPlanVariantKey key_;
+  PlanVariantKey key_;
   GuardedShapeProfile profile_;
   std::vector<GuardedFakeFrozenPlanCall> ordered_calls_;
   std::vector<GuardedFakeSelectedArtifact> retained_artifacts_;
@@ -164,4 +165,4 @@ class GuardedDeterministicMockPlanAssembler {
       const std::vector<GuardedFakeSelectedArtifact>& selected_artifacts) const;
 };
 
-}  // namespace kxc::shape::experimental::v1::fakes::compiler_foundation_v1
+}  // namespace kxc::api::experimental::shape_specialization::v1::fakes::compiler_foundation_v1

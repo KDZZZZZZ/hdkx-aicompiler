@@ -151,7 +151,7 @@ bool TestGateAndPreparation() {
           "concrete Relay template must retain two units and hard-gate multi-profile");
     const auto oracle = ProductionExactShapeAdapter::InstantiateExactProfile(
         prepared, kxc::shape::experimental::v1::BindingSet());
-    CHECK(oracle.profile().key().bindings().bindings().empty(), "only empty concrete profile is accepted");
+    CHECK(oracle.profile().bindings().bindings().empty(), "only empty concrete profile is accepted");
     CHECK(Throws([&] { (void)ProductionExactShapeAdapter::InstantiateExactProfile(
               prepared, kxc::shape::experimental::v1::BindingSet({{"s", 4}})); }),
           "non-empty symbolic binding must fail before compilation/cache work");
@@ -187,7 +187,7 @@ bool TestCallerRelayIsolation() {
               !source.input.checked_type().defined(),
           "PrepareGraphTemplate must not type-mutate caller-owned Relay nodes");
     const std::string frozen_key =
-        prepared.graph_template().key().CanonicalBytes();
+        prepared.graph_template().key().canonical_bytes();
 
     auto* call = const_cast<kxc::CallNode*>(source.call.operator->());
     call->op = kxc::relay::Op::Get("sqrt");
@@ -203,7 +203,7 @@ bool TestCallerRelayIsolation() {
     function->body = source.input;
     kxc::SetCheckedType(source.function,
                         kxc::TensorType({7}, "int32"));
-    CHECK(prepared.graph_template().key().CanonicalBytes() == frozen_key,
+    CHECK(prepared.graph_template().key().canonical_bytes() == frozen_key,
           "caller mutation must not alter prepared template identity");
 
     const auto oracle = ProductionExactShapeAdapter::InstantiateExactProfile(
@@ -257,8 +257,11 @@ bool TestNegativesBeforeCache() {
     const auto before = kxc::api::internal::GetPrimitiveCacheStats();
     CHECK(Throws([] { (void)ProductionExactShapeAdapter::PrepareGraphTemplate(TwoUnitGraph("float32", -1), Config()); }),
           "legacy -1 must be rejected");
-    CHECK(Throws([] { (void)ProductionExactShapeAdapter::PrepareGraphTemplate(TwoUnitGraph("int32"), Config()); }),
-          "unsupported shape-v1 dtype must be rejected");
+    const auto integer_graph =
+        ProductionExactShapeAdapter::PrepareGraphTemplate(
+            TwoUnitGraph("int32"), Config());
+    CHECK(integer_graph.unit_count() == 2,
+          "Shape preparation must not own or restrict the compiler dtype contract");
     CHECK(Throws([] { (void)ProductionExactShapeAdapter::PrepareGraphTemplate(PassThroughGraph(), Config()); }),
           "a no-compute graph must be rejected during preparation");
     const auto left = ProductionExactShapeAdapter::PrepareGraphTemplate(
@@ -274,47 +277,47 @@ bool TestNegativesBeforeCache() {
     const auto frozen = ProductionExactShapeAdapter::PrepareGraphTemplate(
         TwoUnitGraph(), mutable_config);
     const std::string frozen_key =
-        frozen.graph_template().key().CanonicalBytes();
+        frozen.graph_template().key().canonical_bytes();
     const kxc::api::UnitSemanticKey target_test_semantic(
         "shape-production-target-test");
-    const kxc::api::ArtifactKey artifact_before =
+    const kxc::api::PrimitiveArtifactKey artifact_before =
         kxc::api::internal::BuildPrimitiveArtifactKey(
             target_test_semantic, mutable_config->target, "pipeline-test",
             "schedule-test", "backend-test");
     ++target_node->attrs.max_shared_memory_per_block;
-    const kxc::api::ArtifactKey artifact_changed =
+    const kxc::api::PrimitiveArtifactKey artifact_changed =
         kxc::api::internal::BuildPrimitiveArtifactKey(
             target_test_semantic, mutable_config->target, "pipeline-test",
             "schedule-test", "backend-test");
-    CHECK(frozen.graph_template().key().CanonicalBytes() == frozen_key,
+    CHECK(frozen.graph_template().key().canonical_bytes() == frozen_key,
           "prepared template must deep-freeze its target snapshot");
     CHECK(artifact_before != artifact_changed,
           "scheduling-relevant target changes must split production artifact identity");
     const auto changed = ProductionExactShapeAdapter::PrepareGraphTemplate(
         TwoUnitGraph(), mutable_config);
-    CHECK(!(frozen.graph_template().key() == changed.graph_template().key()),
-          "target capability changes must change template/profile identity");
+    CHECK(frozen.graph_template().key() == changed.graph_template().key(),
+          "target capability must not enter graph semantic identity");
     const std::string changed_key =
-        changed.graph_template().key().CanonicalBytes();
+        changed.graph_template().key().canonical_bytes();
     target_node->attrs.available_global_memory ^= 1;
-    const kxc::api::ArtifactKey artifact_volatile_only =
+    const kxc::api::PrimitiveArtifactKey artifact_volatile_only =
         kxc::api::internal::BuildPrimitiveArtifactKey(
             target_test_semantic, mutable_config->target, "pipeline-test",
             "schedule-test", "backend-test");
     const auto volatile_only =
         ProductionExactShapeAdapter::PrepareGraphTemplate(
             TwoUnitGraph(), mutable_config);
-    CHECK(volatile_only.graph_template().key().CanonicalBytes() == changed_key &&
+    CHECK(volatile_only.graph_template().key().canonical_bytes() == changed_key &&
               artifact_changed == artifact_volatile_only,
           "volatile available memory must not split codegen identity");
     const auto changed_profile =
         ProductionExactShapeAdapter::InstantiateExactProfile(
             changed, kxc::shape::experimental::v1::BindingSet());
-    CHECK(Throws([&] {
-              (void)ProductionExactShapeAdapter::AssembleExactPlan(
-                  frozen, changed_profile);
-          }),
-          "target-snapshot profile mismatch must fail before compiler/cache work");
+    const auto frozen_profile =
+        ProductionExactShapeAdapter::InstantiateExactProfile(
+            frozen, kxc::shape::experimental::v1::BindingSet());
+    CHECK(changed_profile.profile().key() == frozen_profile.profile().key(),
+          "ShapeProfileKey must remain independent of target capability");
     const auto constant_one =
         ProductionExactShapeAdapter::PrepareGraphTemplate(
             ConstantGraph(1.0F), Config());

@@ -1,9 +1,7 @@
-/*! \file include/kxc/compiler/adaptive.h
- * \brief Experimental v1 static-exact adaptive control-plane contracts.
+/*! \file test/support/adaptive_v1.h
+ * \brief Test-only retired v1 adaptive control-plane contracts.
  *
- * \warning This installed API is an experimental fake integration seam. It is
- * not a production Compiler or RuntimeSession adapter, and source/ABI
- * compatibility is not promised before the real Core contracts are integrated.
+ * \warning This fake is not installed or linked into the production runtime.
  */
 
 #pragma once
@@ -356,6 +354,8 @@ enum class CompileStatus : std::uint8_t {
 /*! \brief Immutable terminal result shared with request waiters. */
 class CompileResult final {
 public:
+    CompileResult() = default;
+
     static CompileResult Ready(
         std::shared_ptr<const KernelArtifact> artifact,
         std::shared_ptr<const ArtifactValidationRecord> validation,

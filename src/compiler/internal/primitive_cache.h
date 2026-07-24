@@ -32,13 +32,15 @@ public:
     PrimitiveArtifactPin() = default;
 
     bool defined() const noexcept;
-    const ArtifactKey& key() const;
+    const PrimitiveArtifactKey& key() const;
     const CachedPrimitive& artifact() const;
 
 private:
     friend class PrimitiveCacheLease;
-    friend PrimitiveArtifactPin LookupPrimitiveCache(const ArtifactKey&);
-    friend PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey&);
+    friend PrimitiveArtifactPin LookupPrimitiveCache(
+        const PrimitiveArtifactKey&);
+    friend PrimitiveCacheLease AcquirePrimitiveCache(
+        const PrimitiveArtifactKey&);
     friend PrimitiveArtifactPin PublishPrimitiveCacheLease(
         const PrimitiveCacheLease&, CachedPrimitive);
     explicit PrimitiveArtifactPin(
@@ -75,14 +77,15 @@ public:
     PrimitiveCacheLease() = default;
 
     PrimitiveCacheAccess access() const noexcept;
-    const ArtifactKey& key() const;
+    const PrimitiveArtifactKey& key() const;
     const PrimitiveArtifactPin& pin() const;
     const PrimitiveFailureRecord& failure() const;
     std::string ticket_id() const;
     uint64_t merged_waiter_count() const;
 
 private:
-    friend PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey&);
+    friend PrimitiveCacheLease AcquirePrimitiveCache(
+        const PrimitiveArtifactKey&);
     friend PrimitiveCacheWaitResult WaitPrimitiveCacheLeaseResult(
         const PrimitiveCacheLease&);
     friend PrimitiveArtifactPin WaitPrimitiveCacheLease(
@@ -94,7 +97,7 @@ private:
         std::string, std::chrono::milliseconds);
 
     PrimitiveCacheAccess access_{PrimitiveCacheAccess::kRejected};
-    ArtifactKey key_;
+    PrimitiveArtifactKey key_;
     PrimitiveArtifactPin pin_;
     PrimitiveFailureRecord failure_;
     std::shared_ptr<PrimitiveFlight> flight_;
@@ -131,16 +134,16 @@ struct PrimitiveCacheStats final {
 
 std::string BuildTargetCapabilityFingerprint(const Target& target);
 
-ArtifactKey BuildPrimitiveArtifactKey(
+PrimitiveArtifactKey BuildPrimitiveArtifactKey(
     const UnitSemanticKey& semantic_key, const Target& target,
     const std::string& pipeline_fingerprint,
     const char* schedule_version, const char* backend_version);
 
 /*! \brief Finds a ready artifact without changing cache state or creating a flight. */
-PrimitiveArtifactPin LookupPrimitiveCache(const ArtifactKey& key);
+PrimitiveArtifactPin LookupPrimitiveCache(const PrimitiveArtifactKey& key);
 ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin);
 
-PrimitiveCacheLease AcquirePrimitiveCache(const ArtifactKey& key);
+PrimitiveCacheLease AcquirePrimitiveCache(const PrimitiveArtifactKey& key);
 PrimitiveCacheWaitResult WaitPrimitiveCacheLeaseResult(
     const PrimitiveCacheLease& lease);
 PrimitiveArtifactPin WaitPrimitiveCacheLease(
@@ -154,7 +157,7 @@ void FailPrimitiveCacheLease(
 
 PrimitiveCacheStats GetPrimitiveCacheStats();
 void SetPrimitiveCacheLimitsForTesting(PrimitiveCacheLimits limits);
-void ForgetPrimitiveFailureForTesting(const ArtifactKey& key);
+void ForgetPrimitiveFailureForTesting(const PrimitiveArtifactKey& key);
 void ClearPrimitiveCacheForTesting();
 
 /*! \brief Narrow bridge between opaque public transactions and compiler internals. */
