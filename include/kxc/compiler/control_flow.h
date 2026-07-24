@@ -17,7 +17,7 @@ namespace kxc::api {
 
 /*! \brief Lowers checked static Relay, including Relay If, into a ControlPlan v2.
  *
- * This is compiler preparation/reference semantics only.  It neither creates a
+ * ControlPlan is the compiler preparation typestate.  It neither creates a
  * runtime session nor performs eager execution, tracing, or backend execution.
  */
 runtime::ControlPlan LowerRelayToControlPlan(Function function);
@@ -55,7 +55,7 @@ struct ControlKernelBinding final {
     std::shared_ptr<const ControlFlowArtifactLease> production_lease;
 };
 
-/*! \brief Binds a verified ControlPlan v2 into runtime-only execution schema v1.
+/*! \brief Binds compiler-preparation ControlPlan v2 into runtime-execution ControlExecutionPlan v1.
  *
  * Bindings are selected solely by task id and supplied module entry.  The
  * unresolved kernel reference is validated as provenance, never interpreted

@@ -16,7 +16,6 @@
 
 #include "internal_lowering.h"
 #include "production_control_flow_test.h"
-#include "kxc/profiling/profiling.h"
 #include "kxc/support/hash.h"
 
 namespace kxc::api {
@@ -55,6 +54,26 @@ bool ControlFlowArtifactLease::Covers(
         }
     }
     return false;
+}
+
+CompiledControlFlowGraph::CompiledControlFlowGraph(
+    runtime::ControlExecutionPlan plan,
+    std::shared_ptr<const ControlFlowArtifactLease> artifact_lease)
+    : plan_(std::move(plan)), artifact_lease_(std::move(artifact_lease)) {
+    if (!plan_.defined() || !artifact_lease_ || artifact_lease_->generation() == 0) {
+        throw std::invalid_argument(
+            "CompiledControlFlowGraph requires a defined plan and artifact lease generation");
+    }
+    plan_.Validate();
+}
+
+const runtime::ControlExecutionPlan& CompiledControlFlowGraph::plan() const noexcept {
+    return plan_;
+}
+
+const std::shared_ptr<const ControlFlowArtifactLease>&
+CompiledControlFlowGraph::artifact_lease() const noexcept {
+    return artifact_lease_;
 }
 
 namespace {
@@ -209,7 +228,6 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
             binding.launch_metadata_digest});
         state->artifact_pins.push_back(binding.artifact_pin);
     }
-    std::vector<ArtifactPin> selected_pins = state->artifact_pins;
     const auto lease = std::shared_ptr<const ControlFlowArtifactLease>(
         new ControlFlowArtifactLease(std::move(state)));
 
@@ -222,7 +240,7 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
     }
     runtime::ControlExecutionPlan plan =
         BindControlPlanForRuntime(lowered.plan, bindings);
-    return CompiledControlFlowGraph{std::move(plan), std::move(selected_pins), lease};
+    return CompiledControlFlowGraph(std::move(plan), std::move(lease));
 #endif
 }
 

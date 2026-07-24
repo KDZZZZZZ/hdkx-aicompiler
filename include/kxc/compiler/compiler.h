@@ -49,18 +49,25 @@ private:
 static_assert(std::is_copy_constructible_v<CompiledGraph>);
 static_assert(std::is_copy_assignable_v<CompiledGraph>);
 
-/*! \brief Gated, resolved static-exact control-flow artifact set.
+/*! \brief Immutable compiler-only result for one resolved control execution plan.
  *
- * `plan` is runtime-only: it contains resolved module entries, ABI, launch
- * metadata, immutable module constants, and opaque retention leases, but no
- * Relay, TE, cache lookup, or compiler callback.  The accepted Relay loop is
- * only bounded While; generic loops and recursion remain unsupported.
+ * The runtime execution plan retains the same process-local artifact lease as
+ * this result.  It contains no Relay, TE, cache lookup, or compiler callback.
  */
-struct CompiledControlFlowGraph final {
-    runtime::ControlExecutionPlan plan;
-    std::vector<ArtifactPin> artifact_pins;
-    // Process-local lifetime binding, not caller-supplied authority or provenance.
-    std::shared_ptr<const ControlFlowArtifactLease> artifact_lease;
+class CompiledControlFlowGraph final {
+public:
+    const runtime::ControlExecutionPlan& plan() const noexcept;
+    const std::shared_ptr<const ControlFlowArtifactLease>& artifact_lease() const noexcept;
+
+private:
+    CompiledControlFlowGraph(
+        runtime::ControlExecutionPlan plan,
+        std::shared_ptr<const ControlFlowArtifactLease> artifact_lease);
+
+    friend class Compiler;
+
+    runtime::ControlExecutionPlan plan_;
+    std::shared_ptr<const ControlFlowArtifactLease> artifact_lease_;
 };
 
 /*!

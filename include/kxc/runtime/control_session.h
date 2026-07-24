@@ -31,7 +31,7 @@ struct ControlRunAsyncResult : ControlRunResult {
  *
  * Module snapshots are copied once while constructing the session, including
  * unselected branches, then shared by every run; no branch constant is copied
- * per run. */
+ * per run.  ControlRuntimeSession remains the authority that allocates outputs. */
 class ControlRuntimeSession final {
 public:
     explicit ControlRuntimeSession(ControlExecutionPlan plan);

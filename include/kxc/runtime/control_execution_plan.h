@@ -128,7 +128,7 @@ struct ControlExecutionPlanSpec {
     std::vector<ControlExecutionValueId> graph_outputs;
 };
 
-/*! \brief Frozen, runtime-only resolved control graph. */
+/*! \brief Frozen runtime execution typestate resolved from compiler-preparation ControlPlan. */
 class ControlExecutionPlan final {
 public:
     static constexpr std::int64_t kSchemaVersion = 1;

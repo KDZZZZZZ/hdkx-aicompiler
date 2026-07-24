@@ -582,11 +582,11 @@ bool TestProductionRelayWhileNumericE2E() {
     ControlRunAsyncResult asynchronous;
     {
         auto compiled = kxc::api::Compiler::CompileControlFlowExact(make_loop(3), config);
-        CHECK(!compiled.artifact_pins.empty() && compiled.artifact_lease,
+        CHECK(compiled.artifact_lease(),
               "real Relay While must retain the compiled body artifact pin");
-        lease = compiled.artifact_lease;
+        lease = compiled.artifact_lease();
         const auto expected_events = [&compiled](std::int64_t trips) {
-            const auto& spec = compiled.plan.spec();
+            const auto& spec = compiled.plan().spec();
             const auto& entry = spec.regions[0];
             const auto& loop = entry.tasks[0];
             std::vector<std::string> events;
@@ -619,7 +619,7 @@ bool TestProductionRelayWhileNumericE2E() {
             }
             return events;
         };
-        ControlRuntimeSession session(compiled.plan);
+        ControlRuntimeSession session(compiled.plan());
         const auto run = [&](bool one, bool two, bool three,
                              std::int64_t expected_value,
                              std::int64_t expected_trips) {
@@ -649,9 +649,32 @@ bool TestProductionRelayWhileNumericE2E() {
     CHECK(lease.expired(),
           "releasing RunAsync completion must release the retained production artifact lease");
 
+    std::weak_ptr<const kxc::api::ControlFlowArtifactLease> plan_lease;
+    ControlExecutionPlan retained_plan;
+    {
+        const auto compiled =
+            kxc::api::Compiler::CompileControlFlowExact(make_loop(3), config);
+        const auto extra_lease = compiled.artifact_lease();
+        plan_lease = extra_lease;
+        retained_plan = compiled.plan();
+    }
+    CHECK(!plan_lease.expired(),
+          "the copied execution plan must retain the compiler-minted lease and its pins");
+    {
+        ControlRuntimeSession session(retained_plan);
+        const ControlRunResult result = session.Run(
+            {ScalarBool(true), ScalarBool(true), ScalarBool(true), ScalarBool(false),
+             ScalarI64(7), ScalarI64(1)});
+        CHECK(result.outputs.size() == 5 && ReadI64(result.outputs[4]) == 10,
+              "the plan must execute after its compile result and extra lease handle are released");
+    }
+    retained_plan = ControlExecutionPlan{};
+    CHECK(plan_lease.expired(),
+          "releasing the retained plan must release its plan-retained production lease");
+
     const auto exhausted = kxc::api::Compiler::CompileControlFlowExact(make_loop(1), config);
     CHECK(ErrorText([&] {
-              (void)ControlRuntimeSession(exhausted.plan).Run(
+              (void)ControlRuntimeSession(exhausted.plan()).Run(
                   {ScalarBool(true), ScalarBool(true), ScalarBool(false), ScalarBool(false),
                    ScalarI64(7), ScalarI64(1)});
           }).find("max_trip_count") != std::string::npos,
@@ -689,10 +712,10 @@ bool TestProductionControlFlowGateAndArtifacts() {
     CHECK(error.empty(), "enabled production API must resolve real compiler artifacts");
     const auto compiled = kxc::api::Compiler::CompileControlFlowExact(
         function, config);
-    CHECK(!compiled.artifact_pins.empty() && compiled.artifact_lease &&
-              compiled.artifact_lease->generation() != 0,
+    CHECK(compiled.artifact_lease() &&
+              compiled.artifact_lease()->generation() != 0,
           "resolved production plan must retain real pins in a compiler-minted lease");
-    for (const auto& region : compiled.plan.regions()) {
+    for (const auto& region : compiled.plan().regions()) {
         for (const auto& task : region.tasks) {
             if (task.kind != ControlExecutionTaskKind::kKernel) continue;
             CHECK(task.kernel.binding_revision() == 0,
@@ -700,7 +723,7 @@ bool TestProductionControlFlowGateAndArtifacts() {
         }
     }
 #if KXC_ENABLE_CONTROL_RUNTIME
-    ControlRuntimeSession session(compiled.plan);
+    ControlRuntimeSession session(compiled.plan());
     const ControlRunResult yes =
         session.Run({ScalarBool(true), ScalarI64(2), ScalarI64(3)});
     const ControlRunResult no =
