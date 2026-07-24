@@ -6,10 +6,13 @@ an execution path, launcher descriptor, completion protocol, or CMake gate.
 `CompiledModule` is the sole invocation owner.  An immutable, versioned
 `ModuleInvocationContract` resolves guards and all logical/physical/valid
 extents before allocation, injects immutable constants, and launches the real
-`CompiledKernel`.  Generated extent scalars are ordered, one-element `uint64`
-input buffers immediately after caller data-input slots in `KernelSignature`;
-their descriptors and ordered ASTs are canonical ABI bytes.  Callers never
-provide these buffers.
+`CompiledKernel`.  `KernelSignature` is the sole physical ABI authority:
+contracts contain only guards, extent expressions, limits, and generated
+scalar expressions.  Generated extent scalars occupy explicit ordered
+`kRuntimeExtent` signature slots and are one-element `uint64` buffers;
+callers never provide them.  This role is backend registration, not proof that
+arbitrary machine code consumes the scalar semantically; that remains backend
+E2E evidence.
 
 `RuntimeSession` and control execution fail closed for non-static contracts
 until graph dynamic-memory planning exists.  Generic Relay symbolic lowering,

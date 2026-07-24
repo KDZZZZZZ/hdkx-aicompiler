@@ -7,19 +7,21 @@ RuntimeShape plan/session, fake completion, trusted launcher descriptors and
 all related CMake gates are deleted.  Historical W3 evidence is intentionally
 not an API claim.
 
-Every `CompiledModule` entry owns one immutable version-1
+Every `CompiledModule` entry owns one immutable version-2
 `ModuleInvocationContract`.  The contract's canonical bytes bind logical input
-guards/output extents to the physical `KernelSignature`; exact runtime ABI
+guards/output extents to the physical `KernelSignature`, which is the sole
+source for dtype, device, rank, alignment, layout, and scope; exact runtime ABI
 fingerprints include those bytes and no longer include graph-local value or
 storage identifiers.  `BuildCompiledModule` automatically makes a constant
 contract for static signatures and rejects dynamic physical outputs unless a
 matching contract is supplied.
 
 Public `CompiledModule::Invoke(symbol, data_inputs, stream[, budget])` accepts
-only data inputs.  It validates shape/dtype/device/layout, resolves checked
-input-axis expressions, enforces `valid <= logical <= physical`, checks bytes,
-alignment/layout/scope and budgets, allocates outputs, injects immutable module
-constants, and obtains completion only from `CompiledKernel::Launch`.
+only data inputs.  It validates each matching physical signature argument,
+resolves checked input-axis expressions, enforces `valid <= logical <= physical`,
+checks bytes and budgets (the contract budget is an immutable upper bound and a caller budget can only tighten it), allocates outputs from matching signature specs,
+injects immutable module constants, and obtains completion only from
+`CompiledKernel::Launch`.
 `RuntimeSession` preserves preallocated memory-plan reuse through the same
 internal resolver, but rejects nonstatic/scalar invocation contracts at session
 construction because it has no dynamic graph memory plan.  Task-DAG and
@@ -31,7 +33,7 @@ discard its bound symbol, signature, contract, or constants.
 The default is OFF (`KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI`).  Static contracts
 remain executable with the gate OFF; nonconstant contracts fail before
 allocation or launch.  W4-1 supports input-shape-derived extents, zero extents,
-and an explicit module-generated `uint64[1]` extent-scalar buffer ABI.  It does
+and an explicit module-generated `kRuntimeExtent` `uint64[1]` buffer ABI.  It does
 not support data-dependent/ragged shapes, workspace codegen, arbitrary tail
 transforms, generic symbolic Relay lowering, compiler-emitted scalar contracts,
 or dynamic graph memory planning.  Rank-zero static tensors remain valid
@@ -60,8 +62,8 @@ The combined W4-1 branch was rebuilt after the final scalar-ABI preflight fix:
 
 | Configuration | Result | Evidence tier |
 |---|---:|---|
-| LLVM OFF, CUDA OFF, dynamic ABI OFF, CPU label | **41/41 passed** | validated locally |
-| LLVM OFF, CUDA OFF, dynamic ABI ON, CPU label | **41/41 passed** | validated locally |
+| LLVM OFF, CUDA OFF, dynamic ABI OFF, CPU label | **44/44 passed** | validated locally |
+| LLVM OFF, CUDA OFF, dynamic ABI ON, CPU label | **44/44 passed** | validated locally |
 | ASan+UBSan: module/session/control focused set | **3/3 passed** | validated locally |
 | Relay operator contract | **24/24 passed** | validated locally |
 | Pass contract | **20/20 passed** | validated locally |

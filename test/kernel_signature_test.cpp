@@ -73,6 +73,26 @@ bool TestValidSignature() {
 }
 
 // Canonical bytes are the ABI identity; diagnostics must not participate.
+bool TestRuntimeExtentRole() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const KernelArgSpec input("input", KernelArgRole::kInput, Float32(), {2}, Device::CPU());
+    const KernelArgSpec extent("extent", KernelArgRole::kRuntimeExtent,
+                               DLDataType{kDLUInt, 64, 1}, {1}, Device::CPU(), 8);
+    const KernelArgSpec output("output", KernelArgRole::kOutput, Float32(), {2}, Device::CPU(), 1, true);
+    const KernelSignature signature("extent", {input, extent, output});
+    TEST_CHECK(signature.arguments()[1]->role == KernelArgRole::kRuntimeExtent &&
+                   signature.CanonicalBytes().find("kxc.kernel-signature.v2") != std::string::npos &&
+                   extent.CanonicalBytes().find("kxc.kernel-arg-spec.v2") != std::string::npos,
+               "runtime extent must be a versioned explicit signature role");
+    TEST_CHECK(Throws([] { KernelArgSpec("bad", KernelArgRole::kRuntimeExtent,
+                                        Float32(), {1}, Device::CPU()); }) &&
+                   Throws([] { KernelArgSpec("bad", KernelArgRole::kRuntimeExtent,
+                                        DLDataType{kDLUInt, 64, 1}, {2}, Device::CPU()); }),
+               "runtime extent must be immutable uint64[1]");
+    return true;
+}
+
 bool TestCanonicalBytesCoverEveryAbiField() {
     using namespace kxc;
     using namespace kxc::codegen;
@@ -85,7 +105,7 @@ bool TestCanonicalBytesCoverEveryAbiField() {
     const KernelSignature signature("entry", {input, constant, output});
     const std::string canonical = signature.CanonicalBytes();
     TEST_CHECK(canonical == signature.CanonicalBytes() &&
-                   canonical.find("kxc.kernel-signature.v1") != std::string::npos &&
+                   canonical.find("kxc.kernel-signature.v2") != std::string::npos &&
                    canonical.find("KernelSignature(") == std::string::npos,
                "canonical signature must be deterministic and independent of diagnostics");
 
@@ -540,6 +560,7 @@ bool TestBuildKernelSignature() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"valid_signature", TestValidSignature},
+        {"runtime_extent_role", TestRuntimeExtentRole},
         {"canonical_bytes_all_abi_fields", TestCanonicalBytesCoverEveryAbiField},
         {"shape_variants", TestShapeVariants},
         {"array_immutability", TestArrayImmutability},

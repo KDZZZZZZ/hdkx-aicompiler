@@ -78,7 +78,7 @@ CompiledModule BuildDynamicLLVMModule() {
     const String symbol("llvm_dynamic_twice");
     const KernelSignature signature(symbol, {
         KernelArgSpec("input", KernelArgRole::kInput, F32(), {-1}, Device::CPU(), 8),
-        KernelArgSpec("extent", KernelArgRole::kInput, U64(), {1}, Device::CPU(), 8),
+        KernelArgSpec("extent", KernelArgRole::kRuntimeExtent, U64(), {1}, Device::CPU(), 8),
         KernelArgSpec("output", KernelArgRole::kOutput, F32(), {-1}, Device::CPU(), 8,
                       true),
     });
@@ -92,21 +92,17 @@ CompiledModule BuildDynamicLLVMModule() {
 
     const ModuleShapeExpr twice = ModuleShapeExpr::Mul(
         ModuleShapeExpr::InputAxis(0, 0), ModuleShapeExpr::Const(2));
-    ModuleInputContract input{F32(), Device::CPU(), 1,
-                              {{0, 0, 3, 1, std::nullopt, std::nullopt}}};
+    ModuleInputContract input{{{0, 0, 3, 1, std::nullopt, std::nullopt}}};
     ModuleTensorContract output;
-    output.dtype = F32();
-    output.device = Device::CPU();
     output.logical = {twice};
     output.physical = {twice};
     output.valid = {twice};
-    output.alignment = 8;
     output.max_bytes = 6 * sizeof(float);
     auto contract = std::make_shared<ModuleInvocationContract>(
         std::vector<ModuleInputContract>{input},
         std::vector<ModuleTensorContract>{output},
         std::vector<ModuleRuntimeExtentScalar>{{
-            ModuleShapeExpr::InputAxis(0, 0), U64(), Device::CPU(), 8}});
+            ModuleShapeExpr::InputAxis(0, 0)}});
     return internal::BuildCompiledModule(
         BuildTarget(Device::CPU()),
         {{function, signature, metadata, kernel, std::move(contract)}}, {});

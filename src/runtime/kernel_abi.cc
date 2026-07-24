@@ -90,6 +90,8 @@ const char* RoleName(KernelArgRole role) {
     switch (role) {
         case KernelArgRole::kInput:
             return "input";
+        case KernelArgRole::kRuntimeExtent:
+            return "runtime_extent";
         case KernelArgRole::kConstant:
             return "constant";
         case KernelArgRole::kOutput:
@@ -103,10 +105,12 @@ int RoleOrder(KernelArgRole role) {
     switch (role) {
         case KernelArgRole::kInput:
             return 0;
-        case KernelArgRole::kConstant:
+        case KernelArgRole::kRuntimeExtent:
             return 1;
-        case KernelArgRole::kOutput:
+        case KernelArgRole::kConstant:
             return 2;
+        case KernelArgRole::kOutput:
+            return 3;
     }
     throw std::invalid_argument("KernelArgSpec contains an unknown role");
 }
@@ -181,6 +185,9 @@ void KernelArgSpec::Validate() const {
     if (!IsPowerOfTwo(node->alignment)) {
         throw std::invalid_argument("KernelArgSpec alignment must be a power of two");
     }
+    if (node->alignment > std::numeric_limits<size_t>::max()) {
+        throw std::invalid_argument("KernelArgSpec alignment exceeds host size_t");
+    }
 
     for (int64_t dimension : node->shape_) {
         if (dimension < kDynamicDimension) {
@@ -206,11 +213,18 @@ void KernelArgSpec::Validate() const {
         throw std::invalid_argument("Only constant KernelArgSpec may define constant_key");
     }
 
+    if (node->role == KernelArgRole::kRuntimeExtent &&
+        (node->dtype.code != kDLUInt || node->dtype.bits != 64 ||
+         node->dtype.lanes != 1 || node->shape_.size() != 1 ||
+         node->shape_[0] != 1 || node->mutable_data)) {
+        throw std::invalid_argument("Runtime extent KernelArgSpec must be immutable uint64[1]");
+    }
     // 第一阶段 ABI 不支持 in-place input；输出是唯一允许内核写入的角色。
     if (node->role == KernelArgRole::kOutput && !node->mutable_data) {
         throw std::invalid_argument("Output KernelArgSpec must be mutable");
     }
-    if (node->role == KernelArgRole::kInput && node->mutable_data) {
+    if ((node->role == KernelArgRole::kInput ||
+         node->role == KernelArgRole::kRuntimeExtent) && node->mutable_data) {
         throw std::invalid_argument("Input KernelArgSpec must be immutable");
     }
     (void)RoleOrder(node->role);
@@ -218,7 +232,7 @@ void KernelArgSpec::Validate() const {
 
 std::string KernelArgSpec::CanonicalBytes() const {
     const auto* node = operator->();
-    support::CanonicalBytesEncoder bytes("kxc.kernel-arg-spec.v1");
+    support::CanonicalBytesEncoder bytes("kxc.kernel-arg-spec.v2");
     bytes.Field("name", std::string(node->name));
     bytes.IntegerField("role", static_cast<int>(node->role));
     bytes.IntegerField("dtype_code", static_cast<int>(node->dtype.code));
@@ -283,7 +297,7 @@ KernelSignature::KernelSignature(const ObjectRef& ref) : ObjectRef(ref) {
     if (defined()) Validate();
 }
 
-// 参数状态机保证固定的 input -> constant -> output 分段，避免调用方猜测顺序。
+// 参数状态机保证固定的 input -> runtime extent -> constant -> output 分段。
 void KernelSignature::Validate() const {
     const auto* node = operator->();
     if (std::string(node->symbol).empty()) {
@@ -304,7 +318,7 @@ void KernelSignature::Validate() const {
         const int role = RoleOrder(spec->role);
         if (role < current_role) {
             throw std::invalid_argument(
-                "KernelSignature arguments must be ordered input, constant, output");
+                "KernelSignature arguments must be ordered input, runtime extent, constant, output");
         }
         current_role = role;
         saw_output = saw_output || spec->role == KernelArgRole::kOutput;
@@ -351,7 +365,7 @@ bool KernelSignature::has_dynamic_input_shape() const {
 
 std::string KernelSignature::CanonicalBytes() const {
     const auto* node = operator->();
-    support::CanonicalBytesEncoder bytes("kxc.kernel-signature.v1");
+    support::CanonicalBytesEncoder bytes("kxc.kernel-signature.v2");
     bytes.Field("symbol", std::string(node->symbol));
     bytes.IntegerField("argument_count", node->arguments_.size());
     for (const auto& argument : node->arguments_) {

@@ -876,33 +876,28 @@ bool TestNonstaticAndScalarContractsRejectedAtConstruction() {
          KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {3, 4},
                        cpu, 1, true)});
     auto dynamic_launcher = std::make_shared<RecordingLauncher>();
-    const api::CompiledModule dynamic_module =
-        MakeModule(dynamic_signature, {}, dynamic_launcher);
     TEST_CHECK(Throws([&] {
-                   (void)runtime::RuntimeSession(
-                       dynamic_module, MakePlan(dynamic_signature));
+                   (void)MakeModule(dynamic_signature, {}, dynamic_launcher);
                }) && dynamic_launcher->calls == 0,
-               "RuntimeSession must reject a nonstatic contract before execution");
+               "dynamic signatures without complete finite guards must be rejected at module admission");
 
     const DLDataType u64{kDLUInt, 64, 1};
     KernelSignature scalar_signature(
         "scalar_session",
         {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {-1}, cpu, 8),
-         KernelArgSpec("extent", KernelArgRole::kInput, u64, {1}, cpu, 8),
+         KernelArgSpec("extent", KernelArgRole::kRuntimeExtent, u64, {1}, cpu, 8),
          KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {-1}, cpu,
                        8, true)});
-    ModuleInputContract input{Float32(), cpu, 1,
-                              {{0, 0, 4, 1, std::nullopt, std::nullopt}}};
+    ModuleInputContract input{{{0, 0, 4, 1, std::nullopt, std::nullopt}}};
     const auto twice = ModuleShapeExpr::Mul(ModuleShapeExpr::InputAxis(0, 0),
                                              ModuleShapeExpr::Const(2));
     ModuleTensorContract output;
-    output.dtype = Float32(); output.device = cpu; output.logical = {twice};
-    output.physical = {twice}; output.valid = {twice}; output.alignment = 8;
+    output.logical = {twice}; output.physical = {twice}; output.valid = {twice};
     output.max_bytes = 32;
     auto contract = std::make_shared<ModuleInvocationContract>(
         std::vector<ModuleInputContract>{input},
         std::vector<ModuleTensorContract>{output},
-        std::vector<ModuleRuntimeExtentScalar>{{twice, u64, cpu, 8}});
+        std::vector<ModuleRuntimeExtentScalar>{{twice}});
     auto scalar_launcher = std::make_shared<RecordingLauncher>();
     const KernelLaunchMetadata metadata(cpu, CodeGenBackend::kLLVM);
     const api::CompiledModule scalar_module = api::internal::BuildCompiledModule(

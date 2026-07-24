@@ -21,6 +21,7 @@ using runtime::NDArray;
 #define CHECK(x) do { if (!(x)) { std::cerr << __FUNCTION__ << ": " #x "\n"; return false; } } while (false)
 DLDataType F32() { return runtime::DataTypeFromString("float32"); }
 DLDataType U64() { return {kDLUInt, 64, 1}; }
+bool SameDType(DLDataType lhs, DLDataType rhs) { return lhs.code==rhs.code && lhs.bits==rhs.bits && lhs.lanes==rhs.lanes; }
 bool Throws(const std::function<void()>& f) { try { f(); } catch (const std::exception&) { return true; } return false; }
 
 class Recorder final : public KernelLauncher {
@@ -51,17 +52,17 @@ CompiledModule Build(const KernelSignature& signature, const std::shared_ptr<Rec
     return internal::BuildCompiledModule(BuildTarget(Device::CPU()), {Entry(signature, launcher, std::move(contract))}, std::move(constants));
 }
 std::shared_ptr<const ModuleInvocationContract> DynamicContract(bool scalar = true, size_t budget = 4096) {
-    ModuleInputContract in{F32(), Device::CPU(), 1, {{0, 0, 64, 1, std::nullopt, std::nullopt}}};
+    ModuleInputContract in{{{0, 0, 64, 1, std::nullopt, std::nullopt}}};
     const auto twice=ModuleShapeExpr::Mul(ModuleShapeExpr::InputAxis(0, 0), ModuleShapeExpr::Const(2));
-    ModuleTensorContract out; out.dtype=F32(); out.device=Device::CPU(); out.max_bytes=4096;
+    ModuleTensorContract out; out.max_bytes=4096;
     out.logical={twice}; out.physical={twice}; out.valid={twice};
     std::vector<ModuleRuntimeExtentScalar> scalars;
-    if (scalar) scalars.push_back({twice, U64(), Device::CPU(), 8});
+    if (scalar) scalars.push_back({twice});
     return std::make_shared<ModuleInvocationContract>(std::vector<ModuleInputContract>{in}, std::vector<ModuleTensorContract>{out}, std::move(scalars), budget);
 }
 CompiledModule Dynamic(const std::shared_ptr<Recorder>& launcher, bool scalar = true, size_t budget = 4096) {
     Array<KernelArgSpec> args{KernelArgSpec("x",KernelArgRole::kInput,F32(),{-1},Device::CPU())};
-    if (scalar) args.push_back(KernelArgSpec("extent",KernelArgRole::kInput,U64(),{1},Device::CPU(),8));
+    if (scalar) args.push_back(KernelArgSpec("extent",KernelArgRole::kRuntimeExtent,U64(),{1},Device::CPU(),8));
     args.push_back(KernelArgSpec("y",KernelArgRole::kOutput,F32(),{-1},Device::CPU(),1,true));
     return Build(KernelSignature("dynamic",args),launcher,DynamicContract(scalar,budget));
 }
@@ -70,12 +71,13 @@ bool StaticPublicInvokeAndConstants() {
     auto launcher=std::make_shared<Recorder>();
     KernelSignature sig("static", {KernelArgSpec("x",KernelArgRole::kInput,F32(),{2,3},Device::CPU(),4),
         KernelArgSpec("c",KernelArgRole::kConstant,F32(),{3},Device::CPU(),4,false,"c"),
-        KernelArgSpec("y",KernelArgRole::kOutput,F32(),{2,3},Device::CPU(),4,true)});
+        KernelArgSpec("y",KernelArgRole::kOutput,F32(),{2,3},Device::CPU(),64,true)});
     NDArray source=NDArray::Zeros({3},F32(),Device::CPU()); Map<String,NDArray> constants; constants.Set("c",source);
     auto module=Build(sig,launcher,{},constants); auto result=module.Invoke("static",{NDArray::Zeros({2,3},F32(),Device::CPU(),4)},DeviceStream::Default(Device::CPU()));
     CHECK(result.operation.IsReady() && launcher->calls==1 && result.outputs.size()==1);
     CHECK(result.operation->retained_storage.size()==3);
     CHECK(result.outputs[0].physical==std::vector<ModuleExtent>({2,3}) && module.invocation_contract("static").outputs()[0].max_bytes==24);
+    CHECK(SameDType(result.outputs[0].storage.dtype(),F32()) && result.outputs[0].storage.device()==Device::CPU() && result.outputs[0].storage.storage()->alignment>=64);
     CHECK(launcher->seen.size()==3 && launcher->seen[1].get()!=source.get());
     auto copy=module.constants(); const float changed[3]={1,2,3}; copy.at("c").CopyFromBytes(changed,sizeof(changed));
     std::vector<float> actual(3); module.constants().at("c").CopyToBytes(actual.data(),sizeof(changed)); CHECK(actual==std::vector<float>({0,0,0}));
@@ -143,10 +145,25 @@ bool DynamicGateGuardsScalarsAndPreallocation() {
 #endif
     return true;
 }
+bool MultipleRuntimeExtentOrdering() {
+    auto launcher=std::make_shared<Recorder>(); const auto extent=ModuleShapeExpr::InputAxis(0,0); const auto twice=ModuleShapeExpr::Mul(extent,ModuleShapeExpr::Const(2));
+    ModuleInputContract input{{{0,0,64,1,std::nullopt,std::nullopt}}}; ModuleTensorContract output; output.logical={twice}; output.physical={twice}; output.valid={twice}; output.max_bytes=4096;
+    KernelSignature signature("two_extents",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{-1},Device::CPU()),KernelArgSpec("twice",KernelArgRole::kRuntimeExtent,U64(),{1},Device::CPU(),8),KernelArgSpec("extent",KernelArgRole::kRuntimeExtent,U64(),{1},Device::CPU(),8),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{-1},Device::CPU(),1,true)});
+    auto contract=std::make_shared<ModuleInvocationContract>(std::vector<ModuleInputContract>{input},std::vector<ModuleTensorContract>{output},std::vector<ModuleRuntimeExtentScalar>{{twice},{extent}});
+    auto module=Build(signature,launcher,contract); const auto stream=DeviceStream::Default(Device::CPU());
+#if KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
+    CHECK(module.Invoke("two_extents",{NDArray::Zeros({3},F32(),Device::CPU())},stream).operation.IsReady() && launcher->seen.size()==4);
+    std::uint64_t first=0, second=0; launcher->seen[1].CopyToBytes(&first,sizeof(first)); launcher->seen[2].CopyToBytes(&second,sizeof(second)); CHECK(first==6 && second==3);
+#else
+    CHECK(Throws([&]{module.Invoke("two_extents",{NDArray::Zeros({3},F32(),Device::CPU())},stream);}) && launcher->calls==0);
+#endif
+    return true;
+}
 bool BudgetAndExtentsBeforeAllocationOrLaunch() {
     auto launcher=std::make_shared<Recorder>(); auto module=Dynamic(launcher,true,8); auto stream=DeviceStream::Default(Device::CPU());
 #if KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
     CHECK(Throws([&]{module.Invoke("dynamic",{NDArray::Zeros({2},F32(),Device::CPU())},stream);}) && launcher->calls==0);
+    CHECK(Throws([&]{module.Invoke("dynamic",{NDArray::Zeros({2},F32(),Device::CPU())},stream,4096);}) && launcher->calls==0);
     auto contract=DynamicContract(true); const auto& output=contract->outputs()[0]; CHECK(!output.logical.empty());
 #endif
     return true;
@@ -166,23 +183,27 @@ bool MultiEntryConstantsAndCanonicalIdentity() {
     return true;
 }
 bool ContractAssemblyAndExpressionLimits() {
-    ModuleInputContract first{F32(),Device::CPU(),1,{{0,1,8,2,2,std::nullopt}}};
-    ModuleInputContract second{F32(),Device::CPU(),1,{{0,1,8,1,std::nullopt,ModuleAxisReference{0,0}}}};
-    ModuleTensorContract out; out.dtype=F32(); out.device=Device::CPU(); out.max_bytes=64; out.logical={ModuleShapeExpr::Const(1)}; out.physical=out.logical; out.valid=out.logical;
-    const auto canonical=ModuleInvocationContract({first,second},{out}).CanonicalBytes();
-    CHECK(canonical==ModuleInvocationContract({first,second},{out}).CanonicalBytes());
+    ModuleInputContract first{{{0,1,8,2,2,std::nullopt}}};
+    ModuleInputContract second{{{0,1,8,1,std::nullopt,ModuleAxisReference{0,0}}}};
+    ModuleTensorContract out; out.max_bytes=64; out.logical={ModuleShapeExpr::Const(1)}; out.physical=out.logical; out.valid=out.logical;
+    const auto canonical=ModuleInvocationContract({first,second},{out},{}).CanonicalBytes();
+    CHECK(ModuleInvocationContract({first,second},{out},{}).abi_version()==2 && canonical.rfind("KXC_MODULE_INVOKE_V2;",0)==0);
+    CHECK(canonical==ModuleInvocationContract({first,second},{out},{}).CanonicalBytes());
     auto altered=out; altered.logical={ModuleShapeExpr::Const(2)}; altered.physical=altered.logical; altered.valid=altered.logical;
-    CHECK(canonical!=ModuleInvocationContract({first,second},{altered}).CanonicalBytes());
+    CHECK(canonical!=ModuleInvocationContract({first,second},{altered},{}).CanonicalBytes());
+    CHECK(Throws([&]{ ModuleInvocationContract({first},{altered},{}).Validate(KernelSignature("bad_output", {KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)})); }));
     auto guard_changed=first; guard_changed.axis_guards[0].upper=7;
-    CHECK(canonical!=ModuleInvocationContract({guard_changed,second},{out}).CanonicalBytes());
+    CHECK(canonical!=ModuleInvocationContract({guard_changed,second},{out},{}).CanonicalBytes());
     auto unordered_second=second; unordered_second.axis_guards.clear();
-    auto reordered=ModuleInvocationContract({unordered_second,first},{out}).CanonicalBytes();
+    auto reordered=ModuleInvocationContract({unordered_second,first},{out},{}).CanonicalBytes();
     CHECK(canonical!=reordered);
-    CHECK(canonical!=ModuleInvocationContract({first,second},{out},{{ModuleShapeExpr::Const(1),U64(),Device::CPU(),8}}).CanonicalBytes());
+    CHECK(canonical!=ModuleInvocationContract({first,second},{out},{{ModuleShapeExpr::Const(1)}}).CanonicalBytes());
     CHECK(Throws([&]{
-        (void)ModuleInvocationContract(
-            {first,second},{out},
-            {{ModuleShapeExpr::Const(1),F32(),Device::CPU(),4}});
+        ModuleInvocationContract({first},{out},{{ModuleShapeExpr::Const(1)}}).Validate(
+            KernelSignature("bad_scalar", {KernelArgSpec("x", KernelArgRole::kInput,
+                F32(), {2}, Device::CPU()), KernelArgSpec("extent", KernelArgRole::kInput,
+                U64(), {1}, Device::CPU()), KernelArgSpec("y", KernelArgRole::kOutput,
+                F32(), {1}, Device::CPU(), 1, true)}));
     }));
     auto identity_launcher=std::make_shared<Recorder>();
     KernelSignature identity("identity",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{2},Device::CPU(),1,true)});
@@ -190,10 +211,30 @@ bool ContractAssemblyAndExpressionLimits() {
     const runtime::ExecutablePlan ids_a({runtime::ValueSpec(0,100,{2},F32(),Device::CPU(),true),runtime::ValueSpec(1,101,{2},F32(),Device::CPU(),false,false,true)},{runtime::KernelCall("identity",{0},{1})},{0},{},{1});
     const runtime::ExecutablePlan ids_b({runtime::ValueSpec(41,7,{2},F32(),Device::CPU(),true),runtime::ValueSpec(99,8,{2},F32(),Device::CPU(),false,false,true)},{runtime::KernelCall("identity",{41},{99})},{41},{},{99});
     CHECK(runtime::ComputeCallExactAbiFingerprint(identity_module,ids_a,0)==runtime::ComputeCallExactAbiFingerprint(identity_module,ids_b,0));
-    auto unordered=first; unordered.axis_guards.push_back({0,1,8,1,std::nullopt,std::nullopt}); CHECK(Throws([&]{ModuleInvocationContract({unordered},{out});}));
-    auto forward=first; forward.axis_guards[0].equal_to=ModuleAxisReference{0,0}; CHECK(Throws([&]{ModuleInvocationContract({forward},{out});}));
-    auto expr=ModuleShapeExpr::Const(1); for(size_t i=0;i<=ModuleShapeExpr::kMaxDepth;++i) expr=ModuleShapeExpr::Add(expr,ModuleShapeExpr::Const(1)); out.logical={expr}; out.physical={expr}; out.valid={expr}; CHECK(Throws([&]{ModuleInvocationContract({first},{out});}));
+    auto unordered=first; unordered.axis_guards.push_back({0,1,8,1,std::nullopt,std::nullopt}); CHECK(Throws([&]{ModuleInvocationContract({unordered},{out},{},0).Validate(KernelSignature("guards",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)}));}));
+    auto forward=first; forward.axis_guards[0].equal_to=ModuleAxisReference{0,0}; CHECK(Throws([&]{ModuleInvocationContract({forward},{out},{},0).Validate(KernelSignature("forward",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)}));}));
+    auto expr=ModuleShapeExpr::Const(1); for(size_t i=0;i<=ModuleShapeExpr::kMaxDepth;++i) expr=ModuleShapeExpr::Add(expr,ModuleShapeExpr::Const(1)); out.logical={expr}; out.physical={expr}; out.valid={expr}; CHECK(Throws([&]{ModuleInvocationContract({first},{out},{},0).Validate(KernelSignature("depth",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)}));}));
     CHECK(Throws([&]{ModuleShapeExpr::FloorDiv(ModuleShapeExpr::Const(1),ModuleShapeExpr::Const(0)).Evaluate({});}));
+    ModuleInputContract unbounded{{{0,0,64,1,std::nullopt,std::nullopt}}}; ModuleTensorContract dynamic_output; dynamic_output.max_bytes=4096;
+    const auto rejects_divisor=[&](ModuleShapeExpr divisor) { const auto expr=ModuleShapeExpr::FloorDiv(ModuleShapeExpr::Const(8),divisor); dynamic_output.logical={expr}; dynamic_output.physical={expr}; dynamic_output.valid={expr}; return Throws([&]{ Build(KernelSignature("bad_divisor",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{-1},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{-1},Device::CPU(),1,true)}),std::make_shared<Recorder>(),std::make_shared<ModuleInvocationContract>(std::vector<ModuleInputContract>{unbounded},std::vector<ModuleTensorContract>{dynamic_output},std::vector<ModuleRuntimeExtentScalar>{})); }); };
+    CHECK(rejects_divisor(ModuleShapeExpr::Const(0)) && rejects_divisor(ModuleShapeExpr::InputAxis(0,0)) && rejects_divisor(ModuleShapeExpr::Add(ModuleShapeExpr::Const(std::numeric_limits<ModuleExtent>::max()),ModuleShapeExpr::Const(1))));
+    const auto rejects_expression=[&](ModuleShapeExpr expr) { dynamic_output.logical={expr}; dynamic_output.physical={expr}; dynamic_output.valid={expr}; return Throws([&]{ Build(KernelSignature("bad_range",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{-1},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{-1},Device::CPU(),1,true)}),std::make_shared<Recorder>(),std::make_shared<ModuleInvocationContract>(std::vector<ModuleInputContract>{unbounded},std::vector<ModuleTensorContract>{dynamic_output},std::vector<ModuleRuntimeExtentScalar>{})); }); };
+    CHECK(rejects_expression(ModuleShapeExpr::Add(ModuleShapeExpr::Const(std::numeric_limits<ModuleExtent>::max()),ModuleShapeExpr::Const(1))) && rejects_expression(ModuleShapeExpr::Mul(ModuleShapeExpr::Const(std::numeric_limits<ModuleExtent>::max()),ModuleShapeExpr::Const(2))) && rejects_expression(ModuleShapeExpr::Mul(ModuleShapeExpr::InputAxis(0,0),ModuleShapeExpr::Const(std::numeric_limits<ModuleExtent>::max()))));
+    ModuleInputContract bounded{{{0,0,3,1,std::nullopt,std::nullopt}}}; const auto bounded_expr=ModuleShapeExpr::Mul(ModuleShapeExpr::InputAxis(0,0),ModuleShapeExpr::Const(2)); dynamic_output.logical={bounded_expr}; dynamic_output.physical={bounded_expr}; dynamic_output.valid={bounded_expr};
+    const KernelSignature dynamic_signature("bounded_range",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{-1},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{-1},Device::CPU(),1,true)});
+    CHECK(!Throws([&]{ Build(dynamic_signature,std::make_shared<Recorder>(),std::make_shared<ModuleInvocationContract>(std::vector<ModuleInputContract>{bounded},std::vector<ModuleTensorContract>{dynamic_output},std::vector<ModuleRuntimeExtentScalar>{})); }));
+    ModuleTensorContract one; one.logical={ModuleShapeExpr::Const(1)}; one.physical=one.logical; one.valid=one.logical; one.max_bytes=4096;
+    ModuleInputContract partial{{{0,0,4,1,std::nullopt,std::nullopt}}};
+    CHECK(Throws([&]{ Build(KernelSignature("partial_guard",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{-1,-1},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{-1},Device::CPU(),1,true)}),std::make_shared<Recorder>(),std::make_shared<ModuleInvocationContract>(std::vector<ModuleInputContract>{partial},std::vector<ModuleTensorContract>{one},std::vector<ModuleRuntimeExtentScalar>{})); }));
+    ModuleInputContract outside_domain{{{0,0,static_cast<ModuleExtent>(std::numeric_limits<int64_t>::max())+1,1,std::nullopt,std::nullopt}}};
+    CHECK(Throws([&]{ Build(dynamic_signature,std::make_shared<Recorder>(),std::make_shared<ModuleInvocationContract>(std::vector<ModuleInputContract>{outside_domain},std::vector<ModuleTensorContract>{one},std::vector<ModuleRuntimeExtentScalar>{})); }));
+    ModuleInputContract ordered_input{{{0,2,4,1,std::nullopt,std::nullopt}}}; const auto axis=ModuleShapeExpr::InputAxis(0,0);
+    const auto admits_output=[&](ModuleTensorContract candidate) { return !Throws([&]{ Build(dynamic_signature,std::make_shared<Recorder>(),std::make_shared<ModuleInvocationContract>(std::vector<ModuleInputContract>{ordered_input},std::vector<ModuleTensorContract>{candidate},std::vector<ModuleRuntimeExtentScalar>{})); }); };
+    ModuleTensorContract ordered; ordered.valid={ModuleShapeExpr::Const(1)}; ordered.logical={axis}; ordered.physical={ModuleShapeExpr::Const(5)}; ordered.max_bytes=4096;
+    ModuleTensorContract equal; equal.logical={axis}; equal.physical={axis}; equal.valid={axis}; equal.max_bytes=4096;
+    ModuleTensorContract invalid_constants; invalid_constants.valid={ModuleShapeExpr::Const(2)}; invalid_constants.logical={ModuleShapeExpr::Const(1)}; invalid_constants.physical={ModuleShapeExpr::Const(1)}; invalid_constants.max_bytes=4096;
+    ModuleTensorContract crossing; crossing.valid={ModuleShapeExpr::Const(1)}; crossing.logical={axis}; crossing.physical={ModuleShapeExpr::Const(3)}; crossing.max_bytes=4096;
+    CHECK(admits_output(ordered) && admits_output(equal) && !admits_output(invalid_constants) && !admits_output(crossing));
     CHECK(Throws([&]{ModuleShapeExpr::Mul(ModuleShapeExpr::Const(std::numeric_limits<ModuleExtent>::max()),ModuleShapeExpr::Const(2)).Evaluate({});}));
     return true;
 }
@@ -203,6 +244,6 @@ bool InvalidCompletionIsRejected() {
 }
 }  // namespace
 int main() {
-    const std::vector<std::pair<const char*,bool(*)()>> tests={{"static",StaticPublicInvokeAndConstants},{"source",PublicSourceValidation},{"object_symbols",ObjectReadinessZeroByteAndSymbols},{"dynamic",DynamicGateGuardsScalarsAndPreallocation},{"budget",BudgetAndExtentsBeforeAllocationOrLaunch},{"constants",MultiEntryConstantsAndCanonicalIdentity},{"contract",ContractAssemblyAndExpressionLimits},{"completion",InvalidCompletionIsRejected}};
+    const std::vector<std::pair<const char*,bool(*)()>> tests={{"static",StaticPublicInvokeAndConstants},{"source",PublicSourceValidation},{"object_symbols",ObjectReadinessZeroByteAndSymbols},{"dynamic",DynamicGateGuardsScalarsAndPreallocation},{"multiple_scalars",MultipleRuntimeExtentOrdering},{"budget",BudgetAndExtentsBeforeAllocationOrLaunch},{"constants",MultiEntryConstantsAndCanonicalIdentity},{"contract",ContractAssemblyAndExpressionLimits},{"completion",InvalidCompletionIsRejected}};
     int failed=0; for(const auto& test:tests) try { if(!test.second()) ++failed; else std::cout<<"[PASS] "<<test.first<<"\n"; } catch(const std::exception& e) { std::cerr<<"[FAIL] "<<test.first<<": "<<e.what()<<"\n"; ++failed; } return failed?1:0;
 }

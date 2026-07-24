@@ -56,10 +56,12 @@ constexpr int64_t kDynamicDimension = -1;
 enum class KernelArgRole : int {
     /*! \brief 由调用方提供且内核只读的输入张量。 */
     kInput = 0,
+    /*! \brief 由模块根据 invocation contract 生成的 uint64[1] 输入缓冲区。 */
+    kRuntimeExtent = 1,
     /*! \brief 由编译结果的稳定 key 解析且内核只读的常量张量。 */
-    kConstant = 1,
+    kConstant = 2,
     /*! \brief 由调用方或后续强类型运行时分配且允许内核写入的输出张量。 */
-    kOutput = 2,
+    kOutput = 3,
 };
 
 /*! \brief 保存单个有序内核参数的完整张量契约。 */
@@ -135,13 +137,13 @@ public:
     /*! \brief 从通用对象引用恢复签名，并校验运行时节点类型。 */
     explicit KernelSignature(const ObjectRef& ref);
 
-    /*! \brief 校验参数分段、名称/key 唯一性以及输出契约。 */
+    /*! \brief 校验 input/runtime-extent/constant/output 分段、名称/key 唯一性及输出契约。 */
     void Validate() const;
     /*! \brief 返回参数序列的独立 Array，保持节点内 ABI 顺序不可变。 */
     Array<KernelArgSpec> arguments() const;
     /*! \brief 判断签名是否含动态输入；动态输出会在 Validate 中被拒绝。 */
     bool has_dynamic_input_shape() const;
-    /*! \brief 返回版本化、长度分隔的有序 ABI 签名字节。 */
+    /*! \brief 返回版本化、长度分隔的有序 ABI 签名字节（v2 起含 runtime extent role）。 */
     std::string CanonicalBytes() const;
     /*! \brief 生成参数顺序稳定的诊断文本。 */
     std::string ToString() const;

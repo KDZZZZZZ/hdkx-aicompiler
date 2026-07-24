@@ -170,7 +170,7 @@ ValidatedPlanContract ValidateModuleAndPlan(
         }
         const api::ModuleInvocationContract contract =
             module.invocation_contract(call->symbol);
-        if (!contract.IsConstantShape() ||
+        if (!contract.IsConstantShape(signature) ||
             !contract.runtime_extent_scalars().empty()) {
             throw std::invalid_argument(
                 context + " requires unsupported nonstatic/scalar module invocation ABI");
@@ -200,6 +200,8 @@ ValidatedPlanContract ValidateModuleAndPlan(
                     }
                     value_id = regular_inputs[regular_index++];
                     break;
+                case codegen::KernelArgRole::kRuntimeExtent:
+                    throw std::invalid_argument(context + " cannot bind a generated runtime extent");
                 case codegen::KernelArgRole::kConstant:
                     if (constant_index >= constant_inputs.size()) {
                         throw std::invalid_argument(
@@ -423,7 +425,7 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
         }
         const api::ModuleInvocationContract contract =
             module.invocation_contract(task->symbol);
-        if (!contract.IsConstantShape() ||
+        if (!contract.IsConstantShape(signature) ||
             !contract.runtime_extent_scalars().empty()) {
             throw std::invalid_argument(
                 context + " requires unsupported nonstatic/scalar module invocation ABI");
@@ -453,6 +455,8 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
                     }
                     value_id = regular_inputs[regular_index++];
                     break;
+                case codegen::KernelArgRole::kRuntimeExtent:
+                    throw std::invalid_argument(context + " cannot bind a generated runtime extent");
                 case codegen::KernelArgRole::kConstant:
                     if (constant_index >= constant_inputs.size()) {
                         throw std::invalid_argument(
@@ -569,13 +573,14 @@ AsyncOperation InvokeOrderedModuleEntry(const api::CompiledModule& module,
                                         const String& symbol,
                                         const Array<NDArray>& ordered,
                                         const DeviceStream& stream) {
+    const codegen::KernelSignature module_signature = module.signature(symbol);
     const api::ModuleInvocationContract contract = module.invocation_contract(symbol);
-    if (!contract.IsConstantShape() || !contract.runtime_extent_scalars().empty()) {
+    if (!contract.IsConstantShape(module_signature) || !contract.runtime_extent_scalars().empty()) {
         throw std::logic_error("RuntimeSession fails closed until dynamic graph memory planning exists");
     }
     Array<NDArray> inputs;
     Array<NDArray> outputs;
-    const Array<codegen::KernelArgSpec> signature = module.signature(symbol).arguments();
+    const Array<codegen::KernelArgSpec> signature = module_signature.arguments();
     if (ordered.size() != signature.size()) {
         throw std::logic_error("RuntimeSession ordered arguments do not match module ABI");
     }
@@ -612,6 +617,8 @@ Array<NDArray> PrepareCallArguments(
             case codegen::KernelArgRole::kInput:
                 value_id = regular_inputs[regular_index++];
                 break;
+            case codegen::KernelArgRole::kRuntimeExtent:
+                throw std::logic_error("RuntimeSession cannot bind generated runtime extents");
             case codegen::KernelArgRole::kConstant:
                 value_id = constant_inputs[constant_index++];
                 break;
@@ -865,6 +872,8 @@ Array<NDArray> PrepareTaskArguments(
             case codegen::KernelArgRole::kInput:
                 value_id = regular_inputs[regular_index++];
                 break;
+            case codegen::KernelArgRole::kRuntimeExtent:
+                throw std::logic_error("RuntimeSession cannot bind generated runtime extents");
             case codegen::KernelArgRole::kConstant:
                 value_id = constant_inputs[constant_index++];
                 break;

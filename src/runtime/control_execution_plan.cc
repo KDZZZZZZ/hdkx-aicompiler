@@ -280,6 +280,8 @@ void ValidateKernel(State& state, const ControlExecutionTask& task) {
                 }
                 boundary.push_back(value_id);
                 break;
+            case codegen::KernelArgRole::kRuntimeExtent:
+                Fail("control execution cannot bind generated runtime extents");
             case codegen::KernelArgRole::kConstant: {
                 if (!state.constants.count(value_id)) {
                     Fail("kernel constant ABI must bind a graph constant");
@@ -527,7 +529,7 @@ BoundControlKernel::BoundControlKernel(api::CompiledModule module,
     }
     const codegen::KernelSignature signature = entry->second.signature;
     const api::ModuleInvocationContract contract = module.invocation_contract(entry_symbol);
-    if (!contract.IsConstantShape() || !contract.runtime_extent_scalars().empty()) {
+    if (!contract.IsConstantShape(signature) || !contract.runtime_extent_scalars().empty()) {
         throw std::invalid_argument("BoundControlKernel fails closed until dynamic graph memory planning exists");
     }
     const codegen::KernelLaunchMetadata metadata = entry->second.launch_metadata;
