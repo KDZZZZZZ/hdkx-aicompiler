@@ -393,10 +393,6 @@ ModuleInvocationResult CompiledModule::Invoke(const String& symbol, const Array<
     AsyncOperation operation=LaunchResolved(*this,entry,node->constants_,data_inputs,outputs,stream,resolved); return ModuleInvocationResult{std::move(descriptors),std::move(operation)};
 }
 
-ModuleInvocationContract CompiledModule::invocation_contract(const String& symbol) const {
-    return *FindEntry(CheckedNode(*this), symbol).invocation_contract;
-}
-
 codegen::KernelSignature CompiledModule::signature(const String& symbol) const {
     return FindEntry(CheckedNode(*this), symbol).signature;
 }
@@ -413,6 +409,12 @@ Map<String, runtime::NDArray> CompiledModule::constants() const {
 const Map<String, runtime::NDArray>&
 internal::BorrowCompiledModuleConstants(const CompiledModule& module) {
     return CheckedNode(module)->constants_;
+}
+
+const ModuleInvocationContract&
+internal::BorrowCompiledModuleInvocationContract(
+    const CompiledModule& module, const String& symbol) {
+    return *FindEntry(CheckedNode(module), symbol).invocation_contract;
 }
 
 bool CompiledModule::HasFunction(const String& symbol) const {

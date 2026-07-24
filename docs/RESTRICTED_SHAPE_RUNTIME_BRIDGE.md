@@ -3,8 +3,8 @@
 The restricted Shape runtime bridge was deleted in W4-1.  It no longer provides
 an execution path, launcher descriptor, completion protocol, or CMake gate.
 
-`CompiledModule` is the sole invocation owner.  An immutable, versioned
-`ModuleInvocationContract` resolves guards and all logical/physical/valid
+`CompiledModule` is the sole invocation owner.  A source-private immutable,
+versioned `ModuleInvocationContract` resolves guards and all logical/physical/valid
 extents before allocation, injects immutable constants, and launches the real
 `CompiledKernel`.  `KernelSignature` is the sole physical ABI authority:
 contracts contain only guards, extent expressions, limits, and generated
@@ -15,8 +15,8 @@ arbitrary machine code consumes the scalar semantically; that remains backend
 E2E evidence.
 
 `RuntimeSession` and control execution fail closed for non-static contracts
-until graph dynamic-memory planning exists. `ModuleShapeExpr` is CompiledModule
-invocation typestate, not a generic Relay symbolic-to-module lowering path;
+until graph dynamic-memory planning exists. Source-private `ModuleShapeExpr` is
+CompiledModule invocation typestate, not a generic Relay symbolic-to-module lowering path;
 restricted symbolic Shape exact decisions do not feed it. Generic Relay
 symbolic lowering, buckets/polymorphic execution, ragged/data-dependent
 shapes, workspace schemas, and tail transforms remain unsupported. A backend

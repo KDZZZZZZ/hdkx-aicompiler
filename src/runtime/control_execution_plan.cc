@@ -524,7 +524,9 @@ BoundControlKernel::BoundControlKernel(
         throw std::invalid_argument("BoundControlKernel module entry disappeared");
     }
     const codegen::KernelSignature signature = entry->second.signature;
-    const api::ModuleInvocationContract contract = module.invocation_contract(entry_symbol);
+    const api::ModuleInvocationContract& contract =
+        api::internal::BorrowCompiledModuleInvocationContract(
+            module, entry_symbol);
     if (!contract.IsConstantShape(signature) || !contract.runtime_extent_scalars().empty()) {
         throw std::invalid_argument("BoundControlKernel fails closed until dynamic graph memory planning exists");
     }

@@ -145,8 +145,9 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
         if (metadata->device != device) {
             throw std::invalid_argument(context + " targets a different execution device");
         }
-        const api::ModuleInvocationContract contract =
-            module.invocation_contract(call->symbol);
+        const api::ModuleInvocationContract& contract =
+            api::internal::BorrowCompiledModuleInvocationContract(
+                module, call->symbol);
         if (!contract.IsConstantShape(signature) ||
             !contract.runtime_extent_scalars().empty()) {
             throw std::invalid_argument(
@@ -272,7 +273,8 @@ AsyncOperation InvokeOrderedModuleEntry(const api::CompiledModule& module,
                                         const Array<NDArray>& ordered,
                                         const DeviceStream& stream) {
     const codegen::KernelSignature module_signature = module.signature(symbol);
-    const api::ModuleInvocationContract contract = module.invocation_contract(symbol);
+    const api::ModuleInvocationContract& contract =
+        api::internal::BorrowCompiledModuleInvocationContract(module, symbol);
     if (!contract.IsConstantShape(module_signature) ||
         !contract.runtime_extent_scalars().empty()) {
         throw std::logic_error(

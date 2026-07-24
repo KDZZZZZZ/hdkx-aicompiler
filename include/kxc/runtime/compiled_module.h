@@ -23,7 +23,6 @@ public:
                                   const Array<runtime::NDArray>& data_inputs,
                                   const DeviceStream& stream,
                                   std::size_t run_byte_budget = 0) const;
-    ModuleInvocationContract invocation_contract(const String& symbol) const;
     codegen::KernelSignature signature(const String& symbol) const;
     codegen::KernelLaunchMetadata launch_metadata(const String& symbol) const;
     /*! \brief Returns independent payload snapshots; callers cannot mutate

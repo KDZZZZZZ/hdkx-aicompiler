@@ -75,7 +75,8 @@ bool StaticPublicInvokeAndConstants() {
     auto module=Build(sig,launcher,{},constants); auto result=module.Invoke("static",{NDArray::Zeros({2,3},F32(),Device::CPU(),4)},DeviceStream::Default(Device::CPU()));
     CHECK(result.operation.IsReady() && launcher->calls==1 && result.outputs.size()==1);
     CHECK(result.operation->retained_storage.size()==3);
-    CHECK(result.outputs[0].physical==std::vector<ModuleExtent>({2,3}) && module.invocation_contract("static").outputs()[0].max_bytes==24);
+    CHECK(result.outputs[0].physical==std::vector<ModuleExtent>({2,3}) &&
+          internal::BorrowCompiledModuleInvocationContract(module, "static").outputs()[0].max_bytes==24);
     CHECK(SameDType(result.outputs[0].storage.dtype(),F32()) && result.outputs[0].storage.device()==Device::CPU() && result.outputs[0].storage.storage()->alignment>=64);
     CHECK(launcher->seen.size()==3 && launcher->seen[1].get()!=source.get());
     auto copy=module.constants(); const float changed[3]={1,2,3}; copy.at("c").CopyFromBytes(changed,sizeof(changed));

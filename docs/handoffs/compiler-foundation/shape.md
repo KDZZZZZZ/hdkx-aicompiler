@@ -33,10 +33,11 @@ lowering, dynamic graph memory planning, dynamic output allocation, ragged or
 data-dependent shapes, workspace schemas, and tail transforms are unsupported.
 `-1` remains a legacy input ABI sentinel, not symbolic Shape support.
 
-`ModuleShapeExpr` and `ModuleInvocationContract` are separate CompiledModule
-invocation typestate. They validate manually supplied/module-lowered invocation
-contracts; they neither consume restricted symbolic decisions nor establish a
-generic Relay symbolic-to-module lowering path.
+Source-private `ModuleShapeExpr` and `ModuleInvocationContract` are separate
+CompiledModule invocation typestate. They validate compiler/runtime-authored
+contracts; public clients only receive `CompiledModule::Invoke` results. They
+neither consume restricted symbolic decisions nor establish a generic Relay
+symbolic-to-module lowering path.
 
 ## Verification
 

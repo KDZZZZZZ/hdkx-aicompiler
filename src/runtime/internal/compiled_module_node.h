@@ -9,6 +9,7 @@
 #include "kxc/profiling/profiling.h"
 #include "kxc/target/target.h"
 #include "kxc/runtime/compiled_module.h"
+#include "module_invocation_contract.h"
 #include "../../codegen/internal/compiled_kernel.h"
 #include "kxc/tir/stmt.h"
 
@@ -61,6 +62,10 @@ CompiledModule BuildCompiledModule(
 /*! \brief Internal immutable borrow; public constants() returns deep copies. */
 const Map<String, runtime::NDArray>& BorrowCompiledModuleConstants(
     const CompiledModule& module);
+
+/*! \brief Source-private contract inspection for runtime planning and identity. */
+const ModuleInvocationContract& BorrowCompiledModuleInvocationContract(
+    const CompiledModule& module, const String& symbol);
 
 /*! Internal preallocated-output hook used by RuntimeSession/control paths. */
 AsyncOperation InvokeCompiledModuleWithOutputs(

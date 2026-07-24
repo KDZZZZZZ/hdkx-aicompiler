@@ -7,8 +7,8 @@ RuntimeShape plan/session, fake completion, trusted launcher descriptors and
 all related CMake gates are deleted.  Historical W3 evidence is intentionally
 not an API claim.
 
-Every `CompiledModule` entry owns one immutable version-2
-`ModuleInvocationContract`.  The contract's canonical bytes bind logical input
+Every `CompiledModule` entry owns one immutable version-2 source-private
+`ModuleInvocationContract`. The contract's canonical bytes bind logical input
 guards/output extents to the physical `KernelSignature`, which is the sole
 source for dtype, device, rank, alignment, layout, and scope; exact runtime ABI
 fingerprints include those bytes and no longer include graph-local value or
@@ -81,10 +81,11 @@ execution, ragged/data-dependent outputs, and data-dependent output allocation
 remain unsupported. The compiler Shape bucket/polymorphic contract universe was
 deleted; no guarded policy/profile/request or compatibility alias remains.
 
-`ModuleShapeExpr` and `ModuleInvocationContract` are CompiledModule invocation
-typestate for manually supplied/module-lowered contracts. They do not consume
-restricted symbolic Shape decisions and do not provide generic Relay
-symbolic-to-module lowering. An uncertain post-launch completion failure is
+`ModuleShapeExpr` and `ModuleInvocationContract` are source-private
+CompiledModule invocation typestate for compiler/runtime-authored contracts;
+public clients cannot author or inspect them. They do not consume restricted
+symbolic Shape decisions and do not provide generic Relay symbolic-to-module
+lowering. An uncertain post-launch completion failure is
 retained for process lifetime rather than risking early release; this is a
 safety quarantine, not bounded failure recovery or normal memory accounting.
 

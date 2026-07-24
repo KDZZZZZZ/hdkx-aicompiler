@@ -18,6 +18,11 @@ OLD_INCLUDE = re.compile(
 )
 DEFINE_CALL = re.compile(r'^\s*KXC_OBJECT_DEFINE(?:_WITH_KEY)?\s*\(')
 REGISTER_CALL = re.compile(r'^\s*KXC_REGISTER_(?:GLOBAL|OP)\s*\(')
+SEALED_MODULE_CONTRACT = re.compile(
+    r'\b(?:ModuleShapeExpr|ModuleAxisReference|ModuleAxisGuard|'
+    r'ModuleInputContract|ModuleTensorContract|ModuleRuntimeExtentScalar|'
+    r'ModuleInvocationContract)\b'
+)
 
 
 def manifest(cmake: str, variable: str) -> set[str]:
@@ -92,6 +97,7 @@ def main() -> int:
         failures.append("Stale header manifest entries: " + ", ".join(stale))
 
     for path in headers:
+        relative_path = path.relative_to(root).as_posix()
         for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if FORBIDDEN_INCLUDE.search(line):
                 failures.append(f"{path.relative_to(root)}:{line_no}: forbidden dependency: {line.strip()}")
@@ -101,6 +107,10 @@ def main() -> int:
                 failures.append(f"{path.relative_to(root)}:{line_no}: object definition in public header")
             if REGISTER_CALL.match(line):
                 failures.append(f"{path.relative_to(root)}:{line_no}: static registration in public header")
+            if relative_path in installed and SEALED_MODULE_CONTRACT.search(line):
+                failures.append(
+                    f"{path.relative_to(root)}:{line_no}: sealed module contract in installed header"
+                )
 
     if args.compile:
         failures.extend(

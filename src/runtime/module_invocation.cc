@@ -1,4 +1,4 @@
-#include "kxc/runtime/module_invocation.h"
+#include "internal/module_invocation_contract.h"
 
 #include <algorithm>
 #include <limits>
