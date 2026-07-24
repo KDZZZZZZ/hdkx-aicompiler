@@ -499,6 +499,9 @@ set(KXC_RUNTIME_SESSION_SOURCES
   src/runtime/session.cc
 )
 
+if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE OR KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
+  list(APPEND KXC_COMPILER_SOURCES src/compiler/experimental_identity.cc)
+endif()
 if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
   list(APPEND KXC_COMPILER_SOURCES
     src/compiler/adaptive/production_path_experimental.cc
@@ -564,6 +567,9 @@ if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
 else()
   add_library(kxc_shape_test_obj OBJECT src/shape/shape.cc)
   kxc_configure_module_obj(kxc_shape_test_obj)
+  add_library(kxc_experimental_identity_test_obj OBJECT
+    src/compiler/experimental_identity.cc)
+  kxc_configure_module_obj(kxc_experimental_identity_test_obj)
   add_library(kxc_shape_experimental_test_obj OBJECT
     src/compiler/shape_exact.cc
     src/compiler/shape_specialization.cc
@@ -770,9 +776,10 @@ kxc_add_runtime_exe(shape_specialization_test
 if(TARGET kxc_shape_experimental_test_obj)
   target_sources(shape_specialization_test PRIVATE
     $<TARGET_OBJECTS:kxc_shape_test_obj>
+    $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>
     $<TARGET_OBJECTS:kxc_shape_experimental_test_obj>)
   add_dependencies(shape_specialization_test kxc_shape_test_obj
-    kxc_shape_experimental_test_obj)
+    kxc_experimental_identity_test_obj kxc_shape_experimental_test_obj)
 endif()
 add_custom_target(run_shape_specialization_test
   COMMAND "$<TARGET_FILE:shape_specialization_test>"
@@ -876,9 +883,10 @@ if(KXC_BUILD_PASS_TESTS)
         restricted_symbolic_shape_test)
       target_sources(${_kxc_shape_test} PRIVATE
         $<TARGET_OBJECTS:kxc_shape_test_obj>
+        $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>
         $<TARGET_OBJECTS:kxc_shape_experimental_test_obj>)
       add_dependencies(${_kxc_shape_test} kxc_shape_test_obj
-        kxc_shape_experimental_test_obj)
+        kxc_experimental_identity_test_obj kxc_shape_experimental_test_obj)
     endforeach()
   endif()
   if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
@@ -942,6 +950,11 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
   kxc_add_runtime_exe(compiler_capability_test test/compiler_capability_test.cpp)
   kxc_add_runtime_exe(compiler_identity_test test/compiler_identity_test.cpp)
+  if(TARGET kxc_experimental_identity_test_obj)
+    target_sources(compiler_identity_test PRIVATE
+      $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>)
+    add_dependencies(compiler_identity_test kxc_experimental_identity_test_obj)
+  endif()
   kxc_add_runtime_exe(operator_compilation_test test/operator_compilation_test.cpp)
   kxc_add_runtime_exe(primitive_cache_test test/primitive_cache_test.cpp)
   kxc_add_runtime_exe(compiler_extension_contract_test test/compiler_extension_contract_test.cpp)
