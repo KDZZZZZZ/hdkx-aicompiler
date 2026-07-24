@@ -348,7 +348,7 @@ Signature 从最终优化后的 PrimFunc 构建，因此 CUDA thread binding、s
 | nn_avg_pool2d | 部分实现 | 数值通过 | 当前调度不可达 | 无 | 与 max pool 共用 attrs，compute 忽略 dilation |
 | nn_global_avg_pool2d | MVP 可用 | 数值通过 | 当前调度不可达 | GlobalAveragePool | 静态 NCHW rank-4 |
 | nn_flatten | MVP 可用 | 数值通过 | 未逐算子验证 | Flatten | 静态 shape 和 axis |
-| reshape | 部分实现 | 数值通过 | 未逐算子验证 | 无 | schema 为单输入，type infer 仍接受 legacy shape input |
+| reshape | exact-static 单输入 | 数值通过 | 未逐算子验证 | 无 | schema 与 type infer 均拒绝 legacy shape input |
 | transpose | MVP 可用 | 数值通过 | 未逐算子验证 | 无 | 静态 axes |
 | cast | MVP 可用 | 数值通过 | 未逐算子验证 | 无 | 受当前标量 dtype 映射限制 |
 | reduce_mean | MVP 可用 | 数值通过 | 当前调度不可达 | 无 | 静态 axes/keepdims |

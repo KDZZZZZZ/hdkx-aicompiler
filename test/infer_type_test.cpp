@@ -300,6 +300,12 @@ bool TestFlattenAndReshapeProductArithmetic() {
     kxc::Call duplicate_inferred(
         kxc::relay::Op::Get("reshape"), {reshape_zero_data},
         kxc::relay::ReshapeAttrs::Create({0, -1, -1}, 1));
+    kxc::Var legacy_shape_input(
+        "legacy_shape_input", kxc::TensorType({1}, "int64"));
+    kxc::Call legacy_two_input(
+        kxc::relay::Op::Get("reshape"),
+        {reshape_zero_data, legacy_shape_input},
+        kxc::relay::ReshapeAttrs::Create({0}));
     TEST_CHECK(ExpectThrow([&] {
                    kxc::relay::InferTypePass(
                        kxc::Function({reshape_zero_data}, invalid_negative));
@@ -307,8 +313,13 @@ bool TestFlattenAndReshapeProductArithmetic() {
                    ExpectThrow([&] {
                        kxc::relay::InferTypePass(
                            kxc::Function({reshape_zero_data}, duplicate_inferred));
+                   }) &&
+                   ExpectThrow([&] {
+                       kxc::relay::InferTypePass(kxc::Function(
+                           {reshape_zero_data, legacy_shape_input},
+                           legacy_two_input));
                    }),
-               "reshape zero dimensions must not bypass negative or inferred-dimension rules");
+               "reshape must reject invalid dimensions and legacy two-input arity");
     return true;
 }
 

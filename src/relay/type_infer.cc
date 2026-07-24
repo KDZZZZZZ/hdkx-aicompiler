@@ -521,9 +521,7 @@ Type FlattenInferType(const Attrs& attrs, const Array<Type>& input_types) {
 
 // 解释 0、-1 与 allowzero 后推导 reshape 结果。
 Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    if (input_types.size() != 1 && input_types.size() != 2) {
-        throw std::runtime_error("reshape expects data and optional legacy shape input");
-    }
+    RequireArity("reshape", input_types, 1);
     const auto* data = RequireTensor("reshape", input_types[0], "data");
     const auto* reshape_attrs = attrs.As<ReshapeAttrsNode>();
     if (!reshape_attrs) {
