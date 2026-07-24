@@ -5,7 +5,7 @@
 #include "../internal/primitive_cache.h"
 
 #include "../internal/execution_contract.h"
-#include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -37,7 +37,7 @@ struct PrimitiveFlight final {
 namespace {
 
 using Clock = std::chrono::steady_clock;
-constexpr int kKernelABIVersion = 1;
+constexpr int kKernelABIVersion = 2;
 
 struct CacheRecord final {
     std::shared_ptr<const PrimitiveArtifact> artifact;
@@ -269,9 +269,9 @@ ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin) {
     const CachedPrimitive& artifact = pin.artifact();
     ArtifactRecord record{pin.key(),
                           "primitive-v1:" + pin.key().canonical_bytes(),
-                          profiling::HashText(artifact.signature.ToString()),
-                          profiling::HashText(
-                              artifact.launch_metadata.ToString()),
+                          support::HashText(artifact.signature.CanonicalBytes()),
+                          support::HashText(
+                              artifact.launch_metadata.CanonicalBytes()),
                           artifact.provenance,
                           artifact.accounted_bytes,
                           artifact.validation_record};

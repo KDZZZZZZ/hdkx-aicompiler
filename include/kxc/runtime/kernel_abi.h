@@ -105,6 +105,8 @@ public:
     Array<int64_t> shape() const;
     /*! \brief 校验 dtype、shape、角色、对齐和常量 key 的全部不变量。 */
     void Validate() const;
+    /*! \brief 返回版本化、长度分隔的完整 ABI 规范字节。 */
+    std::string CanonicalBytes() const;
     /*! \brief 生成确定性诊断文本，不包含进程内地址或类型索引。 */
     std::string ToString() const;
     /*! \brief 返回经过类型检查的只读节点。 */
@@ -139,6 +141,8 @@ public:
     Array<KernelArgSpec> arguments() const;
     /*! \brief 判断签名是否含动态输入；动态输出会在 Validate 中被拒绝。 */
     bool has_dynamic_input_shape() const;
+    /*! \brief 返回版本化、长度分隔的有序 ABI 签名字节。 */
+    std::string CanonicalBytes() const;
     /*! \brief 生成参数顺序稳定的诊断文本。 */
     std::string ToString() const;
     /*! \brief 返回经过类型检查的只读节点。 */
@@ -182,6 +186,8 @@ public:
 
     /*! \brief 校验 CPU/LLVM 与 CUDA 各自允许的启动元数据。 */
     void Validate() const;
+    /*! \brief 返回版本化、长度分隔的完整启动 ABI 字节。 */
+    std::string CanonicalBytes() const;
     /*! \brief 生成确定性的后端、设备和 launch 尺寸文本。 */
     std::string ToString() const;
     /*! \brief 返回经过类型检查的只读节点。 */

@@ -9,6 +9,7 @@
 #include "kxc/relay/op.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 #include "kxc/runtime/kernel_abi.h"
 #include "kxc/te/te.h"
 #include "kxc/relay/pass/print_ir.h"
@@ -897,7 +898,7 @@ LoweredFunction LowerToTIR(Function func) {
     spec.event_type = "lower_to_tir";
     profiling::ScopedSpan span(profile_context, std::move(spec));
     const std::string relay_text = relay::pass::ToText(func);
-    const std::string relay_hash = profiling::HashText(relay_text);
+    const std::string relay_hash = support::HashText(relay_text);
     span.AddField("relay_ir_hash", relay_hash);
     span.AddMetric("relay_ir_bytes", static_cast<double>(relay_text.size()));
 
@@ -920,7 +921,7 @@ LoweredFunction LowerToTIR(Function func) {
         std::ostringstream tir_os;
         tir::pass::DumpPrimFunc(lowered, tir_os);
         const std::string tir_text = tir_os.str();
-        const std::string tir_hash = profiling::HashText(tir_text);
+        const std::string tir_hash = support::HashText(tir_text);
         const bool changed = relay_hash != tir_hash;
         span.AddField("tir_ir_hash", tir_hash);
         span.AddField("ir_changed", changed ? "true" : "false");

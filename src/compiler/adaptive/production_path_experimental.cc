@@ -19,7 +19,7 @@
 #include "../internal/primitive_cache.h"
 #include "../../runtime/internal/compiled_module_node.h"
 #include "../../runtime/internal/memory_plan.h"
-#include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 
 namespace kxc::api::adaptive::experimental::production_path {
 namespace {
@@ -125,12 +125,12 @@ bool SameArtifactRecord(const ArtifactRecord& lhs,
 
 bool SameCachedPrimitive(const internal::CachedPrimitive& lhs,
                          const internal::CachedPrimitive& rhs) {
-    return lhs.signature.ToString() == rhs.signature.ToString() &&
-           lhs.launch_metadata.ToString() == rhs.launch_metadata.ToString() &&
-           lhs.kernel.signature().ToString() ==
-               rhs.kernel.signature().ToString() &&
-           lhs.kernel.launch_metadata().ToString() ==
-               rhs.kernel.launch_metadata().ToString() &&
+    return lhs.signature.CanonicalBytes() == rhs.signature.CanonicalBytes() &&
+           lhs.launch_metadata.CanonicalBytes() == rhs.launch_metadata.CanonicalBytes() &&
+           lhs.kernel.signature().CanonicalBytes() ==
+               rhs.kernel.signature().CanonicalBytes() &&
+           lhs.kernel.launch_metadata().CanonicalBytes() ==
+               rhs.kernel.launch_metadata().CanonicalBytes() &&
            lhs.kernel->launcher == rhs.kernel->launcher &&
            lhs.accounted_bytes == rhs.accounted_bytes &&
            lhs.provenance == rhs.provenance &&
@@ -145,9 +145,9 @@ void ValidatePublicRecord(
         record.executable_token !=
             "primitive-v1:" + production_pin.key().canonical_bytes() ||
         record.signature_digest !=
-            profiling::HashText(cached.signature.ToString()) ||
+            support::HashText(cached.signature.CanonicalBytes()) ||
         record.launch_metadata_digest !=
-            profiling::HashText(cached.launch_metadata.ToString()) ||
+            support::HashText(cached.launch_metadata.CanonicalBytes()) ||
         record.provenance != cached.provenance ||
         record.byte_size != cached.accounted_bytes ||
         record.validation_record != cached.validation_record) {
@@ -245,22 +245,22 @@ VerifiedGraphArtifacts VerifyGraphArtifacts(
         const auto module_entry =
             module_node->entries_.find(std::string(call->symbol));
         const internal::CachedPrimitive& cached = retained_pin.artifact();
-        const std::string signature_bytes = signature.ToString();
-        const std::string metadata_bytes = metadata.ToString();
+        const std::string signature_bytes = signature.CanonicalBytes();
+        const std::string metadata_bytes = metadata.CanonicalBytes();
         if (module_entry == module_node->entries_.end() ||
             !cached.kernel.IsReady() ||
             cached.kernel->launcher !=
                 module_entry->second.executable->launcher ||
-            cached.signature.ToString() != signature_bytes ||
-            cached.kernel.signature().ToString() != signature_bytes ||
-            cached.launch_metadata.ToString() != metadata_bytes ||
-            cached.kernel.launch_metadata().ToString() != metadata_bytes ||
+            cached.signature.CanonicalBytes() != signature_bytes ||
+            cached.kernel.signature().CanonicalBytes() != signature_bytes ||
+            cached.launch_metadata.CanonicalBytes() != metadata_bytes ||
+            cached.kernel.launch_metadata().CanonicalBytes() != metadata_bytes ||
             std::string(signature->symbol) != std::string(call->symbol) ||
             metadata->device != target_device || metadata->backend != backend ||
             binding.signature_digest !=
-                profiling::HashText(signature_bytes) ||
+                support::HashText(signature_bytes) ||
             binding.launch_metadata_digest !=
-                profiling::HashText(metadata_bytes)) {
+                support::HashText(metadata_bytes)) {
             throw std::invalid_argument(
                 "adaptive pinned signature/launch/target/launcher contract differs "
                 "from its module entry");
@@ -313,10 +313,10 @@ public:
                 internal::ProductionArtifactAccess::Pin(candidate.pins[index]);
             if (actual.call_index != expected.call_index ||
                 actual.link_symbol != expected.link_symbol ||
-                actual_pin.artifact().signature.ToString() !=
-                    expected_pin.artifact().signature.ToString() ||
-                actual_pin.artifact().launch_metadata.ToString() !=
-                    expected_pin.artifact().launch_metadata.ToString()) {
+                actual_pin.artifact().signature.CanonicalBytes() !=
+                    expected_pin.artifact().signature.CanonicalBytes() ||
+                actual_pin.artifact().launch_metadata.CanonicalBytes() !=
+                    expected_pin.artifact().launch_metadata.CanonicalBytes()) {
                 throw std::invalid_argument(
                     "adaptive candidate changed a verified callable ABI");
             }

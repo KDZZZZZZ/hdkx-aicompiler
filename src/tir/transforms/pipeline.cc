@@ -17,6 +17,7 @@
 #include "kxc/ffi/registration.h"
 #include "kxc/pass/pass.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 #include "kxc/tir/pass/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/convert_for_loops_serial.h"
@@ -126,14 +127,14 @@ PrimFunc RunInstrumentedPass(const PrimFunc& func, const std::string& pass_name)
     profiling::ScopedSpan span(profile_context, std::move(spec));
 
     const std::string before_text = PrimFuncToText(func);
-    const std::string before_hash = profiling::HashText(before_text);
+    const std::string before_hash = support::HashText(before_text);
     span.AddField("ir_before_hash", before_hash);
     span.AddMetric("ir_before_bytes", static_cast<double>(before_text.size()));
 
     try {
         PrimFunc updated = RunSinglePass(func, pass_name);
         const std::string after_text = PrimFuncToText(updated);
-        const std::string after_hash = profiling::HashText(after_text);
+        const std::string after_hash = support::HashText(after_text);
         const bool changed = before_hash != after_hash;
         span.AddField("ir_after_hash", after_hash);
         span.AddField("ir_changed", changed ? "true" : "false");

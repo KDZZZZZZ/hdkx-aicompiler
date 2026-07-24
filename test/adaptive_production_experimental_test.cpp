@@ -25,7 +25,7 @@
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
 #include "kxc/compiler/adaptive_hot_swap_v2.h"
 #endif
-#include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/compiled_module.h"
 #include "../src/compiler/internal/primitive_cache.h"
@@ -282,8 +282,8 @@ kxc::api::CompiledGraph MakeGraph(
         pins.push_back(pin);
         bindings.push_back(api::ArtifactPlanBinding{
             index, api::LinkSymbol{Symbol(index)}, pin,
-            profiling::HashText(signature.ToString()),
-            profiling::HashText(metadata.ToString())});
+            support::HashText(signature.CanonicalBytes()),
+            support::HashText(metadata.CanonicalBytes())});
     }
 
     api::CompiledModule module = api::internal::BuildCompiledModule(

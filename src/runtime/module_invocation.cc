@@ -20,6 +20,7 @@ bool ValidDType(DLDataType d) {
          d.code == kDLBfloat || d.code == kDLComplex || d.code == kDLBool);
 }
 std::string DType(DLDataType d) { return std::to_string(d.code) + ":" + std::to_string(d.bits) + ":" + std::to_string(d.lanes); }
+void PutDevice(std::string& out, const Device& device) { Put(out, static_cast<ModuleExtent>(device.device_type())); Put(out, static_cast<ModuleExtent>(device.device_id())); }
 bool Same(DLDataType a, DLDataType b) { return a.code == b.code && a.bits == b.bits && a.lanes == b.lanes; }
 }
 
@@ -119,10 +120,10 @@ bool ModuleInvocationContract::IsConstantShape() const noexcept {
     return true;
 }
 std::string ModuleInvocationContract::CanonicalBytes() const {
-    std::string b="KXC_MODULE_INVOKE_V1;"; Put(b,abi_version_);Put(b,inputs_.size());Put(b,outputs_.size());Put(b,runtime_extent_scalars_.size());Put(b,run_byte_budget_);
-    for(const auto& i:inputs_){Put(b,DType(i.dtype));Put(b,i.device.ToString());Put(b,i.rank);Put(b,i.axis_guards.size());for(const auto& g:i.axis_guards){Put(b,g.axis);Put(b,g.lower);Put(b,g.upper);Put(b,g.divisible_by);Put(b,g.exact?1:0);if(g.exact)Put(b,*g.exact);Put(b,g.equal_to?1:0);if(g.equal_to){Put(b,g.equal_to->input_index);Put(b,g.equal_to->axis);}}}
-    for(const auto&o:outputs_){Put(b,DType(o.dtype));Put(b,o.device.ToString());Put(b,o.alignment);Put(b,o.layout);Put(b,o.scope);Put(b,o.max_bytes);for(const auto* v:{&o.logical,&o.physical,&o.valid}){Put(b,v->size());for(const auto&e:*v)e.AppendCanonical(b);}}
-    for(const auto& scalar:runtime_extent_scalars_){Put(b,DType(scalar.dtype));Put(b,scalar.device.ToString());Put(b,scalar.alignment);scalar.expression.AppendCanonical(b);} return b;
+    std::string b="KXC_MODULE_INVOKE_V2;"; Put(b,abi_version_);Put(b,inputs_.size());Put(b,outputs_.size());Put(b,runtime_extent_scalars_.size());Put(b,run_byte_budget_);
+    for(const auto& i:inputs_){Put(b,DType(i.dtype));PutDevice(b,i.device);Put(b,i.rank);Put(b,i.axis_guards.size());for(const auto& g:i.axis_guards){Put(b,g.axis);Put(b,g.lower);Put(b,g.upper);Put(b,g.divisible_by);Put(b,g.exact?1:0);if(g.exact)Put(b,*g.exact);Put(b,g.equal_to?1:0);if(g.equal_to){Put(b,g.equal_to->input_index);Put(b,g.equal_to->axis);}}}
+    for(const auto&o:outputs_){Put(b,DType(o.dtype));PutDevice(b,o.device);Put(b,o.alignment);Put(b,o.layout);Put(b,o.scope);Put(b,o.max_bytes);for(const auto* v:{&o.logical,&o.physical,&o.valid}){Put(b,v->size());for(const auto&e:*v)e.AppendCanonical(b);}}
+    for(const auto& scalar:runtime_extent_scalars_){Put(b,DType(scalar.dtype));PutDevice(b,scalar.device);Put(b,scalar.alignment);scalar.expression.AppendCanonical(b);} return b;
 }
 void ModuleInvocationContract::Validate(const codegen::KernelSignature& signature) const {
     signature.Validate(); if(abi_version_!=kAbiVersion) throw std::invalid_argument("module invocation ABI version is unsupported"); const auto args=signature.arguments(); size_t in=0,out=0,scalar=0;

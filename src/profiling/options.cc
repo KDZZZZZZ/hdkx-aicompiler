@@ -3,6 +3,7 @@
  */
 
 #include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 
 #include <algorithm>
 #include <cctype>
@@ -22,12 +23,6 @@ bool ParseEnvBool(const std::string& value, bool default_value) {
   std::string lowered = value;
   std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
   return lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
-}
-
-std::uint64_t Djb2(const std::string& text) {
-  std::uint64_t hash = 5381;
-  for (unsigned char c : text) hash = ((hash << 5) + hash) + c;
-  return hash;
 }
 
 }  // namespace
@@ -90,9 +85,7 @@ std::string IRCaptureModeToString(IRCaptureMode mode) {
 }
 
 std::string HashText(const std::string& text) {
-  std::ostringstream os;
-  os << std::hex << Djb2(text);
-  return os.str();
+  return support::HashText(text);
 }
 
 std::string ShapeSignatureToString(const std::vector<std::vector<int64_t>>& shapes) {

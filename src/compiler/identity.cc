@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "../runtime/internal/compiled_module_node.h"
-#include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/compiled_module.h"
@@ -38,7 +38,7 @@ void RequireNonEmpty(const std::string& value, const char* field) {
 
 std::string Digest(const std::string& canonical,
                    std::string index_digest) {
-    return index_digest.empty() ? profiling::HashText(canonical)
+    return index_digest.empty() ? support::HashText(canonical)
                                 : std::move(index_digest);
 }
 
@@ -248,7 +248,7 @@ GraphSemanticKey BuildGraphSemanticKey(const Function& function) {
             "graph semantic identity requires an exact Function node");
     }
     std::string canonical;
-    AppendField(&canonical, "kind", "graph-semantic-key-v4");
+    AppendField(&canonical, "kind", "graph-semantic-key-v5-canonical-device");
     std::unordered_map<const Object*, size_t> node_ids;
     std::function<void(const Expr&)> visit = [&](const Expr& expr) {
         if (!expr.defined()) {
@@ -283,8 +283,10 @@ GraphSemanticKey BuildGraphSemanticKey(const Function& function) {
             for (int64_t dimension : constant->data.shape()) {
                 AppendInteger(&canonical, "constant_dimension", dimension);
             }
-            AppendField(&canonical, "constant_device",
-                        constant->data.device().ToString());
+            AppendInteger(&canonical, "constant_device_type",
+                          static_cast<int>(constant->data.device().device_type()));
+            AppendInteger(&canonical, "constant_device_id",
+                          constant->data.device().device_id());
             std::string bytes(constant->data.NBytes(), '\0');
             if (!bytes.empty()) {
                 constant->data.CopyToBytes(bytes.data(), bytes.size());
@@ -675,10 +677,10 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     plan.Validate();
     std::string canonical;
-    // v4 is intentionally a new byte contract.  It covers callable/runtime
+    // v5 is intentionally a new byte contract.  It covers callable/runtime
     // ABI only; selected artifacts and their generations/receipts are PlanVariant
     // selection identity and must never affect compatibility.
-    AppendField(&canonical, "kind", "static-exact-plan-abi-v4-callable-runtime");
+    AppendField(&canonical, "kind", "static-exact-plan-abi-v5-canonical-kernel-abi");
     AppendTargetContract(&canonical, ModuleTarget(module));
     const Array<runtime::KernelCall> calls = plan.calls();
     if (ordered_artifacts.size() != calls.size()) {
@@ -721,8 +723,8 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
             module.launch_metadata(call->symbol);
         signature.Validate();
         metadata.Validate();
-        AppendField(&canonical, "kernel_signature", signature.ToString());
-        AppendField(&canonical, "launch_metadata", metadata.ToString());
+        AppendField(&canonical, "kernel_signature", signature.CanonicalBytes());
+        AppendField(&canonical, "launch_metadata", metadata.CanonicalBytes());
     }
     for (int64_t id : plan.input_value_ids()) {
         AppendInteger(&canonical, "graph_input_ordinal", value_ordinals.at(id));

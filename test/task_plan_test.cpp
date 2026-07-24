@@ -5,11 +5,13 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "kxc/runtime/task_plan.h"
+#include "../src/runtime/internal/compiled_module_node.h"
 
 namespace {
 
@@ -31,6 +33,42 @@ bool Throws(const std::function<void()>& function) {
 }
 
 DLDataType Float32() { return DLDataType{kDLFloat, 32, 1}; }
+
+class TaskPlanLauncher final : public kxc::codegen::KernelLauncher {
+public:
+    bool IsReady() const noexcept override { return true; }
+    kxc::AsyncOperation Launch(const kxc::Array<kxc::runtime::NDArray>&,
+                               const kxc::DeviceStream&,
+                               const kxc::ObjectRef&) const override {
+        return {};
+    }
+};
+
+kxc::api::CompiledModule ModuleForExactAbi(uint64_t alignment) {
+    using namespace kxc;
+    using namespace kxc::api;
+    using namespace kxc::codegen;
+    const KernelSignature signature(
+        "entry", {KernelArgSpec("input", KernelArgRole::kInput, Float32(),
+                                 {4}, Device::CPU(), alignment),
+                  KernelArgSpec("output", KernelArgRole::kOutput, Float32(),
+                                {4}, Device::CPU(), alignment, true)});
+    const KernelLaunchMetadata launch(Device::CPU(), CodeGenBackend::kLLVM);
+    const auto launcher = std::make_shared<TaskPlanLauncher>();
+    return internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()),
+        {internal::CompiledModuleEntry{tir::PrimFunc(), signature, launch,
+                                       CompiledKernel(signature, launch, launcher)}}, {});
+}
+
+kxc::runtime::ExecutablePlan PlanForExactAbi() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    return ExecutablePlan(
+        {ValueSpec(0, 0, {4}, Float32(), Device::CPU(), true),
+         ValueSpec(1, 1, {4}, Float32(), Device::CPU(), false, false, true)},
+        {KernelCall("entry", {0}, {1})}, {0}, {}, {1});
+}
 
 kxc::runtime::FrozenTaskPlan MakeValidPlan() {
     using namespace kxc;
@@ -131,6 +169,19 @@ bool TestArtifactDeclarationContracts() {
     TEST_CHECK(variant.manifest().bindings()[0]->entry_symbol == "entry" &&
                    !std::string(variant.manifest()->plan_fingerprint).empty(),
                "PlanVariant must retain a complete call declaration");
+    return true;
+}
+
+bool TestExactAbiFingerprintUsesKernelCanonicalBytes() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const ExecutablePlan plan = PlanForExactAbi();
+    const String first = ComputeCallExactAbiFingerprint(ModuleForExactAbi(4), plan, 0);
+    const String changed = ComputeCallExactAbiFingerprint(ModuleForExactAbi(8), plan, 0);
+    TEST_CHECK(std::string(first) != std::string(changed) &&
+                   std::string(first).find(
+                       "runtime-call-exact-abi-v2-canonical-kernel-abi:") == 0,
+               "module-entry exact ABI must change with canonical KernelSignature fields");
     return true;
 }
 
@@ -390,6 +441,7 @@ int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"frozen_dto_and_deterministic_topology", TestFrozenDtoAndDeterministicTopology},
         {"artifact_declaration_contracts", TestArtifactDeclarationContracts},
+        {"exact_abi_kernel_canonical", TestExactAbiFingerprintUsesKernelCanonicalBytes},
         {"task_kinds_and_invalid_enums", TestTaskKindsAndInvalidEnums},
         {"static_cycles_and_missing_dependencies", TestStaticCyclesAndMissingDependencies},
         {"producer_allocation_and_boundary_validation", TestProducerAllocationAndBoundaryValidation},

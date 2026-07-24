@@ -3,6 +3,7 @@
  */
 
 #include "kxc/runtime/kernel_abi.h"
+#include "kxc/support/canonical.h"
 #include "kxc/support/object_registration.h"
 
 #include <limits>
@@ -215,6 +216,24 @@ void KernelArgSpec::Validate() const {
     (void)RoleOrder(node->role);
 }
 
+std::string KernelArgSpec::CanonicalBytes() const {
+    const auto* node = operator->();
+    support::CanonicalBytesEncoder bytes("kxc.kernel-arg-spec.v1");
+    bytes.Field("name", std::string(node->name));
+    bytes.IntegerField("role", static_cast<int>(node->role));
+    bytes.IntegerField("dtype_code", static_cast<int>(node->dtype.code));
+    bytes.IntegerField("dtype_bits", static_cast<int>(node->dtype.bits));
+    bytes.IntegerField("dtype_lanes", static_cast<int>(node->dtype.lanes));
+    bytes.IntegerField("rank", node->shape_.size());
+    for (int64_t dimension : node->shape_) bytes.IntegerField("dimension", dimension);
+    bytes.IntegerField("device_type", static_cast<int>(node->device.device_type()));
+    bytes.IntegerField("device_id", node->device.device_id());
+    bytes.IntegerField("alignment", node->alignment);
+    bytes.BoolField("mutable_data", node->mutable_data);
+    bytes.Field("constant_key", std::string(node->constant_key));
+    return std::move(bytes).Take();
+}
+
 // 输出字段顺序固定，便于测试、日志比较和后续稳定序列化。
 std::string KernelArgSpec::ToString() const {
     const auto* node = operator->();
@@ -330,6 +349,17 @@ bool KernelSignature::has_dynamic_input_shape() const {
     return false;
 }
 
+std::string KernelSignature::CanonicalBytes() const {
+    const auto* node = operator->();
+    support::CanonicalBytesEncoder bytes("kxc.kernel-signature.v1");
+    bytes.Field("symbol", std::string(node->symbol));
+    bytes.IntegerField("argument_count", node->arguments_.size());
+    for (const auto& argument : node->arguments_) {
+        bytes.Field("argument", argument.CanonicalBytes());
+    }
+    return std::move(bytes).Take();
+}
+
 // 按参数原顺序生成诊断，不能对 Array 排序而改变 ABI 位置。
 std::string KernelSignature::ToString() const {
     const auto* node = operator->();
@@ -401,6 +431,23 @@ void KernelLaunchMetadata::Validate() const {
         return;
     }
     throw std::invalid_argument("KernelLaunchMetadata uses a non-executable backend");
+}
+
+std::string KernelLaunchMetadata::CanonicalBytes() const {
+    const auto* node = operator->();
+    support::CanonicalBytesEncoder bytes("kxc.kernel-launch-metadata.v1");
+    bytes.IntegerField("device_type", static_cast<int>(node->device.device_type()));
+    bytes.IntegerField("device_id", node->device.device_id());
+    bytes.IntegerField("backend", static_cast<int>(node->backend));
+    bytes.IntegerField("grid_x", node->grid.x);
+    bytes.IntegerField("grid_y", node->grid.y);
+    bytes.IntegerField("grid_z", node->grid.z);
+    bytes.IntegerField("block_x", node->block.x);
+    bytes.IntegerField("block_y", node->block.y);
+    bytes.IntegerField("block_z", node->block.z);
+    bytes.IntegerField("dynamic_shared_memory_bytes",
+                       node->dynamic_shared_memory_bytes);
+    return std::move(bytes).Take();
 }
 
 // 输出不依赖枚举数值，避免未来内部重排影响诊断文本。

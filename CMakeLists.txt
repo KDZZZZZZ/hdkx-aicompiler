@@ -140,7 +140,9 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/task_plan.h
   include/kxc/shape/shape.h
   include/kxc/support/arena.h
+  include/kxc/support/canonical.h
   include/kxc/support/container.h
+  include/kxc/support/hash.h
   include/kxc/support/detail/array_inl.h
   include/kxc/support/detail/map_inl.h
   include/kxc/support/object.h
@@ -345,6 +347,7 @@ endif()
 
 set(KXC_SUPPORT_SOURCES
   src/support/arena.cc
+  src/support/hash.cc
   src/support/object.cc
   src/support/type_registry.cc
   src/support/string.cc

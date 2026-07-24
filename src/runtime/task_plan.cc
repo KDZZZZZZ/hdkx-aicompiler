@@ -70,12 +70,17 @@ void AppendIds(std::string* out, const std::string& name,
     }
 }
 
+void AppendDevice(std::string* out, const Device& device) {
+    AppendField(out, "device_type", std::to_string(static_cast<int>(device.device_type())));
+    AppendField(out, "device_id", std::to_string(device.device_id()));
+}
+
 std::string ValueCanonical(const ValueSpec& value) {
     std::string result;
     AppendField(&result, "dtype_code", std::to_string(value->dtype.code));
     AppendField(&result, "dtype_bits", std::to_string(value->dtype.bits));
     AppendField(&result, "dtype_lanes", std::to_string(value->dtype.lanes));
-    AppendField(&result, "device", value->device.ToString());
+    AppendDevice(&result, value->device);
     for (int64_t dimension : value.shape()) {
         AppendField(&result, "dimension", std::to_string(dimension));
     }
@@ -99,7 +104,7 @@ std::string ArrayContract(const NDArray& value) {
     AppendField(&result, "dtype_code", std::to_string(value.dtype().code));
     AppendField(&result, "dtype_bits", std::to_string(value.dtype().bits));
     AppendField(&result, "dtype_lanes", std::to_string(value.dtype().lanes));
-    AppendField(&result, "device", value.device().ToString());
+    AppendDevice(&result, value.device());
     for (int64_t dimension : value.shape()) {
         AppendField(&result, "dimension", std::to_string(dimension));
     }
@@ -128,11 +133,12 @@ std::string ModuleEntryCanonical(
     launch.Validate();
 
     std::string result;
+    AppendField(&result, "kind", "runtime-module-entry-abi-v2-canonical-kernel-abi");
     AppendField(&result, "entry_symbol", Text(symbol));
-    AppendField(&result, "signature", signature.ToString());
+    AppendField(&result, "signature", signature.CanonicalBytes());
     AppendField(&result, "module_invocation_abi",
                 module.invocation_contract(symbol).CanonicalBytes());
-    AppendField(&result, "launch", launch.ToString());
+    AppendField(&result, "launch", launch.CanonicalBytes());
     for (int64_t value_id : inputs) {
         const auto found = values.find(value_id);
         if (found == values.end()) {
@@ -575,13 +581,13 @@ String ComputeCallExactAbiFingerprint(const api::CompiledModule& module,
     }
     const KernelCall& call = calls[static_cast<size_t>(call_index)];
     std::string canonical;
-    AppendField(&canonical, "kind", "runtime-call-exact-abi-v1");
+    AppendField(&canonical, "kind", "runtime-call-exact-abi-v2-canonical-kernel-abi");
     AppendField(&canonical, "contract",
                 ModuleEntryCanonical(module, call->symbol,
                                      call.input_value_ids(),
                                      call.output_value_ids(),
                                      ValueIndex(plan.values()), {}));
-    return Fingerprint("runtime-call-exact-abi-v1", canonical);
+    return Fingerprint("runtime-call-exact-abi-v2-canonical-kernel-abi", canonical);
 }
 
 String ComputeTaskExactAbiFingerprint(const api::CompiledModule& module,
@@ -605,13 +611,13 @@ String ComputeTaskExactAbiFingerprint(const api::CompiledModule& module,
             "task ABI fingerprint requires a known kernel task");
     }
     std::string canonical;
-    AppendField(&canonical, "kind", "runtime-task-exact-abi-v1");
+    AppendField(&canonical, "kind", "runtime-task-exact-abi-v2-canonical-kernel-abi");
     AppendField(&canonical, "contract",
                 ModuleEntryCanonical(module, selected->symbol,
                                      selected.input_value_ids(),
                                      selected.output_value_ids(),
                                      ValueIndex(plan.values()), alignments));
-    return Fingerprint("runtime-task-exact-abi-v1", canonical);
+    return Fingerprint("runtime-task-exact-abi-v2-canonical-kernel-abi", canonical);
 }
 
 String ComputePlanVariantFingerprint(
@@ -622,7 +628,7 @@ String ComputePlanVariantFingerprint(
             "plan fingerprint requires an executable plan");
     }
     std::string canonical;
-    AppendField(&canonical, "kind", "runtime-plan-variant-v1");
+    AppendField(&canonical, "kind", "runtime-plan-variant-v2-canonical-device");
     const Array<ValueSpec> plan_values = plan.values();
     std::vector<ValueSpec> values(plan_values.begin(), plan_values.end());
     std::sort(values.begin(), values.end(),
@@ -645,7 +651,7 @@ String ComputePlanVariantFingerprint(
     AppendIds(&canonical, "graph_constant", plan.constant_value_ids());
     AppendIds(&canonical, "graph_output", plan.output_value_ids());
     AppendBindings(&canonical, bindings);
-    return Fingerprint("runtime-plan-variant-v1", canonical);
+    return Fingerprint("runtime-plan-variant-v2-canonical-device", canonical);
 }
 
 String ComputeFrozenTaskPlanFingerprint(
@@ -656,7 +662,7 @@ String ComputeFrozenTaskPlanFingerprint(
             "task plan fingerprint requires a frozen task plan");
     }
     std::string canonical;
-    AppendField(&canonical, "kind", "runtime-frozen-task-plan-v1");
+    AppendField(&canonical, "kind", "runtime-frozen-task-plan-v2-canonical-kernel-abi");
     AppendField(&canonical, "version", std::to_string(plan->version));
     const Array<ValueSpec> plan_values = plan.values();
     std::vector<ValueSpec> values(plan_values.begin(), plan_values.end());
@@ -678,7 +684,7 @@ String ComputeFrozenTaskPlanFingerprint(
         AppendField(&item, "task_id", std::to_string(task->task_id));
         AppendField(&item, "kind",
                     std::to_string(static_cast<int32_t>(task->kind)));
-        AppendField(&item, "device", task->device.ToString());
+        AppendDevice(&item, task->device);
         AppendField(&item, "stream_id", std::to_string(task->stream_id));
         AppendField(&item, "symbol", Text(task->symbol));
         AppendField(&item, "generation",
@@ -716,7 +722,7 @@ String ComputeFrozenTaskPlanFingerprint(
     AppendIds(&canonical, "graph_constant", plan.constant_value_ids());
     AppendIds(&canonical, "graph_output", plan.output_value_ids());
     AppendBindings(&canonical, bindings);
-    return Fingerprint("runtime-frozen-task-plan-v1", canonical);
+    return Fingerprint("runtime-frozen-task-plan-v2-canonical-kernel-abi", canonical);
 }
 
 PlanVariant MakePlanVariant(

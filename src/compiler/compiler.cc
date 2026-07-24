@@ -30,6 +30,7 @@
 #include "../runtime/internal/memory_plan.h"
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 #include "kxc/relay/pass/print_ir.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/tir/pass/print_ir.h"
@@ -136,7 +137,7 @@ void AddResultFields(profiling::ScopedSpan* span, const CompileResult& result) {
     const CompileStage stage = result.stage();
     if (stage == CompileStage::kRelayOptimized) {
         const std::string text = relay::pass::ToText(result.optimized_relay());
-        span->AddField("ir_hash", profiling::HashText(text));
+        span->AddField("ir_hash", support::HashText(text));
         span->AddMetric("ir_bytes", static_cast<double>(text.size()));
         return;
     }
@@ -168,7 +169,7 @@ void AddResultFields(profiling::ScopedSpan* span, const CompileResult& result) {
         span->AddField(prefix + "symbol", std::string(primitive.symbol));
         span->AddField(prefix + "operator",
                        std::string(primitive.operator_identity));
-        span->AddField(prefix + "ir_hash", profiling::HashText(text));
+        span->AddField(prefix + "ir_hash", support::HashText(text));
         span->AddMetric(prefix + "ir_bytes", static_cast<double>(text.size()));
         if (primitive.launch_metadata) {
             span->AddField(
@@ -770,9 +771,9 @@ CompiledGraph CompilePipeline(
             index,
             LinkSymbol{std::string(calls[index]->symbol)},
             artifact_pins[index],
-            profiling::HashText(primitives[index].signature->ToString()),
-            profiling::HashText(
-                primitives[index].launch_metadata->ToString())});
+            support::HashText(primitives[index].signature->CanonicalBytes()),
+            support::HashText(
+                primitives[index].launch_metadata->CanonicalBytes())});
     }
     return CompiledGraph{std::move(module), std::move(plan),
                          std::move(artifact_pins), std::move(variant),
@@ -866,7 +867,7 @@ internal::ResolveCompilerExecutionContract(const CompileConfig& config) {
                                 contract.schedule_version);
     AppendPipelineIdentityField(&contract.canonical_bytes, "backend",
                                 contract.backend_version);
-    contract.fingerprint = profiling::HashText(contract.canonical_bytes);
+    contract.fingerprint = support::HashText(contract.canonical_bytes);
     return contract;
 }
 
@@ -973,9 +974,9 @@ CompiledGraph internal::FinishCompilerGraph(
             index,
             LinkSymbol{std::string(calls[index]->symbol)},
             artifact_pins[index],
-            profiling::HashText(primitives[index].signature->ToString()),
-            profiling::HashText(
-                primitives[index].launch_metadata->ToString())});
+            support::HashText(primitives[index].signature->CanonicalBytes()),
+            support::HashText(
+                primitives[index].launch_metadata->CanonicalBytes())});
     }
     AddResultFields(&assemble_span, result);
     if (profile_context) profile_context->Flush();

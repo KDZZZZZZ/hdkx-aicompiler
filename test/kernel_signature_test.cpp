@@ -72,6 +72,85 @@ bool TestValidSignature() {
     return true;
 }
 
+// Canonical bytes are the ABI identity; diagnostics must not participate.
+bool TestCanonicalBytesCoverEveryAbiField() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const KernelArgSpec input("input", KernelArgRole::kInput, Float32(),
+                              {-1, 4}, Device::CPU(), 4);
+    const KernelArgSpec constant("weight", KernelArgRole::kConstant, Float32(),
+                                 {4}, Device::CPU(), 4, false, "constant.0");
+    const KernelArgSpec output("output", KernelArgRole::kOutput, Float32(),
+                               {3, 4}, Device::CPU(), 8, true);
+    const KernelSignature signature("entry", {input, constant, output});
+    const std::string canonical = signature.CanonicalBytes();
+    TEST_CHECK(canonical == signature.CanonicalBytes() &&
+                   canonical.find("kxc.kernel-signature.v1") != std::string::npos &&
+                   canonical.find("KernelSignature(") == std::string::npos,
+               "canonical signature must be deterministic and independent of diagnostics");
+
+    const auto differs = [](const KernelArgSpec& lhs, const KernelArgSpec& rhs) {
+        return lhs.CanonicalBytes() != rhs.CanonicalBytes();
+    };
+    TEST_CHECK(differs(input, KernelArgSpec("renamed", KernelArgRole::kInput,
+                                            Float32(), {-1, 4}, Device::CPU(), 4)) &&
+                   differs(input, KernelArgSpec("input", KernelArgRole::kInput,
+                                                DLDataType{kDLInt, 32, 1}, {-1, 4},
+                                                Device::CPU(), 4)) &&
+                   differs(input, KernelArgSpec("input", KernelArgRole::kInput,
+                                                Float32(), {3, 4}, Device::CPU(), 4)) &&
+                   differs(input, KernelArgSpec("input", KernelArgRole::kInput,
+                                                Float32(), {-1, 4}, Device::CUDA(1), 4)) &&
+                   differs(input, KernelArgSpec("input", KernelArgRole::kInput,
+                                                Float32(), {-1, 4}, Device::CPU(), 8)) &&
+                   differs(input, constant) && differs(input, output) &&
+                   differs(constant, KernelArgSpec("weight", KernelArgRole::kConstant,
+                                                   Float32(), {4}, Device::CPU(), 4,
+                                                   false, "constant.1")),
+               "argument canonical bytes must cover name, role, dtype, signed dimensions, "
+               "device, alignment, mutability, and constant key");
+
+    const KernelArgSpec second_input("second", KernelArgRole::kInput, Float32(),
+                                     {-1, 4}, Device::CPU(), 4);
+    const KernelSignature ordered("entry", {input, second_input, output});
+    const KernelSignature reordered("entry", {second_input, input, output});
+    const KernelSignature renamed("other_entry", {input, constant, output});
+    TEST_CHECK(ordered.CanonicalBytes() != reordered.CanonicalBytes() &&
+                   canonical != renamed.CanonicalBytes(),
+               "signature canonical bytes must cover symbol and ordered arguments");
+
+    const KernelLaunchMetadata cuda(Device::CUDA(), CodeGenBackend::kCUDA,
+                                    Dim3{2, 3, 4}, Dim3{5, 6, 7}, 8);
+    const std::string launch = cuda.CanonicalBytes();
+    const auto launch_differs = [&cuda](Device device, CodeGenBackend backend,
+                                        Dim3 grid, Dim3 block, uint64_t shared) {
+        return cuda.CanonicalBytes() !=
+               KernelLaunchMetadata(device, backend, grid, block, shared).CanonicalBytes();
+    };
+    TEST_CHECK(launch.find("kxc.kernel-launch-metadata.v1") != std::string::npos &&
+                   launch.find("KernelLaunchMetadata(") == std::string::npos &&
+                   launch_differs(Device::CUDA(1), CodeGenBackend::kCUDA,
+                                  Dim3{2, 3, 4}, Dim3{5, 6, 7}, 8) &&
+                   launch_differs(Device::CUDA(), CodeGenBackend::kCUDA,
+                                  Dim3{9, 3, 4}, Dim3{5, 6, 7}, 8) &&
+                   launch_differs(Device::CUDA(), CodeGenBackend::kCUDA,
+                                  Dim3{2, 9, 4}, Dim3{5, 6, 7}, 8) &&
+                   launch_differs(Device::CUDA(), CodeGenBackend::kCUDA,
+                                  Dim3{2, 3, 9}, Dim3{5, 6, 7}, 8) &&
+                   launch_differs(Device::CUDA(), CodeGenBackend::kCUDA,
+                                  Dim3{2, 3, 4}, Dim3{9, 6, 7}, 8) &&
+                   launch_differs(Device::CUDA(), CodeGenBackend::kCUDA,
+                                  Dim3{2, 3, 4}, Dim3{5, 9, 7}, 8) &&
+                   launch_differs(Device::CUDA(), CodeGenBackend::kCUDA,
+                                  Dim3{2, 3, 4}, Dim3{5, 6, 9}, 8) &&
+                   launch_differs(Device::CUDA(), CodeGenBackend::kCUDA,
+                                  Dim3{2, 3, 4}, Dim3{5, 6, 7}, 9) &&
+                   launch_differs(Device::CPU(), CodeGenBackend::kLLVM,
+                                  Dim3{1, 1, 1}, Dim3{1, 1, 1}, 0),
+               "launch canonical bytes must cover backend, logical device, grid, block, and shared memory");
+    return true;
+}
+
 // 动态维只允许出现在输入；标量和零尺寸静态 shape 都是合法张量契约。
 bool TestShapeVariants() {
     using namespace kxc;
@@ -461,6 +540,7 @@ bool TestBuildKernelSignature() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"valid_signature", TestValidSignature},
+        {"canonical_bytes_all_abi_fields", TestCanonicalBytesCoverEveryAbiField},
         {"shape_variants", TestShapeVariants},
         {"array_immutability", TestArrayImmutability},
         {"dtype_coverage", TestDTypeCoverage},

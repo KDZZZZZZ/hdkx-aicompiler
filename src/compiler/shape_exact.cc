@@ -9,7 +9,7 @@
 #include "internal/execution_contract.h"
 #include "internal/primitive_cache.h"
 #include "../runtime/internal/memory_plan.h"
-#include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 #include "kxc/runtime/device_api.h"
 
 #ifndef KXC_ENABLE_SHAPE_PRODUCTION_EXACT
@@ -686,12 +686,12 @@ void VerifyVariant(
         const ArtifactRecord& record = public_pin.handle().record();
         if (!(record.artifact_key == expected) ||
             !(primitive_pin.key() == expected) ||
-            record.signature_digest != profiling::HashText(
-                primitive_pin.artifact().signature.ToString()) ||
-            record.launch_metadata_digest != profiling::HashText(
-                primitive_pin.artifact().launch_metadata.ToString()) ||
-            metadata.ToString() !=
-                primitive_pin.artifact().launch_metadata.ToString()) {
+            record.signature_digest != support::HashText(
+                primitive_pin.artifact().signature.CanonicalBytes()) ||
+            record.launch_metadata_digest != support::HashText(
+                primitive_pin.artifact().launch_metadata.CanonicalBytes()) ||
+            metadata.CanonicalBytes() !=
+                primitive_pin.artifact().launch_metadata.CanonicalBytes()) {
             Reject("production artifact pin does not retain the real full artifact key/signature/launch metadata");
         }
     }

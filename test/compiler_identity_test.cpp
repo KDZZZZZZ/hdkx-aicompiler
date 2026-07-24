@@ -5,6 +5,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -13,7 +14,11 @@
 #include "kxc/compiler/compiler.h"
 #include "kxc/compiler/identity.h"
 #include "kxc/relay/op.h"
+#include "kxc/runtime/compiled_module.h"
+#include "kxc/runtime/executable_plan.h"
+#include "kxc/runtime/kernel_abi.h"
 #include "kxc/support/object_registration.h"
+#include "../src/runtime/internal/compiled_module_node.h"
 
 namespace {
 
@@ -221,6 +226,56 @@ bool TestDispatchAndPlanVariantRemainSeparate() {
     return true;
 }
 
+class IdentityLauncher final : public kxc::codegen::KernelLauncher {
+public:
+    bool IsReady() const noexcept override { return true; }
+    kxc::AsyncOperation Launch(
+        const kxc::Array<kxc::runtime::NDArray>&,
+        const kxc::DeviceStream&, const kxc::ObjectRef&) const override {
+        return {};
+    }
+};
+
+kxc::api::PlanAbiFingerprint PlanAbiForAlignment(uint64_t alignment) {
+    using namespace kxc;
+    using namespace kxc::api;
+    using namespace kxc::codegen;
+    const DLDataType dtype{kDLFloat, 32, 1};
+    const KernelSignature signature(
+        "entry", {KernelArgSpec("input", KernelArgRole::kInput, dtype, {2},
+                                 Device::CPU(), alignment),
+                  KernelArgSpec("output", KernelArgRole::kOutput, dtype, {2},
+                                Device::CPU(), alignment, true)});
+    const KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
+    const auto launcher = std::make_shared<IdentityLauncher>();
+    const CompiledModule module = internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()),
+        {internal::CompiledModuleEntry{tir::PrimFunc(), signature, metadata,
+                                       CompiledKernel(signature, metadata, launcher)}}, {});
+    const runtime::ExecutablePlan plan(
+        {runtime::ValueSpec(0, 0, {2}, dtype, Device::CPU(), true),
+         runtime::ValueSpec(1, 1, {2}, dtype, Device::CPU(), false, false, true)},
+        {runtime::KernelCall("entry", {0}, {1})}, {0}, {}, {1});
+    const PrimitiveArtifactKey artifact(
+        UnitSemanticKey("identity-plan-unit"), "cpu", "pipeline", 1,
+        "schedule", "backend");
+    return BuildPlanAbiFingerprint(module, plan, {{0, "entry", artifact}});
+}
+
+bool TestPlanAbiUsesKernelCanonicalBytes() {
+    const kxc::api::PlanAbiFingerprint first = PlanAbiForAlignment(4);
+    const kxc::api::PlanAbiFingerprint changed = PlanAbiForAlignment(8);
+    TEST_CHECK(first.defined() && first != changed &&
+                   first.canonical_bytes().find("kxc.kernel-signature.v1") !=
+                       std::string::npos &&
+                   first.canonical_bytes().find("kxc.kernel-launch-metadata.v1") !=
+                       std::string::npos &&
+                   first.canonical_bytes().find("KernelSignature(") ==
+                       std::string::npos,
+               "Plan ABI must embed canonical kernel contracts rather than diagnostics");
+    return true;
+}
+
 bool TestGraphSemanticIdentityCanonicalizesLogicalPlacement() {
     using namespace kxc;
     using namespace kxc::api;
@@ -350,6 +405,7 @@ int main() {
         {"digest_collision_full_equality", TestDigestCollisionUsesCanonicalEquality},
         {"artifact_field_safe_miss", TestEveryArtifactSemanticFieldCausesSafeMiss},
         {"dispatch_and_plan_are_separate", TestDispatchAndPlanVariantRemainSeparate},
+        {"plan_abi_kernel_canonical", TestPlanAbiUsesKernelCanonicalBytes},
         {"graph_identity_logical_placement",
          TestGraphSemanticIdentityCanonicalizesLogicalPlacement},
         {"graph_identity_rejects_undefined_exprs",

@@ -13,6 +13,7 @@
 
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/normalize_to_anf.h"
@@ -476,7 +477,7 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
     }
     result.canonical_bytes = String(CanonicalBytes(result));
     result.fingerprint =
-        String(profiling::HashText(static_cast<std::string>(result.canonical_bytes)));
+        String(support::HashText(static_cast<std::string>(result.canonical_bytes)));
     return result;
 }
 
@@ -562,7 +563,7 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
     ValidateTargetRequirements(pipeline, target, has_cuda_schedule);
     const std::string canonical = CanonicalBytes(pipeline);
     if (canonical != AsString(pipeline.canonical_bytes) ||
-        profiling::HashText(canonical) != AsString(pipeline.fingerprint)) {
+        support::HashText(canonical) != AsString(pipeline.fingerprint)) {
         throw std::invalid_argument("PipelineExecutor canonical pipeline identity was tampered");
     }
 }

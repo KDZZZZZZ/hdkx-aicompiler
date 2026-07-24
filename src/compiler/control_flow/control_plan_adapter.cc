@@ -11,7 +11,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "kxc/profiling/profiling.h"
+#include "kxc/support/hash.h"
 
 namespace kxc::api {
 namespace {
@@ -129,8 +129,8 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
                     if (supplied.production_lease &&
                         !supplied.production_lease->Covers(
                             task.id, supplied.entry_symbol,
-                            profiling::HashText(declared_signature.ToString()),
-                            profiling::HashText(declared_metadata.ToString()))) {
+                            support::HashText(declared_signature.CanonicalBytes()),
+                            support::HashText(declared_metadata.CanonicalBytes()))) {
                         Fail("production lease does not cover the selected task/module artifact");
                     }
                     runtime::BoundControlKernel kernel(
