@@ -59,6 +59,42 @@ kxc::api::CompileConfig CpuConfig() {
         kxc::BuildTarget(kxc::Device::CPU()), 1);
 }
 
+kxc::Target TargetSnapshot(int device_id, std::string capability,
+                           std::string kind = "llvm",
+                           kxc::DeviceTypeCode device_type = kxc::kCPU) {
+    auto* target = new kxc::TargetNode();
+    target->kind = std::move(kind);
+    target->device_type = device_type;
+    target->device_id = device_id;
+    target->attrs.exists = 1;
+    target->attrs.arch = capability;
+    target->attrs.compute_version = capability;
+    target->attrs.driver_version = capability == "arch-a" ? 1 : 2;
+    target->attrs.total_global_memory =
+        capability == "arch-a" ? 16LL << 30 : 32LL << 30;
+    target->attrs.max_clock_rate_khz =
+        capability == "arch-a" ? 1000000 : 2000000;
+    target->attrs.max_threads_per_block =
+        capability == "arch-a" ? 512 : 1024;
+    return kxc::Target(kxc::ObjectRef(target));
+}
+
+kxc::Function PlacementGraph(const kxc::VirtualDevice& virtual_device) {
+    kxc::Var input("input", kxc::TensorType({2}, "float32"));
+    kxc::Call body(kxc::relay::Op::Get("nn_relu"), {input});
+    body.set_virtual_device(virtual_device);
+    return kxc::Function({input}, body);
+}
+
+kxc::Function DeviceCopyGraph(const kxc::VirtualDevice& source,
+                              const kxc::VirtualDevice& destination) {
+    kxc::Var input("input", kxc::TensorType({2}, "float32"));
+    return kxc::Function(
+        {input}, kxc::Call(kxc::relay::Op::Get("device.copy"), {input},
+                           kxc::relay::DeviceCopyAttrs::Create(
+                               source, destination)));
+}
+
 template <typename DerivedCall>
 kxc::Function MakeDerivedCallFunction() {
     kxc::Var input("input", kxc::TensorType({2}, "float32"));
@@ -188,6 +224,60 @@ bool TestDispatchAndPlanVariantRemainSeparate() {
     return true;
 }
 
+bool TestGraphSemanticIdentityCanonicalizesLogicalPlacement() {
+    using namespace kxc;
+    using namespace kxc::api;
+    const Device cpu = Device::CPU();
+    const VirtualDevice first(cpu, TargetSnapshot(0, "arch-a"), "global", 7);
+    const VirtualDevice same(cpu, TargetSnapshot(0, "arch-b"), "global", 7);
+    const GraphSemanticKey first_key =
+        Compiler::BuildGraphSemanticKey(PlacementGraph(first));
+    const GraphSemanticKey same_key =
+        Compiler::BuildGraphSemanticKey(PlacementGraph(same));
+    TEST_CHECK(first_key == same_key,
+               "Relay placement must exclude Target capability snapshots");
+
+    const GraphSemanticKey different_device = Compiler::BuildGraphSemanticKey(
+        PlacementGraph(VirtualDevice(
+            Device::CUDA(1), TargetSnapshot(1, "arch-b", "cuda", kCUDA),
+            "global", 7)));
+    const GraphSemanticKey different_scope = Compiler::BuildGraphSemanticKey(
+        PlacementGraph(VirtualDevice(cpu, TargetSnapshot(0, "arch-b"), "shared", 7)));
+    const GraphSemanticKey different_id = Compiler::BuildGraphSemanticKey(
+        PlacementGraph(VirtualDevice(cpu, TargetSnapshot(0, "arch-b"), "global", 8)));
+    TEST_CHECK(first_key != different_device && first_key != different_scope &&
+                   first_key != different_id,
+               "logical device, memory scope, and virtual-device id must miss");
+
+    const GraphSemanticKey target_only_first = Compiler::BuildGraphSemanticKey(
+        PlacementGraph(VirtualDevice(TargetSnapshot(0, "arch-a"), "global", 7)));
+    const GraphSemanticKey target_only_same = Compiler::BuildGraphSemanticKey(
+        PlacementGraph(VirtualDevice(TargetSnapshot(0, "arch-b"), "global", 7)));
+    const GraphSemanticKey target_only_different = Compiler::BuildGraphSemanticKey(
+        PlacementGraph(VirtualDevice(TargetSnapshot(0, "arch-b", "c"), "global", 7)));
+    const GraphSemanticKey target_only_different_id =
+        Compiler::BuildGraphSemanticKey(
+            PlacementGraph(VirtualDevice(TargetSnapshot(1, "arch-b"), "global", 7)));
+    TEST_CHECK(target_only_first == target_only_same &&
+                   target_only_first != target_only_different &&
+                   target_only_first != target_only_different_id,
+               "target-only placement retains kind/id while excluding capabilities");
+
+    const GraphSemanticKey copy_first = Compiler::BuildGraphSemanticKey(
+        DeviceCopyGraph(first, VirtualDevice(cpu, TargetSnapshot(0, "arch-a"),
+                                              "global", 8)));
+    const GraphSemanticKey copy_same = Compiler::BuildGraphSemanticKey(
+        DeviceCopyGraph(same, VirtualDevice(cpu, TargetSnapshot(0, "arch-b"),
+                                             "global", 8)));
+    const GraphSemanticKey copy_different = Compiler::BuildGraphSemanticKey(
+        DeviceCopyGraph(same, VirtualDevice(
+            Device::CUDA(1), TargetSnapshot(1, "arch-b", "cuda", kCUDA),
+            "global", 8)));
+    TEST_CHECK(copy_first == copy_same && copy_first != copy_different,
+               "DeviceCopy attrs retain source/destination logical placement");
+    return true;
+}
+
 bool TestGraphSemanticIdentityRejectsUndefinedExprs() {
     using namespace kxc;
     const Expr leaf = relay::Op::Get("nn_relu");
@@ -263,6 +353,8 @@ int main() {
         {"digest_collision_full_equality", TestDigestCollisionUsesCanonicalEquality},
         {"artifact_field_safe_miss", TestEveryArtifactSemanticFieldCausesSafeMiss},
         {"dispatch_and_plan_are_separate", TestDispatchAndPlanVariantRemainSeparate},
+        {"graph_identity_logical_placement",
+         TestGraphSemanticIdentityCanonicalizesLogicalPlacement},
         {"graph_identity_rejects_undefined_exprs",
          TestGraphSemanticIdentityRejectsUndefinedExprs},
         {"graph_identity_exact_node_whitelist",

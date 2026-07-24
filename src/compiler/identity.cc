@@ -248,7 +248,7 @@ GraphSemanticKey BuildGraphSemanticKey(const Function& function) {
             "graph semantic identity requires an exact Function node");
     }
     std::string canonical;
-    AppendField(&canonical, "kind", "graph-semantic-key-v3");
+    AppendField(&canonical, "kind", "graph-semantic-key-v4");
     std::unordered_map<const Object*, size_t> node_ids;
     std::function<void(const Expr&)> visit = [&](const Expr& expr) {
         if (!expr.defined()) {
@@ -266,10 +266,9 @@ GraphSemanticKey BuildGraphSemanticKey(const Function& function) {
         AppendField(&canonical, "node_id", std::to_string(node_id));
         if (const auto* relay_node =
                 dynamic_cast<const RelayNode*>(expr.get())) {
-            if (relay_node->virtual_device_.defined()) {
-                AppendField(&canonical, "virtual_device",
-                            relay_node->virtual_device_.ToString());
-            }
+            AppendField(&canonical, "virtual_device",
+                        relay::SerializeVirtualDeviceLogicalPlacement(
+                            relay_node->virtual_device_));
         }
         if (const auto* constant = AsExactExprNode<ConstantNode>(expr)) {
             AppendField(&canonical, "node_kind", "constant");

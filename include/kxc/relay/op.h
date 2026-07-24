@@ -174,6 +174,10 @@ public:
 /*! \brief Returns a stable type-and-value serialization for compilation identity. */
 std::string SerializeAttrs(const Attrs& attrs);
 
+/*! \brief Returns canonical logical placement without Target capabilities. */
+std::string SerializeVirtualDeviceLogicalPlacement(
+    const VirtualDevice& virtual_device);
+
 /*! \brief nn.conv2d 的卷积窗口、布局和输出通道属性。 */
 class Conv2DAttrsNode : public BaseAttrsNode {
 public:

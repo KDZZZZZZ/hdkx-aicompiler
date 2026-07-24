@@ -109,62 +109,30 @@ void CanonicalAttrWriter::Add(std::string_view name,
 
 void CanonicalAttrWriter::Add(std::string_view name,
                               const VirtualDevice& value) {
-    CanonicalAttrWriter nested;
-    nested.Add("defined", value.defined());
-    if (value.defined()) {
-        const VirtualDeviceNode* node = value.operator->();
-        nested.Add("device_defined", node->device.defined());
-        if (node->device.defined()) {
-            nested.Add("device_type",
-                       static_cast<int>(node->device.device_type()));
-            nested.Add("device_id", node->device.device_id());
-        }
-        nested.Add("target_defined", node->target.defined());
-        if (node->target.defined()) {
-            const TargetNode* target = node->target.operator->();
-            nested.Add("target_kind", target->kind);
-            nested.Add("target_device_type",
-                       static_cast<int>(target->device_type));
-            nested.Add("target_device_id", target->device_id);
-            nested.Add("target_exists", target->attrs.exists);
-            nested.Add("target_max_threads_per_block",
-                       target->attrs.max_threads_per_block);
-            nested.Add("target_warp_size", target->attrs.warp_size);
-            nested.Add("target_max_shared_memory_per_block",
-                       target->attrs.max_shared_memory_per_block);
-            nested.Add("target_compute_version",
-                       target->attrs.compute_version);
-            nested.Add("target_device_name", target->attrs.device_name);
-            nested.Add("target_max_clock_rate_khz",
-                       target->attrs.max_clock_rate_khz);
-            nested.Add("target_max_registers_per_block",
-                       target->attrs.max_registers_per_block);
-            nested.Add("target_api_version", target->attrs.api_version);
-            nested.Add("target_driver_version", target->attrs.driver_version);
-            nested.Add("target_l2_cache_size_bytes",
-                       target->attrs.l2_cache_size_bytes);
-            nested.Add("target_total_global_memory",
-                       target->attrs.total_global_memory);
-            nested.Add("target_available_global_memory",
-                       target->attrs.available_global_memory);
-            nested.Add("target_max_shared_memory_per_multiprocessor",
-                       target->attrs.max_shared_memory_per_multiprocessor);
-            nested.Add("target_max_registers_per_multiprocessor",
-                       target->attrs.max_registers_per_multiprocessor);
-            nested.Add("target_max_threads_per_multiprocessor",
-                       target->attrs.max_threads_per_multiprocessor);
-            nested.Add("target_compute_version_major",
-                       target->attrs.compute_version_major);
-            nested.Add("target_compute_version_minor",
-                       target->attrs.compute_version_minor);
-            nested.Add("target_multi_processor_count",
-                       target->attrs.multi_processor_count);
-            nested.Add("target_arch", target->attrs.arch);
-        }
-        nested.Add("memory_scope", node->memory_scope);
-        nested.Add("virtual_device_id", node->virtual_device_id);
+    AddEncoded(name, "virtual-device",
+               SerializeVirtualDeviceLogicalPlacement(value));
+}
+
+std::string SerializeVirtualDeviceLogicalPlacement(
+    const VirtualDevice& virtual_device) {
+    CanonicalAttrWriter writer;
+    writer.Add("defined", virtual_device.defined());
+    if (!virtual_device.defined()) return writer.Finish();
+
+    const VirtualDeviceNode* node = virtual_device.operator->();
+    writer.Add("device_defined", node->device.defined());
+    if (node->device.defined()) {
+        writer.Add("device_type", static_cast<int>(node->device.device_type()));
+        writer.Add("device_id", node->device.device_id());
+    } else if (node->target.defined()) {
+        const TargetNode* target = node->target.operator->();
+        writer.Add("target_kind", target->kind);
+        writer.Add("target_device_type", static_cast<int>(target->device_type));
+        writer.Add("target_device_id", target->device_id);
     }
-    AddEncoded(name, "virtual-device", nested.Finish());
+    writer.Add("memory_scope", node->memory_scope);
+    writer.Add("virtual_device_id", node->virtual_device_id);
+    return writer.Finish();
 }
 
 std::string CanonicalAttrWriter::Finish() const {
