@@ -55,17 +55,28 @@ bool IsFlatTensorTuple(const Type& type) {
     return true;
 }
 
+class CapabilityFailure final : public std::invalid_argument {
+public:
+    explicit CapabilityFailure(ExecutableCapabilityIssue issue)
+        : std::invalid_argument(issue.detail), issue(std::move(issue)) {}
+
+    ExecutableCapabilityIssue issue;
+};
+
 class CapabilityVerifier {
 public:
     explicit CapabilityVerifier(const ExecutableCapabilityOptions& options)
         : options_(options) {}
 
     void Verify(const Function& function) {
-        if (!function.defined()) {
-            Fail("function", "Function", "defined_function", "Function is undefined");
+        if (!function.defined() || !function->body.defined()) {
+            Fail("function", "Function", "defined_function",
+                 "Function is undefined or has no body");
         }
         RequireChecked(Expr(ObjectRef(function)), "function");
-        VerifyType(function.checked_type(), "function.checked_type");
+        if (options_.require_checked_types) {
+            VerifyType(function.checked_type(), "function.checked_type");
+        }
         for (size_t i = 0; i < function->params.size(); ++i) {
             const Var& parameter = function->params[i];
             const std::string path = "function.params[" + std::to_string(i) + "]";
@@ -74,19 +85,23 @@ public:
             }
             RequireChecked(Expr(ObjectRef(parameter)), path);
             VerifyType(parameter->type_annotation, path + ".type_annotation");
-            VerifyType(parameter.checked_type(), path + ".checked_type");
+            if (options_.require_checked_types) {
+                VerifyType(parameter.checked_type(), path + ".checked_type");
+                if (!TypeEqual(parameter->type_annotation, parameter.checked_type())) {
+                    Fail(path, "Var", "typed_parameter",
+                         "annotation and checked_type differ");
+                }
+            }
             if (!parameter->type_annotation.As<TensorTypeNode>() &&
                 !options_.allow_tuple_parameters) {
                 Fail(path, "Var", "tensor_parameter",
                      "static ValueGraph parameters must be TensorType");
             }
-            if (!TypeEqual(parameter->type_annotation, parameter.checked_type())) {
-                Fail(path, "Var", "typed_parameter", "annotation and checked_type differ");
-            }
             bindings_[parameter.get()] += 1;
         }
         Visit(function->body, "function.body");
-        if (!TypeEqual(function.checked_type(), function->body.checked_type())) {
+        if (options_.require_checked_types &&
+            !TypeEqual(function.checked_type(), function->body.checked_type())) {
             Fail("function", "Function", "typed_function_result",
                  "Function checked_type differs from its body");
         }
@@ -99,16 +114,14 @@ private:
     [[noreturn]] void Fail(const std::string& path, const std::string& kind,
                            const std::string& capability,
                            const std::string& detail) const {
-        throw std::invalid_argument("Executable capability error: path=" + path +
-                                    "; node=" + kind + "; required capability=" +
-                                    capability + "; detail=" + detail);
+        throw CapabilityFailure({path, kind, capability, detail});
     }
 
     void RequireChecked(const Expr& expr, const std::string& path) const {
         if (!expr.defined()) {
             Fail(path, "Undefined", "defined_typed_relay", "expression is undefined");
         }
-        if (!expr.checked_type().defined()) {
+        if (options_.require_checked_types && !expr.checked_type().defined()) {
             Fail(path, NodeKind(expr), "defined_typed_relay", "checked_type is missing");
         }
         const auto* relay_node = dynamic_cast<const RelayNode*>(expr.get());
@@ -135,6 +148,9 @@ private:
             Fail(path, "Type", "defined_typed_relay", "type is undefined");
         }
         if (const auto* tensor = type.As<TensorTypeNode>()) {
+            if (tensor->dtype.empty()) {
+                Fail(path, "TensorType", "tensor_dtype", "tensor dtype must be explicit");
+            }
             for (size_t i = 0; i < tensor->shape.size(); ++i) {
                 if (tensor->shape[i] < 0) {
                     Fail(path + ".shape[" + std::to_string(i) + "]", "TensorType",
@@ -178,37 +194,12 @@ private:
             Fail(path, "Call", "pure_deterministic_no_alias",
                  "operator is not a pure deterministic non-aliasing kernel");
         }
-        const Type output_type = expr.checked_type();
-        const size_t output_leaves = TensorLeafCount(output_type);
-        if (op->spec.lowering_kind ==
-                relay::OperatorLoweringKind::kSingleTE &&
-            !output_type.As<TensorTypeNode>()) {
-            Fail(path, "Call", "single_tensor_output",
-                 "single-output lowering requires TensorType");
-        }
-        if (op->spec.lowering_kind ==
-                relay::OperatorLoweringKind::kMultiTE &&
-            (!output_type.As<TupleTypeNode>() ||
-             (!options_.allow_nested_tuple_call_outputs &&
-              !IsFlatTensorTuple(output_type)))) {
-            Fail(path, "Call", "flat_multi_tensor_output",
-                 "static ValueGraph multi-output Calls require a flat tensor tuple");
-        }
-        if (output_leaves == 0 ||
-            (op->spec.output_arity >= 0 &&
-             static_cast<size_t>(op->spec.output_arity) != output_leaves)) {
-            Fail(path, "Call", "operator_output_arity",
-                 "Call output leaves differ from OperatorSpec");
-        }
         const size_t actual_arity = call->args.size();
         if ((op->spec.input_arity.num_inputs >= 0 &&
-             actual_arity !=
-                 static_cast<size_t>(op->spec.input_arity.num_inputs)) ||
+             actual_arity != static_cast<size_t>(op->spec.input_arity.num_inputs)) ||
             (op->spec.input_arity.num_inputs < 0 &&
-             (actual_arity <
-                  static_cast<size_t>(op->spec.input_arity.min_inputs) ||
-              actual_arity >
-                  static_cast<size_t>(op->spec.input_arity.max_inputs)))) {
+             (actual_arity < static_cast<size_t>(op->spec.input_arity.min_inputs) ||
+              actual_arity > static_cast<size_t>(op->spec.input_arity.max_inputs)))) {
             Fail(path, "Call", "operator_input_arity",
                  "Call input arity differs from OperatorSpec");
         }
@@ -230,42 +221,55 @@ private:
             Fail(path, "Call", "operator_implementation_binding",
                  "OperatorSpec implementation binding is missing");
         }
-        const auto* infer =
-            std::any_cast<relay::FInferType>(&relation->second);
+        const auto* infer = std::any_cast<relay::FInferType>(&relation->second);
         if (!infer || !*infer) {
             Fail(path, "Call", "operator_implementation_binding",
                  "type relation binding has the wrong type or is empty");
         }
-        if (op->spec.lowering_kind ==
-                relay::OperatorLoweringKind::kSingleTE) {
+        if (op->spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE) {
             if (op->spec.lowering_key != "FRelayToTE") {
                 Fail(path, "Call", "operator_implementation_binding",
                      "single-output lowering must use FRelayToTE");
             }
-            const auto* lower =
-                std::any_cast<relay::FRelayToTE>(&lowering->second);
+            const auto* lower = std::any_cast<relay::FRelayToTE>(&lowering->second);
             if (!lower || !*lower) {
                 Fail(path, "Call", "operator_implementation_binding",
                      "single-output lowering binding has the wrong type or is empty");
             }
-        }
-        if (op->spec.lowering_kind ==
-                relay::OperatorLoweringKind::kMultiTE) {
+        } else {
             if (op->spec.lowering_key != "FRelayToTEMulti") {
                 Fail(path, "Call", "operator_implementation_binding",
                      "multi-output lowering must use FRelayToTEMulti");
             }
-            const auto* lower =
-                std::any_cast<relay::FRelayToTEMulti>(&lowering->second);
+            const auto* lower = std::any_cast<relay::FRelayToTEMulti>(&lowering->second);
             if (!lower || !*lower) {
                 Fail(path, "Call", "operator_implementation_binding",
                      "multi-output lowering binding has the wrong type or is empty");
             }
         }
-        Array<Type> input_types;
-        for (const Expr& argument : call->args) {
-            input_types.push_back(argument.checked_type());
+        if (!options_.require_checked_types) return;
+
+        const Type output_type = expr.checked_type();
+        const size_t output_leaves = TensorLeafCount(output_type);
+        if (op->spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE &&
+            !output_type.As<TensorTypeNode>()) {
+            Fail(path, "Call", "single_tensor_output",
+                 "single-output lowering requires TensorType");
         }
+        if (op->spec.lowering_kind == relay::OperatorLoweringKind::kMultiTE &&
+            (!output_type.As<TupleTypeNode>() ||
+             (!options_.allow_nested_tuple_call_outputs && !IsFlatTensorTuple(output_type)))) {
+            Fail(path, "Call", "flat_multi_tensor_output",
+                 "static ValueGraph multi-output Calls require a flat tensor tuple");
+        }
+        if (output_leaves == 0 ||
+            (op->spec.output_arity >= 0 &&
+             static_cast<size_t>(op->spec.output_arity) != output_leaves)) {
+            Fail(path, "Call", "operator_output_arity",
+                 "Call output leaves differ from OperatorSpec");
+        }
+        Array<Type> input_types;
+        for (const Expr& argument : call->args) input_types.push_back(argument.checked_type());
         const relay::Attrs attrs =
             call->attrs.defined() ? relay::Attrs(call->attrs) : relay::Attrs();
         Type inferred;
@@ -284,7 +288,7 @@ private:
                         const std::string& path) const {
         if (bindings_.count(expr.get()) == 0) {
             Fail(path, "Var", "lexically_bound_var", "free variable '" +
-                var->vid->name_hint + "'");
+                 var->vid->name_hint + "'");
         }
     }
 
@@ -298,26 +302,29 @@ private:
                              const std::string& path) const {
         const Device state_device = Placement(loop->initial_state);
         if (Placement(Expr(ObjectRef(loop->loop_var))) != state_device ||
-            Placement(loop->body) != state_device ||
-            Placement(result) != state_device) {
+            Placement(loop->body) != state_device || Placement(result) != state_device) {
             Fail(path, "While", "exact_loop_state_placement",
                  "While initial state, binder, body, and result must have one exact device placement");
         }
         if (Placement(loop->condition) != Device::CPU()) {
             Fail(path + ".condition", NodeKind(loop->condition),
-                 "cpu_loop_condition_placement",
-                 "While condition must be placed on CPU:0");
+                 "cpu_loop_condition_placement", "While condition must be placed on CPU:0");
         }
     }
 
     void Visit(const Expr& expr, const std::string& path) {
         RequireChecked(expr, path);
-        VerifyType(expr.checked_type(), path + ".checked_type");
+        if (options_.require_checked_types) VerifyType(expr.checked_type(), path + ".checked_type");
         if (const auto* var = expr.As<VarNode>()) {
             VerifyBoundVar(expr, var, path);
             return;
         }
-        if (expr.As<ConstantNode>()) return;
+        if (const auto* constant = expr.As<ConstantNode>()) {
+            if (!constant->data.defined()) {
+                Fail(path, "Constant", "constant_payload", "constant payload is undefined");
+            }
+            return;
+        }
         if (const auto* call = expr.As<CallNode>()) {
             VerifyCallContract(expr, call, path);
             for (size_t i = 0; i < call->args.size(); ++i) {
@@ -337,16 +344,18 @@ private:
         }
         if (const auto* get_item = expr.As<TupleGetItemNode>()) {
             Visit(get_item->tuple, path + ".tuple");
-            const auto* tuple_type = get_item->tuple.checked_type().As<TupleTypeNode>();
-            if (!tuple_type || get_item->index < 0 ||
-                static_cast<size_t>(get_item->index) >= tuple_type->fields.size()) {
+            if (get_item->index < 0) {
                 Fail(path, "TupleGetItem", "well_typed_tuple_get_item",
                      "tuple index is outside the checked tuple type");
             }
-            if (!TypeEqual(expr.checked_type(),
-                           tuple_type->fields[static_cast<size_t>(get_item->index)])) {
-                Fail(path, "TupleGetItem", "well_typed_tuple_get_item",
-                     "checked_type differs from selected tuple field");
+            if (options_.require_checked_types) {
+                const auto* tuple_type = get_item->tuple.checked_type().As<TupleTypeNode>();
+                if (!tuple_type || static_cast<size_t>(get_item->index) >= tuple_type->fields.size() ||
+                    !TypeEqual(expr.checked_type(),
+                               tuple_type->fields[static_cast<size_t>(get_item->index)])) {
+                    Fail(path, "TupleGetItem", "well_typed_tuple_get_item",
+                         "tuple index is outside the checked tuple type");
+                }
             }
             return;
         }
@@ -355,54 +364,51 @@ private:
                 Fail(path, "If", "if", "static-dataflow executable does not enable If");
             }
             Visit(if_node->cond, path + ".cond");
+            Visit(if_node->true_branch, path + ".true_branch");
+            Visit(if_node->false_branch, path + ".false_branch");
             const auto* predicate = if_node->cond.checked_type().As<TensorTypeNode>();
             if (!predicate || predicate->dtype != "bool" || !predicate->shape.empty()) {
                 Fail(path + ".cond", NodeKind(if_node->cond), "scalar_bool_if_predicate",
                      "If predicate must have scalar bool TensorType");
             }
-            Visit(if_node->true_branch, path + ".true_branch");
-            Visit(if_node->false_branch, path + ".false_branch");
-            if (!TypeEqual(if_node->true_branch.checked_type(),
-                           if_node->false_branch.checked_type()) ||
+            if (!TypeEqual(if_node->true_branch.checked_type(), if_node->false_branch.checked_type()) ||
                 !TypeEqual(expr.checked_type(), if_node->true_branch.checked_type())) {
                 Fail(path, "If", "exact_if_branch_type",
                      "If branches and result must have exactly the same type");
             }
             return;
         }
-        if (const auto* while_node = expr.As<WhileNode>()) {
+        if (const auto* loop = expr.As<WhileNode>()) {
             if (!options_.allow_while) {
                 Fail(path, "While", "control_flow.loop",
                      "static-dataflow executable does not enable While");
             }
-            if (while_node->max_trip_count < 0 || !while_node->loop_var.defined()) {
+            if (loop->max_trip_count < 0 || !loop->loop_var.defined()) {
                 Fail(path, "While", "bounded_loop",
                      "While requires a defined binder and non-negative max_trip_count");
             }
-            VerifyLoopPlacement(expr, while_node, path);
-            Visit(while_node->initial_state, path + ".initial_state");
-            RequireChecked(Expr(ObjectRef(while_node->loop_var)), path + ".loop_var");
-            VerifyType(while_node->loop_var.checked_type(), path + ".loop_var.checked_type");
-            if (!TypeEqual(while_node->initial_state.checked_type(),
-                           while_node->loop_var.checked_type())) {
+            VerifyLoopPlacement(expr, loop, path);
+            Visit(loop->initial_state, path + ".initial_state");
+            RequireChecked(Expr(ObjectRef(loop->loop_var)), path + ".loop_var");
+            VerifyType(loop->loop_var.checked_type(), path + ".loop_var.checked_type");
+            if (!TypeEqual(loop->initial_state.checked_type(), loop->loop_var.checked_type())) {
                 Fail(path + ".loop_var", "Var", "typed_loop_binding",
                      "loop binder must exactly match initial state");
             }
-            bindings_[while_node->loop_var.get()] += 1;
-            Visit(while_node->condition, path + ".condition");
-            Visit(while_node->body, path + ".body");
-            auto binding = bindings_.find(while_node->loop_var.get());
+            bindings_[loop->loop_var.get()] += 1;
+            Visit(loop->condition, path + ".condition");
+            Visit(loop->body, path + ".body");
+            auto binding = bindings_.find(loop->loop_var.get());
             if (--binding->second == 0) bindings_.erase(binding);
-            const auto* predicate = while_node->condition.checked_type().As<TensorTypeNode>();
+            const auto* predicate = loop->condition.checked_type().As<TensorTypeNode>();
             if (!predicate || predicate->dtype != "bool" || !predicate->shape.empty()) {
-                Fail(path + ".condition", NodeKind(while_node->condition),
+                Fail(path + ".condition", NodeKind(loop->condition),
                      "scalar_bool_loop_predicate", "While condition must be a scalar bool TensorType");
             }
-            if (!TypeEqual(while_node->initial_state.checked_type(),
-                           while_node->body.checked_type()) ||
-                !TypeEqual(expr.checked_type(), while_node->initial_state.checked_type())) {
+            if (!TypeEqual(loop->initial_state.checked_type(), loop->body.checked_type()) ||
+                !TypeEqual(expr.checked_type(), loop->initial_state.checked_type())) {
                 Fail(path, "While", "exact_loop_state_type",
-                     "initial state, body, and result must have exactly the same type");
+                     "initial state, body, and result must exactly match");
             }
             return;
         }
@@ -412,15 +418,16 @@ private:
                 Fail(path + ".var", "Var", "lexical_let_binding", "Let binder is undefined");
             }
             RequireChecked(Expr(ObjectRef(let->var)), path + ".var");
-            VerifyType(let->var.checked_type(), path + ".var.checked_type");
-            if (let->var->type_annotation.defined()) {
-                VerifyType(let->var->type_annotation, path + ".var.type_annotation");
-                if (!TypeEqual(let->var->type_annotation, let->var.checked_type())) {
-                    Fail(path + ".var", "Var", "typed_let_binding",
-                         "annotation and checked_type differ");
-                }
+            const Type binder_type = let->var.checked_type().defined()
+                ? let->var.checked_type() : let->var->type_annotation;
+            VerifyType(binder_type, path + ".var.type");
+            if (options_.require_checked_types && let->var->type_annotation.defined() &&
+                !TypeEqual(let->var->type_annotation, let->var.checked_type())) {
+                Fail(path + ".var", "Var", "typed_let_binding",
+                     "annotation and checked_type differ");
             }
-            if (!TypeEqual(let->var.checked_type(), let->value.checked_type())) {
+            if (options_.require_checked_types &&
+                !TypeEqual(let->var.checked_type(), let->value.checked_type())) {
                 Fail(path + ".var", "Var", "typed_let_binding",
                      "binder checked_type differs from value type");
             }
@@ -434,31 +441,45 @@ private:
     }
 };
 
+std::string IssueDiagnostic(const ExecutableCapabilityIssue& issue) {
+    return "Executable capability error: path=" + issue.path + "; node=" +
+           issue.node_kind + "; required capability=" + issue.capability +
+           "; detail=" + issue.detail;
+}
+
 }  // namespace
 
-ExecutableCapabilityOptions StaticDataflowExecutableCapabilities(
-    Device execution_device) {
+ExecutableCapabilityOptions StaticDataflowExecutableCapabilities(Device execution_device) {
     ExecutableCapabilityOptions options;
     options.execution_device = std::move(execution_device);
     return options;
 }
 
-void VerifyExecutableCapability(const Function& function,
-                                const ExecutableCapabilityOptions& options) {
+std::vector<ExecutableCapabilityIssue> CollectExecutableCapabilityIssues(
+    const Function& function, const ExecutableCapabilityOptions& options) {
     if (options.version != ExecutableCapabilityOptions::kVersion) {
-        throw std::invalid_argument(
-            "Executable capability error: path=options.version; node=Options; "
-            "required capability=static_options_v1; detail=unsupported options version");
+        return {{"options.version", "Options", "static_options_v1",
+                 "unsupported options version"}};
     }
     if (options.execution_device.defined() &&
         options.execution_device.device_type() != kCPU &&
         options.execution_device.device_type() != kCUDA) {
-        throw std::invalid_argument(
-            "Executable capability error: path=options.execution_device; "
-            "node=Options; required capability=cpu_or_cuda_device; "
-            "detail=unsupported execution device");
+        return {{"options.execution_device", "Options", "cpu_or_cuda_device",
+                 "unsupported execution device"}};
     }
-    CapabilityVerifier(options).Verify(function);
+    try {
+        CapabilityVerifier(options).Verify(function);
+    } catch (const CapabilityFailure& failure) {
+        return {failure.issue};
+    }
+    return {};
+}
+
+void VerifyExecutableCapability(const Function& function,
+                                const ExecutableCapabilityOptions& options) {
+    const std::vector<ExecutableCapabilityIssue> issues =
+        CollectExecutableCapabilityIssues(function, options);
+    if (!issues.empty()) throw std::invalid_argument(IssueDiagnostic(issues.front()));
 }
 
 }  // namespace kxc::api::internal

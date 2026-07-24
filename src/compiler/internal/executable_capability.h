@@ -5,6 +5,8 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/device.h"
@@ -21,14 +23,28 @@ struct ExecutableCapabilityOptions {
     bool allow_tuple_parameters{false};
     bool allow_nested_tuple_call_outputs{false};
     bool allow_device_regions{false};
+    // Compiler entry can receive Relay before InferType; typed boundaries cannot.
+    bool require_checked_types{true};
     Device execution_device;
+};
+
+/*! \brief A structured rejection from the shared executable Relay policy. */
+struct ExecutableCapabilityIssue final {
+    std::string path;
+    std::string node_kind;
+    std::string capability;
+    std::string detail;
 };
 
 /*! \brief The static-dataflow contract used before ValueGraph construction. */
 ExecutableCapabilityOptions StaticDataflowExecutableCapabilities(
     Device execution_device = Device());
 
-/*! \brief Verifies the typed, static-exact Relay subset required by an executable. */
+/*! \brief Returns shared-policy rejections without formatting exception text. */
+std::vector<ExecutableCapabilityIssue> CollectExecutableCapabilityIssues(
+    const Function& function, const ExecutableCapabilityOptions& options);
+
+/*! \brief Verifies the static-exact Relay subset required by an executable. */
 void VerifyExecutableCapability(const Function& function,
                                 const ExecutableCapabilityOptions& options);
 
