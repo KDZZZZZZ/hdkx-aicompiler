@@ -3,8 +3,6 @@
  */
 
 #include "kxc/profiling/profiling.h"
-#include "kxc/support/hash.h"
-
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -82,10 +80,6 @@ std::string IRCaptureModeToString(IRCaptureMode mode) {
     case IRCaptureMode::kVerbose: return "verbose";
   }
   return "changed_or_failed";
-}
-
-std::string HashText(const std::string& text) {
-  return support::HashText(text);
 }
 
 std::string ShapeSignatureToString(const std::vector<std::vector<int64_t>>& shapes) {

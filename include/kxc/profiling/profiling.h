@@ -215,8 +215,6 @@ const std::string& CurrentSpanId();
 std::string LogSeverityToString(LogSeverity severity);
 /*! \brief 将 IRCaptureMode 转成稳定字符串。 */
 std::string IRCaptureModeToString(IRCaptureMode mode);
-/*! \brief 对文本生成稳定哈希字符串。 */
-std::string HashText(const std::string& text);
 /*! \brief 将输入 shape 列表格式化为诊断/事件字段。 */
 std::string ShapeSignatureToString(const std::vector<std::vector<int64_t>>& shapes);
 /*! \brief 从 initializer_list 构造 StringMap。 */
