@@ -267,11 +267,5 @@ struct LinkSymbol final {
     std::string CanonicalBytes() const;
 };
 
-/*! \brief Physical allocation identity scoped to one frozen plan. */
-struct StorageId final {
-    int64_t value{-1};
-
-    std::string CanonicalBytes() const;
-};
 
 }  // namespace kxc::api

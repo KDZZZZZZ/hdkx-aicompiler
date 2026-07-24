@@ -17,10 +17,6 @@ enum class FallbackReason : int32_t {
     kMissingArtifactManifest = 2,
     kUnsupportedDynamicInput = 3,
     kUnsupportedAlias = 4,
-    kUnsupportedFusion = 5,
-    kUnsupportedLibrary = 6,
-    kUnsupportedControlFlow = 7,
-    kUnsupportedShapeEvaluation = 8,
     kAdapterBug = 9,
 };
 

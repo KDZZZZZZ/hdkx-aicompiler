@@ -43,78 +43,54 @@ kxc::runtime::FrozenTaskPlan MakeChainPlan(
     using namespace kxc;
     using namespace kxc::runtime;
     const Device cpu = Device::CPU();
-    Array<ValueSpec> values{
-        ValueSpec(0, 0, {4}, Float32(), cpu, true),
-        ValueSpec(1, 1, {4}, Float32(), cpu, false, false, false, false,
-                  async_first),
-        ValueSpec(2, 2, {4}, Float32(), cpu),
-        ValueSpec(3, 3, {4}, Float32(), cpu),
-        ValueSpec(4, 4, {4}, Float32(), cpu, false, false, true),
-    };
-    Array<TaskSpec> tasks{
-        TaskSpec(10, TaskKind::kAllocate, cpu, {}, {1}, {}, String(), 0, 0,
-                 64),
-        TaskSpec(11, TaskKind::kKernel, cpu, {0}, {1}, {10}, "k1"),
-        TaskSpec(20, TaskKind::kAllocate, cpu, {}, {2}, {11}, String(), 0, 0,
-                 32),
-        TaskSpec(21, TaskKind::kKernel, cpu, {1}, {2}, {20, 11}, "k2"),
-        TaskSpec(30, TaskKind::kAllocate, cpu, {}, {3}, {21}, String(), 0, 0,
-                 16),
-        TaskSpec(31, TaskKind::kKernel, cpu, {2}, {3}, {30, 21}, "k3"),
-        TaskSpec(40, TaskKind::kAllocate, cpu, {}, {4}, {31}, String(), 0, 0,
-                 16),
-        TaskSpec(41, TaskKind::kKernel, cpu, {3}, {4}, {40, 31}, "k4"),
-    };
-    Array<RegionSpec> regions{
-        RegionSpec(0, RegionKind::kPerCall, "", {10, 11}, {0}, {1}, {},
-                   RegionEffect::kPure,
-                   conservative_first ? RegionAlias::kConservative
-                                      : RegionAlias::kNoAlias),
-        RegionSpec(1, RegionKind::kPerCall, "", {20, 21}, {1}, {2}, {}),
-        RegionSpec(2, RegionKind::kPerCall, "", {30, 31}, {2}, {3}, {}),
-        RegionSpec(3, RegionKind::kPerCall, "", {40, 41}, {3}, {4}, {}),
-    };
-    return FrozenTaskPlan(kFrozenTaskPlanVersion, std::move(values),
-                          std::move(tasks), std::move(regions), {0}, {}, {4});
-}
-
-kxc::runtime::FrozenTaskPlan MakeAllKindsPlan() {
-    using namespace kxc;
-    using namespace kxc::runtime;
-    const Device cpu = Device::CPU();
     return FrozenTaskPlan(
         kFrozenTaskPlanVersion,
-        {ValueSpec(0, 0, {1}, Float32(), cpu, true),
-         ValueSpec(1, 1, {1}, Float32(), cpu),
-         ValueSpec(2, 2, {1}, Float32(), cpu),
-         ValueSpec(3, 3, {1}, Float32(), cpu, false, false, true)},
+        {ValueSpec(0, 0, {4}, Float32(), cpu, true),
+         ValueSpec(1, 1, {4}, Float32(), cpu, false, false, false, false,
+                   async_first),
+         ValueSpec(2, 2, {4}, Float32(), cpu),
+         ValueSpec(3, 3, {4}, Float32(), cpu),
+         ValueSpec(4, 4, {4}, Float32(), cpu, false, false, true)},
         {TaskSpec(10, TaskKind::kAllocate, cpu, {}, {1}, {}, String(), 0, 0,
-                  16),
-         TaskSpec(11, TaskKind::kKernel, cpu, {0}, {1}, {10}, "kernel"),
-         TaskSpec(12, TaskKind::kEvent, cpu, {}, {}, {11}),
-         TaskSpec(20, TaskKind::kAllocate, cpu, {}, {2}, {12}, String(), 0, 0,
-                  16),
-         TaskSpec(21, TaskKind::kCopy, cpu, {1}, {2}, {20, 12}),
+                  64),
+         TaskSpec(11, TaskKind::kKernel, cpu, {0}, {1}, {10}, "k1"),
+         TaskSpec(20, TaskKind::kAllocate, cpu, {}, {2}, {11}, String(), 0, 0,
+                  32),
+         TaskSpec(21, TaskKind::kKernel, cpu, {1}, {2}, {20, 11}, "k2"),
          TaskSpec(30, TaskKind::kAllocate, cpu, {}, {3}, {21}, String(), 0, 0,
                   16),
-         TaskSpec(31, TaskKind::kShapeEval, cpu, {1, 2}, {3}, {30, 11, 21},
-                  "shape.program"),
-         TaskSpec(32, TaskKind::kSync, cpu, {}, {}, {31})},
-        {RegionSpec(0, RegionKind::kFusion, "fixture.key",
-                    {10, 11, 12, 20, 21, 30, 31, 32}, {0}, {3}, {})},
-        {0}, {}, {3});
+         TaskSpec(31, TaskKind::kKernel, cpu, {2}, {3}, {30, 21}, "k3"),
+         TaskSpec(40, TaskKind::kAllocate, cpu, {}, {4}, {31}, String(), 0, 0,
+                  16),
+         TaskSpec(41, TaskKind::kKernel, cpu, {3}, {4}, {40, 31}, "k4")},
+        {RegionSpec(0, RegionKind::kPerCall, "", {10, 11}, {0}, {1}, {},
+                    RegionEffect::kPure,
+                    conservative_first ? RegionAlias::kConservative
+                                       : RegionAlias::kNoAlias),
+         RegionSpec(1, RegionKind::kPerCall, "", {20, 21}, {1}, {2}, {}),
+         RegionSpec(2, RegionKind::kPerCall, "", {30, 31}, {2}, {3}, {}),
+         RegionSpec(3, RegionKind::kPerCall, "", {40, 41}, {3}, {4}, {})},
+        {0}, {}, {4});
 }
 
 kxc::runtime::FrozenTaskPlan WithDeclaredManifest(
     const kxc::runtime::FrozenTaskPlan& plan) {
     using namespace kxc;
     using namespace kxc::runtime;
-    const String identity("artifact:kernel:canonical-v1");
-    const String abi("exact-abi:kernel:v1");
-    Array<SelectedArtifactBinding> bindings{SelectedArtifactBinding(
-        ArtifactBindingKind::kTask, 11, identity, 0, abi, "kernel",
-        ComputeEntryBindingFingerprint(ArtifactBindingKind::kTask, 11,
-                                       identity, 0, abi, "kernel"))};
+    Array<SelectedArtifactBinding> bindings;
+    for (const auto& task : plan.tasks()) {
+        if (task->kind != TaskKind::kKernel) continue;
+        const String identity(
+            task->task_id == 11 ? "artifact:kernel:canonical-v1"
+                                : "artifact:" + std::to_string(task->task_id));
+        const String abi("exact-abi:" + std::to_string(task->task_id));
+        bindings.push_back(SelectedArtifactBinding(
+            ArtifactBindingKind::kTask, task->task_id, identity,
+            task->artifact_generation, abi, task->symbol,
+            ComputeEntryBindingFingerprint(
+                ArtifactBindingKind::kTask, task->task_id, identity,
+                task->artifact_generation, abi, task->symbol)));
+    }
     return plan.WithManifest(SelectedArtifactManifest(
         ComputeFrozenTaskPlanFingerprint(plan, bindings), bindings));
 }
@@ -135,8 +111,7 @@ bool TestDependencyAwareMemoryReuse() {
                "linear dependency peak should contain two adjacent values");
 
     const FrozenTaskPlan guarded = PlanTaskMemory(MakeChainPlan(true));
-    TEST_CHECK(guarded.values()[1]->storage_id !=
-                   guarded.values()[3]->storage_id,
+    TEST_CHECK(guarded.values()[1]->storage_id != guarded.values()[3]->storage_id,
                "async-live values must never enter reusable storage slots");
     const FrozenTaskPlan conservative =
         PlanTaskMemory(MakeChainPlan(false, true));
@@ -164,94 +139,67 @@ bool TestIndependentBranchesDoNotReuse() {
                   0, 1),
          TaskSpec(31, TaskKind::kKernel, cpu, {1, 2}, {3}, {30, 11, 21},
                   "join")},
-        {RegionSpec(0, RegionKind::kFusion, "", {10, 11, 20, 21, 30, 31},
+        {RegionSpec(0, RegionKind::kPerCall, "", {10, 11, 20, 21, 30, 31},
                     {0}, {3}, {})},
         {0}, {}, {3});
     const FrozenTaskPlan planned = PlanTaskMemory(plan);
-    TEST_CHECK(planned.values()[1]->storage_id !=
-                   planned.values()[2]->storage_id,
+    TEST_CHECK(planned.values()[1]->storage_id != planned.values()[2]->storage_id,
                "incomparable branch lifetimes must remain distinct");
     return true;
 }
 
-bool TestDeterministicExecutorCoversTaskKinds() {
+bool TestDeterministicExecutorEvents() {
     using namespace kxc;
     using namespace kxc::runtime;
     const FrozenTaskPlan plan =
-        WithDeclaredManifest(PlanTaskMemory(MakeAllKindsPlan()));
+        WithDeclaredManifest(PlanTaskMemory(MakeChainPlan()));
     std::unordered_map<int64_t, int> values{{0, 3}};
     std::vector<int64_t> action_order;
     std::vector<RuntimeEvent> observed;
     const Array<RuntimeEvent> trace = ExecuteTasksDeterministically(
         plan, [&](const TaskSpec& task) {
             action_order.push_back(task->task_id);
-            switch (task->kind) {
-                case TaskKind::kKernel:
-                    values[task.output_value_ids()[0]] =
-                        values.at(task.input_value_ids()[0]) + 1;
-                    break;
-                case TaskKind::kCopy:
-                    values[task.output_value_ids()[0]] =
-                        values.at(task.input_value_ids()[0]);
-                    break;
-                case TaskKind::kShapeEval:
-                    values[task.output_value_ids()[0]] =
-                        values.at(task.input_value_ids()[0]) +
-                        values.at(task.input_value_ids()[1]);
-                    break;
-                case TaskKind::kAllocate:
-                case TaskKind::kEvent:
-                case TaskKind::kSync:
-                    break;
+            if (task->kind == TaskKind::kKernel) {
+                values[task.output_value_ids()[0]] =
+                    values.at(task.input_value_ids()[0]) + 1;
             }
         },
         [&](const RuntimeEvent& event) { observed.push_back(event); });
-    const std::vector<int64_t> expected{10, 11, 12, 20, 21, 30, 31, 32};
-    TEST_CHECK(action_order == expected,
-               "fake executor action order must be deterministic");
-    TEST_CHECK(values.at(3) == 8,
-               "kernel/copy/shape-eval fake semantics did not compose");
-
+    const std::vector<int64_t> expected{10, 11, 20, 21, 30, 31, 40, 41};
+    TEST_CHECK(action_order == expected && values.at(4) == 7,
+               "kernel and allocation actions must execute deterministically");
     TEST_CHECK(observed.size() == trace.size(),
                "synchronous observer must see every returned event");
+
     for (size_t i = 0; i < trace.size(); ++i) {
         TEST_CHECK(observed[i].kind == trace[i].kind &&
                        observed[i].task_id == trace[i].task_id &&
                        observed[i].dependency_task_id ==
-                           trace[i].dependency_task_id,
+                           trace[i].dependency_task_id &&
+                       observed[i].value_id == trace[i].value_id,
                    "observer event order must be deterministic");
     }
 
-    bool saw_wait = false;
-    bool saw_launch = false;
-    bool saw_generation = false;
-    bool saw_allocation = false;
-    bool saw_release = false;
+    size_t exact_generation = 0;
     std::vector<int64_t> allocations;
     std::vector<int64_t> releases;
     for (const auto& event : trace) {
-        saw_wait = saw_wait || event.kind == RuntimeEventKind::kTaskWait;
-        saw_launch = saw_launch || event.kind == RuntimeEventKind::kTaskLaunch;
-        saw_allocation =
-            saw_allocation || event.kind == RuntimeEventKind::kAllocation;
-        saw_release = saw_release || event.kind == RuntimeEventKind::kRelease;
-        if (event.kind == RuntimeEventKind::kGeneration) {
-            saw_generation =
-                event.task_id == 11 && event.generation == 0 &&
-                event.artifact_identity == "artifact:kernel:canonical-v1" &&
-                event.entry_symbol == "kernel";
+        if (event.kind == RuntimeEventKind::kGeneration && event.task_id == 11 &&
+            event.generation == 0 &&
+            std::string(event.artifact_identity) == "artifact:kernel:canonical-v1" &&
+            std::string(event.entry_symbol) == "k1") {
+            ++exact_generation;
         }
-        if (event.kind == TaskTraceEventKind::kAllocate) {
+        if (event.kind == RuntimeEventKind::kAllocation) {
             allocations.push_back(event.value_id);
-        } else if (event.kind == TaskTraceEventKind::kRelease) {
+        } else if (event.kind == RuntimeEventKind::kRelease) {
             releases.push_back(event.value_id);
         }
     }
-    TEST_CHECK(saw_wait && saw_launch && saw_generation && saw_allocation &&
-                   saw_release,
-               "observer schema must expose the declared generation plus task lifecycle");
-    TEST_CHECK(allocations == std::vector<int64_t>({1, 2, 3}) &&
-                   releases == std::vector<int64_t>({1, 2}),
+    TEST_CHECK(exact_generation == 1,
+               "generation must retain the declared task identity and symbol");
+    TEST_CHECK(allocations == std::vector<int64_t>({1, 2, 3, 4}) &&
+                   releases == std::vector<int64_t>({1, 2, 3}),
                "allocation/release trace must follow consumer completion");
 
     const Array<RuntimeEvent> repeated = ExecuteTasksDeterministically(
@@ -263,77 +211,54 @@ bool TestDeterministicExecutorCoversTaskKinds() {
                        repeated[i].task_id == trace[i].task_id &&
                        repeated[i].dependency_task_id ==
                            trace[i].dependency_task_id &&
-                       repeated[i].value_id == trace[i].value_id,
+                       repeated[i].value_id == trace[i].value_id &&
+                       repeated[i].storage_id == trace[i].storage_id,
                    "deterministic observer trace changed between runs");
     }
     return true;
 }
 
-bool TestTaskLifecycleEventSequence() {
+bool TestTaskLifecycleFailureAndOverflow() {
     using namespace kxc;
     using namespace kxc::runtime;
     const FrozenTaskPlan plan =
-        WithDeclaredManifest(PlanTaskMemory(MakeAllKindsPlan()));
-
+        WithDeclaredManifest(PlanTaskMemory(MakeChainPlan()));
     std::vector<RuntimeEventKind> success_events;
     ExecuteTasksDeterministically(
         plan, [](const TaskSpec&) {},
-        [&success_events](const RuntimeEvent& event) {
+        [&](const RuntimeEvent& event) {
             if (event.task_id == 11) success_events.push_back(event.kind);
         });
-    const std::vector<RuntimeEventKind> expected_success{
-        RuntimeEventKind::kTaskWait, RuntimeEventKind::kGeneration,
-        RuntimeEventKind::kTaskStart, RuntimeEventKind::kTaskLaunch,
-        RuntimeEventKind::kTaskComplete};
-    TEST_CHECK(success_events == expected_success,
+    TEST_CHECK(success_events == std::vector<RuntimeEventKind>({
+                                     RuntimeEventKind::kTaskWait,
+                                     RuntimeEventKind::kGeneration,
+                                     RuntimeEventKind::kTaskStart,
+                                     RuntimeEventKind::kTaskLaunch,
+                                     RuntimeEventKind::kTaskComplete}),
                "kernel events must be wait -> generation -> start -> launch -> complete");
-
-    std::vector<RuntimeEventKind> failure_events;
-    TEST_CHECK(
-        Throws([&plan, &failure_events] {
-            ExecuteTasksDeterministically(
-                plan,
-                [](const TaskSpec& task) {
-                    if (task->task_id == 11) {
-                        throw std::runtime_error("fake kernel submission failed");
-                    }
-                },
-                [&failure_events](const RuntimeEvent& event) {
-                    if (event.task_id == 11) {
-                        failure_events.push_back(event.kind);
-                    }
-                });
-        }),
-        "failing action must propagate its exception");
-    const std::vector<RuntimeEventKind> expected_failure{
-        RuntimeEventKind::kTaskWait, RuntimeEventKind::kGeneration,
-        RuntimeEventKind::kTaskStart};
-    TEST_CHECK(failure_events == expected_failure,
-               "failed action must retain generation -> start without launch or complete");
-    return true;
-}
-
-bool TestExecutorFailureAndOverflowGuards() {
-    using namespace kxc;
-    using namespace kxc::runtime;
-    const FrozenTaskPlan plan = MakeAllKindsPlan();
-    int calls = 0;
     TEST_CHECK(Throws([&] {
-                   ExecuteTasksDeterministically(
-                       plan, [&](const TaskSpec& task) {
-                           ++calls;
-                           if (task->task_id == 21) {
-                               throw std::runtime_error("fake copy failed");
-                           }
-                       });
-               }) &&
-                   calls == 5,
-               "post-start failure must stop without replaying prior tasks");
-    TEST_CHECK(Throws([&] {
-                   ExecuteTasksDeterministically(plan,
-                                                 DeterministicTaskAction());
+                   ExecuteTasksDeterministically(plan, DeterministicTaskAction());
                }),
                "empty fake action must fail before execution");
+
+    std::vector<RuntimeEventKind> failure_events;
+    TEST_CHECK(Throws([&] {
+                   ExecuteTasksDeterministically(
+                       plan,
+                       [](const TaskSpec& task) {
+                           if (task->task_id == 11) {
+                               throw std::runtime_error("fake kernel submission failed");
+                           }
+                       },
+                       [&](const RuntimeEvent& event) {
+                           if (event.task_id == 11) failure_events.push_back(event.kind);
+                       });
+               }) &&
+                   failure_events == std::vector<RuntimeEventKind>({
+                                         RuntimeEventKind::kTaskWait,
+                                         RuntimeEventKind::kGeneration,
+                                         RuntimeEventKind::kTaskStart}),
+               "failed actions must not emit launch or completion events");
 
     const Device cpu = Device::CPU();
     const int64_t huge = std::numeric_limits<int64_t>::max();
@@ -356,11 +281,8 @@ int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"dependency_aware_memory_reuse", TestDependencyAwareMemoryReuse},
         {"independent_branches_do_not_reuse", TestIndependentBranchesDoNotReuse},
-        {"deterministic_executor_covers_task_kinds",
-         TestDeterministicExecutorCoversTaskKinds},
-        {"task_lifecycle_event_sequence", TestTaskLifecycleEventSequence},
-        {"executor_failure_and_overflow_guards",
-         TestExecutorFailureAndOverflowGuards},
+        {"deterministic_executor_events", TestDeterministicExecutorEvents},
+        {"task_lifecycle_failure_and_overflow", TestTaskLifecycleFailureAndOverflow},
     };
     int failures = 0;
     for (const auto& test : tests) {

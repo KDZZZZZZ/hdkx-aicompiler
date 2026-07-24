@@ -392,15 +392,6 @@ std::string LinkSymbol::CanonicalBytes() const {
     return canonical;
 }
 
-std::string StorageId::CanonicalBytes() const {
-    if (value < 0) {
-        throw std::invalid_argument("storage id must be non-negative");
-    }
-    std::string canonical;
-    AppendField(&canonical, "kind", "plan-storage-id-v1");
-    AppendField(&canonical, "storage_id", std::to_string(value));
-    return canonical;
-}
 
 UnitSemanticKey::UnitSemanticKey(std::string canonical_bytes,
                                  std::string index_digest)

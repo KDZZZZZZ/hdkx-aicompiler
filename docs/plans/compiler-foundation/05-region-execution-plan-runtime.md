@@ -46,7 +46,7 @@ CompilationUnit {
   target, layout, workspace, EffectSummary, AliasSummary;
 }
 Task {
-  TaskId id; TaskKind {Kernel, Copy, ShapeEval, Allocate, Event, Sync, Control};
+  TaskId id; TaskKind {Kernel, Allocate};
   inputs, outputs, dependencies; Device device; StreamClass stream;
   optional<UnitLocator> unit; optional<ArtifactGeneration> generation;
 }

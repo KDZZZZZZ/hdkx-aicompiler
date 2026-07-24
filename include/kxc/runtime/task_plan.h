@@ -157,12 +157,9 @@ PlanVariant MakePlanVariant(
     const Array<ArtifactSelection>& selections,
     std::shared_ptr<const void> retention_lease = nullptr);
 
-/*! \brief Runtime-neutral region category; PerCall remains the fallback policy. */
+/*! \brief Per-call region category produced by the compiler. */
 enum class RegionKind : int32_t {
     kPerCall = 0,
-    kFusion = 1,
-    kLibrary = 2,
-    kControlFlow = 3,
 };
 
 /*! \brief Conservative effect ordering contract for a region. */
@@ -180,11 +177,7 @@ enum class RegionAlias : int32_t {
 /*! \brief Actions represented by frozen task plan version 1. */
 enum class TaskKind : int32_t {
     kKernel = 0,
-    kCopy = 1,
-    kEvent = 2,
-    kShapeEval = 3,
     kAllocate = 4,
-    kSync = 5,
 };
 
 class RegionSpecNode final : public Object {

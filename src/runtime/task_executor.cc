@@ -15,10 +15,7 @@
 namespace kxc::runtime {
 namespace {
 
-bool IsDataProducer(TaskKind kind) {
-    return kind == TaskKind::kKernel || kind == TaskKind::kCopy ||
-           kind == TaskKind::kShapeEval;
-}
+bool IsDataProducer(TaskKind kind) { return kind == TaskKind::kKernel; }
 
 bool IsSourceValue(const ValueSpec& value) {
     return value->is_input || value->is_constant;

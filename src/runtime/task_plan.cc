@@ -212,14 +212,7 @@ void ValidateIds(const Array<int64_t>& ids, const std::string& context,
     }
 }
 
-bool IsDataProducer(TaskKind kind) {
-    return kind == TaskKind::kKernel || kind == TaskKind::kCopy ||
-           kind == TaskKind::kShapeEval;
-}
-
-bool IsSourceValue(const ValueSpec& value) {
-    return value->is_input || value->is_constant;
-}
+bool IsDataProducer(TaskKind kind) { return kind == TaskKind::kKernel; }
 
 bool SameShape(const Array<int64_t>& lhs, const Array<int64_t>& rhs) {
     if (lhs.size() != rhs.size()) return false;
@@ -236,6 +229,10 @@ bool SameStorageContract(const ValueSpec& lhs, const ValueSpec& rhs) {
            lhs->device == rhs->device && SameShape(lhs.shape(), rhs.shape());
 }
 
+bool IsSourceValue(const ValueSpec& value) {
+    return value->is_input || value->is_constant;
+}
+
 bool CanShareStorage(const ValueSpec& value) {
     return !IsSourceValue(value) && !value->is_output && !value->is_alias &&
            !value->is_async_live;
@@ -246,14 +243,9 @@ std::set<int64_t> ToSet(const Array<int64_t>& values) {
 }
 
 void ValidateRegionKind(RegionKind kind) {
-    switch (kind) {
-        case RegionKind::kPerCall:
-        case RegionKind::kFusion:
-        case RegionKind::kLibrary:
-        case RegionKind::kControlFlow:
-            return;
+    if (kind != RegionKind::kPerCall) {
+        throw std::invalid_argument("RegionSpec kind is invalid");
     }
-    throw std::invalid_argument("RegionSpec kind is invalid");
 }
 
 void ValidateRegionEffect(RegionEffect effect) {
@@ -275,16 +267,9 @@ void ValidateRegionAlias(RegionAlias alias) {
 }
 
 void ValidateTaskKind(TaskKind kind) {
-    switch (kind) {
-        case TaskKind::kKernel:
-        case TaskKind::kCopy:
-        case TaskKind::kEvent:
-        case TaskKind::kShapeEval:
-        case TaskKind::kAllocate:
-        case TaskKind::kSync:
-            return;
+    if (kind != TaskKind::kKernel && kind != TaskKind::kAllocate) {
+        throw std::invalid_argument("TaskSpec kind is invalid");
     }
-    throw std::invalid_argument("TaskSpec kind is invalid");
 }
 
 template <typename T>
@@ -918,21 +903,6 @@ void TaskSpec::Validate() const {
                     "Kernel task requires a symbol and outputs only");
             }
             break;
-        case TaskKind::kCopy:
-            if (has_symbol || node->input_value_ids_.size() != 1 ||
-                node->output_value_ids_.size() != 1 || node->alignment != 0 ||
-                node->artifact_generation != 0) {
-                throw std::invalid_argument(
-                    "Copy task requires one input and one output");
-            }
-            break;
-        case TaskKind::kShapeEval:
-            if (!has_symbol || node->output_value_ids_.empty() ||
-                node->alignment != 0 || node->artifact_generation != 0) {
-                throw std::invalid_argument(
-                    "ShapeEval task requires a program key and outputs");
-            }
-            break;
         case TaskKind::kAllocate:
             if (has_symbol || !node->input_value_ids_.empty() ||
                 node->output_value_ids_.size() != 1 || node->alignment == 0 ||
@@ -940,15 +910,6 @@ void TaskSpec::Validate() const {
                 node->artifact_generation != 0) {
                 throw std::invalid_argument(
                     "Allocate task requires one output and power-of-two alignment");
-            }
-            break;
-        case TaskKind::kEvent:
-        case TaskKind::kSync:
-            if (has_symbol || !node->input_value_ids_.empty() ||
-                !node->output_value_ids_.empty() || node->alignment != 0 ||
-                node->artifact_generation != 0) {
-                throw std::invalid_argument(
-                    "Event and Sync tasks carry only dependencies");
             }
             break;
     }
@@ -1144,13 +1105,6 @@ void FrozenTaskPlan::Validate() const {
                 throw std::invalid_argument(
                     "A task input producer must precede its consumer");
             }
-        }
-        if (task->kind == TaskKind::kCopy &&
-            !SameStorageContract(
-                values_by_id.at(task.input_value_ids()[0]),
-                values_by_id.at(task.output_value_ids()[0]))) {
-            throw std::invalid_argument(
-                "Copy task values require matching exact tensor contracts");
         }
     }
     for (int64_t output : node->output_value_ids_) {

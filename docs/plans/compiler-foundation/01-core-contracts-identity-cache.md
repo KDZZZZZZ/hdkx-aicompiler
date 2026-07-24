@@ -90,7 +90,6 @@
 | `DispatchKey` | artifact family、已绑定 shape/layout/valid-extent 条件、variant policy/version | 02/03 的选择逻辑 | primitive 语义本身 |
 | `PlanVariantKey` | graph template revision、selected artifact generations、concrete profile、physical memory-plan version | plan registry、profile | mutable cache state |
 | `LinkSymbol` | artifact entry 或安全重定位 alias | module lookup、launch | cache equivalence |
-| `StorageId` | 单个 plan 内物理存储分配 | memory planner、lifetime verifier | value/semantic identity |
 
 当前 `CompilationUnit::structural_hash` 的职责应迁移为 `UnitSemanticKey`；图内 `unit_id` 和 `KernelCall` value ids 继续保留，但只作为定位/连线数据。若 backend 不能重定位 entry，则由 artifact key 派生 artifact symbol，plan 单独保存 call locator；不能重新把 symbol 绑回 semantic key。
 

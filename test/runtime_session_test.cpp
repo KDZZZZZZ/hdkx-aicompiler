@@ -247,43 +247,29 @@ SessionFixture MakeStaticFixture() {
 }
 
 kxc::runtime::FrozenTaskPlan MakeStaticTaskPlan(
-    bool with_shape_eval = false, uint64_t kernel_alignment = 64,
-    kxc::runtime::RegionKind kernel_region_kind =
-        kxc::runtime::RegionKind::kPerCall,
-    int64_t artifact_generation = 0) {
+    uint64_t kernel_alignment = 64, int64_t artifact_generation = 0) {
     using namespace kxc;
     using namespace kxc::runtime;
     const Device cpu = Device::CPU();
-    Array<ValueSpec> values{
-        ValueSpec(0, 0, {2, 3}, Float32(), cpu, true),
-        ValueSpec(1, 1, {3}, Float32(), cpu, false, true),
-        ValueSpec(2, 2, {2, 3}, Float32(), cpu),
-        ValueSpec(3, 3, {2, 3}, Float32(), cpu, false, false, true),
-    };
-    Array<TaskSpec> tasks{
-        TaskSpec(10, TaskKind::kAllocate, cpu, {}, {2}, {}, String(), 0, 0,
-                 kernel_alignment),
-        TaskSpec(11, TaskKind::kKernel, cpu, {0, 1}, {2}, {10},
-                 "session_fixture", artifact_generation),
-        TaskSpec(12, TaskKind::kEvent, cpu, {}, {}, {11}),
-        TaskSpec(20, TaskKind::kAllocate, cpu, {}, {3}, {12}, String(), 0, 0,
-                 64),
-    };
-    if (with_shape_eval) {
-        tasks.push_back(TaskSpec(21, TaskKind::kShapeEval, cpu, {2}, {3},
-                                 {20, 12}, "shape.program"));
-    } else {
-        tasks.push_back(TaskSpec(21, TaskKind::kCopy, cpu, {2}, {3},
-                                 {20, 12}));
-    }
-    tasks.push_back(TaskSpec(22, TaskKind::kSync, cpu, {}, {}, {21}));
-    Array<RegionSpec> regions{
-        RegionSpec(0, kernel_region_kind, "", {10, 11, 12}, {0, 1}, {2},
-                   {1}, RegionEffect::kOrdered),
-        RegionSpec(1, RegionKind::kPerCall, "", {20, 21, 22}, {2}, {3}, {}),
-    };
-    return FrozenTaskPlan(kFrozenTaskPlanVersion, std::move(values),
-                          std::move(tasks), std::move(regions), {0}, {1}, {3});
+    return FrozenTaskPlan(
+        kFrozenTaskPlanVersion,
+        {ValueSpec(0, 0, {2, 3}, Float32(), cpu, true),
+         ValueSpec(1, 1, {3}, Float32(), cpu, false, true),
+         ValueSpec(2, 2, {2, 3}, Float32(), cpu),
+         ValueSpec(3, 3, {2, 3}, Float32(), cpu, false, false, true)},
+        {TaskSpec(10, TaskKind::kAllocate, cpu, {}, {2}, {}, String(), 0, 0,
+                  kernel_alignment),
+         TaskSpec(11, TaskKind::kKernel, cpu, {0, 1}, {2}, {10},
+                  "session_fixture", artifact_generation),
+         TaskSpec(20, TaskKind::kAllocate, cpu, {}, {3}, {11}, String(), 0, 0,
+                  kernel_alignment),
+         TaskSpec(21, TaskKind::kKernel, cpu, {2, 1}, {3}, {20, 11},
+                  "session_fixture", artifact_generation)},
+        {RegionSpec(0, RegionKind::kPerCall, "", {10, 11}, {0, 1}, {2}, {1},
+                    RegionEffect::kOrdered),
+         RegionSpec(1, RegionKind::kPerCall, "", {20, 21}, {2, 1}, {3}, {1},
+                    RegionEffect::kOrdered)},
+        {0}, {1}, {3});
 }
 
 kxc::runtime::FrozenTaskPlan MakeRepeatedKernelTaskPlan() {
@@ -650,29 +636,29 @@ bool TestFrozenTaskDagExecutionAndRetention() {
         result = session.RunAsync({input}, DeviceStream::Default(Device::CPU()));
     }
     retention.reset();
-    bool saw_wait = false;
-    bool saw_launch = false;
-    bool saw_allocation = false;
-    bool saw_release = false;
-    bool saw_generation = false;
+    size_t exact_generation = 0;
+    size_t exact_release = 0;
+    size_t successful_launches = 0;
     for (const auto& event : events) {
-        saw_wait = saw_wait || event.kind == runtime::RuntimeEventKind::kTaskWait;
-        saw_launch =
-            saw_launch || event.kind == runtime::RuntimeEventKind::kTaskLaunch;
-        saw_allocation = saw_allocation ||
-                         event.kind == runtime::RuntimeEventKind::kAllocation;
-        saw_release =
-            saw_release || event.kind == runtime::RuntimeEventKind::kRelease;
-        if (event.kind == runtime::RuntimeEventKind::kGeneration) {
-            saw_generation =
-                event.generation == 0 &&
-                event.artifact_identity == "artifact:task:canonical:11";
+        if (event.kind == runtime::RuntimeEventKind::kGeneration &&
+            event.task_id == 11 && event.generation == 0 &&
+            std::string(event.artifact_identity) == "artifact:task:canonical:11" &&
+            std::string(event.entry_symbol) == "session_fixture") {
+            ++exact_generation;
+        }
+        if (event.kind == runtime::RuntimeEventKind::kRelease &&
+            event.task_id == 21 && event.value_id == 2) {
+            ++exact_release;
+        }
+        if (event.kind == runtime::RuntimeEventKind::kTaskLaunch &&
+            event.task_kind == runtime::TaskKind::kKernel) {
+            ++successful_launches;
         }
     }
     TEST_CHECK(result.outputs.size() == 1 && result.completion.IsReady() &&
-                   fixture.launcher->calls == 1 && saw_wait && saw_launch &&
-                   saw_allocation && saw_release && saw_generation,
-               "task execution or observer event schema is incomplete");
+                   fixture.launcher->calls == 2 && exact_generation == 1 &&
+                   exact_release == 1 && successful_launches == 2,
+               "task execution must preserve exact generation, release, and launch events");
     TEST_CHECK(result.completion->retained_storage.size() == 4 &&
                    !retained_manifest_owner.expired(),
                "completion must retain storage and selected-artifact manifest");
@@ -681,77 +667,17 @@ bool TestFrozenTaskDagExecutionAndRetention() {
     TEST_CHECK(retained_manifest_owner.expired(),
                "manifest owner must release with the completion handle");
 
-    SessionFixture library_fixture = MakeStaticFixture();
-    std::vector<runtime::RuntimeEvent> library_events;
-    TEST_CHECK(Throws([&] {
-                   runtime::RuntimeSession invalid(
-                       library_fixture.module,
-                       FreezeTaskPlan(
-                           library_fixture.module,
-                           MakeStaticTaskPlan(false, 64,
-                                              runtime::RegionKind::kLibrary)),
-                       [&](const runtime::RuntimeEvent& event) {
-                           library_events.push_back(event);
-                       });
-               }) &&
-                   library_fixture.launcher->calls == 0 &&
-                   library_events.size() == 1 &&
-                   library_events[0].fallback_reason ==
-                       runtime::FallbackReason::kUnsupportedLibrary,
-               "library rejection must be classified before launch");
-    SessionFixture control_fixture = MakeStaticFixture();
-    std::vector<runtime::RuntimeEvent> control_events;
-    TEST_CHECK(Throws([&] {
-                   runtime::RuntimeSession invalid(
-                       control_fixture.module,
-                       FreezeTaskPlan(
-                           control_fixture.module,
-                           MakeStaticTaskPlan(
-                               false, 64,
-                               runtime::RegionKind::kControlFlow)),
-                       [&](const runtime::RuntimeEvent& event) {
-                           control_events.push_back(event);
-                       });
-               }) &&
-                   control_fixture.launcher->calls == 0 &&
-                   control_events.size() == 1 &&
-                   control_events[0].fallback_reason ==
-                       runtime::FallbackReason::kUnsupportedControlFlow,
-               "control-flow rejection must be separately classified");
-    SessionFixture fusion_fixture = MakeStaticFixture();
-    TEST_CHECK(Throws([&] {
-                   runtime::RuntimeSession invalid(
-                       fusion_fixture.module,
-                       FreezeTaskPlan(
-                           fusion_fixture.module,
-                           MakeStaticTaskPlan(false, 64,
-                                              runtime::RegionKind::kFusion)));
-               }) &&
-                   fusion_fixture.launcher->calls == 0,
-               "fusion regions without an execution contract must fail before launch");
     TEST_CHECK(Throws([&] {
                    runtime::RuntimeSession invalid(
                        fixture.module,
-                       FreezeTaskPlan(fixture.module,
-                                      MakeStaticTaskPlan(true)));
-               }),
-               "shape-eval must fail closed until its contract is integrated");
-    TEST_CHECK(Throws([&] {
-                   runtime::RuntimeSession invalid(
-                       fixture.module,
-                       FreezeTaskPlan(fixture.module,
-                                      MakeStaticTaskPlan(false, 1)));
+                       FreezeTaskPlan(fixture.module, MakeStaticTaskPlan(1)));
                }),
                "kernel output alignment must fail at session construction");
 
     TEST_CHECK(Throws([&] {
                    runtime::RuntimeSession invalid(
                        fixture.module,
-                       FreezeTaskPlan(
-                           fixture.module,
-                           MakeStaticTaskPlan(false, 64,
-                                              runtime::RegionKind::kPerCall,
-                                              1)));
+                       FreezeTaskPlan(fixture.module, MakeStaticTaskPlan(64, 1)));
                }),
                "non-zero selected artifact generation must remain rejected");
 
@@ -767,7 +693,9 @@ bool TestFrozenTaskDagExecutionAndRetention() {
             runtime::ArtifactBindingKind::kTask, binding->invocation_id,
             binding->artifact_identity, 0, bad_abi,
             binding->entry_symbol));
-    const Array<runtime::SelectedArtifactBinding> tampered_bindings{tampered};
+    Array<runtime::SelectedArtifactBinding> tampered_bindings =
+        valid.manifest().bindings();
+    tampered_bindings[0] = tampered;
     const runtime::FrozenTaskPlan tampered_plan = raw.WithManifest(
         runtime::SelectedArtifactManifest(
             runtime::ComputeFrozenTaskPlanFingerprint(raw,

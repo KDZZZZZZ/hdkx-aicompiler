@@ -151,16 +151,11 @@ observer 同时收到一个 `RuntimeEventKind::kFallback` 事件。已分类原�
 | `kMissingArtifactManifest` | bare `ExecutablePlan` 没有 upper-plane artifact declaration，选择 per-Call；retention lease 不是 admission 条件 |
 | `kUnsupportedDynamicInput` | 任一 `-1`/dynamic value 不进入 static-exact DAG |
 | `kUnsupportedAlias` | alias value 或 conservative alias region 不进入当前 executor |
-| `kUnsupportedFusion` | 当前没有 fusion execution contract，直接 frozen construction 拒绝 |
-| `kUnsupportedLibrary` | 缺 library descriptor/workspace/stream/error ABI，拒绝 |
-| `kUnsupportedControlFlow` | 当前 RuntimeSession 不执行 control-flow region，拒绝 |
-| `kUnsupportedShapeEvaluation` | 缺 ShapeProgram/runtime output contract，拒绝 |
 | `kAdapterBug` | 已通过显式 preflight 后 adapter/validator invariant 失败；发 diagnostic 后 fail closed，不降级执行 |
 
 原来的 `catch (const std::invalid_argument&) { /* silent fallback */ }` 已删除。已知
 unsupported 条件在 adapter 前显式检查；adapter 内异常统一视为 bug 并抛出
-`logic_error`。直接 frozen plan 没有 ordered oracle 可选，因此 library/control/fusion 等
-事件表示带结构化原因的构造拒绝，而不是执行了另一路径。
+`logic_error`。直接 frozen plan 没有 ordered oracle 可选。
 
 Gate ON 时，只有带完整 trusted declaration 的 `PlanVariant` 可以适配为 task DAG。旧
 `RuntimeSession(module, ExecutablePlan, kTaskDAG)` 保持 API 兼容；bare plan 没有

@@ -360,24 +360,6 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
     plan.Validate();
     const Map<String, NDArray>& module_constants =
         api::internal::BorrowCompiledModuleConstants(module);
-    for (const auto& region : plan.regions()) {
-        switch (region->kind) {
-            case RegionKind::kPerCall:
-                break;
-            case RegionKind::kFusion:
-                throw std::invalid_argument(
-                    "RuntimeSession task DAG does not execute fusion regions "
-                    "without a fusion execution contract");
-            case RegionKind::kLibrary:
-                throw std::invalid_argument(
-                    "RuntimeSession task DAG requires a library descriptor, "
-                    "workspace, stream, and error ABI");
-            case RegionKind::kControlFlow:
-                throw std::invalid_argument(
-                    "RuntimeSession task DAG does not execute control-flow regions");
-        }
-    }
-
     const Array<String> module_symbols = module.symbols();
     if (module_symbols.empty()) {
         throw std::invalid_argument(
@@ -415,10 +397,6 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
     }
     size_t kernel_count = 0;
     for (const auto& task : plan.tasks()) {
-        if (task->kind == TaskKind::kShapeEval) {
-            throw std::invalid_argument(
-                "RuntimeSession task DAG requires shape-eval integration");
-        }
         if (task->kind != TaskKind::kKernel) continue;
         ++kernel_count;
         const std::string symbol = std::string(task->symbol);
@@ -808,27 +786,6 @@ FallbackDecision InspectFrozenPlanForRuntime(const FrozenTaskPlan& plan) {
             return {FallbackReason::kUnsupportedAlias,
                     "task DAG runtime does not support conservative alias regions"};
         }
-        switch (region->kind) {
-            case RegionKind::kPerCall:
-                break;
-            case RegionKind::kFusion:
-                return {
-                    FallbackReason::kUnsupportedFusion,
-                    "task DAG runtime does not execute fusion regions without "
-                    "a fusion execution contract"};
-            case RegionKind::kLibrary:
-                return {FallbackReason::kUnsupportedLibrary,
-                        "task DAG runtime requires a library execution contract"};
-            case RegionKind::kControlFlow:
-                return {FallbackReason::kUnsupportedControlFlow,
-                        "task DAG runtime does not execute control-flow regions"};
-        }
-    }
-    for (const auto& task : plan.tasks()) {
-        if (task->kind == TaskKind::kShapeEval) {
-            return {FallbackReason::kUnsupportedShapeEvaluation,
-                    "task DAG runtime requires shape-evaluation integration"};
-        }
     }
     return {};
 }
@@ -1186,23 +1143,6 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
                             node->module, task->symbol, arguments, stream));
                         break;
                     }
-                    case TaskKind::kCopy: {
-                        const NDArray source =
-                            table->Get(task.input_value_ids()[0]);
-                        const NDArray destination =
-                            table->Get(task.output_value_ids()[0]);
-                        operations.push_back(
-                            destination.CopyFromAsync(source, stream));
-                        break;
-                    }
-                    case TaskKind::kEvent:
-                        break;
-                    case TaskKind::kSync:
-                        stream.Sync();
-                        break;
-                    case TaskKind::kShapeEval:
-                        throw std::logic_error(
-                            "validated RuntimeSession task plan contains ShapeEval");
                 }
             },
             node->observer);

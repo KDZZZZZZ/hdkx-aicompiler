@@ -114,19 +114,16 @@ bool TestGraphLocatorIsNotUnitSemantics() {
 
     const UnitSemanticKey semantic("op=add;inputs=f32[4],f32[4]");
     const LinkSymbol symbol{"kxc_unit_7_add"};
-    const StorageId storage{3};
     TEST_CHECK(semantic.defined() &&
                    semantic.canonical_bytes().find("graph-a") ==
                        std::string::npos &&
-                   symbol.CanonicalBytes() != storage.CanonicalBytes() &&
                    symbol.CanonicalBytes() != first.CanonicalBytes(),
-               "semantic, link, storage and routing identities stay disjoint");
+               "semantic, link, and routing identities stay disjoint");
     TEST_CHECK(Throws([] {
                    (void)GraphValueLocator{"", -1, 0}.CanonicalBytes();
                }) &&
-                   Throws([] { (void)LinkSymbol{""}.CanonicalBytes(); }) &&
-                   Throws([] { (void)StorageId{-1}.CanonicalBytes(); }),
-               "invalid locator/link/storage identities must fail closed");
+                   Throws([] { (void)LinkSymbol{""}.CanonicalBytes(); }),
+               "invalid locator and link identities must fail closed");
     return true;
 }
 
