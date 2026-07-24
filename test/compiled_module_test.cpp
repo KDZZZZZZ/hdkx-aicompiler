@@ -179,6 +179,11 @@ bool ContractAssemblyAndExpressionLimits() {
     auto reordered=ModuleInvocationContract({unordered_second,first},{out}).CanonicalBytes();
     CHECK(canonical!=reordered);
     CHECK(canonical!=ModuleInvocationContract({first,second},{out},{{ModuleShapeExpr::Const(1),U64(),Device::CPU(),8}}).CanonicalBytes());
+    CHECK(Throws([&]{
+        (void)ModuleInvocationContract(
+            {first,second},{out},
+            {{ModuleShapeExpr::Const(1),F32(),Device::CPU(),4}});
+    }));
     auto identity_launcher=std::make_shared<Recorder>();
     KernelSignature identity("identity",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{2},Device::CPU(),1,true)});
     auto identity_module=Build(identity,identity_launcher);

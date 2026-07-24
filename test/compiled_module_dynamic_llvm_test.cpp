@@ -105,7 +105,8 @@ CompiledModule BuildDynamicLLVMModule() {
     auto contract = std::make_shared<ModuleInvocationContract>(
         std::vector<ModuleInputContract>{input},
         std::vector<ModuleTensorContract>{output},
-        std::vector<ModuleRuntimeExtentScalar>{{twice, U64(), Device::CPU(), 8}});
+        std::vector<ModuleRuntimeExtentScalar>{{
+            ModuleShapeExpr::InputAxis(0, 0), U64(), Device::CPU(), 8}});
     return internal::BuildCompiledModule(
         BuildTarget(Device::CPU()),
         {{function, signature, metadata, kernel, std::move(contract)}}, {});
