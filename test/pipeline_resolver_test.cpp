@@ -108,15 +108,14 @@ bool TestProductionPlanHasExplicitInferBoundaries() {
             PipelineResolver::Resolve(Request(IRDialect::kRelay, level, cpu));
         const NormalizedPipeline tir =
             PipelineResolver::Resolve(Request(IRDialect::kTIR, level, cpu));
-        TEST_CHECK(relay.defined() && relay.ordered_passes.size() == relay_sizes[level] &&
-                       relay.execution_steps.size() == relay_sizes[level] &&
+        TEST_CHECK(relay.defined() && relay.execution_steps.size() == relay_sizes[level] &&
                        relay.invariant_transitions.size() == relay_sizes[level] &&
-                       tir.ordered_passes.size() == tir_sizes[level],
+                       tir.execution_steps.size() == tir_sizes[level],
                    "compiler plans must contain exactly their executed pass steps");
-        TEST_CHECK(relay.ordered_passes[0] == String("infer_type") &&
-                       relay.ordered_passes[relay.ordered_passes.size() - 2] ==
+        TEST_CHECK(relay.execution_steps.front().pass_name == String("infer_type") &&
+                       relay.execution_steps[relay.execution_steps.size() - 2].pass_name ==
                            String("infer_type") &&
-                       relay.ordered_passes[relay.ordered_passes.size() - 1] ==
+                       relay.execution_steps.back().pass_name ==
                            String("normalize_to_anf") &&
                        relay.execution_steps.front().occurrence == 0 &&
                        relay.execution_steps[relay.execution_steps.size() - 2].occurrence == 1 &&
@@ -144,12 +143,11 @@ bool TestTamperedAndUndeclaredStepsFailClosed() {
                "a missing invariant transition must be rejected");
 
     NormalizedPipeline extra_step = plan;
-    extra_step.ordered_passes.push_back(String("fold_constant"));
+    extra_step.execution_steps.push_back(plan.execution_steps.back());
     TEST_CHECK(Throws([&] { PipelineExecutor::Validate(extra_step, cpu); }),
-               "an extra execution name without a declared transition must be rejected");
+               "an extra execution step without a declared transition must be rejected");
 
     NormalizedPipeline undeclared = plan;
-    undeclared.ordered_passes[1] = String("not_a_declared_pass");
     undeclared.execution_steps[1].pass_name = String("not_a_declared_pass");
     TEST_CHECK(Throws([&] { PipelineExecutor::Validate(undeclared, cpu); }),
                "an undeclared pass must never enter execution");
@@ -164,8 +162,8 @@ bool TestCudaScheduleIsCanonicalAndVerified() {
         PipelineResolver::Resolve(Request(IRDialect::kTIR, 3, cuda));
     const NormalizedPipeline cpu_plan = PipelineResolver::Resolve(
         Request(IRDialect::kTIR, 3, BuildTarget(Device::CPU())));
-    TEST_CHECK(cuda_plan.ordered_passes.size() == 5 &&
-                   Contains(cuda_plan.ordered_passes, "bind_cuda_threads") &&
+    TEST_CHECK(cuda_plan.execution_steps.size() == 5 &&
+                   cuda_plan.execution_steps.back().pass_name == String("bind_cuda_threads") &&
                    Contains(cuda_plan.target_requirements, "cuda_thread_binding") &&
                    std::string(cuda_plan.execution_steps.back().phase) ==
                        "tir_schedule" &&
@@ -245,13 +243,12 @@ bool TestCompilerArtifactIdentityUsesExecutedCanonicalPlan() {
                    contract.canonical_bytes.find(
                        "per-unit-boundary-lowering-v1") !=
                        std::string::npos &&
-                   contract.relay_pipeline.ordered_passes[0] ==
+                   contract.relay_pipeline.execution_steps.front().pass_name ==
                        String("infer_type") &&
-                   contract.relay_pipeline.ordered_passes[
-                       contract.relay_pipeline.ordered_passes.size() - 2] ==
+                   contract.relay_pipeline.execution_steps[
+                       contract.relay_pipeline.execution_steps.size() - 2].pass_name ==
                        String("infer_type") &&
-                   contract.relay_pipeline.ordered_passes[
-                       contract.relay_pipeline.ordered_passes.size() - 1] ==
+                   contract.relay_pipeline.execution_steps.back().pass_name ==
                        String("normalize_to_anf"),
                "artifact identity must use the exact executed Relay/lowering/TIR plan");
     return true;
@@ -267,11 +264,11 @@ bool TestCanonicalChangesAndNoHiddenCompatibilityPass() {
     const NormalizedPipeline changed = PipelineResolver::Resolve(request);
     TEST_CHECK(baseline.fingerprint != changed.fingerprint &&
                    baseline.canonical_bytes != changed.canonical_bytes &&
-                   changed.ordered_passes.size() == 5 &&
-                   changed.ordered_passes[0] == String("infer_type") &&
-                   changed.ordered_passes[changed.ordered_passes.size() - 2] ==
+                   changed.execution_steps.size() == 5 &&
+                   changed.execution_steps.front().pass_name == String("infer_type") &&
+                   changed.execution_steps[changed.execution_steps.size() - 2].pass_name ==
                        String("infer_type") &&
-                   changed.ordered_passes[changed.ordered_passes.size() - 1] ==
+                   changed.execution_steps.back().pass_name ==
                        String("normalize_to_anf"),
                "the exact ordered execution steps must determine canonical identity");
 

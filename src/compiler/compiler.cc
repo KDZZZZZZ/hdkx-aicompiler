@@ -34,7 +34,8 @@
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
 #include "kxc/runtime/session.h"
-#include "kxc/support/hash.h"
+#include "support/canonical.h"
+#include "support/hash.h"
 #include "kxc/relay/pass/print_ir.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/tir/pass/print_ir.h"
@@ -181,8 +182,9 @@ namespace {
 void AppendPipelineIdentityField(std::string* canonical,
                                  const std::string& name,
                                  const std::string& value) {
-    *canonical += std::to_string(name.size()) + ":" + name + "=" +
-                  std::to_string(value.size()) + ":" + value + ";";
+    support::CanonicalBytesEncoder field;
+    field.Field(name, value);
+    *canonical += std::move(field).Take();
 }
 
 bool SameTargetSnapshot(const Target& left, const Target& right) {
@@ -424,8 +426,7 @@ CompileResult ValidateInput(
     config.Validate();
     CapabilityVerifier::RequireEligible(CapabilityRequest{
         function, config->target, "graph", contract.fingerprint,
-        CapabilityBoundary::kCompilerEntry, CapabilityMode::kStaticExact,
-        false, config->opt_level});
+        CapabilityBoundary::kCompilerEntry, false, config->opt_level});
     return CompileResult::Validate(config->target, std::move(function));
 }
 
@@ -436,8 +437,7 @@ CompileResult OptimizeRelay(
         contract.relay_pipeline, input.validated_relay(), input.target());
     CapabilityVerifier::RequireEligible(CapabilityRequest{
         optimized, input.target(), "graph", contract.fingerprint,
-        CapabilityBoundary::kPostGraphPass, CapabilityMode::kStaticExact,
-        true, config->opt_level});
+        CapabilityBoundary::kPostGraphPass, true, config->opt_level});
     return input.AfterRelayOptimization(std::move(optimized));
 }
 

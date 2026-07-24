@@ -27,12 +27,7 @@ struct PipelineRequest final {
     Array<String> initial_analyses;
 };
 
-enum class PipelineExecutionStepKind {
-    kPass,
-};
-
 struct PipelineExecutionStep final {
-    PipelineExecutionStepKind kind{PipelineExecutionStepKind::kPass};
     IRDialect dialect{IRDialect::kUnknown};
     PassScope scope{PassScope::kUnknown};
     size_t occurrence{0};
@@ -43,8 +38,6 @@ struct PipelineExecutionStep final {
 };
 
 struct PipelineInvariantTransition final {
-    String pass_name;
-    String phase;
     Array<String> required;
     Array<String> produced;
     Array<String> declarative_only;
@@ -63,11 +56,9 @@ struct NormalizedPipeline final {
     String named_pipeline;
     Array<String> initial_invariants;
     Array<String> initial_analyses;
-    Array<String> ordered_passes;
     std::vector<PipelineExecutionStep> execution_steps;
     std::vector<PipelineInvariantTransition> invariant_transitions;
     Array<String> target_requirements;
-    Array<String> contract_versions;
     String canonical_bytes;
     String fingerprint;
 

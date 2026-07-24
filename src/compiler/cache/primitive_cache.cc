@@ -5,7 +5,7 @@
 #include "../internal/primitive_cache.h"
 
 #include "../internal/execution_contract.h"
-#include "kxc/support/hash.h"
+#include "support/hash.h"
 
 #include <algorithm>
 #include <condition_variable>

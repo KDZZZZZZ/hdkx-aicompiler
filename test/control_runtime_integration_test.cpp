@@ -526,8 +526,7 @@ bool TestCompilerDefaultStillRejectsIf() {
             function,
             kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU())));
     });
-    CHECK(error.find("mode=static_exact") != std::string::npos &&
-              error.find("missing control_flow.if") != std::string::npos,
+    CHECK(error.find("missing control_flow.if") != std::string::npos,
           "Compiler::Compile must keep the default Relay If rejection");
     return true;
 }

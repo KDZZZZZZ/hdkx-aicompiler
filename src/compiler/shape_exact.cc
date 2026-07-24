@@ -9,7 +9,8 @@
 #include "internal/execution_contract.h"
 #include "internal/primitive_cache.h"
 #include "../runtime/internal/memory_plan.h"
-#include "kxc/support/hash.h"
+#include "support/canonical.h"
+#include "support/hash.h"
 #include "kxc/runtime/device_api.h"
 
 #ifndef KXC_ENABLE_SHAPE_PRODUCTION_EXACT
@@ -333,8 +334,9 @@ std::string ValueName(int64_t id) { return "value." + std::to_string(id); }
 
 void AppendField(std::string* bytes, const std::string& name,
                  const std::string& value) {
-    *bytes += std::to_string(name.size()) + ":" + name + "=" +
-              std::to_string(value.size()) + ":" + value + ";";
+    support::CanonicalBytesEncoder field;
+    field.Field(name, value);
+    *bytes += std::move(field).Take();
 }
 
 std::string IdsCanonical(const Array<int64_t>& ids) {

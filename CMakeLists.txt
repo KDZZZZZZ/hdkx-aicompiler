@@ -123,9 +123,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/session.h
   include/kxc/runtime/storage.h
   include/kxc/support/arena.h
-  include/kxc/support/canonical.h
   include/kxc/support/container.h
-  include/kxc/support/hash.h
   include/kxc/support/detail/array_inl.h
   include/kxc/support/detail/map_inl.h
   include/kxc/support/object.h
@@ -530,6 +528,7 @@ if(KXC_USE_CUDA)
 endif()
 
 function(kxc_configure_module_obj target)
+  target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(${target} PRIVATE kxc_public_api)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}

@@ -7,6 +7,7 @@
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/relay/transforms/pipeline.h"
+#include "../src/compiler/internal/lowered_graph.h"
 
 #include <cstdint>
 #include <exception>
@@ -15,6 +16,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -62,6 +64,16 @@ bool ExpectOverflow(const std::function<void()>& fn) {
     } catch (const std::exception&) {
     }
     return false;
+}
+
+std::vector<kxc::relay::LoweredFunction> LowerUnits(kxc::Function function) {
+    function = kxc::relay::InferTypePass(std::move(function));
+    const kxc::api::internal::LoweredGraph graph =
+        kxc::api::internal::LowerGraph(std::move(function));
+    std::vector<kxc::relay::LoweredFunction> result;
+    result.reserve(graph.primitives.size());
+    for (const auto& primitive : graph.primitives) result.push_back(primitive.lowered);
+    return result;
 }
 
 bool TestElementwiseBroadcast() {
@@ -361,7 +373,7 @@ bool TestConcatenateInferAndLoweringContract() {
                "concatenate must normalize a negative axis and sum its extent");
     TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined(),
                "static concatenate should lower to TIR");
-    TEST_CHECK(kxc::relay::LowerOperatorCallsToTIR(function).size() == 1,
+    TEST_CHECK(LowerUnits(function).size() == 1,
                "one concatenate call must produce one lowering unit");
     TEST_CHECK(kxc::relay::SerializeAttrs(kxc::relay::ConcatenateAttrs::Create(-1)) ==
                    kxc::relay::SerializeAttrs(kxc::relay::ConcatenateAttrs::Create(-1)) &&
@@ -455,7 +467,7 @@ bool TestSliceInferAndLoweringContract() {
     TEST_CHECK(CheckTensor(slice.checked_type(), {2, 3, 3}, "float32"),
                "slice must normalize negative axes and clamp negative/huge endpoints");
     TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined() &&
-                   kxc::relay::LowerOperatorCallsToTIR(function).size() == 1,
+                   LowerUnits(function).size() == 1,
                "slice must lower to one fresh indexed compute");
     TEST_CHECK(kxc::Registry::Global().Get("kxc.relay.op._make.slice").defined(),
                "canonical slice FFI entry must be registered");
@@ -594,7 +606,7 @@ bool TestLayerNormInferAndLoweringContract() {
                "LayerNorm must preserve data shape and dtype");
     TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined(),
                "valid static LayerNorm should lower to TIR");
-    TEST_CHECK(kxc::relay::LowerOperatorCallsToTIR(function).size() == 1,
+    TEST_CHECK(LowerUnits(function).size() == 1,
                "one LayerNorm Relay Call must produce one lowering unit");
 
     kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
@@ -723,7 +735,7 @@ bool TestExactTransformerOperatorSliceComposition() {
                "exact Transformer operator slice shapes must compose without dynamic claims");
     TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined(),
                "exact Transformer operator slice must lower to TIR");
-    TEST_CHECK(kxc::relay::LowerOperatorCallsToTIR(function).size() == 9,
+    TEST_CHECK(LowerUnits(function).size() == 9,
                "exact Transformer operator slice must preserve nine per-op units");
     return true;
 }
@@ -763,8 +775,8 @@ bool TestNegativeExtentLoweringGates() {
                "negative extent TensorType may type-infer before lowering");
     TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(func); }),
                "LowerToTIR must reject negative static extents before producing TIR");
-    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerOperatorCallsToTIR(func); }),
-               "LowerOperatorCallsToTIR must reject negative static extents before producing TIR");
+    TEST_CHECK(ExpectThrow([&] { LowerUnits(func); }),
+               "per-unit lowering must reject negative static extents before producing TIR");
     return true;
 }
 
@@ -780,7 +792,7 @@ bool TestStaticLoweringSizeGates() {
     const auto rejected_by_both = [&](const std::vector<int64_t>& shape) {
         const kxc::Function function = make_add(shape);
         return ExpectThrow([&] { kxc::relay::LowerToTIR(function); }) &&
-               ExpectThrow([&] { kxc::relay::LowerOperatorCallsToTIR(function); });
+               ExpectThrow([&] { LowerUnits(function); });
     };
 
     constexpr int64_t kInt32Max = std::numeric_limits<int32_t>::max();
@@ -793,7 +805,7 @@ bool TestStaticLoweringSizeGates() {
 
     const kxc::Function zero = make_add({0, kInt32Max, kInt32Max});
     TEST_CHECK(kxc::relay::LowerToTIR(zero)->prim_func.defined() &&
-                   kxc::relay::LowerOperatorCallsToTIR(zero).size() == 1,
+                   LowerUnits(zero).size() == 1,
                "zero-element tensors with individually legal extents must remain lowerable");
 
     kxc::Var flatten_data("flatten_data",
@@ -802,9 +814,7 @@ bool TestStaticLoweringSizeGates() {
                       kxc::relay::FlattenAttrs::Create(0));
     const kxc::Function flatten_function({flatten_data}, flatten);
     TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(flatten_function); }) &&
-                   ExpectThrow([&] {
-                       kxc::relay::LowerOperatorCallsToTIR(flatten_function);
-                   }),
+                   ExpectThrow([&] { LowerUnits(flatten_function); }),
                "flattened iteration extents above INT32_MAX must fail closed");
 
     kxc::Var concat_lhs("concat_lhs", kxc::TensorType({kInt32Max}, "float32"));
@@ -814,9 +824,7 @@ bool TestStaticLoweringSizeGates() {
         kxc::relay::ConcatenateAttrs::Create(0));
     const kxc::Function concatenate_function({concat_lhs, concat_rhs}, concatenate);
     TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(concatenate_function); }) &&
-                   ExpectThrow([&] {
-                       kxc::relay::LowerOperatorCallsToTIR(concatenate_function);
-                   }),
+                   ExpectThrow([&] { LowerUnits(concatenate_function); }),
                "Concatenate output extents above INT32_MAX must fail closed");
 
     kxc::Var slice_data("slice_data",
@@ -825,9 +833,7 @@ bool TestStaticLoweringSizeGates() {
                     kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1}));
     const kxc::Function slice_function({slice_data}, slice);
     TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(slice_function); }) &&
-                   ExpectThrow([&] {
-                       kxc::relay::LowerOperatorCallsToTIR(slice_function);
-                   }),
+                   ExpectThrow([&] { LowerUnits(slice_function); }),
                "Slice input extents above INT32_MAX must fail closed");
     return true;
 }
@@ -844,8 +850,7 @@ bool TestMvpElementwiseLowerToTIR() {
 
     kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
     TEST_CHECK(lowered.defined(), "elementwise MVP ops should lower to TIR");
-    const kxc::Array<kxc::relay::LoweredFunction> units =
-        kxc::relay::LowerOperatorCallsToTIR(func);
+    const std::vector<kxc::relay::LoweredFunction> units = LowerUnits(func);
     TEST_CHECK(units.size() == 5,
                "five checked elementwise Calls must lower to five PrimFuncs");
     for (const auto& unit : units) {

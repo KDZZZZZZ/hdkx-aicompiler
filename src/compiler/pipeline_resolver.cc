@@ -13,7 +13,8 @@
 
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
-#include "kxc/support/hash.h"
+#include "support/canonical.h"
+#include "support/hash.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/normalize_to_anf.h"
@@ -31,21 +32,14 @@ std::string AsString(const String& value) {
 
 void AppendField(std::string* canonical, const std::string& name,
                  const std::string& value) {
-    *canonical += std::to_string(name.size()) + ":" + name + "=" +
-                  std::to_string(value.size()) + ":" + value + ";";
+    support::CanonicalBytesEncoder field;
+    field.Field(name, value);
+    *canonical += std::move(field).Take();
 }
 
 void AppendArray(std::string* canonical, const std::string& name,
                  const Array<String>& values) {
     for (const String& value : values) AppendField(canonical, name, AsString(value));
-}
-
-std::string StepKindName(PipelineExecutionStepKind kind) {
-    switch (kind) {
-        case PipelineExecutionStepKind::kPass:
-            return "pass";
-    }
-    throw std::invalid_argument("PipelineExecutor has an unknown step kind");
 }
 
 bool EqualArray(const Array<String>& lhs, const Array<String>& rhs) {
@@ -160,7 +154,6 @@ std::string CanonicalBytes(const NormalizedPipeline& pipeline) {
     AppendArray(&canonical, "initial_analysis", pipeline.initial_analyses);
     AppendArray(&canonical, "target_requirement", pipeline.target_requirements);
     for (const PipelineExecutionStep& step : pipeline.execution_steps) {
-        AppendField(&canonical, "step_kind", StepKindName(step.kind));
         AppendField(&canonical, "step_dialect", ToString(step.dialect));
         AppendField(&canonical, "step_scope", ToString(step.scope));
         AppendField(&canonical, "step_occurrence", std::to_string(step.occurrence));
@@ -171,8 +164,6 @@ std::string CanonicalBytes(const NormalizedPipeline& pipeline) {
     }
     for (const PipelineInvariantTransition& transition :
          pipeline.invariant_transitions) {
-        AppendField(&canonical, "transition_pass", AsString(transition.pass_name));
-        AppendField(&canonical, "transition_phase", AsString(transition.phase));
         AppendArray(&canonical, "transition_required", transition.required);
         AppendArray(&canonical, "transition_produced", transition.produced);
         AppendArray(&canonical, "transition_declarative_only",
@@ -401,13 +392,9 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
     result.named_pipeline = request.named_pipeline;
     result.initial_invariants = request.initial_invariants;
     result.initial_analyses = request.initial_analyses;
-    result.ordered_passes = ordered;
     result.target_requirements = {
         String(request.target->kind + ":" +
                std::to_string(static_cast<int>(request.target->device_type)))};
-    result.contract_versions.push_back(String(
-        "pass-contract-v" + std::to_string(pass_contract_generated::kContractVersion)));
-
     int previous_phase = -1;
     std::unordered_map<std::string, size_t> occurrences;
     for (const String& name : ordered) {
@@ -443,8 +430,6 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
         result.execution_steps.push_back(std::move(step));
 
         PipelineInvariantTransition transition;
-        transition.pass_name = spec.name;
-        transition.phase = spec.phase;
         transition.required = spec.required_invariants;
         transition.produced = spec.produced_invariants;
         transition.declarative_only = spec.declarative_only_invariants;
@@ -471,9 +456,6 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
         transition.invariants_after = SetToArray(invariants);
         transition.analyses_after = SetToArray(analyses);
         result.invariant_transitions.push_back(std::move(transition));
-        result.contract_versions.push_back(String(
-            PassSpecKey(spec.dialect, spec.name) + "@v" +
-            std::to_string(spec.schema_version)));
     }
     result.canonical_bytes = String(CanonicalBytes(result));
     result.fingerprint =
@@ -493,7 +475,6 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
                                          ? PassScope::kGraph
                                          : PassScope::kPrimFunc;
     if (pipeline.scope != expected_scope ||
-        pipeline.ordered_passes.size() != pipeline.execution_steps.size() ||
         pipeline.execution_steps.size() != pipeline.invariant_transitions.size()) {
         throw std::invalid_argument("PipelineExecutor pipeline step vectors disagree");
     }
@@ -512,9 +493,7 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
         const PipelineExecutionStep& step = pipeline.execution_steps[i];
         const PipelineInvariantTransition& transition =
             pipeline.invariant_transitions[i];
-        if (step.kind != PipelineExecutionStepKind::kPass ||
-            step.dialect != pipeline.dialect || step.scope != pipeline.scope ||
-            !(pipeline.ordered_passes[i] == step.pass_name) ||
+        if (step.dialect != pipeline.dialect || step.scope != pipeline.scope ||
             step.occurrence != occurrences[AsString(step.pass_name)]++) {
             throw std::invalid_argument("PipelineExecutor step identity was tampered");
         }
@@ -523,7 +502,6 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
         if (spec.scope != expected_scope || step.phase != spec.phase ||
             step.schema_version != spec.schema_version ||
             step.implementation_key != spec.implementation_key ||
-            transition.pass_name != spec.name || transition.phase != spec.phase ||
             !EqualArray(transition.required, spec.required_invariants) ||
             !EqualArray(transition.produced, spec.produced_invariants) ||
             !EqualArray(transition.declarative_only,

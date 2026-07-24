@@ -1,5 +1,5 @@
-/*! \file include/kxc/support/hash.h
- * \brief Deterministic text hashing for compiler and runtime identity paths.
+/*! \file src/support/hash.h
+ * \brief Private deterministic text hashing for compiler and runtime identity paths.
  */
 
 #pragma once

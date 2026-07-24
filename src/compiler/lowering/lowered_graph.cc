@@ -51,13 +51,13 @@ Array<tir::PrimExpr> TEShape(const TensorTypeNode* type) {
         const int64_t dimension = type->shape[axis];
         if (dimension < 0) {
             throw std::invalid_argument(
-                "LowerOperatorCallsToTIR requires non-negative static dimensions; axis " +
+                "per-unit lowering requires non-negative static dimensions; axis " +
                 std::to_string(axis) + " is " + std::to_string(dimension));
         }
         shape.push_back(tir::IntImm(dimension, tir::DataType::Int(64)));
     }
     relay::internal::ValidateStaticLoweringTensor(
-        shape, TIRDataType(type), "LowerOperatorCallsToTIR boundary TensorType");
+        shape, TIRDataType(type), "per-unit lowering boundary TensorType");
     return shape;
 }
 
@@ -356,8 +356,7 @@ PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
     }
     CapabilityVerifier::RequireEligible(CapabilityRequest{
         function, target, "graph", std::string(pipeline_fingerprint),
-        CapabilityBoundary::kPrePartition, CapabilityMode::kStaticExact,
-        true});
+        CapabilityBoundary::kPrePartition, true});
     PreparedStaticGraph prepared;
     prepared.capability_boundary_checks = 1;
     ValueGraph value_graph = BuildValueGraph(function, device);
@@ -474,20 +473,3 @@ void ValidateLoweredGraph(const LoweredGraph& graph) {
 }
 
 }  // namespace kxc::api::internal
-
-namespace kxc::relay {
-
-Array<LoweredFunction> LowerOperatorCallsToTIR(Function function) {
-    // Compatibility entry: production Compiler executes InferType through its
-    // audited NormalizedPipeline before calling LowerGraph.
-    function = InferTypePass(std::move(function));
-    const api::internal::LoweredGraph graph =
-        api::internal::LowerGraph(std::move(function), Device::CPU());
-    Array<LoweredFunction> result;
-    for (const auto& primitive : graph.primitives) {
-        result.push_back(primitive.lowered);
-    }
-    return result;
-}
-
-}  // namespace kxc::relay

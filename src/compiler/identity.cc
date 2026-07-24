@@ -14,7 +14,8 @@
 #include <vector>
 
 #include "../runtime/internal/compiled_module_node.h"
-#include "kxc/support/hash.h"
+#include "support/canonical.h"
+#include "support/hash.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/compiled_module.h"
@@ -25,8 +26,9 @@ namespace {
 
 void AppendField(std::string* out, const std::string& name,
                  const std::string& value) {
-    *out += std::to_string(name.size()) + ":" + name + "=" +
-            std::to_string(value.size()) + ":" + value + ";";
+    support::CanonicalBytesEncoder field;
+    field.Field(name, value);
+    *out += std::move(field).Take();
 }
 
 void RequireNonEmpty(const std::string& value, const char* field) {

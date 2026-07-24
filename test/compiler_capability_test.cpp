@@ -53,9 +53,8 @@ bool HasIssue(const kxc::api::CapabilityResult& result,
     return false;
 }
 
-bool HasConsistentStatus(const kxc::api::CapabilityResult& result) {
-    return result.supported ==
-           (result.status == kxc::api::CapabilityStatus::kExecutable);
+bool IsExecutable(const kxc::api::CapabilityResult& result) {
+    return result.status == kxc::api::CapabilityStatus::kExecutable;
 }
 
 kxc::Function TypedAdd() {
@@ -76,8 +75,7 @@ kxc::api::CapabilityResult Verify(
     std::string locator = "model/main") {
     return kxc::api::CapabilityVerifier::Verify(kxc::api::CapabilityRequest{
         function, target, std::move(locator), "", boundary,
-        kxc::api::CapabilityMode::kStaticExact, require_checked_types,
-        opt_level});
+        require_checked_types, opt_level});
 }
 
 kxc::Target FakeCudaTarget(bool with_compute_capability = true) {
@@ -112,15 +110,13 @@ bool TestEligibilityIsNotExecutableSupport() {
              CapabilityBoundary::kPrePartition}) {
         const CapabilityResult result =
             Verify(function, target, 2, boundary, true);
-        TEST_CHECK(HasConsistentStatus(result),
-                   "supported must be exactly equivalent to executable status");
 #if KXC_USE_LLVM
-        TEST_CHECK(result.supported && result.issues.empty() &&
+        TEST_CHECK(IsExecutable(result) && result.issues.empty() &&
                        result.status == CapabilityStatus::kExecutable &&
                        !result.pipeline_fingerprint.empty(),
                    "LLVM builds must prove the real normalized compile path");
 #else
-        TEST_CHECK(!result.supported &&
+        TEST_CHECK(!IsExecutable(result) &&
                        result.status ==
                            CapabilityStatus::kEligibleButNotExecutable &&
                        HasIssue(result, "backend.llvm"),
@@ -146,7 +142,7 @@ bool TestRepresentableControlFlowRejectedWithLocator() {
                      (issue.missing_capability == "control_flow.if" &&
                       issue.diagnostic_locator == "model/control/body");
     }
-    TEST_CHECK(!result.supported &&
+    TEST_CHECK(!IsExecutable(result) &&
                    result.status == CapabilityStatus::kUnsupported &&
                    located_if,
                "If rejection must identify the node and missing capability");
@@ -175,7 +171,7 @@ bool TestRepresentableControlFlowRejectedWithLocator() {
     return true;
 }
 
-bool TestLetFutureModeAndDynamicFailClosed() {
+bool TestLetAndDynamicFailClosed() {
     using namespace kxc;
     using namespace kxc::api;
     TensorType type({4}, "float32");
@@ -185,19 +181,10 @@ bool TestLetFutureModeAndDynamicFailClosed() {
     const CapabilityResult let_result = CapabilityVerifier::Verify(
         CapabilityRequest{Function({input}, Let(local, input, local)), target,
                           "model/let", "",
-                          CapabilityBoundary::kCompilerEntry,
-                          CapabilityMode::kStaticExact, false, 2});
+                          CapabilityBoundary::kCompilerEntry, false, 2});
     TEST_CHECK(let_result.status != CapabilityStatus::kUnsupported &&
                    !HasIssue(let_result, "control_flow.let"),
                "lexical Let must remain executable after mandatory ANF normalization");
-
-    const CapabilityResult mode_result = CapabilityVerifier::Verify(
-        CapabilityRequest{TypedAdd(), target, "model/add", "",
-                          CapabilityBoundary::kCompilerEntry,
-                          CapabilityMode::kShapeSpecialization, false, 2});
-    TEST_CHECK(mode_result.status == CapabilityStatus::kUnsupported &&
-                   HasIssue(mode_result, "execution_mode"),
-               "future execution modes must fail closed");
 
     Var dynamic("dynamic", TensorType({-1, 4}, "float32"));
     const CapabilityResult dynamic_result = Verify(
@@ -244,7 +231,7 @@ bool TestRealGemmLoweringRejectionIsNotSupported() {
              relay::GemmAttrs::Create(1.0f, 1.0f, 1, 1)));
     const CapabilityResult result =
         Verify(function, BuildTarget(Device::CPU()));
-    TEST_CHECK(!result.supported && HasConsistentStatus(result) &&
+    TEST_CHECK(!IsExecutable(result) &&
                    result.status ==
                        CapabilityStatus::kEligibleButNotExecutable &&
                    HasIssue(result, "per_unit_lowering") &&
@@ -361,7 +348,7 @@ bool TestCudaReductionScheduleRejectedBeforeBackend() {
                       relay::ReduceMeanAttrs::Create({1}, 1)));
     const CapabilityResult result =
         Verify(reduction, FakeCudaTarget(), 3);
-    TEST_CHECK(!result.supported &&
+    TEST_CHECK(!IsExecutable(result) &&
                    result.status ==
                        CapabilityStatus::kEligibleButNotExecutable &&
                    HasIssue(result, "target_schedule"),
@@ -381,7 +368,7 @@ bool TestCudaLayerNormScheduleRejectedBeforeBackend() {
         Call(relay::Op::Get("nn_layer_norm"), {data, scale, bias},
              relay::LayerNormAttrs::Create(-1, 1e-5f, "float64")));
     const CapabilityResult result = Verify(layer_norm, FakeCudaTarget(), 3);
-    TEST_CHECK(!result.supported &&
+    TEST_CHECK(!IsExecutable(result) &&
                    result.status == CapabilityStatus::kEligibleButNotExecutable &&
                    HasIssue(result, "target_schedule") &&
                    !HasIssue(result, "per_unit_lowering") &&
@@ -400,7 +387,7 @@ bool TestCudaGatherScheduleRejectedBeforeBackend() {
         {data, indices}, Call(relay::Op::Get("gather"), {data, indices},
                               relay::GatherAttrs::Create(0)));
     const CapabilityResult result = Verify(gather, FakeCudaTarget(), 3);
-    TEST_CHECK(!result.supported &&
+    TEST_CHECK(!IsExecutable(result) &&
                    result.status == CapabilityStatus::kEligibleButNotExecutable &&
                    HasIssue(result, "target_schedule") &&
                    result.Diagnostic().find("indirect Load") != std::string::npos,
@@ -439,9 +426,7 @@ bool TestSupportedImpliesProductionCompileSuccess() {
 
     for (const Function& function : matrix) {
         const CapabilityResult result = Verify(function, target, 2);
-        TEST_CHECK(HasConsistentStatus(result),
-                   "matrix row has inconsistent supported/status values");
-        if (!result.supported) continue;
+        if (!IsExecutable(result)) continue;
         try {
             const CompiledGraph compiled = Compiler::Compile(
                 function, CompileConfig::Create(target, 2));
@@ -464,7 +449,7 @@ int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"eligibility_not_support", TestEligibilityIsNotExecutableSupport},
         {"control_flow_locator", TestRepresentableControlFlowRejectedWithLocator},
-        {"let_mode_dynamic", TestLetFutureModeAndDynamicFailClosed},
+        {"let_dynamic", TestLetAndDynamicFailClosed},
         {"tuple_param_unspecified", TestTupleParameterAndUnspecifiedOpRejected},
         {"gemm_transa_lowering", TestRealGemmLoweringRejectionIsNotSupported},
         {"custom_binding_mismatch", TestCustomBindingMismatchRejectedBySharedLowering},

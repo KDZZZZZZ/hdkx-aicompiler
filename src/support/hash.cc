@@ -2,7 +2,7 @@
  * \brief Implements deterministic text hashing shared outside profiling.
  */
 
-#include "kxc/support/hash.h"
+#include "support/hash.h"
 
 #include <cstdint>
 #include <sstream>

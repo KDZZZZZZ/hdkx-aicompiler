@@ -9,7 +9,7 @@
 #include "kxc/relay/op.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/profiling/profiling.h"
-#include "kxc/support/hash.h"
+#include "support/hash.h"
 #include "kxc/runtime/kernel_abi.h"
 #include "kxc/te/te.h"
 #include "kxc/relay/pass/print_ir.h"

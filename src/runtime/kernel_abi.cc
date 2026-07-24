@@ -3,7 +3,7 @@
  */
 
 #include "kxc/runtime/kernel_abi.h"
-#include "kxc/support/canonical.h"
+#include "support/canonical.h"
 #include "kxc/support/object_registration.h"
 
 #include <limits>

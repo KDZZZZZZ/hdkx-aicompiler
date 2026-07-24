@@ -4,7 +4,6 @@
 
 #include "kxc/compiler/capability.h"
 
-#include <algorithm>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -59,7 +58,6 @@ class Verifier final {
 public:
     Verifier(const CapabilityRequest& request, bool prove_execution)
         : request_(request), prove_execution_(prove_execution) {
-        result_.requested_mode = request.requested_mode;
         result_.pipeline_fingerprint = request.pipeline_fingerprint;
         if (request.target.defined() && request.target.As<TargetNode>()) {
             result_.target_identity = request.target->kind + ":" +
@@ -68,11 +66,6 @@ public:
         } else {
             result_.target_identity = "undefined";
         }
-        result_.normalized_requirements = {
-            "relay.static_exact.v1", "relay.registered_operator_calls",
-            "relay.tensor_or_flat_tuple_values", "compiler.per_unit_lowering",
-            "compiler.normalized_pipeline.v2", "compiler.target_schedule",
-            "compiler.backend_codegen"};
     }
 
     CapabilityResult Run() {
@@ -84,10 +77,6 @@ public:
             result_.status = CapabilityStatus::kEligibleButNotExecutable;
         } else {
             result_.status = CapabilityStatus::kExecutable;
-        }
-        result_.supported = result_.status == CapabilityStatus::kExecutable;
-        if (!result_.supported && !result_.issues.empty()) {
-            result_.diagnostic_locator = result_.issues.front().diagnostic_locator;
         }
         return result_;
     }
@@ -102,11 +91,6 @@ private:
                   std::string capability, std::string detail,
                   bool structural = true) {
         has_structural_issue_ = has_structural_issue_ || structural;
-        if (std::find(result_.missing_capabilities.begin(),
-                      result_.missing_capabilities.end(), capability) ==
-            result_.missing_capabilities.end()) {
-            result_.missing_capabilities.push_back(capability);
-        }
         result_.issues.push_back(CapabilityIssue{
             std::move(locator), std::move(node_kind), std::move(capability),
             std::move(detail)});
@@ -120,7 +104,6 @@ private:
         internal::ExecutableCapabilityOptions options =
             internal::StaticDataflowExecutableCapabilities(device);
         options.require_checked_types = request_.require_checked_types;
-        options.allow_while = request_.allow_while;
         for (const internal::ExecutableCapabilityIssue& issue :
              internal::CollectExecutableCapabilityIssues(request_.function, options)) {
             AddIssue(PublicLocator(root, issue.path), issue.node_kind,
@@ -130,11 +113,6 @@ private:
 
     void VerifyRequest() {
         const std::string root = request_.graph_locator.empty() ? "graph" : request_.graph_locator;
-        if (request_.requested_mode != CapabilityMode::kStaticExact) {
-            AddIssue(root, "Function", "execution_mode", std::string("requested mode '") +
-                ToString(request_.requested_mode) +
-                "' is not executable; only static_exact is supported");
-        }
         AddRelayIssues(root);
         VerifyTarget(root);
     }
@@ -235,16 +213,6 @@ const char* ToString(CapabilityBoundary boundary) {
     return "unknown_boundary";
 }
 
-const char* ToString(CapabilityMode mode) {
-    switch (mode) {
-        case CapabilityMode::kStaticExact: return "static_exact";
-        case CapabilityMode::kShapeSpecialization: return "shape_specialization";
-        case CapabilityMode::kControlFlow: return "control_flow";
-        case CapabilityMode::kRegion: return "region";
-    }
-    return "unknown_mode";
-}
-
 const char* ToString(CapabilityStatus status) {
     switch (status) {
         case CapabilityStatus::kUnsupported: return "unsupported";
@@ -255,10 +223,10 @@ const char* ToString(CapabilityStatus status) {
 }
 
 std::string CapabilityResult::Diagnostic() const {
-    if (supported) return "supported";
+    if (status == CapabilityStatus::kExecutable) return "executable";
     std::ostringstream stream;
     stream << "executable capability rejected (status=" << ToString(status)
-           << ", mode=" << ToString(requested_mode) << ", target=" << target_identity
+           << ", target=" << target_identity
            << ", pipeline=" << (pipeline_fingerprint.empty() ? "<none>" : pipeline_fingerprint)
            << ")";
     for (const CapabilityIssue& issue : issues) {
@@ -274,21 +242,7 @@ CapabilityResult CapabilityVerifier::Verify(const CapabilityRequest& request) {
 
 void CapabilityVerifier::RequireEligible(const CapabilityRequest& request) {
     const CapabilityResult result = Verifier(request, false).Run();
-    if (result.supported != (result.status == CapabilityStatus::kExecutable)) {
-        throw std::logic_error("CapabilityVerifier produced inconsistent status");
-    }
     if (result.status == CapabilityStatus::kUnsupported) {
-        throw std::invalid_argument(std::string("CapabilityVerifier[") +
-                                    ToString(request.boundary) + "]: " + result.Diagnostic());
-    }
-}
-
-void CapabilityVerifier::Require(const CapabilityRequest& request) {
-    const CapabilityResult result = Verify(request);
-    if (result.supported != (result.status == CapabilityStatus::kExecutable)) {
-        throw std::logic_error("CapabilityVerifier produced inconsistent status");
-    }
-    if (!result.supported) {
         throw std::invalid_argument(std::string("CapabilityVerifier[") +
                                     ToString(request.boundary) + "]: " + result.Diagnostic());
     }

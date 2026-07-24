@@ -25,7 +25,7 @@
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
 #include "kxc/compiler/adaptive_hot_swap_v2.h"
 #endif
-#include "kxc/support/hash.h"
+#include "../src/support/hash.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/compiled_module.h"
 #include "../src/compiler/internal/compiled_graph_access.h"

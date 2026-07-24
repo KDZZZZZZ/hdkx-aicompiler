@@ -49,9 +49,9 @@ production support 的肯定结论；production approval 保持 pending，直到
 
 ## 当前显式拒绝边界
 
-- `nn_gemm` 的 `transA != 0`：type relation 可表达，但 production TE lowering 明确拒绝；capability 返回 `eligible_but_not_executable`，不得标 supported。
+- `nn_gemm` 的 `transA != 0`：type relation 可表达，但 production TE lowering 明确拒绝；capability 返回 `eligible_but_not_executable`，不得视为 executable。
 - function tuple parameter：当前 value graph ABI 只接受 `TensorType` parameters；tuple outputs/flat multi-output 不等于 tuple parameter support。
-- LLVM/CUDA backend 未编入当前构建：结构可 eligible，但 `supported=false`。
+- LLVM/CUDA backend 未编入当前构建：结构可 eligible，但 status 为 `eligible_but_not_executable`。
 - CUDA Target 必须有可用 device、compute capability 与 launch limits；O3 reduction 不能通过当前保守 `bind_cuda_threads` schedule，因此在 backend 前返回 target-schedule rejection。Gather 的间接 `Load` 索引同样由通用 schedule gate 在 backend 前拒绝。
 - custom lowering 的 tensor 数量、dtype、rank 或 shape 与 checked type 不一致时，由 production per-unit lowering 与 capability 同源拒绝。
 

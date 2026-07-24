@@ -224,11 +224,6 @@ bool TestPerOperatorTargetCardinality() {
                        std::string(fixture.name) + " PrimFunc symbols must be unique");
         }
 
-        const kxc::Array<kxc::relay::LoweredFunction> public_results =
-            kxc::relay::LowerOperatorCallsToTIR(fixture.function);
-        TEST_CHECK(public_results.size() == expected_units,
-                   std::string(fixture.name) +
-                       " public per-operator lowering cardinality mismatch");
     }
     return true;
 }

@@ -19,14 +19,6 @@ enum class CapabilityBoundary {
     kPrePartition,
 };
 
-/*! \brief Requested execution model. Only static-exact is implemented today. */
-enum class CapabilityMode {
-    kStaticExact,
-    kShapeSpecialization,
-    kControlFlow,
-    kRegion,
-};
-
 /*! \brief Truth state for capability verification. */
 enum class CapabilityStatus {
     kUnsupported,
@@ -49,24 +41,15 @@ struct CapabilityRequest final {
     std::string graph_locator{"graph"};
     std::string pipeline_fingerprint;
     CapabilityBoundary boundary{CapabilityBoundary::kCompilerEntry};
-    CapabilityMode requested_mode{CapabilityMode::kStaticExact};
     bool require_checked_types{false};
     int opt_level{2};
-    // Control IR is opt-in; Compiler::Compile always leaves this false.
-    bool allow_while{false};
 };
 
 /*! \brief Complete fail-closed result; callers must not infer fallback support. */
 struct CapabilityResult final {
     CapabilityStatus status{CapabilityStatus::kUnsupported};
-    // True only when status is kExecutable.
-    bool supported{false};
-    std::vector<std::string> missing_capabilities;
-    std::string diagnostic_locator;
     std::string target_identity;
     std::string pipeline_fingerprint;
-    CapabilityMode requested_mode{CapabilityMode::kStaticExact};
-    std::vector<std::string> normalized_requirements;
     std::vector<CapabilityIssue> issues;
 
     std::string Diagnostic() const;
@@ -84,12 +67,9 @@ public:
     static CapabilityResult Verify(const CapabilityRequest& request);
     // Requires only structural eligibility; suitable before per-unit lowering.
     static void RequireEligible(const CapabilityRequest& request);
-    // Requires a completed target scheduling/codegen execution proof.
-    static void Require(const CapabilityRequest& request);
 };
 
 const char* ToString(CapabilityBoundary boundary);
-const char* ToString(CapabilityMode mode);
 const char* ToString(CapabilityStatus status);
 
 }  // namespace kxc::api

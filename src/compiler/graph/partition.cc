@@ -3,6 +3,7 @@
  */
 
 #include "../internal/compilation_unit.h"
+#include "support/canonical.h"
 
 #include <cctype>
 #include <stdexcept>
@@ -30,8 +31,9 @@ std::string BuildUnitSymbol(int64_t unit_id, const std::string& operator_name) {
 
 void AppendCanonicalField(std::string* canonical, const std::string& name,
                           const std::string& value) {
-    *canonical += std::to_string(name.size()) + ":" + name + "=" +
-                  std::to_string(value.size()) + ":" + value + ";";
+    support::CanonicalBytesEncoder field;
+    field.Field(name, value);
+    *canonical += std::move(field).Take();
 }
 
 UnitSemanticKey BuildUnitSemanticKey(const CallInfo& call,

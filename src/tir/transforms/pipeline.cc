@@ -17,7 +17,7 @@
 #include "kxc/ffi/registration.h"
 #include "kxc/pass/pass.h"
 #include "kxc/profiling/profiling.h"
-#include "kxc/support/hash.h"
+#include "support/hash.h"
 #include "kxc/tir/pass/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/convert_for_loops_serial.h"

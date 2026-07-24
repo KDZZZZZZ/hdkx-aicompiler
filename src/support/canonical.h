@@ -1,5 +1,5 @@
-/*! \file include/kxc/support/canonical.h
- * \brief Small deterministic length-delimited canonical byte encoder.
+/*! \file src/support/canonical.h
+ * \brief Private deterministic length-delimited canonical byte encoder.
  */
 
 #pragma once
@@ -12,6 +12,8 @@ namespace kxc::support {
 
 class CanonicalBytesEncoder final {
 public:
+    CanonicalBytesEncoder() = default;
+
     explicit CanonicalBytesEncoder(std::string_view format) {
         Field("format", format);
     }

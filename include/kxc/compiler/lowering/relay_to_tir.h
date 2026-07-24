@@ -80,14 +80,5 @@ public:
  */
 LoweredFunction LowerToTIR(Function func);
 
-/*!
- * \brief Independently lower each ordinary compute Call to one PrimFunc.
- *
- * This compatibility helper exposes production per-operator cardinality for
- * tests. api::Compiler::Compile directly consumes the richer private
- * LoweredGraph contract and remains the only production capability path.
- */
-Array<LoweredFunction> LowerOperatorCallsToTIR(Function func);
-
 }
 }
