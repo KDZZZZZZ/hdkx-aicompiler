@@ -5,14 +5,15 @@
 #include <string>
 #include <vector>
 
-#include "kxc/compiler/identity.h"
+#include "kxc/compiler/experimental_identity.h"
 #include "kxc/shape/shape.h"
 
 // =============================================================================
 // 轨 02 — exact 特化契约（experimental-v1）
 // -----------------------------------------------------------------------------
 // 在纯 ShapeProgram 之上：图模板 → exact profile → unit 特化请求。
-// 所有 graph/unit/profile/artifact/plan identity 均来自 compiler/identity.h。
+// Stable graph/unit/artifact identities come from identity.h; Shape-only
+// profile and plan identities come from experimental_identity.h.
 // 典型用法：
 //   GraphTemplate tmpl(key, shape_program, ordered_units);
 //   tmpl.Verify();

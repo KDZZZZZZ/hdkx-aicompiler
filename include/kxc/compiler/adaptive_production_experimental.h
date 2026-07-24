@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "kxc/compiler/compiler.h"
-#include "kxc/compiler/identity.h"
+#include "kxc/compiler/experimental_identity.h"
 #include "kxc/runtime/session.h"
 
 namespace kxc::api::adaptive::experimental::production_path {

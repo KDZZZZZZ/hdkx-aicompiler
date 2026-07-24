@@ -23,6 +23,7 @@
 #include "internal/compile_state.h"
 #include "internal/compiled_graph_access.h"
 #include "internal/execution_contract.h"
+#include "internal/identity_private.h"
 #include "internal/kernel_abi_builder.h"
 #include "internal/kernel_abi_equivalence.h"
 #include "internal/lowered_graph.h"
@@ -777,7 +778,8 @@ CompiledGraph CompilePipeline(
     Function function, CompileConfig config,
     const internal::CompilerExecutionContract& contract) {
     config.Validate();
-    const GraphSemanticKey graph_semantic_key = BuildGraphSemanticKey(function);
+    const GraphSemanticKey graph_semantic_key =
+        Compiler::BuildGraphSemanticKey(function);
     auto profile_context = MaybeCreateProfileContext(config);
     const std::string run_id =
         profile_context ? profile_context->NextRunId("compile") : "";
@@ -919,7 +921,7 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
     const CompilerExecutionContract& contract) {
     config.Validate();
     const GraphSemanticKey graph_semantic_key =
-        BuildGraphSemanticKey(function);
+        Compiler::BuildGraphSemanticKey(function);
     const PassContext pass_context = PassContext::MergeTarget(
         relay::PassContextFromRelay(function), config->target);
     PassContext::Scope pass_scope(pass_context);
@@ -1008,7 +1010,7 @@ GraphSemanticKey Compiler::BuildGraphSemanticKey(
         throw std::invalid_argument(
             "graph semantic identity requires a defined Function");
     }
-    return kxc::api::BuildGraphSemanticKey(function);
+    return internal::BuildGraphSemanticKey(function);
 }
 
 CompiledGraph Compiler::Compile(Function function, CompileConfig config) {

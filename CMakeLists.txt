@@ -158,6 +158,7 @@ set(KXC_PUBLIC_HEADERS
 
 set(KXC_EXPERIMENTAL_HEADERS
   include/kxc/compiler/adaptive_hot_swap_v2.h
+  include/kxc/compiler/experimental_identity.h
   include/kxc/compiler/adaptive_production_experimental.h
   include/kxc/compiler/restricted_symbolic_shape.h
   include/kxc/compiler/shape_exact.h

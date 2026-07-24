@@ -2,7 +2,9 @@
  * \brief Implements length-delimited compiler identity canonicalization.
  */
 
-#include "kxc/compiler/identity.h"
+#include "kxc/compiler/experimental_identity.h"
+
+#include "internal/identity_private.h"
 
 #include <algorithm>
 #include <functional>
@@ -210,11 +212,10 @@ std::string StaticExactInputProfileCanonical(
 
 }  // namespace
 
-GraphSemanticKey::GraphSemanticKey(std::string canonical_bytes,
-                                   std::string index_digest)
+GraphSemanticKey::GraphSemanticKey(std::string canonical_bytes)
     : canonical_bytes_(std::move(canonical_bytes)) {
     RequireNonEmpty(canonical_bytes_, "graph semantic canonical bytes");
-    digest_ = Digest(canonical_bytes_, std::move(index_digest));
+    digest_ = Digest(canonical_bytes_, {});
 }
 
 bool GraphSemanticKey::defined() const noexcept {
@@ -244,7 +245,12 @@ bool GraphSemanticKey::operator<(
     return canonical_bytes_ < other.canonical_bytes_;
 }
 
-GraphSemanticKey BuildGraphSemanticKey(const Function& function) {
+GraphSemanticKey internal::IdentityAccess::Graph(
+    std::string canonical_bytes) {
+    return GraphSemanticKey(std::move(canonical_bytes));
+}
+
+GraphSemanticKey internal::BuildGraphSemanticKey(const Function& function) {
     if (!AsExactExprNode<FunctionNode>(function)) {
         throw std::invalid_argument(
             "graph semantic identity requires an exact Function node");
@@ -371,31 +377,11 @@ GraphSemanticKey BuildGraphSemanticKey(const Function& function) {
             std::string(expr.get()->GetTypeKey()) + "'");
     };
     visit(function);
-    return GraphSemanticKey(std::move(canonical));
+    return internal::IdentityAccess::Graph(std::move(canonical));
 }
 
-std::string GraphValueLocator::CanonicalBytes() const {
-    RequireNonEmpty(graph_revision, "graph revision");
-    if (value_id < 0 || output_index < 0) {
-        throw std::invalid_argument(
-            "graph value locator requires non-negative value and output ids");
-    }
-    std::string canonical;
-    AppendField(&canonical, "kind", "graph-value-locator-v1");
-    AppendField(&canonical, "graph_revision", graph_revision);
-    AppendField(&canonical, "value_id", std::to_string(value_id));
-    AppendField(&canonical, "output_index", std::to_string(output_index));
-    return canonical;
-}
-
-std::string LinkSymbol::CanonicalBytes() const {
-    RequireNonEmpty(value, "link symbol");
-    std::string canonical;
-    AppendField(&canonical, "kind", "link-symbol-v1");
-    AppendField(&canonical, "symbol", value);
-    return canonical;
-}
-
+UnitSemanticKey::UnitSemanticKey(std::string canonical_bytes)
+    : UnitSemanticKey(std::move(canonical_bytes), {}) {}
 
 UnitSemanticKey::UnitSemanticKey(std::string canonical_bytes,
                                  std::string index_digest)
@@ -425,6 +411,18 @@ bool UnitSemanticKey::operator!=(const UnitSemanticKey& other) const noexcept {
 bool UnitSemanticKey::operator<(const UnitSemanticKey& other) const noexcept {
     return canonical_bytes_ < other.canonical_bytes_;
 }
+
+PrimitiveArtifactKey::PrimitiveArtifactKey(
+    UnitSemanticKey unit_semantic_key,
+    std::string target_capability_fingerprint,
+    std::string pipeline_fingerprint, int abi_version,
+    std::string schedule_version,
+    std::string backend_version)
+    : PrimitiveArtifactKey(
+          std::move(unit_semantic_key),
+          std::move(target_capability_fingerprint),
+          std::move(pipeline_fingerprint), abi_version,
+          std::move(schedule_version), std::move(backend_version), {}) {}
 
 PrimitiveArtifactKey::PrimitiveArtifactKey(
     UnitSemanticKey unit_semantic_key,
@@ -521,8 +519,7 @@ bool OrderedArtifactIdentity::operator!=(
 }
 
 ShapeProfileKey::ShapeProfileKey(GraphSemanticKey graph_semantic_key,
-                                 std::string canonical_bytes,
-                                 std::string index_digest)
+                                 std::string canonical_bytes)
     : graph_semantic_key_(std::move(graph_semantic_key)),
       canonical_bytes_(std::move(canonical_bytes)) {
     if (!graph_semantic_key_.defined()) {
@@ -530,7 +527,7 @@ ShapeProfileKey::ShapeProfileKey(GraphSemanticKey graph_semantic_key,
             "shape profile identity requires graph semantics");
     }
     RequireNonEmpty(canonical_bytes_, "shape profile canonical bytes");
-    digest_ = Digest(canonical_bytes_, std::move(index_digest));
+    digest_ = Digest(canonical_bytes_, {});
 }
 
 bool ShapeProfileKey::defined() const noexcept {
@@ -604,8 +601,7 @@ ShapeProfileKey BuildStaticExactShapeProfileKey(
 
 DispatchKey::DispatchKey(std::string artifact_family,
                          std::string shape_layout_valid_extent,
-                         std::string variant_policy_version,
-                         std::string index_digest) {
+                         std::string variant_policy_version) {
     RequireNonEmpty(artifact_family, "artifact family");
     RequireNonEmpty(shape_layout_valid_extent,
                     "shape/layout/valid-extent contract");
@@ -620,7 +616,7 @@ DispatchKey::DispatchKey(std::string artifact_family,
                 shape_layout_valid_extent);
     AppendField(&canonical_bytes_, "variant_policy",
                 variant_policy_version);
-    digest_ = Digest(canonical_bytes_, std::move(index_digest));
+    digest_ = Digest(canonical_bytes_, {});
 }
 
 bool DispatchKey::defined() const noexcept {
@@ -645,11 +641,10 @@ bool DispatchKey::operator<(const DispatchKey& other) const noexcept {
     return canonical_bytes_ < other.canonical_bytes_;
 }
 
-PlanAbiFingerprint::PlanAbiFingerprint(std::string canonical_bytes,
-                                       std::string index_digest)
+PlanAbiFingerprint::PlanAbiFingerprint(std::string canonical_bytes)
     : canonical_bytes_(std::move(canonical_bytes)) {
     RequireNonEmpty(canonical_bytes_, "plan ABI canonical bytes");
-    digest_ = Digest(canonical_bytes_, std::move(index_digest));
+    digest_ = Digest(canonical_bytes_, {});
 }
 
 bool PlanAbiFingerprint::defined() const noexcept {
@@ -796,8 +791,7 @@ std::string OrderedArtifactSelectionIdentity::CanonicalBytes() const {
 
 PlanVariantKey::PlanVariantKey(GraphSemanticKey graph_semantic_key,
                                ShapeProfileKey shape_profile_key,
-                               std::string canonical_bytes,
-                               std::string index_digest)
+                               std::string canonical_bytes)
     : graph_semantic_key_(std::move(graph_semantic_key)),
       shape_profile_key_(std::move(shape_profile_key)),
       canonical_bytes_(std::move(canonical_bytes)) {
@@ -807,7 +801,7 @@ PlanVariantKey::PlanVariantKey(GraphSemanticKey graph_semantic_key,
             "plan variant requires matching graph and shape identities");
     }
     RequireNonEmpty(canonical_bytes_, "plan variant canonical bytes");
-    digest_ = Digest(canonical_bytes_, std::move(index_digest));
+    digest_ = Digest(canonical_bytes_, {});
 }
 
 PlanVariantKey BuildPlanVariantKey(

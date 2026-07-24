@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "../src/compiler/internal/identity_private.h"
 #include "../src/compiler/internal/primitive_cache.h"
 
 namespace {
@@ -47,8 +48,9 @@ public:
 
 kxc::api::PrimitiveArtifactKey MakeKey(const std::string& unit,
                                        const std::string& digest = {}) {
-    return kxc::api::PrimitiveArtifactKey(
-        kxc::api::UnitSemanticKey("unit=" + unit, digest),
+    return kxc::api::internal::IdentityAccess::ArtifactWithDigest(
+        kxc::api::internal::IdentityAccess::UnitWithDigest(
+            "unit=" + unit, digest),
         "target=cpu-test-v1", "pipeline=test-v1", 1,
         "schedule=test-v1", "backend=fake-v1", digest);
 }

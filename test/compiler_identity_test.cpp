@@ -12,12 +12,14 @@
 #include <vector>
 
 #include "kxc/compiler/compiler.h"
+#include "kxc/compiler/experimental_identity.h"
 #include "kxc/compiler/identity.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
 #include "kxc/runtime/kernel_abi.h"
 #include "kxc/support/object_registration.h"
+#include "../src/compiler/internal/identity_private.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 
 namespace {
@@ -110,41 +112,23 @@ kxc::Function MakeDerivedCallFunction() {
     return kxc::Function({input}, kxc::Expr(kxc::ObjectRef(call)));
 }
 
-bool TestGraphLocatorIsNotUnitSemantics() {
-    using namespace kxc::api;
-    const GraphValueLocator first{"graph-a", 7, 0};
-    const GraphValueLocator second{"graph-a", 8, 0};
-    TEST_CHECK(first.CanonicalBytes() != second.CanonicalBytes(),
-               "graph routing locators must retain value ids");
-
-    const UnitSemanticKey semantic("op=add;inputs=f32[4],f32[4]");
-    const LinkSymbol symbol{"kxc_unit_7_add"};
-    TEST_CHECK(semantic.defined() &&
-                   semantic.canonical_bytes().find("graph-a") ==
-                       std::string::npos &&
-                   symbol.CanonicalBytes() != first.CanonicalBytes(),
-               "semantic, link, and routing identities stay disjoint");
-    TEST_CHECK(Throws([] {
-                   (void)GraphValueLocator{"", -1, 0}.CanonicalBytes();
-               }) &&
-                   Throws([] { (void)LinkSymbol{""}.CanonicalBytes(); }),
-               "invalid locator and link identities must fail closed");
-    return true;
-}
-
 bool TestDigestCollisionUsesCanonicalEquality() {
     using namespace kxc::api;
-    const UnitSemanticKey first("canonical-unit-a", "forced-collision");
-    const UnitSemanticKey second("canonical-unit-b", "forced-collision");
+    const UnitSemanticKey first = internal::IdentityAccess::UnitWithDigest(
+        "canonical-unit-a", "forced-collision");
+    const UnitSemanticKey second = internal::IdentityAccess::UnitWithDigest(
+        "canonical-unit-b", "forced-collision");
     TEST_CHECK(first.digest() == second.digest() && first != second,
                "digest is only an index; full canonical bytes decide equality");
 
-    const PrimitiveArtifactKey first_artifact(
-        first, "cpu-v1", "relay-tir-o2", 1, "schedule-v1", "llvm-v1",
-        "artifact-collision");
-    const PrimitiveArtifactKey second_artifact(
-        second, "cpu-v1", "relay-tir-o2", 1, "schedule-v1", "llvm-v1",
-        "artifact-collision");
+    const PrimitiveArtifactKey first_artifact =
+        internal::IdentityAccess::ArtifactWithDigest(
+            first, "cpu-v1", "relay-tir-o2", 1, "schedule-v1", "llvm-v1",
+            "artifact-collision");
+    const PrimitiveArtifactKey second_artifact =
+        internal::IdentityAccess::ArtifactWithDigest(
+            second, "cpu-v1", "relay-tir-o2", 1, "schedule-v1", "llvm-v1",
+            "artifact-collision");
     TEST_CHECK(first_artifact.digest() == second_artifact.digest() &&
                    first_artifact != second_artifact,
                "artifact lookup must compare complete canonical keys");
@@ -401,7 +385,6 @@ bool TestGraphSemanticIdentityUsesExactNodeWhitelist() {
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
-        {"locator_is_not_semantics", TestGraphLocatorIsNotUnitSemantics},
         {"digest_collision_full_equality", TestDigestCollisionUsesCanonicalEquality},
         {"artifact_field_safe_miss", TestEveryArtifactSemanticFieldCausesSafeMiss},
         {"dispatch_and_plan_are_separate", TestDispatchAndPlanVariantRemainSeparate},
