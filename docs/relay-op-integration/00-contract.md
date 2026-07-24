@@ -1,6 +1,6 @@
 # 0. 算子契约 API
 
-`test/relay_op_contract.json` 是新增 Relay op 的第一处修改。它描述“这个 op 允许存在到什么阶段”，checker 会按它反查 C++ 注册、FFI、ONNX 映射和测试引用。
+`contracts/relay_op_contract.json` 是新增 Relay op 的第一处修改。它描述“这个 op 允许存在到什么阶段”，checker 会按它反查 C++ 注册、FFI、ONNX 映射和测试引用。
 
 ## Contract 字段
 
@@ -88,7 +88,7 @@ Each public Relay operator has a metadata-only `OperatorSpec`. The spec is the
 compilation contract; implementation handles stay in the legacy attribute map
 under stable keys such as `FInferType`, `FRelayToTE`, and `FRelayToTEMulti`.
 
-Required machine-readable fields in `test/relay_op_contract.json`: `schema_version`,
+Required machine-readable fields in `contracts/relay_op_contract.json`: `schema_version`,
 `category`, arity, `attrs`, `output_arity`, `type_relation_key`, `effect`,
 `deterministic`, `alias`, `lowering`, `lowering_key`, `ffi`, `tests`, and
 `onnx_ops`.

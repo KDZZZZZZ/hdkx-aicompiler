@@ -366,32 +366,23 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
     }
 
     Array<String> ordered;
-    std::unordered_set<std::string> seen;
-    const auto append_unique = [&ordered, &seen](const String& pass) {
+    std::unordered_map<std::string, size_t> declared_passes;
+    const auto append_declared = [&ordered, &declared_passes, &request](const String& pass) {
         const std::string name = AsString(pass);
-        if (name.empty() || !seen.insert(name).second) {
+        size_t& count = declared_passes[name];
+        if (name.empty() || (count != 0 &&
+                             !pass_contract_generated::IsRepeatable(request.dialect, name))) {
             throw std::invalid_argument(
-                "generated pipeline contains an empty or duplicate pass");
+                "generated pipeline contains an empty or unapproved repeated pass");
         }
+        ++count;
         ordered.push_back(pass);
     };
-    const bool compiler_pipeline = IsCompilerPipeline(request);
-    if (compiler_pipeline && request.dialect == IRDialect::kRelay) {
-        // These are real contract passes, deliberately duplicated around Relay optimization.
-        ordered.push_back(String("infer_type"));
-        seen.insert("infer_type");
-    }
     for (const String& pass : BasePipeline(request)) {
-        const std::string name = AsString(pass);
-        if (!disabled.count(name)) append_unique(pass);
+        if (!disabled.count(AsString(pass))) append_declared(pass);
     }
     for (const String& pass : request.enabled) {
-        const std::string name = AsString(pass);
-        if (seen.insert(name).second) ordered.push_back(pass);
-    }
-    if (compiler_pipeline && request.dialect == IRDialect::kRelay) {
-        ordered.push_back(String("infer_type"));
-        append_unique(String("normalize_to_anf"));
+        if (!declared_passes.count(AsString(pass))) append_declared(pass);
     }
 
     std::set<std::string> invariants =

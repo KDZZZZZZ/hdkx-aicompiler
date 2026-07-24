@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate critical OperatorSpec metadata from relay_op_contract.json."""
+"""Generate critical OperatorSpec metadata from contracts/relay_op_contract.json."""
 
 from __future__ import annotations
 

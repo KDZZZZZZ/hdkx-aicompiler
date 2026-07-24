@@ -24,7 +24,7 @@ and serialization must be deterministic.
 
 An operator must be added in this order:
 
-1. Declare its machine-readable contract in `test/relay_op_contract.json`.
+1. Declare its machine-readable contract in `contracts/relay_op_contract.json`.
 2. Define or reuse an attrs schema with typed fields, defaults, legal ranges,
    and stable serialization order. Every non-fieldless `BaseAttrsNode` must
    implement `SerializeCanonical(CanonicalAttrWriter&)` and emit every field
@@ -54,7 +54,7 @@ branch on an operator name.
 A pass must be added in this order:
 
 1. Declare its machine-readable contract and named/default membership in
-   `test/pass_contract.json`.
+   `contracts/pass_contract.json`.
 2. Regenerate `src/pass/generated/pass_contract.inc`; C++ binding tables map only
    the generated implementation key to a function.
 3. Validate dialect, scope, phase, required invariants, analyses, and target

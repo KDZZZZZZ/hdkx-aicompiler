@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_contract(root: Path, matrix_arg: str | None) -> tuple[Path, dict[str, Any]]:
-    path = Path(matrix_arg) if matrix_arg else root / "test" / "pass_contract.json"
+    path = Path(matrix_arg) if matrix_arg else root / "contracts" / "pass_contract.json"
     if not path.is_absolute():
         path = root / path
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -110,6 +110,14 @@ def analyze(root: Path, contract: dict[str, Any]) -> dict[str, Any]:
     if extra_bindings:
         issues.append(f"implementation bindings absent from contract: {extra_bindings}")
 
+    declared_passes = set(contract["passes"])
+    raw_repeatable = contract.get("rules", {}).get("repeatable_passes", [])
+    if (not isinstance(raw_repeatable, list) or
+            not all(isinstance(key, str) and key in declared_passes
+                    for key in raw_repeatable)):
+        issues.append("rules.repeatable_passes must name declared dialect.pass entries")
+    repeatable_passes = set(raw_repeatable)
+
     pass_names_by_dialect = {
         dialect: {
             raw["name"]
@@ -119,10 +127,16 @@ def analyze(root: Path, contract: dict[str, Any]) -> dict[str, Any]:
         for dialect in ("relay", "tir")
     }
     for pipeline_name, pass_names in contract["pipelines"].items():
-        if not isinstance(pass_names, list) or len(pass_names) != len(set(pass_names)):
-            issues.append(f"{pipeline_name} must be a duplicate-free pass list")
+        if not isinstance(pass_names, list):
+            issues.append(f"{pipeline_name} must be a pass list")
             continue
         dialect = pipeline_name.split(".", 1)[0]
+        duplicates = {name for name in pass_names if pass_names.count(name) > 1}
+        accidental = sorted(
+            name for name in duplicates if f"{dialect}.{name}" not in repeatable_passes
+        )
+        if accidental:
+            issues.append(f"{pipeline_name} has unapproved repeated passes: {accidental}")
         unknown = sorted(set(pass_names) - pass_names_by_dialect.get(dialect, set()))
         if unknown:
             issues.append(f"{pipeline_name} references unknown passes: {unknown}")

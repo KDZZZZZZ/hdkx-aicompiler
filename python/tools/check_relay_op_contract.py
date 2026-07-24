@@ -111,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--matrix",
         default=None,
-        help="Contract JSON path. Defaults to test/relay_op_contract.json under --root.",
+        help="Contract JSON path. Defaults to contracts/relay_op_contract.json under --root.",
     )
     parser.add_argument(
         "--format",
@@ -249,7 +249,7 @@ def validate_contract_shape(data: dict[str, Any]) -> None:
 
 
 def load_contract(root: Path, matrix_arg: str | None) -> tuple[Path, dict[str, Any]]:
-    matrix_path = Path(matrix_arg) if matrix_arg else root / "test" / "relay_op_contract.json"
+    matrix_path = Path(matrix_arg) if matrix_arg else root / "contracts" / "relay_op_contract.json"
     if not matrix_path.is_absolute():
         matrix_path = root / matrix_path
     with matrix_path.open("r", encoding="utf-8") as f:
@@ -670,7 +670,7 @@ def analyze(
         issues: list[str] = []
 
         if expected is None:
-            issues.append("op is not declared in test/relay_op_contract.json")
+            issues.append("op is not declared in contracts/relay_op_contract.json")
         if op in forbidden_ops:
             issues.append("op name is forbidden alias")
         if expected and not regs:

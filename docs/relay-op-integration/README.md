@@ -1,6 +1,6 @@
 # Relay 算子接入文档包
 
-本文档包是新增或修改 Relay 算子的权威接入说明。写 PR 前先读本页，再按子文档逐项完成。旧的单篇教程只作为背景材料；如果旧文档和本目录冲突，以本目录、`test/relay_op_contract.json` 和 `python/tools/check_relay_op_contract.py` 为准。
+本文档包是新增或修改 Relay 算子的权威接入说明。写 PR 前先读本页，再按子文档逐项完成。旧的单篇教程只作为背景材料；如果旧文档和本目录冲突，以本目录、`contracts/relay_op_contract.json` 和 `python/tools/check_relay_op_contract.py` 为准。
 
 ## 接入顺序
 
@@ -18,7 +18,7 @@
 
 | 内容 | 文件 |
 | --- | --- |
-| 机器可读算子契约 | [test/relay_op_contract.json](../../test/relay_op_contract.json) |
+| 机器可读算子契约 | [contracts/relay_op_contract.json](../../contracts/relay_op_contract.json) |
 | 契约检查器 | [python/tools/check_relay_op_contract.py](../../python/tools/check_relay_op_contract.py) |
 | 当前支持矩阵说明 | [docs/OP_SUPPORT_MATRIX.md](../OP_SUPPORT_MATRIX.md) |
 | Relay op 注册 API | [include/relay/op_macros.h](../../include/relay/op_macros.h), [include/relay/op_attr_types.h](../../include/relay/op_attr_types.h) |

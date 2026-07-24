@@ -164,7 +164,7 @@ range is not a complete independent-compilation contract.
 External/control operators must be registered explicitly with a complete spec.
 Lookup never infers behavior from the operator name and never creates a registry
 entry. New public compute operators must also be declared in
-`test/relay_op_contract.json`.
+`contracts/relay_op_contract.json`.
 
 When adding or changing an operator, update the JSON contract first. Required
 fields include `schema_version`, `category`, arity, `attrs`, `output_arity`,

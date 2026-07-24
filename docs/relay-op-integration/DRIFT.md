@@ -21,7 +21,7 @@
 | Type hook | 所有 contract op 必须有 `FInferType` |
 | Lowering hook | 单输出用 `FRelayToTE`，多输出用 `FRelayToTEMulti` |
 | 多输出 lowering | `LowerToTIR` 已支持 `Tuple`、`TupleGetItem`、多个 output buffer；具体 multi op 仍要逐个注册和测试 |
-| Checker | 以 `test/relay_op_contract.json` 为规范源，静态扫描注册、FFI、ONNX 和测试引用 |
+| Checker | 以 `contracts/relay_op_contract.json` 为规范源，静态扫描注册、FFI、ONNX 和测试引用 |
 | LLVM | 是否支持不能靠文档声明，必须通过 `run_op_numeric_llvm_test` 或等价 numeric test |
 
 ## 保留旧文档的用途

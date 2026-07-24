@@ -823,7 +823,7 @@ if(Python3_Interpreter_FOUND)
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_relay_op_contract.py"
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
-            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/relay_op_contract.json"
+            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/contracts/relay_op_contract.json"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     USES_TERMINAL
     COMMENT "Check Relay operator implementation contract"
@@ -832,7 +832,7 @@ if(Python3_Interpreter_FOUND)
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_pass_contract.py"
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
-            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/pass_contract.json"
+            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/contracts/pass_contract.json"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     USES_TERMINAL
     COMMENT "Check Relay and TIR pass contracts"
@@ -1339,12 +1339,12 @@ if(Python3_Interpreter_FOUND)
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_relay_op_contract.py"
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
-            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/relay_op_contract.json")
+            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/contracts/relay_op_contract.json")
   add_test(NAME pass_contract
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_pass_contract.py"
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
-            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/pass_contract.json")
+            --matrix "${CMAKE_CURRENT_SOURCE_DIR}/contracts/pass_contract.json")
   add_test(NAME include_layers
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_include_layers.py"

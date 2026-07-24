@@ -448,13 +448,18 @@ inline Array<PassSpec> Specs(IRDialect dialect) {
     return result;
 }
 
+inline bool IsRepeatable(IRDialect dialect, const std::string& name) {
+    if (dialect == ParseIRDialect("relay") && name == "infer_type") return true;
+    return false;
+}
+
 inline Array<String> Pipeline(const std::string& name) {
     if (name == "relay.optimize_default") return {String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("canonicalize_cast"), String("remove_standalone_reshapes"), String("eliminate_dead_let"), String("annotate_memory_scope"), String("capture_post_dfs_index_in_spans"), String("infer_type")};
     if (name == "tir.optimize_default") return {String("fold_constant"), String("simplify_expr"), String("force_narrow_index_to_i32"), String("convert_for_loops_serial"), String("loop_partition"), String("unroll_loop"), String("vectorize_loop"), String("remove_no_op")};
-    if (name == "relay.compiler.o0") return {};
-    if (name == "relay.compiler.o1") return {String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr")};
-    if (name == "relay.compiler.o2") return {String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("canonicalize_cast"), String("remove_standalone_reshapes"), String("eliminate_dead_let")};
-    if (name == "relay.compiler.o3") return {String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("canonicalize_cast"), String("remove_standalone_reshapes"), String("eliminate_dead_let")};
+    if (name == "relay.compiler.o0") return {String("infer_type"), String("infer_type"), String("normalize_to_anf")};
+    if (name == "relay.compiler.o1") return {String("infer_type"), String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("infer_type"), String("normalize_to_anf")};
+    if (name == "relay.compiler.o2") return {String("infer_type"), String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("canonicalize_cast"), String("remove_standalone_reshapes"), String("eliminate_dead_let"), String("infer_type"), String("normalize_to_anf")};
+    if (name == "relay.compiler.o3") return {String("infer_type"), String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("canonicalize_cast"), String("remove_standalone_reshapes"), String("eliminate_dead_let"), String("infer_type"), String("normalize_to_anf")};
     if (name == "tir.compiler.o0") return {};
     if (name == "tir.compiler.o1") return {String("fold_constant"), String("simplify_expr")};
     if (name == "tir.compiler.o2") return {String("fold_constant"), String("simplify_expr"), String("force_narrow_index_to_i32"), String("convert_for_loops_serial")};

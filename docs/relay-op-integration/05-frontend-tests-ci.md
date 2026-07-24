@@ -44,7 +44,7 @@ ONNX_TO_RELAY = {
 
 | 步骤 | 文件 | 要求 |
 | --- | --- | --- |
-| 1 | `test/relay_op_contract.json` | 在目标 Relay op 的 `onnx_ops` 中写 ONNX op 名 |
+| 1 | `contracts/relay_op_contract.json` | 在目标 Relay op 的 `onnx_ops` 中写 ONNX op 名 |
 | 2 | `python/kxc_onnx/importer.py` | `ONNX_TO_RELAY` 增加映射 |
 | 3 | `python/kxc_onnx/importer.py` | `_convert_attrs` 把 ONNX attrs 转为 Relay attrs |
 | 4 | tests | importer 测试覆盖新映射 |
@@ -127,7 +127,7 @@ PYTHONPATH=python python -m pytest test/onnx_importer_py_test.py -q
 
 | 项 | 检查 |
 | --- | --- |
-| contract | op 在 `test/relay_op_contract.json` 中声明，字段和实现一致 |
+| contract | op 在 `contracts/relay_op_contract.json` 中声明，字段和实现一致 |
 | Relay | 注册块完整，canonical name 唯一 |
 | attrs | `TAttrs`、`XxxAttrs::Create`、FFI 参数一致 |
 | type | `FInferType` 覆盖正常和失败路径 |

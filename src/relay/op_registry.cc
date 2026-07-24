@@ -17,13 +17,6 @@ namespace relay {
 
 namespace {
 
-void FinalizeOperatorArguments(OpNode* node) {
-    if (!node || !node->has_spec) return;
-    if (node->spec.arguments.empty() && !node->arguments.empty()) {
-        node->spec.arguments = node->arguments;
-    }
-}
-
 void ValidateSpecFields(const OperatorSpec& spec) {
     if (spec.name.empty()) {
         throw std::runtime_error("OperatorSpec name must not be empty");
@@ -101,7 +94,10 @@ public:
         Op op(name);
         OpNode* node = const_cast<OpNode*>(op.operator->());
         node->spec = op_contract_generated::Spec(name);
+        node->num_inputs = node->spec.input_arity.num_inputs;
+        node->arguments = node->spec.arguments;
         node->has_spec = true;
+        ValidateRegisteredSpec(node);
         op_map_.insert({name, op});
         return op_map_.at(name);
     }
@@ -147,9 +143,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<OperatorSpec> specs;
         specs.reserve(op_map_.size());
-        for (auto& kv : op_map_) {
-            FinalizeOperatorArguments(
-                const_cast<OpNode*>(kv.second.operator->()));
+        for (const auto& kv : op_map_) {
             specs.push_back(kv.second->spec);
         }
         std::sort(specs.begin(), specs.end(),
@@ -161,9 +155,7 @@ public:
 
     void Check() {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& kv : op_map_) {
-            FinalizeOperatorArguments(
-                const_cast<OpNode*>(kv.second.operator->()));
+        for (const auto& kv : op_map_) {
             ValidateRegisteredSpec(kv.second.operator->());
         }
         frozen_ = true;

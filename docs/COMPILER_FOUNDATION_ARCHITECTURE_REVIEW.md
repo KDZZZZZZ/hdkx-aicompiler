@@ -74,8 +74,8 @@ ONNX / FFI / 手写 Relay
 
 证据链如下。
 
-1. 算子契约由 `include/kxc/relay/op.h` 的 `OperatorSpec` 承载，机器可读清单为 `test/relay_op_contract.json`；其要求 schema、类型关系、lowering、FFI、backend 和测试。`src/compiler/lowering/lowered_graph.cc` 在 unit lowering 前复核 arity、attrs、`FInferType` 和 lowering binding。
-2. Relay Pass 的元数据在 `include/kxc/pass/pass.h`、`src/pass/pass.cc`，当前 Relay/TIR 注册和调度在 `src/relay/transforms/pipeline.cc`、`src/tir/transforms/pipeline.cc`；机器契约为 `test/pass_contract.json`。图拓扑变换应在 unit 冻结前完成，见 `docs/COMPILER_EXTENSION_CONTRACT.md` 第 4、6 节。
+1. 算子契约由 `include/kxc/relay/op.h` 的 `OperatorSpec` 承载，机器可读清单为 `contracts/relay_op_contract.json`；其要求 schema、类型关系、lowering、FFI、backend 和测试。`src/compiler/lowering/lowered_graph.cc` 在 unit lowering 前复核 arity、attrs、`FInferType` 和 lowering binding。
+2. Relay Pass 的元数据在 `include/kxc/pass/pass.h`、`src/pass/pass.cc`，当前 Relay/TIR 注册和调度在 `src/relay/transforms/pipeline.cc`、`src/tir/transforms/pipeline.cc`；机器契约为 `contracts/pass_contract.json`。图拓扑变换应在 unit 冻结前完成，见 `docs/COMPILER_EXTENSION_CONTRACT.md` 第 4、6 节。
 3. `src/compiler/compiler.cc::OptimizeRelay` 在策略前后执行 `InferTypePass`。`src/compiler/graph/value_graph.cc` 只接收类型完整的参数、常量、Call、tuple/tuple field，并建立 plan 用的 value id。
 4. `src/compiler/graph/partition.cc` 为 ordinary compute Call 产生 unit、symbol 与 `runtime::KernelCall`。`src/compiler/lowering/lowered_graph.cc::LowerCompilationUnit` 只从 unit 边界 tensor 映射读取输入，禁止递归 lowering producer unit。
 5. `src/compiler/compiler.cc` 对每个 primitive 运行 TIR pipeline、ABI 构建与 backend 编译；`include/kxc/runtime/compiled_module.h` 和 `src/runtime/compiled_module.cc` 提供按 symbol 查询、启动的 multi-entry module。
@@ -105,8 +105,8 @@ Compiler / Relay / TE / TIR / Codegen  --->  CompiledModule + ExecutablePlan
 
 | 抽象 | 证据 | 应保留的原因 |
 |---|---|---|
-| 完整 `OperatorSpec` 与 canonical attrs 序列化 | `include/kxc/relay/op.h`、`src/relay/op_registry.cc`、`test/relay_op_contract.json` | 让前端、类型、lowering 和 Pass 查询通用能力，而非在 Runtime 按 op 名分支。 |
-| `PassSpec` + 显式 scope/phase | `include/kxc/pass/pass.h`、`src/pass/pass.cc`、`test/pass_contract.json` | 提供了阻止 graph Pass 在 unit 冻结后跨边界改写的正确契约位置；当前 runner 还需真正执行 invariant/analysis/target 校验。 |
+| 完整 `OperatorSpec` 与 canonical attrs 序列化 | `include/kxc/relay/op.h`、`src/relay/op_registry.cc`、`contracts/relay_op_contract.json` | 让前端、类型、lowering 和 Pass 查询通用能力，而非在 Runtime 按 op 名分支。 |
+| `PassSpec` + 显式 scope/phase | `include/kxc/pass/pass.h`、`src/pass/pass.cc`、`contracts/pass_contract.json` | 提供了阻止 graph Pass 在 unit 冻结后跨边界改写的正确契约位置；当前 runner 还需真正执行 invariant/analysis/target 校验。 |
 | value graph 与 runtime-neutral `ExecutablePlan` | `src/compiler/graph/value_graph.cc`、`include/kxc/runtime/executable_plan.h` | 图连线、kernel ABI 和运行时调度有明确分层；runtime 不需要理解 Relay。 |
 | immutable `KernelSignature` 与 `[input][constant][output]` ABI | `include/kxc/runtime/kernel_abi.h`、`src/compiler/kernel_abi_builder.cc` | shape、dtype、device、alignment、constant key 在启动前可验证。 |
 | multi-entry `CompiledModule` | `include/kxc/runtime/compiled_module.h`、`src/runtime/compiled_module.cc` | entry 以稳定 symbol 独立寻址，适合每 unit 编译、批量 backend module 与版本化。 |
@@ -371,7 +371,7 @@ Issue #14 的目标应定义为“候选 variant 在不影响 in-flight executio
 
 ### 10.1 Pass
 
-1. 以 `test/pass_contract.json` 或等价 schema 为唯一 pipeline metadata 来源；binding table 只绑定 `implementation_key -> function`，不再复制 opt/default/idempotence 等字段。
+1. 以 `contracts/pass_contract.json` 或等价 schema 为唯一 pipeline metadata 来源；binding table 只绑定 `implementation_key -> function`，不再复制 opt/default/idempotence 等字段。
 2. 新增 `PipelineResolver(normalized CompilerConfiguration)`，统一解析 opt level、target capability、用户 enable/disable 和 named pipeline；`Compiler::RelayPassPolicy`、`Compiler::TIRPassPolicy` 与 `GetDefaultPassOrder` 不再分别维护生产顺序。
 3. runner 维护显式 invariant/analysis state，在每个 Pass 前后执行 required/produced/preserved/invalidated、scope、phase 和 target capability 校验，而不是只验证名称与 implementation binding。
 4. graph Pass 继续只在 partition 前运行；修改 shape/dtype/attrs 的 Pass 必须使 checked type/shape analysis 失效并重建，符合 `docs/COMPILER_EXTENSION_CONTRACT.md`。
@@ -380,7 +380,7 @@ Issue #14 的目标应定义为“候选 variant 在不影响 in-flight executio
 
 ### 10.2 Operator contract 与 Partition
 
-1. 收敛 `test/relay_op_contract.json`、C++ `OperatorSpec`、FFI 和 support matrix：选择一个 schema source 生成其余 metadata；新 operator 禁止依赖 `InferCategoryFromName`/legacy defaults 补全关键字段。
+1. 收敛 `contracts/relay_op_contract.json`、C++ `OperatorSpec`、FFI 和 support matrix：选择一个 schema source 生成其余 metadata；新 operator 禁止依赖 `InferCategoryFromName`/legacy defaults 补全关键字段。
 2. type relation 与 lowering 应消费同一个声明式 shape rule/shape program，而不是各自复制 shape 公式；target/dtype/layout 不支持必须在 capability verifier 中 fail closed。
 3. 把当前 “one ordinary Call = one unit” 从 `PartitionValueGraph` 的永久结构条件降格为默认 `PartitionPolicy::PerCall`；保留其 N-call/N-unit characterization test。
 4. 为后续 region policy 定义同样的硬门禁：每 unit 输入/输出是显式 live boundary；不可跨 effect/alias/communication/control-flow 边界；unit semantic key 在无关 graph re-numbering 下不变。

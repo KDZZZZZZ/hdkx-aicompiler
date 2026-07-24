@@ -4,6 +4,7 @@
 
 #include "kxc/ffi/registry.h"
 #include "kxc/relay/op.h"
+#include "kxc/relay/op_macros.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -57,6 +58,19 @@ bool Contains(const std::string& haystack, const std::string& needle) {
 
 bool TestRelayOperatorRegistryLookupAndSpecs() {
     const kxc::relay::Op& add = kxc::relay::Op::Get("add");
+    const std::string generated_add_spec = kxc::relay::SerializeOperatorSpec(add.spec());
+    const kxc::relay::FInferType add_infer_type =
+        std::any_cast<kxc::relay::FInferType>(add->attrs.at("FInferType"));
+    kxc::relay::OpRegEntry(add)
+        .set_num_inputs(2)
+        .set_attr<kxc::relay::FInferType>("FInferType", add_infer_type);
+    TEST_CHECK(kxc::relay::SerializeOperatorSpec(add.spec()) == generated_add_spec,
+               "matching builtin bindings must not rewrite generated OperatorSpec");
+    TEST_CHECK(ExpectThrow([&] { kxc::relay::OpRegEntry(add).set_num_inputs(3); }) &&
+                   ExpectThrow([&] {
+                       kxc::relay::OpRegEntry(add).set_attr<std::string>("TAttrs", "WrongAttrs");
+                   }),
+               "mismatched builtin registration metadata must fail immediately");
     TEST_CHECK(add->name == "add", "registered op lookup should return canonical op");
     TEST_CHECK(add.has_spec(), "registered op should expose OperatorSpec");
     TEST_CHECK(add.spec().type_relation_key == "FInferType",

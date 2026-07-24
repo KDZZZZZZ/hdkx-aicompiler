@@ -78,7 +78,7 @@ pipeline identity.
 
 ## Machine Contract
 
-`test/pass_contract.json` is the machine-readable contract for existing pass
+`contracts/pass_contract.json` is the machine-readable contract for existing pass
 metadata and default order. `python/tools/check_pass_contract.py` cross-checks:
 
 - contract pass entries against C++ pipeline bindings;

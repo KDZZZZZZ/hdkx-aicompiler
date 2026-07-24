@@ -6,7 +6,7 @@
 
 ## 判定规则
 
-`test/relay_op_contract.json` 是 MVP operator contract 的机器可读输入。一个算子只有
+`contracts/relay_op_contract.json` 是 MVP operator contract 的机器可读输入。一个算子只有
 在 schema、type、lowering binding、FFI、per-unit compile、目标后端数值结果和 CI
 均有可追溯证据时，才可由审查者标为 production supported。
 

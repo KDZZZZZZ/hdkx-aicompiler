@@ -3,6 +3,9 @@
   "rules": {
     "single_registration": true,
     "deterministic_order": true,
+    "repeatable_passes": [
+      "relay.infer_type"
+    ],
     "required_fields": [
       "name",
       "schema_version",
@@ -56,27 +59,40 @@
       "vectorize_loop",
       "remove_no_op"
     ],
-    "relay.compiler.o0": [],
+    "relay.compiler.o0": [
+      "infer_type",
+      "infer_type",
+      "normalize_to_anf"
+    ],
     "relay.compiler.o1": [
+      "infer_type",
       "fold_tuple_get_item",
       "fold_constant",
-      "simplify_expr"
+      "simplify_expr",
+      "infer_type",
+      "normalize_to_anf"
     ],
     "relay.compiler.o2": [
+      "infer_type",
       "fold_tuple_get_item",
       "fold_constant",
       "simplify_expr",
       "canonicalize_cast",
       "remove_standalone_reshapes",
-      "eliminate_dead_let"
+      "eliminate_dead_let",
+      "infer_type",
+      "normalize_to_anf"
     ],
     "relay.compiler.o3": [
+      "infer_type",
       "fold_tuple_get_item",
       "fold_constant",
       "simplify_expr",
       "canonicalize_cast",
       "remove_standalone_reshapes",
-      "eliminate_dead_let"
+      "eliminate_dead_let",
+      "infer_type",
+      "normalize_to_anf"
     ],
     "tir.compiler.o0": [],
     "tir.compiler.o1": [
