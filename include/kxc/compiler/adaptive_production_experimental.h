@@ -1,17 +1,17 @@
 /*! \file include/kxc/compiler/adaptive_production_experimental.h
- * \brief Default-off preparation contracts for production adaptive compilers.
+ * \brief Internal preparation contracts for adaptive hot-swap v2.
  *
- * This header prepares and validates static-exact candidates. Routing,
- * generation, leases, health, quarantine, and execution belong to injected
- * control planes such as adaptive hot-swap v2.
+ * This header is enabled only with the v2 lifecycle. It prepares and validates
+ * static-exact candidates; routing, generation, leases, health, quarantine,
+ * and execution remain owned by v2.
  */
 #pragma once
 
-#ifndef KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
-#define KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION 0
+#ifndef KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#define KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2 0
 #endif
 
-#if KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
 
 #include <cstdint>
 #include <memory>
@@ -110,4 +110,4 @@ std::shared_ptr<const PreparedCandidate> PrepareCandidate(
 
 }  // namespace kxc::api::adaptive::experimental::production_path
 
-#endif  // KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
+#endif  // KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2

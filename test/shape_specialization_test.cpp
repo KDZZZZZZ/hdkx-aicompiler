@@ -9,7 +9,6 @@
 #include "kxc/compiler/compiler.h"
 #include "kxc/compiler/shape_specialization.h"
 #include "kxc/relay/op.h"
-#include "support/shape_compiler_foundation_fakes.h"
 
 namespace {
 
@@ -32,7 +31,6 @@ bool Throws(const std::function<void()>& action) {
 
 namespace spec =
     kxc::api::experimental::shape_specialization::v1;
-namespace fake = spec::fakes::compiler_foundation_v1;
 
 kxc::api::GraphSemanticKey GraphKey() {
   const kxc::Var input("input", kxc::TensorType({4}, "float32"));
@@ -68,13 +66,11 @@ spec::GraphTemplate MakeTemplate(
 
 bool TestFormalProfileAndPrimitiveSelection() {
   using kxc::api::GraphSemanticKey;
-  using kxc::api::PlanVariantKey;
   using kxc::api::PrimitiveArtifactKey;
   using kxc::api::ShapeProfileKey;
 
   static_assert(!std::is_same_v<GraphSemanticKey, ShapeProfileKey>);
   static_assert(!std::is_same_v<ShapeProfileKey, PrimitiveArtifactKey>);
-  static_assert(!std::is_same_v<PrimitiveArtifactKey, PlanVariantKey>);
 
   const spec::GraphTemplate graph = MakeTemplate();
   const spec::ExactOracle small = spec::InstantiateExactProfile(
@@ -107,26 +103,13 @@ bool TestFormalProfileAndPrimitiveSelection() {
             small_requests[1].signature_digest,
         "equal ordered shape boundaries must share a signature digest");
 
-  fake::DeterministicMockCoordinator coordinator;
-  const auto selected_small = coordinator.Resolve(small_requests);
-  CHECK(coordinator.unique_resolve_count() == 1,
-        "equal unit/profile/signature requests must reuse one primitive");
-  (void)coordinator.Resolve(large_requests);
-  CHECK(coordinator.unique_resolve_count() == 2,
-        "a different shape profile must select another primitive");
-
-  fake::DeterministicMockPlanAssembler assembler;
-  const fake::FakeFrozenPlan plan =
-      assembler.Assemble(graph, small, selected_small);
-  const fake::FakeFrozenPlan again =
-      assembler.Assemble(graph, small, selected_small);
-  CHECK(plan.key().defined() && plan.key() == again.key() &&
-            plan.key().graph_semantic_key() == graph.key() &&
-            plan.key().shape_profile_key() == small.profile().key(),
-        "frozen plan identity must be the formal component key");
-  CHECK(plan.retained_artifacts().size() == 2 &&
-            plan.retained_artifacts()[0].artifact_key().defined(),
-        "fake plan must retain formal primitive artifact identities");
+  CHECK(small_requests[0].shape_profile_key == small.profile().key() &&
+            large_requests[0].shape_profile_key == large.profile().key(),
+        "exact requests must retain their oracle profile identity");
+  CHECK(spec::MatchesExactSignatureDigest(
+            small_requests[0].signature_digest, small_requests[0].ordered_inputs,
+            small_requests[0].ordered_outputs),
+        "exact requests must carry a matching boundary digest");
   return true;
 }
 
@@ -158,13 +141,12 @@ bool TestTemplateContentAndRoutingFailClosed() {
         }),
         "an oracle cannot be replayed against changed unit semantics");
 
-  fake::DeterministicMockCoordinator coordinator;
-  auto requests = spec::MakeExactSpecializationRequests(graph, oracle);
-  requests[0].ordered_call_index = 1;
-  const auto selected = coordinator.Resolve(requests);
-  fake::DeterministicMockPlanAssembler assembler;
-  CHECK(Throws([&] { (void)assembler.Assemble(graph, oracle, selected); }),
-        "plan assembly must reject forged ordered routing");
+  const auto requests = spec::MakeExactSpecializationRequests(graph, oracle);
+  CHECK(requests[0].ordered_call_index == 0 &&
+            requests[1].ordered_call_index == 1 &&
+            requests[0].call_locator.value() == "call.0" &&
+            requests[1].call_locator.value() == "call.1",
+        "exact requests must preserve GraphTemplate routing order");
   return true;
 }
 

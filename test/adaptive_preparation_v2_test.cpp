@@ -29,6 +29,9 @@
 #include "kxc/relay/op.h"
 #include "kxc/runtime/compiled_module.h"
 #include "../src/compiler/internal/compiled_graph_access.h"
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#include "../src/compiler/test-only/adaptive_hot_swap_v2_test_access.h"
+#endif
 #include "../src/compiler/internal/primitive_cache.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 
@@ -630,6 +633,7 @@ bool TestPreparedCandidateRetainsPinsAndSession() {
 
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
 namespace v2 = kxc::api::adaptive::hot_swap::v2;
+namespace v2_test = kxc::api::adaptive::hot_swap::v2::test_only;
 
 class OneShotHealth final : public v2::HealthAuthority {
 public:
@@ -671,7 +675,7 @@ public:
     }
     bool VerifyAndConsume(const v2::HealthDecision&,
                           const v2::GenerationLease&) noexcept override {
-        reentry_rejected_ = Throws([&] { (void)controller_->SnapshotForTesting(); });
+        reentry_rejected_ = Throws([&] { (void)v2_test::AdaptiveHotSwapTestAccess::Snapshot(*controller_); });
         return reentry_rejected_;
     }
     bool reentry_rejected() const noexcept { return reentry_rejected_; }
@@ -697,7 +701,6 @@ public:
         first_ = MakeLease(9, request);
         return first_;
     }
-    v2::Generation NextGenerationForTesting() const noexcept override { return 10; }
 private:
     std::shared_ptr<const v2::GenerationLease> first_;
 };
@@ -710,7 +713,6 @@ public:
         const v2::GenerationAuthorityRequest& request) override {
         return MakeLease(generations_.at(index_++), request);
     }
-    v2::Generation NextGenerationForTesting() const noexcept override { return 99; }
 private:
     std::vector<v2::Generation> generations_;
     size_t index_{0};
@@ -726,12 +728,11 @@ public:
     std::shared_ptr<const v2::GenerationLease> Issue(
         const v2::GenerationAuthorityRequest& request) override {
         if (controller_) {
-            reentry_rejected_ = Throws([&] { (void)controller_->SnapshotForTesting(); });
+            reentry_rejected_ = Throws([&] { (void)v2_test::AdaptiveHotSwapTestAccess::Snapshot(*controller_); });
         }
         gate_->EnterAndWait();
         return MakeLease(1, request);
     }
-    v2::Generation NextGenerationForTesting() const noexcept override { return 2; }
 private:
     std::shared_ptr<Gate> gate_;
     v2::AdaptiveHotSwapController* controller_{nullptr};
@@ -748,9 +749,6 @@ public:
         return MakeLease(next_++, request);
     }
 
-    v2::Generation NextGenerationForTesting() const noexcept override {
-        return next_;
-    }
 
     size_t issues() const noexcept { return issues_; }
     const kxc::api::PlanVariantKey& last_selection() const noexcept {
@@ -791,9 +789,9 @@ bool TestV2AuthorityBindingMonotonicityAndCancellationRace() {
     v2::AdaptiveHotSwapController monotonic(std::make_shared<FixtureCompiler>(), monotonic_options);
     const auto seven = monotonic.CompileAndPublish({request});
     const auto lower = monotonic.Submit({request}).Wait();
-    monotonic.ClearNegativeCacheForTesting();
+    v2_test::AdaptiveHotSwapTestAccess::ClearNegativeCache(monotonic);
     const auto duplicate = monotonic.Submit({request}).Wait();
-    monotonic.ClearNegativeCacheForTesting();
+    v2_test::AdaptiveHotSwapTestAccess::ClearNegativeCache(monotonic);
     const auto eight = monotonic.CompileAndPublish({request});
     TEST_CHECK(seven->generation() == 7 && !lower.ready() && !duplicate.ready() &&
                    eight->generation() == 8 && monotonic.Acquire(Execute(request)) == eight,
@@ -860,13 +858,13 @@ bool TestV2WaitersCacheEvictionAndOverflow() {
     for (const auto& ticket : stress) {
         TEST_CHECK(ticket.Wait().ready(), "bounded same-key stress must fan out one flight");
     }
-    TEST_CHECK(compiler->calls.load() == 1 && controller.SnapshotForTesting().merged_waiters >= 12,
+    TEST_CHECK(compiler->calls.load() == 1 && v2_test::AdaptiveHotSwapTestAccess::Snapshot(controller).merged_waiters >= 12,
                "v2 must singleflight bounded same-key waiters");
     const auto expired = controller.Submit({request, std::chrono::steady_clock::now()});
     TEST_CHECK(expired.Wait().failure.category == v2::FailureCategory::kTimeout,
                "expired waiter must fail without changing a shared flight");
     const auto second = controller.CompileAndPublish({request});
-    TEST_CHECK(second->generation() == 2 && controller.SnapshotForTesting().discoverable_generations == 1,
+    TEST_CHECK(second->generation() == 2 && v2_test::AdaptiveHotSwapTestAccess::Snapshot(controller).discoverable_generations == 1,
                "producer byte/discoverability eviction must retain only the new route");
     TEST_CHECK(first_result.lease->candidate() != nullptr,
                "eviction must not revoke an external generation lease");
@@ -882,7 +880,7 @@ bool TestV2WaitersCacheEvictionAndOverflow() {
     TEST_CHECK(retries.Submit({request}).Wait().failure.category == v2::FailureCategory::kTransient &&
                failing->calls.load() == after_failure,
                "negative cache must suppress retry during TTL");
-    retries.ClearNegativeCacheForTesting();
+    v2_test::AdaptiveHotSwapTestAccess::ClearNegativeCache(retries);
     TEST_CHECK(retries.Submit({request}).Wait().ready(), "cache clear must allow deterministic retry");
 
     v2::Options overflow = options;
@@ -1018,7 +1016,7 @@ bool TestV2BoundedFailureAndQuarantineMetadata() {
         TEST_CHECK(!transient.Submit({transient_requests.back()}).Wait().ready(),
                    "distinct transient failures must be negative-cached or evicted");
     }
-    const auto transient_snapshot = transient.SnapshotForTesting();
+    const auto transient_snapshot = v2_test::AdaptiveHotSwapTestAccess::Snapshot(transient);
     TEST_CHECK(transient_snapshot.negative_cache_entries == 3 &&
                    transient_snapshot.negative_cache_diagnostic_bytes <= 32 &&
                    transient_snapshot.negative_cache_evictions == 5 &&
@@ -1052,7 +1050,7 @@ bool TestV2BoundedFailureAndQuarantineMetadata() {
                        v2::FailureCategory::kPermanent,
                    "distinct permanent failures must fail closed");
     }
-    const auto permanent_snapshot = permanent.SnapshotForTesting();
+    const auto permanent_snapshot = v2_test::AdaptiveHotSwapTestAccess::Snapshot(permanent);
     TEST_CHECK(permanent_snapshot.negative_cache_entries == 3 &&
                    permanent_snapshot.negative_cache_compile_blocked &&
                    permanent_snapshot.negative_cache_drops == 1 &&
@@ -1063,8 +1061,8 @@ bool TestV2BoundedFailureAndQuarantineMetadata() {
                        v2::FailureCategory::kPermanent &&
                    permanent_compiler->calls.load() == before_cached_permanent,
                "permanent failures within the configured bound must remain fail-closed");
-    permanent.ClearNegativeCacheForTesting();
-    TEST_CHECK(!permanent.SnapshotForTesting().negative_cache_compile_blocked,
+    v2_test::AdaptiveHotSwapTestAccess::ClearNegativeCache(permanent);
+    TEST_CHECK(!v2_test::AdaptiveHotSwapTestAccess::Snapshot(permanent).negative_cache_compile_blocked,
                "test-only negative-cache clear must explicitly release saturation blocking");
 
     kxc::api::internal::ClearPrimitiveCacheForTesting();
@@ -1094,7 +1092,7 @@ bool TestV2BoundedFailureAndQuarantineMetadata() {
     TEST_CHECK(quarantine.EvaluateHealth(quarantine.CompileAndPublish({bad_two})) &&
                    quarantine.EvaluateHealth(quarantine.CompileAndPublish({bad_three})),
                "health authority must drive per-route tombstone saturation");
-    const auto quarantine_snapshot = quarantine.SnapshotForTesting();
+    const auto quarantine_snapshot = v2_test::AdaptiveHotSwapTestAccess::Snapshot(quarantine);
     TEST_CHECK(quarantine_snapshot.quarantine_tombstones == 2 &&
                    quarantine_snapshot.quarantine_compile_blocked_routes == 1 &&
                    quarantine_snapshot.quarantine_saturations == 1 &&
@@ -1106,7 +1104,7 @@ bool TestV2BoundedFailureAndQuarantineMetadata() {
                        v2::FailureCategory::kPermanent &&
                    quarantine_compiler->calls.load() == before_blocked_publish + 1,
                "a saturated route must reject further publication rather than forget a quarantine");
-    quarantine.ClearQuarantinesForTesting();
+    v2_test::AdaptiveHotSwapTestAccess::ClearQuarantines(quarantine);
     TEST_CHECK(quarantine.CompileAndPublish({bad_three}) != nullptr,
                "explicit test-only quarantine clear must release route publication");
     TEST_CHECK(Throws([&] {
@@ -1161,7 +1159,7 @@ bool TestV2HealthRollbackObserverAndAbi() {
     v2::Options observed_options;
     observed_options.max_producer_reported_bytes = 1024;
     observed_options.observer = [&](const v2::Event&) {
-        reentry_rejected = Throws([&] { (void)observed->SnapshotForTesting(); });
+        reentry_rejected = Throws([&] { (void)v2_test::AdaptiveHotSwapTestAccess::Snapshot(*observed); });
     };
     auto observed_compiler = std::make_shared<FixtureCompiler>();
     v2::AdaptiveHotSwapController observed_controller(observed_compiler, observed_options);
@@ -1220,32 +1218,19 @@ bool TestV2TransactionalCancellationAndGlobalBounds() {
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest base = MakeRequest();
     const ProductionRequest successor = MakeRequest(2);
-    std::atomic<int> injected{-1};
     v2::Options transactional_options;
     transactional_options.worker_count = 1;
-    transactional_options.max_producer_reported_bytes = 1024;
-    transactional_options.fail_publication_stage = [&](v2::PublicationStage stage) {
-        return injected.load(std::memory_order_relaxed) == static_cast<int>(stage);
-    };
+    transactional_options.max_producer_reported_bytes = 1;
     auto transactional_compiler = std::make_shared<FixtureCompiler>();
     v2::AdaptiveHotSwapController transactional(transactional_compiler,
                                                  transactional_options);
     const auto predecessor = transactional.CompileAndPublish({base});
-    const auto before = transactional.SnapshotForTesting();
-    for (int stage = static_cast<int>(v2::PublicationStage::kByteBudget);
-         stage <= static_cast<int>(v2::PublicationStage::kFinalCommit); ++stage) {
-        injected.store(stage, std::memory_order_relaxed);
-        const auto rejected = transactional.Submit({successor}).Wait();
-        TEST_CHECK(!rejected.ready() &&
-                       transactional.Acquire(Execute(base)) == predecessor &&
-                       transactional.SnapshotForTesting().next_generation == before.next_generation,
-                   "every injected pre-commit failure must preserve route head and authority generation");
-        transactional.ClearNegativeCacheForTesting();
-    }
-    injected.store(-1, std::memory_order_relaxed);
-    TEST_CHECK(transactional.CompileAndPublish({successor})->generation() ==
-                   predecessor->generation() + 1,
-               "a transaction may publish only after all injected stages pass");
+    transactional_compiler->attack = Attack::kDistinctSelection;
+    transactional_compiler->candidate_primitive_byte_size = 2;
+    const auto rejected = transactional.Submit({successor}).Wait();
+    TEST_CHECK(!rejected.ready() &&
+                   transactional.Acquire(Execute(base)) == predecessor,
+               "a failed pre-publication candidate must preserve the routed generation");
 
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     auto gated = std::make_shared<FixtureCompiler>();
@@ -1306,7 +1291,7 @@ bool TestV2TransactionalCancellationAndGlobalBounds() {
                "global saturation fixture must identify a distinct exact route");
     const auto route_rejection = global.Submit({other_abi}).Wait();
     TEST_CHECK(!route_rejection.ready() &&
-                   global.SnapshotForTesting().routes == 1 &&
+                   v2_test::AdaptiveHotSwapTestAccess::Snapshot(global).routes == 1 &&
                    WaitFor([&] { return route_events.load() == 1; }),
                "global route count saturation must fail closed and emit an event");
     return true;

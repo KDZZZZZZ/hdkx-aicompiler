@@ -1,6 +1,7 @@
 /*! \file adaptive_hot_swap_v2.cc */
 #include "kxc/compiler/adaptive_hot_swap_v2.h"
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#include "../test-only/adaptive_hot_swap_v2_test_access.h"
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
@@ -72,7 +73,6 @@ public:
         ++next_;  // Allocation/freeze failure above never consumes a generation.
         return lease;
     }
-    Generation NextGenerationForTesting() const noexcept override { std::lock_guard<std::mutex> lock(mutex_); return next_; }
 private: mutable std::mutex mutex_; Generation next_;
 };
 }  // namespace
@@ -238,7 +238,6 @@ public:
         Failure c=f; const uint64_t room=options.max_negative_diagnostic_bytes-negative_bytes; if(c.diagnostic.size()>room)c.diagnostic.resize(room); negative_order.push_back(key); auto order=std::prev(negative_order.end()); const auto expiry=f.retry_after==std::chrono::milliseconds::max()?std::chrono::steady_clock::time_point::max():std::chrono::steady_clock::now()+f.retry_after; negative.emplace(key,Negative{std::move(c),expiry,order}); negative_bytes+=negative[key].failure.diagnostic.size();
     }
     void Finish(const std::shared_ptr<Flight>& f,CompileResult result,bool cache) { std::vector<Event> events; { std::lock_guard<std::mutex> lock(mutex); flights.erase(f->key); if(cache) CacheFailure(f->key,result.failure,&events); } f->promise.set_value(result); Event e; e.kind=result.ready()?EventKind::kPublished:EventKind::kRejected; if(!result.ready() && result.failure.diagnostic.find("global route") != std::string::npos) e.kind=EventKind::kRouteSaturated; if(!result.ready() && result.failure.diagnostic.find("tombstone") != std::string::npos) e.kind=EventKind::kTombstoneSaturated; e.dispatch_key_digest=f->request.dispatch_key().digest(); e.plan_abi_digest=f->request.plan_abi().digest(); e.diagnostic=result.ready()?"":result.failure.diagnostic; if(result.ready())e.generation=result.lease->generation(); Emit(std::move(e)); for(auto& x:events)Emit(std::move(x)); }
-    void Inject(PublicationStage stage) const { if(options.fail_publication_stage && options.fail_publication_stage(stage)) throw std::runtime_error("injected adaptive v2 publication failure"); }
     void Metrics(const std::unordered_map<std::string,Route>& map,size_t* route_count,uint64_t* route_bytes,size_t* tombstones,uint64_t* tombstone_bytes) const { *route_count=map.size(); *route_bytes=0; *tombstones=0; *tombstone_bytes=0; for(const auto& [key,route]:map){*route_bytes+=key.size();*tombstones+=route.tombstones.size();for(const auto& a:route.tombstones)*tombstone_bytes+=a.size();} }
     void Evict(std::unordered_map<std::string,Route>* rs,std::vector<std::shared_ptr<const GenerationLease>>* ds,uint64_t* bytes,std::vector<Event>* ev) const noexcept { while(!ds->empty()&&(ds->size()>options.max_discoverable_generations||*bytes>options.max_producer_reported_bytes)){auto l=ds->front();ds->erase(ds->begin());*bytes-=l->producer_reported_bytes();auto it=std::find_if(rs->begin(),rs->end(),[&](const auto& entry){return entry.second.current==l || std::find(entry.second.history.begin(),entry.second.history.end(),l)!=entry.second.history.end();});if(it!=rs->end()){auto& h=it->second.history;h.erase(std::remove(h.begin(),h.end(),l),h.end());if(it->second.current==l)it->second.current.reset();if(!it->second.current&&h.empty()&&it->second.tombstones.empty())rs->erase(it);} ev->push_back(Event{EventKind::kEvicted,l->generation()});} }
     void Compile(const std::shared_ptr<Flight>& f) {
@@ -247,7 +246,7 @@ public:
             CompiledGraph graph=compiler?compiler->Compile(f->request):Compiler::Compile(f->request.graph(),f->request.config());
             const ValidationReceipt receipt=validation->Validate(f->request,graph);
             const auto candidate=preparation::PrepareCandidate(f->request,std::move(graph),receipt.value());
-            const uint64_t bytes=ProducerBytes(*candidate); Inject(PublicationStage::kByteBudget); if(bytes>options.max_producer_reported_bytes) throw CompileError(FailureCategory::kPermanent,"candidate exceeds adaptive v2 producer byte budget");
+            const uint64_t bytes=ProducerBytes(*candidate); if(bytes>options.max_producer_reported_bytes) throw CompileError(FailureCategory::kPermanent,"candidate exceeds adaptive v2 producer byte budget");
             std::shared_ptr<const GenerationLease> lease;
             Event published;
             std::vector<Event> evictions;
@@ -255,24 +254,21 @@ public:
                 if(!Live(*f)) { FinishUnlockedCancelled(f); return; }
                 if(negative_blocked) throw CompileError(FailureCategory::kPermanent,"adaptive v2 permanent negative-cache capacity is fail-closed");
                 auto staged=routes; auto staged_discoverable=discoverable; uint64_t staged_bytes=discoverable_bytes;
-                Inject(PublicationStage::kRoute); auto route=staged.find(f->route_key); if(route==staged.end()){size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>=options.max_routes){++route_saturations;throw CompileError(FailureCategory::kPermanent,"adaptive v2 global route capacity is fail-closed");} route=staged.emplace(f->route_key,Route{}).first;}
+                auto route=staged.find(f->route_key); if(route==staged.end()){size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>=options.max_routes){++route_saturations;throw CompileError(FailureCategory::kPermanent,"adaptive v2 global route capacity is fail-closed");} route=staged.emplace(f->route_key,Route{}).first;}
                 if(route->second.compile_blocked)throw CompileError(FailureCategory::kPermanent,"route compilation is fail-closed after tombstone saturation");
-                Inject(PublicationStage::kQuarantine); if(route->second.tombstones.count(candidate->selection_plan_key().canonical_bytes()))throw CompileError(FailureCategory::kPermanent,"candidate selection identity is quarantined");
+                if(route->second.tombstones.count(candidate->selection_plan_key().canonical_bytes()))throw CompileError(FailureCategory::kPermanent,"candidate selection identity is quarantined");
                 if(bytes>std::numeric_limits<uint64_t>::max()-staged_bytes)throw std::overflow_error("adaptive v2 discoverable byte accounting overflow");
-                Inject(PublicationStage::kAuthority);
                 const Generation predecessor=route->second.current?route->second.current->generation():0;
                 size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>options.max_routes||rb>options.max_route_metadata_bytes||tc>options.max_quarantine_tombstones||tb>options.max_quarantine_tombstone_bytes){++route_saturations;throw CompileError(FailureCategory::kPermanent,"adaptive v2 global route metadata capacity is fail-closed");}
                 // Every fallible container/event operation completes before Issue.
                 route->second.history.reserve(route->second.history.size()+1);
                 staged_discoverable.reserve(staged_discoverable.size()+1);
                 evictions.reserve(staged_discoverable.size()+1);
-                Inject(PublicationStage::kMapAllocation);
                 published.kind=EventKind::kPublished;
                 published.predecessor_generation=predecessor;
                 published.producer_reported_bytes=bytes;
                 published.dispatch_key_digest=f->request.dispatch_key().digest();
                 published.plan_abi_digest=f->request.plan_abi().digest();
-                Inject(PublicationStage::kFinalCommit);
                 // This is the final deadline/cancellation observation and the
                 // publication linearization point. Cancel callbacks take this
                 // same mutex, so either they remove demand first or commit wins.
@@ -408,8 +404,57 @@ bool AdaptiveHotSwapController::EvaluateHealth(
     }
     return true;
 }
-Snapshot AdaptiveHotSwapController::SnapshotForTesting() const {state_->RejectReentry();std::lock_guard<std::mutex> lock(state_->mutex);LockedAuthorityScope authority(state_.get());size_t rc;uint64_t rb;size_t tc;uint64_t tb;state_->Metrics(state_->routes,&rc,&rb,&tc,&tb);size_t blocked=0;for(const auto&[_,r]:state_->routes)if(r.compile_blocked)++blocked;return {state_->generations->NextGenerationForTesting(),state_->queue.size(),state_->active,state_->discoverable.size(),state_->discoverable_bytes,state_->evictions,state_->merged,state_->retries,state_->negative.size(),state_->negative_bytes,state_->negative_evictions,state_->negative_drops,state_->negative_blocked,tc,blocked,state_->quarantine_saturations,rc,rb,tb,state_->route_saturations,state_->tombstone_saturations,false,false};}
-void AdaptiveHotSwapController::ClearNegativeCacheForTesting(){state_->RejectReentry();std::lock_guard<std::mutex> lock(state_->mutex);state_->negative.clear();state_->negative_order.clear();state_->negative_bytes=0;state_->negative_blocked=false;}
-void AdaptiveHotSwapController::ClearQuarantinesForTesting(){state_->RejectReentry();std::lock_guard<std::mutex> lock(state_->mutex);for(auto it=state_->routes.begin();it!=state_->routes.end();){it->second.tombstones.clear();it->second.compile_blocked=false;if(!it->second.current&&it->second.history.empty())it=state_->routes.erase(it);else ++it;}}
+test_only::AdaptiveHotSwapSnapshot
+    test_only::AdaptiveHotSwapTestAccess::Snapshot(
+        const AdaptiveHotSwapController& controller) {
+    controller.state_->RejectReentry();
+    std::lock_guard<std::mutex> lock(controller.state_->mutex);
+    size_t routes;
+    uint64_t route_bytes;
+    size_t tombstones;
+    uint64_t tombstone_bytes;
+    controller.state_->Metrics(controller.state_->routes, &routes, &route_bytes,
+                                &tombstones, &tombstone_bytes);
+    size_t blocked = 0;
+    for (const auto& [_, route] : controller.state_->routes) {
+        if (route.compile_blocked) ++blocked;
+    }
+    return {controller.state_->queue.size(), controller.state_->active,
+            controller.state_->discoverable.size(), controller.state_->discoverable_bytes,
+            controller.state_->evictions, controller.state_->merged,
+            controller.state_->retries, controller.state_->negative.size(),
+            controller.state_->negative_bytes, controller.state_->negative_evictions,
+            controller.state_->negative_drops, controller.state_->negative_blocked,
+            tombstones, blocked, controller.state_->quarantine_saturations, routes,
+            route_bytes, tombstone_bytes, controller.state_->route_saturations,
+            controller.state_->tombstone_saturations};
+}
+
+void test_only::AdaptiveHotSwapTestAccess::ClearNegativeCache(
+    AdaptiveHotSwapController& controller) {
+    controller.state_->RejectReentry();
+    std::lock_guard<std::mutex> lock(controller.state_->mutex);
+    controller.state_->negative.clear();
+    controller.state_->negative_order.clear();
+    controller.state_->negative_bytes = 0;
+    controller.state_->negative_blocked = false;
+}
+
+void test_only::AdaptiveHotSwapTestAccess::ClearQuarantines(
+    AdaptiveHotSwapController& controller) {
+    controller.state_->RejectReentry();
+    std::lock_guard<std::mutex> lock(controller.state_->mutex);
+    for (auto it = controller.state_->routes.begin();
+         it != controller.state_->routes.end();) {
+        it->second.tombstones.clear();
+        it->second.compile_blocked = false;
+        if (!it->second.current && it->second.history.empty()) {
+            it = controller.state_->routes.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 }  // namespace kxc::api::adaptive::hot_swap::v2
 #endif

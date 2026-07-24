@@ -4,7 +4,7 @@
 
 #include "kxc/compiler/adaptive_production_experimental.h"
 
-#if KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
 
 #include <stdexcept>
 #include <utility>
@@ -264,4 +264,4 @@ std::shared_ptr<const PreparedCandidate> PrepareCandidate(
 
 }  // namespace kxc::api::adaptive::experimental::production_path
 
-#endif  // KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
+#endif  // KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2

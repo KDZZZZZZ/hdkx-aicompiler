@@ -1,8 +1,8 @@
 /*! \file adaptive_hot_swap_v2.h
  * \brief Default-OFF v2 whole-plan adaptive lifecycle control plane.
  *
- * This API is process-local experimental control-plane evidence only.  The
- * default authority below is test authority, not authentication or attestation.
+ * This API is process-local experimental control-plane evidence only; it is
+ * not authentication or attestation.
  */
 #pragma once
 
@@ -11,11 +11,6 @@
 #endif
 
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
-#ifndef KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
-#define KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION 1
-#elif !KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
-#error "KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2 requires preparation contracts"
-#endif
 
 #include <atomic>
 #include <chrono>
@@ -52,6 +47,9 @@
 // 发布条件：DispatchKey + PlanAbiFingerprint 均匹配才可换 future routing
 // =============================================================================
 namespace kxc::api::adaptive::hot_swap::v2 {
+namespace test_only {
+class AdaptiveHotSwapTestAccess;
+}
 namespace preparation = experimental::production_path;
 using ProductionCompileRequest = preparation::ProductionCompileRequest;
 using ProductionExecutionRequest = preparation::ProductionExecutionRequest;
@@ -146,7 +144,6 @@ public:
     virtual ~GenerationAuthority() = default;
     virtual std::shared_ptr<const GenerationLease> Issue(
         const GenerationAuthorityRequest& request) = 0;
-    virtual Generation NextGenerationForTesting() const noexcept = 0;
 protected:
     static std::shared_ptr<const GenerationLease> MakeLease(
         Generation generation, const GenerationAuthorityRequest& request);
@@ -216,10 +213,6 @@ public:
     virtual bool VerifyAndConsume(const HealthDecision& decision, const GenerationLease& lease) noexcept = 0;
 };
 
-// 发布事务阶段（测试可注入 fail seam，且在改路由前检查）。
-enum class PublicationStage : uint8_t {
-    kByteBudget, kRoute, kQuarantine, kAuthority, kMapAllocation, kFinalCommit
-};
 enum class EventKind : uint8_t {
     kQueued, kMerged, kPublished, kCancelled, kRetryCached, kEvicted,
     kNegativeEvicted, kNegativeCacheSaturated, kHealthDecision, kQuarantined,
@@ -252,26 +245,11 @@ struct Options final {
     std::shared_ptr<HealthAuthority> health_authority;
     std::shared_ptr<CandidateValidationAuthority> validation_authority;
     std::shared_ptr<GenerationAuthority> generation_authority;
-    // 测试 seam：抛错/失败阶段在任何路由变更前检查。
-    std::function<bool(PublicationStage)> fail_publication_stage;
 };
 // 取消在拿到 publication mutex 的 controller 回调时线性化：
 // 先线性化的 cancel 抑制发布，否则 commit 胜出。
 // deadline 是观察点不是定时器：admission/worker entry/final commit 检查；
 // 最终观察后过期可能与已发布 generation 共存。
-struct Snapshot final {
-    Generation next_generation{1};
-    size_t queued_flights{0}, active_flights{0}, discoverable_generations{0};
-    uint64_t producer_reported_discoverable_bytes{0}, evictions{0}, merged_waiters{0}, retry_cached{0};
-    size_t negative_cache_entries{0};
-    uint64_t negative_cache_diagnostic_bytes{0}, negative_cache_evictions{0}, negative_cache_drops{0};
-    bool negative_cache_compile_blocked{false};
-    size_t quarantine_tombstones{0}, quarantine_compile_blocked_routes{0};
-    uint64_t quarantine_saturations{0};
-    size_t routes{0};
-    uint64_t route_metadata_bytes{0}, quarantine_tombstone_bytes{0}, route_saturations{0}, tombstone_saturations{0};
-    bool process_resident_bytes_known{false}, device_resident_bytes_known{false};
-};
 struct RunAsyncResult final {
     Array<runtime::NDArray> outputs;
     AsyncOperation completion;
@@ -299,10 +277,8 @@ public:
     RunAsyncResult RunAsync(const ProductionExecutionRequest& request, const Array<runtime::NDArray>& inputs, const DeviceStream& stream) const;
     // Evaluate + VerifyAndConsume；过时/已消费返回 false
     bool EvaluateHealth(const std::shared_ptr<const GenerationLease>& lease);
-    void ClearNegativeCacheForTesting();
-    void ClearQuarantinesForTesting();
-    Snapshot SnapshotForTesting() const;
 private:
+    friend class test_only::AdaptiveHotSwapTestAccess;
     class State; std::shared_ptr<State> state_;
 };
 }  // namespace kxc::api::adaptive::hot_swap::v2
