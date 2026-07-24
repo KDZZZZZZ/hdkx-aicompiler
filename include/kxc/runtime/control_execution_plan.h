@@ -12,33 +12,40 @@
 
 namespace kxc::runtime {
 
+namespace internal {
+struct BoundControlKernelAccess;
+struct ControlExecutionPlanAccess;
+struct ControlExecutionPlanSpec;
+}  // namespace internal
+
 using ControlExecutionValueId = std::int64_t;
 using ControlExecutionRegionId = std::int64_t;
 using ControlExecutionTaskId = std::int64_t;
 
-/*! \brief Experimental entry snapshot bound to one ready module artifact. */
+/*! \brief Immutable entry snapshot bound by Compiler to one ready module artifact. */
 class BoundControlKernel final {
 public:
     BoundControlKernel() = default;
-    BoundControlKernel(api::CompiledModule module, String entry_symbol,
-                       std::uint64_t binding_revision,
-                       std::shared_ptr<const void> production_lease = {});
 
     void Validate() const;
-    AsyncOperation Launch(const Array<NDArray>& ordered_arguments,
-                          const DeviceStream& stream) const;
     codegen::KernelSignature signature() const;
     codegen::KernelLaunchMetadata launch_metadata() const;
     /*! \brief Returns an independent deep copy; execution retains a private snapshot. */
     NDArray Constant(const String& key) const;
     /*! \brief Compares bytes/contracts without exposing the execution snapshot. */
     bool MatchesConstant(const String& key, const NDArray& candidate) const;
-    /*! \brief Fixture-only caller label, with no authority, freshness, or hot-swap proof. */
-    std::uint64_t binding_revision() const;
     Device device() const;
     bool defined() const noexcept;
 
 private:
+    friend struct internal::BoundControlKernelAccess;
+    friend struct internal::ControlExecutionPlanAccess;
+
+    AsyncOperation Launch(const Array<NDArray>& ordered_arguments,
+                          const DeviceStream& stream) const;
+    BoundControlKernel(api::CompiledModule module, String entry_symbol,
+                       std::shared_ptr<const void> retention_owner);
+
     struct State;
     std::shared_ptr<const State> state_;
 };
@@ -113,32 +120,19 @@ struct ControlExecutionRegion {
     std::string source_locator;
 };
 
-struct ControlExecutionPlanSpec {
-    static constexpr std::int64_t kSchemaVersion = 1;
-    std::int64_t schema_version{kSchemaVersion};
-    std::int64_t source_control_plan_version{2};
-    ControlExecutionEffectModel effect_model{
-        ControlExecutionEffectModel::kPureFreshKernelOutputsV1};
-    std::vector<ControlExecutionValueSpec> values;
-    ControlExecutionRegionId entry_region{-1};
-    std::vector<ControlExecutionRegionId> region_order;
-    std::vector<ControlExecutionRegion> regions;
-    std::vector<ControlExecutionValueId> graph_inputs;
-    std::vector<ControlExecutionValueId> constant_values;
-    std::vector<ControlExecutionValueId> graph_outputs;
-};
-
-/*! \brief Frozen runtime execution typestate resolved from compiler-preparation ControlPlan. */
+/*! \brief Frozen runtime execution typestate minted only by Compiler. */
 class ControlExecutionPlan final {
 public:
     static constexpr std::int64_t kSchemaVersion = 1;
 
     ControlExecutionPlan() = default;
-    explicit ControlExecutionPlan(ControlExecutionPlanSpec spec);
 
     bool defined() const noexcept;
     void Validate() const;
-    const ControlExecutionPlanSpec& spec() const;
+    std::int64_t source_control_plan_version() const;
+    ControlExecutionEffectModel effect_model() const;
+    ControlExecutionRegionId entry_region() const;
+    const std::vector<ControlExecutionRegionId>& region_order() const;
     const std::vector<ControlExecutionValueSpec>& values() const;
     const std::vector<ControlExecutionRegion>& regions() const;
     const std::vector<ControlExecutionValueId>& graph_inputs() const;
@@ -146,10 +140,11 @@ public:
     const std::vector<ControlExecutionValueId>& graph_outputs() const;
 
 private:
+    friend struct internal::ControlExecutionPlanAccess;
+    explicit ControlExecutionPlan(internal::ControlExecutionPlanSpec spec);
+
     struct Impl;
     std::shared_ptr<const Impl> impl_;
 };
-
-void VerifyControlExecutionPlan(const ControlExecutionPlanSpec& plan);
 
 }  // namespace kxc::runtime

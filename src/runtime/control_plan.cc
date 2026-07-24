@@ -1,6 +1,6 @@
 /*! \file src/runtime/control_plan.cc */
 
-#include "kxc/runtime/control_plan.h"
+#include "internal/control_plan.h"
 
 #include <algorithm>
 #include <functional>

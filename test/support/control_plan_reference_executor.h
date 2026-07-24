@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "kxc/runtime/control_plan.h"
+#include "../../src/runtime/internal/control_plan.h"
 
 namespace kxc::runtime::test_support {
 

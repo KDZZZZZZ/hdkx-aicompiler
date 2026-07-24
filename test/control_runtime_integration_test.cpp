@@ -8,26 +8,23 @@
 #include <exception>
 #include <functional>
 #include <iostream>
-#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "kxc/compiler/compiler.h"
-#include "kxc/compiler/control_flow.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/control_session.h"
 #include "support/control_plan_reference_executor.h"
-#include "../src/compiler/control_flow/production_control_flow_test.h"
+#include "../src/compiler/control_flow/internal_lowering.h"
 #include "../src/runtime/internal/compiled_module_node.h"
+#include "../src/runtime/internal/control_execution_plan_access.h"
 
 #ifndef KXC_ENABLE_CONTROL_RUNTIME
 #define KXC_ENABLE_CONTROL_RUNTIME 0
-#endif
-#ifndef KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
-#define KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION 0
 #endif
 #ifndef KXC_USE_LLVM
 #define KXC_USE_LLVM 0
@@ -41,6 +38,21 @@ using kxc::Map;
 using kxc::String;
 using namespace kxc::runtime;
 using namespace kxc::runtime::test_support;
+using PrivatePlanSpec =
+    kxc::runtime::internal::ControlExecutionPlanSpec;
+using PrivatePlanAccess =
+    kxc::runtime::internal::ControlExecutionPlanAccess;
+
+static_assert(!std::is_constructible_v<
+              BoundControlKernel, kxc::api::CompiledModule, String,
+              std::shared_ptr<const void>>,
+              "installed callers must not mint bound kernels");
+static_assert(!std::is_constructible_v<ControlExecutionPlan, PrivatePlanSpec>,
+              "installed callers must not mint execution plans from specs");
+
+std::shared_ptr<const void> FixtureRetention() {
+    return std::make_shared<const int>(1);
+}
 
 #define CHECK(condition, message) do { if (!(condition)) { std::cerr << "[FAIL] " << __FUNCTION__ << ": " << message << "\n"; return false; } } while (0)
 
@@ -446,14 +458,18 @@ struct LoopFixture {
                               kxc::codegen::KernelArgRole::kOutput})};
 };
 
-std::vector<kxc::api::ControlKernelBinding> Bindings(const BranchFixture& fixture) {
-    return {{21, fixture.then_kernel.module, "then_entry", 7, {1}},
-            {22, fixture.else_kernel.module, "else_entry", 8, {1}}};
+std::vector<kxc::api::internal::ControlKernelBinding> Bindings(
+    const BranchFixture& fixture,
+    std::shared_ptr<const void> retention = std::make_shared<const int>(1)) {
+    return {{21, fixture.then_kernel.module, "then_entry", {1}, retention},
+            {22, fixture.else_kernel.module, "else_entry", {1}, retention}};
 }
 
-std::vector<kxc::api::ControlKernelBinding> Bindings(const LoopFixture& fixture) {
-    return {{31, fixture.condition.module, "condition_entry", 9, {1}},
-            {32, fixture.step.module, "step_entry", 10, {1}}};
+std::vector<kxc::api::internal::ControlKernelBinding> Bindings(
+    const LoopFixture& fixture,
+    std::shared_ptr<const void> retention = std::make_shared<const int>(1)) {
+    return {{31, fixture.condition.module, "condition_entry", {1}, retention},
+            {32, fixture.step.module, "step_entry", {1}, retention}};
 }
 
 std::int64_t ReferenceIterations(const ReferenceExecution& execution,
@@ -482,23 +498,18 @@ FakeKernelCallback ReferenceKernel() {
     };
 }
 
-bool TestLeaseGenerationDoesNotWrap() {
-    using kxc::api::internal::MintControlFlowLeaseGenerationForTest;
-    using kxc::api::internal::SetControlFlowLeaseGenerationForTest;
-    SetControlFlowLeaseGenerationForTest(
-        std::numeric_limits<std::uint64_t>::max() - 1);
-    const std::uint64_t generation = MintControlFlowLeaseGenerationForTest();
-    const std::string first_failure = ErrorText([] {
-        (void)MintControlFlowLeaseGenerationForTest();
-    });
-    const std::string second_failure = ErrorText([] {
-        (void)MintControlFlowLeaseGenerationForTest();
-    });
-    SetControlFlowLeaseGenerationForTest(0);
-    CHECK(generation == std::numeric_limits<std::uint64_t>::max() &&
-              first_failure.find("generation overflowed") != std::string::npos &&
-              second_failure.find("generation overflowed") != std::string::npos,
-          "the terminal lease generation must be issued once and then fail closed without reuse");
+bool TestSealedPlanRetainsOpaqueOwner() {
+    BranchFixture fixture;
+    auto owner = std::make_shared<const int>(1);
+    std::weak_ptr<const int> weak = owner;
+    ControlExecutionPlan plan = kxc::api::internal::BindControlPlanForRuntime(
+        BranchPlan(), Bindings(fixture, owner));
+    owner.reset();
+    CHECK(!weak.expired(),
+          "a sealed plan must privately retain its binding owner");
+    plan = ControlExecutionPlan{};
+    CHECK(weak.expired(),
+          "releasing the final plan must release its private owner");
     return true;
 }
 
@@ -542,10 +553,10 @@ bool TestRelayWhileCompileGates() {
     const std::string control_error = ErrorText([&] {
         (void)kxc::api::Compiler::CompileControlFlowExact(function, config);
     });
-#if !KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
-    CHECK(control_error.find("disabled by KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION") !=
+#if !KXC_ENABLE_CONTROL_RUNTIME
+    CHECK(control_error.find("disabled by KXC_ENABLE_CONTROL_RUNTIME") !=
               std::string::npos,
-          "production Relay While API must remain default-OFF");
+          "Relay While control-flow API must remain default-OFF");
 #elif !KXC_USE_LLVM
     CHECK(control_error.find("KXC_ENABLE_LLVM=ON") != std::string::npos,
           "enabled Relay While API must fail closed without LLVM");
@@ -556,7 +567,7 @@ bool TestRelayWhileCompileGates() {
 }
 
 bool TestProductionRelayWhileNumericE2E() {
-#if KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION && KXC_USE_LLVM && KXC_ENABLE_CONTROL_RUNTIME
+#if KXC_ENABLE_CONTROL_RUNTIME && KXC_USE_LLVM
     const kxc::TensorType boolean({}, "bool");
     const kxc::TensorType integer({}, "int64");
     kxc::Var first("while_first", boolean), second("while_second", boolean);
@@ -578,16 +589,14 @@ bool TestProductionRelayWhileNumericE2E() {
     };
     const auto config =
         kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
-    std::weak_ptr<const kxc::api::ControlFlowArtifactLease> lease;
     ControlRunAsyncResult asynchronous;
     {
         auto compiled = kxc::api::Compiler::CompileControlFlowExact(make_loop(3), config);
-        CHECK(compiled.artifact_lease(),
-              "real Relay While must retain the compiled body artifact pin");
-        lease = compiled.artifact_lease();
+        CHECK(compiled.defined() && compiled.plan().defined(),
+              "real Relay While must produce a sealed execution plan");
         const auto expected_events = [&compiled](std::int64_t trips) {
-            const auto& spec = compiled.plan().spec();
-            const auto& entry = spec.regions[0];
+            const auto& regions = compiled.plan().regions();
+            const auto& entry = regions[0];
             const auto& loop = entry.tasks[0];
             std::vector<std::string> events;
             for (const auto input : loop.inputs) {
@@ -596,7 +605,7 @@ bool TestProductionRelayWhileNumericE2E() {
             }
             events.push_back("task:" + std::to_string(loop.id));
             const auto body = std::find_if(
-                spec.regions.begin(), spec.regions.end(),
+                regions.begin(), regions.end(),
                 [&loop](const auto& region) { return region.id == loop.loop.body_region; });
             for (std::int64_t iteration = 0; iteration < trips; ++iteration) {
                 events.push_back("loop:" + std::to_string(loop.id) + ":iteration:" +
@@ -638,28 +647,19 @@ bool TestProductionRelayWhileNumericE2E() {
             {ScalarBool(true), ScalarBool(true), ScalarBool(true), ScalarBool(false),
              ScalarI64(7), ScalarI64(1)}, DeviceStream::Default(Device::CPU()));
     }
-    CHECK(!lease.expired(),
-          "RunAsync completion must retain the compiler-minted artifact lease after owners die");
     asynchronous.completion.Wait();
     CHECK(asynchronous.outputs.size() == 5 && ReadI64(asynchronous.outputs[4]) == 10 &&
               asynchronous.loop_iterations.size() == 1 &&
               asynchronous.loop_iterations[0].iterations == 3,
           "async real Relay While must retain numeric outputs and iteration accounting");
     asynchronous = ControlRunAsyncResult{};
-    CHECK(lease.expired(),
-          "releasing RunAsync completion must release the retained production artifact lease");
 
-    std::weak_ptr<const kxc::api::ControlFlowArtifactLease> plan_lease;
     ControlExecutionPlan retained_plan;
     {
         const auto compiled =
             kxc::api::Compiler::CompileControlFlowExact(make_loop(3), config);
-        const auto extra_lease = compiled.artifact_lease();
-        plan_lease = extra_lease;
         retained_plan = compiled.plan();
     }
-    CHECK(!plan_lease.expired(),
-          "the copied execution plan must retain the compiler-minted lease and its pins");
     {
         ControlRuntimeSession session(retained_plan);
         const ControlRunResult result = session.Run(
@@ -669,8 +669,6 @@ bool TestProductionRelayWhileNumericE2E() {
               "the plan must execute after its compile result and extra lease handle are released");
     }
     retained_plan = ControlExecutionPlan{};
-    CHECK(plan_lease.expired(),
-          "releasing the retained plan must release its plan-retained production lease");
 
     const auto exhausted = kxc::api::Compiler::CompileControlFlowExact(make_loop(1), config);
     CHECK(ErrorText([&] {
@@ -701,10 +699,10 @@ bool TestProductionControlFlowGateAndArtifacts() {
     const std::string error = ErrorText([&] {
         (void)kxc::api::Compiler::CompileControlFlowExact(function, config);
     });
-#if !KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
-    CHECK(error.find("disabled by KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION") !=
+#if !KXC_ENABLE_CONTROL_RUNTIME
+    CHECK(error.find("disabled by KXC_ENABLE_CONTROL_RUNTIME") !=
               std::string::npos,
-          "production Relay If API must remain default-OFF");
+          "Relay If control-flow API must remain default-OFF");
 #elif !KXC_USE_LLVM
     CHECK(error.find("KXC_ENABLE_LLVM=ON") != std::string::npos,
           "enabled production API must fail closed without a real LLVM backend");
@@ -712,14 +710,14 @@ bool TestProductionControlFlowGateAndArtifacts() {
     CHECK(error.empty(), "enabled production API must resolve real compiler artifacts");
     const auto compiled = kxc::api::Compiler::CompileControlFlowExact(
         function, config);
-    CHECK(compiled.artifact_lease() &&
-              compiled.artifact_lease()->generation() != 0,
-          "resolved production plan must retain real pins in a compiler-minted lease");
+    CHECK(compiled.defined() && compiled.plan().defined(),
+          "resolved production control must be a sealed plan");
     for (const auto& region : compiled.plan().regions()) {
         for (const auto& task : region.tasks) {
-            if (task.kind != ControlExecutionTaskKind::kKernel) continue;
-            CHECK(task.kernel.binding_revision() == 0,
-                  "production bindings must not use fixture revisions");
+            if (task.kind == ControlExecutionTaskKind::kKernel) {
+                CHECK(task.kernel.defined(),
+                      "each production kernel must retain a sealed entry");
+            }
         }
     }
 #if KXC_ENABLE_CONTROL_RUNTIME
@@ -744,13 +742,13 @@ bool TestBindingAndBranchDifferential() {
     decoy_changed.regions[1].tasks[0].kernel_ref = "unrelated-and-invalid-looking";
     decoy_changed.regions[2].tasks[0].kernel_ref = "also-not-an-entry";
     const auto bindings = Bindings(fixture);
-    const ControlExecutionPlan bound = kxc::api::BindControlPlanForRuntime(original, bindings);
+    const ControlExecutionPlan bound = kxc::api::internal::BindControlPlanForRuntime(original, bindings);
     const ControlExecutionPlan decoy_bound =
-        kxc::api::BindControlPlanForRuntime(decoy_changed, bindings);
-    CHECK(bound.spec().regions[1].tasks[0].kernel.signature()->symbol ==
-              decoy_bound.spec().regions[1].tasks[0].kernel.signature()->symbol &&
-              bound.spec().regions[2].tasks[0].kernel.signature()->symbol ==
-              decoy_bound.spec().regions[2].tasks[0].kernel.signature()->symbol,
+        kxc::api::internal::BindControlPlanForRuntime(decoy_changed, bindings);
+    CHECK(bound.regions()[1].tasks[0].kernel.signature()->symbol ==
+              decoy_bound.regions()[1].tasks[0].kernel.signature()->symbol &&
+              bound.regions()[2].tasks[0].kernel.signature()->symbol ==
+              decoy_bound.regions()[2].tasks[0].kernel.signature()->symbol,
           "binding must use task id and supplied entry, never kernel_ref");
 
     const ControlPlanReferenceExecutor reference(ReferenceKernel());
@@ -777,12 +775,12 @@ bool TestBindingAndBranchDifferential() {
     BranchFixture multi_fixture;
     auto multi_bindings = Bindings(multi_fixture);
     multi_bindings.push_back(
-        {23, multi_fixture.then_kernel.module, "then_entry", 13, {1}});
+        {23, multi_fixture.then_kernel.module, "then_entry", {1}, FixtureRetention()});
     multi_bindings.push_back(
-        {24, multi_fixture.else_kernel.module, "else_entry", 14, {1}});
+        {24, multi_fixture.else_kernel.module, "else_entry", {1}, FixtureRetention()});
     const ControlPlan multi_plan = MultiBranchPlan();
     const ControlExecutionPlan multi_bound =
-        kxc::api::BindControlPlanForRuntime(multi_plan, multi_bindings);
+        kxc::api::internal::BindControlPlanForRuntime(multi_plan, multi_bindings);
     const ReferenceExecution multi_expected_true = reference.Execute(
         multi_plan, {{0, FakeValue::Bool(true)}, {1, FakeValue::I64(4)}});
     const ReferenceExecution multi_expected_false = reference.Execute(
@@ -807,14 +805,10 @@ bool TestBindingAndBranchDifferential() {
               multi_fixture.else_kernel.launcher->calls == 2,
           "all false-side Phi bindings must forward and then must not relaunch");
 #else
-    NDArray direct_output = ScalarI64(0);
-    CHECK(Throws([&] {
-              (void)bound.spec().regions[1].tasks[0].kernel.Launch(
-                  {ScalarI64(1), direct_output},
-                  DeviceStream::Default(Device::CPU()));
-          }) && Throws([&] { ControlRuntimeSession disabled(bound); }) &&
-              fixture.then_kernel.launcher->calls == 0 && fixture.else_kernel.launcher->calls == 0,
-          "gate OFF must reject direct bound launch and session construction");
+    CHECK(Throws([&] { ControlRuntimeSession disabled(bound); }) &&
+              fixture.then_kernel.launcher->calls == 0 &&
+              fixture.else_kernel.launcher->calls == 0,
+          "gate OFF must reject session construction without dispatch");
 #endif
     return true;
 }
@@ -822,7 +816,7 @@ bool TestBindingAndBranchDifferential() {
 bool TestLoopDifferentialAndBound() {
     LoopFixture fixture;
     const ControlPlanReferenceExecutor reference(ReferenceKernel());
-    const ControlExecutionPlan bound = kxc::api::BindControlPlanForRuntime(LoopPlan(), Bindings(fixture));
+    const ControlExecutionPlan bound = kxc::api::internal::BindControlPlanForRuntime(LoopPlan(), Bindings(fixture));
 #if KXC_ENABLE_CONTROL_RUNTIME
     ControlRuntimeSession session(bound);
     for (const auto& sample : std::vector<std::pair<std::int64_t, std::int64_t>>{{3, 0}, {2, 1}, {0, 3}}) {
@@ -838,10 +832,10 @@ bool TestLoopDifferentialAndBound() {
     LoopFixture multi_fixture;
     auto multi_bindings = Bindings(multi_fixture);
     multi_bindings.push_back(
-        {33, multi_fixture.step.module, "step_entry", 15, {6}});
+        {33, multi_fixture.step.module, "step_entry", {6}, FixtureRetention()});
     const ControlPlan multi_plan = MultiLoopPlan();
     const ControlExecutionPlan multi_bound =
-        kxc::api::BindControlPlanForRuntime(multi_plan, multi_bindings);
+        kxc::api::internal::BindControlPlanForRuntime(multi_plan, multi_bindings);
     const ReferenceExecution multi_expected = reference.Execute(
         multi_plan, {{0, FakeValue::I64(0)}, {5, FakeValue::I64(10)}});
     const ControlRunResult multi_actual = ControlRuntimeSession(multi_bound).Run(
@@ -857,7 +851,7 @@ bool TestLoopDifferentialAndBound() {
           "multiple loop-carried values and backedges must match the reference");
 
     const ControlExecutionPlan exhausted =
-        kxc::api::BindControlPlanForRuntime(LoopPlan(1), Bindings(fixture));
+        kxc::api::internal::BindControlPlanForRuntime(LoopPlan(1), Bindings(fixture));
     CHECK(Throws([&] {
               (void)reference.Execute(LoopPlan(1), {{0, FakeValue::I64(0)}});
           }) && Throws([&] { ControlRuntimeSession(exhausted).Run({ScalarI64(0)}); }),
@@ -874,18 +868,18 @@ bool TestReadOnlyInputAliasingAndAbiOrder() {
     Fixture sum = MakeFixture("sum_entry", ScalarOp::kDouble,
                               {kxc::codegen::KernelArgRole::kInput,
                                kxc::codegen::KernelArgRole::kOutput});
-    const ControlExecutionPlan repeated = kxc::api::BindControlPlanForRuntime(
+    const ControlExecutionPlan repeated = kxc::api::internal::BindControlPlanForRuntime(
         RepeatedOperandPlan(),
-        {{40, sum.module, "sum_entry", 11, {0}}});
+        {{40, sum.module, "sum_entry", {0}, FixtureRetention()}});
     Fixture aliased = MakeFixture("alias_entry", ScalarOp::kSum,
                                   {kxc::codegen::KernelArgRole::kInput,
                                    kxc::codegen::KernelArgRole::kInput,
                                    kxc::codegen::KernelArgRole::kOutput});
     const ControlExecutionPlan aliased_inputs =
-        kxc::api::BindControlPlanForRuntime(
+        kxc::api::internal::BindControlPlanForRuntime(
             AliasedInputsPlan(),
-            {{60, aliased.module, "alias_entry", 12, {0, 1}}});
-    CHECK(aliased_inputs.spec().effect_model ==
+            {{60, aliased.module, "alias_entry", {0, 1}, FixtureRetention()}});
+    CHECK(aliased_inputs.effect_model() ==
               ControlExecutionEffectModel::kPureFreshKernelOutputsV1,
           "effect model must not claim physical no-alias semantics");
 #if KXC_ENABLE_CONTROL_RUNTIME
@@ -923,14 +917,13 @@ bool TestReadOnlyInputAliasingAndAbiOrder() {
 bool TestConstantAbiOrderAndResolvedValidation() {
     Fixture fixture = MakeConstantOrderFixture();
     const ControlPlan plan = ConstantOrderPlan();
-    const kxc::api::ControlKernelBinding exact{
-        41, fixture.module, "constant_order_entry", 12, {0, 1, 2}};
+    const kxc::api::internal::ControlKernelBinding exact{
+        41, fixture.module, "constant_order_entry", {0, 1, 2}, FixtureRetention()};
     const ControlExecutionPlan bound =
-        kxc::api::BindControlPlanForRuntime(plan, {exact});
+        kxc::api::internal::BindControlPlanForRuntime(plan, {exact});
     const BoundControlKernel& bound_kernel =
-        bound.spec().regions[0].tasks[0].kernel;
-    CHECK(bound_kernel.binding_revision() == 12,
-          "binding revision must preserve only the caller fixture label");
+        bound.regions()[0].tasks[0].kernel;
+    CHECK(bound_kernel.defined(), "binding must mint a sealed kernel entry");
 
     NDArray original_constant = fixture.module.constants().at("constant.a");
     const std::int64_t changed_original = 100;
@@ -950,7 +943,7 @@ bool TestConstantAbiOrderAndResolvedValidation() {
     auto swapped = exact;
     swapped.abi_non_output_value_ids = {0, 2, 1};
     CHECK(Throws([&] {
-              (void)kxc::api::BindControlPlanForRuntime(plan, {swapped});
+              (void)kxc::api::internal::BindControlPlanForRuntime(plan, {swapped});
           }) && fixture.launcher->calls == 0,
           "adapter must reject reordered same-contract constants");
 
@@ -961,18 +954,18 @@ bool TestConstantAbiOrderAndResolvedValidation() {
         malformed_module->constants_.at("constant.a").As<NDArrayNode>());
     malformed_payload->byte_offset =
         malformed_payload->storage.capacity_bytes();
-    const kxc::api::ControlKernelBinding malformed_constant_binding{
-        41, malformed_constant.module, "constant_order_entry", 16, {0, 1, 2}};
+    const kxc::api::internal::ControlKernelBinding malformed_constant_binding{
+        41, malformed_constant.module, "constant_order_entry", {0, 1, 2}, FixtureRetention()};
     CHECK(Throws([&] {
-              (void)kxc::api::BindControlPlanForRuntime(
+              (void)kxc::api::internal::BindControlPlanForRuntime(
                   plan, {malformed_constant_binding});
           }) && malformed_constant.launcher->calls == 0,
           "malformed constant storage must fail during immutable binding");
 
-    ControlExecutionPlanSpec malformed = bound.spec();
+    PrivatePlanSpec malformed = PrivatePlanAccess::CopySpec(bound);
     malformed.regions[0].tasks[0].kind =
         static_cast<ControlExecutionTaskKind>(999);
-    CHECK(Throws([&] { (void)ControlExecutionPlan(malformed); }),
+    CHECK(Throws([&] { (void)PrivatePlanAccess::Create(std::move(malformed)); }),
           "resolved verifier must reject unknown public task enum values");
 
     Fixture two_output = MakeFixture(
@@ -981,15 +974,15 @@ bool TestConstantAbiOrderAndResolvedValidation() {
          kxc::codegen::KernelArgRole::kOutput,
          kxc::codegen::KernelArgRole::kOutput});
     const ControlExecutionPlan ordered_outputs =
-        kxc::api::BindControlPlanForRuntime(
+        kxc::api::internal::BindControlPlanForRuntime(
             TwoOutputKernelPlan(),
-            {{50, two_output.module, "two_output_entry", 17, {0}}});
-    ControlExecutionPlanSpec swapped_outputs = ordered_outputs.spec();
+            {{50, two_output.module, "two_output_entry", {0}, FixtureRetention()}});
+    PrivatePlanSpec swapped_outputs = PrivatePlanAccess::CopySpec(ordered_outputs);
     swapped_outputs.regions[0].tasks[0].argument_values = {0, 2, 1};
-    ControlExecutionPlanSpec duplicate_outputs = ordered_outputs.spec();
+    PrivatePlanSpec duplicate_outputs = PrivatePlanAccess::CopySpec(ordered_outputs);
     duplicate_outputs.regions[0].tasks[0].argument_values = {0, 1, 1};
-    CHECK(Throws([&] { (void)ControlExecutionPlan(swapped_outputs); }) &&
-              Throws([&] { (void)ControlExecutionPlan(duplicate_outputs); }) &&
+    CHECK(Throws([&] { (void)PrivatePlanAccess::Create(std::move(swapped_outputs)); }) &&
+              Throws([&] { (void)PrivatePlanAccess::Create(std::move(duplicate_outputs)); }) &&
               two_output.launcher->calls == 0,
           "resolved kernel ABI must preserve exact output order and uniqueness");
 
@@ -1006,14 +999,13 @@ bool TestConstantAbiOrderAndResolvedValidation() {
         "constant.empty",
         NDArray::Empty({0}, Type("int64"), Device::CPU(), 128));
     auto zero_launcher = std::make_shared<ScalarLauncher>(ScalarOp::kThen);
-    BoundControlKernel zero_bound(
+    BoundControlKernel zero_bound = PrivatePlanAccess::BindKernel(
         MakeModule("zero_constant_entry", zero_arguments, zero_launcher,
                    zero_constants),
-        "zero_constant_entry", 19);
+        "zero_constant_entry", FixtureRetention());
     const NDArray empty_copy = zero_bound.Constant("constant.empty");
     CHECK(empty_copy.device() == Device::CPU() && empty_copy.NBytes() == 0 &&
               empty_copy.storage().data() == nullptr &&
-              zero_bound.binding_revision() == 19 &&
               zero_launcher->calls == 0,
           "zero-byte CPU constants must bind and deep-copy without dereference");
 #if KXC_ENABLE_CONTROL_RUNTIME
@@ -1036,28 +1028,28 @@ bool TestSharedConstantAlignmentAcrossRegions() {
         MakeSharedConstantFixture("shared_then_entry", 64, 2);
     Fixture else_fixture =
         MakeSharedConstantFixture("shared_else_entry", 32, 2);
-    const std::vector<kxc::api::ControlKernelBinding> bindings{
-        {21, then_fixture.module, "shared_then_entry", 20, {1, 5}},
-        {22, else_fixture.module, "shared_else_entry", 21, {1, 5}},
+    const std::vector<kxc::api::internal::ControlKernelBinding> bindings{
+        {21, then_fixture.module, "shared_then_entry", {1, 5}, FixtureRetention()},
+        {22, else_fixture.module, "shared_else_entry", {1, 5}, FixtureRetention()},
     };
     const ControlExecutionPlan bound =
-        kxc::api::BindControlPlanForRuntime(plan, bindings);
+        kxc::api::internal::BindControlPlanForRuntime(plan, bindings);
 
     Fixture wrong_bytes =
         MakeSharedConstantFixture("wrong_bytes_entry", 32, 3);
     auto wrong_bytes_bindings = bindings;
     wrong_bytes_bindings[1] =
-        {22, wrong_bytes.module, "wrong_bytes_entry", 22, {1, 5}};
+        {22, wrong_bytes.module, "wrong_bytes_entry", {1, 5}, FixtureRetention()};
     Fixture wrong_contract = MakeSharedConstantFixture(
         "wrong_contract_entry", 32, 2, {1});
     auto wrong_contract_bindings = bindings;
     wrong_contract_bindings[1] =
-        {22, wrong_contract.module, "wrong_contract_entry", 23, {1, 5}};
+        {22, wrong_contract.module, "wrong_contract_entry", {1, 5}, FixtureRetention()};
     CHECK(Throws([&] {
-              (void)kxc::api::BindControlPlanForRuntime(
+              (void)kxc::api::internal::BindControlPlanForRuntime(
                   plan, wrong_bytes_bindings);
           }) && Throws([&] {
-              (void)kxc::api::BindControlPlanForRuntime(
+              (void)kxc::api::internal::BindControlPlanForRuntime(
                   plan, wrong_contract_bindings);
           }) && then_fixture.launcher->calls == 0 &&
               else_fixture.launcher->calls == 0 &&
@@ -1065,7 +1057,7 @@ bool TestSharedConstantAlignmentAcrossRegions() {
               wrong_contract.launcher->calls == 0,
           "shared constants must reject genuine byte and contract mismatches before launch");
 
-    const auto& regions = bound.spec().regions;
+    const auto& regions = bound.regions();
     NDArray then_copy =
         regions[1].tasks[0].kernel.Constant("constant.shared");
     NDArray else_copy =
@@ -1083,10 +1075,10 @@ bool TestSharedConstantAlignmentAcrossRegions() {
 
     Fixture local_then = MakeSharedConstantFixture("local_then", 64, 2);
     Fixture local_else = MakeSharedConstantFixture("local_else", 32, 3);
-    const ControlExecutionPlan module_local = kxc::api::BindControlPlanForRuntime(
+    const ControlExecutionPlan module_local = kxc::api::internal::BindControlPlanForRuntime(
         ModuleLocalConstantBranchPlan(),
-        {{21, local_then.module, "local_then", 24, {1, 5}},
-         {22, local_else.module, "local_else", 25, {1, 6}}});
+        {{21, local_then.module, "local_then", {1, 5}, FixtureRetention()},
+         {22, local_else.module, "local_else", {1, 6}, FixtureRetention()}});
 #if KXC_ENABLE_CONTROL_RUNTIME
     const ControlRunResult local_true = ControlRuntimeSession(module_local).Run(
         {ScalarBool(true), ScalarI64(5)});
@@ -1122,35 +1114,38 @@ bool TestBindingAndValidationNegatives() {
     BranchFixture fixture;
     const ControlPlan branch = BranchPlan();
     const auto bindings = Bindings(fixture);
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, {bindings[0]}); }),
+    CHECK(Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(branch, {bindings[0]}); }),
           "missing kernel binding must fail");
     auto duplicate = bindings;
     duplicate.push_back(bindings[0]);
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, duplicate); }),
+    CHECK(Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(branch, duplicate); }),
           "duplicate task binding must fail");
     auto extra = bindings;
-    extra.push_back({99, fixture.then_kernel.module, "then_entry", 12, {1}});
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, extra); }),
+    extra.push_back({99, fixture.then_kernel.module, "then_entry", {1}, FixtureRetention()});
+    CHECK(Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(branch, extra); }),
           "extra absent-task binding must fail");
     auto non_kernel = bindings;
-    non_kernel.push_back({20, fixture.then_kernel.module, "then_entry", 12, {1}});
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, non_kernel); }),
+    non_kernel.push_back({20, fixture.then_kernel.module, "then_entry", {1}, FixtureRetention()});
+    CHECK(Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(branch, non_kernel); }),
           "non-kernel binding must fail");
-    auto zero_revision = bindings;
-    zero_revision[0].binding_revision = 0;
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, zero_revision); }),
-          "binding_revision zero must fail");
+    auto missing_retention = bindings;
+    missing_retention[0].retention_owner.reset();
+    CHECK(Throws([&] {
+              (void)kxc::api::internal::BindControlPlanForRuntime(
+                  branch, missing_retention);
+          }),
+          "a binding without a retention owner must fail");
     auto wrong_abi = bindings;
     wrong_abi[0].abi_non_output_value_ids = {0};
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, wrong_abi); }),
+    CHECK(Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(branch, wrong_abi); }),
           "wrong explicit ABI ids must fail");
 
     Fixture wrong_signature = MakeFixture("wrong_signature", ScalarOp::kSum,
         {kxc::codegen::KernelArgRole::kInput, kxc::codegen::KernelArgRole::kInput,
          kxc::codegen::KernelArgRole::kOutput});
     auto signature_mismatch = bindings;
-    signature_mismatch[0] = {21, wrong_signature.module, "wrong_signature", 12, {1, 1}};
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, signature_mismatch); }),
+    signature_mismatch[0] = {21, wrong_signature.module, "wrong_signature", {1, 1}, FixtureRetention()};
+    CHECK(Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(branch, signature_mismatch); }),
           "wrong module signature ABI must fail before runtime launch");
     Fixture bad_output = MakeFixture("bad_output", ScalarOp::kThen,
         {kxc::codegen::KernelArgRole::kInput, kxc::codegen::KernelArgRole::kOutput},
@@ -1158,7 +1153,7 @@ bool TestBindingAndValidationNegatives() {
     auto bad_contract = bindings;
     bad_contract[0].module = bad_output.module;
     bad_contract[0].entry_symbol = "bad_output";
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(branch, bad_contract); }) &&
+    CHECK(Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(branch, bad_contract); }) &&
               wrong_signature.launcher->calls == 0 && bad_output.launcher->calls == 0,
           "wrong module output contract must fail before runtime launch");
 
@@ -1168,42 +1163,42 @@ bool TestBindingAndValidationNegatives() {
     effects.regions[0].tasks[0].effect.host_callback = true;
     ControlPlan aliases = branch;
     aliases.regions[0].tasks[0].alias.may_alias = {{2, 3}};
-    CHECK(Throws([&] { (void)kxc::api::BindControlPlanForRuntime(dynamic, bindings); }) &&
-              Throws([&] { (void)kxc::api::BindControlPlanForRuntime(effects, bindings); }) &&
-              Throws([&] { (void)kxc::api::BindControlPlanForRuntime(aliases, bindings); }) &&
+    CHECK(Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(dynamic, bindings); }) &&
+              Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(effects, bindings); }) &&
+              Throws([&] { (void)kxc::api::internal::BindControlPlanForRuntime(aliases, bindings); }) &&
               fixture.then_kernel.launcher->calls == 0 && fixture.else_kernel.launcher->calls == 0,
           "invalid source dynamic/effect/alias plans must fail before dispatch");
 
     const ControlExecutionPlan valid =
-        kxc::api::BindControlPlanForRuntime(branch, bindings);
-    ControlExecutionPlanSpec bad_provenance = valid.spec();
+        kxc::api::internal::BindControlPlanForRuntime(branch, bindings);
+    PrivatePlanSpec bad_provenance = PrivatePlanAccess::CopySpec(valid);
     bad_provenance.source_control_plan_version = 1;
-    ControlExecutionPlanSpec bad_predicate = valid.spec();
+    PrivatePlanSpec bad_predicate = PrivatePlanAccess::CopySpec(valid);
     bad_predicate.values[0].dtype = "int64";
-    ControlExecutionPlanSpec bad_phi = valid.spec();
+    PrivatePlanSpec bad_phi = PrivatePlanAccess::CopySpec(valid);
     bad_phi.regions[0].tasks[0].branch.phis[0].then_value = 1;
-    ControlExecutionPlanSpec bad_placement = valid.spec();
+    PrivatePlanSpec bad_placement = PrivatePlanAccess::CopySpec(valid);
     bad_placement.regions[0].tasks[0].stream = "borrowed";
-    ControlExecutionPlanSpec bad_scope = valid.spec();
+    PrivatePlanSpec bad_scope = PrivatePlanAccess::CopySpec(valid);
     bad_scope.regions[0].tasks[0].inputs = {0, 1, 3};
     bad_scope.regions[1].live_ins = {3};
     bad_scope.regions[1].tasks[0].inputs = {3};
     bad_scope.regions[1].tasks[0].argument_values = {3, 2};
 
     LoopFixture loop_fixture;
-    const ControlExecutionPlan valid_loop = kxc::api::BindControlPlanForRuntime(
+    const ControlExecutionPlan valid_loop = kxc::api::internal::BindControlPlanForRuntime(
         LoopPlan(), Bindings(loop_fixture));
-    ControlExecutionPlanSpec unbounded_loop = valid_loop.spec();
+    PrivatePlanSpec unbounded_loop = PrivatePlanAccess::CopySpec(valid_loop);
     unbounded_loop.regions[0].tasks[0].loop.max_trip_count = -1;
-    ControlExecutionPlanSpec bad_backedge = valid_loop.spec();
+    PrivatePlanSpec bad_backedge = PrivatePlanAccess::CopySpec(valid_loop);
     bad_backedge.regions[0].tasks[0].loop.carried[0].backedge = 0;
-    CHECK(Throws([&] { (void)ControlExecutionPlan(bad_provenance); }) &&
-              Throws([&] { (void)ControlExecutionPlan(bad_predicate); }) &&
-              Throws([&] { (void)ControlExecutionPlan(bad_phi); }) &&
-              Throws([&] { (void)ControlExecutionPlan(bad_placement); }) &&
-              Throws([&] { (void)ControlExecutionPlan(bad_scope); }) &&
-              Throws([&] { (void)ControlExecutionPlan(unbounded_loop); }) &&
-              Throws([&] { (void)ControlExecutionPlan(bad_backedge); }) &&
+    CHECK(Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_provenance)); }) &&
+              Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_predicate)); }) &&
+              Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_phi)); }) &&
+              Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_placement)); }) &&
+              Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_scope)); }) &&
+              Throws([&] { (void)PrivatePlanAccess::Create(std::move(unbounded_loop)); }) &&
+              Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_backedge)); }) &&
               fixture.then_kernel.launcher->calls == 0 &&
               fixture.else_kernel.launcher->calls == 0 &&
               loop_fixture.condition.launcher->calls == 0 &&
@@ -1248,9 +1243,9 @@ bool TestBindingAndValidationNegatives() {
         {kxc::codegen::KernelArgRole::kInput,
          kxc::codegen::KernelArgRole::kOutput}, {}, true);
     const ControlExecutionPlan invalid_completion_plan =
-        kxc::api::BindControlPlanForRuntime(
+        kxc::api::internal::BindControlPlanForRuntime(
             branch,
-            {{21, invalid_completion.module, "invalid_completion", 18, {1}},
+            {{21, invalid_completion.module, "invalid_completion", {1}, FixtureRetention()},
              bindings[1]});
     CHECK(Throws([&] {
               (void)ControlRuntimeSession(invalid_completion_plan)
@@ -1272,7 +1267,7 @@ bool TestAsyncCompletionRetention() {
         selected_launcher = fixture.then_kernel.launcher;
         unselected_launcher = fixture.else_kernel.launcher;
         const ControlExecutionPlan resolved =
-            kxc::api::BindControlPlanForRuntime(BranchPlan(), Bindings(fixture));
+            kxc::api::internal::BindControlPlanForRuntime(BranchPlan(), Bindings(fixture));
         ControlRuntimeSession session(resolved);
         ControlRunAsyncResult result = session.RunAsync(
             {ScalarBool(true), ScalarI64(5)}, DeviceStream::Default(Device::CPU()));
@@ -1292,7 +1287,7 @@ bool TestAsyncCompletionRetention() {
 #else
     BranchFixture fixture;
     const ControlExecutionPlan resolved =
-        kxc::api::BindControlPlanForRuntime(BranchPlan(), Bindings(fixture));
+        kxc::api::internal::BindControlPlanForRuntime(BranchPlan(), Bindings(fixture));
     CHECK(Throws([&] { ControlRuntimeSession disabled(resolved); }) &&
               fixture.then_kernel.launcher->calls == 0 && fixture.else_kernel.launcher->calls == 0,
           "gate-off construction must clearly reject without dispatch");
@@ -1304,7 +1299,7 @@ bool TestAsyncCompletionRetention() {
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
-        {"lease_generation_does_not_wrap", TestLeaseGenerationDoesNotWrap},
+        {"sealed_plan_retains_opaque_owner", TestSealedPlanRetainsOpaqueOwner},
         {"compiler_default_rejects_if", TestCompilerDefaultStillRejectsIf},
         {"relay_while_compile_gates", TestRelayWhileCompileGates},
         {"production_relay_while_numeric_e2e", TestProductionRelayWhileNumericE2E},

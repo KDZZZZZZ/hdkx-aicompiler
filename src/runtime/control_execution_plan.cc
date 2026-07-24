@@ -11,9 +11,11 @@
 #include <utility>
 
 #include "internal/compiled_module_node.h"
+#include "internal/control_execution_plan_access.h"
 #include "internal/kernel_argument_validation.h"
 
 namespace kxc::runtime {
+using internal::ControlExecutionPlanSpec;
 namespace {
 
 #ifndef KXC_ENABLE_CONTROL_RUNTIME
@@ -491,36 +493,30 @@ struct BoundControlKernel::State final {
     State(api::CompiledModule module, codegen::KernelSignature signature,
           codegen::KernelLaunchMetadata metadata,
           codegen::CompiledKernel executable, Map<String, NDArray> constants,
-          std::uint64_t binding_revision,
-          std::shared_ptr<const void> production_lease)
+          std::shared_ptr<const void> retention_owner)
         : module(std::move(module)),
           signature(std::move(signature)),
           metadata(std::move(metadata)),
           executable(std::move(executable)),
           constants(std::move(constants)),
-          binding_revision(binding_revision),
-          production_lease(std::move(production_lease)) {}
+          retention_owner(std::move(retention_owner)) {}
 
     api::CompiledModule module;
     codegen::KernelSignature signature;
     codegen::KernelLaunchMetadata metadata;
     codegen::CompiledKernel executable;
     Map<String, NDArray> constants;
-    const std::uint64_t binding_revision{0};
-    // Keeps compiler-owned immutable pins alive without exposing compiler API.
-    const std::shared_ptr<const void> production_lease;
+    // One opaque owner retains compiler pins or a test fixture for this entry.
+    const std::shared_ptr<const void> retention_owner;
 };
 
-BoundControlKernel::BoundControlKernel(api::CompiledModule module,
-                                       String entry_symbol,
-                                       std::uint64_t binding_revision,
-                                       std::shared_ptr<const void> production_lease) {
-    const bool production = static_cast<bool>(production_lease);
+BoundControlKernel::BoundControlKernel(
+    api::CompiledModule module, String entry_symbol,
+    std::shared_ptr<const void> retention_owner) {
     if (!module.defined() || !module.IsReady() || entry_symbol == "" ||
-        !module.HasFunction(entry_symbol) ||
-        (production == (binding_revision != 0))) {
+        !module.HasFunction(entry_symbol) || !retention_owner) {
         throw std::invalid_argument(
-            "BoundControlKernel requires a ready module entry and exactly one fixture revision or retained production lease");
+            "BoundControlKernel requires a ready module entry and retention owner");
     }
     const auto* node = module.As<api::CompiledModuleNode>();
     const auto entry = node->entries_.find(std::string(entry_symbol));
@@ -548,14 +544,12 @@ BoundControlKernel::BoundControlKernel(api::CompiledModule module,
     Map<String, NDArray> constants = SnapshotCpuConstants(bound_module, signature);
     state_ = std::make_shared<State>(
         std::move(bound_module), signature, metadata, executable,
-        std::move(constants), binding_revision, std::move(production_lease));
+        std::move(constants), std::move(retention_owner));
     Validate();
 }
 
 void BoundControlKernel::Validate() const {
-    if (!state_ ||
-        (state_->binding_revision == 0 && !state_->production_lease) ||
-        !state_->module.defined() ||
+    if (!state_ || !state_->retention_owner || !state_->module.defined() ||
         !state_->executable.defined() || !state_->executable.IsReady() ||
         state_->executable.signature().get() != state_->signature.get() ||
         state_->executable.launch_metadata().get() != state_->metadata.get()) {
@@ -655,13 +649,10 @@ bool BoundControlKernel::MatchesConstant(
     return SamePayload(state_->constants.at(key), candidate);
 }
 
-std::uint64_t BoundControlKernel::binding_revision() const {
-    if (!state_) throw std::runtime_error("undefined BoundControlKernel");
-    return state_->binding_revision;
-}
-
 Device BoundControlKernel::device() const { return launch_metadata()->device; }
 bool BoundControlKernel::defined() const noexcept { return static_cast<bool>(state_); }
+
+namespace {
 
 void VerifyControlExecutionPlan(const ControlExecutionPlanSpec& plan) {
     if (plan.schema_version != ControlExecutionPlanSpec::kSchemaVersion ||
@@ -747,6 +738,8 @@ void VerifyControlExecutionPlan(const ControlExecutionPlanSpec& plan) {
     }
 }
 
+}  // namespace
+
 struct ControlExecutionPlan::Impl final {
     explicit Impl(ControlExecutionPlanSpec spec) : spec(std::move(spec)) {}
     const ControlExecutionPlanSpec spec;
@@ -762,14 +755,59 @@ void ControlExecutionPlan::Validate() const {
     if (!impl_) throw std::invalid_argument("ControlExecutionPlan is undefined");
     VerifyControlExecutionPlan(impl_->spec);
 }
-const ControlExecutionPlanSpec& ControlExecutionPlan::spec() const {
+std::int64_t ControlExecutionPlan::source_control_plan_version() const {
     if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
-    return impl_->spec;
+    return impl_->spec.source_control_plan_version;
 }
-const std::vector<ControlExecutionValueSpec>& ControlExecutionPlan::values() const { return spec().values; }
-const std::vector<ControlExecutionRegion>& ControlExecutionPlan::regions() const { return spec().regions; }
-const std::vector<ControlExecutionValueId>& ControlExecutionPlan::graph_inputs() const { return spec().graph_inputs; }
-const std::vector<ControlExecutionValueId>& ControlExecutionPlan::constant_values() const { return spec().constant_values; }
-const std::vector<ControlExecutionValueId>& ControlExecutionPlan::graph_outputs() const { return spec().graph_outputs; }
+ControlExecutionEffectModel ControlExecutionPlan::effect_model() const {
+    if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
+    return impl_->spec.effect_model;
+}
+ControlExecutionRegionId ControlExecutionPlan::entry_region() const {
+    if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
+    return impl_->spec.entry_region;
+}
+const std::vector<ControlExecutionRegionId>& ControlExecutionPlan::region_order() const {
+    if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
+    return impl_->spec.region_order;
+}
+const std::vector<ControlExecutionValueSpec>& ControlExecutionPlan::values() const {
+    if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
+    return impl_->spec.values;
+}
+const std::vector<ControlExecutionRegion>& ControlExecutionPlan::regions() const {
+    if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
+    return impl_->spec.regions;
+}
+const std::vector<ControlExecutionValueId>& ControlExecutionPlan::graph_inputs() const {
+    if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
+    return impl_->spec.graph_inputs;
+}
+const std::vector<ControlExecutionValueId>& ControlExecutionPlan::constant_values() const {
+    if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
+    return impl_->spec.constant_values;
+}
+const std::vector<ControlExecutionValueId>& ControlExecutionPlan::graph_outputs() const {
+    if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
+    return impl_->spec.graph_outputs;
+}
+
+BoundControlKernel internal::ControlExecutionPlanAccess::BindKernel(
+    api::CompiledModule module, String entry_symbol,
+    std::shared_ptr<const void> retention_owner) {
+    return BoundControlKernel(std::move(module), std::move(entry_symbol),
+                              std::move(retention_owner));
+}
+
+ControlExecutionPlan internal::ControlExecutionPlanAccess::Create(
+    ControlExecutionPlanSpec spec) {
+    return ControlExecutionPlan(std::move(spec));
+}
+
+ControlExecutionPlanSpec internal::ControlExecutionPlanAccess::CopySpec(
+    const ControlExecutionPlan& plan) {
+    plan.Validate();
+    return plan.impl_->spec;
+}
 
 }  // namespace kxc::runtime

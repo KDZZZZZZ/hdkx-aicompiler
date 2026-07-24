@@ -2,6 +2,8 @@
 
 #include "kxc/runtime/control_session.h"
 
+#include "internal/bound_control_kernel_access.h"
+
 #include <cstdint>
 #include <exception>
 #include <limits>
@@ -248,7 +250,8 @@ void ExecuteKernel(const ControlExecutionTask& task, const PlanIndex& index,
         }
         ordered.push_back(state->Get(value_id));
     }
-    state->operations.push_back(task.kernel.Launch(ordered, stream));
+    state->operations.push_back(
+        internal::BoundControlKernelAccess::Launch(task.kernel, ordered, stream));
 }
 
 void ExecuteBranch(const ControlExecutionTask& task, const PlanIndex& index,
@@ -348,9 +351,9 @@ ControlRuntimeSession::ControlRuntimeSession(ControlExecutionPlan plan)
     const PlanIndex index = Index(plan_);
     auto constants = std::make_shared<ConstantState>();
     std::unordered_set<ControlExecutionRegionId> visited;
-    CollectConstantBindings(Region(index, plan_.spec().entry_region), index,
+    CollectConstantBindings(Region(index, plan_.entry_region()), index,
                             &constants->values, &visited);
-    for (const auto value_id : plan_.spec().constant_values) {
+    for (const auto value_id : plan_.constant_values()) {
         if (!constants->values.count(value_id)) {
             Fail("validated constant has no module binding");
         }
@@ -382,34 +385,34 @@ ControlRunAsyncResult ControlRuntimeSession::RunAsync(const Array<NDArray>& inpu
     if (!stream.defined() || stream.device() != Device::CPU() || !stream.is_default()) {
         Fail("v1 requires the CPU:0 default DeviceStream");
     }
-    const auto& spec = plan_.spec();
-    if (inputs.size() != spec.graph_inputs.size()) {
-        Fail("input count expected " + std::to_string(spec.graph_inputs.size()) +
+    const auto& graph_inputs = plan_.graph_inputs();
+    if (inputs.size() != graph_inputs.size()) {
+        Fail("input count expected " + std::to_string(graph_inputs.size()) +
              ", actual " + std::to_string(inputs.size()));
     }
     const PlanIndex index = Index(plan_);
     auto state = std::make_shared<RunState>(plan_);
     for (std::size_t i = 0; i < inputs.size(); ++i) {
-        const auto value_id = spec.graph_inputs[i];
+        const auto value_id = graph_inputs[i];
         ValidateArray(Value(index, value_id), inputs[i], "input[" + std::to_string(i) + "]");
         state->Bind(value_id, inputs[i]);
     }
     if (!constants_) Fail("session constant cache is unavailable");
-    for (const auto value_id : spec.constant_values) {
+    for (const auto value_id : plan_.constant_values()) {
         state->Bind(value_id, constants_->values.at(value_id));
     }
     std::unordered_set<ControlExecutionRegionId> preflight_visited;
-    PreflightRegion(Region(index, spec.entry_region), index, *state,
+    PreflightRegion(Region(index, plan_.entry_region()), index, *state,
                     &preflight_visited);
 
     try {
-        ExecuteRegion(Region(index, spec.entry_region), index, stream, state.get());
+        ExecuteRegion(Region(index, plan_.entry_region()), index, stream, state.get());
     } catch (...) {
         WaitPrior(state->operations);
         throw;
     }
     Array<NDArray> outputs;
-    for (const auto value_id : spec.graph_outputs) outputs.push_back(state->Get(value_id));
+    for (const auto value_id : plan_.graph_outputs()) outputs.push_back(state->Get(value_id));
     AsyncOperation completion;
     if (state->operations.empty()) {
         completion = AsyncOperation::Completed(stream);

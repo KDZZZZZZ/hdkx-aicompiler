@@ -2,10 +2,9 @@
  * \brief Static-exact Relay-to-ControlPlan preparation lowering.
  */
 
-#include "kxc/compiler/control_flow.h"
+#include "internal_lowering.h"
 
 #include "../internal/executable_capability.h"
-#include "internal_lowering.h"
 
 #include <algorithm>
 #include <any>
@@ -625,10 +624,6 @@ private:
 };
 
 }  // namespace
-
-runtime::ControlPlan LowerRelayToControlPlan(Function function) {
-    return ControlPlanBuilder(std::move(function)).BuildWithSidecar().plan;
-}
 
 namespace internal {
 ControlPlanLowering LowerRelayToControlPlanWithSidecar(Function function) {

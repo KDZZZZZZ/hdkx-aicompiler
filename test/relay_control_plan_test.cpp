@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "../src/compiler/internal/value_graph.h"
-#include "kxc/compiler/control_flow.h"
+#include "../src/compiler/control_flow/internal_lowering.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/transforms/infer_type.h"
@@ -38,6 +38,12 @@ using kxc::runtime::test_support::ControlPlanReferenceExecutor;
 using kxc::runtime::test_support::FakeValue;
 
 const TensorType kI64({}, "int64");
+
+ControlPlan LowerRelayToControlPlan(Function function) {
+    return kxc::api::internal::LowerRelayToControlPlanWithSidecar(
+               std::move(function))
+        .plan;
+}
 
 Call Add(const Expr& lhs, const Expr& rhs) {
     return Call(kxc::relay::Op::Get("add"), {lhs, rhs});
@@ -125,7 +131,7 @@ kxc::runtime::test_support::FakeKernelCallback ArithmeticKernels() {
 bool TestCanonicalAndRepeatedArguments() {
     Var x("x", kI64), y("y", kI64), shared("shared", kI64);
     Function first({x, y}, Let(shared, Add(x, y), Add(shared, shared)));
-    ControlPlan plan = kxc::api::LowerRelayToControlPlan(first);
+    ControlPlan plan = LowerRelayToControlPlan(first);
     TEST_CHECK(plan.regions.size() == 1 && plan.regions[0].tasks.size() == 2,
                "Let must not create a task and a shared Call must be produced once");
     const ControlTask& repeated = plan.regions[0].tasks[1];
@@ -138,14 +144,14 @@ bool TestCanonicalAndRepeatedArguments() {
     Var x2("x", kI64), y2("y", kI64), shared2("shared", kI64);
     Function equivalent({x2, y2}, Let(shared2, Add(x2, y2), Add(shared2, shared2)));
     TEST_CHECK(plan.CanonicalText() ==
-                   kxc::api::LowerRelayToControlPlan(equivalent).CanonicalText(),
+                   LowerRelayToControlPlan(equivalent).CanonicalText(),
                "equivalent Relay must have deterministic ControlPlan text");
 
     Var px("px", kI64), py("py", kI64), pz("pz", kI64);
     Tuple nested({Add(px, py), Tuple({Add(py, pz), Add(pz, px)})});
     Function projection({px, py, pz}, TupleGetItem(nested, 1));
     ControlPlan projection_plan =
-        kxc::api::LowerRelayToControlPlan(projection);
+        LowerRelayToControlPlan(projection);
     TEST_CHECK(projection_plan.graph_outputs.size() == 2 &&
                    projection_plan.regions[0].tasks.size() == 3,
                "nested tuple projection must preserve selected leaves and pure dead work");
@@ -161,7 +167,7 @@ bool TestCanonicalAndRepeatedArguments() {
         "nested tuple projection must execute the complete selected field");
 
     Var nested_input("nested_input", kI64);
-    ControlPlan nested_output_plan = kxc::api::LowerRelayToControlPlan(
+    ControlPlan nested_output_plan = LowerRelayToControlPlan(
         Function({nested_input}, Call(UnresolvedNestedOutputOp(), {nested_input})));
     TEST_CHECK(
         nested_output_plan.graph_outputs.size() == 3 &&
@@ -176,7 +182,7 @@ bool TestIfExecutionAndNestedTuplePhi() {
     Var p("p", TensorType({}, "bool")), q("q", TensorType({}, "bool"));
     Var x("x", kI64), y("y", kI64);
     Function simple({p, x, y}, If(p, Add(x, y), Mul(x, y)));
-    ControlPlan simple_plan = kxc::api::LowerRelayToControlPlan(simple);
+    ControlPlan simple_plan = LowerRelayToControlPlan(simple);
     ControlPlanReferenceExecutor executor(ArithmeticKernels());
     const auto yes = executor.Execute(simple_plan, {{0, FakeValue::Bool(true)},
                                                      {1, FakeValue::I64(2)},
@@ -192,7 +198,7 @@ bool TestIfExecutionAndNestedTuplePhi() {
         {}, kxc::runtime::DataTypeFromString("int64"), kxc::Device::CPU());
     kxc::Constant constant(constant_data);
     Function captured({p, x}, If(p, Add(x, constant), Mul(x, constant)));
-    ControlPlan captured_plan = kxc::api::LowerRelayToControlPlan(captured);
+    ControlPlan captured_plan = LowerRelayToControlPlan(captured);
     TEST_CHECK(captured_plan.constant_values.size() == 1,
                "branch constant capture must remain an explicit plan source");
     const auto captured_result = executor.Execute(
@@ -206,7 +212,7 @@ bool TestIfExecutionAndNestedTuplePhi() {
     Expr inner = If(q, Tuple({Add(x, y), Mul(x, y)}),
                     Tuple({Mul(x, y), Add(x, y)}));
     Function nested({p, q, x, y}, If(p, inner, Tuple({Add(x, x), Mul(y, y)})));
-    ControlPlan nested_plan = kxc::api::LowerRelayToControlPlan(nested);
+    ControlPlan nested_plan = LowerRelayToControlPlan(nested);
     std::size_t branches = 0;
     for (const auto& region : nested_plan.regions) {
         for (const auto& task : region.tasks) {
@@ -230,7 +236,7 @@ bool TestRelaySourceWhileExecution() {
     const Expr body = Tuple(kxc::Array<Expr>{Add(element, increment)});
     const Function loop({initial, increment},
                         While(initial_state, state, condition, body, 3));
-    const ControlPlan plan = kxc::api::LowerRelayToControlPlan(loop);
+    const ControlPlan plan = LowerRelayToControlPlan(loop);
     const auto run = [&plan](std::int64_t start) {
         return ControlPlanReferenceExecutor(ArithmeticKernels()).Execute(
             plan, {{plan.graph_inputs[0], FakeValue::I64(start)},
@@ -252,7 +258,7 @@ bool TestRelaySourceWhileExecution() {
                "Relay-source While trip counts must be exact");
     Function exhausted({initial, increment},
         While(initial_state, state, condition, body, 1));
-    const ControlPlan exhausted_plan = kxc::api::LowerRelayToControlPlan(exhausted);
+    const ControlPlan exhausted_plan = LowerRelayToControlPlan(exhausted);
     const std::string exhausted_error = ErrorText([&] {
         (void)ControlPlanReferenceExecutor(ArithmeticKernels()).Execute(
             exhausted_plan, {{exhausted_plan.graph_inputs[0], FakeValue::I64(0)},
@@ -270,7 +276,7 @@ bool TestRelaySourceWhileExecution() {
                                      TupleGetItem(shifted_state, 2),
                                      TupleGetItem(shifted_state, 3), tail,
                                      Add(TupleGetItem(shifted_state, 4), increment)});
-    const ControlPlan shifted_plan = kxc::api::LowerRelayToControlPlan(Function(
+    const ControlPlan shifted_plan = LowerRelayToControlPlan(Function(
         {first, second, third, tail, value, increment},
         While(shifted_initial, shifted_state, shifted_condition, shifted_body, 3)));
     const auto shifted = ControlPlanReferenceExecutor(ArithmeticKernels()).Execute(
@@ -294,7 +300,7 @@ bool TestWhileMappingAndGates() {
     Var state("state", kI64);
     Function loop({predicate, initial, increment},
                   While(initial, state, predicate, Add(state, increment), 3));
-    const ControlPlan plan = kxc::api::LowerRelayToControlPlan(loop);
+    const ControlPlan plan = LowerRelayToControlPlan(loop);
     TEST_CHECK(plan.regions.size() == 3 && plan.graph_outputs.size() == 1,
                "While must lower to condition/body regions and one carried result");
     const ControlTask& task = plan.regions[0].tasks.front();
@@ -307,14 +313,14 @@ bool TestWhileMappingAndGates() {
                    carried.initial == plan.graph_inputs[1] &&
                    carried.body_argument != carried.backedge,
                "LoopSpec must retain result/initial/body-argument/backedge roles");
-    TEST_CHECK(plan.CanonicalText() == kxc::api::LowerRelayToControlPlan(loop).CanonicalText(),
+    TEST_CHECK(plan.CanonicalText() == LowerRelayToControlPlan(loop).CanonicalText(),
                "While ControlPlan text must be deterministic");
 
     Var inner_predicate("inner_predicate", TensorType({}, "bool"));
     Function nested({predicate, inner_predicate, initial, increment},
         While(initial, state, predicate,
               If(inner_predicate, Add(state, increment), state), 3));
-    const ControlPlan nested_plan = kxc::api::LowerRelayToControlPlan(nested);
+    const ControlPlan nested_plan = LowerRelayToControlPlan(nested);
     std::size_t loops = 0, branches = 0;
     for (const auto& region : nested_plan.regions) for (const auto& nested_task : region.tasks) {
         loops += nested_task.kind == ControlTaskKind::kLoop;
@@ -349,7 +355,7 @@ bool TestWhileMappingAndGates() {
 bool TestStaticAndControlGates() {
     Var dynamic("dynamic", TensorType({-1}, "int64"));
     const std::string dynamic_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(Function({dynamic}, dynamic));
+        (void)LowerRelayToControlPlan(Function({dynamic}, dynamic));
     });
     TEST_CHECK(dynamic_error.find("static_exact_shape") != std::string::npos,
                "dynamic shapes must retain capability diagnostics");
@@ -357,7 +363,7 @@ bool TestStaticAndControlGates() {
     Var predicate("predicate", TensorType({}, "bool")), x("x", kI64), y("y", kI64);
     predicate.set_virtual_device(kxc::VirtualDevice::ForDevice(kxc::Device::CUDA()));
     const std::string predicate_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(Function({predicate, x, y}, If(predicate, x, y)));
+        (void)LowerRelayToControlPlan(Function({predicate, x, y}, If(predicate, x, y)));
     });
     TEST_CHECK(predicate_error.find("branch predicate must be a CPU scalar bool") != std::string::npos,
                "ControlPlan must reject an implicit non-CPU predicate copy");
@@ -367,7 +373,7 @@ bool TestStaticAndControlGates() {
         kxc::VirtualDevice::ForDevice(kxc::Device::CUDA()));
     Var loop_initial("loop_initial", kI64), loop_state("loop_state", kI64);
     const std::string loop_condition_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(Function(
+        (void)LowerRelayToControlPlan(Function(
             {loop_condition, loop_initial},
             While(loop_initial, loop_state, loop_condition, loop_state, 0)));
     });
@@ -381,7 +387,7 @@ bool TestStaticAndControlGates() {
     placement_state.set_virtual_device(
         kxc::VirtualDevice::ForDevice(kxc::Device::CUDA()));
     const std::string loop_state_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(Function(
+        (void)LowerRelayToControlPlan(Function(
             {placement_condition, placement_initial},
             While(placement_initial, placement_state, placement_condition,
                   placement_state, 0)));
@@ -395,7 +401,7 @@ bool TestStaticAndControlGates() {
     If mismatch(mismatch_predicate, mismatch_x, mismatch_y);
     mismatch.set_virtual_device(kxc::VirtualDevice::ForDevice(kxc::Device::CUDA()));
     const std::string mismatch_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(
+        (void)LowerRelayToControlPlan(
             Function({mismatch_predicate, mismatch_x, mismatch_y}, mismatch));
     });
     TEST_CHECK(mismatch_error.find("phi sources/results") != std::string::npos,
@@ -410,7 +416,7 @@ bool TestStaticAndControlGates() {
     cross_ordinal.set_virtual_device(
         kxc::VirtualDevice::ForDevice(kxc::Device::CUDA(1)));
     const std::string ordinal_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(
+        (void)LowerRelayToControlPlan(
             Function({cuda_x, cuda_y}, cross_ordinal));
     });
     TEST_CHECK(ordinal_error.find("one explicit device") != std::string::npos,
@@ -422,7 +428,7 @@ bool TestStaticAndControlGates() {
     placed_tuple.set_virtual_device(
         kxc::VirtualDevice::ForDevice(kxc::Device::CUDA(1)));
     const std::string structural_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(
+        (void)LowerRelayToControlPlan(
             Function({structural_x, structural_y}, placed_tuple));
     });
     TEST_CHECK(structural_error.find("structural alias placement") !=
@@ -435,7 +441,7 @@ bool TestStaticAndControlGates() {
     placed_let.set_virtual_device(
         kxc::VirtualDevice::ForDevice(kxc::Device::CUDA(1)));
     const std::string let_placement_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(
+        (void)LowerRelayToControlPlan(
             Function({structural_x, structural_y}, placed_let));
     });
     TEST_CHECK(let_placement_error.find("structural alias placement") !=
@@ -448,7 +454,7 @@ bool TestStaticAndControlGates() {
     Var gate_x("gate_x", kI64), gate_y("gate_y", kI64);
     add_node->spec.alias_contract = "must_alias";
     const std::string alias_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(Function({gate_x, gate_y}, Add(gate_x, gate_y)));
+        (void)LowerRelayToControlPlan(Function({gate_x, gate_y}, Add(gate_x, gate_y)));
     });
     add_node->spec = saved_spec;
     TEST_CHECK(alias_error.find("non-aliasing kernel") != std::string::npos,
@@ -456,7 +462,7 @@ bool TestStaticAndControlGates() {
 
     add_node->spec.effect = kxc::relay::OperatorEffectKind::kStateful;
     const std::string effect_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(Function({gate_x, gate_y}, Add(gate_x, gate_y)));
+        (void)LowerRelayToControlPlan(Function({gate_x, gate_y}, Add(gate_x, gate_y)));
     });
     add_node->spec = saved_spec;
     TEST_CHECK(effect_error.find("pure deterministic non-aliasing kernel") != std::string::npos,
@@ -466,7 +472,7 @@ bool TestStaticAndControlGates() {
     const std::any saved_lowering = add_node->attrs.at(lowering_key);
     add_node->attrs[lowering_key] = kxc::relay::FRelayToTE{};
     const std::string empty_hook_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(
+        (void)LowerRelayToControlPlan(
             Function({gate_x, gate_y}, Add(gate_x, gate_y)));
     });
     add_node->attrs[lowering_key] = saved_lowering;
@@ -476,7 +482,7 @@ bool TestStaticAndControlGates() {
 
     Var duplicate("duplicate", kI64);
     const std::string duplicate_error = ErrorText([&] {
-        (void)kxc::api::LowerRelayToControlPlan(Function({duplicate}, Tuple({duplicate, duplicate})));
+        (void)LowerRelayToControlPlan(Function({duplicate}, Tuple({duplicate, duplicate})));
     });
     TEST_CHECK(duplicate_error.find("duplicate graph output") != std::string::npos,
                "ControlPlan v2 graph outputs must be unique");

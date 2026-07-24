@@ -17,14 +17,15 @@ option(KXC_ENABLE_LLVM "Enable LLVM backend for codegen" ON)
 option(KXC_ENABLE_REGION_TASK_DAG
   "Enable experimental RuntimeSession execution of frozen Region task DAGs" OFF)
 option(KXC_ENABLE_CONTROL_RUNTIME
-  "Enable experimental static-exact CPU control runtime execution" OFF)
+  "Enable default-OFF static-exact CPU control compilation and execution" OFF)
+if(DEFINED KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION)
+  message(FATAL_ERROR "KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION was removed; use KXC_ENABLE_CONTROL_RUNTIME")
+endif()
 if(DEFINED KXC_ENABLE_RUNTIME_SHAPE_TASKS OR DEFINED KXC_ENABLE_RUNTIME_SHAPE_CUDA OR DEFINED KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE)
   message(FATAL_ERROR "Legacy RuntimeShape/bridge CMake cache variables were removed by W4-1; use KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI")
 endif()
 option(KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
   "Enable nonconstant CompiledModule invocation contracts" OFF)
-option(KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
-  "Enable default-OFF real-artifact static CPU Relay If compilation" OFF)
 option(KXC_ENABLE_SHAPE_PRODUCTION_EXACT
   "Enable the production exact Relay/compiler/shape adapter" OFF)
 option(KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE
@@ -75,7 +76,6 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/capability.h
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
-  include/kxc/compiler/control_flow.h
   include/kxc/compiler/artifact.h
   include/kxc/compiler/identity.h
   include/kxc/compiler/pipeline.h
@@ -120,7 +120,6 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/relay/visitor.h
   include/kxc/runtime/compiled_module.h
   include/kxc/runtime/control_execution_plan.h
-  include/kxc/runtime/control_plan.h
   include/kxc/runtime/control_session.h
   include/kxc/runtime/device.h
   include/kxc/runtime/device_api.h
@@ -555,7 +554,6 @@ function(kxc_configure_module_obj target)
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
     KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
-    KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>
@@ -742,7 +740,6 @@ function(kxc_add_runtime_exe target source_file)
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
     KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
-    KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>

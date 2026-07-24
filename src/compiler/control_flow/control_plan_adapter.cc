@@ -1,8 +1,8 @@
 /*! \file src/compiler/control_flow/control_plan_adapter.cc
- * \brief Experimental fixture binding from ControlPlan v2 to runtime schema v1.
+ * \brief Compiler-private binding from ControlPlan v2 to runtime schema v1.
  */
 
-#include "kxc/compiler/control_flow.h"
+#include "internal_lowering.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -11,9 +11,9 @@
 #include <unordered_set>
 #include <utility>
 
-#include "kxc/support/hash.h"
+#include "../../runtime/internal/control_execution_plan_access.h"
 
-namespace kxc::api {
+namespace kxc::api::internal {
 namespace {
 
 [[noreturn]] void Fail(const std::string& detail) {
@@ -71,20 +71,20 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
         plan.constant_values.begin(), plan.constant_values.end());
     std::unordered_map<runtime::TaskId, const ControlKernelBinding*> binding_by_task;
     for (const auto& binding : bindings) {
-        const bool production = static_cast<bool>(binding.production_lease);
         if (binding.task_id < 0 || !binding.module.defined() ||
             binding.entry_symbol == "" ||
             !binding.module.HasFunction(binding.entry_symbol) ||
-            (production == (binding.binding_revision != 0))) {
-            Fail("each binding requires task id, ready module entry, and exactly one fixture revision or compiler-minted production lease");
+            !binding.retention_owner) {
+            Fail("each binding requires task id, ready module entry, and retention owner");
         }
         if (!binding_by_task.emplace(binding.task_id, &binding).second) {
             Fail("duplicate binding task id");
         }
     }
 
-    runtime::ControlExecutionPlanSpec resolved;
-    resolved.schema_version = runtime::ControlExecutionPlanSpec::kSchemaVersion;
+    runtime::internal::ControlExecutionPlanSpec resolved;
+    resolved.schema_version =
+        runtime::internal::ControlExecutionPlanSpec::kSchemaVersion;
     resolved.source_control_plan_version = runtime::ControlPlan::kSchemaVersion;
     resolved.effect_model =
         runtime::ControlExecutionEffectModel::kPureFreshKernelOutputsV1;
@@ -122,21 +122,10 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
                         Fail("missing kernel task binding for task " + std::to_string(task.id));
                     }
                     const ControlKernelBinding& supplied = *found->second;
-                    const codegen::KernelSignature declared_signature =
-                        supplied.module.signature(supplied.entry_symbol);
-                    const codegen::KernelLaunchMetadata declared_metadata =
-                        supplied.module.launch_metadata(supplied.entry_symbol);
-                    if (supplied.production_lease &&
-                        !supplied.production_lease->Covers(
-                            task.id, supplied.entry_symbol,
-                            support::HashText(declared_signature.CanonicalBytes()),
-                            support::HashText(declared_metadata.CanonicalBytes()))) {
-                        Fail("production lease does not cover the selected task/module artifact");
-                    }
-                    runtime::BoundControlKernel kernel(
-                        supplied.module, supplied.entry_symbol,
-                        supplied.binding_revision,
-                        std::static_pointer_cast<const void>(supplied.production_lease));
+                    runtime::BoundControlKernel kernel =
+                        runtime::internal::ControlExecutionPlanAccess::BindKernel(
+                            supplied.module, supplied.entry_symbol,
+                            supplied.retention_owner);
                     const Array<codegen::KernelArgSpec> signature = kernel.signature().arguments();
                     std::size_t expected_non_outputs = 0;
                     for (const auto& argument : signature) {
@@ -189,7 +178,8 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
     for (const auto& binding : binding_by_task) {
         if (!kernel_tasks.count(binding.first)) Fail("binding targets a non-kernel task");
     }
-    return runtime::ControlExecutionPlan(std::move(resolved));
+    return runtime::internal::ControlExecutionPlanAccess::Create(
+        std::move(resolved));
 }
 
-}  // namespace kxc::api
+}  // namespace kxc::api::internal

@@ -10,9 +10,9 @@
 #include <vector>
 
 #include "kxc/compiler/compile_config.h"
-#include "kxc/compiler/control_flow.h"
 #include "kxc/compiler/artifact.h"
 #include "kxc/runtime/compiled_module.h"
+#include "kxc/runtime/control_execution_plan.h"
 #include "kxc/runtime/executable_plan.h"
 #include "kxc/runtime/task_plan.h"
 #include "kxc/support/container.h"
@@ -49,26 +49,25 @@ private:
 static_assert(std::is_copy_constructible_v<CompiledGraph>);
 static_assert(std::is_copy_assignable_v<CompiledGraph>);
 
-/*! \brief Immutable compiler-only result for one resolved control execution plan.
+/*! \brief Immutable compiler result for one resolved control execution plan.
  *
- * The runtime execution plan retains the same process-local artifact lease as
- * this result.  It contains no Relay, TE, cache lookup, or compiler callback.
+ * Bound kernels privately retain the same process-local pin owner. The result
+ * contains no Relay, TE, cache lookup, or compiler callback.
  */
 class CompiledControlFlowGraph final {
 public:
-    const runtime::ControlExecutionPlan& plan() const noexcept;
-    const std::shared_ptr<const ControlFlowArtifactLease>& artifact_lease() const noexcept;
+    bool defined() const noexcept;
+    const runtime::ControlExecutionPlan& plan() const;
 
 private:
-    CompiledControlFlowGraph(
-        runtime::ControlExecutionPlan plan,
-        std::shared_ptr<const ControlFlowArtifactLease> artifact_lease);
-
+    struct State;
+    explicit CompiledControlFlowGraph(std::shared_ptr<const State> state);
     friend class Compiler;
-
-    runtime::ControlExecutionPlan plan_;
-    std::shared_ptr<const ControlFlowArtifactLease> artifact_lease_;
+    std::shared_ptr<const State> state_;
 };
+
+static_assert(std::is_copy_constructible_v<CompiledControlFlowGraph>);
+static_assert(std::is_copy_assignable_v<CompiledControlFlowGraph>);
 
 /*!
  * \brief Relay Function 到可执行模块的统一编译入口。
@@ -89,9 +88,9 @@ public:
     /*! \brief Explicit default-OFF production path for static CPU Relay control.
      *
      * Supports static If and bounded condition-before-body While on CPU:0/default
-     * stream with real available backend artifacts.  The compiler mints and
-     * retains a process-local typed artifact lease; it is not authentication
-     * or external provenance.  Compiler::Compile remains the static-dataflow
+     * stream with real available backend artifacts. Bound kernels privately
+     * retain one process-local pin owner; it is not authentication or external
+     * provenance. Compiler::Compile remains the static-dataflow
      * API and continues to reject Relay control flow.
      */
     static CompiledControlFlowGraph CompileControlFlowExact(

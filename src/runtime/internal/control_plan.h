@@ -1,4 +1,4 @@
-/*! \file include/kxc/runtime/control_plan.h
+/*! \file src/runtime/internal/control_plan.h
  * \brief Static-exact, runtime-neutral structured control-flow plan v2.
  */
 #pragma once

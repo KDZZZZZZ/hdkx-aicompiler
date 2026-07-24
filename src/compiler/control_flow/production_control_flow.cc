@@ -5,8 +5,6 @@
 #include "kxc/compiler/compiler.h"
 
 #include <algorithm>
-#include <atomic>
-#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -15,94 +13,37 @@
 #include <vector>
 
 #include "internal_lowering.h"
-#include "production_control_flow_test.h"
-#include "kxc/support/hash.h"
 
 namespace kxc::api {
 
-struct ControlFlowArtifactLease::Entry final {
-    runtime::TaskId task_id{-1};
-    String entry_symbol;
-    std::string signature_digest;
-    std::string launch_metadata_digest;
-};
-
-struct ControlFlowArtifactLease::State final {
-    std::uint64_t generation{0};
-    std::vector<Entry> entries;
-    // The lease is the strong owner of exactly the pins selected below.
-    std::vector<ArtifactPin> artifact_pins;
-};
-
-ControlFlowArtifactLease::ControlFlowArtifactLease(
-    std::shared_ptr<const State> state) : state_(std::move(state)) {}
-
-std::uint64_t ControlFlowArtifactLease::generation() const noexcept {
-    return state_ ? state_->generation : 0;
-}
-
-bool ControlFlowArtifactLease::Covers(
-    runtime::TaskId task_id, const String& entry_symbol,
-    const std::string& signature_digest,
-    const std::string& launch_metadata_digest) const {
-    if (!state_ || state_->generation == 0) return false;
-    for (const Entry& entry : state_->entries) {
-        if (entry.task_id == task_id && entry.entry_symbol == entry_symbol &&
-            entry.signature_digest == signature_digest &&
-            entry.launch_metadata_digest == launch_metadata_digest) {
-            return true;
-        }
+struct CompiledControlFlowGraph::State final {
+    explicit State(runtime::ControlExecutionPlan plan)
+        : plan(std::move(plan)) {
+        this->plan.Validate();
     }
-    return false;
-}
+    const runtime::ControlExecutionPlan plan;
+};
 
 CompiledControlFlowGraph::CompiledControlFlowGraph(
-    runtime::ControlExecutionPlan plan,
-    std::shared_ptr<const ControlFlowArtifactLease> artifact_lease)
-    : plan_(std::move(plan)), artifact_lease_(std::move(artifact_lease)) {
-    if (!plan_.defined() || !artifact_lease_ || artifact_lease_->generation() == 0) {
-        throw std::invalid_argument(
-            "CompiledControlFlowGraph requires a defined plan and artifact lease generation");
-    }
-    plan_.Validate();
+    std::shared_ptr<const State> state) : state_(std::move(state)) {}
+
+bool CompiledControlFlowGraph::defined() const noexcept {
+    return static_cast<bool>(state_);
 }
 
-const runtime::ControlExecutionPlan& CompiledControlFlowGraph::plan() const noexcept {
-    return plan_;
-}
-
-const std::shared_ptr<const ControlFlowArtifactLease>&
-CompiledControlFlowGraph::artifact_lease() const noexcept {
-    return artifact_lease_;
+const runtime::ControlExecutionPlan& CompiledControlFlowGraph::plan() const {
+    if (!state_) throw std::logic_error("CompiledControlFlowGraph is undefined");
+    return state_->plan;
 }
 
 namespace {
 
-#ifndef KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
-#define KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION 0
+#ifndef KXC_ENABLE_CONTROL_RUNTIME
+#define KXC_ENABLE_CONTROL_RUNTIME 0
 #endif
-
-// This stores the most recently issued generation.  Keeping the terminal
-// value makes overflow a permanent fail-closed state instead of wrapping.
-std::atomic<std::uint64_t> last_lease_generation{0};
 
 [[noreturn]] void Fail(const std::string& detail) {
     throw std::invalid_argument("CompileControlFlowExact: " + detail);
-}
-
-std::uint64_t MintLeaseGeneration() {
-    std::uint64_t previous = last_lease_generation.load(std::memory_order_relaxed);
-    for (;;) {
-        if (previous == std::numeric_limits<std::uint64_t>::max()) {
-            Fail("process-local artifact lease generation overflowed");
-        }
-        const std::uint64_t generation = previous + 1;
-        if (last_lease_generation.compare_exchange_weak(
-                previous, generation, std::memory_order_relaxed,
-                std::memory_order_relaxed)) {
-            return generation;
-        }
-    }
 }
 
 std::vector<runtime::ValueId> AbiNonOutputs(const runtime::ControlTask& task,
@@ -153,31 +94,17 @@ struct ResolvedBinding final {
     String entry_symbol;
     std::vector<runtime::ValueId> abi_non_output_value_ids;
     ArtifactPin artifact_pin;
-    std::string signature_digest;
-    std::string launch_metadata_digest;
 };
 
 }  // namespace
 
-namespace internal {
-
-std::uint64_t MintControlFlowLeaseGenerationForTest() {
-    return MintLeaseGeneration();
-}
-
-void SetControlFlowLeaseGenerationForTest(std::uint64_t last_generation) {
-    last_lease_generation.store(last_generation, std::memory_order_relaxed);
-}
-
-}  // namespace internal
-
 CompiledControlFlowGraph Compiler::CompileControlFlowExact(
     Function function, CompileConfig config) {
-#if !KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
+#if !KXC_ENABLE_CONTROL_RUNTIME
     (void)function;
     (void)config;
     throw std::runtime_error(
-        "CompileControlFlowExact is disabled by KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION");
+        "CompileControlFlowExact is disabled by KXC_ENABLE_CONTROL_RUNTIME");
 #else
     config.Validate();
     internal::ControlPlanLowering lowered =
@@ -204,43 +131,36 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
                 !compiled.module().HasFunction(calls[0]->symbol)) {
                 Fail("branch Call must resolve to exactly one real immutable compiler artifact");
             }
-            const auto signature = compiled.module().signature(calls[0]->symbol);
-            const auto metadata = compiled.module().launch_metadata(calls[0]->symbol);
             resolved.push_back(ResolvedBinding{
                 task.id, compiled.module(), calls[0]->symbol,
-                AbiNonOutputs(task, lowered.plan), pins.front(),
-                support::HashText(signature.CanonicalBytes()),
-                support::HashText(metadata.CanonicalBytes())});
+                AbiNonOutputs(task, lowered.plan), pins.front()});
         }
     }
     if (resolved.empty()) {
         Fail("requires at least one real branch kernel; a pure structural If has no production artifact");
     }
 
-    const std::uint64_t generation = MintLeaseGeneration();
-    auto state = std::make_shared<ControlFlowArtifactLease::State>();
-    state->generation = generation;
-    state->entries.reserve(resolved.size());
-    state->artifact_pins.reserve(resolved.size());
+    std::vector<ArtifactPin> pins;
+    pins.reserve(resolved.size());
     for (const ResolvedBinding& binding : resolved) {
-        state->entries.push_back(ControlFlowArtifactLease::Entry{
-            binding.task_id, binding.entry_symbol, binding.signature_digest,
-            binding.launch_metadata_digest});
-        state->artifact_pins.push_back(binding.artifact_pin);
+        pins.push_back(binding.artifact_pin);
     }
-    const auto lease = std::shared_ptr<const ControlFlowArtifactLease>(
-        new ControlFlowArtifactLease(std::move(state)));
+    const std::shared_ptr<const void> retention_owner =
+        std::make_shared<const std::vector<ArtifactPin>>(std::move(pins));
 
-    std::vector<ControlKernelBinding> bindings;
+    std::vector<internal::ControlKernelBinding> bindings;
     bindings.reserve(resolved.size());
     for (ResolvedBinding& binding : resolved) {
-        bindings.push_back(ControlKernelBinding{
-            binding.task_id, std::move(binding.module), std::move(binding.entry_symbol),
-            0, std::move(binding.abi_non_output_value_ids), lease});
+        bindings.push_back(internal::ControlKernelBinding{
+            binding.task_id, std::move(binding.module),
+            std::move(binding.entry_symbol),
+            std::move(binding.abi_non_output_value_ids), retention_owner});
     }
     runtime::ControlExecutionPlan plan =
-        BindControlPlanForRuntime(lowered.plan, bindings);
-    return CompiledControlFlowGraph(std::move(plan), std::move(lease));
+        internal::BindControlPlanForRuntime(lowered.plan, bindings);
+    return CompiledControlFlowGraph(
+        std::make_shared<const CompiledControlFlowGraph::State>(
+            std::move(plan)));
 #endif
 }
 
