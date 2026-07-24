@@ -1259,6 +1259,10 @@ endif()
 if(KXC_BUILD_CODEGEN_TESTS AND KXC_USE_LLVM)
   kxc_add_runtime_exe(codegen_llvm_test test/codegen_llvm_test.cpp)
   kxc_add_runtime_exe(op_numeric_llvm_test test/op_numeric_llvm_test.cpp)
+  if(KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI)
+    kxc_add_runtime_exe(compiled_module_dynamic_llvm_test
+      test/compiled_module_dynamic_llvm_test.cpp)
+  endif()
 
   add_custom_target(run_codegen_llvm_test
     COMMAND "$<TARGET_FILE:codegen_llvm_test>"
@@ -1275,6 +1279,15 @@ if(KXC_BUILD_CODEGEN_TESTS AND KXC_USE_LLVM)
     USES_TERMINAL
     COMMENT "Run per-op LLVM numeric tests"
   )
+  if(TARGET compiled_module_dynamic_llvm_test)
+    add_custom_target(run_compiled_module_dynamic_llvm_test
+      COMMAND "$<TARGET_FILE:compiled_module_dynamic_llvm_test>"
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+      DEPENDS compiled_module_dynamic_llvm_test
+      USES_TERMINAL
+      COMMENT "Run real LLVM dynamic CompiledModule Invoke E2E"
+    )
+  endif()
 endif()
 
 # CTest is the CI execution surface. Keep the existing run_* custom targets for
@@ -1303,6 +1316,7 @@ endforeach()
 
 kxc_add_ctest_if_target(codegen_llvm_test "llvm;codegen")
 kxc_add_ctest_if_target(op_numeric_llvm_test "llvm;numeric")
+kxc_add_ctest_if_target(compiled_module_dynamic_llvm_test "llvm;dynamic-module;e2e;numeric")
 if(KXC_USE_LLVM)
   kxc_add_ctest_if_target(onnx_importer_test "llvm;onnx;protobuf;e2e;integration")
 else()

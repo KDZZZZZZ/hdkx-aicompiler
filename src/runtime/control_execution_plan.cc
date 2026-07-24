@@ -538,9 +538,14 @@ BoundControlKernel::BoundControlKernel(api::CompiledModule module,
         throw std::invalid_argument(
             "BoundControlKernel fixture binding requires CPU:0 metadata");
     }
-    Map<String, NDArray> constants = SnapshotCpuConstants(module, signature);
+    // Bind an immutable, one-entry module snapshot.  Canonical invocation must
+    // still resolve the entry by symbol, but it must not depend on a mutable
+    // caller-owned CompiledModule table after this control binding is built.
+    api::CompiledModule bound_module = api::internal::BuildCompiledModule(
+        BuildTarget(metadata->device), {entry->second}, module.constants());
+    Map<String, NDArray> constants = SnapshotCpuConstants(bound_module, signature);
     state_ = std::make_shared<State>(
-        std::move(module), signature, metadata, executable,
+        std::move(bound_module), signature, metadata, executable,
         std::move(constants), binding_revision, std::move(production_lease));
     Validate();
 }

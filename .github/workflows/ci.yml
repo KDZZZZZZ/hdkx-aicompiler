@@ -252,7 +252,7 @@ jobs:
           operator_compilation_test codegen_llvm_test op_numeric_llvm_test
           onnx_importer_test runtime_session_test shape_production_exact_test
           restricted_symbolic_shape_test compiled_module_test
-          control_runtime_integration_test
+          compiled_module_dynamic_llvm_test control_runtime_integration_test
           adaptive_production_experimental_test adaptive_hot_swap_v2_test
 
       - name: Run production compiler-to-task-DAG E2E
@@ -264,7 +264,7 @@ jobs:
         run: >
           ctest --test-dir out/build/ci-llvm --output-on-failure
           --no-tests=error
-          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|control_runtime_integration_test|adaptive_production_experimental_test|adaptive_hot_swap_v2_test)$'
+          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|compiled_module_dynamic_llvm_test|onnx_importer_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|control_runtime_integration_test|adaptive_production_experimental_test|adaptive_hot_swap_v2_test)$'
 
   python-onnx-importer:
     name: Python ONNX importer tests

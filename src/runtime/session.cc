@@ -168,6 +168,13 @@ ValidatedPlanContract ValidateModuleAndPlan(
             throw std::invalid_argument(
                 context + " targets a different execution device");
         }
+        const api::ModuleInvocationContract contract =
+            module.invocation_contract(call->symbol);
+        if (!contract.IsConstantShape() ||
+            !contract.runtime_extent_scalars().empty()) {
+            throw std::invalid_argument(
+                context + " requires unsupported nonstatic/scalar module invocation ABI");
+        }
 
         Array<int64_t> regular_inputs;
         Array<int64_t> constant_inputs;
@@ -435,6 +442,13 @@ ValidatedPlanContract ValidateModuleAndTaskPlan(
         if (metadata->device != device || task->device != device) {
             throw std::invalid_argument(
                 context + " targets a different execution device");
+        }
+        const api::ModuleInvocationContract contract =
+            module.invocation_contract(task->symbol);
+        if (!contract.IsConstantShape() ||
+            !contract.runtime_extent_scalars().empty()) {
+            throw std::invalid_argument(
+                context + " requires unsupported nonstatic/scalar module invocation ABI");
         }
 
         Array<int64_t> regular_inputs;
