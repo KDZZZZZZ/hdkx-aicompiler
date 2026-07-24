@@ -17,7 +17,7 @@
         "reason": "Relay softmax is registered for static floating-point tensors; masked/all-masked semantics remain unsupported.",
         "evidence": [
           "src/relay/op/nn/softmax.cc",
-          "test/relay_op_contract.json"
+          "contracts/relay_op_contract.json"
         ]
       },
       "lowering": {
@@ -299,7 +299,7 @@
         "evidence": [
           "src/relay/type_infer.cc",
           "test/infer_type_test.cpp",
-          "test/relay_op_contract.json"
+          "contracts/relay_op_contract.json"
         ]
       },
       "lowering": {

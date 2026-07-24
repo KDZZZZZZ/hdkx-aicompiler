@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "../src/runtime/internal/control_plan.h"
+#include "../src/compiler/control_flow/control_plan.h"
 
 namespace {
 using kxc::Device;
@@ -87,7 +87,7 @@ ControlPlan LoopPlan(std::int64_t max_trip_count = 3) {
 
 bool TestValidAndCanonical() {
     ControlPlan plan = BranchPlan();
-    plan.Validate();
+    plan.ValidateStaticExact();
     const std::string first = plan.CanonicalText();
     const std::string second = plan.CanonicalText();
     CHECK(first == second && first.find("ControlPlan/v2") == 0, "canonical text must be stable");
@@ -97,15 +97,15 @@ bool TestValidAndCanonical() {
     std::reverse(reordered.regions.begin(), reordered.regions.end());
     CHECK(reordered.CanonicalText() == first,
           "canonical text must follow ids and explicit region_order");
-    LoopPlan().Validate();
-    LinearPlan().Validate();
+    LoopPlan().ValidateStaticExact();
+    LinearPlan().ValidateStaticExact();
     ControlPlan repeated_operand = LinearPlan();
     repeated_operand.regions[0].tasks[0].argument_values = {0, 0};
-    repeated_operand.Validate();
+    repeated_operand.ValidateStaticExact();
     ControlPlan constant_source = LinearPlan();
     constant_source.graph_inputs.clear();
     constant_source.constant_values = {0};
-    constant_source.Validate();
+    constant_source.ValidateStaticExact();
 
     ControlPlan cuda_data = BranchPlan();
     for (std::size_t i = 1; i < cuda_data.values.size(); ++i) {
@@ -113,88 +113,88 @@ bool TestValidAndCanonical() {
     }
     cuda_data.regions[1].tasks[0].device = Device::CUDA(1);
     cuda_data.regions[2].tasks[0].device = Device::CUDA(1);
-    cuda_data.Validate();
+    cuda_data.ValidateStaticExact();
     return true;
 }
 
 bool TestSchemaAndValueContracts() {
     ControlPlan plan = BranchPlan();
     plan.schema_version = 1;
-    CHECK(Throws([&] { plan.Validate(); }), "legacy v1 schema must fail closed");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "legacy v1 schema must fail closed");
     plan = BranchPlan(); plan.values[2].shape = {-1};
-    CHECK(Throws([&] { plan.Validate(); }), "dynamic dimensions must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "dynamic dimensions must fail");
     plan = BranchPlan(); plan.values[2].dtype = "unknown";
-    CHECK(Throws([&] { plan.Validate(); }), "malformed dtype must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "malformed dtype must fail");
     plan = BranchPlan(); plan.values[2].device = Device();
-    CHECK(Throws([&] { plan.Validate(); }), "undefined device must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "undefined device must fail");
     plan = BranchPlan(); plan.values.push_back(plan.values[0]);
-    CHECK(Throws([&] { plan.Validate(); }), "duplicate value must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "duplicate value must fail");
     plan = BranchPlan(); plan.values[0].source_locator.clear();
-    CHECK(Throws([&] { plan.Validate(); }), "missing value locator must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "missing value locator must fail");
     plan = LinearPlan(); plan.values[1].device = Device::CUDA();
-    CHECK(Throws([&] { plan.Validate(); }), "kernel device mismatch must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "kernel device mismatch must fail");
     plan = LinearPlan(); plan.regions[0].tasks[0].stream = "async";
-    CHECK(Throws([&] { plan.Validate(); }), "undeclared stream semantics must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "undeclared stream semantics must fail");
     return true;
 }
 
 bool TestTaskAndRegionClosureFailures() {
     ControlPlan plan = BranchPlan();
     plan.regions[0].tasks[0].dependencies = {21};
-    CHECK(Throws([&] { plan.Validate(); }), "forward/outside dependency must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "forward/outside dependency must fail");
     plan = BranchPlan(); plan.regions[0].tasks[0].source_locator.clear();
-    CHECK(Throws([&] { plan.Validate(); }), "missing task locator must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "missing task locator must fail");
     plan = LinearPlan();
     plan.regions[0].tasks[0].binding_state = KernelBindingState::kNotApplicable;
-    CHECK(Throws([&] { plan.Validate(); }),
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }),
           "kernel tasks must remain explicitly unresolved");
     plan = BranchPlan();
     plan.regions[0].tasks[0].binding_state =
         KernelBindingState::kUnresolvedRelayKernel;
-    CHECK(Throws([&] { plan.Validate(); }),
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }),
           "branch tasks must not carry a kernel binding");
     plan = LinearPlan(); plan.regions[0].tasks[1].dependencies.clear();
-    CHECK(Throws([&] { plan.Validate(); }),
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }),
           "data consumer must depend on its local producer");
     plan = BranchPlan(); plan.regions[1].live_ins.clear(); plan.regions[1].effect = Reads({});
-    CHECK(Throws([&] { plan.Validate(); }), "missing live-in closure must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "missing live-in closure must fail");
     plan = BranchPlan(); plan.regions[1].live_outs.clear();
-    CHECK(Throws([&] { plan.Validate(); }), "missing live-out closure must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "missing live-out closure must fail");
     plan = BranchPlan(); plan.regions[0].tasks[0].effect.allocates = {4};
-    CHECK(Throws([&] { plan.Validate(); }), "allocation effect must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "allocation effect must fail");
     plan = BranchPlan(); plan.regions[0].tasks[0].effect.writes = {1};
-    CHECK(Throws([&] { plan.Validate(); }), "live-in writes must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "live-in writes must fail");
     plan = BranchPlan(); plan.regions[0].tasks[0].effect.host_callback = true;
-    CHECK(Throws([&] { plan.Validate(); }), "host callbacks must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "host callbacks must fail");
     plan = BranchPlan(); plan.regions[0].tasks[0].effect.device_sync = true;
-    CHECK(Throws([&] { plan.Validate(); }), "implicit device sync must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "implicit device sync must fail");
     plan = BranchPlan(); plan.regions[0].tasks[0].alias.may_alias = {{2, 3}};
-    CHECK(Throws([&] { plan.Validate(); }), "may-alias must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "may-alias must fail");
     plan = BranchPlan(); plan.regions[0].tasks[0].alias.no_alias = {{2, 2}};
-    CHECK(Throws([&] { plan.Validate(); }), "invalid no-alias must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "invalid no-alias must fail");
     return true;
 }
 
 bool TestStructuredWiringFailures() {
     ControlPlan plan = BranchPlan();
     plan.values[4].dtype = "float32";
-    CHECK(Throws([&] { plan.Validate(); }), "phi contract mismatch must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "phi contract mismatch must fail");
     plan = BranchPlan(); plan.values[0].dtype = "int64";
-    CHECK(Throws([&] { plan.Validate(); }), "non-bool predicate must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "non-bool predicate must fail");
     plan = BranchPlan(); plan.values[0].device = Device::CUDA();
-    CHECK(Throws([&] { plan.Validate(); }), "device predicate without copy must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "device predicate without copy must fail");
     plan = BranchPlan(); plan.regions[1].live_outs = {1};
-    CHECK(Throws([&] { plan.Validate(); }), "phi source must be a branch live-out");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "phi source must be a branch live-out");
     plan = BranchPlan(); plan.regions[0].tasks[0].branch.then_region = 12;
-    CHECK(Throws([&] { plan.Validate(); }), "same branch child region must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "same branch child region must fail");
     plan = BranchPlan(); plan.regions[2].tasks[0].id = 21;
-    CHECK(Throws([&] { plan.Validate(); }), "duplicate task id must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "duplicate task id must fail");
     plan = BranchPlan(); plan.regions[0].tasks[0].branch.then_region = 99;
-    CHECK(Throws([&] { plan.Validate(); }), "unknown child region must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "unknown child region must fail");
     plan = LoopPlan(-1);
-    CHECK(Throws([&] { plan.Validate(); }), "negative trip count must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "negative trip count must fail");
     plan = LoopPlan(); plan.values[3].shape = {1};
-    CHECK(Throws([&] { plan.Validate(); }), "shape-changing backedge must fail");
+    CHECK(Throws([&] { plan.ValidateStaticExact(); }), "shape-changing backedge must fail");
     return true;
 }
 

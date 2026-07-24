@@ -3,8 +3,8 @@
 > **状态：已归档。** 本文混有旧目录、whole-graph lowering 和单-entry
 > RuntimeSession 描述，不再是当前实现入口。当前生产路径以
 > `Compiler::Compile -> per-unit LowerGraph -> CompiledModule + ExecutablePlan -> RuntimeSession`
-> 为准；详见 [`COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
-> 与当前源码/测试。
+> 为准；当前边界见 [`ARCHITECTURE_STATUS.md`](ARCHITECTURE_STATUS.md)，历史基线审查见
+> [`COMPILER_FOUNDATION_BASELINE_REVIEW.md`](COMPILER_FOUNDATION_BASELINE_REVIEW.md)。
 
 本文档保留历史实现导览。
 

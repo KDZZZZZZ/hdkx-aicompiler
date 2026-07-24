@@ -351,7 +351,6 @@ set(KXC_IR_SOURCES
 
 set(KXC_RUNTIME_CORE_SOURCES
   src/runtime/module_invocation.cc
-  src/runtime/control_plan.cc
   src/runtime/device.cc
   src/runtime/device_api.cc
   src/runtime/device_stream.cc
@@ -476,6 +475,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/cache/primitive_cache.cc
   src/compiler/capability.cc
   src/compiler/compile_config.cc
+  src/compiler/control_flow/control_plan.cc
   src/compiler/control_flow/control_plan_adapter.cc
   src/compiler/control_flow/executable_capability.cc
   src/compiler/control_flow/relay_control_plan.cc
@@ -689,13 +689,6 @@ if(KXC_USE_CUDA)
   kxc_enable_cuda(kxc_codegen_cuda_obj)
   list(APPEND KXC_MODULE_OBJECT_TARGETS kxc_codegen_cuda_obj)
 endif()
-
-# Compatibility alias: previous single object library name used by tooling.
-add_library(kxc_runtime_obj INTERFACE)
-target_link_libraries(kxc_runtime_obj INTERFACE kxc_public_api)
-foreach(_kxc_mod IN LISTS KXC_MODULE_OBJECT_TARGETS)
-  target_sources(kxc_runtime_obj INTERFACE $<TARGET_OBJECTS:${_kxc_mod}>)
-endforeach()
 
 set(KXC_RUNTIME_OBJECT_FILES "")
 foreach(_kxc_mod IN LISTS KXC_MODULE_OBJECT_TARGETS)

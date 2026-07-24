@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "../../src/runtime/internal/control_plan.h"
+#include "../../src/compiler/control_flow/control_plan.h"
 
 namespace kxc::runtime::test_support {
 
@@ -49,7 +49,7 @@ public:
         : kernel_(std::move(kernel)) {}
 
     ReferenceExecution Execute(const ControlPlan& plan, const FakeValueTable& inputs) const {
-        plan.Validate();
+        plan.ValidateStaticExact();
         if (!kernel_) throw std::invalid_argument("reference executor requires a kernel callback");
         ReferenceExecution result;
         std::vector<ValueId> source_values = plan.graph_inputs;

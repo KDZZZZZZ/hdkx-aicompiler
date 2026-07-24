@@ -268,7 +268,7 @@ Pass scheduling now has an IR-independent metadata layer:
 
 - Public metadata: `include/kxc/pass/pass.h`
 - Registry implementation: `src/pass/pass.cc`
-- Machine contract: `test/pass_contract.json`
+- Machine contract: `contracts/pass_contract.json`
 - Checker: `python/tools/check_pass_contract.py`
 - Contract document: `docs/PASS_CONTRACT.md`
 

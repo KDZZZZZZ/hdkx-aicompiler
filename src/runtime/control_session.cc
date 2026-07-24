@@ -153,7 +153,7 @@ void CollectConstantBindings(const ControlExecutionRegion& region,
                 if (previous != constants->end() &&
                     !task.kernel.MatchesConstant(
                         arguments[i]->constant_key, previous->second)) {
-                    Fail("one logical constant has inconsistent fixture payloads");
+                    Fail("one logical constant has inconsistent bound payloads");
                 }
                 if (previous == constants->end() ||
                     previous->second.storage()->alignment <

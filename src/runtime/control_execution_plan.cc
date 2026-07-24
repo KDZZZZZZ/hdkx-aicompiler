@@ -147,7 +147,7 @@ Map<String, NDArray> SnapshotCpuConstants(
         if (argument->role != codegen::KernelArgRole::kConstant) continue;
         if (argument->device != Device::CPU() ||
             !source_constants.count(argument->constant_key)) {
-            Fail("constant snapshot requires a bound CPU fixture payload");
+            Fail("constant snapshot requires a bound CPU module payload");
         }
         const NDArray& source = source_constants.at(argument->constant_key);
         api::ValidateKernelArgument(signature, i, argument, source,
@@ -506,7 +506,7 @@ struct BoundControlKernel::State final {
     codegen::KernelLaunchMetadata metadata;
     codegen::CompiledKernel executable;
     Map<String, NDArray> constants;
-    // One opaque owner retains compiler pins or a test fixture for this entry.
+    // One opaque owner retains the entry's compiler or test binding lifetime.
     const std::shared_ptr<const void> retention_owner;
 };
 
@@ -536,7 +536,7 @@ BoundControlKernel::BoundControlKernel(
     metadata.Validate();
     if (metadata->device != Device::CPU()) {
         throw std::invalid_argument(
-            "BoundControlKernel fixture binding requires CPU:0 metadata");
+            "BoundControlKernel binding requires CPU:0 metadata");
     }
     // Bind an immutable, one-entry module snapshot.  Canonical invocation must
     // still resolve the entry by symbol, but it must not depend on a mutable

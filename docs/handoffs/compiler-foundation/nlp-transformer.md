@@ -20,7 +20,7 @@
 4. binary `concatenate`
 5. positive-step `slice`
 
-每个算子均进入机器契约 `test/relay_op_contract.json` 及 generated
+每个算子均进入机器契约 `contracts/relay_op_contract.json` 及 generated
 `OperatorSpec`，并覆盖 canonical attrs、type inference、Relay-to-TE、FFI、Python
 ONNX importer、C++ import-spec reifier、CPU negative tests、条件 LLVM 数值测试和
 `test/nlp_validation/transformer_capability_matrix.json`。

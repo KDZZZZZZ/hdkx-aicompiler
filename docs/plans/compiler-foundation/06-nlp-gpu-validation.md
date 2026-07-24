@@ -2,7 +2,7 @@
 
 > **状态：** 规划中；不是 compiler foundation 的基础依赖，也不表示当前支持 Transformer  
 > **所属路线：** [编译器基础路线图](README.md)  
-> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
+> **历史输入：** [编译器基础架构基线审查](../../COMPILER_FOUNDATION_BASELINE_REVIEW.md)；本文为迁移计划归档。
 > **范围：** 以 feature-gated Transformer 负载验证 shape、region、plan/runtime 与 CPU/LLVM/CUDA 路径；不实现代码。
 ## 1. 定位与基本原则
 本文件不是“先支持 NLP 才能建设基础架构”的依赖倒置。04 的 structured control flow/shape

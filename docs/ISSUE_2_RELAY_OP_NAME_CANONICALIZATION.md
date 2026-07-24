@@ -444,7 +444,7 @@ Issue #2 不能只靠人工 review。规范落地后必须有构建期和 CI 期
 建议新增机器可读文件作为单一事实源，例如：
 
 - `docs/OP_SUPPORT_MATRIX.md`：面向人阅读。
-- `test/relay_op_contract.json`：面向检查脚本和 C++ 测试。
+- `contracts/relay_op_contract.json`：面向检查脚本和 C++ 测试。
 
 `relay_op_contract.json` 至少包含：
 
@@ -536,7 +536,7 @@ Issue #2 不能只靠人工 review。规范落地后必须有构建期和 CI 期
 add_custom_target(check_relay_op_contract
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_relay_op_contract.py"
           --root "${CMAKE_CURRENT_SOURCE_DIR}"
-          --matrix "${CMAKE_CURRENT_SOURCE_DIR}/test/relay_op_contract.json"
+          --matrix "${CMAKE_CURRENT_SOURCE_DIR}/contracts/relay_op_contract.json"
 )
 
 add_custom_target(run_cpu_required_tests

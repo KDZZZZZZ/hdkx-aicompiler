@@ -1,4 +1,4 @@
-/*! \file src/runtime/internal/control_plan.h
+/*! \file src/compiler/control_flow/control_plan.h
  * \brief Static-exact, runtime-neutral structured control-flow plan v2.
  */
 #pragma once
@@ -125,8 +125,6 @@ struct ControlPlan {
 
     /*! \throws std::invalid_argument if this is not a static-exact v2 plan. */
     void ValidateStaticExact() const;
-    /*! \brief Compatibility shorthand for ValidateStaticExact. */
-    void Validate() const { ValidateStaticExact(); }
     /*! \brief Stable text for diagnostics; locators are rendered, never interpreted. */
     std::string CanonicalText() const;
 };

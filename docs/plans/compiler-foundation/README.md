@@ -4,7 +4,7 @@
 >
 > **集成证据：** [`../../handoffs/compiler-foundation/INTEGRATION.md`](../../handoffs/compiler-foundation/INTEGRATION.md)
 >
-> **权威输入：** [`docs/COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md`](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)
+> **历史输入：** [`docs/COMPILER_FOUNDATION_BASELINE_REVIEW.md`](../../COMPILER_FOUNDATION_BASELINE_REVIEW.md)。本目录是迁移计划归档，不是当前能力权威。
 >
 > **并行协作：** [`BRANCHING.md`](BRANCHING.md)
 >

@@ -19,7 +19,7 @@ flow. The complete compiler/runtime path is default OFF behind the single
 
 The preparation DTO and authoring seams are source-private:
 
-- `src/runtime/internal/control_plan.h`
+- `src/compiler/control_flow/control_plan.h`
 - `src/compiler/control_flow/internal_lowering.h`
 - `src/runtime/internal/control_execution_plan_spec.h`
 - `src/runtime/internal/control_execution_plan_access.h`

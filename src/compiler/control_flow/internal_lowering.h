@@ -10,7 +10,7 @@
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/control_execution_plan.h"
-#include "../../runtime/internal/control_plan.h"
+#include "control_plan.h"
 
 namespace kxc::api::internal {
 

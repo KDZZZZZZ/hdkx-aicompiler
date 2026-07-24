@@ -2,7 +2,7 @@
 
 > **状态：** 尚未实施；此前 default-OFF Region task-DAG 实验轨已删除。本文是未来规划，不得视为能力声明；当前 runtime 基线见 [runtime handoff](../../handoffs/compiler-foundation/runtime-plan.md)。
 > **所属路线：** [编译器基础路线图](README.md)  
-> **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
+> **历史输入：** [编译器基础架构基线审查](../../COMPILER_FOUNDATION_BASELINE_REVIEW.md)；本文为迁移计划归档。
 > **范围：** 从 per-Call partition policy 演进为 region、task DAG 与 dependency-aware runtime；不实现代码。
 ## 1. 当前基线与演进原则
 当前链路将普通 compute `Call` 分成一个 `CompilationUnit`、一个 `PrimFunc` 与一个

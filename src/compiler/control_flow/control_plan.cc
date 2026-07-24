@@ -1,6 +1,6 @@
-/*! \file src/runtime/control_plan.cc */
+/*! \file src/compiler/control_flow/control_plan.cc */
 
-#include "internal/control_plan.h"
+#include "control_plan.h"
 
 #include <algorithm>
 #include <functional>
@@ -446,7 +446,7 @@ void VerifyControlPlan(const ControlPlan& plan) {
 void ControlPlan::ValidateStaticExact() const { VerifyControlPlan(*this); }
 
 std::string ControlPlan::CanonicalText() const {
-    Validate();
+    ValidateStaticExact();
     std::ostringstream out;
     out << "ControlPlan/v2\nvalues\n";
     std::vector<const ControlValueSpec*> values_by_id;

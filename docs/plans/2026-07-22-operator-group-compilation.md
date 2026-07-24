@@ -138,7 +138,7 @@ struct OperatorSpec {
 - 缺失 schema、arity 冲突、attrs type 冲突、输出数不明确、lowering 能力缺失和重复名称必须在 registry freeze/check 阶段失败。
 - 普通计算算子只有在 spec 完整且 lowering 能力有效时，才可成为 `CompilationUnit`。
 - 非计算节点或具有特殊执行语义的节点必须由 spec 显式标记，不能伪装成普通 compute unit。
-- `test/relay_op_contract.json` 是机器可读事实源，C++ registry、FFI、前端映射与测试由 checker 反查。
+- `contracts/relay_op_contract.json` 是机器可读事实源，C++ registry、FFI、前端映射与测试由 checker 反查。
 
 ### 4.3 文件边界
 
@@ -148,7 +148,7 @@ struct OperatorSpec {
 - Modify: `include/kxc/relay/op_attr_types.h`
 - Modify: `include/kxc/relay/op_macros.h`
 - Modify: `src/relay/op_registry.cc`
-- Modify: `test/relay_op_contract.json`
+- Modify: `contracts/relay_op_contract.json`
 - Modify: `python/tools/check_relay_op_contract.py`
 - Modify: `docs/relay-op-integration/00-contract.md`
 - Modify: `docs/OPERATOR_REGISTRATION_GUIDE.md`
@@ -212,7 +212,7 @@ struct PassSpec {
 - Modify: `src/relay/transforms/pipeline.cc`
 - Modify: `include/kxc/tir/transforms/pipeline.h`
 - Modify: `src/tir/transforms/pipeline.cc`
-- Create: `test/pass_contract.json`
+- Create: `contracts/pass_contract.json`
 - Create: `python/tools/check_pass_contract.py`
 - Modify: `test/pass_pipeline_test.cpp`
 - Create: `docs/PASS_CONTRACT.md`
@@ -229,7 +229,7 @@ struct PassSpec {
 
 新增算子必须按以下顺序落地，禁止先写 lowering、再补 schema：
 
-1. **Contract**：先在 `test/relay_op_contract.json` 声明 canonical name、schema version、arity、attrs、输出数规则、effect、alias、lowering kind、target capability、FFI/前端映射和测试要求。
+1. **Contract**：先在 `contracts/relay_op_contract.json` 声明 canonical name、schema version、arity、attrs、输出数规则、effect、alias、lowering kind、target capability、FFI/前端映射和测试要求。
 2. **Schema**：定义或复用 attrs Object，明确每个字段的类型、默认值、合法域和序列化顺序；不得通过未记录的约定解释 attrs。
 3. **Registration**：通过 `OperatorSpec` 注册完整元数据、type relation key 和 lowering implementation key；注册完成后必须通过 freeze/check。
 4. **Type relation**：验证输入数量、rank、shape、dtype、属性和输出数量；错误必须包含 operator name、参数位置和违反的约束。
@@ -251,7 +251,7 @@ struct PassSpec {
 
 新增 Pass 必须按以下顺序落地：
 
-1. **Contract**：先在 `test/pass_contract.json` 声明 canonical name、schema version、dialect、scope、phase、opt level、依赖、不变量、analysis 保留/失效关系和 target dependence。
+1. **Contract**：先在 `contracts/pass_contract.json` 声明 canonical name、schema version、dialect、scope、phase、opt level、依赖、不变量、analysis 保留/失效关系和 target dependence。
 2. **Registration**：注册 `PassSpec` 与唯一 implementation key；禁止在多个 pipeline 表中重复维护 Pass 元数据。
 3. **Input checks**：执行前验证 IR dialect、scope、phase、required invariants、required analyses 和 target capability。
 4. **Transformation**：实现只处理声明范围内的 IR，不访问更高层或更低层私有状态。
