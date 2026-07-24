@@ -1,6 +1,6 @@
 # 05：Region 执行计划与运行时
 
-> **状态：** 分阶段实施中；W1 default-OFF task DAG 与 W2 generation-0 runtime manifest/observability 已实现，详见 [runtime handoff](../../handoffs/compiler-foundation/runtime-plan.md)；本文其余阶段仍是规划，不得视为能力声明
+> **状态：** 尚未实施；此前 default-OFF Region task-DAG 实验轨已删除。本文是未来规划，不得视为能力声明；当前 runtime 基线见 [runtime handoff](../../handoffs/compiler-foundation/runtime-plan.md)。
 > **所属路线：** [编译器基础路线图](README.md)  
 > **权威输入：** [编译器基础架构审查](../../COMPILER_FOUNDATION_ARCHITECTURE_REVIEW.md)  
 > **范围：** 从 per-Call partition policy 演进为 region、task DAG 与 dependency-aware runtime；不实现代码。
@@ -139,13 +139,12 @@ stream/device、错误 generation、未同步读取与输出不可达。保留�
 **测试：** single-stream 与 multi-stream bitwise/tolerance 一致、copy/compute overlap trace、
 missing event rejection、跨 device copy correctness、in-flight artifact generation 保活。
 ## 6. RuntimeSession 的稳定职责
-`RuntimeSession` 继续只消费 `CompiledModule + ExecutablePlan` 或等价的纯 runtime
-`FrozenPlanVariant`。构造期验证 module entry、plan value、signature、constant mapping 与
-selected generation；运行期验证实际 NDArray 对 logical/physical/valid-extent 的契约，再执行。
-它不应：调用 Compiler；查询 primitive cache；等待/提交编译；解释 Relay；根据 op 名、模型格式
-或“较大 capacity”选择 kernel；在运行中原地替换 executable。上层控制面负责 shape binding、
-variant dispatch、CompileCoordinator 和将选择结果冻结为 plan。in-flight `AsyncOperation` 必须
-强引用 selected artifact/module 与 storage，使新 generation 仅影响新请求。
+当前 `RuntimeSession` 只消费 `CompiledModule + ExecutablePlan`。构造期验证 module entry、
+plan value、signature 和 constant mapping；运行期验证实际 NDArray contract 后按 ordered calls
+执行。它不应：调用 Compiler；查询 primitive cache；等待/提交编译；解释 Relay；根据 op 名、
+模型格式或“较大 capacity”选择 kernel；在运行中原地替换 executable。未来控制面负责 shape
+binding、variant dispatch、CompileCoordinator 和冻结计划；in-flight `AsyncOperation` 必须强引用
+module 与 storage。
 ## 7. 可观测性与验收数据
 每个 task/region 至少记录 graph revision、unit semantic key、locator、task kind、device/stream、
 logical/physical/valid extent、dependency wait、allocation bytes、artifact generation、queue/launch

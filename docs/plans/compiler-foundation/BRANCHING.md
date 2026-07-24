@@ -6,7 +6,7 @@
 - 本轮集成分支：`integration/compiler-foundation`
 - W0 规划共同基线：`e295a73343f82a7852eeae4ba6d11e3d892adc52`
 - W1 固定基线分支：`baseline/compiler-foundation-w1@525950a`
-- W1 已集成六条 isolated/default-off baseline，并通过 Region Task DAG OFF/ON 的 38/38 CPU CTest；详细证据见 [`../../handoffs/compiler-foundation/INTEGRATION.md`](../../handoffs/compiler-foundation/INTEGRATION.md)。
+- W1 历史 default-off Region task-DAG 轨已删除；当前静态 runtime 基线与动态 CompiledModule ABI 证据见 [`../../handoffs/compiler-foundation/INTEGRATION.md`](../../handoffs/compiler-foundation/INTEGRATION.md)。
 - W2 feature branches 从 `integration/compiler-foundation@525950a` 分叉，专门处理跨轨 production adapter，不回写 W1 固定基线。
 
 `dev` 不接收并行开发中的中间状态。所有能力分支先进入
@@ -31,7 +31,6 @@ W2 跨轨分支：
 | Shape production exact adapter | `feature/compiler-foundation-shape-production` | `hdkx-aicompiler-wt-shape-production` |
 | Adaptive production exact adapter | `feature/compiler-foundation-adaptive-production` | `hdkx-aicompiler-wt-adaptive-production` |
 | Control runtime adapter/executor | `feature/compiler-foundation-control-runtime` | `hdkx-aicompiler-wt-control-runtime` |
-| Runtime manifest/observability | `feature/compiler-foundation-runtime-observability` | `hdkx-aicompiler-wt-runtime-observability` |
 | Transformer operator slices | `feature/compiler-foundation-nlp-transformer` | `hdkx-aicompiler-wt-nlp-transformer` |
 
 ## 3. 开发规则

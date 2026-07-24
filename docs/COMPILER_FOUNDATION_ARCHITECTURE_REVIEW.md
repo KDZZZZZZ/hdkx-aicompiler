@@ -464,7 +464,7 @@ flowchart LR
 | 波次 | 可并行工作 | 汇合产物 | 进入条件 |
 |---|---|---|---|
 | W0：接口冻结 | 01 的 verifier、schema/pipeline、identity、artifact lifecycle；02–06 同时写契约测试 | opaque public artifact view 与 capability matrix | 不扩大当前能力，现有静态回归保持通过 |
-| W1：静态 exact | 02 exact GraphTemplate/profile；03 synchronous singleflight/slot；05 per-call task-DAG adapter | exact `PlanVariant` + immutable artifact generation | canonical key、pin、static Plan ABI 通过 contract suite |
+| W1：静态 exact | 02 exact GraphTemplate/profile；03 synchronous singleflight/slot；05 保持 future task-DAG 规划 | exact compiler-side plan variant + immutable artifact generation | canonical key、pin、static Plan ABI 通过 contract suite |
 | W2：有限自适应 | 02 bucket；03 background/backpressure/canary；05 conservative region/memory DAG | 有限 Shape Profile + 同 ABI 热替换 + per-call 回退 | bucket 数值/tail 证明，in-flight 生命周期和回退安全 |
 | W3：执行语义扩展 | 04 static If/loop；05 control task、多 stream基础；02 allowlist polymorphic | structured control-flow plan 与受限 runtime extent | effect/alias/Phi/liveness/guard 验证齐全 |
 | W4：动态输出与生产化 | 02 ShapeEval/dynamic output；05 allocate/event；06 prefill/decode/GPU/持久化证据 | 可观测、可回滚、可部署的能力报告 | 动态分配、目标指纹、数值、并发与性能门禁齐全 |

@@ -10,7 +10,6 @@
 #include <vector>
 
 #include "kxc/runtime/compiled_module.h"
-#include "kxc/runtime/task_plan.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 
 namespace {
@@ -205,12 +204,6 @@ bool ContractAssemblyAndExpressionLimits() {
                 U64(), {1}, Device::CPU()), KernelArgSpec("y", KernelArgRole::kOutput,
                 F32(), {1}, Device::CPU(), 1, true)}));
     }));
-    auto identity_launcher=std::make_shared<Recorder>();
-    KernelSignature identity("identity",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{2},Device::CPU(),1,true)});
-    auto identity_module=Build(identity,identity_launcher);
-    const runtime::ExecutablePlan ids_a({runtime::ValueSpec(0,100,{2},F32(),Device::CPU(),true),runtime::ValueSpec(1,101,{2},F32(),Device::CPU(),false,false,true)},{runtime::KernelCall("identity",{0},{1})},{0},{},{1});
-    const runtime::ExecutablePlan ids_b({runtime::ValueSpec(41,7,{2},F32(),Device::CPU(),true),runtime::ValueSpec(99,8,{2},F32(),Device::CPU(),false,false,true)},{runtime::KernelCall("identity",{41},{99})},{41},{},{99});
-    CHECK(runtime::ComputeCallExactAbiFingerprint(identity_module,ids_a,0)==runtime::ComputeCallExactAbiFingerprint(identity_module,ids_b,0));
     auto unordered=first; unordered.axis_guards.push_back({0,1,8,1,std::nullopt,std::nullopt}); CHECK(Throws([&]{ModuleInvocationContract({unordered},{out},{},0).Validate(KernelSignature("guards",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)}));}));
     auto forward=first; forward.axis_guards[0].equal_to=ModuleAxisReference{0,0}; CHECK(Throws([&]{ModuleInvocationContract({forward},{out},{},0).Validate(KernelSignature("forward",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)}));}));
     auto expr=ModuleShapeExpr::Const(1); for(size_t i=0;i<=ModuleShapeExpr::kMaxDepth;++i) expr=ModuleShapeExpr::Add(expr,ModuleShapeExpr::Const(1)); out.logical={expr}; out.physical={expr}; out.valid={expr}; CHECK(Throws([&]{ModuleInvocationContract({first},{out},{},0).Validate(KernelSignature("depth",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)}));}));

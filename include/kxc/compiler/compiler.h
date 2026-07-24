@@ -14,7 +14,6 @@
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/control_execution_plan.h"
 #include "kxc/runtime/executable_plan.h"
-#include "kxc/runtime/task_plan.h"
 #include "kxc/support/container.h"
 #include "kxc/relay/relay.h"
 
@@ -35,8 +34,6 @@ public:
     const runtime::ExecutablePlan& plan() const;
     const std::vector<ArtifactPin>& artifact_pins() const;
     const GraphSemanticKey& graph_semantic_key() const;
-    /*! \brief Runtime manifest derived from plan order; generation is always zero. */
-    runtime::PlanVariant plan_variant() const;
 
 private:
     friend struct internal::CompiledGraphAccess;

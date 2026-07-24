@@ -36,39 +36,33 @@ jobs:
         run: python python/tools/check_relay_op_contract.py --root .
 
   cpu-smoke:
-    name: CPU smoke (task DAG ${{ matrix.region_task_dag }}, control ${{ matrix.control_runtime }}, preparation ${{ matrix.production_adapters }}, v2 ${{ matrix.w3_adapters }}, dynamic ABI ${{ matrix.dynamic_module_abi }})
+    name: CPU smoke (control ${{ matrix.control_runtime }}, preparation ${{ matrix.production_adapters }}, v2 ${{ matrix.w3_adapters }}, dynamic ABI ${{ matrix.dynamic_module_abi }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - region_task_dag: "OFF"
-            control_runtime: "OFF"
+          - control_runtime: "OFF"
             production_adapters: "OFF"
             w3_adapters: "OFF"
             dynamic_module_abi: "OFF"
-          - region_task_dag: "OFF"
-            control_runtime: "OFF"
+          - control_runtime: "OFF"
             production_adapters: "OFF"
             w3_adapters: "OFF"
             dynamic_module_abi: "ON"
-          - region_task_dag: "OFF"
-            control_runtime: "OFF"
+          - control_runtime: "OFF"
             production_adapters: "ON"
             w3_adapters: "OFF"
             dynamic_module_abi: "ON"
-          - region_task_dag: "OFF"
-            control_runtime: "ON"
+          - control_runtime: "ON"
             production_adapters: "ON"
             w3_adapters: "ON"
             dynamic_module_abi: "OFF"
-          - region_task_dag: "ON"
-            control_runtime: "OFF"
+          - control_runtime: "OFF"
             production_adapters: "ON"
             w3_adapters: "ON"
             dynamic_module_abi: "ON"
-          - region_task_dag: "ON"
-            control_runtime: "ON"
+          - control_runtime: "ON"
             production_adapters: "ON"
             w3_adapters: "ON"
             dynamic_module_abi: "OFF"
@@ -79,11 +73,10 @@ jobs:
 
       - name: Configure CPU-only build
         run: >
-          cmake -S . -B out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
+          cmake -S . -B out/build/ci-cpu-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
           -DCMAKE_BUILD_TYPE=Debug
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=OFF
-          -DKXC_ENABLE_REGION_TASK_DAG=${{ matrix.region_task_dag }}
           -DKXC_ENABLE_CONTROL_RUNTIME=${{ matrix.control_runtime }}
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=${{ matrix.production_adapters }}
           -DKXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=${{ matrix.production_adapters }}
@@ -96,22 +89,22 @@ jobs:
 
       - name: Build CPU targets
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
+          cmake --build out/build/ci-cpu-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
           --parallel 2
 
       - name: Run runtime plan CTest suite
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
+          cmake --build out/build/ci-cpu-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
           --target run_runtime_plan_tests --parallel 2
 
       - name: Check dependency-free NLP reference and capability gate
         run: >
-          cmake --build out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
+          cmake --build out/build/ci-cpu-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
           --target check_nlp_gpu_validation
 
       - name: Run all CPU foundation CTest checks
         run: >
-          ctest --test-dir out/build/ci-cpu-${{ matrix.region_task_dag }}-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
+          ctest --test-dir out/build/ci-cpu-${{ matrix.control_runtime }}-${{ matrix.production_adapters }}-${{ matrix.w3_adapters }}
           --output-on-failure --no-tests=error
           --label-regex '(^|;)cpu(;|$)'
 
@@ -130,7 +123,6 @@ jobs:
           -DCMAKE_BUILD_TYPE=Debug
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=OFF
-          -DKXC_ENABLE_REGION_TASK_DAG=ON
           -DKXC_ENABLE_CONTROL_RUNTIME=ON
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
           -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON
@@ -146,7 +138,7 @@ jobs:
       - name: Build v2 sanitizer targets
         run: >
           cmake --build out/build/ci-runtime-asan --parallel 2 --target
-          task_plan_test task_executor_test runtime_session_test
+          runtime_session_test
           shape_production_exact_test restricted_symbolic_shape_test compiled_module_test
           relay_control_plan_test control_runtime_integration_test
           adaptive_hot_swap_v2_test
@@ -158,7 +150,7 @@ jobs:
         run: >
           ctest --test-dir out/build/ci-runtime-asan
           --output-on-failure --no-tests=error
-          --tests-regex '^(task_plan_test|task_executor_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|relay_control_plan_test|control_runtime_integration_test|adaptive_hot_swap_v2_test)$'
+          --tests-regex '^(runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|relay_control_plan_test|control_runtime_integration_test|adaptive_hot_swap_v2_test)$'
 
   cpu-tsan-adaptive-v2:
     name: CPU adaptive v2 TSan
@@ -222,7 +214,6 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=ON
-          -DKXC_ENABLE_REGION_TASK_DAG=ON
           -DKXC_ENABLE_CONTROL_RUNTIME=ON
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
           -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON
@@ -243,7 +234,7 @@ jobs:
           compiled_module_dynamic_llvm_test control_runtime_integration_test
           adaptive_hot_swap_v2_test
 
-      - name: Run production compiler-to-task-DAG E2E
+      - name: Run production compiler E2E
         run: >
           ctest --test-dir out/build/ci-llvm --output-on-failure
           --no-tests=error --tests-regex '^operator_compilation_test$'

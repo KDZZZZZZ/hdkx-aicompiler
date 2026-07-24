@@ -24,8 +24,8 @@ injects immutable module constants, and obtains completion only from
 `CompiledKernel::Launch`.
 `RuntimeSession` preserves preallocated memory-plan reuse through the same
 internal resolver, but rejects nonstatic/scalar invocation contracts at session
-construction because it has no dynamic graph memory plan.  Task-DAG and
-resolved control launches delegate there too.  A `BoundControlKernel` snapshots
+construction because it has no dynamic graph memory plan.  Resolved control
+launches delegate there too.  A `BoundControlKernel` snapshots
 the selected entry into an immutable one-entry module before canonical
 invocation, so later mutation of a caller-owned module table cannot relocate or
 discard its bound symbol, signature, contract, or constants.

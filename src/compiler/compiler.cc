@@ -176,20 +176,6 @@ const GraphSemanticKey& CompiledGraph::graph_semantic_key() const {
     if (!state_) throw std::logic_error("CompiledGraph is undefined");
     return state_->graph_semantic_key;
 }
-runtime::PlanVariant CompiledGraph::plan_variant() const {
-    if (!state_) throw std::logic_error("CompiledGraph is undefined");
-    Array<runtime::ArtifactSelection> selections;
-    const Array<runtime::KernelCall> calls = state_->plan.calls();
-    for (size_t index = 0; index < calls.size(); ++index) {
-        selections.push_back(runtime::ArtifactSelection{
-            static_cast<int64_t>(index),
-            String((*state_->artifact_pins)[index].record().artifact_key.canonical_bytes()),
-            0});
-    }
-    return runtime::MakePlanVariant(state_->module, state_->plan, selections,
-                                    state_->artifact_pins);
-}
-
 namespace {
 
 void AppendPipelineIdentityField(std::string* canonical,
