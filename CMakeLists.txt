@@ -79,7 +79,6 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/foundation_contract.h
   include/kxc/compiler/identity.h
   include/kxc/compiler/pipeline.h
-  include/kxc/compiler/guarded_shape_specialization.h
   include/kxc/compiler/shape_exact.h
   include/kxc/compiler/shape_specialization.h
   include/kxc/compiler/restricted_symbolic_shape.h
@@ -505,7 +504,6 @@ set(KXC_COMPILER_SOURCES
   src/compiler/identity.cc
   src/compiler/pipeline_resolver.cc
   src/compiler/compiler.cc
-  src/compiler/guarded_shape_specialization.cc
   src/compiler/shape_exact.cc
   src/compiler/shape_specialization.cc
   src/compiler/restricted_symbolic_shape.cc
@@ -790,16 +788,6 @@ add_custom_target(run_shape_specialization_test
   DEPENDS shape_specialization_test
   USES_TERMINAL
   COMMENT "Run shape_specialization_test")
-
-kxc_add_runtime_exe(shape_guarded_specialization_test
-  test/shape_guarded_specialization_test.cpp)
-target_sources(shape_guarded_specialization_test PRIVATE
-  test/support/guarded_shape_specialization_fakes.cc)
-add_custom_target(run_shape_guarded_specialization_test
-  COMMAND "$<TARGET_FILE:shape_guarded_specialization_test>"
-  DEPENDS shape_guarded_specialization_test
-  USES_TERMINAL
-  COMMENT "Run shape_guarded_specialization_test")
 
 if(KXC_BUILD_RESNET18_IR_DUMP)
   kxc_add_runtime_exe(resnet18_ir_dump test/resnet18_ir_dump.cpp)
@@ -1311,7 +1299,6 @@ endfunction()
 
 kxc_add_ctest_if_target(shape_system_test "shape;cpu")
 kxc_add_ctest_if_target(shape_specialization_test "shape;cpu")
-kxc_add_ctest_if_target(shape_guarded_specialization_test "shape;cpu")
 kxc_add_ctest_if_target(shape_production_exact_test "shape;shape-production;cpu")
 kxc_add_ctest_if_target(restricted_symbolic_shape_test "shape;shape-restricted-symbolic;cpu")
 

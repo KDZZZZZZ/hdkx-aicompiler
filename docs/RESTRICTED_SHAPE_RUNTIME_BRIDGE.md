@@ -15,7 +15,10 @@ arbitrary machine code consumes the scalar semantically; that remains backend
 E2E evidence.
 
 `RuntimeSession` and control execution fail closed for non-static contracts
-until graph dynamic-memory planning exists.  Generic Relay symbolic lowering,
-buckets/polymorphic execution, ragged/data-dependent shapes, workspace
-schemas, and tail transforms remain unsupported.  A backend must explicitly
-register and consume a generated scalar descriptor; no bridge path exists.
+until graph dynamic-memory planning exists. `ModuleShapeExpr` is CompiledModule
+invocation typestate, not a generic Relay symbolic-to-module lowering path;
+restricted symbolic Shape exact decisions do not feed it. Generic Relay
+symbolic lowering, buckets/polymorphic execution, ragged/data-dependent
+shapes, workspace schemas, and tail transforms remain unsupported. A backend
+must explicitly register and consume a generated scalar descriptor; no bridge
+path exists.

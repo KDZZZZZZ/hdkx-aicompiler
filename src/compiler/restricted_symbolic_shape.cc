@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <map>
-#include <optional>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -19,10 +18,8 @@ namespace shape =
     kxc::api::experimental::shape_specialization::v1;
 
 struct RestrictedDispatchDecision::Impl final {
-    DispatchKind kind;
     shape::GraphTemplate graph;
     shape::ExactOracle exact_oracle;
-    std::optional<shape::GuardedShapeProfile> guarded_profile;
 };
 
 namespace {
@@ -61,18 +58,12 @@ void VerifyContracts(const std::vector<shape::UnitSpecializationRequest>& reques
                                                 request.ordered_outputs)) {
             Reject("invalid exact request routing or signature");
         }
-        for (const auto& value : request.ordered_inputs) if (!ValidContract(value)) Reject("invalid exact input extent contract");
-        for (const auto& value : request.ordered_outputs) if (!ValidContract(value)) Reject("invalid exact output extent contract");
-    }
-}
-
-void VerifyContracts(const std::vector<shape::GuardedUnitSpecializationRequest>& requests) {
-    for (size_t i = 0; i < requests.size(); ++i) {
-        const auto& request = requests[i];
-        if (request.ordered_call_index != i || request.call_locator.value().empty() ||
-            request.guard_canonical.empty()) Reject("invalid guarded request routing or authority");
-        for (const auto& value : request.ordered_inputs) if (!ValidContract(value)) Reject("invalid guarded input logical/physical/valid extent contract");
-        for (const auto& value : request.ordered_outputs) if (!ValidContract(value)) Reject("invalid guarded output logical/physical/valid extent contract");
+        for (const auto& value : request.ordered_inputs) {
+            if (!ValidContract(value)) Reject("invalid exact input extent contract");
+        }
+        for (const auto& value : request.ordered_outputs) {
+            if (!ValidContract(value)) Reject("invalid exact output extent contract");
+        }
     }
 }
 
@@ -97,7 +88,9 @@ shape::ConcreteTensorShapeContract StaticValue(const shape::GraphTemplate& graph
 
 void RequireSameShape(const shape::ConcreteTensorShapeContract& left,
                       const shape::ConcreteTensorShapeContract& right) {
-    if (!(left == right) || !ValidContract(left)) Reject("broadcast or non-exact shape contract is unsupported");
+    if (!(left == right) || !ValidContract(left)) {
+        Reject("broadcast or non-exact shape contract is unsupported");
+    }
 }
 
 void ValidateFrozenUnits(const shape::GraphTemplate& graph,
@@ -129,7 +122,9 @@ void CollectOperations(const Expr& expression, const std::set<const Object*>& pa
         return;
     }
     const auto* call = expression.As<CallNode>();
-    if (!call || !seen->insert(expression.get()).second) Reject("only a tree of restricted calls is supported");
+    if (!call || !seen->insert(expression.get()).second) {
+        Reject("only a tree of restricted calls is supported");
+    }
     const auto* op = call->op.As<relay::OpNode>();
     if (!op || (op->name != "relu" && op->name != "nn_relu" && op->name != "sqrt" &&
                 op->name != "add" && op->name != "mul")) {
@@ -142,12 +137,18 @@ void CollectOperations(const Expr& expression, const std::set<const Object*>& pa
 }
 
 std::vector<std::string> ValidateSyntax(const Function& function) {
-    if (!function.defined() || function->params.empty()) Reject("a nonempty fixed-rank parameter list is required");
+    if (!function.defined() || function->params.empty()) {
+        Reject("a nonempty fixed-rank parameter list is required");
+    }
     std::set<const Object*> parameters;
     for (const Var& parameter : function->params) {
         const auto* type = parameter->type_annotation.As<TensorTypeNode>();
-        if (!type || type->shape.empty()) Reject("every input must have a fixed non-scalar tensor rank");
-        for (int64_t extent : type->shape) if (extent < 0) Reject("legacy -1 or negative input extent is unsupported");
+        if (!type || type->shape.empty()) {
+            Reject("every input must have a fixed non-scalar tensor rank");
+        }
+        for (int64_t extent : type->shape) {
+            if (extent < 0) Reject("legacy -1 or negative input extent is unsupported");
+        }
         if (!parameters.insert(parameter.get()).second) Reject("duplicate input parameter");
     }
     std::set<const Object*> seen;
@@ -160,8 +161,9 @@ std::vector<int64_t> Dimensions(const shape::NamedTensorContract& value) {
     return value.contract.Evaluate(shape::BindingSet()).logical;
 }
 
-shape::NamedTensorContract Overlay(const shape::NamedTensorContract& source,
-                                   const std::map<std::vector<int64_t>, std::vector<shape::DimExpr>>& shapes) {
+shape::NamedTensorContract Overlay(
+    const shape::NamedTensorContract& source,
+    const std::map<std::vector<int64_t>, std::vector<shape::DimExpr>>& shapes) {
     const auto found = shapes.find(Dimensions(source));
     const std::vector<shape::DimExpr>& dimensions = found == shapes.end()
         ? source.contract.logical().dimensions() : found->second;
@@ -173,35 +175,24 @@ shape::NamedTensorContract Overlay(const shape::NamedTensorContract& source,
 
 void VerifyBindings(const shape::GraphTemplate& graph, const shape::BindingSet& bindings) {
     const auto& symbols = graph.shape_program().declared_symbols();
-    if (bindings.bindings().size() != symbols.size()) Reject("bindings must explicitly bind every overlay symbol exactly once");
-    for (const std::string& symbol : symbols) if (!bindings.Find(symbol).has_value()) Reject("unbound overlay symbol");
+    if (bindings.bindings().size() != symbols.size()) {
+        Reject("bindings must explicitly bind every overlay symbol exactly once");
+    }
+    for (const std::string& symbol : symbols) {
+        if (!bindings.Find(symbol).has_value()) Reject("unbound overlay symbol");
+    }
 }
 
 std::vector<shape::UnitSpecializationRequest> RebuildExact(
     const RestrictedDispatchDecision::Impl& decision) {
-    const auto requests = shape::MakeExactSpecializationRequests(decision.graph, decision.exact_oracle);
+    const auto requests = shape::MakeExactSpecializationRequests(
+        decision.graph, decision.exact_oracle);
     if (requests.empty()) Reject("decision has no exact requests");
     VerifyContracts(requests);
     const auto& exact_key = decision.exact_oracle.profile().key();
     for (const auto& request : requests) {
-        if (!(request.shape_profile_key == exact_key)) Reject("exact request is detached from decision oracle");
-    }
-    return requests;
-}
-
-std::vector<shape::GuardedUnitSpecializationRequest> RebuildGuarded(
-    const RestrictedDispatchDecision::Impl& decision) {
-    if (!decision.guarded_profile) return {};
-    const auto requests = shape::MakeGuardedSpecializationRequests(decision.graph, *decision.guarded_profile);
-    const auto exact = RebuildExact(decision);
-    if (requests.size() != exact.size()) Reject("guarded decision cardinality mismatch");
-    VerifyContracts(requests);
-    const auto expected = decision.kind == DispatchKind::kBucket
-        ? shape::GuardedProfileKind::kBucket : shape::GuardedProfileKind::kPolymorphic;
-    for (const auto& request : requests) {
-        if (request.kind != expected ||
-            !(request.exact_oracle_key == decision.exact_oracle.profile().key())) {
-            Reject("guarded request is detached from decision authority");
+        if (!(request.shape_profile_key == exact_key)) {
+            Reject("exact request is detached from decision oracle");
         }
     }
     return requests;
@@ -209,45 +200,12 @@ std::vector<shape::GuardedUnitSpecializationRequest> RebuildGuarded(
 
 void VerifyDecision(const RestrictedDispatchDecision::Impl& decision) {
     (void)RebuildExact(decision);
-    const auto guarded = RebuildGuarded(decision);
-    if ((decision.kind == DispatchKind::kExact) != guarded.empty()) {
-        Reject("decision kind and guarded profile disagree");
-    }
 }
 
 std::string ExactUnitBoundaryIdentity(const shape::UnitSpecializationRequest& request) {
     return "restricted.exact-unit-boundary.v2|" +
            request.unit_semantic_key.canonical_bytes() + "|" +
            request.signature_digest.value();
-}
-
-std::string GuardedUnitBoundaryIdentity(const shape::GuardedUnitSpecializationRequest& request) {
-    return "restricted.guarded-unit-boundary.v2|" +
-           request.unit_semantic_key.canonical_bytes() + "|" +
-           request.specialization_canonical;
-}
-
-std::string ProofToken(const std::string& operation) {
-    if (operation == "relu" || operation == "sqrt" || operation == "add" || operation == "mul") {
-        return "restricted." + operation + ".equal-shape.v1";
-    }
-    Reject("unsupported polymorphic unit operation");
-}
-
-void VerifyPolymorphicProofs(const std::vector<std::string>& operations,
-                             const shape::GraphTemplate& graph,
-                             const shape::PolymorphicPolicy& policy) {
-    const auto& proofs = policy.allowlist_proofs();
-    if (proofs.size() != operations.size() || proofs.size() != graph.ordered_units().size()) {
-        Reject("polymorphic proof cardinality does not match frozen operations");
-    }
-    for (size_t index = 0; index < proofs.size(); ++index) {
-        if (proofs[index].ordered_unit_index != index ||
-            !(proofs[index].unit_semantic_key == graph.ordered_units()[index].semantic_key) ||
-            proofs[index].proof != ProofToken(operations[index])) {
-            Reject("polymorphic proof is not an allowlisted restricted operation token");
-        }
-    }
 }
 
 void VerifyCounters(const shape_exact::v1::PreparedGraphTemplate& representative,
@@ -267,7 +225,6 @@ struct PreparedRestrictedSymbolicTemplate::Impl final {
     shape_exact::v1::PreparedGraphTemplate representative;
     shape::GraphTemplate graph;
     std::vector<InputAxisSymbol> symbols;
-    std::vector<std::string> operations;
     shape_exact::v1::ShapeExactPreparationCounters counters;
 };
 
@@ -304,7 +261,9 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
     for (const auto& symbol : input_axis_symbols) {
         if (symbol.symbol.empty() || symbol.lower < 0 || symbol.upper < symbol.lower || symbol.divisible_by <= 0 ||
             !axes.insert({symbol.parameter_index, symbol.axis}).second ||
-            symbol.parameter_index >= representative->params.size()) Reject("duplicate, out-of-range, or invalid input-axis symbol");
+            symbol.parameter_index >= representative->params.size()) {
+            Reject("duplicate, out-of-range, or invalid input-axis symbol");
+        }
         const auto existing_definition = definitions.find(symbol.symbol);
         if (existing_definition != definitions.end() &&
             (existing_definition->second.lower != symbol.lower ||
@@ -320,7 +279,6 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
             Reject("input-axis symbol does not cover its frozen representative extent");
         }
     }
-    // Freeze through the production exact adapter before exposing any symbolic overlay.
     shape_exact::v1::PreparedGraphTemplate frozen =
         shape_exact::v1::ProductionExactShapeAdapter::PrepareGraphTemplate(representative, config);
     const shape::GraphTemplate& static_graph = frozen.graph_template();
@@ -333,7 +291,9 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
         const auto static_shape = Dimensions(static_graph.shape_program().inputs()[parameter]);
         std::vector<shape::DimExpr> dimensions;
         for (int64_t extent : static_shape) dimensions.push_back(shape::DimExpr::Const(extent));
-        for (const auto& symbol : input_axis_symbols) if (symbol.parameter_index == parameter) dimensions[symbol.axis] = shape::DimExpr::Symbol(symbol.symbol);
+        for (const auto& symbol : input_axis_symbols) {
+            if (symbol.parameter_index == parameter) dimensions[symbol.axis] = shape::DimExpr::Symbol(symbol.symbol);
+        }
         const auto existing = shape_overlays.find(static_shape);
         if (existing != shape_overlays.end() && existing->second != dimensions) {
             Reject("equal-shape inputs must share an identical explicit overlay");
@@ -355,15 +315,11 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
     const auto counters = frozen.counters();
     return PreparedRestrictedSymbolicTemplate(std::make_shared<PreparedRestrictedSymbolicTemplate::Impl>(
         PreparedRestrictedSymbolicTemplate::Impl{std::move(frozen), std::move(graph),
-            std::move(input_axis_symbols), operations, counters}));
+            std::move(input_axis_symbols), counters}));
 }
 
 RestrictedDispatchDecision::RestrictedDispatchDecision(std::shared_ptr<const Impl> impl)
     : impl_(std::move(impl)) {}
-
-DispatchKind RestrictedDispatchDecision::kind() const noexcept {
-    return impl_ ? impl_->kind : DispatchKind::kExact;
-}
 
 const shape::ExactOracle& RestrictedDispatchDecision::exact_oracle() const {
     if (!impl_) Reject("decision is undefined");
@@ -377,32 +333,10 @@ std::vector<shape::UnitSpecializationRequest> RestrictedDispatchDecision::exact_
     return RebuildExact(*impl_);
 }
 
-std::vector<shape::GuardedUnitSpecializationRequest> RestrictedDispatchDecision::guarded_requests() const {
-    if (!impl_) Reject("decision is undefined");
-    VerifyDecision(*impl_);
-    return RebuildGuarded(*impl_);
-}
-
 const shape::GraphTemplate& RestrictedDispatchDecision::graph_template() const {
     if (!impl_) Reject("decision is undefined");
     VerifyDecision(*impl_);
     return impl_->graph;
-}
-
-const shape::GuardedShapeProfile* RestrictedDispatchDecision::guarded_profile() const {
-    if (!impl_) Reject("decision is undefined");
-    VerifyDecision(*impl_);
-    return impl_->guarded_profile ? &*impl_->guarded_profile : nullptr;
-}
-
-const shape::BucketPolicy* RestrictedDispatchDecision::bucket_policy() const {
-    const auto* profile = guarded_profile();
-    return profile ? profile->bucket_policy() : nullptr;
-}
-
-const shape::PolymorphicPolicy* RestrictedDispatchDecision::polymorphic_policy() const {
-    const auto* profile = guarded_profile();
-    return profile ? profile->polymorphic_policy() : nullptr;
 }
 
 RestrictedDispatchDecision RestrictedSymbolicShapeAdapter::MintExact(
@@ -412,36 +346,7 @@ RestrictedDispatchDecision RestrictedSymbolicShapeAdapter::MintExact(
     VerifyBindings(prepared.impl_->graph, bindings);
     const shape::ExactOracle oracle = shape::InstantiateExactProfile(prepared.impl_->graph, bindings);
     RestrictedDispatchDecision result(std::make_shared<RestrictedDispatchDecision::Impl>(
-        RestrictedDispatchDecision::Impl{DispatchKind::kExact, prepared.impl_->graph, oracle, std::nullopt}));
-    VerifyDecision(*result.impl_);
-    VerifyCounters(prepared.impl_->representative, prepared.impl_->counters);
-    return result;
-}
-
-RestrictedDispatchDecision RestrictedSymbolicShapeAdapter::MintBucket(
-    const PreparedRestrictedSymbolicTemplate& prepared, const shape::BindingSet& bindings,
-    const shape::BucketPolicy& policy) {
-    RestrictedDispatchDecision exact = MintExact(prepared, bindings);
-    const shape::GuardedShapeProfile profile = shape::BuildBucketProfile(
-        prepared.impl_->graph, exact.impl_->exact_oracle, policy);
-    RestrictedDispatchDecision result(std::make_shared<RestrictedDispatchDecision::Impl>(
-        RestrictedDispatchDecision::Impl{DispatchKind::kBucket, prepared.impl_->graph,
-            exact.impl_->exact_oracle, profile}));
-    VerifyDecision(*result.impl_);
-    VerifyCounters(prepared.impl_->representative, prepared.impl_->counters);
-    return result;
-}
-
-RestrictedDispatchDecision RestrictedSymbolicShapeAdapter::MintPolymorphic(
-    const PreparedRestrictedSymbolicTemplate& prepared, const shape::BindingSet& bindings,
-    const shape::PolymorphicPolicy& policy) {
-    RestrictedDispatchDecision exact = MintExact(prepared, bindings);
-    VerifyPolymorphicProofs(prepared.impl_->operations, prepared.impl_->graph, policy);
-    const shape::GuardedShapeProfile profile = shape::BuildPolymorphicProfile(
-        prepared.impl_->graph, exact.impl_->exact_oracle, policy);
-    RestrictedDispatchDecision result(std::make_shared<RestrictedDispatchDecision::Impl>(
-        RestrictedDispatchDecision::Impl{DispatchKind::kPolymorphic, prepared.impl_->graph,
-            exact.impl_->exact_oracle, profile}));
+        RestrictedDispatchDecision::Impl{prepared.impl_->graph, oracle}));
     VerifyDecision(*result.impl_);
     VerifyCounters(prepared.impl_->representative, prepared.impl_->counters);
     return result;
@@ -455,24 +360,15 @@ std::vector<size_t> RestrictedSymbolicShapeAdapter::ChangedUnitIndices(
     const auto previous_exact = RebuildExact(*previous.impl_);
     const auto next_exact = RebuildExact(*next.impl_);
     if (previous_exact.size() != next_exact.size()) Reject("decision unit cardinality mismatch");
-    const auto previous_guarded = RebuildGuarded(*previous.impl_);
-    const auto next_guarded = RebuildGuarded(*next.impl_);
     std::vector<size_t> changed;
     for (size_t i = 0; i < previous_exact.size(); ++i) {
-        const auto& previous_semantic = previous.kind() == DispatchKind::kExact
-            ? previous_exact[i].unit_semantic_key
-            : previous_guarded[i].unit_semantic_key;
-        const auto& next_semantic = next.kind() == DispatchKind::kExact
-            ? next_exact[i].unit_semantic_key
-            : next_guarded[i].unit_semantic_key;
-        if (!(previous_semantic == next_semantic)) Reject("decision unit semantic contexts are incomparable");
-        const std::string left = previous.kind() == DispatchKind::kExact
-            ? ExactUnitBoundaryIdentity(previous_exact[i])
-            : GuardedUnitBoundaryIdentity(previous_guarded[i]);
-        const std::string right = next.kind() == DispatchKind::kExact
-            ? ExactUnitBoundaryIdentity(next_exact[i])
-            : GuardedUnitBoundaryIdentity(next_guarded[i]);
-        if (left != right) changed.push_back(i);
+        if (!(previous_exact[i].unit_semantic_key == next_exact[i].unit_semantic_key)) {
+            Reject("decision unit semantic contexts are incomparable");
+        }
+        if (ExactUnitBoundaryIdentity(previous_exact[i]) !=
+            ExactUnitBoundaryIdentity(next_exact[i])) {
+            changed.push_back(i);
+        }
     }
     return changed;
 }

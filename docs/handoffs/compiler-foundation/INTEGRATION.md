@@ -78,9 +78,15 @@ migration diagnostic.  No live legacy API symbol remains under `include/`,
 
 Generic Relay emission, dynamic graph memory planning, bucket/polymorphic
 execution, ragged/data-dependent outputs, and data-dependent output allocation
-remain unsupported.  An uncertain post-launch completion failure is retained
-for process lifetime rather than risking early release; this is a safety
-quarantine, not bounded failure recovery or normal memory accounting.
+remain unsupported. The compiler Shape bucket/polymorphic contract universe was
+deleted; no guarded policy/profile/request or compatibility alias remains.
+
+`ModuleShapeExpr` and `ModuleInvocationContract` are CompiledModule invocation
+typestate for manually supplied/module-lowered contracts. They do not consume
+restricted symbolic Shape decisions and do not provide generic Relay
+symbolic-to-module lowering. An uncertain post-launch completion failure is
+retained for process lifetime rather than risking early release; this is a
+safety quarantine, not bounded failure recovery or normal memory accounting.
 
 Public C++ API additions require recompilation; no ABI compatibility is
 claimed.

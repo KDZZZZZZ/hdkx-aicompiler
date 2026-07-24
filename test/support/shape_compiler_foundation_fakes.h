@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "kxc/compiler/guarded_shape_specialization.h"
+#include "kxc/compiler/shape_specialization.h"
 
 // Test-only deterministic seam. It is never installed as public API.
 namespace kxc::api::experimental::shape_specialization::v1::fakes::
@@ -94,75 +94,6 @@ class DeterministicMockPlanAssembler {
   [[nodiscard]] FakeFrozenPlan Assemble(const GraphTemplate& graph_template,
                                         const ExactOracle& oracle,
                                         const std::vector<FakeSelectedArtifact>& selected_artifacts) const;
-};
-
-class GuardedFakeSelectedArtifact {
- public:
-  [[nodiscard]] size_t ordered_call_index() const noexcept;
-  [[nodiscard]] const ShapeProfileKey& shape_profile_key() const noexcept;
-  [[nodiscard]] const ShapeProfileKey& exact_oracle_key() const noexcept;
-  [[nodiscard]] GuardedProfileKind kind() const noexcept;
-  [[nodiscard]] const std::string& guard_canonical() const noexcept;
-  [[nodiscard]] const PrimitiveArtifactKey& artifact_key() const noexcept;
-  [[nodiscard]] const std::string& entry_symbol() const noexcept;
-  [[nodiscard]] uint64_t generation() const noexcept;
-
- private:
-  GuardedFakeSelectedArtifact(const GuardedUnitSpecializationRequest& request,
-                              PrimitiveArtifactKey artifact_key,
-                              std::string entry_symbol);
-  GuardedUnitSpecializationRequest request_;
-  PrimitiveArtifactKey artifact_key_;
-  std::string entry_symbol_;
-  friend class GuardedDeterministicMockCoordinator;
-};
-
-class GuardedDeterministicMockCoordinator {
- public:
-  [[nodiscard]] std::vector<GuardedFakeSelectedArtifact> Resolve(
-      const GraphTemplate& graph_template, const GuardedShapeProfile& profile,
-      const std::vector<GuardedUnitSpecializationRequest>& requests);
-  [[nodiscard]] size_t unique_resolve_count() const noexcept;
-
- private:
-  std::vector<PrimitiveArtifactKey> unique_artifacts_;
-};
-
-struct GuardedFakeFrozenPlanCall {
-  GraphLocalCallLocator call_locator;
-  std::string entry_symbol;
-  uint64_t generation;
-  std::vector<GuardedValueContract> inputs;
-  std::vector<GuardedValueContract> outputs;
-  std::string guard_canonical;
-  std::optional<TailContract> tail_contract;
-  std::vector<RuntimeExtentScalar> runtime_extent_abi;
-};
-
-class GuardedFakeFrozenPlan {
- public:
-  [[nodiscard]] const PlanVariantKey& key() const noexcept;
-  [[nodiscard]] const GuardedShapeProfile& profile() const noexcept;
-  [[nodiscard]] const std::vector<GuardedFakeFrozenPlanCall>& ordered_calls() const noexcept;
-  [[nodiscard]] const std::vector<GuardedFakeSelectedArtifact>& retained_artifacts() const noexcept;
-
- private:
-  GuardedFakeFrozenPlan(PlanVariantKey key, GuardedShapeProfile profile,
-                        std::vector<GuardedFakeFrozenPlanCall> ordered_calls,
-                        std::vector<GuardedFakeSelectedArtifact> retained_artifacts);
-  PlanVariantKey key_;
-  GuardedShapeProfile profile_;
-  std::vector<GuardedFakeFrozenPlanCall> ordered_calls_;
-  std::vector<GuardedFakeSelectedArtifact> retained_artifacts_;
-  friend class GuardedDeterministicMockPlanAssembler;
-};
-
-// Frozen contract fake only; it executes nothing and is not a cache or runtime.
-class GuardedDeterministicMockPlanAssembler {
- public:
-  [[nodiscard]] GuardedFakeFrozenPlan Assemble(
-      const GraphTemplate& graph_template, const GuardedShapeProfile& profile,
-      const std::vector<GuardedFakeSelectedArtifact>& selected_artifacts) const;
 };
 
 }  // namespace kxc::api::experimental::shape_specialization::v1::fakes::compiler_foundation_v1
