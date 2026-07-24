@@ -1,4 +1,6 @@
-# Runtime Shape W3 handoff
+# Historical W3 Runtime Shape handoff (superseded by W4-1)
+
+> Historical migration text only. The described RuntimeShape APIs were removed in W4-1; see `INTEGRATION.md`.
 
 `KXC_ENABLE_RUNTIME_SHAPE_TASKS=OFF` and `KXC_ENABLE_RUNTIME_SHAPE_CUDA=OFF`
 remain the defaults. The established CPU:0 path remains `ShapeEval -> Allocate

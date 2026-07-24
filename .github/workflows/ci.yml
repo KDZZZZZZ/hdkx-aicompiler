@@ -78,8 +78,7 @@ jobs:
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=${{ matrix.production_adapters }}
           -DKXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=${{ matrix.production_adapters }}
           -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=${{ matrix.w3_adapters }}
-          -DKXC_ENABLE_RUNTIME_SHAPE_TASKS=${{ matrix.w3_adapters }}
-          -DKXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE=${{ matrix.w3_adapters }}
+          -DKXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=${{ matrix.w3_adapters }}
           -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=${{ matrix.w3_adapters }}
           -DKXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=${{ matrix.w3_adapters }}
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
@@ -135,8 +134,7 @@ jobs:
           -DKXC_ENABLE_CONTROL_RUNTIME=ON
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
           -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON
-          -DKXC_ENABLE_RUNTIME_SHAPE_TASKS=ON
-          -DKXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE=ON
+          -DKXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON
           -DKXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=ON
           -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=ON
           -DKXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=ON
@@ -150,8 +148,7 @@ jobs:
         run: >
           cmake --build out/build/ci-runtime-asan --parallel 2 --target
           task_plan_test task_executor_test runtime_session_test
-          shape_production_exact_test restricted_symbolic_shape_test
-          runtime_shape_session_test restricted_shape_runtime_bridge_test
+          shape_production_exact_test restricted_symbolic_shape_test compiled_module_test
           relay_control_plan_test control_runtime_integration_test
           adaptive_production_experimental_test adaptive_hot_swap_v2_test
 
@@ -162,7 +159,7 @@ jobs:
         run: >
           ctest --test-dir out/build/ci-runtime-asan
           --output-on-failure --no-tests=error
-          --tests-regex '^(task_plan_test|task_executor_test|runtime_session_test|shape_production_exact_test|restricted_symbolic_shape_test|runtime_shape_session_test|restricted_shape_runtime_bridge_test|relay_control_plan_test|control_runtime_integration_test|adaptive_production_experimental_test|adaptive_hot_swap_v2_test)$'
+          --tests-regex '^(task_plan_test|task_executor_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|relay_control_plan_test|control_runtime_integration_test|adaptive_production_experimental_test|adaptive_hot_swap_v2_test)$'
 
   cpu-tsan-adaptive-v2:
     name: CPU adaptive v2 TSan
@@ -230,8 +227,7 @@ jobs:
           -DKXC_ENABLE_CONTROL_RUNTIME=ON
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
           -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON
-          -DKXC_ENABLE_RUNTIME_SHAPE_TASKS=ON
-          -DKXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE=ON
+          -DKXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON
           -DKXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=ON
           -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=ON
           -DKXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=ON
@@ -245,8 +241,7 @@ jobs:
           cmake --build out/build/ci-llvm --parallel 2 --target
           operator_compilation_test codegen_llvm_test op_numeric_llvm_test
           onnx_importer_test runtime_session_test shape_production_exact_test
-          restricted_symbolic_shape_test runtime_shape_session_test
-          restricted_shape_runtime_bridge_test restricted_shape_runtime_llvm_e2e_test
+          restricted_symbolic_shape_test compiled_module_test
           control_runtime_integration_test
           adaptive_production_experimental_test adaptive_hot_swap_v2_test
 
@@ -259,7 +254,7 @@ jobs:
         run: >
           ctest --test-dir out/build/ci-llvm --output-on-failure
           --no-tests=error
-          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test|runtime_session_test|shape_production_exact_test|restricted_symbolic_shape_test|runtime_shape_session_test|restricted_shape_runtime_bridge_test|restricted_shape_runtime_llvm_e2e_test|control_runtime_integration_test|adaptive_production_experimental_test|adaptive_hot_swap_v2_test)$'
+          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|onnx_importer_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|control_runtime_integration_test|adaptive_production_experimental_test|adaptive_hot_swap_v2_test)$'
 
   python-onnx-importer:
     name: Python ONNX importer tests

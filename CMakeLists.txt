@@ -18,23 +18,18 @@ option(KXC_ENABLE_REGION_TASK_DAG
   "Enable experimental RuntimeSession execution of frozen Region task DAGs" OFF)
 option(KXC_ENABLE_CONTROL_RUNTIME
   "Enable experimental static-exact CPU control runtime execution" OFF)
-option(KXC_ENABLE_RUNTIME_SHAPE_TASKS
-  "Enable experimental CPU-only dynamic runtime shape tasks" OFF)
-option(KXC_ENABLE_RUNTIME_SHAPE_CUDA
-  "Enable experimental genuine CUDA async runtime shape tasks" OFF)
+if(DEFINED KXC_ENABLE_RUNTIME_SHAPE_TASKS OR DEFINED KXC_ENABLE_RUNTIME_SHAPE_CUDA OR DEFINED KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE)
+  message(FATAL_ERROR "Legacy RuntimeShape/bridge CMake cache variables were removed by W4-1; use KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI")
+endif()
+option(KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
+  "Enable nonconstant CompiledModule invocation contracts" OFF)
 option(KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION
   "Enable default-OFF real-artifact static CPU Relay If compilation" OFF)
 option(KXC_ENABLE_SHAPE_PRODUCTION_EXACT
   "Enable the production exact Relay/compiler/shape adapter" OFF)
 option(KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE
   "Enable the experimental restricted symbolic Shape decision adapter" OFF)
-option(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE
-  "Enable the default-off restricted Shape trusted runtime bridge" OFF)
-if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE AND
-   (NOT KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE OR NOT KXC_ENABLE_RUNTIME_SHAPE_TASKS OR
-    NOT KXC_ENABLE_SHAPE_PRODUCTION_EXACT))
-  message(FATAL_ERROR "KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE requires restricted symbolic Shape, runtime shape tasks, and production exact Shape gates")
-endif()
+
 option(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
   "Enable default-off experimental adapter for a production compiler path" OFF)
 option(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
@@ -82,7 +77,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/pipeline.h
   include/kxc/compiler/shape_exact.h
   include/kxc/compiler/restricted_symbolic_shape.h
-  include/kxc/compiler/restricted_shape_runtime_bridge.h
+
   include/kxc/compiler/lowering/relay_to_tir.h
   include/kxc/distributed/ccl_backend.h
   include/kxc/distributed/dref.h
@@ -132,8 +127,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/executable_plan.h
   include/kxc/runtime/kernel_abi.h
   include/kxc/runtime/ndarray.h
-  include/kxc/runtime/runtime_shape_plan.h
-  include/kxc/runtime/runtime_shape_session.h
+  include/kxc/runtime/module_invocation.h
   include/kxc/runtime/session.h
   include/kxc/runtime/storage.h
   include/kxc/runtime/task_executor.h
@@ -227,8 +221,7 @@ foreach(_kxc_public_module IN ITEMS
 endforeach()
 target_link_libraries(kxc_compiler_api INTERFACE kxc_shape_api)
 target_compile_definitions(kxc_runtime_api INTERFACE
-  KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>
-  KXC_ENABLE_RUNTIME_SHAPE_CUDA=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_CUDA}>)
+  KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>)
 
 target_compile_definitions(kxc_compiler_api INTERFACE
   KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>
@@ -248,10 +241,6 @@ elseif(KXC_ENABLE_CUDA AND NOT CUDAToolkit_FOUND)
 else()
   set(KXC_USE_CUDA 0)
   message(STATUS "CUDA support: disabled by KXC_ENABLE_CUDA=OFF")
-endif()
-if(KXC_ENABLE_RUNTIME_SHAPE_CUDA AND
-   (NOT KXC_ENABLE_RUNTIME_SHAPE_TASKS OR NOT KXC_USE_CUDA))
-  message(FATAL_ERROR "KXC_ENABLE_RUNTIME_SHAPE_CUDA requires runtime shape tasks and a compiled CUDA backend")
 endif()
 
 # ==================== LLVM Support ====================
@@ -375,6 +364,7 @@ set(KXC_IR_SOURCES
 )
 
 set(KXC_RUNTIME_CORE_SOURCES
+  src/runtime/module_invocation.cc
   src/runtime/control_plan.cc
   src/runtime/device.cc
   src/runtime/device_api.cc
@@ -385,7 +375,6 @@ set(KXC_RUNTIME_CORE_SOURCES
   src/runtime/task_plan.cc
   src/runtime/storage.cc
   src/runtime/ndarray.cc
-  src/runtime/runtime_shape_session.cc
   src/runtime/device/cpu_device_api.cc
   src/runtime/kernel_abi.cc
 )
@@ -517,7 +506,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/compiler.cc
   src/compiler/shape_exact.cc
   src/compiler/restricted_symbolic_shape.cc
-  src/compiler/restricted_shape_runtime_bridge.cc
+
   src/compiler/graph/partition.cc
   src/compiler/graph/value_graph.cc
   src/compiler/kernel_abi_builder.cc
@@ -565,12 +554,10 @@ function(kxc_configure_module_obj target)
     KXC_USE_LLVM=${KXC_USE_LLVM}
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
-    KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>
-    KXC_ENABLE_RUNTIME_SHAPE_CUDA=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_CUDA}>
+    KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
     KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
-    KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE=$<BOOL:${KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>
     KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2}>)
 endfunction()
@@ -754,12 +741,10 @@ function(kxc_add_runtime_exe target source_file)
     KXC_USE_LLVM=${KXC_USE_LLVM}
     KXC_ENABLE_REGION_TASK_DAG=$<BOOL:${KXC_ENABLE_REGION_TASK_DAG}>
     KXC_ENABLE_CONTROL_RUNTIME=$<BOOL:${KXC_ENABLE_CONTROL_RUNTIME}>
-    KXC_ENABLE_RUNTIME_SHAPE_TASKS=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_TASKS}>
-    KXC_ENABLE_RUNTIME_SHAPE_CUDA=$<BOOL:${KXC_ENABLE_RUNTIME_SHAPE_CUDA}>
+    KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
     KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION=$<BOOL:${KXC_ENABLE_RELAY_CONTROL_FLOW_PRODUCTION}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
-    KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE=$<BOOL:${KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE}>
     KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION=$<BOOL:${KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION}>
     KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2}>)
   if(KXC_USE_CUDA)
@@ -914,16 +899,6 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(adaptive_contract_test test/adaptive_contract_test.cpp)
   kxc_add_runtime_exe(shape_production_exact_test test/shape_production_exact_test.cpp)
   kxc_add_runtime_exe(restricted_symbolic_shape_test test/restricted_symbolic_shape_test.cpp)
-  kxc_add_runtime_exe(restricted_shape_runtime_bridge_gate_off_test
-    test/restricted_shape_runtime_bridge_gate_off_test.cpp)
-  if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE)
-    kxc_add_runtime_exe(restricted_shape_runtime_bridge_test
-      test/restricted_shape_runtime_bridge_test.cpp)
-  endif()
-  if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE AND KXC_USE_LLVM)
-    kxc_add_runtime_exe(restricted_shape_runtime_llvm_e2e_test
-      test/restricted_shape_runtime_llvm_e2e_test.cpp)
-  endif()
   kxc_add_runtime_exe(adaptive_coordinator_test test/adaptive_coordinator_test.cpp)
   kxc_add_runtime_exe(adaptive_kernel_slot_test test/adaptive_kernel_slot_test.cpp)
   if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
@@ -939,21 +914,6 @@ if(KXC_BUILD_PASS_TESTS)
     set_tests_properties(shape_production_exact_test PROPERTIES LABELS "shape-production;cpu")
     add_test(NAME restricted_symbolic_shape_test COMMAND restricted_symbolic_shape_test)
     set_tests_properties(restricted_symbolic_shape_test PROPERTIES LABELS "shape-restricted-symbolic;cpu")
-    add_test(NAME restricted_shape_runtime_bridge_gate_off_test
-      COMMAND restricted_shape_runtime_bridge_gate_off_test)
-    set_tests_properties(restricted_shape_runtime_bridge_gate_off_test PROPERTIES
-      LABELS "shape-restricted-runtime-bridge;cpu;gate-off")
-    if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE)
-      add_test(NAME restricted_shape_runtime_bridge_test COMMAND restricted_shape_runtime_bridge_test)
-      set_tests_properties(restricted_shape_runtime_bridge_test PROPERTIES
-        LABELS "shape-restricted-runtime-bridge;runtime-shape;cpu")
-    endif()
-    if(KXC_ENABLE_RESTRICTED_SHAPE_RUNTIME_BRIDGE AND KXC_USE_LLVM)
-      add_test(NAME restricted_shape_runtime_llvm_e2e_test
-        COMMAND restricted_shape_runtime_llvm_e2e_test)
-      set_tests_properties(restricted_shape_runtime_llvm_e2e_test PROPERTIES
-        LABELS "llvm;numeric;e2e;runtime-shape;shape-restricted-runtime-bridge")
-    endif()
     add_custom_target(run_restricted_symbolic_shape_test
       COMMAND "$<TARGET_FILE:restricted_symbolic_shape_test>"
       DEPENDS restricted_symbolic_shape_test
@@ -1047,22 +1007,6 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
   kxc_add_runtime_exe(runtime_session_test test/runtime_session_test.cpp)
-  if(KXC_ENABLE_RUNTIME_SHAPE_TASKS)
-    kxc_add_runtime_exe(runtime_shape_session_test test/runtime_shape_session_test.cpp)
-  endif()
-  if(KXC_ENABLE_RUNTIME_SHAPE_CUDA AND KXC_USE_CUDA)
-    kxc_add_runtime_exe(runtime_shape_cuda_async_test test/runtime_shape_cuda_async_test.cpp)
-  endif()
-  add_executable(runtime_shape_gate_off_test
-    test/runtime_shape_gate_off_test.cpp
-    src/runtime/runtime_shape_session.cc)
-  target_include_directories(runtime_shape_gate_off_test PRIVATE "${KXC_INCLUDE_DIR}"
-    "${KXC_DLPACK_INCLUDE_DIR}")
-  target_compile_definitions(runtime_shape_gate_off_test PRIVATE
-    KXC_ENABLE_RUNTIME_SHAPE_TASKS=0)
-  add_dependencies(runtime_shape_gate_off_test kxc_runtime)
-  target_link_libraries(runtime_shape_gate_off_test PRIVATE "$<TARGET_FILE:kxc_runtime>" Threads::Threads)
-  kxc_enable_cuda(runtime_shape_gate_off_test)
   kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
 
   set(KXC_CONTROL_FLOW_TESTS
@@ -1106,19 +1050,6 @@ if(KXC_BUILD_PASS_TESTS)
       LABELS "runtime-plan;cpu;core"
       WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   endforeach()
-  add_test(NAME runtime_shape_gate_off_test COMMAND runtime_shape_gate_off_test)
-  set_tests_properties(runtime_shape_gate_off_test PROPERTIES
-    LABELS "runtime-shape;cpu;gate-off")
-  if(KXC_ENABLE_RUNTIME_SHAPE_TASKS)
-    add_test(NAME runtime_shape_session_test COMMAND runtime_shape_session_test)
-    set_tests_properties(runtime_shape_session_test PROPERTIES
-      LABELS "runtime-shape;cpu;dynamic-shape")
-  endif()
-  if(KXC_ENABLE_RUNTIME_SHAPE_CUDA AND KXC_USE_CUDA)
-    add_test(NAME runtime_shape_cuda_async_test COMMAND runtime_shape_cuda_async_test)
-    set_tests_properties(runtime_shape_cuda_async_test PROPERTIES
-      LABELS "runtime-shape;cuda;hardware" SKIP_RETURN_CODE 77)
-  endif()
 
   if(KXC_ONNX_IMPORTER_PY_DEPS_FOUND)
     set(KXC_ONNX_IMPORT_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/resnet18.import.json")

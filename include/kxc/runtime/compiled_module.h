@@ -7,6 +7,7 @@
 #include "kxc/runtime/device_stream.h"
 #include "kxc/runtime/ndarray.h"
 #include "kxc/runtime/kernel_abi.h"
+#include "kxc/runtime/module_invocation.h"
 
 namespace kxc::api {
 
@@ -16,11 +17,13 @@ class CompiledModule : public ObjectRef {
 public:
     explicit CompiledModule(const ObjectRef& ref);
 
-    /*! \brief Launches one entry; equal constant snapshots are validated then
-     * replaced by the module-owned immutable payloads. */
-    AsyncOperation Launch(const String& symbol,
-                          const Array<runtime::NDArray>& ordered_arguments,
-                          const DeviceStream& stream) const;
+    /*! \brief Resolves a module-owned ABI, allocates outputs, injects constants,
+     * and launches the real CompiledKernel. */
+    ModuleInvocationResult Invoke(const String& symbol,
+                                  const Array<runtime::NDArray>& data_inputs,
+                                  const DeviceStream& stream,
+                                  std::size_t run_byte_budget = 0) const;
+    ModuleInvocationContract invocation_contract(const String& symbol) const;
     codegen::KernelSignature signature(const String& symbol) const;
     codegen::KernelLaunchMetadata launch_metadata(const String& symbol) const;
     /*! \brief Returns independent payload snapshots; callers cannot mutate

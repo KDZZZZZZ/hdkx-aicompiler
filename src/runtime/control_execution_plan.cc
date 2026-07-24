@@ -593,8 +593,14 @@ AsyncOperation BoundControlKernel::Launch(
             launch_arguments.push_back(ordered_arguments[i]);
         }
     }
-    AsyncOperation operation =
-        state_->executable.Launch(launch_arguments, stream);
+    Array<NDArray> inputs;
+    Array<NDArray> outputs;
+    for (size_t i = 0; i < arguments.size(); ++i) {
+        if (arguments[i]->role == codegen::KernelArgRole::kInput) inputs.push_back(ordered_arguments[i]);
+        if (arguments[i]->role == codegen::KernelArgRole::kOutput) outputs.push_back(ordered_arguments[i]);
+    }
+    AsyncOperation operation = api::internal::InvokeCompiledModuleWithOutputs(
+        state_->module, state_->signature->symbol, inputs, outputs, stream);
     if (!operation.defined() || !operation->stream.defined() ||
         operation.device() != stream.device() || !operation->stream.is_default() ||
         operation->completed == (operation->backend_event != nullptr)) {
