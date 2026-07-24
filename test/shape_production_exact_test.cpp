@@ -388,8 +388,8 @@ bool TestLLVMRelayMutationCannotPoisonCache() {
     const auto after_clean = kxc::api::internal::GetPrimitiveCacheStats();
     CHECK(after_attacked.misses == 1 && after_clean.misses == 1 &&
               after_clean.hits >= after_attacked.hits + 1 &&
-              attacked.artifact_pins()[0].handle().record().artifact_key ==
-                  clean.artifact_pins()[0].handle().record().artifact_key,
+              attacked.artifact_pins()[0].record().artifact_key ==
+                  clean.artifact_pins()[0].record().artifact_key,
           "mutated caller Call must neither change code nor publish new code under the old key");
 
     const kxc::Array<kxc::runtime::NDArray> inputs{
@@ -466,9 +466,8 @@ bool TestLLVMExactCacheRuntimeAndLifecycle() {
                   after_first.misses == 2,
               "first exact assembly must publish two real primitive artifacts");
         for (const auto& pin : first.artifact_pins()) {
-            CHECK(kxc::api::ProductionArtifactCacheAdapter()
-                          .Lookup(pin.handle().record().artifact_key)
-                          .kind == kxc::api::ArtifactLookupKind::kHit,
+            CHECK(kxc::api::internal::LookupPrimitiveCache(
+                          pin.record().artifact_key).defined(),
                   "every retained production pin must be discoverable by its full key");
         }
         const auto second = ProductionExactShapeAdapter::AssembleExactPlan(
@@ -539,8 +538,8 @@ bool TestLLVMExactCacheRuntimeAndLifecycle() {
         CHECK(after_constant_one.misses >= after_other.misses + 1 &&
                   after_constant_two.misses == after_constant_one.misses &&
                   after_constant_two.hits >= after_constant_one.hits + 1 &&
-                  constant_one.artifact_pins()[0].handle().record().artifact_key ==
-                      constant_two.artifact_pins()[0].handle().record().artifact_key &&
+                  constant_one.artifact_pins()[0].record().artifact_key ==
+                      constant_two.artifact_pins()[0].record().artifact_key &&
                   !(constant_one.plan_variant_key() ==
                     constant_two.plan_variant_key()),
               "constant payloads must reuse primitive code but split frozen plan identity");

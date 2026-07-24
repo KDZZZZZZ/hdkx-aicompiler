@@ -484,14 +484,13 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
     const auto second = api::Compiler::Compile(function, config);
     const api::internal::PrimitiveCacheStats after_second =
         api::internal::GetPrimitiveCacheStats();
-    api::ProductionArtifactCacheAdapter adapter;
     bool public_pins_are_production_backed =
         first.artifact_pins().size() == 2 && second.artifact_pins().size() == 2;
     for (const api::ArtifactPin& pin : second.artifact_pins()) {
         public_pins_are_production_backed =
             public_pins_are_production_backed && pin.defined() &&
-            adapter.Lookup(pin.handle().record().artifact_key).kind ==
-                api::ArtifactLookupKind::kHit;
+            api::internal::LookupPrimitiveCache(
+                pin.record().artifact_key).defined();
     }
     const runtime::PlanVariant second_variant = second.plan_variant();
     bool compiler_declaration_matches_pins = second_variant.defined() &&
@@ -508,7 +507,6 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
                     static_cast<int64_t>(index) &&
                 bindings[index]->artifact_identity ==
                     second.artifact_pins()[index]
-                        .handle()
                         .record()
                         .artifact_key.canonical_bytes();
         }
@@ -527,7 +525,6 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
 bool TestProductionCompileVariantRuntimeE2E() {
     using namespace kxc;
     api::internal::ClearPrimitiveCacheForTesting();
-    const api::ProductionArtifactCacheAdapter adapter;
     std::optional<runtime::RuntimeSession> session;
     std::optional<runtime::RunAsyncResult> run_result;
     std::weak_ptr<const void> retained_production_lease;
@@ -549,12 +546,11 @@ bool TestProductionCompileVariantRuntimeE2E() {
         TEST_CHECK(pin_count == chain.expected_compute_calls &&
                        bindings.size() == pin_count &&
                        declaration.retention_lease() != nullptr &&
-                       adapter.stats().active_pins == pin_count,
+                       api::internal::GetPrimitiveCacheStats().active_pins == pin_count,
                    "Compiler must assemble a production-backed declaration and lease");
         for (size_t index = 0; index < pin_count; ++index) {
             const std::string identity =
                 compiled.artifact_pins()[index]
-                    .handle()
                     .record()
                     .artifact_key.canonical_bytes();
             TEST_CHECK(bindings[index]->invocation_id ==
@@ -602,12 +598,12 @@ bool TestProductionCompileVariantRuntimeE2E() {
     TEST_CHECK(run_result && run_result->outputs.size() == 1 &&
                    TensorEquals(run_result->outputs[0], 9.0f) &&
                    !retained_production_lease.expired() &&
-                   adapter.stats().active_pins == pin_count,
+                   api::internal::GetPrimitiveCacheStats().active_pins == pin_count,
                "completion must retain production pins and the numeric result");
     run_result->completion.Wait();
     run_result->completion = AsyncOperation();
     TEST_CHECK(retained_production_lease.expired() &&
-                   adapter.stats().active_pins == 0,
+                   api::internal::GetPrimitiveCacheStats().active_pins == 0,
                "production pin lease must release with completion ownership");
     api::internal::ClearPrimitiveCacheForTesting();
     return true;

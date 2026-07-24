@@ -42,7 +42,7 @@ Failure FromException(const std::exception& e, const Options& o) {
 uint64_t ProducerBytes(const PreparedCandidate& c) {
     uint64_t n = 0;
     for (const auto& pin : c.compiled_graph().artifact_pins()) {
-        const uint64_t add = pin.handle().record().byte_size;
+        const uint64_t add = pin.record().byte_size;
         if (add > std::numeric_limits<uint64_t>::max() - n) throw std::overflow_error("adaptive v2 producer byte sum overflow");
         n += add;
     }

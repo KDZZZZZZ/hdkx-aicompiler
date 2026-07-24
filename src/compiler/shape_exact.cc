@@ -682,8 +682,8 @@ void VerifyVariant(
             Reject("production artifact pin is undefined");
         }
         const internal::PrimitiveArtifactPin primitive_pin =
-            internal::ProductionArtifactAccess::Pin(public_pin);
-        const ArtifactRecord& record = public_pin.handle().record();
+            internal::ArtifactPinAccess::Unwrap(public_pin);
+        const ArtifactRecord& record = public_pin.record();
         if (!(record.artifact_key == expected) ||
             !(primitive_pin.key() == expected) ||
             record.signature_digest != support::HashText(
@@ -815,7 +815,7 @@ ExactPlanVariant ProductionExactShapeAdapter::AssembleExactPlan(
     selections.reserve(compiled.plan().calls().size());
     for (size_t i = 0; i < compiled.plan().calls().size(); ++i) {
         const ArtifactRecord& record =
-            compiled.artifact_pins()[i].handle().record();
+            compiled.artifact_pins()[i].record();
         selections.push_back(OrderedArtifactSelectionIdentity{
             i, std::string(compiled.plan().calls()[i]->symbol),
             record.artifact_key, 0});

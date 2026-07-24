@@ -6,7 +6,7 @@
 #include <string>
 
 #include "../../codegen/internal/compiled_kernel.h"
-#include "kxc/compiler/foundation_contract.h"
+#include "kxc/compiler/artifact.h"
 #include "kxc/target/target.h"
 
 namespace kxc::api::internal {
@@ -80,7 +80,6 @@ public:
     const PrimitiveArtifactKey& key() const;
     const PrimitiveArtifactPin& pin() const;
     const PrimitiveFailureRecord& failure() const;
-    std::string ticket_id() const;
     uint64_t merged_waiter_count() const;
 
 private:
@@ -101,6 +100,9 @@ private:
     PrimitiveArtifactPin pin_;
     PrimitiveFailureRecord failure_;
     std::shared_ptr<PrimitiveFlight> flight_;
+    // Shared only by copies of the owner lease. Its final release fails an
+    // unfinished flight so waiters cannot strand the in-flight budget.
+    std::shared_ptr<const void> owner_guard_;
 };
 
 struct PrimitiveCacheWaitResult final {
@@ -141,7 +143,6 @@ PrimitiveArtifactKey BuildPrimitiveArtifactKey(
 
 /*! \brief Finds a ready artifact without changing cache state or creating a flight. */
 PrimitiveArtifactPin LookupPrimitiveCache(const PrimitiveArtifactKey& key);
-ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin);
 
 PrimitiveCacheLease AcquirePrimitiveCache(const PrimitiveArtifactKey& key);
 PrimitiveCacheWaitResult WaitPrimitiveCacheLeaseResult(
@@ -160,11 +161,10 @@ void SetPrimitiveCacheLimitsForTesting(PrimitiveCacheLimits limits);
 void ForgetPrimitiveFailureForTesting(const PrimitiveArtifactKey& key);
 void ClearPrimitiveCacheForTesting();
 
-/*! \brief Narrow bridge between opaque public transactions and compiler internals. */
-struct ProductionArtifactAccess final {
-    static ProductionArtifactCandidate Make(CachedPrimitive artifact);
-    static CachedPrimitive Copy(const ProductionArtifactCandidate& candidate);
-    static PrimitiveArtifactPin Pin(const ArtifactPin& pin);
+/*! \brief Private bridge that mints and verifies opaque public cache pins. */
+struct ArtifactPinAccess final {
+    static ArtifactPin Wrap(const PrimitiveArtifactPin& pin);
+    static PrimitiveArtifactPin Unwrap(const ArtifactPin& pin);
 };
 
 }  // namespace kxc::api::internal

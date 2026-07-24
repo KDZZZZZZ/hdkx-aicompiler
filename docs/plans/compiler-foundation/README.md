@@ -130,7 +130,7 @@ flowchart LR
 | 里程碑 | 进入条件 | 集成产物 | 状态 |
 |---|---|---|---|
 | M0：事实收敛 | 本路线图与现有架构审查一致 | capability matrix、legacy/current/target 文档标记 | 第二轮修正已完成，待终审 |
-| M1：核心冻结 | 01 的最小接口和 key/cache 语义审查通过 | CoreContract v2、static-exact production transaction/pin adapter、artifact pin/singleflight | 进行中（CPU 27/27；待 LLVM 绿色记录与跨轨消费确认） |
+| M1：核心冻结 | 01 的公开 artifact view 与 internal key/cache 语义审查通过 | opaque artifact pin、Compiler/internal static-exact primitive cache | 进行中（待 LLVM 绿色记录与跨轨消费确认） |
 | M2：exact shape | 02 能从模板绑定静态 exact profile | `GraphTemplate` + exact `PlanVariant` | 未开始 |
 | M3：受控自适应 | 03 可合并同 key 请求并安全发布 generation | coordinator + slot + failure/backpressure | 未开始 |
 | M4：可扩展执行 | 04/05 的 task/region 计划可验证且保留回退 | dynamic task vocabulary、region plan | 未开始 |
@@ -144,4 +144,4 @@ M1 之前，各轨内部可以独立实现纯 IR、状态机、executor 或 fixt
 
 跨轨 PR 必须注明消费的接口版本、key/ABI/pipeline fingerprint 变化、是否影响 mock/fake，以及回退路径。任何轨道都不得扩展 `RuntimeSession` 的职责来绕过控制面，也不得将 object address、graph-local value id 或 backend symbol 作为跨图 artifact identity。
 
-本路线图本身不实现接口。Track01 的本地 CPU evidence 为 27/27 CTest。Core adapter 只拥有 static-exact primitive transaction、failure TTL、取消快照、全局背压与 pin；Track03 仍拥有 dispatch/队列/异步取消/细分预算/generation/hot swap。LLVM workflow 已要求 operator relocation/cache、codegen、numeric 与 ONNX compile，但本机/当前会话未发现 LLVM 且没有绿色运行记录，不能把已配置 workflow 或未执行的条件块写成已通过。
+本路线图本身不实现接口。`Compiler::Compile` 和内部 primitive cache 拥有 static-exact mutation、failure TTL、全局背压与 pin；公共图仅暴露 opaque real pins。Track03 仍拥有 dispatch/队列/异步取消/细分预算/generation/hot swap。LLVM workflow 已要求 operator relocation/cache、codegen、numeric 与 ONNX compile，但本机/当前会话未发现 LLVM 且没有绿色运行记录，不能把已配置 workflow 或未执行的条件块写成已通过。

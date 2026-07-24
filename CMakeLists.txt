@@ -76,7 +76,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
   include/kxc/compiler/control_flow.h
-  include/kxc/compiler/foundation_contract.h
+  include/kxc/compiler/artifact.h
   include/kxc/compiler/identity.h
   include/kxc/compiler/pipeline.h
   include/kxc/compiler/shape_exact.h
@@ -500,7 +500,6 @@ set(KXC_COMPILER_SOURCES
   src/compiler/control_flow/relay_control_plan.cc
   src/compiler/control_flow/production_control_flow.cc
   src/compiler/compile_state.cc
-  src/compiler/foundation_contract.cc
   src/compiler/identity.cc
   src/compiler/pipeline_resolver.cc
   src/compiler/compiler.cc
@@ -997,7 +996,6 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
   kxc_add_runtime_exe(compiler_capability_test test/compiler_capability_test.cpp)
   kxc_add_runtime_exe(compiler_identity_test test/compiler_identity_test.cpp)
-  kxc_add_runtime_exe(compiler_foundation_contract_test test/compiler_foundation_contract_test.cpp)
   kxc_add_runtime_exe(operator_compilation_test test/operator_compilation_test.cpp)
   kxc_add_runtime_exe(primitive_cache_test test/primitive_cache_test.cpp)
   kxc_add_runtime_exe(compiler_extension_contract_test test/compiler_extension_contract_test.cpp)
@@ -1308,7 +1306,7 @@ foreach(_kxc_cpu_core_test IN ITEMS
     executable_plan_test graph_partition_test infer_type_test
     onnx_import_spec_contract_test profile_bundle_test
     compiler_contract_test compiler_capability_test compiler_identity_test
-    compiler_foundation_contract_test operator_compilation_test primitive_cache_test
+    operator_compilation_test primitive_cache_test
     compiler_extension_contract_test kernel_signature_test compiled_module_test
     cuda_schedule_test)
   # cuda_schedule_test exercises CPU-only scheduling contracts with synthetic

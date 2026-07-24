@@ -11,7 +11,7 @@
 
 #include "kxc/compiler/compile_config.h"
 #include "kxc/compiler/control_flow.h"
-#include "kxc/compiler/foundation_contract.h"
+#include "kxc/compiler/artifact.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
 #include "kxc/runtime/task_plan.h"
@@ -21,16 +21,14 @@
 namespace kxc {
 namespace api {
 
+namespace internal {
+struct CompiledGraphAccess;
+}  // namespace internal
+
 /*! \brief Immutable validated compiler output. Plan order is pin order. */
 class CompiledGraph final {
 public:
     CompiledGraph() = default;
-
-    /*! \brief Validates a complete candidate before publishing immutable state. */
-    static CompiledGraph Create(CompiledModule module,
-                                runtime::ExecutablePlan plan,
-                                std::vector<ArtifactPin> artifact_pins,
-                                GraphSemanticKey graph_semantic_key);
 
     bool defined() const noexcept;
     const CompiledModule& module() const;
@@ -41,6 +39,8 @@ public:
     runtime::PlanVariant plan_variant() const;
 
 private:
+    friend struct internal::CompiledGraphAccess;
+
     struct State;
     explicit CompiledGraph(std::shared_ptr<const State> state);
     std::shared_ptr<const State> state_;

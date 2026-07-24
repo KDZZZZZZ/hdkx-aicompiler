@@ -26,7 +26,6 @@ struct PrimitiveArtifact final {
 struct PrimitiveFlight final {
     std::mutex mutex;
     std::condition_variable ready;
-    uint64_t ticket_id{0};
     uint64_t publish_stamp{0};
     uint64_t merged_waiters{0};
     bool completed{false};
@@ -57,7 +56,6 @@ struct PrimitiveCache final {
     std::unordered_map<std::string, FailureEntry> failures;
     PrimitiveCacheLimits limits;
     uint64_t next_stamp{1};
-    uint64_t next_ticket_id{1};
     uint64_t hits{0};
     uint64_t misses{0};
     uint64_t evictions{0};
@@ -165,6 +163,42 @@ bool MakeRoomForReadyArtifact(PrimitiveCache* cache, uint64_t bytes) {
     return cache->entries.size() < cache->limits.max_entries &&
            cache->accounted_bytes <= remaining;
 }
+void AbandonPrimitiveCacheFlight(
+    const PrimitiveArtifactKey& key,
+    const std::shared_ptr<PrimitiveFlight>& flight) noexcept {
+    try {
+        const std::string canonical = KeyBytes(key);
+        PrimitiveCache& cache = Cache();
+        PrimitiveFailureRecord failure{
+            PrimitiveFailureCategory::kCompile,
+            "primitive cache owner was abandoned", 1000};
+        {
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            const auto active = cache.in_flight.find(canonical);
+            if (active == cache.in_flight.end() ||
+                active->second.get() != flight.get()) {
+                return;
+            }
+            cache.in_flight.erase(active);
+            if (cache.next_stamp != std::numeric_limits<uint64_t>::max()) {
+                cache.failures.insert_or_assign(
+                    canonical, FailureEntry{failure,
+                                            Clock::now() + std::chrono::seconds(1),
+                                            cache.next_stamp++});
+                BoundFailures(&cache);
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(flight->mutex);
+            if (flight->completed) return;
+            flight->failure = std::move(failure);
+            flight->completed = true;
+        }
+        flight->ready.notify_all();
+    } catch (...) {
+    }
+}
+
 PrimitiveFailureRecord FailureWithRemaining(
     const FailureEntry& entry, Clock::time_point now) {
     PrimitiveFailureRecord failure = entry.failure;
@@ -223,13 +257,6 @@ const PrimitiveFailureRecord& PrimitiveCacheLease::failure() const {
     return failure_;
 }
 
-std::string PrimitiveCacheLease::ticket_id() const {
-    if (!flight_) {
-        throw std::logic_error("primitive cache lease has no shared ticket");
-    }
-    return "primitive-flight-v1:" + std::to_string(flight_->ticket_id);
-}
-
 uint64_t PrimitiveCacheLease::merged_waiter_count() const {
     if (!flight_) return 0;
     std::lock_guard<std::mutex> lock(flight_->mutex);
@@ -261,7 +288,34 @@ PrimitiveArtifactPin LookupPrimitiveCache(const PrimitiveArtifactKey& key) {
                : PrimitiveArtifactPin(ready->second.artifact);
 }
 
-ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin) {
+}  // namespace kxc::api::internal
+
+namespace kxc::api {
+
+ArtifactPin::ArtifactPin(std::shared_ptr<const ArtifactRecord> record,
+                         std::shared_ptr<const void> owner)
+    : record_(std::move(record)), owner_(std::move(owner)) {
+    if (!record_ || !record_->artifact_key.defined() ||
+        record_->executable_token.empty() || record_->signature_digest.empty() ||
+        record_->launch_metadata_digest.empty() || record_->provenance.empty() ||
+        record_->byte_size == 0 || record_->validation_record.empty() || !owner_) {
+        throw std::invalid_argument(
+            "production ArtifactPin requires a complete record and owner");
+    }
+}
+
+bool ArtifactPin::defined() const noexcept { return record_ != nullptr; }
+
+const ArtifactRecord& ArtifactPin::record() const {
+    if (!record_) throw std::logic_error("ArtifactPin is undefined");
+    return *record_;
+}
+
+}  // namespace kxc::api
+
+namespace kxc::api::internal {
+
+ArtifactPin ArtifactPinAccess::Wrap(const PrimitiveArtifactPin& pin) {
     if (!pin.defined()) {
         throw std::invalid_argument(
             "cannot expose an undefined primitive artifact pin");
@@ -275,7 +329,7 @@ ArtifactPin ToArtifactPin(const PrimitiveArtifactPin& pin) {
                           artifact.provenance,
                           artifact.accounted_bytes,
                           artifact.validation_record};
-    return ArtifactPin(ArtifactHandle(std::move(record)),
+    return ArtifactPin(std::make_shared<const ArtifactRecord>(std::move(record)),
                        std::make_shared<PrimitiveArtifactPin>(pin));
 }
 
@@ -330,22 +384,25 @@ PrimitiveCacheLease AcquirePrimitiveCache(
             "bounded in-flight compile budget is saturated", 0};
         return lease;
     }
-    if (cache.next_ticket_id == std::numeric_limits<uint64_t>::max() ||
-        cache.next_stamp == std::numeric_limits<uint64_t>::max()) {
+    if (cache.next_stamp == std::numeric_limits<uint64_t>::max()) {
         ++cache.rejections;
         lease.access_ = PrimitiveCacheAccess::kRejected;
         lease.failure_ = PrimitiveFailureRecord{
             PrimitiveFailureCategory::kBackpressure,
-            "primitive cache ticket/stamp space is exhausted", 0};
+            "primitive cache stamp space is exhausted", 0};
         return lease;
     }
 
     ++cache.misses;
     lease.access_ = PrimitiveCacheAccess::kOwner;
     lease.flight_ = std::make_shared<PrimitiveFlight>();
-    lease.flight_->ticket_id = cache.next_ticket_id++;
     lease.flight_->publish_stamp = cache.next_stamp++;
     cache.in_flight.emplace(canonical, lease.flight_);
+    lease.owner_guard_ = std::shared_ptr<const void>(
+        new int(0), [key, flight = lease.flight_](const void* value) {
+            delete static_cast<const int*>(value);
+            AbandonPrimitiveCacheFlight(key, flight);
+        });
     return lease;
 }
 
@@ -504,28 +561,14 @@ void ForgetPrimitiveFailureForTesting(const PrimitiveArtifactKey& key) {
     cache.failures.erase(KeyBytes(key));
 }
 
-ProductionArtifactCandidate ProductionArtifactAccess::Make(
-    CachedPrimitive artifact) {
-    return ProductionArtifactCandidate(
-        std::make_shared<const CachedPrimitive>(std::move(artifact)));
-}
-
-CachedPrimitive ProductionArtifactAccess::Copy(
-    const ProductionArtifactCandidate& candidate) {
-    if (!candidate.owner_) {
-        throw std::invalid_argument("production artifact candidate is undefined");
-    }
-    return *std::static_pointer_cast<const CachedPrimitive>(candidate.owner_);
-}
-
-PrimitiveArtifactPin ProductionArtifactAccess::Pin(const ArtifactPin& pin) {
+PrimitiveArtifactPin ArtifactPinAccess::Unwrap(const ArtifactPin& pin) {
     if (!pin.defined() || !pin.owner_) {
         throw std::invalid_argument("ArtifactPin is not backed by the production cache");
     }
     const auto primitive =
         std::static_pointer_cast<const PrimitiveArtifactPin>(pin.owner_);
     if (!primitive || !primitive->defined() || primitive->key() !=
-                                                 pin.handle().record().artifact_key) {
+                                                 pin.record().artifact_key) {
         throw std::invalid_argument("production ArtifactPin owner is inconsistent");
     }
     return *primitive;
@@ -542,7 +585,6 @@ void ClearPrimitiveCacheForTesting() {
         cache.failures.clear();
         cache.limits = PrimitiveCacheLimits{};
         cache.next_stamp = 1;
-        cache.next_ticket_id = 1;
         cache.hits = 0;
         cache.misses = 0;
         cache.evictions = 0;

@@ -6,6 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -27,6 +28,15 @@
 #include "kxc/compiler/distributed/multi_device.h"
 
 namespace {
+
+template <typename T, typename = void>
+struct HasPublicCreate : std::false_type {};
+
+template <typename T>
+struct HasPublicCreate<T, std::void_t<decltype(&T::Create)>> : std::true_type {};
+
+static_assert(!HasPublicCreate<kxc::api::CompiledGraph>::value,
+              "CompiledGraph must not expose a public factory");
 
 #define TEST_CHECK(condition, message)                                           \
     do {                                                                          \

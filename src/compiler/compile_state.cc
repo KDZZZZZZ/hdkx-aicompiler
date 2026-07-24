@@ -370,7 +370,7 @@ void CompileResult::ValidateState() const {
         if (needs_backend) {
             if (!node->artifact_pins_.empty() &&
                 (!node->artifact_pins_[i].defined() ||
-                 node->artifact_pins_[i].handle().record().artifact_key
+                 node->artifact_pins_[i].record().artifact_key
                          .unit_semantic_key() != primitive.semantic_key)) {
                 throw std::invalid_argument(context +
                                             " production artifact pin drifted");

@@ -28,6 +28,7 @@
 #include "kxc/support/hash.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/compiled_module.h"
+#include "../src/compiler/internal/compiled_graph_access.h"
 #include "../src/compiler/internal/primitive_cache.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 
@@ -236,9 +237,9 @@ struct GraphOptions final {
     bool foreign_launch_metadata{false};
     uint64_t primitive_byte_size{1};
     std::string primitive_provenance{"adaptive-production-path-fixture"};
+    std::string cached_symbol_prefix;
     std::vector<std::shared_ptr<const kxc::codegen::KernelLauncher>> launchers;
     bool reverse_pins{false};
-    bool unbacked_public_pin{false};
 };
 
 kxc::api::CompiledGraph MakeGraph(
@@ -271,10 +272,18 @@ kxc::api::CompiledGraph MakeGraph(
             index < options.launchers.size() && options.launchers[index]
                 ? options.launchers[index]
                 : std::make_shared<FixtureLauncher>();
+        const KernelSignature cached_signature =
+            options.cached_symbol_prefix.empty()
+                ? signature
+                : KernelSignature(
+                      String(options.cached_symbol_prefix +
+                             std::to_string(index)),
+                      signature.arguments());
         const api::internal::PrimitiveArtifactPin primitive = PinPrimitive(
-            primitive_keys[index], signature, metadata, std::move(launcher),
-            options.primitive_byte_size, options.primitive_provenance);
-        const api::ArtifactPin pin = api::internal::ToArtifactPin(primitive);
+            primitive_keys[index], cached_signature, metadata,
+            std::move(launcher), options.primitive_byte_size,
+            options.primitive_provenance);
+        const api::ArtifactPin pin = api::internal::ArtifactPinAccess::Wrap(primitive);
         const CompiledKernel module_kernel(
             signature, metadata, primitive.artifact().kernel->launcher);
         entries.push_back(api::internal::CompiledModuleEntry{
@@ -284,13 +293,9 @@ kxc::api::CompiledGraph MakeGraph(
     if (options.reverse_pins && pins.size() >= 2) {
         std::swap(pins[0], pins[1]);
     }
-    if (options.unbacked_public_pin) {
-        pins.front() = api::ArtifactPin(
-            api::ArtifactHandle(pins.front().handle().record()));
-    }
     api::CompiledModule module = api::internal::BuildCompiledModule(
         BuildTarget(Device::CPU()), std::move(entries), {});
-    return api::CompiledGraph::Create(
+    return api::internal::CompiledGraphAccess::Create(
         std::move(module), MakePlan(primitive_keys.size(), options.input_extent),
         std::move(pins), graph_semantic_key);
 }
@@ -356,7 +361,6 @@ enum class Attack {
     kWrongSignature,
     kWrongMetadata,
     kWrongOrder,
-    kUnbackedPublicPin,
 };
 
 class FixtureCompiler final : public production_path::ProductionPathCompilerAdapter {
@@ -385,7 +389,7 @@ public:
             launchers.reserve(request.verified_artifact_pins().size());
             for (const auto& pin : request.verified_artifact_pins()) {
                 launchers.push_back(
-                    kxc::api::internal::ProductionArtifactAccess::Pin(pin)
+                    kxc::api::internal::ArtifactPinAccess::Unwrap(pin)
                         .artifact().kernel->launcher);
             }
             if (attack == Attack::kDistinctSelection) {
@@ -403,14 +407,13 @@ public:
             options.primitive_provenance = candidate_primitive_provenance;
             options.launchers = launchers;
             options.reverse_pins = attack == Attack::kWrongOrder;
-            options.unbacked_public_pin = attack == Attack::kUnbackedPublicPin;
             kxc::api::CompiledGraph graph =
                 MakeGraph(request.graph_semantic_key(), keys,
                           std::move(options));
             {
                 std::lock_guard<std::mutex> lock(launcher_mutex);
                 last_launcher = std::dynamic_pointer_cast<const FixtureLauncher>(
-                    kxc::api::internal::ProductionArtifactAccess::Pin(
+                    kxc::api::internal::ArtifactPinAccess::Unwrap(
                         graph.artifact_pins()[0]).artifact().kernel->launcher);
             }
             active.fetch_sub(1, std::memory_order_acq_rel);
@@ -512,6 +515,21 @@ bool TestPreparedCandidateValidationAndExactIdentity() {
                    candidate->validation_receipt() == "fixture-receipt",
                "preparation must bind the validated graph, pins, session, and receipt");
 
+    // Primitive cache entries may originate at a different graph-local link
+    // symbol. The current module symbol remains exact while only the physical
+    // ordered calling convention is reused.
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    GraphOptions relocated;
+    relocated.cached_symbol_prefix = "cached_graph_symbol_";
+    const auto relocated_candidate = PrepareCandidate(
+        request,
+        MakeGraph(request.graph_semantic_key(), SelectedKeys(request),
+                  relocated),
+        "relocated-receipt");
+    TEST_CHECK(relocated_candidate &&
+                   relocated_candidate->compiled_graph().defined(),
+               "same physical ABI must permit graph-local symbol relocation");
+
     GraphOptions malformed;
     malformed.output_alignment = 32;
     TEST_CHECK(Throws([&] {
@@ -545,17 +563,6 @@ bool TestPreparedCandidateValidationAndExactIdentity() {
                        "fixture-receipt");
                }),
                "reversed ordered pins must fail preparation");
-
-    GraphOptions unbacked_pin;
-    unbacked_pin.unbacked_public_pin = true;
-    TEST_CHECK(Throws([&] {
-                   (void)PrepareCandidate(
-                       request,
-                       MakeGraph(request.graph_semantic_key(),
-                                 SelectedKeys(request), unbacked_pin),
-                       "fixture-receipt");
-               }),
-               "an unbacked public pin must fail preparation");
 
     const kxc::api::PrimitiveArtifactKey foreign_target_key(
         kxc::api::UnitSemanticKey("adaptive-fixture-foreign-target-v1"),

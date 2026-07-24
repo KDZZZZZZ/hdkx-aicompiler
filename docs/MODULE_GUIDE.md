@@ -76,9 +76,9 @@ CUDA/CUPTI 硬件测试分别带有 `llvm` 与 `cuda;hardware` 标签，CPU-only
 **Ready for supervisor re-review；不自称 Core complete。**
 
 - [x] executable capability 使用真实 normalized per-unit compile proof
-- [x] public `ProductionArtifactCacheAdapter` transaction/singleflight 接入真实 primitive cache，并保活 production pin
+- [x] `Compiler::Compile` 与内部 primitive cache 是唯一 mutation authority；公共图仅保留 opaque real pin
 - [x] normalized pipeline 在每步后执行已证明 invariant 的 validator
-- [x] 本地 CPU CTest、contract、include/public-header：27/27
+- [x] 本地 CPU CTest、contract、include/public-header 检查
 - [x] LLVM workflow 包含 relocation/cache、codegen、numeric，以及真实 ONNX protobuf -> Python serializer -> C++ reifier -> LLVM RuntimeSession 数值链路
 - [ ] LLVM-enabled builder 实际绿色记录与目标后端逐项批准（本机/当前会话无 LLVM 记录）
 

@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "../../codegen/internal/compiled_kernel.h"
-#include "kxc/compiler/foundation_contract.h"
+#include "kxc/compiler/artifact.h"
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/executable_plan.h"
 #include "kxc/runtime/kernel_abi.h"

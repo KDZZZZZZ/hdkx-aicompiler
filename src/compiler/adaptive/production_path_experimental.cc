@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "../internal/kernel_abi_equivalence.h"
 #include "../internal/primitive_cache.h"
 #include "../../runtime/internal/compiled_module_node.h"
 #include "../../runtime/internal/memory_plan.h"
@@ -81,7 +82,7 @@ VerifiedGraphArtifacts VerifyGraphArtifacts(
     verified.identities.reserve(calls.size());
     verified.pins.reserve(calls.size());
     for (size_t index = 0; index < calls.size(); ++index) {
-        const auto pin = internal::ProductionArtifactAccess::Pin(pins[index]);
+        const auto pin = internal::ArtifactPinAccess::Unwrap(pins[index]);
         const auto signature = graph.module().signature(calls[index]->symbol);
         for (const auto& argument : signature.arguments()) {
             RequireStaticShape(argument.shape(), "adaptive KernelSignature");
@@ -109,14 +110,15 @@ void ValidateCandidate(const ProductionCompileRequest& request,
         const OrderedArtifactIdentity& expected = request.ordered_artifacts()[index];
         const OrderedArtifactIdentity& actual = candidate.identities[index];
         const internal::PrimitiveArtifactPin expected_pin =
-            internal::ProductionArtifactAccess::Pin(
+            internal::ArtifactPinAccess::Unwrap(
                 request.verified_artifact_pins()[index]);
         const internal::PrimitiveArtifactPin actual_pin =
-            internal::ProductionArtifactAccess::Pin(candidate.pins[index]);
+            internal::ArtifactPinAccess::Unwrap(candidate.pins[index]);
         if (actual.call_index != expected.call_index ||
             actual.link_symbol != expected.link_symbol ||
-            actual_pin.artifact().signature.CanonicalBytes() !=
-                expected_pin.artifact().signature.CanonicalBytes() ||
+            !internal::SamePhysicalKernelAbi(
+                actual_pin.artifact().signature,
+                expected_pin.artifact().signature) ||
             actual_pin.artifact().launch_metadata.CanonicalBytes() !=
                 expected_pin.artifact().launch_metadata.CanonicalBytes()) {
             throw std::invalid_argument(
@@ -197,7 +199,7 @@ void ProductionCompileRequest::Validate() const {
     }
     for (size_t index = 0; index < ordered_artifacts_.size(); ++index) {
         const internal::PrimitiveArtifactPin pin =
-            internal::ProductionArtifactAccess::Pin(verified_artifact_pins_[index]);
+            internal::ArtifactPinAccess::Unwrap(verified_artifact_pins_[index]);
         if (ordered_artifacts_[index].call_index != index ||
             ordered_artifacts_[index].artifact_key != pin.key()) {
             throw std::invalid_argument(
