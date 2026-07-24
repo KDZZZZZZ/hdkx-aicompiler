@@ -36,7 +36,7 @@ jobs:
         run: python python/tools/check_relay_op_contract.py --root .
 
   cpu-smoke:
-    name: CPU smoke (task DAG ${{ matrix.region_task_dag }}, control ${{ matrix.control_runtime }}, W2 ${{ matrix.production_adapters }}, W3 ${{ matrix.w3_adapters }}, dynamic ABI ${{ matrix.dynamic_module_abi }})
+    name: CPU smoke (task DAG ${{ matrix.region_task_dag }}, control ${{ matrix.control_runtime }}, preparation ${{ matrix.production_adapters }}, v2 ${{ matrix.w3_adapters }}, dynamic ABI ${{ matrix.dynamic_module_abi }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -118,7 +118,7 @@ jobs:
 
 
   cpu-asan:
-    name: CPU W3 runtime/adaptive/control ASan/UBSan
+    name: CPU v2 runtime/adaptive/control ASan/UBSan
     runs-on: ubuntu-latest
 
     steps:
@@ -145,22 +145,22 @@ jobs:
           -DCMAKE_CXX_FLAGS_DEBUG="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
-      - name: Build W3 sanitizer targets
+      - name: Build v2 sanitizer targets
         run: >
           cmake --build out/build/ci-runtime-asan --parallel 2 --target
           task_plan_test task_executor_test runtime_session_test
           shape_production_exact_test restricted_symbolic_shape_test compiled_module_test
           relay_control_plan_test control_runtime_integration_test
-          adaptive_production_experimental_test adaptive_hot_swap_v2_test
+          adaptive_hot_swap_v2_test
 
-      - name: Run W3 sanitizer suite
+      - name: Run v2 sanitizer suite
         env:
           ASAN_OPTIONS: abort_on_error=1:detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: >
           ctest --test-dir out/build/ci-runtime-asan
           --output-on-failure --no-tests=error
-          --tests-regex '^(task_plan_test|task_executor_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|relay_control_plan_test|control_runtime_integration_test|adaptive_production_experimental_test|adaptive_hot_swap_v2_test)$'
+          --tests-regex '^(task_plan_test|task_executor_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|relay_control_plan_test|control_runtime_integration_test|adaptive_hot_swap_v2_test)$'
 
   cpu-tsan-adaptive-v2:
     name: CPU adaptive v2 TSan
@@ -244,7 +244,7 @@ jobs:
           onnx_importer_test runtime_session_test shape_production_exact_test
           restricted_symbolic_shape_test compiled_module_test
           compiled_module_dynamic_llvm_test control_runtime_integration_test
-          adaptive_production_experimental_test adaptive_hot_swap_v2_test
+          adaptive_hot_swap_v2_test
 
       - name: Run production compiler-to-task-DAG E2E
         run: >
@@ -255,7 +255,7 @@ jobs:
         run: >
           ctest --test-dir out/build/ci-llvm --output-on-failure
           --no-tests=error
-          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|compiled_module_dynamic_llvm_test|onnx_importer_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|control_runtime_integration_test|adaptive_production_experimental_test|adaptive_hot_swap_v2_test)$'
+          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|compiled_module_dynamic_llvm_test|onnx_importer_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|control_runtime_integration_test|adaptive_hot_swap_v2_test)$'
 
   python-onnx-importer:
     name: Python ONNX importer tests

@@ -117,24 +117,29 @@ FailureCategory CompileError::category() const noexcept { return category_; }
 ValidationReceipt::ValidationReceipt(std::string value) : value_(std::move(value)) { if (value_.empty()) throw std::invalid_argument("validation receipt is empty"); }
 const std::string& ValidationReceipt::value() const noexcept { return value_; }
 ValidationReceipt CandidateValidationAuthority::IssueReceipt(std::string value) { return ValidationReceipt(std::move(value)); }
-GenerationLease::GenerationLease(Generation g, std::shared_ptr<const FrozenPlanVariant> v, DispatchKey r, PlanVariantKey selection_plan, PlanAbiFingerprint abi, std::string receipt, uint64_t bytes)
-    : generation_(g), variant_(std::move(v)), route_(std::move(r)), selection_plan_(std::move(selection_plan)), plan_abi_(std::move(abi)), validation_receipt_(std::move(receipt)), producer_reported_bytes_(bytes) {
-    if (!generation_ || !variant_ || !route_.defined() || !selection_plan_.defined() || !plan_abi_.defined() || validation_receipt_.empty()) throw std::invalid_argument("generation authority issued incomplete lease");
+GenerationLease::GenerationLease(Generation g, std::shared_ptr<const PreparedCandidate> c, DispatchKey r, PlanAbiFingerprint abi, uint64_t bytes)
+    : generation_(g), candidate_(std::move(c)), route_(std::move(r)), plan_abi_(std::move(abi)), producer_reported_bytes_(bytes) {
+    if (!generation_ || !candidate_ || !route_.defined() || !plan_abi_.defined()) throw std::invalid_argument("generation authority issued incomplete lease");
 }
 std::shared_ptr<const GenerationLease> GenerationAuthority::MakeLease(Generation g, const GenerationAuthorityRequest& r) {
-    if (!r.candidate || r.selection_plan != r.candidate->selection_plan_key() ||
+    if (!g || !r.candidate || !r.route.defined() || !r.plan_abi.defined() ||
+        !r.selection_plan.defined() || r.validation_receipt.value().empty() ||
+        !r.candidate->compiled_graph().defined() || !r.candidate->session() ||
+        r.selection_plan != r.candidate->selection_plan_key() ||
         r.candidate->validation_receipt() != r.validation_receipt.value()) {
         throw std::invalid_argument("generation authority request selection or receipt mismatch");
     }
-    const auto variant = legacy::FreezePreparedCandidate(g, r.route, r.plan_abi, r.candidate);
-    return std::shared_ptr<const GenerationLease>(new GenerationLease(g, variant, r.route, r.selection_plan, r.plan_abi, r.validation_receipt.value(), r.producer_reported_bytes));
+    return std::shared_ptr<const GenerationLease>(new GenerationLease(
+        g, r.candidate, r.route, r.plan_abi, r.producer_reported_bytes));
 }
 Generation GenerationLease::generation() const noexcept { return generation_; }
-const std::shared_ptr<const FrozenPlanVariant>& GenerationLease::variant() const noexcept { return variant_; }
+const std::shared_ptr<const PreparedCandidate>& GenerationLease::candidate() const noexcept { return candidate_; }
+const CompiledGraph& GenerationLease::compiled_graph() const noexcept { return candidate_->compiled_graph(); }
+const std::shared_ptr<const runtime::RuntimeSession>& GenerationLease::session() const noexcept { return candidate_->session(); }
 const DispatchKey& GenerationLease::dispatch_key() const noexcept { return route_; }
 const PlanAbiFingerprint& GenerationLease::plan_abi() const noexcept { return plan_abi_; }
-const PlanVariantKey& GenerationLease::selection_plan_key() const noexcept { return selection_plan_; }
-const std::string& GenerationLease::validation_receipt() const noexcept { return validation_receipt_; }
+const PlanVariantKey& GenerationLease::selection_plan_key() const noexcept { return candidate_->selection_plan_key(); }
+const std::string& GenerationLease::validation_receipt() const noexcept { return candidate_->validation_receipt(); }
 uint64_t GenerationLease::producer_reported_bytes() const noexcept { return producer_reported_bytes_; }
 CompileTicket::CompileTicket(std::shared_future<CompileResult> r, std::chrono::steady_clock::time_point d, CancellationToken c) : result_(std::move(r)), deadline_(d), cancellation_(std::move(c)) {}
 bool CompileTicket::valid() const noexcept { return result_.valid(); }
@@ -241,7 +246,7 @@ public:
             { std::lock_guard<std::mutex> lock(mutex); if(!Live(*f)) { FinishUnlockedCancelled(f); return; } }
             CompiledGraph graph=compiler?compiler->Compile(f->request):Compiler::Compile(f->request.graph(),f->request.config());
             const ValidationReceipt receipt=validation->Validate(f->request,graph);
-            const auto candidate=legacy::PrepareCandidate(f->request,std::move(graph),receipt.value());
+            const auto candidate=preparation::PrepareCandidate(f->request,std::move(graph),receipt.value());
             const uint64_t bytes=ProducerBytes(*candidate); Inject(PublicationStage::kByteBudget); if(bytes>options.max_producer_reported_bytes) throw CompileError(FailureCategory::kPermanent,"candidate exceeds adaptive v2 producer byte budget");
             std::shared_ptr<const GenerationLease> lease;
             Event published;
@@ -275,15 +280,13 @@ public:
                 GenerationAuthorityRequest authority_request{f->request.dispatch_key(),candidate->selection_plan_key(),f->request.plan_abi(),receipt,candidate,bytes};
                 LockedAuthorityScope issuance(this);
                 lease=generations->Issue(authority_request);
-                const auto& variant = lease ? lease->variant() : std::shared_ptr<const FrozenPlanVariant>{};
                 if(!lease || lease->generation() <= last_committed_generation ||
                    lease->dispatch_key()!=f->request.dispatch_key() || lease->plan_abi()!=f->request.plan_abi() ||
                    lease->selection_plan_key()!=candidate->selection_plan_key() ||
                    lease->validation_receipt()!=receipt.value() || lease->producer_reported_bytes()!=bytes ||
-                   !variant || variant->generation()!=lease->generation() ||
-                   variant->dispatch_key()!=lease->dispatch_key() || variant->plan_abi()!=lease->plan_abi() ||
-                   variant->artifact_lease().selection_plan_key()!=lease->selection_plan_key() ||
-                   variant->session()!=candidate->session()) throw CompileError(FailureCategory::kPermanent,"generation authority issued mismatched lease");
+                   lease->candidate()!=candidate ||
+                   lease->compiled_graph().graph_semantic_key()!=candidate->compiled_graph().graph_semantic_key() ||
+                   lease->session()!=candidate->session()) throw CompileError(FailureCategory::kPermanent,"generation authority issued mismatched lease");
                 // No-throw handoff only: reserved vector assignments/erase/swap.
                 route->second.current=lease;route->second.history.push_back(lease);staged_discoverable.push_back(lease);staged_bytes+=bytes;Evict(&staged,&staged_discoverable,&staged_bytes,&evictions);
                 routes.swap(staged);discoverable.swap(staged_discoverable);discoverable_bytes=staged_bytes;this->evictions+=evictions.size();last_committed_generation=lease->generation();flights.erase(f->key);published.generation=lease->generation();
@@ -303,7 +306,7 @@ CompileTicket AdaptiveHotSwapController::Submit(CompileRequest request) {
 }
 std::shared_ptr<const GenerationLease> AdaptiveHotSwapController::CompileAndPublish(CompileRequest r){auto result=Submit(std::move(r)).Wait();if(result.ready())return result.lease;throw CompileError(result.failure.category,result.failure.diagnostic);}
 std::shared_ptr<const GenerationLease> AdaptiveHotSwapController::Acquire(const ProductionExecutionRequest& r) const {state_->RejectReentry();r.Validate();std::shared_ptr<const GenerationLease> out;{std::lock_guard<std::mutex> lock(state_->mutex);auto it=state_->routes.find(RouteKey(r.dispatch_key(),r.plan_abi()));if(it!=state_->routes.end()&&it->second.current&&it->second.current->plan_abi()==r.plan_abi()&&!it->second.tombstones.count(it->second.current->selection_plan_key().canonical_bytes()))out=it->second.current;}if(!out)throw std::out_of_range("no exact published adaptive v2 generation");return out;}
-RunAsyncResult AdaptiveHotSwapController::RunAsync(const ProductionExecutionRequest& r,const Array<runtime::NDArray>& inputs,const DeviceStream& stream) const {auto lease=Acquire(r);auto result=lease->variant()->session()->RunAsync(inputs,stream);result.completion.RetainDependencies({},std::make_shared<RunRetention>(RunRetention{lease}));return {std::move(result.outputs),std::move(result.completion),std::move(lease)};}
+RunAsyncResult AdaptiveHotSwapController::RunAsync(const ProductionExecutionRequest& r,const Array<runtime::NDArray>& inputs,const DeviceStream& stream) const {auto lease=Acquire(r);auto result=lease->session()->RunAsync(inputs,stream);result.completion.RetainDependencies({},std::make_shared<RunRetention>(RunRetention{lease}));return {std::move(result.outputs),std::move(result.completion),std::move(lease)};}
 bool AdaptiveHotSwapController::EvaluateHealth(
     const std::shared_ptr<const GenerationLease>& lease) {
     state_->RejectReentry();

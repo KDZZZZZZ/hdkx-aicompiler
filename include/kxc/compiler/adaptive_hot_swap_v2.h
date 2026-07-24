@@ -14,7 +14,7 @@
 #ifndef KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
 #define KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION 1
 #elif !KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION
-#error "KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2 requires the production adapter"
+#error "KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2 requires preparation contracts"
 #endif
 
 #include <atomic>
@@ -30,7 +30,7 @@
 #include "kxc/compiler/adaptive_production_experimental.h"
 
 // =============================================================================
-// 轨 03 W3 — AdaptiveHotSwapController v2（default-OFF，依赖 W2 production）
+// 轨 03 W3 — AdaptiveHotSwapController v2（default-OFF，依赖 preparation contracts）
 // -----------------------------------------------------------------------------
 // 进程内 experimental 控制面；内建 Generation/Health authority 是测试权威，
 // 不是认证/attestation。CMake：KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=ON
@@ -52,12 +52,11 @@
 // 发布条件：DispatchKey + PlanAbiFingerprint 均匹配才可换 future routing
 // =============================================================================
 namespace kxc::api::adaptive::hot_swap::v2 {
-namespace legacy = experimental::production_path;
-using ProductionCompileRequest = legacy::ProductionCompileRequest;
-using ProductionExecutionRequest = legacy::ProductionExecutionRequest;
-using ProductionPathCompilerAdapter = legacy::ProductionPathCompilerAdapter;
-using FrozenPlanVariant = legacy::FrozenPlanVariant;
-using PreparedCandidate = legacy::PreparedCandidate;
+namespace preparation = experimental::production_path;
+using ProductionCompileRequest = preparation::ProductionCompileRequest;
+using ProductionExecutionRequest = preparation::ProductionExecutionRequest;
+using ProductionPathCompilerAdapter = preparation::ProductionPathCompilerAdapter;
+using PreparedCandidate = preparation::PreparedCandidate;
 inline constexpr uint32_t kAdaptiveHotSwapContractVersion = 3;
 using Generation = uint64_t;  // 不回绕的代际号
 
@@ -157,23 +156,23 @@ protected:
 class GenerationLease final {
 public:
     Generation generation() const noexcept;
-    const std::shared_ptr<const FrozenPlanVariant>& variant() const noexcept;
+    const std::shared_ptr<const PreparedCandidate>& candidate() const noexcept;
+    const CompiledGraph& compiled_graph() const noexcept;
+    const std::shared_ptr<const runtime::RuntimeSession>& session() const noexcept;
     const DispatchKey& dispatch_key() const noexcept;
     const PlanAbiFingerprint& plan_abi() const noexcept;
     const PlanVariantKey& selection_plan_key() const noexcept;
     const std::string& validation_receipt() const noexcept;
     uint64_t producer_reported_bytes() const noexcept;
 private:
-    GenerationLease(Generation generation, std::shared_ptr<const FrozenPlanVariant> variant,
-                    DispatchKey route, PlanVariantKey selection_plan,
-                    PlanAbiFingerprint plan_abi, std::string validation_receipt,
+    GenerationLease(Generation generation,
+                    std::shared_ptr<const PreparedCandidate> candidate,
+                    DispatchKey route, PlanAbiFingerprint plan_abi,
                     uint64_t producer_reported_bytes);
     Generation generation_{0};
-    std::shared_ptr<const FrozenPlanVariant> variant_;
+    std::shared_ptr<const PreparedCandidate> candidate_;
     DispatchKey route_;
-    PlanVariantKey selection_plan_;
     PlanAbiFingerprint plan_abi_;
-    std::string validation_receipt_;
     uint64_t producer_reported_bytes_{0};
     friend class GenerationAuthority;
 };

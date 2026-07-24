@@ -911,13 +911,14 @@ if(KXC_BUILD_PASS_TESTS)
     add_dependencies(${_kxc_adaptive_v1_test}
       kxc_adaptive_v1_test_obj)
   endforeach()
-  if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
-    kxc_add_runtime_exe(adaptive_production_experimental_test
-      test/adaptive_production_experimental_test.cpp)
+  if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION AND
+     NOT KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
+    kxc_add_runtime_exe(adaptive_preparation_experimental_test
+      test/adaptive_preparation_v2_test.cpp)
   endif()
   if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
     kxc_add_runtime_exe(adaptive_hot_swap_v2_test
-      test/adaptive_production_experimental_test.cpp)
+      test/adaptive_preparation_v2_test.cpp)
   endif()
   if(BUILD_TESTING)
     add_custom_target(run_restricted_symbolic_shape_test
@@ -938,19 +939,20 @@ if(KXC_BUILD_PASS_TESTS)
       set_tests_properties(${_kxc_adaptive_test} PROPERTIES
         LABELS "adaptive;cpu")
     endforeach()
-    if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
-      add_test(NAME adaptive_production_experimental_test
-        COMMAND "$<TARGET_FILE:adaptive_production_experimental_test>")
-      set_tests_properties(adaptive_production_experimental_test PROPERTIES
-        LABELS "adaptive;adaptive-production-experimental;cpu"
+    if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION AND
+       NOT KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
+      add_test(NAME adaptive_preparation_experimental_test
+        COMMAND "$<TARGET_FILE:adaptive_preparation_experimental_test>")
+      set_tests_properties(adaptive_preparation_experimental_test PROPERTIES
+        LABELS "adaptive;adaptive-preparation-experimental;cpu"
         TIMEOUT 60)
-      add_custom_target(run_adaptive_production_experimental_tests
+      add_custom_target(run_adaptive_preparation_experimental_tests
         COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
-                -L adaptive-production-experimental -L cpu
+                -L adaptive-preparation-experimental -L cpu
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-        DEPENDS adaptive_production_experimental_test
+        DEPENDS adaptive_preparation_experimental_test
         USES_TERMINAL
-        COMMENT "Run experimental production-path adaptive CPU CTest suite")
+        COMMENT "Run experimental production-path preparation CPU CTest suite")
     endif()
     if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
       add_test(NAME adaptive_hot_swap_v2_test
@@ -974,9 +976,10 @@ if(KXC_BUILD_PASS_TESTS)
               adaptive_kernel_slot_test
       USES_TERMINAL
       COMMENT "Run adaptive CPU CTest suite")
-    if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
+    if(KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION AND
+       NOT KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
       add_dependencies(run_adaptive_tests
-        adaptive_production_experimental_test)
+        adaptive_preparation_experimental_test)
     endif()
     if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
       add_dependencies(run_adaptive_tests adaptive_hot_swap_v2_test)
