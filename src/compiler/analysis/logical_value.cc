@@ -17,7 +17,16 @@ namespace {
 
 void Flatten(const Type& type, const std::string& path,
              std::vector<Type>* leaves) {
-    if (type.As<TensorTypeNode>()) {
+    if (const auto* tensor = type.As<TensorTypeNode>()) {
+        if (tensor->dtype.empty()) {
+            Fail(path, "capability=tensor_dtype; tensor dtype must be explicit");
+        }
+        for (std::size_t index = 0; index < tensor->shape.size(); ++index) {
+            if (tensor->shape[index] < 0) {
+                Fail(path + ".shape[" + std::to_string(index) + "]",
+                     "capability=static_exact_shape; dimension is dynamic");
+            }
+        }
         leaves->push_back(type);
         return;
     }

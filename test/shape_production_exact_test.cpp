@@ -160,7 +160,7 @@ bool TestGateAndPreparation() {
     const auto prepared = ProductionExactShapeAdapter::PrepareGraphTemplate(TwoUnitGraph(), Config());
     const auto counters = prepared.counters();
     CHECK(counters.execution_contract_resolutions == 1 && counters.relay_graph_pipelines == 1 &&
-          counters.capability_boundary_checks == 3 && counters.value_graph_builds == 1 &&
+          counters.capability_boundary_checks == 2 && counters.value_graph_builds == 1 &&
           counters.partitions == 1, "preparation must execute each graph step exactly once");
     CHECK(prepared.unit_count() == 2 && !prepared.multi_profile_supported(),
           "concrete Relay template must retain two units and hard-gate multi-profile");

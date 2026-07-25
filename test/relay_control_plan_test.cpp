@@ -452,9 +452,9 @@ bool TestStaticAndControlGates() {
             {loop_condition, loop_initial},
             While(loop_initial, loop_state, loop_condition, loop_state, 0)));
     });
-    TEST_CHECK(loop_condition_error.find("required capability=cpu_loop_condition_placement") !=
+    TEST_CHECK(loop_condition_error.find("cpu_loop_condition_placement") !=
                    std::string::npos,
-               "While condition placement must fail in the capability gate before plan lowering");
+               "While condition placement must fail in control-plan lowering");
 
     Var placement_condition("placement_condition", TensorType({}, "bool"));
     Var placement_initial("placement_initial", kI64),
@@ -467,9 +467,9 @@ bool TestStaticAndControlGates() {
             While(placement_initial, placement_state, placement_condition,
                   placement_state, 0)));
     });
-    TEST_CHECK(loop_state_error.find("required capability=exact_loop_state_placement") !=
+    TEST_CHECK(loop_state_error.find("exact_loop_state_placement") !=
                    std::string::npos,
-               "While state placement must fail in the capability gate before plan lowering");
+               "While state placement must fail in control-plan lowering");
 
     Var mismatch_predicate("mismatch_predicate", TensorType({}, "bool"));
     Var mismatch_x("mismatch_x", kI64), mismatch_y("mismatch_y", kI64);
@@ -570,7 +570,7 @@ bool TestStaticAndControlGates() {
     const std::string graph_error = ErrorText([&] {
         (void)kxc::api::internal::BuildValueGraph(ordinary_if);
     });
-    TEST_CHECK(graph_error.find("required capability=if") != std::string::npos,
+    TEST_CHECK(graph_error.find("capability=if") != std::string::npos,
                "ordinary ValueGraph compilation must still reject Relay If");
     return true;
 }

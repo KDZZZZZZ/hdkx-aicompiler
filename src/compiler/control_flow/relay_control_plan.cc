@@ -4,7 +4,6 @@
 
 #include "internal_lowering.h"
 
-#include "../internal/executable_capability.h"
 #include "../internal/logical_value.h"
 #include "../internal/resolved_relay_call.h"
 
@@ -47,26 +46,30 @@ public:
             function_ = relay::InferTypePass(function_);
             function_ = relay::NormalizeToANF(function_);
             relay::VerifyANF(function_);
-            internal::ExecutableCapabilityOptions options;
-            options.version = internal::ExecutableCapabilityOptions::kVersion;
-            options.allow_if = true;
-            options.allow_while = true;
-            options.allow_tuple_parameters = true;
-            options.allow_nested_tuple_call_outputs = true;
-            options.allow_device_regions = true;
-            internal::VerifyExecutableCapability(function_, options);
         } else {
             relay::VerifyANF(function_);
         }
 
+        if (!function_->body.defined()) {
+            Fail("function", "capability=defined_typed_relay; Function has no body");
+        }
+        (void)RequireCheckedType(Expr(ObjectRef(function_)), "function");
         const internal::RegionId root = NewRegion("function");
         plan_.entry_region = root;
         Env environment;
         for (std::size_t i = 0; i < function_->params.size(); ++i) {
             const Var& parameter = function_->params[i];
             const std::string path = "function.params[" + std::to_string(i) + "]";
+            if (!parameter.defined() || !parameter->type_annotation.defined()) {
+                Fail(path, "capability=typed_parameter; parameter annotation is missing");
+            }
+            const Type parameter_type = RequireCheckedType(
+                Expr(ObjectRef(parameter)), path);
+            if (!TypeEqual(parameter->type_annotation, parameter_type)) {
+                Fail(path, "capability=typed_parameter; annotation and checked_type differ");
+            }
             const Leaves ids = AddLeaves(Expr(ObjectRef(parameter)),
-                                         parameter.checked_type(),
+                                         parameter_type,
                                          internal::LogicalValueOrigin::kParameter,
                                          path);
             environment.emplace(parameter.get(), ids);
@@ -75,6 +78,10 @@ public:
 
         const Leaves outputs = LowerTerminal(function_->body, root, &environment,
                                              "function.body");
+        if (!TypeEqual(RequireCheckedType(Expr(ObjectRef(function_)), "function"),
+                       RequireCheckedType(function_->body, "function.body"))) {
+            Fail("function", "capability=typed_function_result; Function and body checked_type differ");
+        }
         ValidateAliasPlacement(Expr(ObjectRef(function_)), outputs, "function");
         if (outputs.empty()) Fail("function.body", "requires at least one tensor graph output");
         std::unordered_set<internal::ValueId> output_set;
@@ -135,6 +142,18 @@ private:
         return plan_.values[static_cast<std::size_t>(id)];
     }
 
+    Type RequireCheckedType(const Expr& expr, const std::string& path) const {
+        const Type type = expr.checked_type();
+        if (!type.defined()) {
+            Fail(path, "capability=defined_typed_relay; checked_type is missing");
+        }
+        return type;
+    }
+
+    Device Placement(const Expr& expr, const std::string& path) const {
+        return internal::ResolveLogicalValueDevice(expr, Device::CPU(), path);
+    }
+
     void ValidateAliasPlacement(const Expr& alias, const Leaves& leaves,
                                 const std::string& path) const {
         const auto* relay_node = dynamic_cast<const RelayNode*>(alias.get());
@@ -177,15 +196,19 @@ private:
         if (const auto* var = expr.As<VarNode>()) {
             const auto it = environment.find(expr.get());
             if (it == environment.end()) {
-                Fail(path, "encountered free or unbound Var '" + var->vid->name_hint + "'");
+                Fail(path, "capability=lexically_bound_var; encountered free or unbound Var '" + var->vid->name_hint + "'");
             }
+            (void)RequireCheckedType(expr, path);
             ids = it->second;
-        } else if (expr.As<ConstantNode>()) {
+        } else if (const auto* constant = expr.As<ConstantNode>()) {
+            if (!constant->data.defined()) {
+                Fail(path, "capability=constant_payload; constant payload is undefined");
+            }
             const auto found = constants_.find(expr.get());
             if (found != constants_.end()) {
                 ids = found->second;
             } else {
-                ids = AddLeaves(expr, expr.checked_type(),
+                ids = AddLeaves(expr, RequireCheckedType(expr, path),
                                 internal::LogicalValueOrigin::kConstant, path);
                 constants_.emplace(expr.get(), ids);
                 plan_.constant_values.insert(plan_.constant_values.end(), ids.begin(), ids.end());
@@ -248,7 +271,7 @@ private:
             arguments.insert(arguments.end(), leaves.begin(), leaves.end());
         }
         const Leaves outputs = AddLeaves(
-            expr, expr.checked_type(),
+            expr, RequireCheckedType(expr, path),
             internal::LogicalValueOrigin::kPrimitiveOutput, path);
         if (outputs.size() != resolved.output_leaf_types.size()) {
             Fail(path,
@@ -287,10 +310,16 @@ private:
                              const std::string& path) {
         const Leaves tuple = ResolveAtomic(get_item->tuple, region, environment,
                                            path + ".tuple");
-        const auto* tuple_type = get_item->tuple.checked_type().As<TupleTypeNode>();
+        const Type result_type = RequireCheckedType(expr, path);
+        const auto* tuple_type =
+            RequireCheckedType(get_item->tuple, path + ".tuple").As<TupleTypeNode>();
         if (!tuple_type || get_item->index < 0 ||
             static_cast<std::size_t>(get_item->index) >= tuple_type->fields.size()) {
-            Fail(path, "TupleGetItem is outside its checked TupleType");
+            Fail(path, "capability=well_typed_tuple_get_item; TupleGetItem is outside its checked TupleType");
+        }
+        if (!TypeEqual(result_type,
+                       tuple_type->fields[static_cast<std::size_t>(get_item->index)])) {
+            Fail(path, "capability=well_typed_tuple_get_item; TupleGetItem checked type differs from its selected field");
         }
         std::size_t begin = 0;
         for (int i = 0; i < get_item->index; ++i) {
@@ -304,7 +333,7 @@ private:
                 tuple_type->fields[static_cast<std::size_t>(get_item->index)],
                 path + ".checked_type");
         if (begin + selected_types.size() > tuple.size()) {
-            Fail(path, "TupleGetItem flattening is inconsistent with its checked TupleType");
+            Fail(path, "capability=well_typed_tuple_get_item; TupleGetItem flattening is inconsistent with its checked TupleType");
         }
         Leaves selected(
             tuple.begin() + static_cast<std::ptrdiff_t>(begin),
@@ -317,11 +346,34 @@ private:
     Leaves LowerWhile(const Expr& expr, const WhileNode* while_node,
                       internal::RegionId parent, const Env& environment,
                       const std::string& path) {
+        if (!while_node->loop_var.defined() || while_node->max_trip_count < 0) {
+            Fail(path, "capability=bounded_loop; While requires a defined binder and non-negative max_trip_count");
+        }
+        const Type initial_type = RequireCheckedType(while_node->initial_state,
+                                                     path + ".initial_state");
+        const Type loop_type = RequireCheckedType(
+            Expr(ObjectRef(while_node->loop_var)), path + ".loop_var");
+        const Type result_type = RequireCheckedType(expr, path);
+        if (!TypeEqual(initial_type, loop_type)) {
+            Fail(path + ".loop_var", "capability=typed_loop_binding; loop binder must exactly match initial state");
+        }
+        if (!TypeEqual(result_type, initial_type)) {
+            Fail(path, "capability=exact_loop_state_type; While result must exactly match initial state");
+        }
+        const Device state_device = Placement(while_node->initial_state,
+                                               path + ".initial_state");
+        if (Placement(Expr(ObjectRef(while_node->loop_var)), path + ".loop_var") != state_device ||
+            Placement(while_node->body, path + ".body") != state_device ||
+            Placement(expr, path) != state_device) {
+            Fail(path, "capability=exact_loop_state_placement; While state must retain one exact device placement");
+        }
+        if (Placement(while_node->condition, path + ".condition") != Device::CPU()) {
+            Fail(path + ".condition", "capability=cpu_loop_condition_placement; While condition must be placed on CPU:0");
+        }
         const Leaves initial = ResolveAtomic(while_node->initial_state, parent,
                                              environment, path + ".initial_state");
         const Leaves results = AddLeaves(
-            expr, expr.checked_type(),
-            internal::LogicalValueOrigin::kLoopCarried, path);
+            expr, result_type, internal::LogicalValueOrigin::kLoopCarried, path);
         if (initial.empty() || initial.size() != results.size()) {
             Fail(path, "While state flattening does not match its result type");
         }
@@ -333,7 +385,7 @@ private:
         const std::size_t parent_task_index = Region(parent).tasks.size() - 1;
 
         const Leaves arguments = AddLeaves(Expr(ObjectRef(while_node->loop_var)),
-                                           while_node->loop_var.checked_type(),
+                                           loop_type,
                                            internal::LogicalValueOrigin::kLoopCarried,
                                            path + ".loop_var");
         const internal::RegionId condition_region = NewRegion(path + ".condition");
@@ -389,10 +441,19 @@ private:
                    const Env& environment, const std::string& path) {
         const Leaves predicate = ResolveAtomic(if_node->cond, parent, environment,
                                                path + ".cond");
-        if (predicate.size() != 1) Fail(path + ".cond", "requires one scalar bool predicate leaf");
+        if (predicate.size() != 1 || !internal::IsCpuScalarBool(Value(predicate.front()))) {
+            Fail(path + ".cond", "capability=scalar_bool_if_predicate; branch predicate must be a CPU scalar bool");
+        }
+        const Type result_type = RequireCheckedType(expr, path);
+        const Type then_type = RequireCheckedType(if_node->true_branch,
+                                                  path + ".true_branch");
+        const Type else_type = RequireCheckedType(if_node->false_branch,
+                                                  path + ".false_branch");
+        if (!TypeEqual(result_type, then_type) || !TypeEqual(then_type, else_type)) {
+            Fail(path, "capability=exact_if_branch_type; If branches and result must exactly match");
+        }
         const Leaves results = AddLeaves(
-            expr, expr.checked_type(), internal::LogicalValueOrigin::kPhi,
-            path);
+            expr, result_type, internal::LogicalValueOrigin::kPhi, path);
         if (results.empty()) Fail(path, "If must produce at least one tensor leaf");
 
         internal::ControlTask task;
@@ -449,6 +510,7 @@ private:
         if (const auto* if_node = expr.As<IfNode>()) return LowerIf(expr, if_node, region, environment, path);
         if (const auto* while_node = expr.As<WhileNode>()) return LowerWhile(expr, while_node, region, environment, path);
         if (const auto* tuple = expr.As<TupleNode>()) {
+            (void)RequireCheckedType(expr, path);
             Leaves values;
             for (std::size_t i = 0; i < tuple->fields.size(); ++i) {
                 const Leaves field = ResolveAtomic(tuple->fields[i], region, environment,
@@ -461,12 +523,24 @@ private:
         if (const auto* get_item = expr.As<TupleGetItemNode>()) {
             return LowerTupleGetItem(expr, get_item, region, environment, path);
         }
-        Fail(path, "encountered unsupported non-ANF Relay value");
+        if (expr.As<FunctionNode>()) {
+            Fail(path, "capability=first_order_relay; function values are unsupported");
+        }
+        Fail(path, "capability=supported_static_relay_node; encountered unsupported non-ANF Relay value");
     }
 
     Leaves LowerTerminal(const Expr& expr, internal::RegionId region, Env* environment,
                          const std::string& path) {
         if (const auto* let = expr.As<LetNode>()) {
+            if (!let->var.defined()) {
+                Fail(path + ".var", "capability=lexical_let_binding; Let binder is undefined");
+            }
+            const Type binder_type = RequireCheckedType(
+                Expr(ObjectRef(let->var)), path + ".var");
+            const Type value_type = RequireCheckedType(let->value, path + ".value");
+            if (!TypeEqual(binder_type, value_type)) {
+                Fail(path + ".var", "capability=typed_let_binding; Let binder and value differ");
+            }
             const Leaves value = LowerValue(let->value, region, *environment, path + ".value");
             ValidateAliasPlacement(Expr(ObjectRef(let->var)), value,
                                    path + ".var");

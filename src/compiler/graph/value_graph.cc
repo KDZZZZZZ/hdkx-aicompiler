@@ -3,7 +3,6 @@
  */
 
 #include "../internal/value_graph.h"
-#include "../internal/executable_capability.h"
 
 #include <cstddef>
 #include <optional>
@@ -24,27 +23,44 @@ public:
     ValueGraphBuilder(Function function, Device execution_device)
         : execution_device_(std::move(execution_device)) {
         if (!function.defined()) {
-            throw std::invalid_argument("BuildValueGraph requires a defined Function");
+            throw std::invalid_argument(
+                "BuildValueGraph: capability=defined_typed_relay; requires a defined Function");
         }
         graph_.function = std::move(function);
     }
 
     ValueGraph Build() {
-        VerifyExecutableCapability(
-            graph_.function,
-            StaticDataflowExecutableCapabilities(execution_device_));
+        if (!graph_.function->body.defined()) {
+            throw std::invalid_argument(
+                "BuildValueGraph: capability=defined_typed_relay; Function has no body");
+        }
+        RequireCheckedType(Expr(ObjectRef(graph_.function)), "Function");
         for (const auto& parameter : graph_.function->params) {
-            if (!parameter->type_annotation.As<TensorTypeNode>()) {
+            const std::string path =
+                "function.params[" + std::to_string(graph_.input_value_ids.size()) + "]";
+            if (!parameter.defined() || !parameter->type_annotation.defined() ||
+                !parameter->type_annotation.As<TensorTypeNode>()) {
                 throw std::invalid_argument(
-                    "BuildValueGraph requires TensorType function parameters");
+                    "BuildValueGraph: capability=tensor_parameter; " +
+                    path + " requires a TensorType annotation");
+            }
+            if (!TypeEqual(parameter->type_annotation,
+                           RequireCheckedType(parameter, "parameter"))) {
+                throw std::invalid_argument(
+                    "BuildValueGraph: capability=typed_parameter; " +
+                    path + " annotation and checked_type differ");
             }
             const int64_t id = AddValue(
                 parameter, ValueOrigin::kParameter, parameter->type_annotation,
-                "function.params[" + std::to_string(graph_.input_value_ids.size()) +
-                    "]");
+                path);
             graph_.input_value_ids.push_back(id);
         }
 
+        if (!TypeEqual(RequireCheckedType(Expr(ObjectRef(graph_.function)), "Function"),
+                       RequireCheckedType(graph_.function->body, "Function body"))) {
+            throw std::invalid_argument(
+                "BuildValueGraph: capability=typed_function_result; Function and body checked_type differ");
+        }
         const std::vector<int64_t> outputs = Resolve(graph_.function->body);
         if (outputs.empty()) {
             throw std::invalid_argument("BuildValueGraph requires graph outputs");
@@ -81,6 +97,18 @@ private:
             throw std::invalid_argument(
                 "Stable graph AddValue requires exactly one TensorType leaf");
         }
+        if (!execution_device_.defined()) {
+            const auto* relay = dynamic_cast<const RelayNode*>(source.get());
+            if (relay && relay->virtual_device_.defined()) {
+                throw std::invalid_argument(
+                    "BuildValueGraph: capability=explicit_execution_device; " +
+                    source_locator + " has explicit Relay placement");
+            }
+        } else if (leaves.front().device != execution_device_) {
+            throw std::invalid_argument(
+                "BuildValueGraph: capability=matching_execution_device; " +
+                source_locator + " placement differs from the execution device");
+        }
         graph_.values.push_back(std::move(leaves.front()));
         graph_.value_ids_by_expr[source.get()].push_back(id);
         if (origin == ValueOrigin::kConstant) {
@@ -91,9 +119,11 @@ private:
 
     std::vector<int64_t> Resolve(const Expr& expr) {
         if (!expr.defined()) {
-            throw std::invalid_argument("BuildValueGraph encountered undefined Relay Expr");
+            throw std::invalid_argument(
+                "BuildValueGraph: capability=defined_typed_relay; Relay Expr is undefined");
         }
         if (expr.As<VarNode>()) {
+            (void)RequireCheckedType(expr, "Var");
             const auto bound_it = bound_value_ids_.find(expr.get());
             if (bound_it != bound_value_ids_.end()) {
                 // Keep the Var identity queryable by unit lowering while resolving
@@ -106,12 +136,16 @@ private:
                 return parameter_it->second;
             }
             throw std::invalid_argument(
-                "BuildValueGraph encountered a free or unbound Var");
+                "BuildValueGraph: capability=lexically_bound_var; encountered a free or unbound Var");
         }
         const auto memo_it = graph_.value_ids_by_expr.find(expr.get());
         if (memo_it != graph_.value_ids_by_expr.end()) return memo_it->second;
 
-        if (expr.As<ConstantNode>()) {
+        if (const auto* constant = expr.As<ConstantNode>()) {
+            if (!constant->data.defined()) {
+                throw std::invalid_argument(
+                    "BuildValueGraph: capability=constant_payload; constant payload is undefined");
+            }
             return {AddValue(expr, ValueOrigin::kConstant,
                              RequireCheckedType(expr, "Constant"),
                              "function.constant[" +
@@ -121,12 +155,29 @@ private:
         if (const auto* call = expr.As<CallNode>()) {
             return ResolveCall(expr, call);
         }
+        if (expr.As<IfNode>()) {
+            throw std::invalid_argument(
+                "BuildValueGraph: capability=if; static dataflow does not support If");
+        }
         if (expr.As<WhileNode>()) {
             throw std::invalid_argument(
-                "BuildValueGraph rejects While; required capability=control_flow.loop");
+                "BuildValueGraph: capability=control_flow.loop; static dataflow does not support While");
+        }
+        if (expr.As<FunctionNode>()) {
+            throw std::invalid_argument(
+                "BuildValueGraph: capability=first_order_relay; function values are unsupported");
         }
         if (const auto* let = expr.As<LetNode>()) {
+            if (!let->var.defined()) {
+                throw std::invalid_argument(
+                    "BuildValueGraph: capability=lexical_let_binding; Let binder is undefined");
+            }
+            const Type binder_type = RequireCheckedType(let->var, "Let binder");
             const std::vector<int64_t> value_ids = Resolve(let->value);
+            if (!TypeEqual(binder_type, RequireCheckedType(let->value, "Let value"))) {
+                throw std::invalid_argument(
+                    "BuildValueGraph: capability=typed_let_binding; Let binder and value differ");
+            }
             const auto outer = bound_value_ids_.find(let->var.get());
             const std::optional<std::vector<int64_t>> saved =
                 outer == bound_value_ids_.end()
@@ -143,6 +194,7 @@ private:
             return body_ids;
         }
         if (const auto* tuple = expr.As<TupleNode>()) {
+            (void)RequireCheckedType(expr, "Tuple");
             std::vector<int64_t> fields;
             for (const auto& field : tuple->fields) {
                 const std::vector<int64_t> field_values = Resolve(field);
@@ -153,13 +205,21 @@ private:
         }
         if (const auto* get_item = expr.As<TupleGetItemNode>()) {
             const std::vector<int64_t> tuple_values = Resolve(get_item->tuple);
+            const Type result_type = RequireCheckedType(expr, "TupleGetItem");
             const auto* tuple_type =
-                get_item->tuple.checked_type().As<TupleTypeNode>();
+                RequireCheckedType(get_item->tuple, "TupleGetItem tuple").As<TupleTypeNode>();
             if (!tuple_type || get_item->index < 0 ||
                 static_cast<size_t>(get_item->index) >=
                     tuple_type->fields.size()) {
                 throw std::invalid_argument(
+                    "BuildValueGraph: capability=well_typed_tuple_get_item; "
                     "TupleGetItem index is outside its checked TupleType");
+            }
+            if (!TypeEqual(result_type,
+                           tuple_type->fields[static_cast<size_t>(get_item->index)])) {
+                throw std::invalid_argument(
+                    "BuildValueGraph: capability=well_typed_tuple_get_item; "
+                    "TupleGetItem checked type differs from its selected field");
             }
             size_t begin = 0;
             for (int index = 0; index < get_item->index; ++index) {
@@ -170,6 +230,7 @@ private:
                 tuple_type->fields[static_cast<size_t>(get_item->index)]);
             if (begin + count > tuple_values.size()) {
                 throw std::invalid_argument(
+                    "BuildValueGraph: capability=well_typed_tuple_get_item; "
                     "TupleGetItem checked type does not match flattened values");
             }
             std::vector<int64_t> selected(
@@ -186,8 +247,9 @@ private:
     Type RequireCheckedType(const Expr& expr, const char* kind) const {
         const Type type = expr.checked_type();
         if (!type.defined()) {
-            throw std::invalid_argument(std::string("BuildValueGraph requires checked_type for ") +
-                                        kind);
+            throw std::invalid_argument(
+                std::string("BuildValueGraph: capability=defined_typed_relay; ") +
+                kind + " checked_type is missing");
         }
         return type;
     }

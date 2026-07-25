@@ -12,7 +12,6 @@
 #include <variant>
 #include <vector>
 
-#include "../src/compiler/internal/executable_capability.h"
 #include "../src/compiler/internal/lowered_graph.h"
 #include "../src/compiler/internal/relay_program.h"
 #include "../src/compiler/internal/resolved_relay_call.h"
@@ -134,75 +133,45 @@ bool SameIds(const kxc::Array<int64_t>& lhs, const kxc::Array<int64_t>& rhs) {
     return true;
 }
 
-bool TestStaticExactDiagnosticsAndIfGate() {
+bool TestStaticBuilderRejections() {
     using namespace kxc;
     using namespace kxc::api::internal;
     const TensorType type({4}, "float32");
+    struct RejectedProgramCase {
+        const char* name;
+        std::function<void()> build;
+        const char* expected_fragment;
+    };
 
     Var untyped("untyped");
-    const std::string untyped_error = ErrorText([&] {
-        VerifyExecutableCapability(Function({untyped}, untyped),
-                                    StaticDataflowExecutableCapabilities());
-    });
-    TEST_CHECK(untyped_error.find("required capability=defined_typed_relay") !=
-                   std::string::npos,
-               "untyped Relay must report the typed capability");
-
     Var free_var("free", type);
-    Function free_function({}, free_var);
-    free_function = relay::InferTypePass(free_function);
-    const std::string free_error = ErrorText([&] {
-        VerifyExecutableCapability(free_function, StaticDataflowExecutableCapabilities());
-    });
-    TEST_CHECK(free_error.find("path=function.body") != std::string::npos &&
-                   free_error.find("node=Var") != std::string::npos &&
-                   free_error.find("required capability=lexically_bound_var") !=
-                       std::string::npos,
-               "free Var diagnostic must carry deterministic path, kind, and capability");
-
+    Function free_function = relay::InferTypePass(Function({}, free_var));
     Var dynamic("dynamic", TensorType({-1, 4}, "float32"));
-    Function dynamic_function({dynamic}, dynamic);
-    dynamic_function = relay::InferTypePass(dynamic_function);
-    const std::string dynamic_error = ErrorText([&] {
-        VerifyExecutableCapability(dynamic_function,
-                                    StaticDataflowExecutableCapabilities());
-    });
-    TEST_CHECK(dynamic_error.find("shape[0]") != std::string::npos &&
-                   dynamic_error.find("static_exact_shape") != std::string::npos,
-               "every negative TensorType dimension must be rejected");
-
+    Function dynamic_function = relay::InferTypePass(Function({dynamic}, dynamic));
     Var predicate("predicate", TensorType({}, "bool"));
-    Var x("x", type);
-    Var y("y", type);
-    Function conditional({predicate, x, y}, If(predicate, x, y));
-    conditional = relay::InferTypePass(conditional);
-    const std::string if_error = ErrorText([&] {
-        VerifyExecutableCapability(conditional, StaticDataflowExecutableCapabilities());
-    });
-    TEST_CHECK(if_error.find("path=function.body") != std::string::npos &&
-                   if_error.find("node=If") != std::string::npos &&
-                   if_error.find("required capability=if") != std::string::npos,
-               "default static-dataflow capability must reject If with a clear gate");
+    Var x("x", type), y("y", type);
+    Function conditional = relay::InferTypePass(
+        Function({predicate, x, y}, If(predicate, x, y)));
+    Var closure_arg("closure_arg", type);
+    Function closure = relay::InferTypePass(
+        Function({closure_arg}, Function({}, closure_arg)));
 
-    ExecutableCapabilityOptions with_if = StaticDataflowExecutableCapabilities();
-    with_if.allow_if = true;
-    VerifyExecutableCapability(conditional, with_if);
-    return true;
-}
-
-bool TestFunctionValueIsRejected() {
-    using namespace kxc;
-    using namespace kxc::api::internal;
-    Var x("x", TensorType({4}, "float32"));
-    Function inner({}, x);
-    Function outer({x}, inner);
-    outer = relay::InferTypePass(outer);
-    const std::string error = ErrorText([&] {
-        VerifyExecutableCapability(outer, StaticDataflowExecutableCapabilities());
-    });
-    TEST_CHECK(error.find("node=Function") != std::string::npos &&
-                   error.find("first_order_relay") != std::string::npos,
-               "function values and closures must be rejected");
+    const std::vector<RejectedProgramCase> cases{
+        {"untyped", [&] { (void)BuildValueGraph(Function({untyped}, untyped)); },
+         "defined_typed_relay"},
+        {"free", [&] { (void)BuildValueGraph(free_function); },
+         "lexically_bound_var"},
+        {"dynamic", [&] { (void)BuildValueGraph(dynamic_function); },
+         "static_exact_shape"},
+        {"function", [&] { (void)BuildValueGraph(closure); },
+         "first_order_relay"},
+        {"residual_if", [&] { (void)BuildValueGraph(conditional); }, "capability=if"},
+    };
+    for (const RejectedProgramCase& test : cases) {
+        const std::string error = ErrorText(test.build);
+        TEST_CHECK(error.find(test.expected_fragment) != std::string::npos,
+                   std::string(test.name) + " must fail closed: " + error);
+    }
     return true;
 }
 
@@ -547,13 +516,10 @@ bool TestTupleParameterCapabilityIsNotOverclaimed() {
     Function function({parameter}, first);
     SetCheckedType(function, tensor);
     const std::string error = ErrorText([&] {
-        VerifyExecutableCapability(function,
-                                    StaticDataflowExecutableCapabilities(
-                                        Device::CPU()));
+        (void)BuildValueGraph(function, Device::CPU());
     });
-    TEST_CHECK(error.find("required capability=tensor_parameter") !=
-                   std::string::npos,
-               "static ValueGraph verifier must reject tuple parameters itself");
+    TEST_CHECK(error.find("tensor_parameter") != std::string::npos,
+               "static ValueGraph must reject tuple parameters itself");
     return true;
 }
 
@@ -715,8 +681,7 @@ bool TestResolvedRelayCallIsTheOperatorAuthority() {
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
-        {"static_exact_diagnostics_and_if_gate", TestStaticExactDiagnosticsAndIfGate},
-        {"function_value_rejected", TestFunctionValueIsRejected},
+        {"static_builder_rejections", TestStaticBuilderRejections},
         {"value_graph_let_matches_nested", TestValueGraphLetMatchesNestedTopology},
         {"target_placement_and_operator_contracts",
          TestTargetPlacementAndOperatorContractsFailClosed},

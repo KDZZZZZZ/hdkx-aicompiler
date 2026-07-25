@@ -132,7 +132,7 @@ Compiler::Compile
 Compiler::CompileControlFlowExact
   -> InferTypePass
   -> NormalizeToANF
-  -> internal executable capability
+  -> whole-function capability preflight
   -> ControlPlanBuilder
   -> task_id -> frozen Function sidecar
   -> 每个 Function 再调用 Compiler::Compile
@@ -151,8 +151,8 @@ relay::LowerToTIR
 | 责任 | 改造前实现 A | 改造前实现 B/C | 漂移风险 |
 |---|---|---|---|
 | Relay 准备 | [`src/compiler/compiler.cc`](../src/compiler/compiler.cc) | [`src/compiler/control_flow/relay_control_plan.cc`](../src/compiler/control_flow/relay_control_plan.cc) | pass、ANF、capability 顺序和模式不一致 |
-| Operator Call 合同 | [`src/compiler/control_flow/executable_capability.cc`](../src/compiler/control_flow/executable_capability.cc) | `relay_control_plan.cc`、[`src/compiler/lowering/lowered_graph.cc`](../src/compiler/lowering/lowered_graph.cc)、已删除的 `src/compiler/lowering/relay_to_tir.cc` | arity、attrs、type relation、lowering binding 规则分叉 |
-| Tensor leaf 展开 | [`src/compiler/graph/value_graph.cc`](../src/compiler/graph/value_graph.cc) | `relay_control_plan.cc`、`executable_capability.cc` | nested tuple、output arity、静态形状规则漂移 |
+| Operator Call 合同 | whole-function capability preflight | topology builder 和 lowering | arity、attrs、type relation、lowering binding 规则分叉 |
+| Tensor leaf 展开 | [`src/compiler/graph/value_graph.cc`](../src/compiler/graph/value_graph.cc) | `relay_control_plan.cc`、whole-function preflight | nested tuple、output arity、静態形状规则漂移 |
 | Logical value | `ValueInfo` | `ControlValueSpec` | dtype、shape、device、origin 和 locator 重复建模 |
 | Primitive 边界 | `CompilationUnit` | `task_id -> Function` sidecar | semantic key、参数顺序、常量顺序和 device 边界可能不一致 |
 | Relay 到 TE | `LowerCompilationUnit` | `RelayToTEConverter` | whole-graph 与 per-unit cardinality 和常量语义不同 |
@@ -444,6 +444,8 @@ analysis 后，生产入口只读取一次
 builder，`true` 进入 structured-control builder。该选择从 residual capability
 set 的 `any()` 派生；不保存第二个 bool、enum、variant 或 Function wrapper。
 
+`PrepareRelayProgram` 只验证 config、扫描输入和 residual control capability、执行 pipeline，并对 residual policy fail closed。它不再遍历 typed ANF 来验证 ordinary Call；选定 topology 的 builder 在自己的单次遍历中验证节点结构并恰好解析一次 ordinary Call。
+
 选择只发生一次且只发生在编译期。`CompilePrimitiveUnits`、plan binder 和 Runtime 不得再次根据 Relay feature 猜测路径。如果常量条件折叠、不可达分支删除或受控循环展开消除了全部控制节点，必须进入 static fast path；不得为了保留来源信息而生成只含一个 entry Region 的控制计划。profile analysis 最多执行 graph pass 前后的两次线性只读遍历，不得因此重复 InferType、ANF、OperatorSpec 解析或 tensor leaf 展开。
 
 ### 7.2 Dataflow topology builder
@@ -458,7 +460,8 @@ set 的 `any()` 派生；不保存第二个 bool、enum、variant 或 Function w
 
 它不再：
 
-- 重新解析 OperatorSpec binding。
+- 在构图前运行 whole-function capability preflight。
+- 为同一 ordinary Call 重复解析 OperatorSpec binding。
 - 自己实现 tensor leaf 展开规则。
 - 直接调用 backend。
 
@@ -477,7 +480,8 @@ set 的 `any()` 派生；不保存第二个 bool、enum、variant 或 Function w
 它不再：
 
 - 手工重新执行 InferType、ANF 或另一套 capability engine。
-- 重复验证 arity、attrs、type relation 和 lowering binding。
+- 在 lowering 前运行 whole-function capability preflight。
+- 为同一 ordinary Call 重复验证 arity、attrs、type relation 和 lowering binding。
 - 保存 `kernel_ref` 作为 binding authority。
 - 构造叶子 Function sidecar。
 - 表达独立的 dtype/shape/device value ABI。
@@ -500,7 +504,7 @@ unresolved `ControlPlan` 位于 Compiler internal namespace，不能由 Runtime 
 这两个 builder 不是两套 compiler front-end：
 
 - 它们不运行 Relay pass。
-- 它们不各自解析 OperatorSpec。
+- 它们只通过同一 `ResolveRelayCall` 解析各自遇到的 ordinary Call 一次。
 - 它们不各自建立 tensor contract。
 - 它们不决定 capability。
 - 它们只处理各自独有的 topology invariants。

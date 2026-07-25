@@ -9,7 +9,6 @@
 #include <unordered_set>
 #include <utility>
 
-#include "../internal/executable_capability.h"
 #include "kxc/pass/context.h"
 #include "kxc/relay/visitor.h"
 
@@ -234,20 +233,6 @@ PreparedRelayProgram PrepareRelayProgram(
     RelayProgramProfile residual_profile(
         AnalyzeRelayControlCapabilities(typed_anf));
     RequireAllowedCapabilities(residual_profile, policy);
-
-    ExecutableCapabilityOptions options =
-        StaticDataflowExecutableCapabilities(
-            Device(config->target->device_type, config->target->device_id));
-    options.allow_if = policy.Allows(
-        RelayControlCapability::kConditionalBranch);
-    options.allow_while = policy.Allows(
-        RelayControlCapability::kBoundedPreTestLoop);
-    if (residual_profile.requires_control_topology()) {
-        options.allow_tuple_parameters = true;
-        options.allow_nested_tuple_call_outputs = true;
-        options.allow_device_regions = true;
-    }
-    VerifyExecutableCapability(typed_anf, options);
 
     return PreparedRelayProgram(
         std::move(typed_anf), std::move(residual_profile),

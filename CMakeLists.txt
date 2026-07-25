@@ -484,7 +484,6 @@ set(KXC_COMPILER_SOURCES
   src/compiler/compile_config.cc
   src/compiler/control_flow/control_plan.cc
   src/compiler/control_flow/control_plan_adapter.cc
-  src/compiler/control_flow/executable_capability.cc
   src/compiler/control_flow/relay_control_plan.cc
   src/compiler/control_flow/production_control_flow.cc
   src/compiler/identity.cc
