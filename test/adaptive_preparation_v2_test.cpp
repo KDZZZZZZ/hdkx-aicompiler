@@ -302,23 +302,33 @@ bool TestMalformedGraphRejectedBeforePreparation() {
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
 namespace v2 = kxc::api::adaptive::hot_swap::v2;
 
-bool TestAcquireWithoutRouteHasNoCompileSideEffect() {
+bool TestNoBackendAdmissionDoesNotCompile() {
     using namespace kxc;
     api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest request = MakeRequest();
+    std::atomic<size_t> queued_events{0};
+    v2::Options options;
+    options.observer = [&queued_events](const v2::Event& event) {
+        if (event.kind == v2::EventKind::kQueued) ++queued_events;
+    };
+    v2::AdaptiveHotSwapController controller(options);
     const api::internal::PrimitiveCacheStats before =
         api::internal::GetPrimitiveCacheStats();
-    std::atomic<uint64_t> events{0};
-    v2::Options options;
-    options.observer = [&](const v2::Event&) { events.fetch_add(1); };
-    v2::AdaptiveHotSwapController controller(options);
     TEST_CHECK(Throws([&] { (void)controller.Acquire(Execute(request)); }),
-               "Acquire must fail when no exact route has been published");
+               "Acquire without a route must fail");
+
+    v2::CancellationSource cancellation;
+    cancellation.Cancel();
+    const v2::CompileResult cancelled = controller.Submit(
+        {request, std::chrono::steady_clock::time_point::max(),
+         cancellation.token()}).Wait();
     const api::internal::PrimitiveCacheStats after =
         api::internal::GetPrimitiveCacheStats();
-    TEST_CHECK(after.misses == before.misses && after.in_flight == before.in_flight &&
-                   events.load() == 0,
-               "Acquire without a route must not compile or emit events");
+    TEST_CHECK(!cancelled.ready() &&
+                   cancelled.failure.category == v2::FailureCategory::kCancelled &&
+                   after.misses == before.misses &&
+                   after.in_flight == before.in_flight && queued_events == 0,
+               "Acquire and pre-cancelled Submit must not create compile work");
     return true;
 }
 
@@ -368,27 +378,6 @@ private:
     bool reject_subsequent_{false};
 };
 
-bool TestPreCancelledSubmitHasNoCompileSideEffect() {
-    using namespace kxc;
-    api::internal::ClearPrimitiveCacheForTesting();
-    const ProductionRequest request = MakeRequest();
-    const api::internal::PrimitiveCacheStats before =
-        api::internal::GetPrimitiveCacheStats();
-    v2::AdaptiveHotSwapController controller;
-    v2::CancellationSource cancellation;
-    cancellation.Cancel();
-    const v2::CompileResult result = controller.Submit(
-        {request, std::chrono::steady_clock::time_point::max(),
-         cancellation.token()}).Wait();
-    const api::internal::PrimitiveCacheStats after =
-        api::internal::GetPrimitiveCacheStats();
-    TEST_CHECK(!result.ready() &&
-                   result.failure.category == v2::FailureCategory::kCancelled &&
-                   after.misses == before.misses && after.in_flight == before.in_flight &&
-                   Throws([&] { (void)controller.Acquire(Execute(request)); }),
-               "a pre-cancelled Submit must not compile or publish a route");
-    return true;
-}
 #endif
 
 bool TestRealValidationSingleflightAndCancellation() {
@@ -585,10 +574,8 @@ int main() {
         {"malformed_graph_rejected_before_preparation", TestMalformedGraphRejectedBeforePreparation},
     };
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
-    tests.push_back({"acquire_without_route_no_compile_side_effect",
-                     TestAcquireWithoutRouteHasNoCompileSideEffect});
-    tests.push_back({"pre_cancelled_submit_no_compile_side_effect",
-                     TestPreCancelledSubmitHasNoCompileSideEffect});
+    tests.push_back({"no_backend_admission_does_not_compile",
+                     TestNoBackendAdmissionDoesNotCompile});
 #endif
 #if KXC_USE_LLVM
     tests.push_back({"real_validation_singleflight_cancellation",
