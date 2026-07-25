@@ -116,25 +116,54 @@ unit。只有测量证明 graph preparation 成为实际瓶颈时，才在 route
 
 ### 1.3 重编译意图
 
-当前唯一入口仍是：
+重编译意图只能由用户显式操作产生。不要新增 `CompilationMode` 枚举；现有
+API 组合已经完整表达三种常见模式：
 
-```cpp
-AdaptiveHotSwapController::Submit(CompileRequest)
+```text
+1. 先完全编译再运行
+
+   lease = controller.CompileAndPublish(
+       MakeCompileRequest(graph, config, AllPrimitiveUnitIds))
+   RunWithLease(lease)
+
+   语义：用户明确请求全部 units，同步等待 candidate 编译、验证和发布完成，
+   只运行返回的 generation。
+
+2. 能运行就行
+
+   lease = controller.Acquire(execution_request)
+   RunWithLease(lease)
+
+   语义：只使用当前已发布且 ABI 兼容的 generation；没有可运行 generation
+   就明确失败，不隐式触发编译。
+
+3. 先保证能运行，再热替换
+
+   runnable = controller.Acquire(execution_request)
+   ticket = controller.Submit(replacement_request)
+   RunWithLease(runnable)
+   replacement = ticket.Wait()
+
+   语义：先冻结一个确定可运行的旧 lease，再异步编译 replacement。旧运行不受
+   publication 竞争影响；后续 Acquire 才能观察新 generation。
 ```
 
-调用方显式提供 replacement unit ids 和已有 `CompileConfig`。Controller
-负责 admission、singleflight、取消、ABI 验证和 publication。
+`CompileAndPublish()` 和 `Submit()` 是仅有的编译意图入口；调用方显式提供
+replacement unit ids 和已有 `CompileConfig`。`Acquire()`、`RunAsync()` 和
+RuntimeSession 永远不能产生编译意图。
 
 本轮不新增：
 
+- `CompilationMode`
 - `AdaptiveObservation`
 - `RecompileIntent`
 - `RecompilePolicy`
 - `PrimitiveVariantCompiler`
 - `AdaptiveControllerAccess`
 
-未来 Shape guard、profiler 或 autotuner 需要自动触发时，只调用同一个
-`Submit()`，不能直接取得 primitive compiler 或 publication authority。
+Shape guard、profiler、Runtime 或 compiler 内部都不能自行调用重编译路径。
+如果未来产品需要自动化，它必须是用户显式创建和配置的外部 control-plane
+组件，并且只能通过公开的 `Submit()` 提交普通用户请求。
 
 ### 1.4 对“新 kernel”的诚实约束
 
@@ -188,6 +217,9 @@ AdaptiveHotSwapController::Submit(CompileRequest)
 10. 新请求只在请求边界选择 generation；kernel launch loop 不增加 lookup。
 11. 旧 generation lease 在新 generation 发布后仍可执行。
 12. 控制流继续使用其正确的 resolved-plan assembler。
+13. 只有用户调用 `CompileAndPublish()` 或 `Submit()` 才会产生编译意图。
+14. `Acquire()`、`RunAsync()`、Runtime、Shape 和 profiler 都不隐式编译。
+15. 三种用户模式由现有 API 组合表达，不新增 mode/policy hierarchy。
 
 ---
 
@@ -585,7 +617,46 @@ const auto same = controller.CompileAndPublish(
 CHECK(same->generation() == baseline->generation());
 ```
 
-**Step 2: 重塑现有 request，避免新 wrapper hierarchy**
+再锁定三个用户显式模式：
+
+```cpp
+// 先完全编译再运行。
+const auto compiled =
+    controller.CompileAndPublish(replacement_request);
+CHECK(RunWithLease(compiled) == expected);
+
+// 能运行就行：只 Acquire，不产生 flight/cache miss/generation。
+const auto stats_before = GetPrimitiveCacheStats();
+const auto current = controller.Acquire(execution_request);
+CHECK(RunWithLease(current) == expected);
+const auto stats_after = GetPrimitiveCacheStats();
+CHECK(stats_after.misses == stats_before.misses);
+CHECK(stats_after.in_flight == stats_before.in_flight);
+CHECK(observer.queued_events() == 0);
+
+// 先冻结可运行 lease，再异步热替换。
+const auto runnable = controller.Acquire(execution_request);
+CompileTicket ticket = controller.Submit(replacement_request);
+CHECK(RunWithLease(runnable) == expected);
+const auto replaced = ticket.Wait().lease;
+CHECK(runnable->generation() < replaced->generation());
+CHECK(RunWithLease(runnable) == expected);
+```
+
+另外验证没有 route 时 `Acquire()` 明确失败，且没有创建 compile flight。
+
+**Step 2: 保持 mode 为 API 组合**
+
+不要新增 `CompilationMode` 或 controller policy。保持：
+
+- `CompileAndPublish()`：用户选择阻塞编译。
+- `Submit()`：用户选择异步编译。
+- `Acquire()/RunAsync()`：用户选择只运行现有 generation。
+
+测试不得通过 sleep 猜测 publication 顺序；先取得 `GenerationLease`，再提交
+replacement，利用 lease 本身冻结执行版本。
+
+**Step 3: 重塑现有 request，避免新 wrapper hierarchy**
 
 让现有 production request 持有一个不可变 baseline graph，并增加：
 
@@ -603,7 +674,7 @@ const std::vector<PrimitiveUnitId>& requested_unit_ids() const noexcept;
 `PreparedAdaptiveProgram`、
 `PrimitiveVariantCompiler` 或 policy interface。
 
-**Step 3: 改写 worker**
+**Step 4: 改写 worker**
 
 替换当前 whole-graph：
 
@@ -633,13 +704,13 @@ Compiler::Compile(request.graph(), request.config())
 - old lease retention
 - transactional route swap
 
-**Step 4: 删除 whole-graph production adapter**
+**Step 5: 删除 whole-graph production adapter**
 
 生产 worker 零引用后删除 `ProductionPathCompilerAdapter` 及其 public constructor
 注入。Controller 测试改用真实小图和已有 cancellation/failure 输入，不增加新的
 public fake。
 
-**Step 5: 运行测试**
+**Step 6: 运行测试**
 
 Run:
 
@@ -656,9 +727,11 @@ cmake --build out/build/dev-mingw-adaptive --target `
 - unit 1 artifact key 改变。
 - old/new lease 均可执行。
 - same-key request 不增加 generation。
+- `Acquire()` 和 `RunAsync()` 不增加 cache miss、flight 或 generation。
+- 旧 lease 在异步 replacement publication 前后都能执行。
 - production worker 无 `Compiler::Compile()` 调用。
 
-**Step 6: Commit**
+**Step 7: Commit**
 
 ```bash
 git add include/kxc/compiler/adaptive_production_experimental.h src/compiler/adaptive/production_path_experimental.cc include/kxc/compiler/adaptive_hot_swap_v2.h src/compiler/adaptive/adaptive_hot_swap_v2.cc test/adaptive_preparation_v2_test.cpp
@@ -699,7 +772,9 @@ Expected:
 - `CompiledGraph` generation 是发布粒度。
 - Normal、Shape exact、Adaptive 使用同一个 free assembler。
 - 控制流保留正确的 resolved-plan assembler。
-- 当前 trigger 是显式 Submit；自动策略尚未实现。
+- 编译意图只来自用户显式 `CompileAndPublish()` 或 `Submit()`。
+- `Acquire()`/`RunAsync()` 永不隐式编译。
+- 三种常见模式由现有 API 组合表达，不新增 mode enum。
 
 **Step 3: 本地启用态回归**
 
@@ -779,6 +854,9 @@ git commit -m "docs: record minimal primitive reassembly architecture"
 - [ ] Normal 和 Shape exact 共用 `AssembleCompiledGraph()`。
 - [ ] Adaptive worker 不调用完整 `Compiler::Compile()`。
 - [ ] Adaptive 只 backend 编译 requested units。
+- [ ] 只有用户显式 `CompileAndPublish()`/`Submit()` 能触发编译。
+- [ ] `Acquire()`/`RunAsync()` 没有隐式 compile side effect。
+- [ ] compile-before-run、use-runnable 和 run-then-hot-swap 均有确定性测试。
 - [ ] unchanged pin owner 跨 generation 复用。
 - [ ] same-key request 不增加 generation。
 - [ ] old/new lease 均可执行。
