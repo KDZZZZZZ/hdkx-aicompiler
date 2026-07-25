@@ -122,11 +122,79 @@ Adaptive:
   Publish(candidate)
 ```
 
-### 1.4 本轮非目标
+### 1.4 重编译意图的唯一权威
+
+Runtime、Shape guard 和 profiler 只上报事实，不得直接调用
+`PrimitiveVariantCompiler`、`PlanAssembler` 或 publication API。只有
+`AdaptiveController` 能把 observation 变成重编译请求：
+
+```text
+Runtime / Shape Guard / Profiler / Explicit Warmup API
+                       │
+                       └─ AdaptiveObservation
+                                  │
+                                  ▼
+                         RecompilePolicy::Evaluate
+                                  │
+                         optional RecompileIntent
+                                  │
+                                  ▼
+                         AdaptiveController
+                                  │
+             ResolveAffectedPrimitiveUnits(template, intent)
+                                  │
+                                  └─ PlanCompileRequest
+                                           │
+                                           ▼
+                                PrimitiveVariantCompiler
+```
+
+内部意图至少区分：
+
+```cpp
+enum class RecompileReason : std::uint8_t {
+    kShapeCoverageMiss,
+    kHotShapeSpecialization,
+    kPerformanceRegression,
+    kAutotuningCandidate,
+    kExplicitWarmup,
+};
+
+struct RecompileIntent final {
+    RecompileReason reason;
+    GraphSemanticKey graph_semantic_key;
+    PlanVariantKey base_variant_key;
+    std::optional<ShapeProfileKey> shape_profile_key;
+    std::string optimization_objective;
+};
+```
+
+规则：
+
+- 新 shape 已被当前 guard/variant 覆盖时，不产生 correctness 型重编译。
+- 新 shape 没有任何可执行 variant 覆盖时，可以产生高优先级
+  `kShapeCoverageMiss`。
+- 已覆盖 shape 只有达到 hotness/收益阈值后，才可以产生
+  `kHotShapeSpecialization`。
+- profiler 只提交结构化测量；性能回退、调优候选是否值得编译由 policy
+  决定。
+- explicit warmup 也必须经过 controller 的 admission、singleflight、预算和
+  publication 检查，不能绕过 controller。
+- intent 不接受 caller 指定的可变 kernel/artifact 集合；受影响的
+  `PrimitiveUnitId` 由 compiler 根据 `PreparedPlanTemplate` 中的
+  shape/value/unit 依赖关系计算。
+- target、device 或 Plan ABI 改变不属于同一 program 的 hot-swap；必须建立
+  新 template/program。
+
+本轮实现这条 authority boundary、observation/intent 类型和可注入的
+deterministic policy seam。真实 profiler 自动触发、收益预测模型和 schedule
+搜索仍属于后续工作。
+
+### 1.5 本轮非目标
 
 - 不实现 mutable `KernelSlot` 或运行中 plan 原地改指针。
 - 不把 AdaptiveController 放进 `RuntimeSession`。
-- 不实现 profiling 自动触发策略。
+- 不实现真实 profiler 自动触发策略或收益预测算法。
 - 不实现 bucket/polymorphic/dynamic-output Shape。
 - 不实现新的 schedule 搜索算法；本轮只建立可接收不同 artifact selection 的正确架构。
 - 不改变“一 ordinary Relay Call 一 PrimitiveUnit”的当前 partition 策略。
@@ -145,6 +213,10 @@ Adaptive:
 8. 相同 `PlanVariantKey` 的重复请求不得制造无意义的新 generation。
 9. Adaptive worker 不再调用完整 `Compiler::Compile`。
 10. Runtime public API 不依赖 `PreparedPlanTemplate`、primitive cache 或 Adaptive。
+11. 只有 `AdaptiveController` 能将 observation 转换为 `PlanCompileRequest`；
+    Runtime、Shape 和 profiler 不依赖 primitive compiler 或 publication API。
+12. 已被当前 variant 覆盖的新 shape 不产生 correctness 型重编译；未覆盖
+    shape 和性能优化意图必须具有不同 reason。
 
 ---
 
@@ -561,6 +633,7 @@ git commit -m "compiler: assemble exact shape plans from shared artifacts"
 - Modify: `src/compiler/adaptive/production_path_experimental.cc`
 - Modify: `include/kxc/compiler/adaptive_hot_swap_v2.h`
 - Modify: `src/compiler/adaptive/adaptive_hot_swap_v2.cc`
+- Create: `src/compiler/internal/recompile_policy.h`
 - Create: `src/compiler/internal/primitive_variant_compiler.h`
 - Create: `src/compiler/internal/adaptive_controller_access.h`
 - Test: `test/adaptive_preparation_v2_test.cpp`
@@ -573,6 +646,11 @@ git commit -m "compiler: assemble exact shape plans from shared artifacts"
 - 未指定 unit 沿用 baseline pin。
 - candidate 由 assembler 生成。
 - 不调用完整 `Compiler::Compile`。
+- Shape guard、Runtime observation 和 profiler sample 不能直接取得
+  primitive compiler 或 publication authority。
+- 已覆盖的新 shape 不产生 correctness 型 request；coverage miss 与
+  performance intent 使用不同 reason。
+- explicit warmup 也经过 controller admission 和 singleflight。
 
 fixture adapter 记录收到的 unit ids：
 
@@ -622,7 +700,28 @@ public experimental 层使用 opaque Pimpl `PreparedAdaptiveProgram`，内部持
 
 删除 request 对 caller-mutable Relay 和可重复 `Compiler::Compile` 的依赖。
 
-**Step 4: 改写 worker**
+**Step 4: 建立 observation → intent → request 的唯一入口**
+
+在 `src/compiler/internal/recompile_policy.h` 定义：
+
+- `AdaptiveObservation`：Shape coverage、hotness、performance sample、
+  autotuning candidate 或 explicit warmup 的只读事实。
+- `RecompileIntent`：policy 接受 observation 后产生的内部决策。
+- `RecompilePolicy`：deterministic、可注入、无 publication authority 的策略
+  接口。
+
+只有 `AdaptiveController` 可以：
+
+1. 接收 observation。
+2. 调用 policy。
+3. 根据 template 解析受影响的 primitive units。
+4. 建立 `PlanCompileRequest`。
+5. 将 request 送入既有 admission/singleflight 队列。
+
+测试 policy 可以确定性地产生 intent，但不得直接注入 artifact、generation
+或 publication transaction。
+
+**Step 5: 改写 worker**
 
 Worker 顺序：
 
@@ -635,7 +734,7 @@ Worker 顺序：
 7. 若 selection key 未变化，返回当前 lease，不分配 generation。
 8. 否则进入既有 publication transaction。
 
-**Step 5: 保留 publication 协议**
+**Step 6: 保留 publication 协议**
 
 不得改变：
 
@@ -646,7 +745,7 @@ Worker 顺序：
 - old lease retention。
 - transactional `routes.swap`。
 
-**Step 6: 运行 Adaptive 测试**
+**Step 7: 运行 Adaptive 测试**
 
 Run:
 
@@ -658,10 +757,10 @@ out/build/dev-mingw-adaptive/plan_assembler_test.exe
 
 Expected: 全部 PASS；测试日志证明 worker 没有 whole-graph compile。
 
-**Step 7: Commit**
+**Step 8: Commit**
 
 ```bash
-git add include/kxc/compiler/adaptive_production_experimental.h src/compiler/adaptive/production_path_experimental.cc include/kxc/compiler/adaptive_hot_swap_v2.h src/compiler/adaptive/adaptive_hot_swap_v2.cc src/compiler/internal/primitive_variant_compiler.h src/compiler/internal/adaptive_controller_access.h test/adaptive_preparation_v2_test.cpp
+git add include/kxc/compiler/adaptive_production_experimental.h src/compiler/adaptive/production_path_experimental.cc include/kxc/compiler/adaptive_hot_swap_v2.h src/compiler/adaptive/adaptive_hot_swap_v2.cc src/compiler/internal/recompile_policy.h src/compiler/internal/primitive_variant_compiler.h src/compiler/internal/adaptive_controller_access.h test/adaptive_preparation_v2_test.cpp
 git commit -m "compiler: assemble adaptive plans from primitive replacements"
 ```
 
@@ -866,6 +965,12 @@ git rev-parse origin/compiler-foundation-acceptance-cleanup
 
 - [ ] 普通、Shape exact、Adaptive 三条路径共用唯一 `PlanAssembler`。
 - [ ] Adaptive worker 不再调用完整 `Compiler::Compile`。
+- [ ] 只有 `AdaptiveController` 能把 observation 转换成
+  `PlanCompileRequest`。
+- [ ] Runtime、Shape guard 和 profiler 不依赖 primitive compiler 或
+  publication API。
+- [ ] Shape coverage miss 与 hot-shape/performance intent 有不同 reason 和
+  admission policy。
 - [ ] replacement 编译只访问指定 `PrimitiveUnitId`。
 - [ ] unchanged artifact pins 跨 generation 复用。
 - [ ] candidate ABI 不兼容时 publication 前拒绝。
