@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "../internal/logical_value.h"
+#include "../internal/primitive_unit.h"
 
 namespace kxc::runtime {
 
@@ -68,23 +68,15 @@ struct LoopSpec {
 
 enum class ControlTaskKind { kKernel, kBranch, kLoop };
 
-/*! \brief Preparation-time kernel binding state; v2 has no executable artifact. */
-enum class KernelBindingState {
-    kNotApplicable,
-    kUnresolvedRelayKernel,
-};
-
 struct ControlTask {
     TaskId id{-1};
     ControlTaskKind kind{ControlTaskKind::kKernel};
-    /*! \brief Runtime must not execute kUnresolvedRelayKernel as an artifact. */
-    KernelBindingState binding_state{KernelBindingState::kNotApplicable};
+    api::internal::PrimitiveUnitId primitive_unit_id{-1};
     std::vector<ValueId> inputs;
     /*! \brief Ordered logical kernel operands; duplicates are significant. */
     std::vector<ValueId> argument_values;
     std::vector<ValueId> outputs;
     std::vector<TaskId> dependencies;
-    std::string kernel_ref;
     std::string source_locator;
     Device device{Device::CPU()};
     std::string stream{"default"};

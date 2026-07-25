@@ -26,8 +26,8 @@ struct LoweredGraph {
     Map<String, runtime::NDArray> constants;
 };
 
-relay::LoweredFunction LowerCompilationUnit(
-    const ValueGraph& graph, const CompilationUnit& unit);
+relay::LoweredFunction LowerPrimitiveUnit(
+    const ValueGraph& graph, const PrimitiveUnit& unit);
 PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
                                        Target target,
                                        String pipeline_fingerprint);

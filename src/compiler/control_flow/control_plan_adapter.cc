@@ -65,20 +65,20 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
     const runtime::ControlPlan& plan,
     const std::vector<ControlKernelBinding>& bindings) {
     // Validate every preparation invariant before dropping its effect/alias
-    // fields.  Fixture selection still never reads unresolved kernel_ref text.
+    // fields. Artifact selection uses PrimitiveUnitId, never diagnostic text.
     plan.ValidateStaticExact();
     std::unordered_set<runtime::ValueId> constant_values(
         plan.constant_values.begin(), plan.constant_values.end());
-    std::unordered_map<runtime::TaskId, const ControlKernelBinding*> binding_by_task;
+    std::unordered_map<PrimitiveUnitId, const ControlKernelBinding*> binding_by_unit;
     for (const auto& binding : bindings) {
-        if (binding.task_id < 0 || !binding.module.defined() ||
+        if (binding.primitive_unit_id < 0 || !binding.module.defined() ||
             binding.entry_symbol == "" ||
             !binding.module.HasFunction(binding.entry_symbol) ||
             !binding.retention_owner) {
             Fail("each binding requires task id, ready module entry, and retention owner");
         }
-        if (!binding_by_task.emplace(binding.task_id, &binding).second) {
-            Fail("duplicate binding task id");
+        if (!binding_by_unit.emplace(binding.primitive_unit_id, &binding).second) {
+            Fail("duplicate PrimitiveUnit binding id");
         }
     }
 
@@ -102,7 +102,7 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
              value.device, value.source_locator});
     }
 
-    std::unordered_set<runtime::TaskId> kernel_tasks;
+    std::unordered_set<PrimitiveUnitId> kernel_units;
     for (const auto& region : plan.regions) {
         runtime::ControlExecutionRegion target;
         target.id = region.id;
@@ -120,10 +120,12 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
             bound.stream = task.stream;
             switch (task.kind) {
                 case runtime::ControlTaskKind::kKernel: {
-                    kernel_tasks.insert(task.id);
-                    const auto found = binding_by_task.find(task.id);
-                    if (found == binding_by_task.end()) {
-                        Fail("missing kernel task binding for task " + std::to_string(task.id));
+                    kernel_units.insert(task.primitive_unit_id);
+                    const auto found =
+                        binding_by_unit.find(task.primitive_unit_id);
+                    if (found == binding_by_unit.end()) {
+                        Fail("missing compiled PrimitiveUnit binding for unit " +
+                             std::to_string(task.primitive_unit_id));
                     }
                     const ControlKernelBinding& supplied = *found->second;
                     runtime::BoundControlKernel kernel =
@@ -176,11 +178,13 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
         }
         resolved.regions.push_back(std::move(target));
     }
-    if (binding_by_task.size() != kernel_tasks.size()) {
+    if (binding_by_unit.size() != kernel_units.size()) {
         Fail("extra binding for a non-kernel or absent task");
     }
-    for (const auto& binding : binding_by_task) {
-        if (!kernel_tasks.count(binding.first)) Fail("binding targets a non-kernel task");
+    for (const auto& binding : binding_by_unit) {
+        if (!kernel_units.count(binding.first)) {
+            Fail("binding targets a PrimitiveUnit absent from the control plan");
+        }
     }
     return runtime::internal::ControlExecutionPlanAccess::Create(
         std::move(resolved));

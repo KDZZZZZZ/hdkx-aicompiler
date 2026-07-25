@@ -36,8 +36,8 @@ ControlValueSpec Bool(ValueId id) {
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {
     ControlTask task;
-    task.id = id; task.kind = ControlTaskKind::kKernel; task.binding_state = KernelBindingState::kUnresolvedRelayKernel; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out);
-    task.kernel_ref = ref; task.source_locator = ref;
+    task.id = id; task.kind = ControlTaskKind::kKernel; task.primitive_unit_id = id; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out);
+    task.source_locator = ref;
     task.effect = Reads(task.inputs); return task;
 }
 
@@ -149,12 +149,11 @@ bool TestTaskAndRegionClosureFailures() {
     plan = BranchPlan(); plan.regions[0].tasks[0].source_locator.clear();
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "missing task locator must fail");
     plan = LinearPlan();
-    plan.regions[0].tasks[0].binding_state = KernelBindingState::kNotApplicable;
+    plan.regions[0].tasks[0].primitive_unit_id = -1;
     CHECK(Throws([&] { plan.ValidateStaticExact(); }),
           "kernel tasks must remain explicitly unresolved");
     plan = BranchPlan();
-    plan.regions[0].tasks[0].binding_state =
-        KernelBindingState::kUnresolvedRelayKernel;
+    plan.regions[0].tasks[0].primitive_unit_id = 20;
     CHECK(Throws([&] { plan.ValidateStaticExact(); }),
           "branch tasks must not carry a kernel binding");
     plan = LinearPlan(); plan.regions[0].tasks[1].dependencies.clear();

@@ -356,9 +356,10 @@ std::string PartitionCanonical(const internal::PartitionedGraph& partitioned) {
     AppendField(&result, "unit_count", std::to_string(partitioned.units.size()));
     for (const auto& unit : partitioned.units) {
         std::string encoded;
-        AppendField(&encoded, "ordinal", std::to_string(unit.unit_id));
+        AppendField(&encoded, "ordinal", std::to_string(unit.id));
         AppendField(&encoded, "semantic", unit.semantic_key.canonical_bytes());
-        AppendField(&encoded, "inputs", IdsCanonical(unit.input_value_ids));
+        AppendField(&encoded, "inputs",
+                    IdsCanonical(unit.boundary_input_value_ids));
         AppendField(&encoded, "outputs", IdsCanonical(unit.output_value_ids));
         AppendField(&result, "unit", encoded);
     }
@@ -436,7 +437,9 @@ shape::GraphTemplate BuildTemplate(
         shape::UnitSkeleton skeleton{shape::GraphLocalCallLocator(
             ValueName(unit.output_value_ids[0])),
             unit.semantic_key, {}, {}};
-        for (int64_t id : unit.input_value_ids) skeleton.input_value_names.push_back(ValueName(id));
+        for (int64_t id : unit.boundary_input_value_ids) {
+            skeleton.input_value_names.push_back(ValueName(id));
+        }
         for (int64_t id : unit.output_value_ids) skeleton.output_value_names.push_back(ValueName(id));
         units.push_back(std::move(skeleton));
     }
@@ -629,7 +632,8 @@ void VerifyVariant(
             !shape::MatchesExactSignatureDigest(
                 request.signature_digest, request.ordered_inputs,
                 request.ordered_outputs) ||
-            request.ordered_inputs.size() != unit.input_value_ids.size() ||
+            request.ordered_inputs.size() !=
+                unit.boundary_input_value_ids.size() ||
             request.ordered_outputs.size() != unit.output_value_ids.size()) {
             Reject("exact request routing, profile, artifact, or semantic identity drifted");
         }
@@ -637,7 +641,8 @@ void VerifyVariant(
             const auto& value = request.ordered_inputs[j];
             if (!ExactContract(value) ||
                 !SameContract(value, ProfileValue(
-                    oracle, ValueName(unit.input_value_ids[j])))) {
+                    oracle,
+                    ValueName(unit.boundary_input_value_ids[j])))) {
                 Reject("exact request input contract drifted");
             }
         }
@@ -651,17 +656,20 @@ void VerifyVariant(
         }
         const runtime::KernelCall& call = compiled.plan().calls()[i];
         if (!(call->symbol == unit.symbol) || !compiled.module().HasFunction(call->symbol) ||
-            !SameIds(call.input_value_ids(), unit.input_value_ids) ||
+            !SameIds(call.input_value_ids(),
+                     unit.boundary_input_value_ids) ||
             !SameIds(call.output_value_ids(), unit.output_value_ids)) {
             Reject("compiled plan routing does not match prepared partition");
         }
         const codegen::KernelSignature signature = compiled.module().signature(call->symbol);
         const Array<codegen::KernelArgSpec> args = signature.arguments();
-        if (args.size() != unit.input_value_ids.size() + unit.output_value_ids.size()) {
+        if (args.size() != unit.boundary_input_value_ids.size() +
+                               unit.output_value_ids.size()) {
             Reject("compiled signature arity does not match exact request");
         }
-        for (size_t j = 0; j < unit.input_value_ids.size(); ++j) {
-            const auto& value = partitioned.value_graph.values[static_cast<size_t>(unit.input_value_ids[j])];
+        for (size_t j = 0; j < unit.boundary_input_value_ids.size(); ++j) {
+            const auto& value = partitioned.value_graph.values[
+                static_cast<size_t>(unit.boundary_input_value_ids[j])];
             VerifyArg(args[j], value.origin == internal::ValueOrigin::kConstant
                           ? codegen::KernelArgRole::kConstant : codegen::KernelArgRole::kInput,
                       request.ordered_inputs[j],
@@ -671,7 +679,7 @@ void VerifyVariant(
         for (size_t j = 0; j < unit.output_value_ids.size(); ++j) {
             const auto& value = partitioned.value_graph.values[
                 static_cast<size_t>(unit.output_value_ids[j])];
-            VerifyArg(args[unit.input_value_ids.size() + j],
+            VerifyArg(args[unit.boundary_input_value_ids.size() + j],
                       codegen::KernelArgRole::kOutput,
                       request.ordered_outputs[j],
                       value.checked_type.As<TensorTypeNode>(),

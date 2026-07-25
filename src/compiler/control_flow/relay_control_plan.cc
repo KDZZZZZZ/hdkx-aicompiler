@@ -92,7 +92,7 @@ public:
         FinalizeRegions();
         plan_.ValidateStaticExact();
         return internal::ControlPlanLowering{std::move(plan_),
-                                                   std::move(kernel_functions_)};
+                                              std::move(primitive_units_)};
     }
 
 private:
@@ -107,7 +107,7 @@ private:
     std::unordered_map<runtime::RegionId, std::size_t> region_index_;
     std::unordered_map<runtime::RegionId, RegionState> region_state_;
     std::unordered_map<const Object*, Leaves> constants_;
-    std::unordered_map<runtime::TaskId, Function> kernel_functions_;
+    std::vector<internal::PrimitiveUnit> primitive_units_;
 
     runtime::ControlRegion& Region(runtime::RegionId id) {
         return plan_.regions.at(region_index_.at(id));
@@ -198,15 +198,6 @@ private:
         return ids;
     }
 
-    static Leaves UniqueBoundaryInputs(const Leaves& arguments) {
-        Leaves inputs;
-        std::unordered_set<runtime::ValueId> seen;
-        for (const runtime::ValueId argument : arguments) {
-            if (seen.insert(argument).second) inputs.push_back(argument);
-        }
-        return inputs;
-    }
-
     std::vector<runtime::TaskId> Dependencies(runtime::RegionId region,
                                                const Leaves& inputs) {
         std::vector<runtime::TaskId> dependencies;
@@ -265,12 +256,15 @@ private:
         }
         runtime::ControlTask task;
         task.kind = runtime::ControlTaskKind::kKernel;
-        task.binding_state =
-            runtime::KernelBindingState::kUnresolvedRelayKernel;
-        task.inputs = UniqueBoundaryInputs(arguments);
+        internal::PrimitiveUnit unit = internal::BuildPrimitiveUnit(
+            static_cast<internal::PrimitiveUnitId>(primitive_units_.size()),
+            std::move(resolved), arguments, outputs, plan_.values);
+        task.primitive_unit_id = unit.id;
+        task.inputs.assign(unit.boundary_input_value_ids.begin(),
+                           unit.boundary_input_value_ids.end());
         task.argument_values = arguments;
         task.outputs = outputs;
-        task.device = Value(outputs.front()).device;
+        task.device = unit.device;
         for (const runtime::ValueId input : task.inputs) {
             if (Value(input).device != task.device) {
                 Fail(path, "kernel inputs and outputs require one explicit device");
@@ -281,41 +275,9 @@ private:
                 Fail(path, "kernel outputs require one explicit device");
             }
         }
-        task.kernel_ref =
-            "relay.kernel.v2;" +
-            relay::SerializeOperatorSpec(resolved.spec) +
-            ";attrs=" + relay::SerializeAttrs(resolved.attrs);
         task.source_locator = path;
-        const runtime::TaskId task_id = AddTask(region, std::move(task));
-        Array<Var> parameters;
-        Array<Expr> substituted_arguments;
-        std::unordered_map<const Object*, Expr> substitutions;
-        for (std::size_t index = 0; index < call->args.size(); ++index) {
-            const Expr& argument = call->args[index];
-            if (argument.As<ConstantNode>()) {
-                substituted_arguments.push_back(argument);
-                continue;
-            }
-            const auto* variable = argument.As<VarNode>();
-            if (!variable || !argument.checked_type().defined()) {
-                Fail(path, "frozen kernel sidecar requires typed ANF atomic arguments");
-            }
-            auto found = substitutions.find(argument.get());
-            if (found == substitutions.end()) {
-                Var fresh("control_task_" + std::to_string(task_id) + "_arg_" +
-                              std::to_string(parameters.size()),
-                          argument.checked_type());
-                found = substitutions.emplace(argument.get(), Expr(fresh)).first;
-                parameters.push_back(std::move(fresh));
-            }
-            substituted_arguments.push_back(found->second);
-        }
-        // Branch-local and ANF lexical Vars are replaced with fresh typed function
-        // parameters.  The task's ValueId ABI is retained separately above.
-        kernel_functions_.emplace(
-            task_id, Function(std::move(parameters),
-                              Call(call->op, std::move(substituted_arguments),
-                                   call->attrs)));
+        AddTask(region, std::move(task));
+        primitive_units_.push_back(std::move(unit));
         return outputs;
     }
 

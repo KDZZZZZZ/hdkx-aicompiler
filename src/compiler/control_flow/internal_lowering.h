@@ -4,7 +4,6 @@
 #pragma once
 
 #include <memory>
-#include <unordered_map>
 #include <vector>
 
 #include "kxc/relay/relay.h"
@@ -15,11 +14,10 @@
 
 namespace kxc::api::internal {
 
-/* This sidecar is deliberately compiler-private.  kernel_ref is provenance
- * text only; branch compilation uses the frozen Call/attrs/constants here. */
+/*! \brief Compiler-internal topology plus its shared primitive units. */
 struct ControlPlanLowering final {
     runtime::ControlPlan plan;
-    std::unordered_map<runtime::TaskId, Function> kernel_functions;
+    std::vector<PrimitiveUnit> primitive_units;
 };
 
 ControlPlanLowering LowerRelayToControlPlanWithSidecar(Function function);
@@ -27,7 +25,7 @@ ControlPlanLowering LowerPreparedRelayToControlPlanWithSidecar(
     const PreparedRelayProgram& program);
 
 struct ControlKernelBinding final {
-    runtime::TaskId task_id{-1};
+    PrimitiveUnitId primitive_unit_id{-1};
     CompiledModule module;
     String entry_symbol;
     std::vector<runtime::ValueId> abi_non_output_value_ids;

@@ -30,7 +30,7 @@ ControlValueSpec Bool(ValueId id) {
                             "value" + std::to_string(id)};
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {
-    ControlTask task; task.id = id; task.kind = ControlTaskKind::kKernel; task.binding_state = KernelBindingState::kUnresolvedRelayKernel; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out); task.kernel_ref = ref; task.source_locator = ref; task.effect = Reads(task.inputs); return task;
+    ControlTask task; task.id = id; task.kind = ControlTaskKind::kKernel; task.primitive_unit_id = id; task.inputs = std::move(in); task.argument_values = task.inputs; task.outputs = std::move(out); task.source_locator = ref; task.effect = Reads(task.inputs); return task;
 }
 
 ControlPlan BranchPlan() {
@@ -55,10 +55,10 @@ ControlPlan LoopPlan(std::int64_t max_trip_count = 3) {
 
 FakeKernelCallback Callback() {
     return [](const ControlTask& task, const std::vector<FakeValue>& values) {
-        if (task.kernel_ref == "then") return std::vector<FakeValue>{FakeValue::I64(values[0].integer + 10)};
-        if (task.kernel_ref == "else") return std::vector<FakeValue>{FakeValue::I64(values[0].integer + 20)};
-        if (task.kernel_ref == "condition") return std::vector<FakeValue>{FakeValue::Bool(values[0].integer < 3)};
-        if (task.kernel_ref == "step") return std::vector<FakeValue>{FakeValue::I64(values[0].integer + 1)};
+        if (task.source_locator == "then") return std::vector<FakeValue>{FakeValue::I64(values[0].integer + 10)};
+        if (task.source_locator == "else") return std::vector<FakeValue>{FakeValue::I64(values[0].integer + 20)};
+        if (task.source_locator == "condition") return std::vector<FakeValue>{FakeValue::Bool(values[0].integer < 3)};
+        if (task.source_locator == "step") return std::vector<FakeValue>{FakeValue::I64(values[0].integer + 1)};
         throw std::invalid_argument("unexpected fake kernel");
     };
 }
@@ -117,8 +117,8 @@ bool TestNestedIfAndMultiplePhi() {
     plan.regions[0].tasks[0].outputs = {4, 7};
     plan.regions[0].tasks[0].branch.phis.push_back({7, 5, 6});
     ControlPlanReferenceExecutor executor([](const ControlTask& task, const std::vector<FakeValue>& values) {
-        if (task.kernel_ref == "two-then") return std::vector<FakeValue>{FakeValue::I64(values[0].integer), FakeValue::I64(values[0].integer + 1)};
-        if (task.kernel_ref == "two-else") return std::vector<FakeValue>{FakeValue::I64(values[0].integer), FakeValue::I64(values[0].integer + 2)};
+        if (task.source_locator == "two-then") return std::vector<FakeValue>{FakeValue::I64(values[0].integer), FakeValue::I64(values[0].integer + 1)};
+        if (task.source_locator == "two-else") return std::vector<FakeValue>{FakeValue::I64(values[0].integer), FakeValue::I64(values[0].integer + 2)};
         throw std::invalid_argument("unexpected fake kernel");
     });
     ReferenceExecution result = executor.Execute(plan, {{0, FakeValue::Bool(false)}, {1, FakeValue::I64(4)}});
@@ -162,8 +162,8 @@ bool TestMultipleCarriedAndContracts() {
                     {11, {1, 6}, {2}, {Kernel(31, {1, 6}, {2}, "condition")}, Reads({1, 6}), {}, "condition"},
                     {12, {1, 6}, {3, 7}, {Kernel(32, {1, 6}, {3, 7}, "two-step")}, Reads({1, 6}), {}, "body"}};
     ControlPlanReferenceExecutor executor([](const ControlTask& task, const std::vector<FakeValue>& values) {
-        if (task.kernel_ref == "condition") return std::vector<FakeValue>{FakeValue::Bool(values[0].integer < 2)};
-        if (task.kernel_ref == "two-step") return std::vector<FakeValue>{FakeValue::I64(values[0].integer + 1), FakeValue::I64(values[1].integer + 2)};
+        if (task.source_locator == "condition") return std::vector<FakeValue>{FakeValue::Bool(values[0].integer < 2)};
+        if (task.source_locator == "two-step") return std::vector<FakeValue>{FakeValue::I64(values[0].integer + 1), FakeValue::I64(values[1].integer + 2)};
         throw std::invalid_argument("unexpected fake kernel");
     });
     ReferenceExecution result = executor.Execute(plan, {{0, FakeValue::I64(0)}, {5, FakeValue::I64(10)}});

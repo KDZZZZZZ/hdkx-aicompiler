@@ -89,11 +89,10 @@ ControlTask Kernel(TaskId id, std::vector<ValueId> inputs,
     ControlTask task;
     task.id = id;
     task.kind = ControlTaskKind::kKernel;
-    task.binding_state = KernelBindingState::kUnresolvedRelayKernel;
+    task.primitive_unit_id = id;
     task.inputs = std::move(inputs);
     task.argument_values = task.inputs;
     task.outputs = std::move(outputs);
-    task.kernel_ref = locator;
     task.source_locator = locator;
     task.effect = Reads(task.inputs);
     return task;
@@ -742,8 +741,10 @@ bool TestBindingAndBranchDifferential() {
     BranchFixture fixture;
     const ControlPlan original = BranchPlan();
     ControlPlan decoy_changed = original;
-    decoy_changed.regions[1].tasks[0].kernel_ref = "unrelated-and-invalid-looking";
-    decoy_changed.regions[2].tasks[0].kernel_ref = "also-not-an-entry";
+    decoy_changed.regions[1].tasks[0].source_locator =
+        "unrelated-diagnostic-locator";
+    decoy_changed.regions[2].tasks[0].source_locator =
+        "also-not-an-entry";
     const auto bindings = Bindings(fixture);
     const ControlExecutionPlan bound = kxc::api::internal::BindControlPlanForRuntime(original, bindings);
     const ControlExecutionPlan decoy_bound =
@@ -752,7 +753,7 @@ bool TestBindingAndBranchDifferential() {
               decoy_bound.regions()[1].tasks[0].kernel.signature()->symbol &&
               bound.regions()[2].tasks[0].kernel.signature()->symbol ==
               decoy_bound.regions()[2].tasks[0].kernel.signature()->symbol,
-          "binding must use task id and supplied entry, never kernel_ref");
+          "binding must use PrimitiveUnit id and supplied entry, never diagnostic text");
 
     const ControlPlanReferenceExecutor reference(ReferenceKernel());
     const ReferenceExecution expected_true = reference.Execute(

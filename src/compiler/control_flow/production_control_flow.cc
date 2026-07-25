@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -89,12 +90,45 @@ void RequireProductionSubset(const runtime::ControlPlan& plan,
 }
 
 struct ResolvedBinding final {
-    runtime::TaskId task_id{-1};
+    internal::PrimitiveUnitId primitive_unit_id{-1};
     CompiledModule module;
     String entry_symbol;
     std::vector<runtime::ValueId> abi_non_output_value_ids;
     ArtifactPin artifact_pin;
 };
+
+Function BuildCompatibilityFunction(const internal::PrimitiveUnit& unit) {
+    const auto* call = unit.call.call.As<CallNode>();
+    if (!call) Fail("PrimitiveUnit does not contain a Relay Call");
+    Array<Var> parameters;
+    Array<Expr> arguments;
+    std::unordered_map<const Object*, Expr> substitutions;
+    for (std::size_t index = 0; index < call->args.size(); ++index) {
+        const Expr& argument = call->args[index];
+        if (argument.As<ConstantNode>()) {
+            arguments.push_back(argument);
+            continue;
+        }
+        const auto* variable = argument.As<VarNode>();
+        if (!variable || !argument.checked_type().defined()) {
+            Fail("PrimitiveUnit compatibility compile requires typed ANF atomic arguments");
+        }
+        auto found = substitutions.find(argument.get());
+        if (found == substitutions.end()) {
+            Var fresh(
+                "primitive_unit_" + std::to_string(unit.id) + "_arg_" +
+                    std::to_string(parameters.size()),
+                argument.checked_type());
+            found =
+                substitutions.emplace(argument.get(), Expr(fresh)).first;
+            parameters.push_back(std::move(fresh));
+        }
+        arguments.push_back(found->second);
+    }
+    return Function(
+        std::move(parameters),
+        Call(call->op, std::move(arguments), call->attrs));
+}
 
 }  // namespace
 
@@ -123,18 +157,26 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
     RequireProductionSubset(lowered.plan, config);
 
     std::vector<ResolvedBinding> resolved;
-    resolved.reserve(lowered.kernel_functions.size());
+    resolved.reserve(lowered.primitive_units.size());
     for (const auto& region : lowered.plan.regions) {
         for (const auto& task : region.tasks) {
             if (task.kind != runtime::ControlTaskKind::kKernel) continue;
-            const auto frozen = lowered.kernel_functions.find(task.id);
-            if (frozen == lowered.kernel_functions.end()) {
-                Fail("malformed compiler-private lowering sidecar: missing frozen Call for task " +
-                     std::to_string(task.id));
+            if (task.primitive_unit_id < 0 ||
+                static_cast<std::size_t>(task.primitive_unit_id) >=
+                    lowered.primitive_units.size()) {
+                Fail("control task references an unknown PrimitiveUnit");
+            }
+            const internal::PrimitiveUnit& unit =
+                lowered.primitive_units[
+                    static_cast<std::size_t>(task.primitive_unit_id)];
+            if (unit.id != task.primitive_unit_id) {
+                Fail("control PrimitiveUnit ids must be dense and ordered");
             }
             // This is the unchanged real Compiler path on an If-free branch
-            // fragment, therefore it uses normal lowering, codegen, cache, and pins.
-            CompiledGraph compiled = Compiler::Compile(frozen->second, config);
+            // fragment. Phase 5 replaces this compatibility adapter with the
+            // shared primitive batch compiler.
+            CompiledGraph compiled =
+                Compiler::Compile(BuildCompatibilityFunction(unit), config);
             const auto& pins = compiled.artifact_pins();
             const auto& calls = compiled.plan().calls();
             if (!compiled.module().IsReady() || pins.size() != 1 ||
@@ -143,7 +185,7 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
                 Fail("branch Call must resolve to exactly one real immutable compiler artifact");
             }
             resolved.push_back(ResolvedBinding{
-                task.id, compiled.module(), calls[0]->symbol,
+                unit.id, compiled.module(), calls[0]->symbol,
                 AbiNonOutputs(task, lowered.plan), pins.front()});
         }
     }
@@ -163,7 +205,7 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
     bindings.reserve(resolved.size());
     for (ResolvedBinding& binding : resolved) {
         bindings.push_back(internal::ControlKernelBinding{
-            binding.task_id, std::move(binding.module),
+            binding.primitive_unit_id, std::move(binding.module),
             std::move(binding.entry_symbol),
             std::move(binding.abi_non_output_value_ids), retention_owner});
     }

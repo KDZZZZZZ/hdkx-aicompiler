@@ -3,9 +3,7 @@
  */
 
 #include "../internal/compilation_unit.h"
-#include "support/canonical.h"
 
-#include <cctype>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -14,81 +12,6 @@
 
 namespace kxc::api::internal {
 namespace {
-
-std::string SanitizeSymbolPart(const std::string& name) {
-    std::string result;
-    result.reserve(name.size());
-    for (unsigned char ch : name) {
-        result.push_back(std::isalnum(ch) ? static_cast<char>(ch) : '_');
-    }
-    return result.empty() ? "op" : result;
-}
-
-std::string BuildUnitSymbol(int64_t unit_id, const std::string& operator_name) {
-    return "kxc_unit_" + std::to_string(unit_id) + "_" +
-           SanitizeSymbolPart(operator_name);
-}
-
-void AppendCanonicalField(std::string* canonical, const std::string& name,
-                          const std::string& value) {
-    support::CanonicalBytesEncoder field;
-    field.Field(name, value);
-    *canonical += std::move(field).Take();
-}
-
-UnitSemanticKey BuildUnitSemanticKey(const CallInfo& call,
-                                     const ValueGraph& graph) {
-    if (!call.call.As<CallNode>() ||
-        call.resolved.call.get() != call.call.get()) {
-        throw std::invalid_argument(
-            "Unit semantic identity requires an operator Call");
-    }
-
-    std::string canonical;
-    AppendCanonicalField(&canonical, "kind", "unit-semantic-key-v1");
-    AppendCanonicalField(&canonical, "operator",
-                         relay::SerializeOperatorSpec(call.resolved.spec));
-
-    std::unordered_map<int64_t, size_t> boundary_index;
-    for (size_t index = 0; index < call.input_value_ids.size(); ++index) {
-        const int64_t id = call.input_value_ids[index];
-        if (id < 0 || static_cast<size_t>(id) >= graph.values.size()) {
-            throw std::invalid_argument(
-                "Unit semantic identity references an invalid input value id");
-        }
-        boundary_index.emplace(id, index);
-        const ValueInfo& value = graph.values[static_cast<size_t>(id)];
-        AppendCanonicalField(
-            &canonical, "input_role",
-            value.origin == ValueOrigin::kConstant ? "constant" : "input");
-        AppendCanonicalField(&canonical, "input_type",
-                             TypeToString(value.checked_type));
-    }
-    for (int64_t id : call.argument_value_ids) {
-        const auto boundary = boundary_index.find(id);
-        if (boundary == boundary_index.end()) {
-            throw std::invalid_argument(
-                "Logical argument is outside the unit boundary");
-        }
-        AppendCanonicalField(&canonical, "logical_input",
-                             std::to_string(boundary->second));
-    }
-    for (int64_t id : call.output_value_ids) {
-        if (id < 0 || static_cast<size_t>(id) >= graph.values.size()) {
-            throw std::invalid_argument(
-                "Unit semantic identity references an invalid output value id");
-        }
-        AppendCanonicalField(
-            &canonical, "output_type",
-            TypeToString(graph.values[static_cast<size_t>(id)].checked_type));
-    }
-    AppendCanonicalField(
-        &canonical, "attrs",
-        call.resolved.attrs.defined()
-            ? relay::SerializeAttrs(call.resolved.attrs)
-            : "<none>");
-    return UnitSemanticKey(std::move(canonical));
-}
 
 bool SameIds(const Array<int64_t>& lhs, const Array<int64_t>& rhs) {
     if (lhs.size() != rhs.size()) return false;
@@ -109,15 +32,15 @@ PartitionedGraph PartitionValueGraph(ValueGraph value_graph) {
     int64_t next_unit_id = 0;
     for (const auto& call : value_graph.calls) {
         if (!IsOrdinaryCompute(call.lowering_kind)) continue;
-        const std::string symbol = BuildUnitSymbol(next_unit_id, call.operator_name);
-        CompilationUnit unit{next_unit_id,
-                             String(symbol),
-                             call.call,
-                             call.input_value_ids,
-                             call.output_value_ids,
-                             BuildUnitSemanticKey(call, value_graph)};
+        PrimitiveUnit unit = BuildPrimitiveUnit(
+            next_unit_id, call.resolved, call.argument_value_ids,
+            call.output_value_ids, value_graph.values);
+        if (!SameIds(unit.boundary_input_value_ids, call.input_value_ids)) {
+            throw std::invalid_argument(
+                "ValueGraph and PrimitiveUnit boundary ordering drifted");
+        }
         result.calls.push_back(
-            runtime::KernelCall(unit.symbol, unit.input_value_ids,
+            runtime::KernelCall(unit.symbol, unit.boundary_input_value_ids,
                                 unit.output_value_ids));
         result.units.push_back(std::move(unit));
         ++next_unit_id;
@@ -149,49 +72,54 @@ void ValidatePartition(const PartitionedGraph& partitioned) {
     if (partitioned.units.size() != compute_calls.size() ||
         partitioned.calls.size() != partitioned.units.size()) {
         throw std::invalid_argument(
-            "Every ordinary compute Call must own exactly one CompilationUnit and KernelCall");
+            "Every ordinary compute Call must own exactly one PrimitiveUnit and KernelCall");
     }
 
     std::unordered_set<const Object*> owned_calls;
     std::unordered_set<std::string> symbols;
     for (size_t index = 0; index < partitioned.units.size(); ++index) {
-        const CompilationUnit& unit = partitioned.units[index];
-        if (unit.unit_id != static_cast<int64_t>(index)) {
+        const PrimitiveUnit& unit = partitioned.units[index];
+        if (unit.id != static_cast<int64_t>(index)) {
             throw std::invalid_argument(
-                "CompilationUnit ids must be dense and topologically ordered");
+                "PrimitiveUnit ids must be dense and topologically ordered");
         }
-        const auto* call_node = unit.call.As<CallNode>();
+        ValidatePrimitiveUnit(unit, partitioned.value_graph.values);
+        const auto* call_node = unit.call.call.As<CallNode>();
         if (!call_node) {
             throw std::invalid_argument(
-                "CompilationUnit must contain exactly one root Relay Call");
+                "PrimitiveUnit must contain exactly one root Relay Call");
         }
-        const auto call_it = compute_calls.find(unit.call.get());
+        const auto call_it = compute_calls.find(unit.call.call.get());
         if (call_it == compute_calls.end()) {
             throw std::invalid_argument(
-                "CompilationUnit owns a non-compute or unknown Call");
+                "PrimitiveUnit owns a non-compute or unknown Call");
         }
-        if (!owned_calls.insert(unit.call.get()).second) {
+        if (!owned_calls.insert(unit.call.call.get()).second) {
             throw std::invalid_argument(
-                "Ordinary compute Call belongs to more than one CompilationUnit");
+                "Ordinary compute Call belongs to more than one PrimitiveUnit");
         }
         if (std::string(unit.symbol).empty() ||
             !symbols.insert(std::string(unit.symbol)).second ||
             !unit.semantic_key.defined()) {
             throw std::invalid_argument(
-                "CompilationUnit symbol and semantic key must be valid");
+                "PrimitiveUnit symbol and semantic key must be valid");
         }
-        if (!SameIds(unit.input_value_ids, call_it->second->input_value_ids) ||
+        if (!SameIds(unit.argument_value_ids,
+                     call_it->second->argument_value_ids) ||
+            !SameIds(unit.boundary_input_value_ids,
+                     call_it->second->input_value_ids) ||
             !SameIds(unit.output_value_ids, call_it->second->output_value_ids)) {
             throw std::invalid_argument(
-                "CompilationUnit boundary ids do not match its Call record");
+                "PrimitiveUnit value ids do not match its Call record");
         }
 
         const runtime::KernelCall& plan_call = partitioned.calls[index];
         if (!(plan_call->symbol == unit.symbol) ||
-            !SameIds(plan_call.input_value_ids(), unit.input_value_ids) ||
+            !SameIds(plan_call.input_value_ids(),
+                     unit.boundary_input_value_ids) ||
             !SameIds(plan_call.output_value_ids(), unit.output_value_ids)) {
             throw std::invalid_argument(
-                "CompilationUnit and KernelCall draft must stay one-to-one");
+                "PrimitiveUnit and KernelCall draft must stay one-to-one");
         }
     }
 }

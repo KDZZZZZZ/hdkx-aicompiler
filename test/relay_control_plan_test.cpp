@@ -7,6 +7,7 @@
 #include <functional>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -40,10 +41,14 @@ using kxc::runtime::test_support::FakeValue;
 
 const TensorType kI64({}, "int64");
 
-ControlPlan LowerRelayToControlPlan(Function function) {
+kxc::api::internal::ControlPlanLowering LowerRelayProgram(
+    Function function) {
     return kxc::api::internal::LowerRelayToControlPlanWithSidecar(
-               std::move(function))
-        .plan;
+        std::move(function));
+}
+
+ControlPlan LowerRelayToControlPlan(Function function) {
+    return LowerRelayProgram(std::move(function)).plan;
 }
 
 Call Add(const Expr& lhs, const Expr& rhs) {
@@ -114,15 +119,36 @@ std::string ErrorText(const std::function<void()>& fn) {
     return "";
 }
 
-kxc::runtime::test_support::FakeKernelCallback ArithmeticKernels() {
-    return [](const ControlTask& task, const std::vector<FakeValue>& args) {
-        if (task.kernel_ref.find("name=add;") != std::string::npos) {
+bool SameIds(const kxc::Array<std::int64_t>& left,
+             const kxc::Array<std::int64_t>& right) {
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        if (left[index] != right[index]) return false;
+    }
+    return true;
+}
+
+kxc::runtime::test_support::FakeKernelCallback ArithmeticKernels(
+    const std::vector<kxc::api::internal::PrimitiveUnit>& units) {
+    std::unordered_map<kxc::api::internal::PrimitiveUnitId, std::string>
+        operator_names;
+    for (const auto& unit : units) {
+        operator_names.emplace(unit.id, unit.call.spec.name);
+    }
+    return [operator_names = std::move(operator_names)](
+               const ControlTask& task,
+               const std::vector<FakeValue>& args) {
+        const auto found = operator_names.find(task.primitive_unit_id);
+        if (found == operator_names.end()) {
+            throw std::invalid_argument("unknown fake PrimitiveUnit");
+        }
+        if (found->second == "add") {
             return std::vector<FakeValue>{FakeValue::I64(args[0].integer + args[1].integer)};
         }
-        if (task.kernel_ref.find("name=mul;") != std::string::npos) {
+        if (found->second == "mul") {
             return std::vector<FakeValue>{FakeValue::I64(args[0].integer * args[1].integer)};
         }
-        if (task.kernel_ref.find("name=test_control_predicate;") != std::string::npos) {
+        if (found->second == "test_control_predicate") {
             return std::vector<FakeValue>{FakeValue::Bool(args[0].integer < 2)};
         }
         throw std::invalid_argument("unexpected fake kernel reference");
@@ -138,9 +164,8 @@ bool TestCanonicalAndRepeatedArguments() {
     const ControlTask& repeated = plan.regions[0].tasks[1];
     TEST_CHECK(repeated.inputs.size() == 1 && repeated.argument_values.size() == 2 &&
                    repeated.argument_values[0] == repeated.argument_values[1] &&
-                   repeated.binding_state ==
-                       kxc::runtime::KernelBindingState::kUnresolvedRelayKernel,
-               "kernel boundary inputs must be unique and Relay kernels must remain unresolved");
+                   repeated.primitive_unit_id >= 0,
+               "kernel boundary inputs must be unique and reference a PrimitiveUnit");
 
     Var x2("x", kI64), y2("y", kI64), shared2("shared", kI64);
     Function equivalent({x2, y2}, Let(shared2, Add(x2, y2), Add(shared2, shared2)));
@@ -151,13 +176,14 @@ bool TestCanonicalAndRepeatedArguments() {
     Var px("px", kI64), py("py", kI64), pz("pz", kI64);
     Tuple nested({Add(px, py), Tuple({Add(py, pz), Add(pz, px)})});
     Function projection({px, py, pz}, TupleGetItem(nested, 1));
-    ControlPlan projection_plan =
-        LowerRelayToControlPlan(projection);
+    const auto projection_lowering = LowerRelayProgram(projection);
+    const ControlPlan& projection_plan = projection_lowering.plan;
     TEST_CHECK(projection_plan.graph_outputs.size() == 2 &&
                    projection_plan.regions[0].tasks.size() == 3,
                "nested tuple projection must preserve selected leaves and pure dead work");
     const auto projection_result =
-        ControlPlanReferenceExecutor(ArithmeticKernels()).Execute(
+        ControlPlanReferenceExecutor(
+            ArithmeticKernels(projection_lowering.primitive_units)).Execute(
             projection_plan,
             {{projection_plan.graph_inputs[0], FakeValue::I64(1)},
              {projection_plan.graph_inputs[1], FakeValue::I64(2)},
@@ -171,11 +197,10 @@ bool TestCanonicalAndRepeatedArguments() {
     ControlPlan nested_output_plan = LowerRelayToControlPlan(
         Function({nested_input}, Call(UnresolvedNestedOutputOp(), {nested_input})));
     TEST_CHECK(
-        nested_output_plan.graph_outputs.size() == 3 &&
+            nested_output_plan.graph_outputs.size() == 3 &&
             nested_output_plan.regions[0].tasks.size() == 1 &&
-            nested_output_plan.regions[0].tasks[0].binding_state ==
-                kxc::runtime::KernelBindingState::kUnresolvedRelayKernel,
-        "nested Call leaves may be prepared only as an unresolved Relay kernel");
+            nested_output_plan.regions[0].tasks[0].primitive_unit_id >= 0,
+        "nested Call leaves must reference a shared PrimitiveUnit");
     return true;
 }
 
@@ -183,9 +208,12 @@ bool TestSharedLogicalValueContracts() {
     Var lhs("lhs", kI64), rhs("rhs", kI64);
     Function typed =
         kxc::relay::InferTypePass(Function({lhs, rhs}, Add(lhs, rhs)));
-    const kxc::api::internal::ValueGraph static_graph =
-        kxc::api::internal::BuildValueGraph(typed, Device::CPU());
-    const ControlPlan control_plan = LowerRelayToControlPlan(typed);
+    const kxc::api::internal::PartitionedGraph static_plan =
+        kxc::api::internal::PartitionValueGraph(
+            kxc::api::internal::BuildValueGraph(typed, Device::CPU()));
+    const auto control_lowering = LowerRelayProgram(typed);
+    const auto& static_graph = static_plan.value_graph;
+    const ControlPlan& control_plan = control_lowering.plan;
     TEST_CHECK(static_graph.values.size() == control_plan.values.size(),
                "static and control preparation must produce the same logical leaf count");
     for (std::size_t index = 0; index < static_graph.values.size(); ++index) {
@@ -198,6 +226,18 @@ bool TestSharedLogicalValueContracts() {
                     static_value, control_value),
             "static and control preparation must share one value/type/device contract");
     }
+    TEST_CHECK(
+        static_plan.units.size() == 1 &&
+            control_lowering.primitive_units.size() == 1 &&
+            static_plan.units[0].semantic_key ==
+                control_lowering.primitive_units[0].semantic_key &&
+            SameIds(static_plan.units[0].argument_value_ids,
+                    control_lowering.primitive_units[0]
+                        .argument_value_ids) &&
+            SameIds(static_plan.units[0].boundary_input_value_ids,
+                    control_lowering.primitive_units[0]
+                        .boundary_input_value_ids),
+        "static and control topology must build the same PrimitiveUnit contract");
     return true;
 }
 
@@ -205,8 +245,10 @@ bool TestIfExecutionAndNestedTuplePhi() {
     Var p("p", TensorType({}, "bool")), q("q", TensorType({}, "bool"));
     Var x("x", kI64), y("y", kI64);
     Function simple({p, x, y}, If(p, Add(x, y), Mul(x, y)));
-    ControlPlan simple_plan = LowerRelayToControlPlan(simple);
-    ControlPlanReferenceExecutor executor(ArithmeticKernels());
+    const auto simple_lowering = LowerRelayProgram(simple);
+    const ControlPlan& simple_plan = simple_lowering.plan;
+    ControlPlanReferenceExecutor executor(
+        ArithmeticKernels(simple_lowering.primitive_units));
     const auto yes = executor.Execute(simple_plan, {{0, FakeValue::Bool(true)},
                                                      {1, FakeValue::I64(2)},
                                                      {2, FakeValue::I64(3)}});
@@ -221,10 +263,13 @@ bool TestIfExecutionAndNestedTuplePhi() {
         {}, kxc::runtime::DataTypeFromString("int64"), kxc::Device::CPU());
     kxc::Constant constant(constant_data);
     Function captured({p, x}, If(p, Add(x, constant), Mul(x, constant)));
-    ControlPlan captured_plan = LowerRelayToControlPlan(captured);
+    const auto captured_lowering = LowerRelayProgram(captured);
+    const ControlPlan& captured_plan = captured_lowering.plan;
     TEST_CHECK(captured_plan.constant_values.size() == 1,
                "branch constant capture must remain an explicit plan source");
-    const auto captured_result = executor.Execute(
+    const auto captured_result =
+        ControlPlanReferenceExecutor(
+            ArithmeticKernels(captured_lowering.primitive_units)).Execute(
         captured_plan,
         {{captured_plan.graph_inputs[0], FakeValue::Bool(true)},
          {captured_plan.graph_inputs[1], FakeValue::I64(3)},
@@ -259,9 +304,11 @@ bool TestRelaySourceWhileExecution() {
     const Expr body = Tuple(kxc::Array<Expr>{Add(element, increment)});
     const Function loop({initial, increment},
                         While(initial_state, state, condition, body, 3));
-    const ControlPlan plan = LowerRelayToControlPlan(loop);
-    const auto run = [&plan](std::int64_t start) {
-        return ControlPlanReferenceExecutor(ArithmeticKernels()).Execute(
+    const auto loop_lowering = LowerRelayProgram(loop);
+    const ControlPlan& plan = loop_lowering.plan;
+    const auto run = [&plan, &loop_lowering](std::int64_t start) {
+        return ControlPlanReferenceExecutor(
+            ArithmeticKernels(loop_lowering.primitive_units)).Execute(
             plan, {{plan.graph_inputs[0], FakeValue::I64(start)},
                    {plan.graph_inputs[1], FakeValue::I64(1)}});
     };
@@ -281,9 +328,11 @@ bool TestRelaySourceWhileExecution() {
                "Relay-source While trip counts must be exact");
     Function exhausted({initial, increment},
         While(initial_state, state, condition, body, 1));
-    const ControlPlan exhausted_plan = LowerRelayToControlPlan(exhausted);
+    const auto exhausted_lowering = LowerRelayProgram(exhausted);
+    const ControlPlan& exhausted_plan = exhausted_lowering.plan;
     const std::string exhausted_error = ErrorText([&] {
-        (void)ControlPlanReferenceExecutor(ArithmeticKernels()).Execute(
+        (void)ControlPlanReferenceExecutor(
+            ArithmeticKernels(exhausted_lowering.primitive_units)).Execute(
             exhausted_plan, {{exhausted_plan.graph_inputs[0], FakeValue::I64(0)},
                              {exhausted_plan.graph_inputs[1], FakeValue::I64(1)}});
     });
@@ -299,10 +348,12 @@ bool TestRelaySourceWhileExecution() {
                                      TupleGetItem(shifted_state, 2),
                                      TupleGetItem(shifted_state, 3), tail,
                                      Add(TupleGetItem(shifted_state, 4), increment)});
-    const ControlPlan shifted_plan = LowerRelayToControlPlan(Function(
+    const auto shifted_lowering = LowerRelayProgram(Function(
         {first, second, third, tail, value, increment},
         While(shifted_initial, shifted_state, shifted_condition, shifted_body, 3)));
-    const auto shifted = ControlPlanReferenceExecutor(ArithmeticKernels()).Execute(
+    const ControlPlan& shifted_plan = shifted_lowering.plan;
+    const auto shifted = ControlPlanReferenceExecutor(
+        ArithmeticKernels(shifted_lowering.primitive_units)).Execute(
         shifted_plan,
         {{shifted_plan.graph_inputs[0], FakeValue::Bool(true)},
          {shifted_plan.graph_inputs[1], FakeValue::Bool(true)},
@@ -442,7 +493,7 @@ bool TestStaticAndControlGates() {
         (void)LowerRelayToControlPlan(
             Function({cuda_x, cuda_y}, cross_ordinal));
     });
-    TEST_CHECK(ordinal_error.find("one explicit device") != std::string::npos,
+    TEST_CHECK(ordinal_error.find("input/output device") != std::string::npos,
                "ControlPlan must preserve and compare CUDA device ordinals");
 
     Var structural_x("structural_x", kI64);

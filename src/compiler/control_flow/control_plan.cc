@@ -49,6 +49,7 @@ struct State {
     std::unordered_set<ValueId> constant_values;
     std::unordered_set<ValueId> source_values;
     std::unordered_set<ValueId> body_arguments;
+    std::unordered_set<api::internal::PrimitiveUnitId> primitive_units;
     std::unordered_map<ValueId, std::pair<RegionId, RegionId>> body_argument_regions;
     std::unordered_map<ValueId, TaskId> producers;
     std::unordered_set<RegionId> visited;
@@ -262,12 +263,12 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
             unique_arguments.erase(
                 std::unique(unique_arguments.begin(), unique_arguments.end()),
                 unique_arguments.end());
-            if (task.binding_state !=
-                    KernelBindingState::kUnresolvedRelayKernel ||
-                task.kernel_ref.empty() || task.outputs.empty() ||
+            if (task.primitive_unit_id < 0 ||
+                !state.primitive_units.insert(task.primitive_unit_id).second ||
+                task.outputs.empty() ||
                 !IsEmpty(task.branch) || !IsEmpty(task.loop) ||
                 !SameIds(task.inputs, unique_arguments)) {
-                Fail("kernel task must be an unresolved Relay kernel with a valid kind-specific contract");
+                Fail("kernel task must reference one unique PrimitiveUnit with a valid kind-specific contract");
             }
             for (ValueId input : task.inputs) {
                 if (Value(state, input, "kernel input").device != task.device) {
@@ -280,15 +281,13 @@ void ValidateRegion(State& state, RegionId id, const std::unordered_set<ValueId>
                 }
             }
         } else if (task.kind == ControlTaskKind::kBranch) {
-            if (task.binding_state != KernelBindingState::kNotApplicable ||
-                !task.kernel_ref.empty() || !task.argument_values.empty() ||
+            if (task.primitive_unit_id >= 0 || !task.argument_values.empty() ||
                 !IsEmpty(task.loop) || task.device != Device::CPU()) {
                 Fail("branch task has an invalid kind-specific contract");
             }
             ValidateBranch(state, task, available);
         } else if (task.kind == ControlTaskKind::kLoop) {
-            if (task.binding_state != KernelBindingState::kNotApplicable ||
-                !task.kernel_ref.empty() || !task.argument_values.empty() ||
+            if (task.primitive_unit_id >= 0 || !task.argument_values.empty() ||
                 !IsEmpty(task.branch) || task.device != Device::CPU()) {
                 Fail("loop task has an invalid kind-specific contract");
             }
@@ -478,8 +477,8 @@ std::string ControlPlan::CanonicalText() const {
         out << " loc=" << Quote(region.source_locator) << " "; PrintEffect(out, region.effect); out << " "; PrintAlias(out, region.alias); out << "\n";
         for (const ControlTask& task : region.tasks) {
             out << "  task " << task.id << " kind=" << static_cast<int>(task.kind)
-                << " binding=" << static_cast<int>(task.binding_state) << " in="; PrintIds(out, task.inputs); out << " args="; PrintIds(out, task.argument_values); out << " out="; PrintIds(out, task.outputs); out << " dep="; PrintIds(out, task.dependencies);
-            out << " ref=" << Quote(task.kernel_ref) << " loc=" << Quote(task.source_locator)
+                << " unit=" << task.primitive_unit_id << " in="; PrintIds(out, task.inputs); out << " args="; PrintIds(out, task.argument_values); out << " out="; PrintIds(out, task.outputs); out << " dep="; PrintIds(out, task.dependencies);
+            out << " loc=" << Quote(task.source_locator)
                 << " device=" << Quote(task.device.ToString())
                 << " stream=" << Quote(task.stream) << " "; PrintEffect(out, task.effect); out << " "; PrintAlias(out, task.alias);
             if (task.kind == ControlTaskKind::kBranch) {

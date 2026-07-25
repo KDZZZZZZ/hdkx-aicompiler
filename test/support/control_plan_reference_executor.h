@@ -114,11 +114,6 @@ private:
         }
         result->trace.events.push_back("task:" + std::to_string(task.id));
         if (task.kind == ControlTaskKind::kKernel) {
-            if (task.binding_state !=
-                KernelBindingState::kUnresolvedRelayKernel) {
-                throw std::invalid_argument(
-                    "reference executor only resolves unresolved test kernels");
-            }
             std::vector<FakeValue> arguments;
             arguments.reserve(task.argument_values.size());
             for (const ValueId argument : task.argument_values) {

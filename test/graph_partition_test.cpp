@@ -84,9 +84,9 @@ bool TestStableChainIdsAndBoundaries() {
     TEST_CHECK(SameIds(graph.input_value_ids, {0, 1, 2}) &&
                    SameIds(graph.output_value_ids, {4}),
                "chain graph boundary ids changed");
-    TEST_CHECK(SameIds(graph.units[0].input_value_ids, {0, 1}) &&
+    TEST_CHECK(SameIds(graph.units[0].boundary_input_value_ids, {0, 1}) &&
                    SameIds(graph.units[0].output_value_ids, {3}) &&
-                   SameIds(graph.units[1].input_value_ids, {3, 2}) &&
+                   SameIds(graph.units[1].boundary_input_value_ids, {3, 2}) &&
                    SameIds(graph.units[1].output_value_ids, {4}),
                "chain unit boundaries must expose producer outputs as values");
     return true;
@@ -105,7 +105,7 @@ bool TestEquivalentGraphsAreDeterministic() {
                    SameIds(first.output_value_ids, {4, 5}),
                "branch tuple topology must assign root, left, right in post-order");
     for (size_t i = 0; i < first.units.size(); ++i) {
-        TEST_CHECK(first.units[i].unit_id == second.units[i].unit_id &&
+        TEST_CHECK(first.units[i].id == second.units[i].id &&
                        first.units[i].symbol == second.units[i].symbol &&
                        first.units[i].semantic_key ==
                            second.units[i].semantic_key,
@@ -129,8 +129,9 @@ bool TestPartitionRejectsMissingDuplicateAndNonCallOwnership() {
                "duplicate ordinary Call ownership must fail");
 
     PartitionedGraph non_call = PartitionValueGraph(BuildValueGraph(MakeChain()));
-    non_call.units[0].call = Tuple({non_call.units[0].call,
-                                    non_call.units[1].call});
+    non_call.units[0].call.call =
+        Tuple({non_call.units[0].call.call,
+               non_call.units[1].call.call});
     TEST_CHECK(Throws([&] { ValidatePartition(non_call); }),
                "a unit containing a non-Call aggregate must fail");
     return true;
@@ -157,7 +158,7 @@ bool TestRepeatedLogicalArgumentUsesOneBoundaryValue() {
     const PartitionedGraph graph =
         PartitionValueGraph(BuildValueGraph(function));
     TEST_CHECK(graph.units.size() == 1 &&
-                   SameIds(graph.units[0].input_value_ids, {0}),
+                   SameIds(graph.units[0].boundary_input_value_ids, {0}),
                "repeated logical operands must share one external boundary value");
     TEST_CHECK(graph.value_graph.calls[0].argument_value_ids.size() == 2 &&
                    graph.value_graph.calls[0].argument_value_ids[0] == 0 &&

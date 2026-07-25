@@ -20,16 +20,9 @@ namespace {
 const ValueInfo& GetValue(const ValueGraph& graph, int64_t value_id) {
     if (value_id < 0 || static_cast<size_t>(value_id) >= graph.values.size() ||
         graph.values[static_cast<size_t>(value_id)].id != value_id) {
-        throw std::invalid_argument("CompilationUnit references an invalid value id");
+        throw std::invalid_argument("PrimitiveUnit references an invalid value id");
     }
     return graph.values[static_cast<size_t>(value_id)];
-}
-
-const CallInfo& GetCall(const ValueGraph& graph, const Expr& call) {
-    for (const auto& record : graph.calls) {
-        if (record.call.get() == call.get()) return record;
-    }
-    throw std::invalid_argument("CompilationUnit Call is missing from ValueGraph");
 }
 
 tir::DataType TIRDataType(const TensorTypeNode* type) {
@@ -68,15 +61,9 @@ te::Tensor MakeBoundaryTensor(const ValueInfo& value) {
 }
 
 const ResolvedRelayCall& ValidateUnitOperator(
-    const ValueGraph& graph, const CompilationUnit& unit) {
-    const CallInfo& record = GetCall(graph, unit.call);
-    if (record.output_value_ids.size() !=
-            record.resolved.output_leaf_types.size() ||
-        record.resolved.call.get() != unit.call.get()) {
-        throw std::invalid_argument(
-            "CompilationUnit output contract drifted from ResolvedRelayCall");
-    }
-    return record.resolved;
+    const ValueGraph& graph, const PrimitiveUnit& unit) {
+    ValidatePrimitiveUnit(unit, graph.values);
+    return unit.call;
 }
 
 Array<te::Tensor> InvokeCurrentCall(const ResolvedRelayCall& resolved,
@@ -111,7 +98,7 @@ Array<te::Tensor> InvokeCurrentCall(const ResolvedRelayCall& resolved,
 }
 
 void ValidateTEOutputContracts(const ValueGraph& graph,
-                               const CompilationUnit& unit,
+                               const PrimitiveUnit& unit,
                                const Array<te::Tensor>& outputs,
                                const std::string& op_name) {
     if (outputs.size() != unit.output_value_ids.size()) {
@@ -191,17 +178,17 @@ void FreezeConstantPayloads(ValueGraph* graph) {
 
 }  // namespace
 
-relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
-                                            const CompilationUnit& unit) {
+relay::LoweredFunction LowerPrimitiveUnit(const ValueGraph& graph,
+                                          const PrimitiveUnit& unit) {
     const ResolvedRelayCall& resolved =
         ValidateUnitOperator(graph, unit);
     const relay::OperatorSpec& spec = resolved.spec;
-    const auto* call = unit.call.As<CallNode>();
+    const auto* call = unit.call.call.As<CallNode>();
 
     std::unordered_map<int64_t, te::Tensor> boundary_tensors;
     Array<te::Tensor> abi_inputs;
     std::vector<relay::internal::ConstantTensor> constants;
-    for (int64_t value_id : unit.input_value_ids) {
+    for (int64_t value_id : unit.boundary_input_value_ids) {
         const ValueInfo& value = GetValue(graph, value_id);
         te::Tensor tensor = MakeBoundaryTensor(value);
         boundary_tensors.emplace(value_id, tensor);
@@ -239,12 +226,12 @@ relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
 
     const Array<te::Tensor> outputs =
         InvokeCurrentCall(
-            resolved, logical_inputs, unit.call.checked_type());
+            resolved, logical_inputs, unit.call.call.checked_type());
     ValidateTEOutputContracts(graph, unit, outputs, spec.name);
     return relay::internal::LowerTensorGraphToTIR(
         abi_inputs, constants, outputs,
         relay::internal::PrimFuncIdentity{
-            unit.symbol, unit.unit_id, String(spec.name), spec.schema_version,
+            unit.symbol, unit.id, String(spec.name), spec.schema_version,
             String(unit.semantic_key.digest())});
 }
 
@@ -287,13 +274,12 @@ LoweredGraph LowerPreparedStaticGraph(const PreparedStaticGraph& prepared) {
     LoweredGraph result;
     result.partitioned = prepared.partitioned;
 
-    for (const CompilationUnit& unit : result.partitioned.units) {
+    for (const PrimitiveUnit& unit : result.partitioned.units) {
         relay::LoweredFunction lowered =
-            LowerCompilationUnit(result.partitioned.value_graph, unit);
-        const ResolvedRelayCall& resolved =
-            GetCall(result.partitioned.value_graph, unit.call).resolved;
+            LowerPrimitiveUnit(result.partitioned.value_graph, unit);
+        const ResolvedRelayCall& resolved = unit.call;
         result.primitives.push_back(
-            LoweredPrimitive{unit.unit_id,
+            LoweredPrimitive{unit.id,
                              unit.symbol,
                              String(resolved.spec.name + "@v" +
                                     std::to_string(
@@ -346,22 +332,22 @@ void ValidateLoweredGraph(const LoweredGraph& graph) {
     graph.plan.Validate();
     if (graph.primitives.size() != graph.partitioned.units.size()) {
         throw std::invalid_argument(
-            "LoweredGraph requires one primitive per CompilationUnit");
+            "LoweredGraph requires one primitive per PrimitiveUnit");
     }
     for (size_t index = 0; index < graph.primitives.size(); ++index) {
         const LoweredPrimitive& primitive = graph.primitives[index];
-        const CompilationUnit& unit = graph.partitioned.units[index];
+        const PrimitiveUnit& unit = graph.partitioned.units[index];
         primitive.lowered.Validate();
         const tir::PrimFunc& function = primitive.lowered->prim_func;
         int64_t unit_id = -1;
-        if (primitive.unit_id != unit.unit_id ||
+        if (primitive.unit_id != unit.id ||
             !(primitive.symbol == unit.symbol) ||
             primitive.semantic_key != unit.semantic_key) {
             throw std::invalid_argument(
-                "Lowered primitive record drifted from its CompilationUnit");
+                "Lowered primitive record drifted from its PrimitiveUnit");
         }
         if (!ReadIntAttr(function, "kxc.unit_id", &unit_id) ||
-            unit_id != unit.unit_id) {
+            unit_id != unit.id) {
             throw std::invalid_argument("PrimFunc unit id metadata mismatch");
         }
         if (!(ReadStringAttr(function, "global_symbol") == unit.symbol)) {
