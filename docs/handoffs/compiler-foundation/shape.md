@@ -1,66 +1,49 @@
 # Compiler Foundation / Shape handoff
 
-## Current status
+## Current authority
 
-The repository-only experimental Shape surface has two independent, narrow
-pieces. These headers are listed in `KXC_EXPERIMENTAL_HEADERS` for source-tree
-checks but are deliberately absent from install/export package targets; they
-carry no source or binary compatibility promise.
+The repository-only experimental Shape headers are source-tree checked but are
+not installed or exported and carry no source or binary compatibility promise.
 
-- `shape_specialization.h` supplies `GraphTemplate`, exact profiles, exact
-  requests, and `ChangedUnitIndices` inputs. It does not compile or execute.
-- `shape_exact.h` is the default-OFF production exact Relay/compiler adapter.
-  Its production bridge remains concrete Relay, one empty profile, and static
-  `RuntimeSession` only.
+`shape_specialization.h` defines graph templates, exact profiles, exact
+requests, and changed-unit inputs. `shape_exact.h`, gated by
+`KXC_ENABLE_SHAPE_PRODUCTION_EXACT`, is the concrete Relay adapter. Its
+preparation and publication use the static compiler authority:
 
-`restricted_symbolic_shape.h` is default-OFF and is an **exact-decision-only
-control plane**. `Prepare` freezes a concrete representative through the exact
-adapter, overlays explicitly bound nonempty symbols, and accepts only fixed-rank
-`relu`/`sqrt` and equal-shape `add`/`mul`. `MintExact` creates immutable exact
-request snapshots. It does not compile, cache, allocate, execute, or lower a
-symbolic Relay graph.
+```text
+PrepareRelayProgram
+  -> BuildValueGraph -> PartitionValueGraph
+  -> PrimitiveUnit[]
+  -> CompilePrimitiveUnits
+  -> AssembleCompiledGraph
+  -> immutable exact CompiledGraph variant
+```
 
-## Deleted and unsupported
+The adapter accepts one concrete profile and static `RuntimeSession` execution.
+It does not maintain a separate lowering, cache, module, or plan assembly path.
 
-The guarded bucket/polymorphic contract universe was deleted: its contract header,
-implementation, deterministic fake resolver/plan types, focused test, and CMake
-and CTest registration no longer exist. There is no bucket or polymorphic
-policy, profile, request, dispatch kind, alias, compatibility shim, or generic
-dynamic lowering path.
+`restricted_symbolic_shape.h`, gated by
+`KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE`, is exact-decision-only. `Prepare`
+freezes a concrete representative through the exact adapter, overlays explicit
+nonempty symbol bindings, and accepts only fixed-rank `relu`/`sqrt` and
+equal-shape `add`/`mul`. `MintExact` produces immutable request snapshots. It
+does not compile, cache, allocate, execute, or lower a symbolic Relay graph.
 
-Bucket execution, polymorphic execution, generic Relay symbolic-to-module
-lowering, dynamic graph memory planning, dynamic output allocation, ragged or
-data-dependent shapes, workspace schemas, and tail transforms are unsupported.
-`-1` remains a legacy input ABI sentinel, not symbolic Shape support.
+Source-private module invocation contracts validate compiler/runtime-authored
+invocations. They do not consume restricted symbolic decisions or establish a
+generic symbolic compilation path.
 
-Source-private `ModuleShapeExpr` and `ModuleInvocationContract` are separate
-CompiledModule invocation typestate. They validate compiler/runtime-authored
-contracts; public clients only receive `CompiledModule::Invoke` results. They
-neither consume restricted symbolic decisions nor establish a generic Relay
-symbolic-to-module lowering path.
+## Unsupported
+
+Dynamic, ragged, data-dependent, bucketed, and polymorphic shapes; generic
+symbolic Relay-to-module lowering; dynamic graph memory planning; dynamic
+output allocation; workspace schemas; and tail transforms are unsupported.
+`-1` remains a legacy input-ABI sentinel, not symbolic Shape support.
 
 ## Verification
 
-Use CPU-only builds with LLVM and CUDA disabled:
-
-```bash
-cmake -S . -B out/shape-restricted-off -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
-  -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=OFF \
-  -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=OFF \
-  -DKXC_BUILD_PASS_TESTS=ON -DKXC_BUILD_CODEGEN_TESTS=OFF
-cmake --build out/shape-restricted-off --target run_restricted_symbolic_shape_test --parallel 2
-ctest --test-dir out/shape-restricted-off --output-on-failure \
-  -R '^restricted_symbolic_shape_test$'
-
-cmake -S . -B out/shape-restricted-on -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
-  -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON \
-  -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON \
-  -DKXC_BUILD_PASS_TESTS=ON -DKXC_BUILD_CODEGEN_TESTS=OFF
-cmake --build out/shape-restricted-on --target \
-  run_shape_system_test run_shape_specialization_test \
-  run_shape_production_exact_test run_restricted_symbolic_shape_test \
-  check_include_layers check_public_headers --parallel 2
-ctest --test-dir out/shape-restricted-on --output-on-failure --no-tests=error
-```
+Use the CPU-only LLVM/CUDA-disabled configured build with exact and restricted
+symbolic Shape gates enabled. Build the shape tests plus
+`check_include_layers` and `check_public_headers`, then run full CTest with
+`--no-tests=error`. Backend execution claims still require an enabled backend
+and its environment.

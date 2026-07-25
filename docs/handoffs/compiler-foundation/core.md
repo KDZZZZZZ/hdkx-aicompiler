@@ -1,31 +1,46 @@
 # Compiler Foundation Core handoff
 
-## Current boundary
+## Current authority
 
-`include/kxc/compiler/artifact.h` exposes only immutable `ArtifactRecord` and
-read-only opaque `ArtifactPin` views. A defined public pin is
-minted only from a real internal primitive-cache pin; clients cannot create,
-publish, fail, or otherwise mutate cache entries.
+`CompileConfig::Create` makes an immutable target/configuration snapshot.
+`Compiler::Compile` is the static publication authority:
 
-`Compiler::Compile` and `src/compiler/internal/primitive_cache.h` are the sole
-mutation authority. The internal primitive cache owns static-exact full-key
-singleflight, negative TTL, bounded in-flight backpressure, byte/entry eviction,
-and pin retention. `Compiler::BuildBackends` acquires every primitive lease
-before waiting: it publishes all leases it owns first, then resolves waiters.
-This prevents opposite key acquisition orders from forming cross-flight wait
-cycles. A defined `CompiledGraph` is minted only by the compiler-private
-access seam from compiler-derived module, plan, pins, and graph key; public
-callers can only consume an existing graph and its opaque real pins.
+```text
+PrepareRelayProgram
+  -> BuildValueGraph -> PartitionValueGraph
+  -> PrimitiveUnit[]
+  -> CompilePrimitiveUnits
+  -> AssembleCompiledGraph
+  -> immutable CompiledGraph
+```
 
-Adaptive v2 owns scheduling, routing, dispatch/generation, priority/budget, and
-asynchronous coordination. Those policies are not represented by the public
-artifact view or by a generic foundation cache API.
+`CompilePrimitiveUnits` owns per-unit lowering, TIR processing, ABI and
+artifact-key construction, primitive-cache acquisition, backend compilation,
+and completion. It returns one complete batch of ready primitive pins.
+`AssembleCompiledGraph` consumes only the prepared static graph, ordered pins,
+and constants to validate correspondence and publish the module and executable
+plan. It never repeats preparation, lowering, cache lookup, or backend work.
+
+`include/kxc/compiler/artifact.h` exposes immutable `ArtifactRecord` and
+read-only opaque `ArtifactPin` views. A defined public pin comes only from a
+real internal primitive pin. Clients cannot create, publish, fail, or mutate a
+cache entry.
+
+The internal primitive cache owns static-exact full-key singleflight, failure
+propagation, bounded in-flight backpressure, byte/entry eviction, and pin
+retention. `CompilePrimitiveUnits` acquires all leases before waiting and
+publishes work owned by the current compilation before resolving waiters, so
+opposite key acquisition orders do not create cross-flight wait cycles.
+
+Exact shape and adaptive replacement reuse this chain. Adaptive compilation
+may request only selected units, but substitutes their ready pins into the
+baseline ordered vector and publishes through `AssembleCompiledGraph`.
 
 `RuntimeSession` remains compiler/cache-free. Consumers must not include
 `src/compiler/internal/*` or `src/runtime/internal/*`.
 
 ## Verification
 
-Use the internal primitive-cache regressions plus compiler/operator/shape tests
-for cache behavior, and the public-header/include/contract checks for the public
-surface. LLVM/CUDA execution remains environment-dependent.
+Use primitive-cache, compiler/operator, exact-shape, and adaptive regressions
+for this boundary, plus the public-header, include-layer, Relay-contract, and
+pass-contract checks. LLVM/CUDA execution remains environment-dependent.
