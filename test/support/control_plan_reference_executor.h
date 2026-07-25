@@ -80,7 +80,13 @@ private:
 
     static void CheckContract(const ControlPlan& plan, ValueId id, const FakeValue& value) {
         const ControlValueSpec& spec = Spec(plan, id);
-        if (value.dtype != spec.dtype || value.shape != spec.shape || value.device != spec.device) {
+        const TensorTypeNode& tensor =
+            api::internal::RequireLogicalTensorType(
+                spec, "reference executor value");
+        const std::vector<std::int64_t> shape(tensor.shape.begin(),
+                                              tensor.shape.end());
+        if (value.dtype != tensor.dtype || value.shape != shape ||
+            value.device != spec.device) {
             throw std::invalid_argument("fake value violates its static contract");
         }
     }

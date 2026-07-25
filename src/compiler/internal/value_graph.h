@@ -8,26 +8,15 @@
 #include <unordered_map>
 #include <vector>
 
+#include "logical_value.h"
 #include "resolved_relay_call.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
 
 namespace kxc::api::internal {
 
-enum class ValueOrigin : int {
-    kParameter = 0,
-    kConstant = 1,
-    kCallOutput = 2,
-};
-
-struct ValueInfo {
-    int64_t value_id{-1};
-    ValueOrigin origin{ValueOrigin::kCallOutput};
-    Expr source;
-    int64_t output_index{0};
-    Type checked_type;
-    bool is_graph_output{false};
-};
+using ValueInfo = LogicalValueContract;
+using ValueOrigin = LogicalValueOrigin;
 
 struct CallInfo {
     Expr call;

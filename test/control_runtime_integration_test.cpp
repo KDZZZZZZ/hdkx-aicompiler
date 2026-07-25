@@ -71,12 +71,16 @@ EffectSummary Reads(std::vector<ValueId> values) {
 }
 
 ControlValueSpec I64(ValueId id) {
-    return ControlValueSpec{id, "int64", {}, Device::CPU(),
+    return ControlValueSpec{id, kxc::TensorType({}, "int64"), Device::CPU(),
+                            kxc::api::internal::LogicalValueOrigin::kPrimitiveOutput,
+                            kxc::Expr(),
                             "value" + std::to_string(id)};
 }
 
 ControlValueSpec Bool(ValueId id) {
-    return ControlValueSpec{id, "bool", {}, Device::CPU(),
+    return ControlValueSpec{id, kxc::TensorType({}, "bool"), Device::CPU(),
+                            kxc::api::internal::LogicalValueOrigin::kPrimitiveOutput,
+                            kxc::Expr(),
                             "value" + std::to_string(id)};
 }
 
@@ -1157,7 +1161,7 @@ bool TestBindingAndValidationNegatives() {
           "wrong module output contract must fail before runtime launch");
 
     ControlPlan dynamic = branch;
-    dynamic.values[1].shape = {-1};
+    dynamic.values[1].checked_type = kxc::TensorType({-1}, "int64");
     ControlPlan effects = branch;
     effects.regions[0].tasks[0].effect.host_callback = true;
     ControlPlan aliases = branch;

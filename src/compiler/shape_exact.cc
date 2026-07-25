@@ -1,5 +1,6 @@
 #include "kxc/compiler/shape_exact.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -390,14 +391,18 @@ std::string GraphCanonical(const internal::PartitionedGraph& partitioned) {
                 std::to_string(partitioned.value_graph.values.size()));
     for (const auto& value : partitioned.value_graph.values) {
         std::string encoded;
-        AppendField(&encoded, "value_id", std::to_string(value.value_id));
+        AppendField(&encoded, "value_id", std::to_string(value.id));
         AppendField(&encoded, "origin",
                     std::to_string(static_cast<int>(value.origin)));
-        AppendField(&encoded, "output_index",
-                    std::to_string(value.output_index));
         AppendField(&encoded, "checked_type", TypeToString(value.checked_type));
+        AppendField(&encoded, "device", value.device.ToString());
+        AppendField(&encoded, "source_locator", value.source_locator);
+        const bool is_graph_output =
+            std::find(partitioned.output_value_ids.begin(),
+                      partitioned.output_value_ids.end(),
+                      value.id) != partitioned.output_value_ids.end();
         AppendField(&encoded, "is_graph_output",
-                    value.is_graph_output ? "1" : "0");
+                    is_graph_output ? "1" : "0");
         if (value.origin == internal::ValueOrigin::kConstant) {
             AppendField(&encoded, "constant", ConstantCanonical(value));
         }
@@ -416,7 +421,7 @@ shape::GraphTemplate BuildTemplate(
     std::vector<shape::NamedTensorContract> inputs;
     std::vector<shape::NamedTensorContract> outputs;
     for (const auto& value : graph.values) {
-        shape::NamedTensorContract named{ValueName(value.value_id),
+        shape::NamedTensorContract named{ValueName(value.id),
                                          ValueContract(value)};
         if (value.origin == internal::ValueOrigin::kParameter ||
             value.origin == internal::ValueOrigin::kConstant) {
@@ -585,17 +590,21 @@ void VerifyVariant(
     for (size_t i = 0; i < compiled.plan().values().size(); ++i) {
         const runtime::ValueSpec& value = compiled.plan().values()[i];
         const auto& source = partitioned.value_graph.values[i];
-        const auto& exact = ProfileValue(oracle, ValueName(source.value_id));
+        const auto& exact = ProfileValue(oracle, ValueName(source.id));
         const auto* expected_type = source.checked_type.As<TensorTypeNode>();
         if (!expected_type) Reject("compiled plan source is not a tensor");
         const DLDataType expected_dtype =
             runtime::DataTypeFromString(expected_type->dtype);
-        if (value->value_id != source.value_id ||
+        const bool is_graph_output =
+            std::find(partitioned.output_value_ids.begin(),
+                      partitioned.output_value_ids.end(),
+                      source.id) != partitioned.output_value_ids.end();
+        if (value->value_id != source.id ||
             value->is_input !=
                 (source.origin == internal::ValueOrigin::kParameter) ||
             value->is_constant !=
                 (source.origin == internal::ValueOrigin::kConstant) ||
-            value->is_output != source.is_graph_output ||
+            value->is_output != is_graph_output ||
             !ExactContract(exact) ||
             !SameDType(value->dtype, expected_dtype) ||
             value->device.device_type() != config->target->device_type ||

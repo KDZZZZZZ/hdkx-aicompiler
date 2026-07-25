@@ -18,11 +18,15 @@ using namespace kxc::runtime::test_support;
 
 EffectSummary Reads(std::vector<ValueId> ids) { return EffectSummary{std::move(ids), {}, {}, false, false}; }
 ControlValueSpec I64(ValueId id) {
-    return ControlValueSpec{id, "int64", {}, Device::CPU(),
+    return ControlValueSpec{id, kxc::TensorType({}, "int64"), Device::CPU(),
+                            kxc::api::internal::LogicalValueOrigin::kPrimitiveOutput,
+                            kxc::Expr(),
                             "value" + std::to_string(id)};
 }
 ControlValueSpec Bool(ValueId id) {
-    return ControlValueSpec{id, "bool", {}, Device::CPU(),
+    return ControlValueSpec{id, kxc::TensorType({}, "bool"), Device::CPU(),
+                            kxc::api::internal::LogicalValueOrigin::kPrimitiveOutput,
+                            kxc::Expr(),
                             "value" + std::to_string(id)};
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {

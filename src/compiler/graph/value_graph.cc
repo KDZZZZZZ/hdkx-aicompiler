@@ -16,14 +16,7 @@ namespace kxc::api::internal {
 namespace {
 
 size_t TensorLeafCount(const Type& type) {
-    if (type.As<TensorTypeNode>()) return 1;
-    if (const auto* tuple = type.As<TupleTypeNode>()) {
-        size_t count = 0;
-        for (const Type& field : tuple->fields) count += TensorLeafCount(field);
-        return count;
-    }
-    throw std::invalid_argument(
-        "BuildValueGraph requires TensorType or nested TupleType leaves");
+    return FlattenLogicalTensorTypes(type, "value_graph.checked_type").size();
 }
 
 class ValueGraphBuilder {
@@ -45,8 +38,10 @@ public:
                 throw std::invalid_argument(
                     "BuildValueGraph requires TensorType function parameters");
             }
-            const int64_t id = AddValue(parameter, ValueOrigin::kParameter, 0,
-                                        parameter->type_annotation);
+            const int64_t id = AddValue(
+                parameter, ValueOrigin::kParameter, parameter->type_annotation,
+                "function.params[" + std::to_string(graph_.input_value_ids.size()) +
+                    "]");
             graph_.input_value_ids.push_back(id);
         }
 
@@ -59,7 +54,6 @@ public:
                 static_cast<size_t>(output_id) >= graph_.values.size()) {
                 throw std::logic_error("BuildValueGraph produced an invalid output id");
             }
-            graph_.values[static_cast<size_t>(output_id)].is_graph_output = true;
             graph_.output_value_ids.push_back(output_id);
         }
         return std::move(graph_);
@@ -70,8 +64,8 @@ private:
     Device execution_device_;
     std::unordered_map<const Object*, std::vector<int64_t>> bound_value_ids_;
 
-    int64_t AddValue(const Expr& source, ValueOrigin origin, int64_t output_index,
-                     const Type& type) {
+    int64_t AddValue(const Expr& source, ValueOrigin origin, const Type& type,
+                     const std::string& source_locator) {
         if (!source.defined() || !type.defined()) {
             throw std::invalid_argument(
                 "Stable graph values require a source and checked type");
@@ -81,8 +75,13 @@ private:
                 "Stable graph value leaves must have TensorType");
         }
         const int64_t id = static_cast<int64_t>(graph_.values.size());
-        graph_.values.push_back(
-            ValueInfo{id, origin, source, output_index, type, false});
+        std::vector<LogicalValueContract> leaves = MakeLogicalValueLeaves(
+            source, type, origin, id, execution_device_, source_locator);
+        if (leaves.size() != 1) {
+            throw std::invalid_argument(
+                "Stable graph AddValue requires exactly one TensorType leaf");
+        }
+        graph_.values.push_back(std::move(leaves.front()));
         graph_.value_ids_by_expr[source.get()].push_back(id);
         if (origin == ValueOrigin::kConstant) {
             graph_.constant_value_ids.push_back(id);
@@ -113,8 +112,11 @@ private:
         if (memo_it != graph_.value_ids_by_expr.end()) return memo_it->second;
 
         if (expr.As<ConstantNode>()) {
-            return {AddValue(expr, ValueOrigin::kConstant, 0,
-                             RequireCheckedType(expr, "Constant"))};
+            return {AddValue(expr, ValueOrigin::kConstant,
+                             RequireCheckedType(expr, "Constant"),
+                             "function.constant[" +
+                                 std::to_string(graph_.constant_value_ids.size()) +
+                                 "]")};
         }
         if (const auto* call = expr.As<CallNode>()) {
             return ResolveCall(expr, call);
@@ -223,9 +225,12 @@ private:
         std::vector<int64_t> result;
         for (size_t index = 0;
              index < resolved.output_leaf_types.size(); ++index) {
-            const int64_t id = AddValue(expr, ValueOrigin::kCallOutput,
-                                        static_cast<int64_t>(index),
-                                        resolved.output_leaf_types[index]);
+            const int64_t id = AddValue(expr, ValueOrigin::kPrimitiveOutput,
+                                        resolved.output_leaf_types[index],
+                                        "function.call[" +
+                                            std::to_string(graph_.calls.size()) +
+                                            "].output[" +
+                                            std::to_string(index) + "]");
             output_ids.push_back(id);
             result.push_back(id);
         }

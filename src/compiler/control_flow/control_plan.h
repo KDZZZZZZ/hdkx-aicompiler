@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "kxc/runtime/device.h"
+#include "../internal/logical_value.h"
 
 namespace kxc::runtime {
 
@@ -16,14 +16,8 @@ using ValueId = std::int64_t;
 using RegionId = std::int64_t;
 using TaskId = std::int64_t;
 
-/*! \brief Static-exact logical value contract for ControlPlan v2. */
-struct ControlValueSpec {
-    ValueId id{-1};
-    std::string dtype;
-    std::vector<std::int64_t> shape;
-    Device device{Device::CPU()};
-    std::string source_locator;
-};
+/*! \brief Compiler-authoritative logical tensor leaf used by ControlPlan v2. */
+using ControlValueSpec = api::internal::LogicalValueContract;
 
 struct EffectSummary {
     std::vector<ValueId> reads;

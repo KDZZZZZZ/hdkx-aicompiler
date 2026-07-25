@@ -22,6 +22,7 @@ namespace {
 #define TEST_CHECK(condition, message) do { if (!(condition)) { std::cerr << "[FAIL] " << __FUNCTION__ << ": " << message << "\n"; return false; } } while (0)
 
 using kxc::Call;
+using kxc::Device;
 using kxc::Expr;
 using kxc::Function;
 using kxc::If;
@@ -175,6 +176,28 @@ bool TestCanonicalAndRepeatedArguments() {
             nested_output_plan.regions[0].tasks[0].binding_state ==
                 kxc::runtime::KernelBindingState::kUnresolvedRelayKernel,
         "nested Call leaves may be prepared only as an unresolved Relay kernel");
+    return true;
+}
+
+bool TestSharedLogicalValueContracts() {
+    Var lhs("lhs", kI64), rhs("rhs", kI64);
+    Function typed =
+        kxc::relay::InferTypePass(Function({lhs, rhs}, Add(lhs, rhs)));
+    const kxc::api::internal::ValueGraph static_graph =
+        kxc::api::internal::BuildValueGraph(typed, Device::CPU());
+    const ControlPlan control_plan = LowerRelayToControlPlan(typed);
+    TEST_CHECK(static_graph.values.size() == control_plan.values.size(),
+               "static and control preparation must produce the same logical leaf count");
+    for (std::size_t index = 0; index < static_graph.values.size(); ++index) {
+        const auto& static_value = static_graph.values[index];
+        const auto& control_value = control_plan.values[index];
+        TEST_CHECK(
+            static_value.id == control_value.id &&
+                static_value.origin == control_value.origin &&
+                kxc::api::internal::SameLogicalValueContract(
+                    static_value, control_value),
+            "static and control preparation must share one value/type/device contract");
+    }
     return true;
 }
 
@@ -505,6 +528,7 @@ bool TestStaticAndControlGates() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"canonical_repeated_arguments", TestCanonicalAndRepeatedArguments},
+        {"shared_logical_value_contracts", TestSharedLogicalValueContracts},
         {"if_execution_nested_tuple_phi", TestIfExecutionAndNestedTuplePhi},
         {"relay_source_while_execution", TestRelaySourceWhileExecution},
         {"while_mapping_and_gates", TestWhileMappingAndGates},

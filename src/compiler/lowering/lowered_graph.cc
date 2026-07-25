@@ -4,6 +4,7 @@
 
 #include "../internal/lowered_graph.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -18,7 +19,7 @@ namespace {
 
 const ValueInfo& GetValue(const ValueGraph& graph, int64_t value_id) {
     if (value_id < 0 || static_cast<size_t>(value_id) >= graph.values.size() ||
-        graph.values[static_cast<size_t>(value_id)].value_id != value_id) {
+        graph.values[static_cast<size_t>(value_id)].id != value_id) {
         throw std::invalid_argument("CompilationUnit references an invalid value id");
     }
     return graph.values[static_cast<size_t>(value_id)];
@@ -63,7 +64,7 @@ te::Tensor MakeBoundaryTensor(const ValueInfo& value) {
     const std::string prefix =
         value.origin == ValueOrigin::kConstant ? "const_value_" : "value_";
     return te::placeholder(TEShape(tensor_type), TIRDataType(tensor_type),
-                           prefix + std::to_string(value.value_id));
+                           prefix + std::to_string(value.id));
 }
 
 const ResolvedRelayCall& ValidateUnitOperator(
@@ -312,11 +313,15 @@ LoweredGraph LowerPreparedStaticGraph(const PreparedStaticGraph& prepared) {
     Array<runtime::ValueSpec> value_specs;
     for (const ValueInfo& value : result.partitioned.value_graph.values) {
         const auto* type = value.checked_type.As<TensorTypeNode>();
+        const bool is_graph_output =
+            std::find(result.partitioned.output_value_ids.begin(),
+                      result.partitioned.output_value_ids.end(),
+                      value.id) != result.partitioned.output_value_ids.end();
         value_specs.push_back(runtime::ValueSpec(
-            value.value_id, value.value_id, type->shape,
-            runtime::DataTypeFromString(type->dtype), prepared.device,
+            value.id, value.id, type->shape,
+            runtime::DataTypeFromString(type->dtype), value.device,
             value.origin == ValueOrigin::kParameter,
-            value.origin == ValueOrigin::kConstant, value.is_graph_output));
+            value.origin == ValueOrigin::kConstant, is_graph_output));
     }
     result.plan = runtime::ExecutablePlan(
         value_specs, result.partitioned.calls,

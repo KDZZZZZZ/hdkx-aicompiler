@@ -19,13 +19,6 @@ namespace {
     throw std::invalid_argument("ControlPlan: " + message);
 }
 
-bool IsDType(const std::string& dtype) {
-    static const std::set<std::string> kTypes{
-        "bool", "int8", "int16", "int32", "int64", "uint8", "uint16",
-        "uint32", "uint64", "float16", "float32", "float64", "bfloat16"};
-    return kTypes.count(dtype) != 0;
-}
-
 bool IsDevice(const Device& device) {
     return device.defined() &&
            (device.device_type() == kCPU || device.device_type() == kCUDA);
@@ -75,7 +68,7 @@ const ControlRegion& Region(const State& state, RegionId id, const char* where) 
 }
 
 bool SameContract(const ControlValueSpec& left, const ControlValueSpec& right) {
-    return left.dtype == right.dtype && left.shape == right.shape && left.device == right.device;
+    return api::internal::SameLogicalValueContract(left, right);
 }
 
 void ValidateEffects(const EffectSummary& effect, const std::vector<ValueId>& expected_reads,
@@ -124,8 +117,7 @@ void ValidateBranch(State& state, const ControlTask& task,
     const BranchSpec& spec = task.branch;
     Value(state, spec.predicate, "branch predicate");
     const ControlValueSpec& predicate = Value(state, spec.predicate, "branch predicate");
-    if (predicate.dtype != "bool" || !predicate.shape.empty() ||
-        predicate.device != Device::CPU()) {
+    if (!api::internal::IsCpuScalarBool(predicate)) {
         Fail("branch predicate must be a CPU scalar bool");
     }
     if (spec.then_region == spec.else_region || spec.then_region < 0 || spec.else_region < 0) {
@@ -172,8 +164,7 @@ void ValidateLoop(State& state, const ControlTask& task,
     const ControlRegion& condition = Region(state, spec.condition_region, "loop");
     const ControlRegion& body = Region(state, spec.body_region, "loop");
     const ControlValueSpec& condition_value = Value(state, spec.condition_value, "loop condition");
-    if (condition_value.dtype != "bool" || !condition_value.shape.empty() ||
-        condition_value.device != Device::CPU()) {
+    if (!api::internal::IsCpuScalarBool(condition_value)) {
         Fail("loop condition must be a CPU scalar bool");
     }
     if (std::find(condition.live_outs.begin(), condition.live_outs.end(), spec.condition_value) == condition.live_outs.end()) {
@@ -365,11 +356,18 @@ void VerifyControlPlan(const ControlPlan& plan) {
         if (value.id < 0 || !state.values.emplace(value.id, &value).second) {
             Fail("value ids must be unique and non-negative");
         }
-        if (!IsDType(value.dtype) || !IsDevice(value.device)) {
-            Fail("value dtype/device is malformed or unsupported");
+        const TensorTypeNode& tensor =
+            api::internal::RequireLogicalTensorType(value, "ControlPlan value");
+        try {
+            (void)DataTypeFromString(tensor.dtype);
+        } catch (const std::exception&) {
+            Fail("value TensorType dtype is malformed or unsupported");
+        }
+        if (!IsDevice(value.device)) {
+            Fail("value device is malformed or unsupported");
         }
         if (value.source_locator.empty()) Fail("value source_locator is required");
-        for (const std::int64_t dim : value.shape) {
+        for (const std::int64_t dim : tensor.shape) {
             if (dim < 0) Fail("value shape must be static and non-negative");
         }
     }
@@ -457,9 +455,10 @@ std::string ControlPlan::CanonicalText() const {
                   return lhs->id < rhs->id;
               });
     for (const ControlValueSpec* value : values_by_id) {
-        out << "  v" << value->id << " " << value->dtype << " ";
-        PrintIds(out, value->shape);
-        out << " " << Quote(value->device.ToString()) << " loc="
+        out << "  v" << value->id << " "
+            << Quote(TypeToString(value->checked_type)) << " "
+            << Quote(value->device.ToString()) << " origin="
+            << static_cast<int>(value->origin) << " loc="
             << Quote(value->source_locator) << "\n";
     }
     out << "entry=" << entry_region << " regions=";

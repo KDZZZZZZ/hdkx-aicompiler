@@ -23,11 +23,15 @@ bool Throws(const std::function<void()>& fn) {
 
 EffectSummary Reads(std::vector<ValueId> ids) { return EffectSummary{std::move(ids), {}, {}, false, false}; }
 ControlValueSpec I64(ValueId id) {
-    return ControlValueSpec{id, "int64", {}, Device::CPU(),
+    return ControlValueSpec{id, kxc::TensorType({}, "int64"), Device::CPU(),
+                            kxc::api::internal::LogicalValueOrigin::kPrimitiveOutput,
+                            kxc::Expr(),
                             "value" + std::to_string(id)};
 }
 ControlValueSpec Bool(ValueId id) {
-    return ControlValueSpec{id, "bool", {}, Device::CPU(),
+    return ControlValueSpec{id, kxc::TensorType({}, "bool"), Device::CPU(),
+                            kxc::api::internal::LogicalValueOrigin::kPrimitiveOutput,
+                            kxc::Expr(),
                             "value" + std::to_string(id)};
 }
 ControlTask Kernel(TaskId id, std::vector<ValueId> in, std::vector<ValueId> out, const char* ref) {
@@ -121,9 +125,9 @@ bool TestSchemaAndValueContracts() {
     ControlPlan plan = BranchPlan();
     plan.schema_version = 1;
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "legacy v1 schema must fail closed");
-    plan = BranchPlan(); plan.values[2].shape = {-1};
+    plan = BranchPlan(); plan.values[2].checked_type = kxc::TensorType({-1}, "int64");
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "dynamic dimensions must fail");
-    plan = BranchPlan(); plan.values[2].dtype = "unknown";
+    plan = BranchPlan(); plan.values[2].checked_type = kxc::TensorType({}, "unknown");
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "malformed dtype must fail");
     plan = BranchPlan(); plan.values[2].device = Device();
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "undefined device must fail");
@@ -177,9 +181,9 @@ bool TestTaskAndRegionClosureFailures() {
 
 bool TestStructuredWiringFailures() {
     ControlPlan plan = BranchPlan();
-    plan.values[4].dtype = "float32";
+    plan.values[4].checked_type = kxc::TensorType({}, "float32");
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "phi contract mismatch must fail");
-    plan = BranchPlan(); plan.values[0].dtype = "int64";
+    plan = BranchPlan(); plan.values[0].checked_type = kxc::TensorType({}, "int64");
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "non-bool predicate must fail");
     plan = BranchPlan(); plan.values[0].device = Device::CUDA();
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "device predicate without copy must fail");
@@ -193,7 +197,7 @@ bool TestStructuredWiringFailures() {
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "unknown child region must fail");
     plan = LoopPlan(-1);
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "negative trip count must fail");
-    plan = LoopPlan(); plan.values[3].shape = {1};
+    plan = LoopPlan(); plan.values[3].checked_type = kxc::TensorType({1}, "int64");
     CHECK(Throws([&] { plan.ValidateStaticExact(); }), "shape-changing backedge must fail");
     return true;
 }

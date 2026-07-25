@@ -94,8 +94,12 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
     resolved.constant_values = plan.constant_values;
     resolved.graph_outputs = plan.graph_outputs;
     for (const auto& value : plan.values) {
-        resolved.values.push_back({value.id, value.dtype, value.shape, value.device,
-                                   value.source_locator});
+        const TensorTypeNode& tensor =
+            RequireLogicalTensorType(value, "ControlPlan runtime binding");
+        resolved.values.push_back(
+            {value.id, tensor.dtype,
+             std::vector<std::int64_t>(tensor.shape.begin(), tensor.shape.end()),
+             value.device, value.source_locator});
     }
 
     std::unordered_set<runtime::TaskId> kernel_tasks;

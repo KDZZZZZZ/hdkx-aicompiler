@@ -5,6 +5,7 @@
 #include "internal_lowering.h"
 
 #include "../internal/executable_capability.h"
+#include "../internal/logical_value.h"
 #include "../internal/resolved_relay_call.h"
 
 #include <algorithm>
@@ -25,37 +26,6 @@ using Leaves = std::vector<runtime::ValueId>;
 
 [[noreturn]] void Fail(const std::string& path, const std::string& detail) {
     throw std::invalid_argument("LowerRelayToControlPlan: path=" + path + "; " + detail);
-}
-
-void FlattenTensorTypes(const Type& type, std::vector<Type>* leaves,
-                        const std::string& path) {
-    if (type.As<TensorTypeNode>()) {
-        leaves->push_back(type);
-        return;
-    }
-    if (const auto* tuple = type.As<TupleTypeNode>()) {
-        for (std::size_t i = 0; i < tuple->fields.size(); ++i) {
-            FlattenTensorTypes(tuple->fields[i], leaves,
-                               path + ".fields[" + std::to_string(i) + "]");
-        }
-        return;
-    }
-    Fail(path, "requires a static TensorType or TupleType");
-}
-
-Device DeviceFor(const Expr& expr, const std::string& path) {
-    const VirtualDevice device = Relay(expr).virtual_device();
-    if (!device.defined()) return Device::CPU();
-    if (!device->device.defined()) {
-        Fail(path, "explicit Relay VirtualDevice must define a CPU or CUDA device");
-    }
-    switch (device->device.device_type()) {
-    case kCPU:
-    case kCUDA:
-        return device->device;
-    default:
-        Fail(path, "Relay VirtualDevice must be CPU or CUDA");
-    }
 }
 
 struct RegionState {
@@ -96,7 +66,9 @@ public:
             const Var& parameter = function_->params[i];
             const std::string path = "function.params[" + std::to_string(i) + "]";
             const Leaves ids = AddLeaves(Expr(ObjectRef(parameter)),
-                                         parameter.checked_type(), path);
+                                         parameter.checked_type(),
+                                         internal::LogicalValueOrigin::kParameter,
+                                         path);
             environment.emplace(parameter.get(), ids);
             plan_.graph_inputs.insert(plan_.graph_inputs.end(), ids.begin(), ids.end());
         }
@@ -167,7 +139,8 @@ private:
                                 const std::string& path) const {
         const auto* relay_node = dynamic_cast<const RelayNode*>(alias.get());
         if (!relay_node || !relay_node->virtual_device_.defined()) return;
-        const Device expected = DeviceFor(alias, path);
+        const Device expected =
+            internal::ResolveLogicalValueDevice(alias, Device::CPU(), path);
         for (runtime::ValueId leaf : leaves) {
             if (Value(leaf).device != expected) {
                 Fail(path,
@@ -177,20 +150,15 @@ private:
     }
 
     Leaves AddLeaves(const Expr& source, const Type& type,
+                     internal::LogicalValueOrigin origin,
                      const std::string& path) {
-        std::vector<Type> leaf_types;
-        FlattenTensorTypes(type, &leaf_types, path + ".checked_type");
-        const Device device = DeviceFor(source, path);
+        std::vector<internal::LogicalValueContract> values =
+            internal::MakeLogicalValueLeaves(
+                source, type, origin, next_value_, Device::CPU(), path);
         Leaves ids;
-        ids.reserve(leaf_types.size());
-        for (std::size_t i = 0; i < leaf_types.size(); ++i) {
-            const auto* tensor = leaf_types[i].As<TensorTypeNode>();
-            runtime::ControlValueSpec value;
-            value.id = next_value_++;
-            value.dtype = tensor->dtype;
-            value.shape.assign(tensor->shape.begin(), tensor->shape.end());
-            value.device = device;
-            value.source_locator = path + ".leaf[" + std::to_string(i) + "]";
+        ids.reserve(values.size());
+        for (auto& value : values) {
+            ++next_value_;
             plan_.values.push_back(std::move(value));
             ids.push_back(plan_.values.back().id);
         }
@@ -217,7 +185,8 @@ private:
             if (found != constants_.end()) {
                 ids = found->second;
             } else {
-                ids = AddLeaves(expr, expr.checked_type(), path);
+                ids = AddLeaves(expr, expr.checked_type(),
+                                internal::LogicalValueOrigin::kConstant, path);
                 constants_.emplace(expr.get(), ids);
                 plan_.constant_values.insert(plan_.constant_values.end(), ids.begin(), ids.end());
             }
@@ -287,7 +256,9 @@ private:
                                                 path + ".args[" + std::to_string(i) + "]");
             arguments.insert(arguments.end(), leaves.begin(), leaves.end());
         }
-        const Leaves outputs = AddLeaves(expr, expr.checked_type(), path);
+        const Leaves outputs = AddLeaves(
+            expr, expr.checked_type(),
+            internal::LogicalValueOrigin::kPrimitiveOutput, path);
         if (outputs.size() != resolved.output_leaf_types.size()) {
             Fail(path,
                  "resolved output leaves do not match control value leaves");
@@ -361,14 +332,15 @@ private:
         }
         std::size_t begin = 0;
         for (int i = 0; i < get_item->index; ++i) {
-            std::vector<Type> ignored;
-            FlattenTensorTypes(tuple_type->fields[static_cast<std::size_t>(i)], &ignored,
-                               path + ".tuple.checked_type");
-            begin += ignored.size();
+            begin += internal::FlattenLogicalTensorTypes(
+                         tuple_type->fields[static_cast<std::size_t>(i)],
+                         path + ".tuple.checked_type")
+                         .size();
         }
-        std::vector<Type> selected_types;
-        FlattenTensorTypes(tuple_type->fields[static_cast<std::size_t>(get_item->index)],
-                           &selected_types, path + ".checked_type");
+        const std::vector<Type> selected_types =
+            internal::FlattenLogicalTensorTypes(
+                tuple_type->fields[static_cast<std::size_t>(get_item->index)],
+                path + ".checked_type");
         if (begin + selected_types.size() > tuple.size()) {
             Fail(path, "TupleGetItem flattening is inconsistent with its checked TupleType");
         }
@@ -385,7 +357,9 @@ private:
                       const std::string& path) {
         const Leaves initial = ResolveAtomic(while_node->initial_state, parent,
                                              environment, path + ".initial_state");
-        const Leaves results = AddLeaves(expr, expr.checked_type(), path);
+        const Leaves results = AddLeaves(
+            expr, expr.checked_type(),
+            internal::LogicalValueOrigin::kLoopCarried, path);
         if (initial.empty() || initial.size() != results.size()) {
             Fail(path, "While state flattening does not match its result type");
         }
@@ -398,15 +372,15 @@ private:
 
         const Leaves arguments = AddLeaves(Expr(ObjectRef(while_node->loop_var)),
                                            while_node->loop_var.checked_type(),
+                                           internal::LogicalValueOrigin::kLoopCarried,
                                            path + ".loop_var");
         const runtime::RegionId condition_region = NewRegion(path + ".condition");
         Env condition_environment = environment;
         condition_environment[while_node->loop_var.get()] = arguments;
         const Leaves condition = LowerTerminal(while_node->condition, condition_region,
                                                &condition_environment, path + ".condition");
-        if (condition.size() != 1 || Value(condition.front()).dtype != "bool" ||
-            !Value(condition.front()).shape.empty() ||
-            Value(condition.front()).device != Device::CPU()) {
+        if (condition.size() != 1 ||
+            !internal::IsCpuScalarBool(Value(condition.front()))) {
             Fail(path + ".condition", "requires a CPU scalar bool condition");
         }
         Region(condition_region).live_outs = condition;
@@ -454,7 +428,9 @@ private:
         const Leaves predicate = ResolveAtomic(if_node->cond, parent, environment,
                                                path + ".cond");
         if (predicate.size() != 1) Fail(path + ".cond", "requires one scalar bool predicate leaf");
-        const Leaves results = AddLeaves(expr, expr.checked_type(), path);
+        const Leaves results = AddLeaves(
+            expr, expr.checked_type(), internal::LogicalValueOrigin::kPhi,
+            path);
         if (results.empty()) Fail(path, "If must produce at least one tensor leaf");
 
         runtime::ControlTask task;
