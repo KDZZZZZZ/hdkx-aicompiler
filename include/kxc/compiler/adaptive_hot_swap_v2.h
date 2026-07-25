@@ -33,7 +33,7 @@
 // 典型用法：
 //   CancellationSource cancel;
 //   CompileRequest req{production_req, deadline, cancel.token()};
-//   AdaptiveHotSwapController ctl(compiler, options);
+//   AdaptiveHotSwapController ctl(options);
 //   CompileTicket ticket = ctl.Submit(req);           // 异步入队 + singleflight
 //   CompileResult r = ticket.Wait();                  // 或 CompileAndPublish 同步
 //   if (r.ready()) {
@@ -50,7 +50,6 @@ namespace kxc::api::adaptive::hot_swap::v2 {
 namespace preparation = experimental::production_path;
 using ProductionCompileRequest = preparation::ProductionCompileRequest;
 using ProductionExecutionRequest = preparation::ProductionExecutionRequest;
-using ProductionPathCompilerAdapter = preparation::ProductionPathCompilerAdapter;
 using PreparedCandidate = preparation::PreparedCandidate;
 inline constexpr uint32_t kAdaptiveHotSwapContractVersion = 3;
 using Generation = uint64_t;  // 不回绕的代际号
@@ -260,7 +259,7 @@ struct RunAsyncResult final {
 // ---------------------------------------------------------------------------
 class AdaptiveHotSwapController final {
 public:
-    explicit AdaptiveHotSwapController(std::shared_ptr<ProductionPathCompilerAdapter> compiler = nullptr, Options options = {});
+    explicit AdaptiveHotSwapController(Options options = {});
     ~AdaptiveHotSwapController();
     AdaptiveHotSwapController(const AdaptiveHotSwapController&) = delete;
     AdaptiveHotSwapController& operator=(const AdaptiveHotSwapController&) = delete;

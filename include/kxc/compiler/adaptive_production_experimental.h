@@ -31,7 +31,8 @@ inline constexpr uint32_t kAdaptivePreparationContractVersion = 1;
 class ProductionCompileRequest final {
 public:
     ProductionCompileRequest(Function graph, CompileConfig config,
-                             const CompiledGraph& expected_contract);
+                             CompiledGraph baseline_graph,
+                             std::vector<std::int64_t> requested_unit_ids);
 
     const Function& graph() const noexcept;
     CompileConfig config() const;
@@ -40,7 +41,8 @@ public:
     const DispatchKey& dispatch_key() const noexcept;
     const PlanAbiFingerprint& plan_abi() const noexcept;
     const std::vector<OrderedArtifactIdentity>& ordered_artifacts() const noexcept;
-    const std::vector<ArtifactPin>& verified_artifact_pins() const noexcept;
+    const CompiledGraph& baseline_graph() const noexcept;
+    const std::vector<std::int64_t>& requested_unit_ids() const noexcept;
     void Validate() const;
 
 private:
@@ -51,7 +53,8 @@ private:
     DispatchKey dispatch_key_;
     PlanAbiFingerprint plan_abi_;
     std::vector<OrderedArtifactIdentity> ordered_artifacts_;
-    std::vector<ArtifactPin> verified_artifact_pins_;
+    CompiledGraph baseline_graph_;
+    std::vector<std::int64_t> requested_unit_ids_;
 };
 
 // Exact data-plane lookup input. It cannot carry a graph or trigger compile.
@@ -67,14 +70,6 @@ public:
 private:
     DispatchKey dispatch_key_;
     PlanAbiFingerprint plan_abi_;
-};
-
-// Injection seam for a production compiler. Implementations must be
-// thread-safe; preparation and all lifecycle authority are external.
-class ProductionPathCompilerAdapter {
-public:
-    virtual ~ProductionPathCompilerAdapter() = default;
-    virtual CompiledGraph Compile(const ProductionCompileRequest& request) = 0;
 };
 
 // Immutable, structurally validated result ready for a lifecycle authority.

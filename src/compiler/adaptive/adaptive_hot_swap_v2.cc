@@ -7,23 +7,43 @@
 #include <limits>
 #include <list>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "../internal/compile_state.h"
+#include "../internal/execution_contract.h"
+#include "../internal/primitive_cache.h"
+#include "../internal/primitive_compiler.h"
+#include "../../runtime/internal/compiled_module_node.h"
+#include "kxc/pass/context.h"
+#include "kxc/profiling/profiling.h"
+#include "kxc/relay/visitor.h"
+#include "kxc/tir/printer/print_ir.h"
+#include "support/hash.h"
+
 namespace kxc::api::adaptive::hot_swap::v2 {
 namespace {
 std::string Part(const std::string& x) { return std::to_string(x.size()) + ":" + x + ";"; }
 std::string FlightKey(const ProductionCompileRequest& request) {
+    const CompileConfig config = request.config();
+    const internal::CompilerExecutionContract contract =
+        internal::ResolveCompilerExecutionContract(config);
     std::string key =
         Part(request.graph_semantic_key().canonical_bytes()) +
         Part(request.shape_profile_key().canonical_bytes()) +
         Part(request.dispatch_key().canonical_bytes()) +
-        Part(request.plan_abi().canonical_bytes());
-    for (const OrderedArtifactIdentity& artifact :
-         request.ordered_artifacts()) {
+        Part(request.plan_abi().canonical_bytes()) +
+        Part(contract.canonical_bytes) +
+        Part(std::to_string(config->opt_level)) +
+        Part(internal::CanonicalTargetSnapshot(config->target));
+    for (const std::int64_t unit_id : request.requested_unit_ids()) {
+        key += Part(std::to_string(unit_id));
+    }
+    for (const OrderedArtifactIdentity& artifact : request.ordered_artifacts()) {
         key += Part(artifact.CanonicalBytes());
     }
     return key;
@@ -47,6 +67,135 @@ uint64_t ProducerBytes(const PreparedCandidate& c) {
         n += add;
     }
     return n;
+}
+profiling::EventSpec MakeStageEvent(const char* stage,
+                                    const CompileConfig& config) {
+    profiling::EventSpec event;
+    event.component = "compiler";
+    event.event_type = "compile_stage";
+    event.pass_name = stage;
+    event.fields = profiling::MakeFields({
+        {"stage", stage},
+        {"target_kind", config->target->kind},
+        {"device_type", std::to_string(static_cast<int>(config->target->device_type))},
+        {"device_id", std::to_string(config->target->device_id)},
+        {"opt_level", std::to_string(config->opt_level)},
+    });
+    return event;
+}
+void AddPrimitiveBatchFields(
+    profiling::ScopedSpan* span,
+    const internal::PreparedCompilerGraph& prepared,
+    const internal::CompiledPrimitiveBatch& batch) {
+    span->AddMetric("primitive_count",
+                    static_cast<double>(batch.primitives.size()));
+    size_t cache_hits = 0;
+    for (const internal::CompiledPrimitive& primitive : batch.primitives) {
+        const internal::PrimitiveUnit& unit = prepared.graph.partitioned.units.at(
+            static_cast<std::size_t>(primitive.unit_id));
+        const std::string prefix = "unit." +
+            std::to_string(primitive.unit_id) + ".";
+        std::ostringstream stream;
+        tir::printer::DumpPrimFunc(primitive.diagnostic_tir, stream);
+        const std::string text = stream.str();
+        const internal::CachedPrimitive& artifact = primitive.pin.artifact();
+        span->AddField(prefix + "symbol", std::string(unit.symbol));
+        span->AddField(
+            prefix + "operator", std::string(unit.call.spec.name) + "@v" +
+                std::to_string(unit.call.spec.schema_version));
+        span->AddField(prefix + "ir_hash", support::HashText(text));
+        span->AddMetric(prefix + "ir_bytes", static_cast<double>(text.size()));
+        span->AddField(prefix + "backend",
+                       artifact.launch_metadata->backend ==
+                               codegen::CodeGenBackend::kLLVM
+                           ? "llvm"
+                           : "cuda");
+        span->AddMetric(prefix + "cache_hit", primitive.cache_hit ? 1.0 : 0.0);
+        if (primitive.cache_hit) ++cache_hits;
+    }
+    span->AddMetric("cache_hits", static_cast<double>(cache_hits));
+    span->AddMetric(
+        "cache_hit_rate", batch.primitives.empty()
+                              ? 0.0
+                              : static_cast<double>(cache_hits) /
+                                    static_cast<double>(batch.primitives.size()));
+}
+bool SameOrderedArtifactKeys(const CompiledGraph& left,
+                             const CompiledGraph& right) {
+    const auto& left_pins = left.artifact_pins();
+    const auto& right_pins = right.artifact_pins();
+    if (left_pins.size() != right_pins.size()) return false;
+    for (size_t index = 0; index < left_pins.size(); ++index) {
+        if (left_pins[index].record().artifact_key !=
+            right_pins[index].record().artifact_key) {
+            return false;
+        }
+    }
+    return true;
+}
+CompiledGraph CompileReplacement(const ProductionCompileRequest& request) {
+    const CompileConfig config = request.config();
+    const internal::CompilerExecutionContract contract =
+        internal::ResolveCompilerExecutionContract(config);
+    const internal::PreparedCompilerGraph prepared =
+        internal::PrepareCompilerGraph(request.graph(), config, contract);
+    const CompiledGraph& baseline = request.baseline_graph();
+    if (prepared.graph.partitioned.units.size() !=
+        baseline.artifact_pins().size()) {
+        throw std::invalid_argument(
+            "adaptive prepared graph primitive count differs from baseline");
+    }
+    std::vector<internal::PrimitiveUnitId> requested_unit_ids;
+    requested_unit_ids.reserve(request.requested_unit_ids().size());
+    for (const std::int64_t unit_id : request.requested_unit_ids()) {
+        requested_unit_ids.push_back(unit_id);
+    }
+    profiling::ActivationScope activation(
+        prepared.profile_context, prepared.profile_run_id);
+    internal::CompiledPrimitiveBatch batch;
+    {
+        const PassContext pass_context = PassContext::MergeTarget(
+            relay::PassContextFromRelay(
+                prepared.optimized.optimized_relay()), config->target);
+        PassContext::Scope pass_scope(pass_context);
+        profiling::ScopedSpan primitive_span(
+            prepared.profile_context,
+            MakeStageEvent("compile_primitives", config),
+            prepared.profile_run_id);
+        try {
+            batch = internal::CompilePrimitiveUnits(
+                prepared.graph.partitioned.units,
+                prepared.graph.partitioned.value_graph.values, config, contract,
+                requested_unit_ids);
+            AddPrimitiveBatchFields(&primitive_span, prepared, batch);
+        } catch (const std::exception& error) {
+            primitive_span.SetStatus("error");
+            primitive_span.SetMessage(error.what());
+            throw std::runtime_error(
+                std::string("Compiler stage 'compile_primitives' failed: ") +
+                error.what());
+        }
+    }
+    std::vector<internal::PrimitiveArtifactPin> pins;
+    pins.reserve(baseline.artifact_pins().size());
+    for (const ArtifactPin& pin : baseline.artifact_pins()) {
+        pins.push_back(internal::ArtifactPinAccess::Unwrap(pin));
+    }
+    for (const internal::CompiledPrimitive& replacement : batch.primitives) {
+        pins.at(static_cast<size_t>(replacement.unit_id)) = replacement.pin;
+    }
+    CompiledGraph graph;
+    {
+        profiling::ScopedSpan assemble_span(
+            prepared.profile_context, MakeStageEvent("assemble", config),
+            prepared.profile_run_id);
+        graph = internal::AssembleCompiledGraph(
+            prepared, pins,
+            internal::BorrowCompiledModuleConstants(baseline.module()));
+        AddPrimitiveBatchFields(&assemble_span, prepared, batch);
+    }
+    if (prepared.profile_context) prepared.profile_context->Flush();
+    return graph;
 }
 class CallbackScope final { public: explicit CallbackScope(std::atomic<size_t>& n) : n_(n) { n_.fetch_add(1, std::memory_order_acq_rel); } ~CallbackScope() { n_.fetch_sub(1, std::memory_order_release); } private: std::atomic<size_t>& n_; };
 thread_local const void* locked_authority_controller = nullptr;
@@ -171,7 +320,7 @@ public:
     };
     struct Route final { std::shared_ptr<const GenerationLease> current; std::vector<std::shared_ptr<const GenerationLease>> history; std::unordered_set<std::string> tombstones; bool compile_blocked{false}; };
     struct Negative final { Failure failure; std::chrono::steady_clock::time_point expires; std::list<std::string>::iterator order; };
-    State(std::shared_ptr<ProductionPathCompilerAdapter> c, Options o) : compiler(std::move(c)), options(std::move(o)) {
+    State(Options o) : options(std::move(o)) {
         if (!options.initial_generation || !options.worker_count ||
             !options.max_queued_flights || !options.max_in_flight ||
             !options.max_waiters_per_flight ||
@@ -242,11 +391,12 @@ public:
     void Compile(const std::shared_ptr<Flight>& f) {
         try {
             { std::lock_guard<std::mutex> lock(mutex); if(!Live(*f)) { FinishUnlockedCancelled(f); return; } }
-            CompiledGraph graph=compiler?compiler->Compile(f->request):Compiler::Compile(f->request.graph(),f->request.config());
+            CompiledGraph graph=CompileReplacement(f->request);
             const ValidationReceipt receipt=validation->Validate(f->request,graph);
             const auto candidate=preparation::PrepareCandidate(f->request,std::move(graph),receipt.value());
             const uint64_t bytes=ProducerBytes(*candidate); if(bytes>options.max_producer_reported_bytes) throw CompileError(FailureCategory::kPermanent,"candidate exceeds adaptive v2 producer byte budget");
             std::shared_ptr<const GenerationLease> lease;
+            std::shared_ptr<const GenerationLease> no_op_lease;
             Event published;
             std::vector<Event> evictions;
             { std::lock_guard<std::mutex> lock(mutex);
@@ -256,45 +406,57 @@ public:
                 auto route=staged.find(f->route_key); if(route==staged.end()){size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>=options.max_routes)throw CompileError(FailureCategory::kPermanent,"adaptive v2 global route capacity is fail-closed"); route=staged.emplace(f->route_key,Route{}).first;}
                 if(route->second.compile_blocked)throw CompileError(FailureCategory::kPermanent,"route compilation is fail-closed after tombstone saturation");
                 if(route->second.tombstones.count(candidate->selection_plan_key().canonical_bytes()))throw CompileError(FailureCategory::kPermanent,"candidate selection identity is quarantined");
-                if(bytes>std::numeric_limits<uint64_t>::max()-staged_bytes)throw std::overflow_error("adaptive v2 discoverable byte accounting overflow");
-                const Generation predecessor=route->second.current?route->second.current->generation():0;
-                size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>options.max_routes||rb>options.max_route_metadata_bytes||tc>options.max_quarantine_tombstones||tb>options.max_quarantine_tombstone_bytes)throw CompileError(FailureCategory::kPermanent,"adaptive v2 global route metadata capacity is fail-closed");
-                // Every fallible container/event operation completes before Issue.
-                route->second.history.reserve(route->second.history.size()+1);
-                staged_discoverable.reserve(staged_discoverable.size()+1);
-                evictions.reserve(staged_discoverable.size()+1);
-                published.kind=EventKind::kPublished;
-                published.predecessor_generation=predecessor;
-                published.producer_reported_bytes=bytes;
-                published.dispatch_key_digest=f->request.dispatch_key().digest();
-                published.plan_abi_digest=f->request.plan_abi().digest();
-                // This is the final deadline/cancellation observation and the
-                // publication linearization point. Cancel callbacks take this
-                // same mutex, so either they remove demand first or commit wins.
                 if(!Live(*f)) { FinishUnlockedCancelled(f); return; }
-                GenerationAuthorityRequest authority_request{f->request.dispatch_key(),candidate->selection_plan_key(),f->request.plan_abi(),receipt,candidate,bytes};
-                LockedAuthorityScope issuance(this);
-                lease=generations->Issue(authority_request);
-                if(!lease || lease->generation() <= last_committed_generation ||
-                   lease->dispatch_key()!=f->request.dispatch_key() || lease->plan_abi()!=f->request.plan_abi() ||
-                   lease->selection_plan_key()!=candidate->selection_plan_key() ||
-                   lease->validation_receipt()!=receipt.value() || lease->producer_reported_bytes()!=bytes ||
-                   lease->candidate()!=candidate ||
-                   lease->compiled_graph().graph_semantic_key()!=candidate->compiled_graph().graph_semantic_key() ||
-                   lease->session()!=candidate->session()) throw CompileError(FailureCategory::kPermanent,"generation authority issued mismatched lease");
-                // No-throw handoff only: reserved vector assignments/erase/swap.
-                route->second.current=lease;route->second.history.push_back(lease);staged_discoverable.push_back(lease);staged_bytes+=bytes;Evict(&staged,&staged_discoverable,&staged_bytes,&evictions);
-                routes.swap(staged);discoverable.swap(staged_discoverable);discoverable_bytes=staged_bytes;last_committed_generation=lease->generation();flights.erase(f->key);published.generation=lease->generation();
+                if (route->second.current && SameOrderedArtifactKeys(
+                        route->second.current->compiled_graph(),
+                        candidate->compiled_graph())) {
+                    no_op_lease = route->second.current;
+                    flights.erase(f->key);
+                } else {
+                    if(bytes>std::numeric_limits<uint64_t>::max()-staged_bytes)throw std::overflow_error("adaptive v2 discoverable byte accounting overflow");
+                    const Generation predecessor=route->second.current?route->second.current->generation():0;
+                    size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>options.max_routes||rb>options.max_route_metadata_bytes||tc>options.max_quarantine_tombstones||tb>options.max_quarantine_tombstone_bytes)throw CompileError(FailureCategory::kPermanent,"adaptive v2 global route metadata capacity is fail-closed");
+                    // Every fallible container/event operation completes before Issue.
+                    route->second.history.reserve(route->second.history.size()+1);
+                    staged_discoverable.reserve(staged_discoverable.size()+1);
+                    evictions.reserve(staged_discoverable.size()+1);
+                    published.kind=EventKind::kPublished;
+                    published.predecessor_generation=predecessor;
+                    published.producer_reported_bytes=bytes;
+                    published.dispatch_key_digest=f->request.dispatch_key().digest();
+                    published.plan_abi_digest=f->request.plan_abi().digest();
+                    // This is the final deadline/cancellation observation and the
+                    // publication linearization point. Cancel callbacks take this
+                    // same mutex, so either they remove demand first or commit wins.
+                    if(!Live(*f)) { FinishUnlockedCancelled(f); return; }
+                    GenerationAuthorityRequest authority_request{f->request.dispatch_key(),candidate->selection_plan_key(),f->request.plan_abi(),receipt,candidate,bytes};
+                    LockedAuthorityScope issuance(this);
+                    lease=generations->Issue(authority_request);
+                    if(!lease || lease->generation() <= last_committed_generation ||
+                       lease->dispatch_key()!=f->request.dispatch_key() || lease->plan_abi()!=f->request.plan_abi() ||
+                       lease->selection_plan_key()!=candidate->selection_plan_key() ||
+                       lease->validation_receipt()!=receipt.value() || lease->producer_reported_bytes()!=bytes ||
+                       lease->candidate()!=candidate ||
+                       lease->compiled_graph().graph_semantic_key()!=candidate->compiled_graph().graph_semantic_key() ||
+                       lease->session()!=candidate->session()) throw CompileError(FailureCategory::kPermanent,"generation authority issued mismatched lease");
+                    // No-throw handoff only: reserved vector assignments/erase/swap.
+                    route->second.current=lease;route->second.history.push_back(lease);staged_discoverable.push_back(lease);staged_bytes+=bytes;Evict(&staged,&staged_discoverable,&staged_bytes,&evictions);
+                    routes.swap(staged);discoverable.swap(staged_discoverable);discoverable_bytes=staged_bytes;last_committed_generation=lease->generation();flights.erase(f->key);published.generation=lease->generation();
+                }
+            }
+            if (no_op_lease) {
+                f->promise.set_value({no_op_lease,{}});
+                return;
             }
             f->promise.set_value({lease,{}});Emit(std::move(published));for(auto& e:evictions)Emit(std::move(e));
         } catch(const std::exception& e) { Finish(f,Failed(FromException(e,options)),true); } catch(...) { Finish(f,Failed(Fail(FailureCategory::kTransient,"non-standard compilation failure",options.transient_backoff)),true); }
     }
     void FinishUnlockedCancelled(const std::shared_ptr<Flight>& f) { flights.erase(f->key); f->promise.set_value(Failed(Fail(FailureCategory::kCancelled,"all flight waiters cancelled or expired",{},false))); }
-    std::shared_ptr<ProductionPathCompilerAdapter> compiler; const Options options; std::shared_ptr<CandidateValidationAuthority> validation; std::shared_ptr<GenerationAuthority> generations;
+    const Options options; std::shared_ptr<CandidateValidationAuthority> validation; std::shared_ptr<GenerationAuthority> generations;
     mutable std::mutex mutex,health_mutex; std::condition_variable wake; std::deque<std::shared_ptr<Flight>> queue; std::unordered_map<std::string,std::shared_ptr<Flight>> flights; std::unordered_map<std::string,Route> routes; std::vector<std::shared_ptr<const GenerationLease>> discoverable; std::vector<std::thread> workers; mutable std::atomic<size_t> callbacks{0}; bool stopping{false}; uint64_t discoverable_bytes{0},negative_bytes{0}; bool negative_blocked{false}; std::unordered_map<std::string,Negative> negative; std::list<std::string> negative_order; Generation last_committed_generation{0};
 };
 
-AdaptiveHotSwapController::AdaptiveHotSwapController(std::shared_ptr<ProductionPathCompilerAdapter> c,Options o):state_(std::make_shared<State>(std::move(c),std::move(o))){state_->Start();}
+AdaptiveHotSwapController::AdaptiveHotSwapController(Options o):state_(std::make_shared<State>(std::move(o))){state_->Start();}
 AdaptiveHotSwapController::~AdaptiveHotSwapController(){if(state_)state_->Stop();}
 CompileTicket AdaptiveHotSwapController::Submit(CompileRequest request) {
     state_->RejectReentry();request.production.Validate();const std::string key=FlightKey(request.production),route=RouteKey(request.production.dispatch_key(),request.production.plan_abi());std::shared_future<CompileResult> future;Event event;{std::lock_guard<std::mutex> lock(state_->mutex);const auto now=std::chrono::steady_clock::now();auto immediate=[&](Failure f,EventKind k){std::promise<CompileResult> p;future=p.get_future().share();p.set_value(Failed(std::move(f)));event.kind=k;};if(request.cancellation.cancelled())immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);else if(now>=request.deadline)immediate(Fail(FailureCategory::kTimeout,"waiter deadline expired",{},true),EventKind::kCancelled);else if(auto it=state_->negative.find(key);it!=state_->negative.end()&&it->second.expires>now){immediate(it->second.failure,EventKind::kRetryCached);}else {if(state_->negative.count(key))state_->EraseNegative(key);if(state_->negative_blocked)immediate(Fail(FailureCategory::kPermanent,"adaptive v2 permanent negative-cache capacity is fail-closed",{},false),EventKind::kRejected);else if(auto it=state_->flights.find(key);it!=state_->flights.end()){if(it->second->waiters.size()>=state_->options.max_waiters_per_flight)immediate(Fail(FailureCategory::kBackpressure,"adaptive v2 waiter budget is full",{},true),EventKind::kRejected);else if(state_->AddWaiter(it->second,request.cancellation,request.deadline)){future=it->second->future;event.kind=EventKind::kMerged;}else immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);}else if(state_->queue.size()>=state_->options.max_queued_flights||state_->flights.size()>=state_->options.max_in_flight)immediate(Fail(FailureCategory::kBackpressure,"adaptive v2 queue or in-flight budget is full",{},true),EventKind::kRejected);else{auto f=std::make_shared<State::Flight>(request.production,key,route);if(state_->AddWaiter(f,request.cancellation,request.deadline)){future=f->future;state_->flights.emplace(key,f);state_->queue.push_back(std::move(f));event.kind=EventKind::kQueued;state_->wake.notify_one();}else immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);}}}event.dispatch_key_digest=request.production.dispatch_key().digest();event.plan_abi_digest=request.production.plan_abi().digest();state_->Emit(std::move(event));return CompileTicket(std::move(future),request.deadline,std::move(request.cancellation));

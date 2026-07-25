@@ -6,6 +6,7 @@
 
 #if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -62,7 +63,6 @@ CompileConfig CloneCompileConfig(const CompileConfig& source) {
 
 struct VerifiedGraphArtifacts final {
     std::vector<OrderedArtifactIdentity> identities;
-    std::vector<ArtifactPin> pins;
 };
 
 VerifiedGraphArtifacts VerifyGraphArtifacts(
@@ -80,7 +80,6 @@ VerifiedGraphArtifacts VerifyGraphArtifacts(
     }
     VerifiedGraphArtifacts verified;
     verified.identities.reserve(calls.size());
-    verified.pins.reserve(calls.size());
     for (size_t index = 0; index < calls.size(); ++index) {
         const auto pin = internal::ArtifactPinAccess::Unwrap(pins[index]);
         const auto signature = graph.module().signature(calls[index]->symbol);
@@ -89,7 +88,6 @@ VerifiedGraphArtifacts VerifyGraphArtifacts(
         }
         verified.identities.push_back(OrderedArtifactIdentity{
             index, std::string(calls[index]->symbol), pin.key()});
-        verified.pins.push_back(pins[index]);
     }
     for (const auto& value : graph.plan().values()) {
         RequireStaticShape(value.shape(), "adaptive ExecutablePlan");
@@ -101,19 +99,20 @@ void ValidateCandidate(const ProductionCompileRequest& request,
                        const CompiledGraph& graph) {
     const VerifiedGraphArtifacts candidate = VerifyGraphArtifacts(
         graph, request.config(), request.graph_semantic_key());
-    if (candidate.pins.size() != request.verified_artifact_pins().size() ||
+    if (candidate.identities.size() !=
+            request.baseline_graph().artifact_pins().size() ||
         candidate.identities.size() != request.ordered_artifacts().size()) {
         throw std::invalid_argument(
             "adaptive candidate primitive mapping differs from the verified baseline");
     }
-    for (size_t index = 0; index < candidate.pins.size(); ++index) {
+    for (size_t index = 0; index < candidate.identities.size(); ++index) {
         const OrderedArtifactIdentity& expected = request.ordered_artifacts()[index];
         const OrderedArtifactIdentity& actual = candidate.identities[index];
         const internal::PrimitiveArtifactPin expected_pin =
             internal::ArtifactPinAccess::Unwrap(
-                request.verified_artifact_pins()[index]);
+                request.baseline_graph().artifact_pins()[index]);
         const internal::PrimitiveArtifactPin actual_pin =
-            internal::ArtifactPinAccess::Unwrap(candidate.pins[index]);
+            internal::ArtifactPinAccess::Unwrap(graph.artifact_pins()[index]);
         if (actual.call_index != expected.call_index ||
             actual.link_symbol != expected.link_symbol ||
             !internal::SamePhysicalKernelAbi(
@@ -157,19 +156,34 @@ PlanVariantKey BuildSelectionPlanKey(
 }  // namespace
 
 ProductionCompileRequest::ProductionCompileRequest(
-    Function graph, CompileConfig config, const CompiledGraph& expected_contract)
-    : graph_(std::move(graph)), config_(CloneCompileConfig(config)) {
+    Function graph, CompileConfig config, CompiledGraph baseline_graph,
+    std::vector<std::int64_t> requested_unit_ids)
+    : graph_(std::move(graph)), config_(CloneCompileConfig(config)),
+      baseline_graph_(std::move(baseline_graph)),
+      requested_unit_ids_(std::move(requested_unit_ids)) {
     graph_semantic_key_ = Compiler::BuildGraphSemanticKey(graph_);
     const VerifiedGraphArtifacts baseline = VerifyGraphArtifacts(
-        expected_contract, config_, graph_semantic_key_);
+        baseline_graph_, config_, graph_semantic_key_);
     ordered_artifacts_ = baseline.identities;
-    verified_artifact_pins_ = baseline.pins;
+    std::sort(requested_unit_ids_.begin(), requested_unit_ids_.end());
+    if (requested_unit_ids_.empty()) {
+        throw std::invalid_argument(
+            "adaptive compile request requires replacement unit ids");
+    }
+    for (size_t index = 0; index < requested_unit_ids_.size(); ++index) {
+        const std::int64_t id = requested_unit_ids_[index];
+        if (id < 0 || static_cast<size_t>(id) >= ordered_artifacts_.size() ||
+            (index > 0 && requested_unit_ids_[index - 1] == id)) {
+            throw std::invalid_argument(
+                "adaptive compile request has invalid replacement unit ids");
+        }
+    }
     shape_profile_key_ = BuildStaticExactShapeProfileKey(
-        graph_semantic_key_, expected_contract.plan());
+        graph_semantic_key_, baseline_graph_.plan());
     dispatch_key_ = BuildStaticExactDispatchKey(graph_semantic_key_,
                                                 shape_profile_key_);
-    plan_abi_ = BuildPlanAbiFingerprint(expected_contract.module(),
-                                        expected_contract.plan(),
+    plan_abi_ = BuildPlanAbiFingerprint(baseline_graph_.module(),
+                                        baseline_graph_.plan(),
                                         ordered_artifacts_);
     Validate();
 }
@@ -181,13 +195,15 @@ const ShapeProfileKey& ProductionCompileRequest::shape_profile_key() const noexc
 const DispatchKey& ProductionCompileRequest::dispatch_key() const noexcept { return dispatch_key_; }
 const PlanAbiFingerprint& ProductionCompileRequest::plan_abi() const noexcept { return plan_abi_; }
 const std::vector<OrderedArtifactIdentity>& ProductionCompileRequest::ordered_artifacts() const noexcept { return ordered_artifacts_; }
-const std::vector<ArtifactPin>& ProductionCompileRequest::verified_artifact_pins() const noexcept { return verified_artifact_pins_; }
+const CompiledGraph& ProductionCompileRequest::baseline_graph() const noexcept { return baseline_graph_; }
+const std::vector<std::int64_t>& ProductionCompileRequest::requested_unit_ids() const noexcept { return requested_unit_ids_; }
 
 void ProductionCompileRequest::Validate() const {
     if (!graph_.defined() || !graph_semantic_key_.defined() ||
         !shape_profile_key_.defined() || !dispatch_key_.defined() ||
-        !plan_abi_.defined() || ordered_artifacts_.empty() ||
-        ordered_artifacts_.size() != verified_artifact_pins_.size()) {
+        !plan_abi_.defined() || !baseline_graph_.defined() ||
+        ordered_artifacts_.empty() || requested_unit_ids_.empty() ||
+        ordered_artifacts_.size() != baseline_graph_.artifact_pins().size()) {
         throw std::invalid_argument(
             "adaptive compile request has an undefined typed contract");
     }
@@ -197,15 +213,22 @@ void ProductionCompileRequest::Validate() const {
         throw std::invalid_argument(
             "adaptive compile request graph identity is inconsistent");
     }
-    for (size_t index = 0; index < ordered_artifacts_.size(); ++index) {
-        const internal::PrimitiveArtifactPin pin =
-            internal::ArtifactPinAccess::Unwrap(verified_artifact_pins_[index]);
-        if (ordered_artifacts_[index].call_index != index ||
-            ordered_artifacts_[index].artifact_key != pin.key()) {
+    const VerifiedGraphArtifacts baseline = VerifyGraphArtifacts(
+        baseline_graph_, config_, graph_semantic_key_);
+    if (baseline.identities != ordered_artifacts_) {
+        throw std::invalid_argument(
+            "adaptive compile request baseline artifact mapping is inconsistent");
+    }
+    for (size_t index = 0; index < requested_unit_ids_.size(); ++index) {
+        const std::int64_t id = requested_unit_ids_[index];
+        if (id < 0 || static_cast<size_t>(id) >= ordered_artifacts_.size() ||
+            (index > 0 && requested_unit_ids_[index - 1] >= id)) {
             throw std::invalid_argument(
-                "adaptive compile request baseline artifact mapping is inconsistent");
+                "adaptive compile request has non-canonical replacement unit ids");
         }
-        (void)ordered_artifacts_[index].CanonicalBytes();
+    }
+    for (const OrderedArtifactIdentity& artifact : ordered_artifacts_) {
+        (void)artifact.CanonicalBytes();
     }
 }
 
