@@ -20,11 +20,11 @@ namespace {
     throw std::invalid_argument("BindControlPlanForRuntime: " + detail);
 }
 
-std::vector<runtime::ValueId> AbiOrderedArguments(
-    const std::vector<runtime::ValueId>& logical_arguments,
-    const std::unordered_set<runtime::ValueId>& constants) {
-    std::vector<runtime::ValueId> result;
-    std::unordered_set<runtime::ValueId> seen;
+std::vector<ValueId> AbiOrderedArguments(
+    const std::vector<ValueId>& logical_arguments,
+    const std::unordered_set<ValueId>& constants) {
+    std::vector<ValueId> result;
+    std::unordered_set<ValueId> seen;
     result.reserve(logical_arguments.size());
     for (const auto value : logical_arguments) {
         if (seen.insert(value).second) result.push_back(value);
@@ -35,7 +35,7 @@ std::vector<runtime::ValueId> AbiOrderedArguments(
     return result;
 }
 
-runtime::ControlExecutionBranchSpec Convert(const runtime::BranchSpec& source) {
+runtime::ControlExecutionBranchSpec Convert(const BranchSpec& source) {
     runtime::ControlExecutionBranchSpec result;
     result.predicate = source.predicate;
     result.then_region = source.then_region;
@@ -46,7 +46,7 @@ runtime::ControlExecutionBranchSpec Convert(const runtime::BranchSpec& source) {
     return result;
 }
 
-runtime::ControlExecutionLoopSpec Convert(const runtime::LoopSpec& source) {
+runtime::ControlExecutionLoopSpec Convert(const LoopSpec& source) {
     runtime::ControlExecutionLoopSpec result;
     result.condition_region = source.condition_region;
     result.body_region = source.body_region;
@@ -62,12 +62,12 @@ runtime::ControlExecutionLoopSpec Convert(const runtime::LoopSpec& source) {
 }  // namespace
 
 runtime::ControlExecutionPlan BindControlPlanForRuntime(
-    const runtime::ControlPlan& plan,
+    const ControlPlan& plan,
     const std::vector<ControlKernelBinding>& bindings) {
     // Validate every preparation invariant before dropping its effect/alias
     // fields. Artifact selection uses PrimitiveUnitId, never diagnostic text.
     plan.ValidateStaticExact();
-    std::unordered_set<runtime::ValueId> constant_values(
+    std::unordered_set<ValueId> constant_values(
         plan.constant_values.begin(), plan.constant_values.end());
     std::unordered_map<PrimitiveUnitId, const ControlKernelBinding*> binding_by_unit;
     for (const auto& binding : bindings) {
@@ -85,7 +85,6 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
     runtime::internal::ControlExecutionPlanSpec resolved;
     resolved.schema_version =
         runtime::internal::ControlExecutionPlanSpec::kSchemaVersion;
-    resolved.source_control_plan_version = runtime::ControlPlan::kSchemaVersion;
     resolved.effect_model =
         runtime::ControlExecutionEffectModel::kPureFreshKernelOutputsV1;
     resolved.entry_region = plan.entry_region;
@@ -93,13 +92,21 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
     resolved.graph_inputs = plan.graph_inputs;
     resolved.constant_values = plan.constant_values;
     resolved.graph_outputs = plan.graph_outputs;
+    const std::unordered_set<ValueId> graph_inputs(
+        plan.graph_inputs.begin(), plan.graph_inputs.end());
+    const std::unordered_set<ValueId> graph_outputs(
+        plan.graph_outputs.begin(), plan.graph_outputs.end());
     for (const auto& value : plan.values) {
         const TensorTypeNode& tensor =
             RequireLogicalTensorType(value, "ControlPlan runtime binding");
-        resolved.values.push_back(
-            {value.id, tensor.dtype,
-             std::vector<std::int64_t>(tensor.shape.begin(), tensor.shape.end()),
-             value.device, value.source_locator});
+        resolved.values.push_back(runtime::ValueSpec(
+            value.id, value.id, tensor.shape,
+            runtime::DataTypeFromString(tensor.dtype), value.device,
+            graph_inputs.count(value.id) != 0,
+            constant_values.count(value.id) != 0,
+            graph_outputs.count(value.id) != 0));
+        resolved.value_metadata.push_back(
+            {value.id, value.source_locator});
     }
 
     std::unordered_set<PrimitiveUnitId> kernel_units;
@@ -119,7 +126,7 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
             bound.device = task.device;
             bound.stream = task.stream;
             switch (task.kind) {
-                case runtime::ControlTaskKind::kKernel: {
+                case ControlTaskKind::kKernel: {
                     kernel_units.insert(task.primitive_unit_id);
                     const auto found =
                         binding_by_unit.find(task.primitive_unit_id);
@@ -165,11 +172,11 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
                     bound.kernel = std::move(kernel);
                     break;
                 }
-                case runtime::ControlTaskKind::kBranch:
+                case ControlTaskKind::kBranch:
                     bound.kind = runtime::ControlExecutionTaskKind::kBranch;
                     bound.branch = Convert(task.branch);
                     break;
-                case runtime::ControlTaskKind::kLoop:
+                case ControlTaskKind::kLoop:
                     bound.kind = runtime::ControlExecutionTaskKind::kLoop;
                     bound.loop = Convert(task.loop);
                     break;

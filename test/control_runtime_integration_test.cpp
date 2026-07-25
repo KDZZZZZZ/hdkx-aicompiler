@@ -36,8 +36,9 @@ using kxc::Device;
 using kxc::DeviceStream;
 using kxc::Map;
 using kxc::String;
+using namespace kxc::api::internal;
 using namespace kxc::runtime;
-using namespace kxc::runtime::test_support;
+using namespace kxc::api::internal::test_support;
 using PrivatePlanSpec =
     kxc::runtime::internal::ControlExecutionPlanSpec;
 using PrivatePlanAccess =
@@ -1175,10 +1176,14 @@ bool TestBindingAndValidationNegatives() {
 
     const ControlExecutionPlan valid =
         kxc::api::internal::BindControlPlanForRuntime(branch, bindings);
-    PrivatePlanSpec bad_provenance = PrivatePlanAccess::CopySpec(valid);
-    bad_provenance.source_control_plan_version = 1;
     PrivatePlanSpec bad_predicate = PrivatePlanAccess::CopySpec(valid);
-    bad_predicate.values[0].dtype = "int64";
+    const ValueSpec predicate_spec = bad_predicate.values[0];
+    bad_predicate.values[0] = ValueSpec(
+        predicate_spec->value_id, predicate_spec->storage_id,
+        predicate_spec.shape(), DataTypeFromString("int64"),
+        predicate_spec->device, predicate_spec->is_input,
+        predicate_spec->is_constant, predicate_spec->is_output,
+        predicate_spec->is_alias, predicate_spec->is_async_live);
     PrivatePlanSpec bad_phi = PrivatePlanAccess::CopySpec(valid);
     bad_phi.regions[0].tasks[0].branch.phis[0].then_value = 1;
     PrivatePlanSpec bad_placement = PrivatePlanAccess::CopySpec(valid);
@@ -1196,8 +1201,7 @@ bool TestBindingAndValidationNegatives() {
     unbounded_loop.regions[0].tasks[0].loop.max_trip_count = -1;
     PrivatePlanSpec bad_backedge = PrivatePlanAccess::CopySpec(valid_loop);
     bad_backedge.regions[0].tasks[0].loop.carried[0].backedge = 0;
-    CHECK(Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_provenance)); }) &&
-              Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_predicate)); }) &&
+    CHECK(Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_predicate)); }) &&
               Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_phi)); }) &&
               Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_placement)); }) &&
               Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_scope)); }) &&
@@ -1207,7 +1211,7 @@ bool TestBindingAndValidationNegatives() {
               fixture.else_kernel.launcher->calls == 0 &&
               loop_fixture.condition.launcher->calls == 0 &&
               loop_fixture.step.launcher->calls == 0,
-          "resolved verifier must close provenance, predicate, Phi, scope, placement, and loop invariants");
+          "resolved verifier must close predicate, Phi, scope, placement, and loop invariants");
 
 #if KXC_ENABLE_CONTROL_RUNTIME
     ControlRuntimeSession session(valid);

@@ -13,7 +13,7 @@
 
 #include "../../src/compiler/control_flow/control_plan.h"
 
-namespace kxc::runtime::test_support {
+namespace kxc::api::internal::test_support {
 
 struct FakeValue {
     std::string dtype;
@@ -81,8 +81,7 @@ private:
     static void CheckContract(const ControlPlan& plan, ValueId id, const FakeValue& value) {
         const ControlValueSpec& spec = Spec(plan, id);
         const TensorTypeNode& tensor =
-            api::internal::RequireLogicalTensorType(
-                spec, "reference executor value");
+            RequireLogicalTensorType(spec, "reference executor value");
         const std::vector<std::int64_t> shape(tensor.shape.begin(),
                                               tensor.shape.end());
         if (value.dtype != tensor.dtype || value.shape != shape ||
@@ -160,4 +159,4 @@ private:
     FakeKernelCallback kernel_;
 };
 
-}  // namespace kxc::runtime::test_support
+}  // namespace kxc::api::internal::test_support

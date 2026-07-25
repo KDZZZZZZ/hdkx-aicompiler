@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace kxc::runtime {
+namespace kxc::api::internal {
 namespace {
 
 [[noreturn]] void Fail(const std::string& message) {
@@ -49,7 +49,7 @@ struct State {
     std::unordered_set<ValueId> constant_values;
     std::unordered_set<ValueId> source_values;
     std::unordered_set<ValueId> body_arguments;
-    std::unordered_set<api::internal::PrimitiveUnitId> primitive_units;
+    std::unordered_set<PrimitiveUnitId> primitive_units;
     std::unordered_map<ValueId, std::pair<RegionId, RegionId>> body_argument_regions;
     std::unordered_map<ValueId, TaskId> producers;
     std::unordered_set<RegionId> visited;
@@ -69,7 +69,7 @@ const ControlRegion& Region(const State& state, RegionId id, const char* where) 
 }
 
 bool SameContract(const ControlValueSpec& left, const ControlValueSpec& right) {
-    return api::internal::SameLogicalValueContract(left, right);
+    return SameLogicalValueContract(left, right);
 }
 
 void ValidateEffects(const EffectSummary& effect, const std::vector<ValueId>& expected_reads,
@@ -118,7 +118,7 @@ void ValidateBranch(State& state, const ControlTask& task,
     const BranchSpec& spec = task.branch;
     Value(state, spec.predicate, "branch predicate");
     const ControlValueSpec& predicate = Value(state, spec.predicate, "branch predicate");
-    if (!api::internal::IsCpuScalarBool(predicate)) {
+    if (!IsCpuScalarBool(predicate)) {
         Fail("branch predicate must be a CPU scalar bool");
     }
     if (spec.then_region == spec.else_region || spec.then_region < 0 || spec.else_region < 0) {
@@ -165,7 +165,7 @@ void ValidateLoop(State& state, const ControlTask& task,
     const ControlRegion& condition = Region(state, spec.condition_region, "loop");
     const ControlRegion& body = Region(state, spec.body_region, "loop");
     const ControlValueSpec& condition_value = Value(state, spec.condition_value, "loop condition");
-    if (!api::internal::IsCpuScalarBool(condition_value)) {
+    if (!IsCpuScalarBool(condition_value)) {
         Fail("loop condition must be a CPU scalar bool");
     }
     if (std::find(condition.live_outs.begin(), condition.live_outs.end(), spec.condition_value) == condition.live_outs.end()) {
@@ -356,9 +356,9 @@ void VerifyControlPlan(const ControlPlan& plan) {
             Fail("value ids must be unique and non-negative");
         }
         const TensorTypeNode& tensor =
-            api::internal::RequireLogicalTensorType(value, "ControlPlan value");
+            RequireLogicalTensorType(value, "ControlPlan value");
         try {
-            (void)DataTypeFromString(tensor.dtype);
+            (void)runtime::DataTypeFromString(tensor.dtype);
         } catch (const std::exception&) {
             Fail("value TensorType dtype is malformed or unsupported");
         }
@@ -494,4 +494,4 @@ std::string ControlPlan::CanonicalText() const {
     return out.str();
 }
 
-}  // namespace kxc::runtime
+}  // namespace kxc::api::internal

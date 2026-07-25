@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "kxc/runtime/compiled_module.h"
+#include "kxc/runtime/executable_plan.h"
 
 namespace kxc::runtime {
 
@@ -48,14 +49,6 @@ private:
 
     struct State;
     std::shared_ptr<const State> state_;
-};
-
-struct ControlExecutionValueSpec {
-    ControlExecutionValueId id{-1};
-    std::string dtype;
-    std::vector<std::int64_t> shape;
-    Device device{Device::CPU()};
-    std::string source_locator;
 };
 
 struct ControlExecutionPhiBinding {
@@ -129,11 +122,10 @@ public:
 
     bool defined() const noexcept;
     void Validate() const;
-    std::int64_t source_control_plan_version() const;
     ControlExecutionEffectModel effect_model() const;
     ControlExecutionRegionId entry_region() const;
     const std::vector<ControlExecutionRegionId>& region_order() const;
-    const std::vector<ControlExecutionValueSpec>& values() const;
+    Array<ValueSpec> values() const;
     const std::vector<ControlExecutionRegion>& regions() const;
     const std::vector<ControlExecutionValueId>& graph_inputs() const;
     const std::vector<ControlExecutionValueId>& constant_values() const;

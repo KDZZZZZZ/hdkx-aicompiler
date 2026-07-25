@@ -3,6 +3,7 @@
 #include "kxc/runtime/control_session.h"
 
 #include "internal/bound_control_kernel_access.h"
+#include "internal/kernel_argument_validation.h"
 
 #include <cstdint>
 #include <exception>
@@ -24,40 +25,24 @@ namespace {
     throw std::invalid_argument("ControlRuntimeSession: " + detail);
 }
 
-bool SameDType(DLDataType lhs, DLDataType rhs) {
-    return lhs.code == rhs.code && lhs.bits == rhs.bits && lhs.lanes == rhs.lanes;
-}
-
-DLDataType DType(const std::string& dtype) {
-    if (dtype == "bool") return {kDLBool, 8, 1};
-    if (dtype == "int8") return {kDLInt, 8, 1};
-    if (dtype == "int16") return {kDLInt, 16, 1};
-    if (dtype == "int32") return {kDLInt, 32, 1};
-    if (dtype == "int64") return {kDLInt, 64, 1};
-    if (dtype == "uint8") return {kDLUInt, 8, 1};
-    if (dtype == "uint16") return {kDLUInt, 16, 1};
-    if (dtype == "uint32") return {kDLUInt, 32, 1};
-    if (dtype == "uint64") return {kDLUInt, 64, 1};
-    if (dtype == "float16") return {kDLFloat, 16, 1};
-    if (dtype == "float32") return {kDLFloat, 32, 1};
-    if (dtype == "float64") return {kDLFloat, 64, 1};
-    if (dtype == "bfloat16") return {kDLBfloat, 16, 1};
-    Fail("unknown dtype");
-}
-
-void ValidateArray(const ControlExecutionValueSpec& spec, const NDArray& value,
+void ValidateArray(const ValueSpec& spec, const NDArray& value,
                    const std::string& where) {
     if (!value.defined() || !value.storage().defined() || !value.IsContiguous()) {
         Fail(where + " requires a defined contiguous NDArray");
     }
-    if (!SameDType(DType(spec.dtype), value.dtype()) ||
-        value.device() != spec.device) {
+    if (!api::SameDType(spec->dtype, value.dtype()) ||
+        value.device() != spec->device) {
         Fail(where + " dtype or device does not match");
     }
+    const Array<std::int64_t> expected_shape = spec.shape();
     const Array<std::int64_t> shape = value.shape();
-    if (shape.size() != spec.shape.size()) Fail(where + " rank does not match");
+    if (shape.size() != expected_shape.size()) {
+        Fail(where + " rank does not match");
+    }
     for (std::size_t i = 0; i < shape.size(); ++i) {
-        if (shape[i] != spec.shape[i]) Fail(where + " shape does not match");
+        if (shape[i] != expected_shape[i]) {
+            Fail(where + " shape does not match");
+        }
     }
     try {
         const std::size_t nbytes = value.NBytes();
@@ -114,20 +99,21 @@ struct RunState final {
 };
 
 struct PlanIndex final {
-    std::unordered_map<ControlExecutionValueId, const ControlExecutionValueSpec*> values;
+    std::unordered_map<ControlExecutionValueId, ValueSpec> values;
     std::unordered_map<ControlExecutionRegionId, const ControlExecutionRegion*> regions;
 };
 
 [[maybe_unused]] PlanIndex Index(const ControlExecutionPlan& plan) {
     PlanIndex index;
-    for (const auto& value : plan.values()) index.values.emplace(value.id, &value);
+    for (const ValueSpec& value : plan.values()) {
+        index.values.emplace(value->value_id, value);
+    }
     for (const auto& region : plan.regions()) index.regions.emplace(region.id, &region);
     return index;
 }
 
-const ControlExecutionValueSpec& Value(const PlanIndex& index,
-                                       ControlExecutionValueId id) {
-    return *index.values.at(id);
+const ValueSpec& Value(const PlanIndex& index, ControlExecutionValueId id) {
+    return index.values.at(id);
 }
 
 const ControlExecutionRegion& Region(const PlanIndex& index,
@@ -242,10 +228,9 @@ void ExecuteKernel(const ControlExecutionTask& task, const PlanIndex& index,
         const auto value_id = task.argument_values[i];
         if (signature[i]->role == codegen::KernelArgRole::kOutput) {
             const auto& value = Value(index, value_id);
-            Array<std::int64_t> shape;
-            for (const auto dimension : value.shape) shape.push_back(dimension);
-            NDArray output = NDArray::Empty(shape, DType(value.dtype),
-                                             value.device, signature[i]->alignment);
+            NDArray output = NDArray::Empty(
+                value.shape(), value->dtype, value->device,
+                signature[i]->alignment);
             state->Bind(value_id, std::move(output));
         }
         ordered.push_back(state->Get(value_id));

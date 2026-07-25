@@ -12,7 +12,7 @@
 
 namespace {
 using kxc::Device;
-using namespace kxc::runtime;
+using namespace kxc::api::internal;
 
 #define CHECK(condition, message) do { if (!(condition)) { std::cerr << "[FAIL] " << __FUNCTION__ << ": " << message << "\n"; return false; } } while (0)
 

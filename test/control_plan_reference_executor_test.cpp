@@ -11,8 +11,8 @@
 
 namespace {
 using kxc::Device;
-using namespace kxc::runtime;
-using namespace kxc::runtime::test_support;
+using namespace kxc::api::internal;
+using namespace kxc::api::internal::test_support;
 
 #define CHECK(condition, message) do { if (!(condition)) { std::cerr << "[FAIL] " << __FUNCTION__ << ": " << message << "\n"; return false; } } while (0)
 

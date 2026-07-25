@@ -10,14 +10,14 @@
 
 #include "../internal/primitive_unit.h"
 
-namespace kxc::runtime {
+namespace kxc::api::internal {
 
 using ValueId = std::int64_t;
 using RegionId = std::int64_t;
 using TaskId = std::int64_t;
 
 /*! \brief Compiler-authoritative logical tensor leaf used by ControlPlan v2. */
-using ControlValueSpec = api::internal::LogicalValueContract;
+using ControlValueSpec = LogicalValueContract;
 
 struct EffectSummary {
     std::vector<ValueId> reads;
@@ -71,7 +71,7 @@ enum class ControlTaskKind { kKernel, kBranch, kLoop };
 struct ControlTask {
     TaskId id{-1};
     ControlTaskKind kind{ControlTaskKind::kKernel};
-    api::internal::PrimitiveUnitId primitive_unit_id{-1};
+    PrimitiveUnitId primitive_unit_id{-1};
     std::vector<ValueId> inputs;
     /*! \brief Ordered logical kernel operands; duplicates are significant. */
     std::vector<ValueId> argument_values;
@@ -117,4 +117,4 @@ struct ControlPlan {
 
 void VerifyControlPlan(const ControlPlan& plan);
 
-}  // namespace kxc::runtime
+}  // namespace kxc::api::internal

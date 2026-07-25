@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <limits>
-#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -24,30 +23,6 @@ namespace {
 
 [[noreturn]] void Fail(const std::string& detail) {
     throw std::invalid_argument("ControlExecutionPlan: " + detail);
-}
-
-bool IsKnownDType(const std::string& dtype) {
-    static const std::set<std::string> types{
-        "bool", "int8", "int16", "int32", "int64", "uint8", "uint16",
-        "uint32", "uint64", "float16", "float32", "float64", "bfloat16"};
-    return types.count(dtype) != 0;
-}
-
-DLDataType DType(const std::string& dtype) {
-    if (dtype == "bool") return {kDLBool, 8, 1};
-    if (dtype == "int8") return {kDLInt, 8, 1};
-    if (dtype == "int16") return {kDLInt, 16, 1};
-    if (dtype == "int32") return {kDLInt, 32, 1};
-    if (dtype == "int64") return {kDLInt, 64, 1};
-    if (dtype == "uint8") return {kDLUInt, 8, 1};
-    if (dtype == "uint16") return {kDLUInt, 16, 1};
-    if (dtype == "uint32") return {kDLUInt, 32, 1};
-    if (dtype == "uint64") return {kDLUInt, 64, 1};
-    if (dtype == "float16") return {kDLFloat, 16, 1};
-    if (dtype == "float32") return {kDLFloat, 32, 1};
-    if (dtype == "float64") return {kDLFloat, 64, 1};
-    if (dtype == "bfloat16") return {kDLBfloat, 16, 1};
-    Fail("unknown dtype");
 }
 
 bool IsCpu0(const Device& device) {
@@ -71,19 +46,31 @@ bool SameSet(std::vector<Id> lhs, std::vector<Id> rhs) {
     return lhs == rhs;
 }
 
-bool SameShape(const std::vector<std::int64_t>& value,
-               const Array<std::int64_t>& argument) {
-    if (value.size() != argument.size()) return false;
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        if (value[i] != argument[i]) return false;
+bool SameShape(const Array<std::int64_t>& lhs,
+               const Array<std::int64_t>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i] != rhs[i]) return false;
     }
     return true;
 }
 
-bool SameContract(const ControlExecutionValueSpec& lhs,
-                  const ControlExecutionValueSpec& rhs) {
-    return lhs.dtype == rhs.dtype && lhs.shape == rhs.shape &&
-           lhs.device == rhs.device;
+bool SameContract(const ValueSpec& lhs, const ValueSpec& rhs) {
+    return api::SameDType(lhs->dtype, rhs->dtype) &&
+           SameShape(lhs.shape(), rhs.shape()) &&
+           lhs->device == rhs->device;
+}
+
+bool IsScalarBool(const ValueSpec& value) {
+    return value->dtype.code == kDLBool && value->dtype.bits == 8 &&
+           value->dtype.lanes == 1 && value.shape().empty() &&
+           value->device == Device::CPU();
+}
+
+Array<ValueSpec> CopyValues(const Array<ValueSpec>& values) {
+    Array<ValueSpec> result;
+    for (const ValueSpec& value : values) result.push_back(value);
+    return result;
 }
 
 bool SamePayload(const NDArray& lhs, const NDArray& rhs) {
@@ -162,7 +149,7 @@ struct State final {
     explicit State(const ControlExecutionPlanSpec& plan) : plan(plan) {}
 
     const ControlExecutionPlanSpec& plan;
-    std::unordered_map<ControlExecutionValueId, const ControlExecutionValueSpec*> values;
+    std::unordered_map<ControlExecutionValueId, ValueSpec> values;
     std::unordered_map<ControlExecutionRegionId, const ControlExecutionRegion*> regions;
     std::unordered_map<ControlExecutionTaskId, const ControlExecutionTask*> tasks;
     std::unordered_map<ControlExecutionValueId, ControlExecutionTaskId> producers;
@@ -177,14 +164,13 @@ struct State final {
     std::unordered_set<ControlExecutionRegionId> visited;
 };
 
-const ControlExecutionValueSpec& Value(const State& state,
-                                       ControlExecutionValueId id,
-                                       const char* where) {
+const ValueSpec& Value(const State& state, ControlExecutionValueId id,
+                       const char* where) {
     const auto found = state.values.find(id);
     if (found == state.values.end()) {
         Fail(std::string(where) + " references an unknown value");
     }
-    return *found->second;
+    return found->second;
 }
 
 const ControlExecutionRegion& Region(const State& state,
@@ -208,21 +194,25 @@ bool Empty(const ControlExecutionLoopSpec& spec) {
            spec.max_trip_count < 0;
 }
 
-void ValidateArray(const ControlExecutionValueSpec& value, const NDArray& array,
+void ValidateArray(const ValueSpec& value, const NDArray& array,
                    const std::string& where) {
     if (!array.defined() || !array.storage().defined() || !array.IsContiguous()) {
         Fail(where + " requires a defined contiguous NDArray");
     }
-    const DLDataType expected = DType(value.dtype);
     const DLDataType actual = array.dtype();
-    if (expected.code != actual.code || expected.bits != actual.bits ||
-        expected.lanes != actual.lanes || array.device() != value.device) {
+    if (!api::SameDType(value->dtype, actual) ||
+        array.device() != value->device) {
         Fail(where + " dtype or device does not match its value spec");
     }
+    const Array<std::int64_t> expected_shape = value.shape();
     const Array<std::int64_t> shape = array.shape();
-    if (shape.size() != value.shape.size()) Fail(where + " rank does not match");
+    if (shape.size() != expected_shape.size()) {
+        Fail(where + " rank does not match");
+    }
     for (std::size_t i = 0; i < shape.size(); ++i) {
-        if (shape[i] != value.shape[i]) Fail(where + " shape does not match");
+        if (shape[i] != expected_shape[i]) {
+            Fail(where + " shape does not match");
+        }
     }
     try {
         const std::size_t nbytes = array.NBytes();
@@ -260,16 +250,15 @@ void ValidateKernel(State& state, const ControlExecutionTask& task) {
     for (std::size_t i = 0; i < arguments.size(); ++i) {
         const auto& argument = arguments[i];
         const ControlExecutionValueId value_id = task.argument_values[i];
-        const ControlExecutionValueSpec& value = Value(state, value_id, "kernel ABI");
+        const ValueSpec& value = Value(state, value_id, "kernel ABI");
         if (argument->device != Device::CPU() ||
             (argument->role == codegen::KernelArgRole::kOutput &&
              !argument->mutable_data) ||
-            value.dtype.empty() || !SameShape(value.shape, argument.shape())) {
+            !SameShape(value.shape(), argument.shape())) {
             Fail("kernel ABI value does not exactly match its signature");
         }
-        const DLDataType dtype = DType(value.dtype);
-        if (dtype.code != argument->dtype.code || dtype.bits != argument->dtype.bits ||
-            dtype.lanes != argument->dtype.lanes || value.device != argument->device) {
+        if (!api::SameDType(value->dtype, argument->dtype) ||
+            value->device != argument->device) {
             Fail("kernel ABI dtype/device does not exactly match its signature");
         }
         for (const std::int64_t dimension : argument.shape()) {
@@ -328,8 +317,7 @@ void ValidateBranch(State& state, const ControlExecutionTask& task,
                     const std::unordered_set<ControlExecutionValueId>& available) {
     const auto& spec = task.branch;
     const auto& predicate = Value(state, spec.predicate, "branch predicate");
-    if (predicate.dtype != "bool" || !predicate.shape.empty() ||
-        predicate.device != Device::CPU() || spec.then_region == spec.else_region ||
+    if (!IsScalarBool(predicate) || spec.then_region == spec.else_region ||
         spec.then_region < 0 || spec.else_region < 0) {
         Fail("branch requires a CPU scalar bool and distinct child regions");
     }
@@ -375,8 +363,7 @@ void ValidateLoop(State& state, const ControlExecutionTask& task,
     const auto& condition = Region(state, spec.condition_region, "loop");
     const auto& body = Region(state, spec.body_region, "loop");
     const auto& condition_value = Value(state, spec.condition_value, "loop condition");
-    if (condition_value.dtype != "bool" || !condition_value.shape.empty() ||
-        condition_value.device != Device::CPU() ||
+    if (!IsScalarBool(condition_value) ||
         std::find(condition.live_outs.begin(), condition.live_outs.end(),
                   spec.condition_value) == condition.live_outs.end()) {
         Fail("loop condition must be a CPU scalar bool condition-region live-out");
@@ -658,22 +645,33 @@ namespace {
 
 void VerifyControlExecutionPlan(const ControlExecutionPlanSpec& plan) {
     if (plan.schema_version != ControlExecutionPlanSpec::kSchemaVersion ||
-        plan.source_control_plan_version != 2 ||
         plan.effect_model !=
             ControlExecutionEffectModel::kPureFreshKernelOutputsV1) {
-        Fail("requires schema v1, ControlPlan v2 provenance, and kPureFreshKernelOutputsV1");
+        Fail("requires schema v1 and kPureFreshKernelOutputsV1");
     }
     if (plan.values.empty() || plan.regions.empty() || plan.graph_outputs.empty()) {
         Fail("values, regions, and graph outputs are required");
     }
+    if (plan.value_metadata.size() != plan.values.size()) {
+        Fail("value diagnostics must exactly cover runtime value contracts");
+    }
     State state(plan);
-    for (const auto& value : plan.values) {
-        if (value.id < 0 || !state.values.emplace(value.id, &value).second ||
-            !IsKnownDType(value.dtype) || !IsCpu0(value.device) ||
-            value.source_locator.empty()) {
-            Fail("value ids/specs must be unique, static CPU:0 contracts with locators");
+    std::unordered_map<ControlExecutionValueId, std::string> value_locators;
+    for (const auto& metadata : plan.value_metadata) {
+        if (metadata.value_id < 0 || metadata.source_locator.empty() ||
+            !value_locators.emplace(metadata.value_id,
+                                    metadata.source_locator).second) {
+            Fail("value diagnostics require unique ids and non-empty locators");
         }
-        for (const auto dimension : value.shape) {
+    }
+    for (const ValueSpec& value : plan.values) {
+        value.Validate();
+        if (!state.values.emplace(value->value_id, value).second ||
+            !IsCpu0(value->device) ||
+            !value_locators.count(value->value_id)) {
+            Fail("value ids/specs must be unique static CPU:0 contracts");
+        }
+        for (const auto dimension : value.shape()) {
             if (dimension < 0) Fail("dynamic shapes are unsupported everywhere");
         }
     }
@@ -681,15 +679,38 @@ void VerifyControlExecutionPlan(const ControlExecutionPlanSpec& plan) {
     RequireUnique(plan.constant_values, "constant values");
     RequireUnique(plan.graph_outputs, "graph outputs");
     for (const auto value : plan.graph_inputs) {
-        Value(state, value, "graph input");
+        if (!Value(state, value, "graph input")->is_input) {
+            Fail("graph input list and ValueSpec roles differ");
+        }
         state.sources.insert(value);
     }
     for (const auto value : plan.constant_values) {
-        Value(state, value, "constant value");
+        if (!Value(state, value, "constant value")->is_constant) {
+            Fail("constant value list and ValueSpec roles differ");
+        }
         if (!state.sources.insert(value).second) Fail("graph inputs and constants overlap");
         state.constants.insert(value);
     }
-    for (const auto value : plan.graph_outputs) Value(state, value, "graph output");
+    for (const auto value : plan.graph_outputs) {
+        if (!Value(state, value, "graph output")->is_output) {
+            Fail("graph output list and ValueSpec roles differ");
+        }
+    }
+    const std::unordered_set<ControlExecutionValueId> graph_inputs(
+        plan.graph_inputs.begin(), plan.graph_inputs.end());
+    const std::unordered_set<ControlExecutionValueId> constant_values(
+        plan.constant_values.begin(), plan.constant_values.end());
+    const std::unordered_set<ControlExecutionValueId> graph_outputs(
+        plan.graph_outputs.begin(), plan.graph_outputs.end());
+    for (const auto& entry : state.values) {
+        const ValueSpec& value = entry.second;
+        if (value->is_input != (graph_inputs.count(entry.first) != 0) ||
+            value->is_constant !=
+                (constant_values.count(entry.first) != 0) ||
+            value->is_output != (graph_outputs.count(entry.first) != 0)) {
+            Fail("ValueSpec roles must exactly match graph boundary lists");
+        }
+    }
     RequireUnique(plan.region_order, "region order");
     if (plan.region_order.size() != plan.regions.size()) Fail("region_order must list each region once");
     for (const auto& region : plan.regions) {
@@ -757,10 +778,6 @@ void ControlExecutionPlan::Validate() const {
     if (!impl_) throw std::invalid_argument("ControlExecutionPlan is undefined");
     VerifyControlExecutionPlan(impl_->spec);
 }
-std::int64_t ControlExecutionPlan::source_control_plan_version() const {
-    if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
-    return impl_->spec.source_control_plan_version;
-}
 ControlExecutionEffectModel ControlExecutionPlan::effect_model() const {
     if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
     return impl_->spec.effect_model;
@@ -773,9 +790,9 @@ const std::vector<ControlExecutionRegionId>& ControlExecutionPlan::region_order(
     if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
     return impl_->spec.region_order;
 }
-const std::vector<ControlExecutionValueSpec>& ControlExecutionPlan::values() const {
+Array<ValueSpec> ControlExecutionPlan::values() const {
     if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
-    return impl_->spec.values;
+    return CopyValues(impl_->spec.values);
 }
 const std::vector<ControlExecutionRegion>& ControlExecutionPlan::regions() const {
     if (!impl_) throw std::runtime_error("undefined ControlExecutionPlan");
@@ -809,7 +826,9 @@ ControlExecutionPlan internal::ControlExecutionPlanAccess::Create(
 ControlExecutionPlanSpec internal::ControlExecutionPlanAccess::CopySpec(
     const ControlExecutionPlan& plan) {
     plan.Validate();
-    return plan.impl_->spec;
+    ControlExecutionPlanSpec result = plan.impl_->spec;
+    result.values = CopyValues(plan.impl_->spec.values);
+    return result;
 }
 
 }  // namespace kxc::runtime

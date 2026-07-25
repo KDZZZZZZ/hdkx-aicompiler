@@ -33,11 +33,11 @@ using kxc::Tuple;
 using kxc::TupleGetItem;
 using kxc::Var;
 using kxc::While;
-using kxc::runtime::ControlPlan;
-using kxc::runtime::ControlTask;
-using kxc::runtime::ControlTaskKind;
-using kxc::runtime::test_support::ControlPlanReferenceExecutor;
-using kxc::runtime::test_support::FakeValue;
+using kxc::api::internal::ControlPlan;
+using kxc::api::internal::ControlTask;
+using kxc::api::internal::ControlTaskKind;
+using kxc::api::internal::test_support::ControlPlanReferenceExecutor;
+using kxc::api::internal::test_support::FakeValue;
 
 const TensorType kI64({}, "int64");
 
@@ -128,7 +128,7 @@ bool SameIds(const kxc::Array<std::int64_t>& left,
     return true;
 }
 
-kxc::runtime::test_support::FakeKernelCallback ArithmeticKernels(
+kxc::api::internal::test_support::FakeKernelCallback ArithmeticKernels(
     const std::vector<kxc::api::internal::PrimitiveUnit>& units) {
     std::unordered_map<kxc::api::internal::PrimitiveUnitId, std::string>
         operator_names;
@@ -319,7 +319,8 @@ bool TestRelaySourceWhileExecution() {
                    one.values.at(plan.graph_outputs[0]).integer == 2 &&
                    many.values.at(plan.graph_outputs[0]).integer == 2,
                "Relay-source While must use condition-before-body for zero, one, and multi trips");
-    const auto loops = [](const kxc::runtime::test_support::ControlTrace& trace) {
+    const auto loops = [](
+        const kxc::api::internal::test_support::ControlTrace& trace) {
         std::size_t count = 0;
         for (const std::string& event : trace.events) if (event.find("loop:") == 0) ++count;
         return count;

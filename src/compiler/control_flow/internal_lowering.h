@@ -16,7 +16,7 @@ namespace kxc::api::internal {
 
 /*! \brief Compiler-internal topology plus its shared primitive units. */
 struct ControlPlanLowering final {
-    runtime::ControlPlan plan;
+    ControlPlan plan;
     std::vector<PrimitiveUnit> primitive_units;
 };
 
@@ -28,12 +28,12 @@ struct ControlKernelBinding final {
     PrimitiveUnitId primitive_unit_id{-1};
     CompiledModule module;
     String entry_symbol;
-    std::vector<runtime::ValueId> abi_non_output_value_ids;
+    std::vector<ValueId> abi_non_output_value_ids;
     std::shared_ptr<const void> retention_owner;
 };
 
 runtime::ControlExecutionPlan BindControlPlanForRuntime(
-    const runtime::ControlPlan& plan,
+    const ControlPlan& plan,
     const std::vector<ControlKernelBinding>& bindings);
 
 }  // namespace kxc::api::internal

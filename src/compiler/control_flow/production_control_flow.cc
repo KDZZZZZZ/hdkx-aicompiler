@@ -49,12 +49,13 @@ namespace {
     throw std::invalid_argument("CompileControlFlowExact: " + detail);
 }
 
-std::vector<runtime::ValueId> AbiNonOutputs(const runtime::ControlTask& task,
-                                            const runtime::ControlPlan& plan) {
-    std::unordered_set<runtime::ValueId> constants(plan.constant_values.begin(),
-                                                    plan.constant_values.end());
-    std::unordered_set<runtime::ValueId> seen;
-    std::vector<runtime::ValueId> unique;
+std::vector<internal::ValueId> AbiNonOutputs(
+    const internal::ControlTask& task,
+    const internal::ControlPlan& plan) {
+    std::unordered_set<internal::ValueId> constants(
+        plan.constant_values.begin(), plan.constant_values.end());
+    std::unordered_set<internal::ValueId> seen;
+    std::vector<internal::ValueId> unique;
     unique.reserve(task.argument_values.size());
     for (const auto value : task.argument_values) {
         if (seen.insert(value).second) unique.push_back(value);
@@ -65,7 +66,7 @@ std::vector<runtime::ValueId> AbiNonOutputs(const runtime::ControlTask& task,
     return unique;
 }
 
-void RequireProductionSubset(const runtime::ControlPlan& plan,
+void RequireProductionSubset(const internal::ControlPlan& plan,
                              const CompileConfig& config) {
 #if !KXC_USE_LLVM
     (void)plan;
@@ -140,7 +141,7 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
     bindings.reserve(compiled.primitives.size());
     for (const auto& region : lowered.plan.regions) {
         for (const auto& task : region.tasks) {
-            if (task.kind != runtime::ControlTaskKind::kKernel) continue;
+            if (task.kind != internal::ControlTaskKind::kKernel) continue;
             if (task.primitive_unit_id < 0 ||
                 static_cast<std::size_t>(task.primitive_unit_id) >=
                     lowered.primitive_units.size()) {
