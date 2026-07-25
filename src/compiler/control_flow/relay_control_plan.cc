@@ -5,9 +5,9 @@
 #include "internal_lowering.h"
 
 #include "../internal/executable_capability.h"
+#include "../internal/resolved_relay_call.h"
 
 #include <algorithm>
-#include <any>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -15,8 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "kxc/relay/op.h"
-#include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/normalize_to_anf.h"
 
@@ -57,77 +55,6 @@ Device DeviceFor(const Expr& expr, const std::string& path) {
         return device->device;
     default:
         Fail(path, "Relay VirtualDevice must be CPU or CUDA");
-    }
-}
-
-void ValidateInputArity(const relay::OperatorSpec& spec, std::size_t actual,
-                        const std::string& path) {
-    if (spec.input_arity.num_inputs >= 0) {
-        if (actual != static_cast<std::size_t>(spec.input_arity.num_inputs)) {
-            Fail(path, "OperatorSpec input arity does not match Call");
-        }
-        return;
-    }
-    if (actual < static_cast<std::size_t>(spec.input_arity.min_inputs) ||
-        actual > static_cast<std::size_t>(spec.input_arity.max_inputs)) {
-        Fail(path, "OperatorSpec variable input arity does not match Call");
-    }
-}
-
-void ValidateCallAttrs(const relay::OperatorSpec& spec, const CallNode* call,
-                       const std::string& path) {
-    if (!call->attrs.defined()) return;
-    if (spec.attrs_type_key.empty()) {
-        Fail(path, "Call attrs are outside the OperatorSpec schema");
-    }
-    const std::string actual(call->attrs.get()->GetTypeKey());
-    if (actual != spec.attrs_type_key && actual != spec.attrs_type_key + "Node") {
-        Fail(path, "Call attrs do not match the OperatorSpec schema");
-    }
-}
-
-bool IsKernelLowering(relay::OperatorLoweringKind kind) {
-    return kind == relay::OperatorLoweringKind::kSingleTE ||
-           kind == relay::OperatorLoweringKind::kMultiTE;
-}
-
-void ValidateOperatorBindings(const relay::OpNode* op, const CallNode* call,
-                              const Expr& call_expr, const std::string& path) {
-    const auto relation = op->attrs.find(op->spec.type_relation_key);
-    const auto lowering = op->attrs.find(op->spec.lowering_key);
-    if (relation == op->attrs.end() || lowering == op->attrs.end()) {
-        Fail(path, "OperatorSpec implementation binding is missing");
-    }
-    const auto* infer = std::any_cast<relay::FInferType>(&relation->second);
-    if (!infer || !*infer) {
-        Fail(path, "OperatorSpec type relation binding has the wrong type or is empty");
-    }
-    if (op->spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE) {
-        if (op->spec.lowering_key != "FRelayToTE") {
-            Fail(path, "OperatorSpec single-output lowering must use FRelayToTE");
-        }
-        const auto* lower =
-            std::any_cast<relay::FRelayToTE>(&lowering->second);
-        if (!lower || !*lower) {
-            Fail(path, "OperatorSpec single-output lowering binding has the wrong type or is empty");
-        }
-    }
-    if (op->spec.lowering_kind == relay::OperatorLoweringKind::kMultiTE) {
-        if (op->spec.lowering_key != "FRelayToTEMulti") {
-            Fail(path, "OperatorSpec multi-output lowering must use FRelayToTEMulti");
-        }
-        const auto* lower =
-            std::any_cast<relay::FRelayToTEMulti>(&lowering->second);
-        if (!lower || !*lower) {
-            Fail(path, "OperatorSpec multi-output lowering binding has the wrong type or is empty");
-        }
-    }
-    Array<Type> input_types;
-    for (const Expr& argument : call->args) input_types.push_back(argument.checked_type());
-    const relay::Attrs attrs =
-        call->attrs.defined() ? relay::Attrs(call->attrs) : relay::Attrs();
-    if (!TypeEqual((*infer)(attrs, input_types), call_expr.checked_type())) {
-        Fail(path, "Call checked_type is stale for its OperatorSpec type relation");
     }
 }
 
@@ -341,20 +268,18 @@ private:
 
     Leaves LowerCall(const Expr& expr, const CallNode* call, runtime::RegionId region,
                      const Env& environment, const std::string& path) {
-        const auto* op = call->op.As<relay::OpNode>();
-        if (!op || !op->has_spec || !relay::Op::TryGet(op->name) ||
-            relay::Op::TryGet(op->name)->get() != call->op.get()) {
-            Fail(path, "requires a registered OperatorSpec Call");
-        }
-        relay::ValidateOperatorSpec(op->spec);
-        if (op->spec.effect != relay::OperatorEffectKind::kPure ||
-            !op->spec.deterministic || op->spec.alias_contract != "none" ||
-            !IsKernelLowering(op->spec.lowering_kind)) {
-            Fail(path, "OperatorSpec is not a pure deterministic non-aliasing kernel lowering");
-        }
-        ValidateInputArity(op->spec, call->args.size(), path);
-        ValidateCallAttrs(op->spec, call, path);
-        ValidateOperatorBindings(op, call, expr, path);
+        internal::ResolvedRelayCall resolved = [&] {
+            try {
+                return internal::ResolveRelayCall(
+                    expr,
+                    internal::OperatorCapabilityPolicy::StructuredControl(),
+                    path);
+            } catch (const internal::RelayCallResolutionError& error) {
+                Fail(error.issue().path,
+                     "capability=" + error.issue().capability + "; " +
+                         error.issue().detail);
+            }
+        }();
 
         Leaves arguments;
         for (std::size_t i = 0; i < call->args.size(); ++i) {
@@ -363,10 +288,9 @@ private:
             arguments.insert(arguments.end(), leaves.begin(), leaves.end());
         }
         const Leaves outputs = AddLeaves(expr, expr.checked_type(), path);
-        if (outputs.empty() ||
-            (op->spec.output_arity >= 0 &&
-             static_cast<std::size_t>(op->spec.output_arity) != outputs.size())) {
-            Fail(path, "OperatorSpec output arity does not match flattened Call result");
+        if (outputs.size() != resolved.output_leaf_types.size()) {
+            Fail(path,
+                 "resolved output leaves do not match control value leaves");
         }
         runtime::ControlTask task;
         task.kind = runtime::ControlTaskKind::kKernel;
@@ -386,8 +310,10 @@ private:
                 Fail(path, "kernel outputs require one explicit device");
             }
         }
-        task.kernel_ref = "relay.kernel.v2;" + relay::SerializeOperatorSpec(op->spec) +
-                          ";attrs=" + relay::SerializeAttrs(relay::Attrs(call->attrs));
+        task.kernel_ref =
+            "relay.kernel.v2;" +
+            relay::SerializeOperatorSpec(resolved.spec) +
+            ";attrs=" + relay::SerializeAttrs(resolved.attrs);
         task.source_locator = path;
         const runtime::TaskId task_id = AddTask(region, std::move(task));
         Array<Var> parameters;

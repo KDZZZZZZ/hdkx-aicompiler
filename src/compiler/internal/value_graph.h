@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "resolved_relay_call.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
 
@@ -30,6 +31,7 @@ struct ValueInfo {
 
 struct CallInfo {
     Expr call;
+    ResolvedRelayCall resolved;
     std::string operator_name;
     relay::OperatorLoweringKind lowering_kind{relay::OperatorLoweringKind::kNone};
     Array<int64_t> argument_value_ids;

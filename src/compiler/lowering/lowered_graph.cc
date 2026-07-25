@@ -4,7 +4,6 @@
 
 #include "../internal/lowered_graph.h"
 
-#include <any>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -12,8 +11,6 @@
 #include <vector>
 
 #include "../internal/te_to_tir.h"
-#include "kxc/compiler/capability.h"
-#include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/transforms/infer_type.h"
 
 namespace kxc::api::internal {
@@ -69,137 +66,44 @@ te::Tensor MakeBoundaryTensor(const ValueInfo& value) {
                            prefix + std::to_string(value.value_id));
 }
 
-relay::Attrs CallAttrs(const CallNode* call) {
-    return call->attrs.defined() ? relay::Attrs(call->attrs) : relay::Attrs();
-}
-
-void ValidateInputArity(const relay::OperatorSpec& spec, size_t actual) {
-    if (spec.input_arity.num_inputs >= 0) {
-        if (actual != static_cast<size_t>(spec.input_arity.num_inputs)) {
-            throw std::invalid_argument("Operator input arity mismatch for op: " +
-                                        spec.name);
-        }
-        return;
-    }
-    if (spec.input_arity.min_inputs < 0 || spec.input_arity.max_inputs < 0 ||
-        actual < static_cast<size_t>(spec.input_arity.min_inputs) ||
-        actual > static_cast<size_t>(spec.input_arity.max_inputs)) {
-        throw std::invalid_argument("Operator variable input arity mismatch for op: " +
-                                    spec.name);
-    }
-}
-
-void ValidateAttrs(const relay::OperatorSpec& spec, const CallNode* call) {
-    if (!call->attrs.defined()) return;
-    if (spec.attrs_type_key.empty()) {
-        throw std::invalid_argument("Operator Call defines attrs outside its schema: " +
-                                    spec.name);
-    }
-    const std::string actual(call->attrs.get()->GetTypeKey());
-    const std::string expected_node = spec.attrs_type_key + "Node";
-    if (actual != spec.attrs_type_key && actual != expected_node) {
-        throw std::invalid_argument("Operator attrs type mismatch for op: " + spec.name);
-    }
-}
-
-const relay::OperatorSpec& ValidateUnitOperator(const ValueGraph& graph,
-                                                const CompilationUnit& unit) {
-    const auto* call = unit.call.As<CallNode>();
-    const auto* op = call ? call->op.As<relay::OpNode>() : nullptr;
-    if (!call || !op || !op->has_spec) {
-        throw std::invalid_argument(
-            "CompilationUnit requires a registered specified operator Call");
-    }
-    relay::ValidateOperatorSpec(op->spec);
-    if (!IsOrdinaryCompute(op->spec.lowering_kind)) {
-        throw std::invalid_argument(
-            "Special execution Call cannot enter ordinary unit lowering: " +
-            op->name);
-    }
-    ValidateInputArity(op->spec, call->args.size());
-    ValidateAttrs(op->spec, call);
-
-    const auto relation_it = op->attrs.find(op->spec.type_relation_key);
-    if (relation_it == op->attrs.end()) {
-        throw std::invalid_argument("Operator type relation binding is missing: " +
-                                    op->name);
-    }
-    const auto* relation = std::any_cast<relay::FInferType>(&relation_it->second);
-    if (!relation || !*relation) {
-        throw std::invalid_argument("Operator type relation binding has wrong type or is empty: " +
-                                    op->name);
-    }
-    Array<Type> argument_types;
-    for (const auto& argument : call->args) {
-        if (!argument.checked_type().defined()) {
-            throw std::invalid_argument("Unit argument has stale or missing checked_type for op: " +
-                                        op->name);
-        }
-        argument_types.push_back(argument.checked_type());
-    }
-    const Type inferred = (*relation)(CallAttrs(call), argument_types);
-    if (!TypeEqual(inferred, unit.call.checked_type())) {
-        throw std::invalid_argument("Operator checked_type is stale for op: " + op->name);
-    }
-
+const ResolvedRelayCall& ValidateUnitOperator(
+    const ValueGraph& graph, const CompilationUnit& unit) {
     const CallInfo& record = GetCall(graph, unit.call);
     if (record.output_value_ids.size() !=
-        static_cast<size_t>(op->spec.output_arity)) {
-        throw std::invalid_argument("Operator output arity mismatch for op: " + op->name);
+            record.resolved.output_leaf_types.size() ||
+        record.resolved.call.get() != unit.call.get()) {
+        throw std::invalid_argument(
+            "CompilationUnit output contract drifted from ResolvedRelayCall");
     }
-    if (op->spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE) {
-        const auto lowering = op->attrs.find(op->spec.lowering_key);
-        const auto* lower =
-            lowering == op->attrs.end()
-                ? nullptr
-                : std::any_cast<relay::FRelayToTE>(&lowering->second);
-        if (!unit.call.checked_type().As<TensorTypeNode>() ||
-            op->spec.lowering_key != "FRelayToTE" || !lower || !*lower) {
-            throw std::invalid_argument("Single-output lowering contract mismatch for op: " +
-                                        op->name);
-        }
-    } else {
-        const auto lowering = op->attrs.find(op->spec.lowering_key);
-        const auto* lower =
-            lowering == op->attrs.end()
-                ? nullptr
-                : std::any_cast<relay::FRelayToTEMulti>(&lowering->second);
-        if (!unit.call.checked_type().As<TupleTypeNode>() ||
-            op->spec.lowering_key != "FRelayToTEMulti" || !lower || !*lower) {
-            throw std::invalid_argument("Multi-output lowering contract mismatch for op: " +
-                                        op->name);
-        }
-    }
-    return op->spec;
+    return record.resolved;
 }
 
-Array<te::Tensor> InvokeCurrentCall(const CallNode* call,
-                                    const relay::OperatorSpec& spec,
+Array<te::Tensor> InvokeCurrentCall(const ResolvedRelayCall& resolved,
                                     const Array<te::Tensor>& logical_inputs,
                                     const Type& output_type) {
-    const auto* op = call->op.As<relay::OpNode>();
-    const relay::Attrs attrs = CallAttrs(call);
-    if (spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE) {
-        const auto* lower = std::any_cast<relay::FRelayToTE>(
-            &op->attrs.at(spec.lowering_key));
-        te::Tensor output = (*lower)(attrs, logical_inputs, output_type);
+    if (std::holds_alternative<relay::FRelayToTE>(resolved.lowering)) {
+        const auto& lower = std::get<relay::FRelayToTE>(
+            resolved.lowering);
+        te::Tensor output =
+            lower(resolved.attrs, logical_inputs, output_type);
         if (!output.defined()) {
             throw std::invalid_argument("Operator lowering returned undefined tensor: " +
-                                        op->name);
+                                        resolved.spec.name);
         }
         return {output};
     }
-    const auto* lower = std::any_cast<relay::FRelayToTEMulti>(
-        &op->attrs.at(spec.lowering_key));
-    Array<te::Tensor> outputs = (*lower)(attrs, logical_inputs, output_type);
-    if (outputs.size() != static_cast<size_t>(spec.output_arity)) {
+    const auto& lower = std::get<relay::FRelayToTEMulti>(
+        resolved.lowering);
+    Array<te::Tensor> outputs =
+        lower(resolved.attrs, logical_inputs, output_type);
+    if (outputs.size() != resolved.output_leaf_types.size()) {
         throw std::invalid_argument("Multi-output lowering result count mismatch for op: " +
-                                    op->name);
+                                    resolved.spec.name);
     }
     for (const auto& output : outputs) {
         if (!output.defined()) {
             throw std::invalid_argument("Multi-output lowering returned undefined tensor: " +
-                                        op->name);
+                                        resolved.spec.name);
         }
     }
     return outputs;
@@ -288,7 +192,9 @@ void FreezeConstantPayloads(ValueGraph* graph) {
 
 relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
                                             const CompilationUnit& unit) {
-    const relay::OperatorSpec& spec = ValidateUnitOperator(graph, unit);
+    const ResolvedRelayCall& resolved =
+        ValidateUnitOperator(graph, unit);
+    const relay::OperatorSpec& spec = resolved.spec;
     const auto* call = unit.call.As<CallNode>();
 
     std::unordered_map<int64_t, te::Tensor> boundary_tensors;
@@ -331,7 +237,8 @@ relay::LoweredFunction LowerCompilationUnit(const ValueGraph& graph,
     }
 
     const Array<te::Tensor> outputs =
-        InvokeCurrentCall(call, spec, logical_inputs, unit.call.checked_type());
+        InvokeCurrentCall(
+            resolved, logical_inputs, unit.call.checked_type());
     ValidateTEOutputContracts(graph, unit, outputs, spec.name);
     return relay::internal::LowerTensorGraphToTIR(
         abi_inputs, constants, outputs,
@@ -354,11 +261,8 @@ PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
         throw std::invalid_argument(
             "PrepareStaticGraph requires matching Target and Device identity");
     }
-    CapabilityVerifier::RequireEligible(CapabilityRequest{
-        function, target, "graph", std::string(pipeline_fingerprint),
-        CapabilityBoundary::kPrePartition, true});
     PreparedStaticGraph prepared;
-    prepared.capability_boundary_checks = 1;
+    prepared.capability_boundary_checks = 0;
     ValueGraph value_graph = BuildValueGraph(function, device);
     prepared.value_graph_builds = 1;
     FreezeConstantPayloads(&value_graph);
@@ -385,13 +289,14 @@ LoweredGraph LowerPreparedStaticGraph(const PreparedStaticGraph& prepared) {
     for (const CompilationUnit& unit : result.partitioned.units) {
         relay::LoweredFunction lowered =
             LowerCompilationUnit(result.partitioned.value_graph, unit);
-        const auto* call = unit.call.As<CallNode>();
-        const auto* op = call->op.As<relay::OpNode>();
+        const ResolvedRelayCall& resolved =
+            GetCall(result.partitioned.value_graph, unit.call).resolved;
         result.primitives.push_back(
             LoweredPrimitive{unit.unit_id,
                              unit.symbol,
-                             String(op->name + "@v" +
-                                    std::to_string(op->spec.schema_version)),
+                             String(resolved.spec.name + "@v" +
+                                    std::to_string(
+                                        resolved.spec.schema_version)),
                              unit.semantic_key,
                              lowered});
         for (const auto& binding : lowered.constants()) {

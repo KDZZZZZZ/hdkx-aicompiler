@@ -476,7 +476,7 @@ bool TestStaticAndControlGates() {
             Function({gate_x, gate_y}, Add(gate_x, gate_y)));
     });
     add_node->attrs[lowering_key] = saved_lowering;
-    TEST_CHECK(empty_hook_error.find("wrong type or is empty") !=
+    TEST_CHECK(empty_hook_error.find("operator_implementation_binding") !=
                    std::string::npos,
                "empty TE hooks must fail before an unresolved task is prepared");
 

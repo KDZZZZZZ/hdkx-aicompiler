@@ -15,6 +15,7 @@
 #include "../src/compiler/internal/executable_capability.h"
 #include "../src/compiler/internal/lowered_graph.h"
 #include "../src/compiler/internal/relay_program.h"
+#include "../src/compiler/internal/resolved_relay_call.h"
 #include "../src/compiler/internal/value_graph.h"
 #include "kxc/compiler/compile_config.h"
 #include "kxc/relay/op.h"
@@ -600,6 +601,49 @@ bool TestRelayProgramPreparationAndPlanning() {
     return true;
 }
 
+bool TestResolvedRelayCallIsTheOperatorAuthority() {
+    using namespace kxc;
+    using namespace kxc::api::internal;
+
+    const TensorType tensor({4}, "float32");
+    Var lhs("lhs", tensor);
+    Var rhs("rhs", tensor);
+    Function function({lhs, rhs}, Add(lhs, rhs));
+    function = relay::InferTypePass(function);
+    const ResolvedRelayCall resolved = ResolveRelayCall(
+        function->body, OperatorCapabilityPolicy::StaticDataflow(),
+        "function.body");
+    TEST_CHECK(
+        resolved.spec.name == "add" &&
+            resolved.input_types.size() == 2 &&
+            resolved.output_leaf_types.size() == 1 &&
+            std::holds_alternative<relay::FRelayToTE>(resolved.lowering),
+        "the shared resolver must freeze schema, type relation, and lowering");
+
+    Var nested_input("nested_input", tensor);
+    Function nested(
+        {nested_input}, Call(NestedMultiOutputOp(), {nested_input}));
+    nested = relay::InferTypePass(nested);
+    const std::string static_error = ErrorText([&] {
+        (void)ResolveRelayCall(
+            nested->body, OperatorCapabilityPolicy::StaticDataflow(),
+            "function.body");
+    });
+    TEST_CHECK(
+        static_error.find("flat_multi_tensor_output") !=
+            std::string::npos,
+        "static dataflow must reject nested multi-output Calls in the resolver");
+    const ResolvedRelayCall control = ResolveRelayCall(
+        nested->body, OperatorCapabilityPolicy::StructuredControl(),
+        "function.body");
+    TEST_CHECK(
+        control.output_leaf_types.size() == 3 &&
+            std::holds_alternative<relay::FRelayToTEMulti>(
+                control.lowering),
+        "structured control may consume recursively flattened tensor leaves");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -615,6 +659,8 @@ int main() {
         {"value_graph_free_var_rejected", TestValueGraphFreeVarRejects},
         {"relay_program_preparation_and_planning",
          TestRelayProgramPreparationAndPlanning},
+        {"resolved_relay_call_authority",
+         TestResolvedRelayCallIsTheOperatorAuthority},
     };
     for (const auto& test : tests) {
         try {

@@ -3,6 +3,7 @@
  */
 
 #include "kxc/compiler/lowering/relay_to_tir.h"
+#include "../internal/resolved_relay_call.h"
 #include "../internal/te_to_tir.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/op_attr_types.h"
@@ -130,52 +131,6 @@ std::string RelayNodeKind(const Expr& expr) {
     return "<unknown>";
 }
 
-// 调用算子注册的单输出或多输出 Relay-to-TE lowering 函数。
-Array<te::Tensor> InvokeRelayToTE(const OpNode* op_node,
-                                  const Attrs& attrs,
-                                  const Array<te::Tensor>& inputs,
-                                  const kxc::Type& out_type) {
-    if (!out_type.defined()) {
-        throw std::runtime_error("LowerToTIR requires checked_type for op: " +
-                                 op_node->name);
-    }
-    if (out_type.As<TensorTypeNode>()) {
-        auto it = op_node->attrs.find("FRelayToTE");
-        if (it == op_node->attrs.end()) {
-            throw std::runtime_error("No FRelayToTE registered for op: " + op_node->name);
-        }
-        auto* lower_ptr = std::any_cast<FRelayToTE>(&it->second);
-        if (!lower_ptr) {
-            throw std::runtime_error("Bad FRelayToTE type for op: " + op_node->name);
-        }
-        te::Tensor out = (*lower_ptr)(attrs, inputs, out_type);
-        return {out};
-    }
-
-    if (const auto* tuple = out_type.As<TupleTypeNode>()) {
-        auto it = op_node->attrs.find("FRelayToTEMulti");
-        if (it == op_node->attrs.end()) {
-            throw std::runtime_error("No FRelayToTEMulti registered for tuple-output op: " +
-                                     op_node->name + ", got " + TypeToString(out_type));
-        }
-        auto* lower_ptr = std::any_cast<FRelayToTEMulti>(&it->second);
-        if (!lower_ptr) {
-            throw std::runtime_error("Bad FRelayToTEMulti type for op: " + op_node->name);
-        }
-        Array<te::Tensor> outputs = (*lower_ptr)(attrs, inputs, out_type);
-        if (outputs.size() != tuple->fields.size()) {
-            throw std::runtime_error("FRelayToTEMulti output count mismatch for op: " +
-                                     op_node->name + ", expected " +
-                                     std::to_string(tuple->fields.size()) + ", got " +
-                                     std::to_string(outputs.size()));
-        }
-        return outputs;
-    }
-
-    throw std::runtime_error("LowerToTIR requires TensorType or TupleType call output for op: " +
-                             op_node->name + ", got " + TypeToString(out_type));
-}
-
 // 把已完成类型推导的 Relay 数据流转换为 TE Tensor 图。
 class RelayToTEConverter : public RelayPassFunctor<Array<te::Tensor>> {
 public:
@@ -267,9 +222,30 @@ protected:
                 "Run LowerRelayToExecPlanPass before LowerToTIR.");
         }
 
-        Attrs attrs = op->attrs.defined() ? Attrs(op->attrs) : Attrs();
-        kxc::Type out_type = ref.checked_type();
-        return InvokeRelayToTE(op_node, attrs, inputs, out_type);
+        const kxc::api::internal::ResolvedRelayCall resolved =
+            kxc::api::internal::ResolveRelayCall(
+                ref,
+                kxc::api::internal::OperatorCapabilityPolicy::StaticDataflow(),
+                "lower_to_tir.call");
+        if (std::holds_alternative<FRelayToTE>(resolved.lowering)) {
+            te::Tensor output = std::get<FRelayToTE>(resolved.lowering)(
+                resolved.attrs, inputs, ref.checked_type());
+            if (!output.defined()) {
+                throw std::runtime_error(
+                    "LowerToTIR operator returned undefined tensor: " +
+                    resolved.spec.name);
+            }
+            return {output};
+        }
+        Array<te::Tensor> outputs =
+            std::get<FRelayToTEMulti>(resolved.lowering)(
+                resolved.attrs, inputs, ref.checked_type());
+        if (outputs.size() != resolved.output_leaf_types.size()) {
+            throw std::runtime_error(
+                "LowerToTIR multi-output count mismatch for op: " +
+                resolved.spec.name);
+        }
+        return outputs;
     }
 
     // 按字段顺序展平 tuple 的 TE 输出。

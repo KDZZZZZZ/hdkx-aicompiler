@@ -479,6 +479,7 @@ set(KXC_RUNTIME_EXECUTABLE_SOURCES
 
 set(KXC_COMPILER_SOURCES
   src/compiler/analysis/relay_program.cc
+  src/compiler/analysis/resolved_relay_call.cc
   src/compiler/cache/primitive_cache.cc
   src/compiler/capability.cc
   src/compiler/compile_config.cc

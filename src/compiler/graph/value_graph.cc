@@ -191,6 +191,9 @@ private:
     }
 
     std::vector<int64_t> ResolveCall(const Expr& expr, const CallNode* call) {
+        ResolvedRelayCall resolved = ResolveRelayCall(
+            expr, OperatorCapabilityPolicy::StaticDataflow(),
+            "function.call");
         Array<int64_t> argument_ids;
         Array<int64_t> unique_ids;
         std::unordered_set<int64_t> seen_inputs;
@@ -216,46 +219,22 @@ private:
             }
         }
 
-        const auto* op = call->op.As<relay::OpNode>();
-        if (!op || !op->has_spec) {
-            throw std::invalid_argument(
-                "BuildValueGraph requires every Call to reference a specified operator");
-        }
-        relay::ValidateOperatorSpec(op->spec);
-
-        const Type output_type = RequireCheckedType(expr, "Call");
-        std::vector<Type> leaf_types;
-        if (output_type.As<TensorTypeNode>()) {
-            leaf_types.push_back(output_type);
-        } else if (const auto* tuple_type = output_type.As<TupleTypeNode>()) {
-            for (const auto& field_type : tuple_type->fields) {
-                if (!field_type.As<TensorTypeNode>()) {
-                    throw std::invalid_argument(
-                        "BuildValueGraph does not support nested tuple Call outputs");
-                }
-                leaf_types.push_back(field_type);
-            }
-        } else {
-            throw std::invalid_argument(
-                "BuildValueGraph Call output must be TensorType or TupleType");
-        }
-
-        if (op->spec.output_arity >= 0 &&
-            static_cast<size_t>(op->spec.output_arity) != leaf_types.size()) {
-            throw std::invalid_argument("OperatorSpec output arity does not match checked type for op: " +
-                                        op->name);
-        }
-
         Array<int64_t> output_ids;
         std::vector<int64_t> result;
-        for (size_t index = 0; index < leaf_types.size(); ++index) {
+        for (size_t index = 0;
+             index < resolved.output_leaf_types.size(); ++index) {
             const int64_t id = AddValue(expr, ValueOrigin::kCallOutput,
-                                        static_cast<int64_t>(index), leaf_types[index]);
+                                        static_cast<int64_t>(index),
+                                        resolved.output_leaf_types[index]);
             output_ids.push_back(id);
             result.push_back(id);
         }
-        graph_.calls.push_back(CallInfo{expr, op->name, op->spec.lowering_kind,
-                                        argument_ids, input_ids, output_ids});
+        const std::string operator_name = resolved.spec.name;
+        const relay::OperatorLoweringKind lowering_kind =
+            resolved.spec.lowering_kind;
+        graph_.calls.push_back(CallInfo{
+            expr, std::move(resolved), operator_name, lowering_kind,
+            argument_ids, input_ids, output_ids});
         return result;
     }
 };

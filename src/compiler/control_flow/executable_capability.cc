@@ -3,15 +3,12 @@
  */
 
 #include "../internal/executable_capability.h"
+#include "../internal/resolved_relay_call.h"
 
-#include <any>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
-
-#include "kxc/relay/op.h"
-#include "kxc/relay/op_attr_types.h"
 
 namespace kxc::api::internal {
 namespace {
@@ -29,30 +26,6 @@ std::string NodeKind(const Expr& expr) {
     if (expr.As<LetNode>()) return "Let";
     if (expr.As<relay::OpNode>()) return "Op";
     return "Unknown";
-}
-
-bool IsOrdinaryOperator(relay::OperatorLoweringKind kind) {
-    return kind == relay::OperatorLoweringKind::kSingleTE ||
-           kind == relay::OperatorLoweringKind::kMultiTE;
-}
-
-size_t TensorLeafCount(const Type& type) {
-    if (type.As<TensorTypeNode>()) return 1;
-    if (const auto* tuple = type.As<TupleTypeNode>()) {
-        size_t count = 0;
-        for (const Type& field : tuple->fields) count += TensorLeafCount(field);
-        return count;
-    }
-    return 0;
-}
-
-bool IsFlatTensorTuple(const Type& type) {
-    const auto* tuple = type.As<TupleTypeNode>();
-    if (!tuple) return false;
-    for (const Type& field : tuple->fields) {
-        if (!field.As<TensorTypeNode>()) return false;
-    }
-    return true;
 }
 
 class CapabilityFailure final : public std::invalid_argument {
@@ -170,117 +143,19 @@ private:
 
     void VerifyCallContract(const Expr& expr, const CallNode* call,
                             const std::string& path) const {
-        const auto* op = call->op.As<relay::OpNode>();
-        if (!op || !op->has_spec) {
-            Fail(path, "Call", "registered_ordinary_op_call",
-                 "Call target is not a specified Op");
-        }
-        const relay::Op* registered = relay::Op::TryGet(op->name);
-        if (!registered || registered->get() != call->op.get()) {
-            Fail(path, "Call", "registered_ordinary_op_call",
-                 "Call target is not the registered Op instance");
-        }
+        (void)call;
         try {
-            relay::ValidateOperatorSpec(op->spec);
-        } catch (const std::exception& error) {
-            Fail(path, "Call", "registered_ordinary_op_call", error.what());
-        }
-        if (!IsOrdinaryOperator(op->spec.lowering_kind)) {
-            Fail(path, "Call", "registered_ordinary_op_call",
-                 "operator is not an ordinary static-dataflow operation");
-        }
-        if (op->spec.effect != relay::OperatorEffectKind::kPure ||
-            !op->spec.deterministic || op->spec.alias_contract != "none") {
-            Fail(path, "Call", "pure_deterministic_no_alias",
-                 "operator is not a pure deterministic non-aliasing kernel");
-        }
-        const size_t actual_arity = call->args.size();
-        if ((op->spec.input_arity.num_inputs >= 0 &&
-             actual_arity != static_cast<size_t>(op->spec.input_arity.num_inputs)) ||
-            (op->spec.input_arity.num_inputs < 0 &&
-             (actual_arity < static_cast<size_t>(op->spec.input_arity.min_inputs) ||
-              actual_arity > static_cast<size_t>(op->spec.input_arity.max_inputs)))) {
-            Fail(path, "Call", "operator_input_arity",
-                 "Call input arity differs from OperatorSpec");
-        }
-        if (call->attrs.defined()) {
-            if (op->spec.attrs_type_key.empty()) {
-                Fail(path, "Call", "operator_attrs_schema",
-                     "Call defines attrs outside its OperatorSpec schema");
-            }
-            const std::string actual(call->attrs.get()->GetTypeKey());
-            if (actual != op->spec.attrs_type_key &&
-                actual != op->spec.attrs_type_key + "Node") {
-                Fail(path, "Call", "operator_attrs_schema",
-                     "Call attrs type differs from OperatorSpec");
-            }
-        }
-        const auto relation = op->attrs.find(op->spec.type_relation_key);
-        const auto lowering = op->attrs.find(op->spec.lowering_key);
-        if (relation == op->attrs.end() || lowering == op->attrs.end()) {
-            Fail(path, "Call", "operator_implementation_binding",
-                 "OperatorSpec implementation binding is missing");
-        }
-        const auto* infer = std::any_cast<relay::FInferType>(&relation->second);
-        if (!infer || !*infer) {
-            Fail(path, "Call", "operator_implementation_binding",
-                 "type relation binding has the wrong type or is empty");
-        }
-        if (op->spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE) {
-            if (op->spec.lowering_key != "FRelayToTE") {
-                Fail(path, "Call", "operator_implementation_binding",
-                     "single-output lowering must use FRelayToTE");
-            }
-            const auto* lower = std::any_cast<relay::FRelayToTE>(&lowering->second);
-            if (!lower || !*lower) {
-                Fail(path, "Call", "operator_implementation_binding",
-                     "single-output lowering binding has the wrong type or is empty");
-            }
-        } else {
-            if (op->spec.lowering_key != "FRelayToTEMulti") {
-                Fail(path, "Call", "operator_implementation_binding",
-                     "multi-output lowering must use FRelayToTEMulti");
-            }
-            const auto* lower = std::any_cast<relay::FRelayToTEMulti>(&lowering->second);
-            if (!lower || !*lower) {
-                Fail(path, "Call", "operator_implementation_binding",
-                     "multi-output lowering binding has the wrong type or is empty");
-            }
-        }
-        if (!options_.require_checked_types) return;
-
-        const Type output_type = expr.checked_type();
-        const size_t output_leaves = TensorLeafCount(output_type);
-        if (op->spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE &&
-            !output_type.As<TensorTypeNode>()) {
-            Fail(path, "Call", "single_tensor_output",
-                 "single-output lowering requires TensorType");
-        }
-        if (op->spec.lowering_kind == relay::OperatorLoweringKind::kMultiTE &&
-            (!output_type.As<TupleTypeNode>() ||
-             (!options_.allow_nested_tuple_call_outputs && !IsFlatTensorTuple(output_type)))) {
-            Fail(path, "Call", "flat_multi_tensor_output",
-                 "static ValueGraph multi-output Calls require a flat tensor tuple");
-        }
-        if (output_leaves == 0 ||
-            (op->spec.output_arity >= 0 &&
-             static_cast<size_t>(op->spec.output_arity) != output_leaves)) {
-            Fail(path, "Call", "operator_output_arity",
-                 "Call output leaves differ from OperatorSpec");
-        }
-        Array<Type> input_types;
-        for (const Expr& argument : call->args) input_types.push_back(argument.checked_type());
-        const relay::Attrs attrs =
-            call->attrs.defined() ? relay::Attrs(call->attrs) : relay::Attrs();
-        Type inferred;
-        try {
-            inferred = (*infer)(attrs, input_types);
-        } catch (const std::exception& error) {
-            Fail(path, "Call", "operator_type_relation", error.what());
-        }
-        if (!TypeEqual(inferred, expr.checked_type())) {
-            Fail(path, "Call", "operator_type_relation",
-                 "Call checked_type is stale for OperatorSpec");
+            (void)ResolveRelayCall(
+                expr,
+                options_.allow_nested_tuple_call_outputs
+                    ? OperatorCapabilityPolicy::StructuredControl(
+                          options_.require_checked_types)
+                    : OperatorCapabilityPolicy::StaticDataflow(
+                          options_.require_checked_types),
+                path);
+        } catch (const RelayCallResolutionError& error) {
+            Fail(error.issue().path, "Call", error.issue().capability,
+                 error.issue().detail);
         }
     }
 

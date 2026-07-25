@@ -38,9 +38,8 @@ void AppendCanonicalField(std::string* canonical, const std::string& name,
 
 UnitSemanticKey BuildUnitSemanticKey(const CallInfo& call,
                                      const ValueGraph& graph) {
-    const auto* call_node = call.call.As<CallNode>();
-    const auto* op = call_node ? call_node->op.As<relay::OpNode>() : nullptr;
-    if (!call_node || !op) {
+    if (!call.call.As<CallNode>() ||
+        call.resolved.call.get() != call.call.get()) {
         throw std::invalid_argument(
             "Unit semantic identity requires an operator Call");
     }
@@ -48,7 +47,7 @@ UnitSemanticKey BuildUnitSemanticKey(const CallInfo& call,
     std::string canonical;
     AppendCanonicalField(&canonical, "kind", "unit-semantic-key-v1");
     AppendCanonicalField(&canonical, "operator",
-                         relay::SerializeOperatorSpec(op->spec));
+                         relay::SerializeOperatorSpec(call.resolved.spec));
 
     std::unordered_map<int64_t, size_t> boundary_index;
     for (size_t index = 0; index < call.input_value_ids.size(); ++index) {
@@ -85,8 +84,8 @@ UnitSemanticKey BuildUnitSemanticKey(const CallInfo& call,
     }
     AppendCanonicalField(
         &canonical, "attrs",
-        call_node->attrs.defined()
-            ? relay::SerializeAttrs(relay::Attrs(call_node->attrs))
+        call.resolved.attrs.defined()
+            ? relay::SerializeAttrs(call.resolved.attrs)
             : "<none>");
     return UnitSemanticKey(std::move(canonical));
 }

@@ -409,8 +409,9 @@ bool TestPrePartitionBoundaryCannotBeBypassed() {
                    [&] {
                        (void)api::internal::LowerGraph(function, Device::CPU());
                    },
-                   "CapabilityVerifier[pre_partition]"),
-               "direct per-unit lowering must run the pre-partition gate");
+                   "required capability=if"),
+               "direct per-unit lowering must run the shared executable "
+               "capability gate");
     return true;
 }
 
