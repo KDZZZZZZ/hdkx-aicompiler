@@ -36,31 +36,6 @@ const Target& ModuleTarget(const CompiledModule& module) {
     return node->target_;
 }
 
-Target CloneTarget(const Target& source) {
-    if (!source.defined() || !source.As<TargetNode>()) {
-        throw std::invalid_argument(
-            "adaptive compile request requires a valid Target snapshot");
-    }
-    const TargetNode* source_node = source.operator->();
-    auto* node = new TargetNode();
-    node->kind = source_node->kind;
-    node->device_type = source_node->device_type;
-    node->device_id = source_node->device_id;
-    node->attrs = source_node->attrs;
-    return Target(ObjectRef(node));
-}
-
-CompileConfig CloneCompileConfig(const CompileConfig& source) {
-    source.Validate();
-    auto* node = new CompileConfigNode();
-    node->opt_level = source->opt_level;
-    node->target = CloneTarget(source->target);
-    node->profile_options = source->profile_options;
-    CompileConfig snapshot{ObjectRef(node)};
-    snapshot.Validate();
-    return snapshot;
-}
-
 struct VerifiedGraphArtifacts final {
     std::vector<OrderedArtifactIdentity> identities;
 };
@@ -158,9 +133,10 @@ PlanVariantKey BuildSelectionPlanKey(
 ProductionCompileRequest::ProductionCompileRequest(
     Function graph, CompileConfig config, CompiledGraph baseline_graph,
     std::vector<std::int64_t> requested_unit_ids)
-    : graph_(std::move(graph)), config_(CloneCompileConfig(config)),
+    : graph_(std::move(graph)), config_(std::move(config)),
       baseline_graph_(std::move(baseline_graph)),
       requested_unit_ids_(std::move(requested_unit_ids)) {
+    config_.Validate();
     graph_semantic_key_ = Compiler::BuildGraphSemanticKey(graph_);
     const VerifiedGraphArtifacts baseline = VerifyGraphArtifacts(
         baseline_graph_, config_, graph_semantic_key_);
@@ -189,7 +165,7 @@ ProductionCompileRequest::ProductionCompileRequest(
 }
 
 const Function& ProductionCompileRequest::graph() const noexcept { return graph_; }
-CompileConfig ProductionCompileRequest::config() const { return CloneCompileConfig(config_); }
+CompileConfig ProductionCompileRequest::config() const { return config_; }
 const GraphSemanticKey& ProductionCompileRequest::graph_semantic_key() const noexcept { return graph_semantic_key_; }
 const ShapeProfileKey& ProductionCompileRequest::shape_profile_key() const noexcept { return shape_profile_key_; }
 const DispatchKey& ProductionCompileRequest::dispatch_key() const noexcept { return dispatch_key_; }
@@ -207,7 +183,6 @@ void ProductionCompileRequest::Validate() const {
         throw std::invalid_argument(
             "adaptive compile request has an undefined typed contract");
     }
-    config_.Validate();
     if (Compiler::BuildGraphSemanticKey(graph_) != graph_semantic_key_ ||
         shape_profile_key_.graph_semantic_key() != graph_semantic_key_) {
         throw std::invalid_argument(

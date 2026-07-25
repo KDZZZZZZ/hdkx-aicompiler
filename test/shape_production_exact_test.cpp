@@ -45,15 +45,14 @@ kxc::api::CompileConfig Config() {
     return kxc::api::CompileConfig::Create(kxc::BuildTarget(kxc::Device::CPU()));
 }
 
-std::pair<kxc::TargetNode*, kxc::api::CompileConfig> MutableConfig() {
+std::pair<kxc::TargetNode*, kxc::Target> MutableTargetSource() {
     const kxc::Target source = kxc::BuildTarget(kxc::Device::CPU());
     auto* node = new kxc::TargetNode();
     node->kind = source->kind;
     node->device_type = source->device_type;
     node->device_id = source->device_id;
     node->attrs = source->attrs;
-    return {node, kxc::api::CompileConfig::Create(
-                      kxc::Target(kxc::ObjectRef(node)))};
+    return {node, kxc::Target(kxc::ObjectRef(node))};
 }
 
 bool SameCounters(const shape_exact::ShapeExactPreparationCounters& left,
@@ -294,40 +293,50 @@ bool TestNegativesBeforeCache() {
     CHECK(Throws([&] { (void)ProductionExactShapeAdapter::AssembleExactPlan(left, foreign); }),
           "foreign exact oracle must fail before compiler/cache work");
 
-    auto [target_node, mutable_config] = MutableConfig();
+    auto [target_node, target_source] = MutableTargetSource();
+    const kxc::api::CompileConfig config =
+        kxc::api::CompileConfig::Create(target_source);
     const auto frozen = ProductionExactShapeAdapter::PrepareGraphTemplate(
-        TwoUnitGraph(), mutable_config);
+        TwoUnitGraph(), config);
     const std::string frozen_key =
         frozen.graph_template().key().canonical_bytes();
     const kxc::api::UnitSemanticKey target_test_semantic(
         "shape-production-target-test");
     const kxc::api::PrimitiveArtifactKey artifact_before =
         kxc::api::internal::BuildPrimitiveArtifactKey(
-            target_test_semantic, mutable_config->target, "pipeline-test",
+            target_test_semantic, config->target, "pipeline-test",
             "schedule-test", "backend-test");
     ++target_node->attrs.max_shared_memory_per_block;
+    const kxc::api::PrimitiveArtifactKey artifact_after_source_mutation =
+        kxc::api::internal::BuildPrimitiveArtifactKey(
+            target_test_semantic, config->target, "pipeline-test",
+            "schedule-test", "backend-test");
+    CHECK(frozen.graph_template().key().canonical_bytes() == frozen_key &&
+              artifact_before == artifact_after_source_mutation,
+          "CompileConfig target snapshot must isolate prepared identity and artifacts");
+    const kxc::api::CompileConfig changed_config =
+        kxc::api::CompileConfig::Create(target_source);
     const kxc::api::PrimitiveArtifactKey artifact_changed =
         kxc::api::internal::BuildPrimitiveArtifactKey(
-            target_test_semantic, mutable_config->target, "pipeline-test",
+            target_test_semantic, changed_config->target, "pipeline-test",
             "schedule-test", "backend-test");
-    CHECK(frozen.graph_template().key().canonical_bytes() == frozen_key,
-          "prepared template must deep-freeze its target snapshot");
-    CHECK(artifact_before != artifact_changed,
-          "scheduling-relevant target changes must split production artifact identity");
     const auto changed = ProductionExactShapeAdapter::PrepareGraphTemplate(
-        TwoUnitGraph(), mutable_config);
-    CHECK(frozen.graph_template().key() == changed.graph_template().key(),
-          "target capability must not enter graph semantic identity");
+        TwoUnitGraph(), changed_config);
+    CHECK(artifact_before != artifact_changed &&
+              frozen.graph_template().key() == changed.graph_template().key(),
+          "a new config must capture scheduling target changes without changing graph semantics");
     const std::string changed_key =
         changed.graph_template().key().canonical_bytes();
     target_node->attrs.available_global_memory ^= 1;
+    const kxc::api::CompileConfig volatile_config =
+        kxc::api::CompileConfig::Create(target_source);
     const kxc::api::PrimitiveArtifactKey artifact_volatile_only =
         kxc::api::internal::BuildPrimitiveArtifactKey(
-            target_test_semantic, mutable_config->target, "pipeline-test",
+            target_test_semantic, volatile_config->target, "pipeline-test",
             "schedule-test", "backend-test");
     const auto volatile_only =
         ProductionExactShapeAdapter::PrepareGraphTemplate(
-            TwoUnitGraph(), mutable_config);
+            TwoUnitGraph(), volatile_config);
     CHECK(volatile_only.graph_template().key().canonical_bytes() == changed_key &&
               artifact_changed == artifact_volatile_only,
           "volatile available memory must not split codegen identity");

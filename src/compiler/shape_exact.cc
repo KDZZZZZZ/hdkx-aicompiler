@@ -874,15 +874,12 @@ PreparedGraphTemplate ProductionExactShapeAdapter::PrepareGraphTemplate(
     RequireEnabled();
     const Function relay_snapshot = RelaySnapshotCloner().Clone(function);
     config.Validate();
-    CompileConfig clone = CompileConfig::Create(
-        internal::CloneTargetSnapshot(config->target), config->opt_level);
-    clone->profile_options = config->profile_options;
     ShapeExactPreparationCounters counters;
     internal::CompilerExecutionContract contract =
-        internal::ResolveCompilerExecutionContract(clone);
+        internal::ResolveCompilerExecutionContract(config);
     ++counters.execution_contract_resolutions;
     internal::PreparedCompilerGraph prepared = internal::PrepareCompilerGraph(
-        relay_snapshot, clone, contract);
+        relay_snapshot, config, contract);
     // Capability/registry identity checks have completed.  Detach every
     // lowering descriptor before the prepared graph becomes observable so
     // Assemble never rereads a caller-accessible registry OpNode.
@@ -895,7 +892,7 @@ PreparedGraphTemplate ProductionExactShapeAdapter::PrepareGraphTemplate(
     shape::GraphTemplate graph = BuildTemplate(prepared);
     return PreparedGraphTemplate(
         std::make_shared<PreparedGraphTemplate::Impl>(
-            std::move(clone), std::move(contract), std::move(prepared),
+            std::move(config), std::move(contract), std::move(prepared),
             std::move(graph), counters));
 }
 

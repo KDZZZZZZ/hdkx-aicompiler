@@ -254,9 +254,8 @@ bool TestCompileResNet18ToLLVM() {
         KXC_ONNX_IMPORT_JSON_PATH, KXC_ONNX_IMPORT_PARAMS_PATH);
 
     kxc::Function prepared = PrepareJitRelayFunction(imported.function);
-    auto config = kxc::api::CompileConfig::Create(
-        kxc::BuildTarget(kxc::Device::CPU()), 1);
-    config->opt_level = ResNet18OptLevel();
+    const auto config = kxc::api::CompileConfig::Create(
+        kxc::BuildTarget(kxc::Device::CPU()), ResNet18OptLevel());
     auto compiled = kxc::api::Compiler::Compile(prepared, config);
     TEST_CHECK(compiled.module().IsReady(),
                "ResNet18 should compile to a ready LLVM module");
@@ -282,9 +281,8 @@ bool TestRunCompiledResNet18LLVM() {
         KXC_ONNX_IMPORT_JSON_PATH, KXC_ONNX_IMPORT_PARAMS_PATH);
     kxc::Function prepared = PrepareJitRelayFunction(imported.function);
 
-    auto config = kxc::api::CompileConfig::Create(
-        kxc::BuildTarget(kxc::Device::CPU()), 1);
-    config->opt_level = ResNet18OptLevel();
+    const auto config = kxc::api::CompileConfig::Create(
+        kxc::BuildTarget(kxc::Device::CPU()), ResNet18OptLevel());
     auto compiled = kxc::api::Compiler::Compile(prepared, config);
     TEST_CHECK(compiled.module().IsReady(), "ResNet18 should compile before execution");
     const kxc::Map<kxc::String, kxc::runtime::NDArray> constants =

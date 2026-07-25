@@ -212,8 +212,6 @@ bool TestRequestSnapshotAndExactIdentity() {
     const Function graph = MakeFunction();
     api::CompileConfig original = api::CompileConfig::Create(
         BuildTarget(Device::CPU()), 1);
-    original->profile_options.enabled = false;
-    original->profile_options.bundle_dir = "before";
     const Target original_target = original->target;
     const std::string frozen_target =
         api::internal::BuildTargetCapabilityFingerprint(original_target);
@@ -221,14 +219,9 @@ bool TestRequestSnapshotAndExactIdentity() {
     const ProductionRequest request(
         graph, original, MakeGraph(graph_key, original), {0});
 
-    original->opt_level = 3;
-    original->profile_options.enabled = true;
-    original->profile_options.bundle_dir = "after";
     auto* mutable_target = const_cast<TargetNode*>(original_target.operator->());
     mutable_target->attrs.arch += "-mutated";
     TEST_CHECK(request.config()->opt_level == 1 &&
-                   !request.config()->profile_options.enabled &&
-                   request.config()->profile_options.bundle_dir == "before" &&
                    api::internal::BuildTargetCapabilityFingerprint(
                        request.config()->target) == frozen_target &&
                    request.baseline_graph().defined() &&

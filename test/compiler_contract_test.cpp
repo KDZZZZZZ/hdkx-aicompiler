@@ -38,6 +38,10 @@ struct HasPublicCreate<T, std::void_t<decltype(&T::Create)>> : std::true_type {}
 
 static_assert(!HasPublicCreate<kxc::api::CompiledGraph>::value,
               "CompiledGraph must not expose a public factory");
+static_assert(std::is_same_v<
+                  decltype(std::declval<kxc::api::CompileConfig&>().operator->()),
+                  const kxc::api::CompileConfigNode*>,
+              "CompileConfig access must be read-only");
 
 #define TEST_CHECK(condition, message)                                           \
     do {                                                                          \
@@ -182,9 +186,31 @@ kxc::Target MakeContractTarget(const std::string& kind, kxc::DeviceTypeCode devi
 bool TestCompileConfigValidation() {
     using namespace kxc;
 
-    api::CompileConfig valid = api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
-    TEST_CHECK(valid->opt_level == 2 && valid->target->kind == "llvm",
-               "valid CPU CompileConfig fields mismatch");
+    auto* source_node = new TargetNode();
+    source_node->kind = "llvm";
+    source_node->device_type = kCPU;
+    source_node->device_id = 0;
+    source_node->attrs.exists = 1;
+    source_node->attrs.device_name = "config-source";
+    source_node->attrs.arch = "config-before";
+    source_node->attrs.max_threads_per_block = 1;
+    source_node->attrs.warp_size = 1;
+    source_node->attrs.multi_processor_count = 1;
+    const Target source{ObjectRef(source_node)};
+    profiling::ProfileOptions profile;
+    profile.enabled = true;
+    profile.bundle_dir = "bundle";
+    const api::CompileConfig valid =
+        api::CompileConfig::Create(source, 2, profile);
+    TEST_CHECK(valid->opt_level == 2 && valid->target->kind == "llvm" &&
+                   valid->profile_options.enabled &&
+                   valid->profile_options.bundle_dir == "bundle",
+               "valid CPU CompileConfig fields or profile options mismatch");
+    TEST_CHECK(valid->target.get() != source.get(),
+               "CompileConfig must own a target snapshot");
+    source_node->attrs.arch = "config-after";
+    TEST_CHECK(valid->target->attrs.arch == "config-before",
+               "mutating the source Target must not alter CompileConfig");
     valid.Validate();
 
     TEST_CHECK(Throws([] {
@@ -206,6 +232,10 @@ bool TestCompileConfigValidation() {
                }),
                "wrong ObjectRef type should fail");
     TEST_CHECK(Throws([] {
+                   api::CompileConfig invalid(ObjectRef(new api::CompileConfigNode()));
+               }),
+               "invalid CompileConfig ObjectRef restoration should fail");
+    TEST_CHECK(Throws([] {
                    api::CompileConfig::Create(
                        MakeContractTarget("cuda", kCPU, 0, true), 1);
                }),
@@ -221,9 +251,6 @@ bool TestCompileConfigValidation() {
                }),
                "unavailable target should fail");
 
-    valid->opt_level = 9;
-    TEST_CHECK(Throws([&] { valid.Validate(); }),
-               "mutated invalid opt_level should fail revalidation");
     return true;
 }
 

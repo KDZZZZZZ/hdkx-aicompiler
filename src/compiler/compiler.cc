@@ -370,19 +370,6 @@ CompiledGraph CompilePipeline(
 
 }  // namespace
 
-Target internal::CloneTargetSnapshot(const Target& target) {
-    const auto* source = target.As<TargetNode>();
-    if (!source) {
-        throw std::invalid_argument(
-            "CloneTargetSnapshot requires a defined TargetNode");
-    }
-    auto* copy = new TargetNode();
-    copy->kind = source->kind;
-    copy->device_type = source->device_type;
-    copy->device_id = source->device_id;
-    copy->attrs = source->attrs;
-    return Target(ObjectRef(copy));
-}
 
 std::string internal::CanonicalTargetSnapshot(const Target& target) {
     const auto* node = target.As<TargetNode>();
@@ -440,7 +427,6 @@ internal::CompilerExecutionContract
 internal::ResolveCompilerExecutionContract(
     const CompileConfig& config,
     const Array<String>& required_relay_control_capabilities) {
-    config.Validate();
     CompilerExecutionContract contract;
     contract.relay_pipeline = ResolveRelayPipeline(
         config, required_relay_control_capabilities);
@@ -470,7 +456,6 @@ internal::ResolveCompilerExecutionContract(
 internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
     Function function, CompileConfig config,
     const CompilerExecutionContract& contract) {
-    config.Validate();
     const GraphSemanticKey graph_semantic_key =
         Compiler::BuildGraphSemanticKey(function);
     auto profile_context = MaybeCreateProfileContext(config);
@@ -504,8 +489,7 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
             "PrepareCompilerGraph execution contract does not match "
             "prepared Relay program");
     }
-    size_t capability_boundary_checks =
-        prepared.capability_boundary_checks();
+    size_t capability_boundary_checks = 0;
     size_t relay_graph_pipelines = 1;
     const Target target = prepared.target();
     const Device device(target->device_type, target->device_id);

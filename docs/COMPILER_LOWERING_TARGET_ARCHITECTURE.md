@@ -100,6 +100,7 @@ PrepareRelayProgram
 - `Compiler::CompileControlFlowExact` 在 capability 完全对齐前继续作为显式、默认关闭的兼容入口，但它只能设置 capability policy 并调用共同 preparation/planning 实现，不能形成第二套 Relay front-end。
 - 调用方不得提供或修改“程序是静态还是控制流”的事实；topology kind 只能由 Compiler 对规范化后 Relay 的分析结果决定。
 - `CompiledModule`、`ExecutablePlan`、`ControlExecutionPlan` 与 artifact cache 的不可变性不能倒退。
+- `CompileConfig::Create(target, opt_level, profile_options)` 复制 Target capability snapshot、一次应用 profiling 环境覆盖并验证；创建后只提供 const 访问。Compiler、Shape 和 Adaptive 传递同一不可变句柄，不在内部 clone 或重复验证。
 - 诊断字符串不能成为 ABI、artifact identity 或 binding authority。
 
 ### 2.5 安全与资源边界

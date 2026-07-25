@@ -35,17 +35,15 @@ public:
  */
 class CompileConfig : public ObjectRef {
 public:
-    /*! \brief 从通用对象引用恢复配置，并验证运行时节点类型。 */
+    /*! \brief 从通用对象引用恢复配置，并验证节点类型和全部字段。 */
     explicit CompileConfig(const ObjectRef& ref);
-    /*! \brief 创建配置、应用 profiling 环境覆盖并立即验证全部字段。 */
-    static CompileConfig Create(Target target, int opt_level = 2);
+    /*! \brief 创建 target 快照、应用一次 profiling 环境覆盖并立即验证全部字段。 */
+    static CompileConfig Create(
+        Target target, int opt_level = 2,
+        profiling::ProfileOptions profile_options = {});
     /*! \brief 校验优化等级以及 Target kind、设备身份和能力的一致性。 */
     void Validate() const;
 
-    /*! \brief 返回可修改节点，供创建后调整 profiling 选项。 */
-    CompileConfigNode* operator->() {
-        return const_cast<CompileConfigNode*>(As<CompileConfigNode>());
-    }
     /*! \brief 返回经过类型检查的只读配置节点。 */
     const CompileConfigNode* operator->() const {
         return As<CompileConfigNode>();

@@ -212,7 +212,6 @@ PreparedRelayProgram::execution_contract() const noexcept {
 PreparedRelayProgram PrepareRelayProgram(
     Function function, const CompileConfig& config,
     const ControlFlowPolicy& policy) {
-    config.Validate();
     if (!function.defined()) {
         throw std::invalid_argument(
             "PrepareRelayProgram requires a defined Function");
@@ -236,7 +235,7 @@ PreparedRelayProgram PrepareRelayProgram(
 
     return PreparedRelayProgram(
         std::move(typed_anf), std::move(residual_profile),
-        CloneTargetSnapshot(config->target), std::move(contract));
+        config->target, std::move(contract));
 }
 
 }  // namespace kxc::api::internal
