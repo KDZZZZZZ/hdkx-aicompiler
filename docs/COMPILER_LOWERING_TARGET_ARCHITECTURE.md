@@ -35,7 +35,7 @@ Relay 控制结构
 
 ```text
 PrepareRelayProgram
-  -> PreparedRelayProgram / compiler-derived residual features
+  -> PreparedRelayProgram / compiler-derived residual profile
   -> PlanRelayProgram
        -> ResolvedRelayCall
        -> LogicalValueContract
@@ -156,7 +156,7 @@ CompileConfig / Target --->| PrepareRelayProgram          |
                            | - typed ANF                  |
                            | - constant-control simplify  |
                            | - one capability engine      |
-                           | - residual feature analysis  |
+                           | - residual profile analysis  |
                            +---------------+--------------+
                                            |
                                  PreparedRelayProgram
@@ -166,8 +166,8 @@ CompileConfig / Target --->| PrepareRelayProgram          |
                            | one compile-time dispatch    |
                            +------+----------------+------+
                                   |                |
-                     no residual  |                | residual
-                     If / While   |                | If / While
+                     no required  |                | required
+                     control cap  |                | control cap
                      +------------v------+   +-----v----------------+
                      | Dataflow topology |   | Structured control  |
                      | builder           |   | topology builder    |
@@ -204,7 +204,7 @@ CompileConfig / Target --->| PrepareRelayProgram          |
 |---|---|---|---|
 | Relay | IR、OperatorSpec、attrs、type relation、lowering binding 注册 | support、target type vocabulary | Compiler cache、Runtime session |
 | Compiler analysis | structural feature scan、feature-safe pipeline、typed ANF、Call 合同解析、logical tensor contract | Relay、Pass、Target | backend handle、Runtime executor |
-| Planner facade | 根据 residual features 一次性选择 topology builder | analysis contract | Relay 重写、TE/TIR、Runtime execution |
+| Planner facade | 根据 residual profile 一次性选择 topology builder | analysis contract | Relay 重写、TE/TIR、Runtime execution |
 | Topology builder | value routing、partition、region、branch、loop、Phi、依赖 | analysis contract、identity | TE/TIR 实现细节、cache mutation |
 | Primitive lowering | 一个 `PrimitiveUnit` 到 TE/TIR | resolved call、logical values、TE/TIR | graph/control topology |
 | Primitive compiler | TIR pass、Kernel ABI、artifact key、cache、backend | lowering、identity、codegen | Relay traversal、control execution |
@@ -233,23 +233,31 @@ Runtime Executor 不得反向依赖以上 Compiler 层。
 ### 6.1 `PreparedRelayProgram`
 
 ```cpp
-enum class ControlFlowPolicy {
-    kReject,
-    kAllowStaticExactControlFlow,
+enum class RelayControlCapability : std::size_t {
+    kConditionalBranch,
+    kBoundedPreTestLoop,
+    kCount,
 };
 
-struct RelayProgramFeatures {
-    bool has_if{false};
-    bool has_while{false};
+using RelayControlCapabilitySet =
+    std::bitset<static_cast<std::size_t>(
+        RelayControlCapability::kCount)>;
 
-    bool has_residual_control_flow() const noexcept {
-        return has_if || has_while;
+struct ControlFlowPolicy {
+    RelayControlCapabilitySet allowed_capabilities;
+};
+
+struct RelayProgramProfile {
+    RelayControlCapabilitySet required_control_capabilities;
+
+    bool requires_control_topology() const noexcept {
+        return required_control_capabilities.any();
     }
 };
 
 struct PreparedRelayProgram {
     Function typed_anf;
-    RelayProgramFeatures residual_features;
+    RelayProgramProfile residual_profile;
     Target target;
     CompilerExecutionContract execution_contract;
 };
@@ -266,18 +274,22 @@ PreparedRelayProgram PrepareRelayProgram(
 - 根据输入结构和 pass 的显式 capability declaration 解析 feature-safe pipeline。
 - 建立 typed ANF。
 - 折叠编译期可判定的 `If`，并按有界成本策略选择性展开固定循环。
-- 在规范化和控制简化后重新计算 `residual_features`。
+- 在规范化和控制简化后重新计算 `residual_profile`。
 - 使用 `CompileConfig` 中的 `ControlFlowPolicy` 调用唯一 capability engine。
 - 不分配 runtime storage，不创建 TIR，不访问 primitive cache。
 
 约束：
 
-- `ControlFlowPolicy` 是“允许哪些能力”的 fail-closed 配置，不是程序类别，也不参与 topology 事实判定。
-- `RelayProgramFeatures` 只能由 Compiler 生成；调用方不得构造或覆盖。
-- `PreparedRelayProgram` 与其中的 features 是 immutable Compiler-internal result；示意代码省略了 private construction/accessor 细节。
+- `ControlFlowPolicy` 是“允许哪些能力”的 fail-closed capability set，不是程序类别，也不参与 topology 事实判定；空集合等价于拒绝全部控制流。
+- capability 校验只做集合包含关系：`required_control_capabilities` 必须是 `allowed_capabilities` 的子集。
+- `RelayProgramProfile` 只能由 Compiler 生成；调用方不得构造或覆盖。
+- `PreparedRelayProgram` 与其中的 profile 是 immutable Compiler-internal result；示意代码省略了 private construction/accessor 细节。
 - 对含控制结构的输入，只能运行明确声明为 control-safe 的 graph passes。请求了未知或 control-unsafe pass 时必须拒绝，不得默认假定可以跨 `If`/`While` 改写。
-- `kAllowStaticExactControlFlow` 不强制使用控制拓扑。控制结构被完全消除后，程序仍选择静态 plan。
-- profile 只记录规范化后仍影响 topology 的最小事实，不复制 dtype、shape、device、identity 或 ABI。
+- policy 允许某项 capability 不等于程序必须使用它。控制结构被完全消除后，`required_control_capabilities` 为空，程序仍选择静态 plan。
+- planner 路由只读取 `requires_control_topology()`；具体 capability bit 只供 capability 校验、lowering 选择、诊断与可观测性使用。
+- `requires_control_topology()` 必须从 capability set 派生，不得再保存第二个布尔字段。
+- profile 只记录规范化后仍影响 topology 的最小控制能力事实，不复制 dtype、shape、device、identity 或 ABI。
+- 初始 capability vocabulary 只有 conditional branch 与 bounded pre-test loop；这是当前 native 支持面，不是 `RelayProgramProfile` 的封闭分类。未来增加 `Match`、`For`、函数控制转移或其他结构时，按需要扩展 capability vocabulary 和对应 lowering，不修改 planning contract。
 
 ### 6.2 `ResolvedRelayCall`
 
@@ -418,10 +430,10 @@ PreparedProgramPlan PlanRelayProgram(
 这是 analysis 之后唯一允许选择 topology 的入口：
 
 ```text
-residual_features.has_residual_control_flow() == false
+residual_profile.requires_control_topology() == false
   -> BuildDataflowTopology
 
-residual_features.has_residual_control_flow() == true
+residual_profile.requires_control_topology() == true
   -> BuildStructuredControlTopology
 ```
 
@@ -431,13 +443,13 @@ residual_features.has_residual_control_flow() == true
 
 `PreparedProgramPlan` 是 Compiler internal typestate，必须在 plan binding 阶段被消费。它不能作为每个 task 的 runtime variant，也不能让 `std::visit` 或 plan-kind 分支进入 kernel launch loop。
 
-该 facade 不需要 virtual interface、heap boxing 或通用 visitor。目标实现是一个普通函数、一个基于两个布尔 feature bit 的编译期路径分支，以及 move-only/不可变 plan 结果。feature analysis 最多执行 graph pass 前后的两次线性只读遍历，不得因此重复 InferType、ANF、OperatorSpec 解析或 tensor leaf 展开。
+该 facade 不需要 virtual interface、heap boxing 或通用 visitor。目标实现是一个普通函数、一次 `bitset::any()` 编译期路径分支，以及 move-only/不可变 plan 结果。profile analysis 最多执行 graph pass 前后的两次线性只读遍历，不得因此重复 InferType、ANF、OperatorSpec 解析或 tensor leaf 展开。
 
 ### 7.2 Dataflow topology builder
 
 保留当前 `ValueGraph -> PartitionedGraph` 的基本职责：
 
-- 接收 `residual_features.has_residual_control_flow() == false` 的 `PreparedRelayProgram`。
+- 接收 `residual_profile.requires_control_topology() == false` 的 `PreparedRelayProgram`。
 - 建立确定性的 ordinary value routing。
 - 为每个 ordinary Call 生成一个 `PrimitiveUnit`。
 - 生成有序 `KernelCall` 拓扑。
@@ -494,7 +506,7 @@ residual_features.has_residual_control_flow() == true
 
 ### 7.5 静态零控制开销不变量
 
-当 `residual_features.has_residual_control_flow() == false` 时，必须同时满足：
+当 `residual_profile.requires_control_topology() == false` 时，必须同时满足：
 
 - 不构造 Region、Branch、Loop、Phi 或 loop-carried state。
 - 不构造只有 entry Region 的退化 `ControlExecutionPlan`。
@@ -556,7 +568,7 @@ public:
 约束：
 
 - 两个入口必须调用同一 `PrepareRelayProgram`、`ResolveRelayCall` 和 `PlanRelayProgram`。
-- `CompileControlFlowExact` 只能施加 `ControlFlowPolicy::kAllowStaticExactControlFlow` 和兼容返回类型约束，不能把 `RelayProgramMode` 传入内部实现。
+- `CompileControlFlowExact` 只能提供当前 static-exact control capability set 和兼容返回类型约束，不能把 `RelayProgramMode` 传入内部实现。
 - `Compiler::Compile` 的默认 policy 继续拒绝尚未正式开放的 residual control flow。
 - 兼容入口不得迫使无残留控制结构的程序使用 `ControlRuntimeSession`。在统一 immutable compiled bundle 完成前，它应在 API 边界转发到静态入口或明确拒绝不符合其兼容返回类型的调用。
 - 最终单一 `Compiler::Compile -> CompiledProgram` facade 属于 immutable compiled bundle 收口；无论该 API 何时落地，本文件定义的内部单 preparation/单 planning 入口不得等待它。
@@ -657,10 +669,10 @@ include/kxc/compiler/lowering/relay_to_tir.h
 ### 阶段 1：统一程序 preparation 与 topology 选择
 
 - 删除 `RelayProgramMode` 输入。
-- 引入 compiler-owned `RelayProgramFeatures` 与 capability-only `ControlFlowPolicy`。
+- 引入 compiler-owned `RelayProgramProfile`、可扩展 `RelayControlCapabilitySet` 与 capability-only `ControlFlowPolicy`。
 - 建立 `PrepareRelayProgram` 与 `PlanRelayProgram` 唯一入口。
 - pass registry 为 graph pass 声明 control-safety capability；pipeline resolver 根据 structural pre-scan fail closed。
-- 在 constant-control simplification 后重新计算 residual features。
+- 在 constant-control simplification 后重新计算 residual profile。
 - 验收：无残留控制结构时只生成 `PreparedStaticPlan`，Runtime hot path 不出现 control task dispatch。
 
 ### 阶段 2：统一 Operator Call 合同
@@ -710,9 +722,9 @@ include/kxc/compiler/lowering/relay_to_tir.h
 |---|---|---|
 | stale checked type | `ResolveRelayCall` | 在 planner 前拒绝，报告 Relay locator |
 | attrs 或 arity 不匹配 | `ResolveRelayCall` | fail closed，不进入 unit 生成 |
-| policy 不允许 residual If/While | `PrepareRelayProgram` capability policy | 报告所需 capability，不伪装成另一程序类别 |
+| policy 未覆盖 residual required capabilities | `PrepareRelayProgram` capability policy | 报告缺少的 capability，不伪装成另一程序类别 |
 | control-unsafe graph pass | pipeline resolver | 配置阶段拒绝 |
-| residual feature 与选择的 plan kind 不一致 | `PlanRelayProgram` | 构造 plan 前拒绝，视为 Compiler invariant violation |
+| residual profile 与选择的 plan kind 不一致 | `PlanRelayProgram` | 构造 plan 前拒绝，视为 Compiler invariant violation |
 | value placement 冲突 | planner | 要求显式 copy task 或拒绝 |
 | primitive ABI 与 task value 顺序不一致 | plan binder | 绑定前拒绝 |
 | artifact cache 编译失败 | `CompilePrimitiveUnits` | 保留分类失败状态，不发布半成品 |
@@ -726,7 +738,7 @@ include/kxc/compiler/lowering/relay_to_tir.h
 
 ```text
 graph_semantic_key
-relay_program_features
+required_control_capabilities
 selected_topology_kind
 control_flow_policy
 region_id
@@ -742,7 +754,7 @@ cache_hit
 约束：
 
 - `region_id`、`task_id`、`unit_id` 是一次 plan 内的 locator，不是跨图 semantic identity。
-- `relay_program_features` 与 `selected_topology_kind` 由 Compiler 生成；`control_flow_policy` 只记录 capability 配置，三者不得互相冒充。
+- `required_control_capabilities` 由 Compiler profile 生成；`selected_topology_kind` 从最终 plan 派生；`control_flow_policy` 只记录允许的 capability 配置。三者都用于诊断，不是可互相覆盖的权威输入。
 - `entry_symbol` 是 module lookup key，不是 mathematical identity。
 - profiling 可以消费 canonical identity digest，但不能拥有 identity hash 算法。
 
@@ -751,8 +763,8 @@ cache_hit
 | 层 | 必须验证 |
 |---|---|
 | Relay Call resolver | fixed/variadic arity、attrs type、type relation、single/multi lowering、effect/alias policy |
-| Program preparation | structural pre-scan、control-safe pass gate、constant If folding、bounded unroll policy、residual feature recomputation |
-| Planning facade | dataflow-only 选择 static、residual If/While 选择 control、选择确定性、plan kind/profile 一致性 |
+| Program preparation | structural pre-scan、control-safe pass gate、constant If folding、bounded unroll policy、residual profile recomputation |
+| Planning facade | empty required-control set 选择 static、non-empty set 选择 control、选择确定性、plan kind/profile 一致性 |
 | Logical values | parameter、constant、tuple、nested tuple、duplicate argument、placement |
 | Dataflow topology builder | stable ids、ordered units、multi-output、constant ordering、plan determinism |
 | Structured-control topology builder | If/Phi、bounded While、loop-carried values、captures、live-in/out、dependency determinism |
@@ -811,7 +823,7 @@ check_relay_op_contract
 
 **状态：** Proposed
 
-**决策：** 删除调用方提供的 `RelayProgramMode`。建立单一 `PreparedRelayProgram`、`ResolvedRelayCall` 和 `LogicalValueContract`；Compiler 在控制简化后生成 residual features，并通过唯一 `PlanRelayProgram` 入口一次性选择 dataflow 或 structured-control topology builder。
+**决策：** 删除调用方提供的 `RelayProgramMode`。建立单一 `PreparedRelayProgram`、`ResolvedRelayCall` 和 `LogicalValueContract`；Compiler 在控制简化后生成包含可扩展 required-control capability set 的 residual profile，并通过唯一 `PlanRelayProgram` 入口一次性选择 dataflow 或 structured-control topology builder。是否需要控制 topology 从 capability set 的 `any()` 派生，不保存第二份布尔权威。
 
 **正面影响：**
 
@@ -823,7 +835,7 @@ check_relay_op_contract
 **负面影响：**
 
 - pass registry 必须声明 graph pass 是否能安全处理结构化控制。
-- constant-control simplification 后必须重新分析 residual features。
+- constant-control simplification 后必须重新分析 residual profile。
 - planning facade 与两个内部 builder 的不变量都需要测试。
 
 **拒绝的替代方案：**
@@ -895,7 +907,7 @@ check_relay_op_contract
 | 一次性重写过大 | 回归难定位 | 按第 11 节分阶段，每阶段保持 green |
 | common analysis 变成巨型万能层 | 新的耦合中心 | 只提供 Call、value、policy 数据，不生成任何 topology |
 | control-safe pass 定义不足 | 控制语义被错误改写 | 默认拒绝，逐个 pass 声明并测试 |
-| feature 分析时机错误 | 已消除的控制仍进入 control executor，或 residual control 被误判为 static | graph pass 前做 structural pre-scan，控制简化后重新计算 residual features，plan 构造时复核 |
+| profile 分析时机错误 | 已消除的控制仍进入 control executor，或 residual control 被误判为 static | graph pass 前做 structural pre-scan，控制简化后重新计算 residual profile，plan 构造时复核 |
 | 统一 facade 把分支下沉到 Runtime | 静态 kernel loop 增加 dispatch | 只允许 `PlanRelayProgram` 做一次编译期选择；增加 static fast-path 结构测试与基准 |
 | 固定循环一律展开 | 编译时间和代码尺寸膨胀 | 使用显式、确定性的 bounded unroll policy；未展开循环继续走 structured-control topology |
 | identity 在迁移中变化 | cache miss 或错误复用 | 增加跨路径 canonical bytes golden tests |
@@ -909,8 +921,9 @@ check_relay_op_contract
 
 - [ ] `Compiler::Compile` 与 `CompileControlFlowExact` 共享 `PrepareRelayProgram`。
 - [ ] Compiler internal 不存在调用方可设置的 `RelayProgramMode`。
-- [ ] `RelayProgramFeatures` 在控制简化后由 Compiler 重新计算，并由唯一 `PlanRelayProgram` 消费。
-- [ ] 无残留 `If`/`While` 的程序只生成静态 plan，不构造退化 control Region，也不进入 `ControlRuntimeSession`。
+- [ ] `RelayProgramProfile` 在控制简化后由 Compiler 重新计算，并由唯一 `PlanRelayProgram` 消费。
+- [ ] topology 选择只由 `required_control_capabilities.any()` 派生，不存在第二个可漂移布尔字段。
+- [ ] `required_control_capabilities` 为空的程序只生成静态 plan，不构造退化 control Region，也不进入 `ControlRuntimeSession`。
 - [ ] 静态 Runtime kernel loop 不包含 plan variant、control predicate 或 task-kind dispatch。
 - [ ] Compiler 内只有一个 `ResolvedRelayCall` 合同解析实现。
 - [ ] tensor leaf 和 logical tensor contract 只有一个权威实现。
