@@ -573,9 +573,11 @@ if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
 else()
   add_library(kxc_shape_test_obj OBJECT src/shape/shape.cc)
   kxc_configure_module_obj(kxc_shape_test_obj)
-  add_library(kxc_experimental_identity_test_obj OBJECT
-    src/compiler/experimental_identity.cc)
-  kxc_configure_module_obj(kxc_experimental_identity_test_obj)
+  if(NOT KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
+    add_library(kxc_experimental_identity_test_obj OBJECT
+      src/compiler/experimental_identity.cc)
+    kxc_configure_module_obj(kxc_experimental_identity_test_obj)
+  endif()
   add_library(kxc_shape_experimental_test_obj OBJECT
     src/compiler/shape_exact.cc
     src/compiler/shape_specialization.cc
@@ -782,10 +784,15 @@ kxc_add_runtime_exe(shape_specialization_test
 if(TARGET kxc_shape_experimental_test_obj)
   target_sources(shape_specialization_test PRIVATE
     $<TARGET_OBJECTS:kxc_shape_test_obj>
-    $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>
     $<TARGET_OBJECTS:kxc_shape_experimental_test_obj>)
   add_dependencies(shape_specialization_test kxc_shape_test_obj
-    kxc_experimental_identity_test_obj kxc_shape_experimental_test_obj)
+    kxc_shape_experimental_test_obj)
+  if(TARGET kxc_experimental_identity_test_obj)
+    target_sources(shape_specialization_test PRIVATE
+      $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>)
+    add_dependencies(shape_specialization_test
+      kxc_experimental_identity_test_obj)
+  endif()
 endif()
 add_custom_target(run_shape_specialization_test
   COMMAND "$<TARGET_FILE:shape_specialization_test>"
@@ -889,10 +896,15 @@ if(KXC_BUILD_PASS_TESTS)
         restricted_symbolic_shape_test)
       target_sources(${_kxc_shape_test} PRIVATE
         $<TARGET_OBJECTS:kxc_shape_test_obj>
-        $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>
         $<TARGET_OBJECTS:kxc_shape_experimental_test_obj>)
       add_dependencies(${_kxc_shape_test} kxc_shape_test_obj
-        kxc_experimental_identity_test_obj kxc_shape_experimental_test_obj)
+        kxc_shape_experimental_test_obj)
+      if(TARGET kxc_experimental_identity_test_obj)
+        target_sources(${_kxc_shape_test} PRIVATE
+          $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>)
+        add_dependencies(${_kxc_shape_test}
+          kxc_experimental_identity_test_obj)
+      endif()
     endforeach()
   endif()
   if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
