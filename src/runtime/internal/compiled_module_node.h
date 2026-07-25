@@ -11,14 +11,12 @@
 #include "kxc/runtime/compiled_module.h"
 #include "module_invocation_contract.h"
 #include "../../codegen/internal/compiled_kernel.h"
-#include "kxc/tir/stmt.h"
 
 namespace kxc::api {
 
 namespace internal {
 
 struct CompiledModuleEntry final {
-    tir::PrimFunc prim_func;
     codegen::KernelSignature signature;
     codegen::KernelLaunchMetadata launch_metadata;
     codegen::CompiledKernel executable;

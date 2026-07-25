@@ -220,8 +220,7 @@ kxc::api::CompiledModule MakeModule(
     CompiledKernel executable(signature, metadata, launcher);
     return api::internal::BuildCompiledModule(
         BuildTarget(Device::CPU()),
-        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
-                                            metadata, executable}},
+        {api::internal::CompiledModuleEntry{signature, metadata, executable}},
         constants);
 }
 
@@ -359,8 +358,7 @@ bool TestModuleOwnedConstantExecution() {
     constants.Set(key, source);
     api::CompiledModule module = api::internal::BuildCompiledModule(
         BuildTarget(cpu),
-        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
-                                            metadata, executable}},
+        {api::internal::CompiledModuleEntry{signature, metadata, executable}},
         constants);
 
     const std::vector<float> mutation{9, 9, 9, 9};
@@ -490,8 +488,7 @@ bool TestInputDeviceValidationBeforeAllocation() {
     CompiledKernel executable(signature, metadata, launcher);
     api::CompiledModule module = api::internal::BuildCompiledModule(
         BuildTarget(cuda),
-        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
-                                            metadata, executable}},
+        {api::internal::CompiledModuleEntry{signature, metadata, executable}},
         {});
     runtime::RuntimeSession session(module, MakePlan(signature));
     std::string message;
@@ -548,7 +545,7 @@ bool TestNonstaticAndScalarContractsRejectedAtConstruction() {
     auto scalar_launcher = std::make_shared<RecordingLauncher>();
     const KernelLaunchMetadata metadata(cpu, CodeGenBackend::kLLVM);
     const api::CompiledModule scalar_module = api::internal::BuildCompiledModule(
-        BuildTarget(cpu), {{tir::PrimFunc(), scalar_signature, metadata,
+        BuildTarget(cpu), {{scalar_signature, metadata,
                             CompiledKernel(scalar_signature, metadata, scalar_launcher),
                             std::move(contract)}}, {});
     TEST_CHECK(Throws([&] {
@@ -612,8 +609,7 @@ bool TestConcurrentArgumentAssembly() {
     CompiledKernel executable(signature, metadata, launcher);
     api::CompiledModule module = api::internal::BuildCompiledModule(
         BuildTarget(Device::CPU()),
-        {api::internal::CompiledModuleEntry{tir::PrimFunc(), signature,
-                                            metadata, executable}},
+        {api::internal::CompiledModuleEntry{signature, metadata, executable}},
         {});
     runtime::RuntimeSession session(module, MakePlan(signature));
     std::atomic<int> failures{0};
@@ -695,8 +691,8 @@ bool TestMultiEntryPlanExecution() {
     CompiledKernel add_kernel(add_signature, add_metadata, add_launcher);
     CompiledKernel mul_kernel(mul_signature, mul_metadata, mul_launcher);
     std::vector<api::internal::CompiledModuleEntry> entries{
-        {tir::PrimFunc(), add_signature, add_metadata, add_kernel},
-        {tir::PrimFunc(), mul_signature, mul_metadata, mul_kernel},
+        {add_signature, add_metadata, add_kernel},
+        {mul_signature, mul_metadata, mul_kernel},
     };
     api::CompiledModule module = api::internal::BuildCompiledModule(
         BuildTarget(cpu), std::move(entries), {});
@@ -766,7 +762,7 @@ bool TestPlannedIntermediateStorageReuse() {
                            cpu, 16, true)});
         KernelLaunchMetadata metadata(cpu, CodeGenBackend::kLLVM);
         auto launcher = std::make_shared<RecordingLauncher>();
-        entries.push_back({tir::PrimFunc(), signature, metadata,
+        entries.push_back({signature, metadata,
                            CompiledKernel(signature, metadata, launcher)});
         launchers.push_back(std::move(launcher));
         calls.push_back(runtime::KernelCall(symbol, {i}, {i + 1}));

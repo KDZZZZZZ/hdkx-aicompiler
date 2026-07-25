@@ -411,8 +411,7 @@ CompiledModule AssemblePrimitiveModule(
     entries.reserve(batch.primitives.size());
     for (const CompiledPrimitive& primitive : batch.primitives) {
         entries.push_back(CompiledModuleEntry{
-            primitive.tir, primitive.signature, primitive.launch_metadata,
-            primitive.kernel});
+            primitive.signature, primitive.launch_metadata, primitive.kernel});
     }
     return BuildCompiledModule(
         target, std::move(entries), batch.constants,

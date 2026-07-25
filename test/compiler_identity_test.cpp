@@ -234,7 +234,7 @@ kxc::api::PlanAbiFingerprint PlanAbiForAlignment(uint64_t alignment) {
     const auto launcher = std::make_shared<IdentityLauncher>();
     const CompiledModule module = internal::BuildCompiledModule(
         BuildTarget(Device::CPU()),
-        {internal::CompiledModuleEntry{tir::PrimFunc(), signature, metadata,
+        {internal::CompiledModuleEntry{signature, metadata,
                                        CompiledKernel(signature, metadata, launcher)}}, {});
     const runtime::ExecutablePlan plan(
         {runtime::ValueSpec(0, 0, {2}, dtype, Device::CPU(), true),

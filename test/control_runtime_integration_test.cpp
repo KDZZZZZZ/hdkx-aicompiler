@@ -375,8 +375,7 @@ kxc::api::CompiledModule MakeModule(
     return api::internal::BuildCompiledModule(
         BuildTarget(Device::CPU()),
         {api::internal::CompiledModuleEntry{
-            tir::PrimFunc(), signature, metadata,
-            CompiledKernel(signature, metadata, launcher)}}, constants);
+            signature, metadata, CompiledKernel(signature, metadata, launcher)}}, constants);
 }
 
 struct Fixture {

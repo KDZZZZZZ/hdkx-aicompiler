@@ -421,8 +421,7 @@ CompiledModule AssembleModule(
     std::vector<internal::CompiledModuleEntry> entries;
     for (const PrimitiveCompileState& primitive : result.primitives()) {
         entries.push_back(internal::CompiledModuleEntry{
-            primitive.tir, *primitive.signature, *primitive.launch_metadata,
-            *primitive.kernel});
+            *primitive.signature, *primitive.launch_metadata, *primitive.kernel});
     }
     return internal::BuildCompiledModule(
         result.target(), std::move(entries), result.constants(),

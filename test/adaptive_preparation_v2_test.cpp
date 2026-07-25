@@ -287,7 +287,7 @@ kxc::api::CompiledGraph MakeGraph(
         const CompiledKernel module_kernel(
             signature, metadata, primitive.artifact().kernel->launcher);
         entries.push_back(api::internal::CompiledModuleEntry{
-            tir::PrimFunc(), signature, metadata, module_kernel});
+            signature, metadata, module_kernel});
         pins.push_back(pin);
     }
     if (options.reverse_pins && pins.size() >= 2) {

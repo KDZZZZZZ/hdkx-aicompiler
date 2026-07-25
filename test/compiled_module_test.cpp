@@ -43,7 +43,7 @@ internal::CompiledModuleEntry Entry(const KernelSignature& signature,
                                     const std::shared_ptr<Recorder>& launcher,
                                     std::shared_ptr<const ModuleInvocationContract> contract = {}) {
     KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
-    return {tir::PrimFunc(), signature, metadata, CompiledKernel(signature, metadata, launcher), std::move(contract)};
+    return {signature, metadata, CompiledKernel(signature, metadata, launcher), std::move(contract)};
 }
 CompiledModule Build(const KernelSignature& signature, const std::shared_ptr<Recorder>& launcher,
                      std::shared_ptr<const ModuleInvocationContract> contract = {},
@@ -108,7 +108,7 @@ bool ObjectReadinessZeroByteAndSymbols() {
     KernelLaunchMetadata metadata(Device::CPU(),CodeGenBackend::kLLVM);
     auto not_ready=std::make_shared<Recorder>(false,false);
     CHECK(Throws([&]{ internal::BuildCompiledModule(BuildTarget(Device::CPU()),
-        {{tir::PrimFunc(),one,metadata,CompiledKernel(one,metadata,not_ready),{}}},{}); }));
+        {{one,metadata,CompiledKernel(one,metadata,not_ready),{}}},{}); }));
 
     auto first=std::make_shared<Recorder>(); auto second=std::make_shared<Recorder>();
     KernelSignature a("entry_a",{KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)});
