@@ -13,17 +13,30 @@
 
 namespace kxc::test_support {
 
-inline std::vector<relay::LoweredFunction> LowerPrimitiveUnits(
-    Function function) {
+struct PrimitiveLoweringFixture final {
+    api::internal::PreparedStaticGraph prepared;
+    std::vector<relay::LoweredFunction> lowered;
+};
+
+inline PrimitiveLoweringFixture LowerPrimitivesForTest(Function function) {
     function = relay::InferTypePass(std::move(function));
-    const api::internal::LoweredGraph graph =
-        api::internal::LowerGraph(std::move(function));
-    std::vector<relay::LoweredFunction> result;
-    result.reserve(graph.primitives.size());
-    for (const auto& primitive : graph.primitives) {
-        result.push_back(primitive.lowered);
+    PrimitiveLoweringFixture result{
+        api::internal::PrepareStaticGraph(
+            std::move(function), Device::CPU(), BuildTarget(Device::CPU()),
+            String()),
+        {}};
+    result.lowered.reserve(result.prepared.partitioned.units.size());
+    for (const api::internal::PrimitiveUnit& unit :
+         result.prepared.partitioned.units) {
+        result.lowered.push_back(api::internal::LowerPrimitiveUnit(
+            result.prepared.partitioned.value_graph.values, unit));
     }
     return result;
+}
+
+inline std::vector<relay::LoweredFunction> LowerPrimitiveUnits(
+    Function function) {
+    return LowerPrimitivesForTest(std::move(function)).lowered;
 }
 
 inline relay::LoweredFunction LowerFirstPrimitive(Function function) {

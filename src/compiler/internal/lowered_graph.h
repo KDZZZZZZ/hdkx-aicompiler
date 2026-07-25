@@ -11,21 +11,6 @@
 
 namespace kxc::api::internal {
 
-struct LoweredPrimitive {
-    int64_t unit_id{-1};
-    String symbol;
-    String operator_identity;
-    UnitSemanticKey semantic_key;
-    relay::LoweredFunction lowered;
-};
-
-struct LoweredGraph {
-    PartitionedGraph partitioned;
-    std::vector<LoweredPrimitive> primitives;
-    runtime::ExecutablePlan plan;
-    Map<String, runtime::NDArray> constants;
-};
-
 relay::LoweredFunction LowerPrimitiveUnit(
     const std::vector<LogicalValueContract>& values,
     const PrimitiveUnit& unit);
@@ -34,11 +19,5 @@ runtime::ExecutablePlan BuildStaticExecutablePlan(
 PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
                                        Target target,
                                        String pipeline_fingerprint);
-LoweredGraph LowerPreparedStaticGraph(const PreparedStaticGraph& prepared);
-LoweredGraph LowerGraph(Function function,
-                        Device device = Device::CPU(),
-                        Target target = Target(),
-                        String pipeline_fingerprint = String());
-void ValidateLoweredGraph(const LoweredGraph& graph);
 
 }  // namespace kxc::api::internal

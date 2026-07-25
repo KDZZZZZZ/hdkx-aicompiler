@@ -24,6 +24,7 @@
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/session.h"
 #include "kxc/te/te.h"
+#include "support/primitive_lowering.h"
 
 namespace {
 
@@ -88,10 +89,9 @@ size_t CountUniqueCalls(const kxc::Function& function) {
     return calls.size();
 }
 
-kxc::api::internal::LoweredGraph LowerForTest(
+kxc::test_support::PrimitiveLoweringFixture LowerForTest(
     const kxc::Function& function) {
-    return kxc::api::internal::LowerGraph(
-        kxc::relay::InferTypePass(function));
+    return kxc::test_support::LowerPrimitivesForTest(function);
 }
 
 bool ReadIntAttr(const kxc::tir::PrimFunc& function, const char* key,
@@ -162,36 +162,40 @@ std::vector<GraphFixture> MakeFixtures() {
 bool TestPerOperatorTargetCardinality() {
     for (const auto& fixture : MakeFixtures()) {
         const size_t expected_units = CountUniqueCalls(fixture.function);
-        const kxc::api::internal::LoweredGraph lowered =
+        const kxc::test_support::PrimitiveLoweringFixture lowered =
             LowerForTest(fixture.function);
         TEST_CHECK(expected_units == fixture.expected_compute_calls,
                    std::string(fixture.name) +
                        " must allocate exactly one target unit per compute Call");
-        TEST_CHECK(lowered.primitives.size() == expected_units &&
-                       lowered.plan.calls().size() == expected_units,
+        TEST_CHECK(lowered.lowered.size() == expected_units &&
+                       lowered.prepared.partitioned.calls.size() == expected_units,
                    std::string(fixture.name) +
                        " must produce exactly one PrimFunc and KernelCall per compute Call");
-        TEST_CHECK(lowered.plan.output_value_ids().size() ==
+        TEST_CHECK(lowered.prepared.partitioned.output_value_ids.size() ==
                        static_cast<size_t>(fixture.expected_graph_outputs),
                    std::string(fixture.name) + " graph output value count changed");
 
         std::unordered_set<std::string> symbols;
-        for (size_t index = 0; index < lowered.primitives.size(); ++index) {
-            const auto& primitive = lowered.primitives[index];
+        for (size_t index = 0; index < lowered.lowered.size(); ++index) {
+            const auto& unit = lowered.prepared.partitioned.units[index];
+            const auto& primitive = lowered.lowered[index];
             int64_t unit_id = -1;
             std::string identity;
-            TEST_CHECK(primitive.lowered.defined() &&
-                           primitive.lowered->prim_func.defined() &&
-                           ReadIntAttr(primitive.lowered->prim_func, "kxc.unit_id",
+            const std::string expected_identity =
+                std::string(unit.call.spec.name) + "@v" +
+                std::to_string(unit.call.spec.schema_version);
+            TEST_CHECK(primitive.defined() && primitive->prim_func.defined() &&
+                           unit.id == static_cast<int64_t>(index) &&
+                           ReadIntAttr(primitive->prim_func, "kxc.unit_id",
                                        &unit_id) &&
-                           unit_id == static_cast<int64_t>(index),
+                           unit_id == unit.id,
                        std::string(fixture.name) + " PrimFunc unit id mismatch");
-            TEST_CHECK(ReadStringAttr(primitive.lowered->prim_func,
+            TEST_CHECK(ReadStringAttr(primitive->prim_func,
                                       "kxc.operator_identity", &identity) &&
-                           identity == std::string(primitive.operator_identity),
+                           identity == expected_identity,
                        std::string(fixture.name) +
                            " PrimFunc operator identity mismatch");
-            TEST_CHECK(symbols.insert(std::string(primitive.symbol)).second,
+            TEST_CHECK(symbols.insert(std::string(unit.symbol)).second,
                        std::string(fixture.name) + " PrimFunc symbols must be unique");
         }
 
@@ -201,19 +205,19 @@ bool TestPerOperatorTargetCardinality() {
 
 bool TestProducerCallsRemainOutsideConsumerPrimFunc() {
     const GraphFixture chain = MakeFixtures()[0];
-    const kxc::api::internal::LoweredGraph lowered =
+    const kxc::test_support::PrimitiveLoweringFixture lowered =
         LowerForTest(chain.function);
-    TEST_CHECK(lowered.primitives.size() == 2,
+    TEST_CHECK(lowered.lowered.size() == 2,
                "chain must lower to two independent primitives");
     int64_t first_inputs = -1;
     int64_t second_inputs = -1;
-    TEST_CHECK(ReadIntAttr(lowered.primitives[0].lowered->prim_func,
+    TEST_CHECK(ReadIntAttr(lowered.lowered[0]->prim_func,
                            "kxc.input_count", &first_inputs) &&
-                   ReadIntAttr(lowered.primitives[1].lowered->prim_func,
+                   ReadIntAttr(lowered.lowered[1]->prim_func,
                                "kxc.input_count", &second_inputs) &&
                    first_inputs == 2 && second_inputs == 2,
                "each chain unit must expose only its two boundary values");
-    TEST_CHECK(lowered.primitives[1].lowered->prim_func->params.size() == 3,
+    TEST_CHECK(lowered.lowered[1]->prim_func->params.size() == 3,
                "consumer PrimFunc ABI must be two inputs plus one output");
     return true;
 }
@@ -238,7 +242,7 @@ bool TestProductionLoweringRejectsStaticSizeOverflow() {
                "production per-unit lowering must reject extents above INT32_MAX");
     TEST_CHECK(rejects({kInt32Max, kInt32Max, 3}),
                "production per-unit lowering must reject row-major product overflow");
-    TEST_CHECK(LowerForTest(make_function({0, kInt32Max, kInt32Max})).primitives.size() == 1,
+    TEST_CHECK(LowerForTest(make_function({0, kInt32Max, kInt32Max})).lowered.size() == 1,
                "production per-unit lowering must retain legal zero-element tensors");
     return true;
 }
@@ -253,15 +257,13 @@ bool TestSharedConstantUsesStableGraphValueKey() {
     Call first = Add(input, constant);
     Function function({input}, Multiply(first, constant));
 
-    const api::internal::LoweredGraph lowered = LowerForTest(function);
-    TEST_CHECK(lowered.primitives.size() == 2 && lowered.constants.size() == 1,
-               "shared constant must be deduplicated graph-wide");
-    TEST_CHECK(lowered.plan.constant_value_ids().size() == 1 &&
-                   lowered.plan.constant_value_ids()[0] == 1,
-               "ExecutablePlan must preserve ordered graph constant value ids");
-    for (const auto& primitive : lowered.primitives) {
-        const Array<relay::ConstantBinding> constants =
-            primitive.lowered.constants();
+    const test_support::PrimitiveLoweringFixture lowered = LowerForTest(function);
+    TEST_CHECK(lowered.lowered.size() == 2 &&
+                   lowered.prepared.partitioned.constant_value_ids.size() == 1 &&
+                   lowered.prepared.partitioned.constant_value_ids[0] == 1,
+               "shared constant must retain one stable graph value id");
+    for (const auto& primitive : lowered.lowered) {
+        const Array<relay::ConstantBinding> constants = primitive.constants();
         TEST_CHECK(constants.size() == 1 &&
                        constants[0]->key == "relay.constant.v1",
                    "each user unit must bind only the stable constant value key it uses");
@@ -328,15 +330,15 @@ bool TestSingleUnitSupportsMultipleOutputs() {
     Var input("input", type);
     Call call(MultiOutputTestOp(), {input});
     Function function({input}, call);
-    const api::internal::LoweredGraph lowered = LowerForTest(function);
-    TEST_CHECK(lowered.primitives.size() == 1 &&
-                   lowered.plan.output_value_ids().size() == 2,
+    const test_support::PrimitiveLoweringFixture lowered = LowerForTest(function);
+    TEST_CHECK(lowered.lowered.size() == 1 &&
+                   lowered.prepared.partitioned.output_value_ids.size() == 2,
                "one multi-output Call must remain one unit with two stable values");
     int64_t output_count = -1;
-    TEST_CHECK(ReadIntAttr(lowered.primitives[0].lowered->prim_func,
+    TEST_CHECK(ReadIntAttr(lowered.lowered[0]->prim_func,
                            "kxc.output_count", &output_count) &&
                    output_count == 2 &&
-                   lowered.primitives[0].lowered->prim_func->params.size() == 3,
+                   lowered.lowered[0]->prim_func->params.size() == 3,
                "multi-output PrimFunc ABI must contain one input and two outputs");
     return true;
 }

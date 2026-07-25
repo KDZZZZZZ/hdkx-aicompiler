@@ -507,7 +507,6 @@ def count_test_refs(root: Path, op_names: set[str]) -> dict[str, dict[str, int]]
                 for signal in (
                     "LowerPrimitiveUnits",
                     "LowerFirstPrimitive",
-                    "LowerGraph",
                 )
             )
             has_backend_signal = (

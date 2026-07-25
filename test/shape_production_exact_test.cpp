@@ -251,13 +251,19 @@ bool TestPreparedConstantSnapshot() {
             kxc::String("prepared-constant-freeze-test"));
     const std::vector<float> mutated{9, 9, 9, 9};
     payload.CopyFromBytes(mutated.data(), payload.NBytes());
-    const kxc::api::internal::LoweredGraph lowered =
-        kxc::api::internal::LowerPreparedStaticGraph(prepared);
-    CHECK(lowered.constants.size() == 1,
+    for (const kxc::api::internal::PrimitiveUnit& unit :
+         prepared.partitioned.units) {
+        (void)kxc::api::internal::LowerPrimitiveUnit(
+            prepared.partitioned.value_graph.values, unit);
+    }
+    const kxc::api::internal::ValueInfo& constant =
+        prepared.partitioned.value_graph.values[
+            prepared.partitioned.constant_value_ids[0]];
+    const auto* frozen = constant.source.As<kxc::ConstantNode>();
+    CHECK(frozen && frozen->data.defined(),
           "prepared constant snapshot must retain one constant");
     std::vector<float> actual(4);
-    lowered.constants.begin()->second.CopyToBytes(
-        actual.data(), actual.size() * sizeof(float));
+    frozen->data.CopyToBytes(actual.data(), actual.size() * sizeof(float));
     CHECK(actual == std::vector<float>({1, 1, 1, 1}),
           "prepared graph must deep-freeze constant payload bytes");
     return true;

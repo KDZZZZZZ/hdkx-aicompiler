@@ -360,7 +360,10 @@ bool TestTEOutputContractsFailClosed() {
     const Function single_function =
         relay::InferTypePass(Function({lhs, rhs}, Add(lhs, rhs)));
     const std::string single_undefined = ErrorText([&] {
-        (void)LowerGraph(single_function, Device::CPU());
+        const PreparedStaticGraph prepared = PrepareStaticGraph(
+            single_function, Device::CPU(), BuildTarget(Device::CPU()), String());
+        (void)LowerPrimitiveUnit(prepared.partitioned.value_graph.values,
+                                 prepared.partitioned.units.front());
     });
     add_node->attrs[add_key] = saved_add_lowering;
 
@@ -373,8 +376,12 @@ bool TestTEOutputContractsFailClosed() {
     function = relay::InferTypePass(function);
     const auto lowering_error = [&](FRelayToTEMulti lowering) {
         multi_node->attrs[multi_key] = std::move(lowering);
-        return ErrorText(
-            [&] { (void)LowerGraph(function, Device::CPU()); });
+        return ErrorText([&] {
+            const PreparedStaticGraph prepared = PrepareStaticGraph(
+                function, Device::CPU(), BuildTarget(Device::CPU()), String());
+            (void)LowerPrimitiveUnit(prepared.partitioned.value_graph.values,
+                                     prepared.partitioned.units.front());
+        });
     };
 
     const std::string multi_empty_hook =
@@ -462,8 +469,10 @@ bool TestNestedTupleGetItemKeepsAllLeaves() {
     Var input("input", type);
     Function nested_call({input}, Call(NestedMultiOutputOp(), {input}));
     nested_call = relay::InferTypePass(nested_call);
-    const std::string nested_call_error = ErrorText(
-        [&] { (void)LowerGraph(nested_call, Device::CPU()); });
+    const std::string nested_call_error = ErrorText([&] {
+        (void)PrepareStaticGraph(
+            nested_call, Device::CPU(), BuildTarget(Device::CPU()), String());
+    });
     TEST_CHECK(nested_call_error.find("flat_multi_tensor_output") !=
                        std::string::npos ||
                    nested_call_error.find("flat_tensor_tuple") !=

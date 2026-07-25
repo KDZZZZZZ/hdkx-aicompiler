@@ -407,7 +407,9 @@ bool TestPrePartitionBoundaryCannotBeBypassed() {
         Function({cond, lhs, rhs}, If(cond, lhs, rhs)));
     TEST_CHECK(ThrowsWith(
                    [&] {
-                       (void)api::internal::LowerGraph(function, Device::CPU());
+                       (void)api::internal::PrepareStaticGraph(
+                           function, Device::CPU(), BuildTarget(Device::CPU()),
+                           String());
                    },
                    "required capability=if"),
                "direct per-unit lowering must run the shared executable "

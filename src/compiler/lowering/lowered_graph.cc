@@ -151,22 +151,6 @@ void ValidateTEOutputContracts(
     }
 }
 
-bool ReadIntAttr(const tir::PrimFunc& function, const char* key,
-                 int64_t* value) {
-    const String attr_key(key);
-    if (!function->attrs.count(attr_key)) return false;
-    const auto* integer = function->attrs.at(attr_key).As<tir::IntImmNode>();
-    if (!integer) return false;
-    *value = integer->value;
-    return true;
-}
-
-String ReadStringAttr(const tir::PrimFunc& function, const char* key) {
-    const String attr_key(key);
-    if (!function->attrs.count(attr_key)) return String();
-    return String(function->attrs.at(attr_key));
-}
-
 void FreezeConstantPayloads(ValueGraph* graph) {
     for (ValueInfo& value : graph->values) {
         if (value.origin != ValueOrigin::kConstant) continue;
@@ -259,45 +243,6 @@ PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
     return prepared;
 }
 
-LoweredGraph LowerPreparedStaticGraph(const PreparedStaticGraph& prepared) {
-    if (!prepared.device.defined() ||
-        !prepared.target.As<TargetNode>() ||
-        prepared.target->device_type != prepared.device.device_type() ||
-        prepared.target->device_id != prepared.device.device_id()) {
-        throw std::invalid_argument(
-            "LowerPreparedStaticGraph requires bound Device and Target identity");
-    }
-    ValidatePartition(prepared.partitioned);
-    LoweredGraph result;
-    result.partitioned = prepared.partitioned;
-
-    for (const PrimitiveUnit& unit : result.partitioned.units) {
-        relay::LoweredFunction lowered =
-            LowerPrimitiveUnit(result.partitioned.value_graph.values, unit);
-        const ResolvedRelayCall& resolved = unit.call;
-        result.primitives.push_back(
-            LoweredPrimitive{unit.id,
-                             unit.symbol,
-                             String(resolved.spec.name + "@v" +
-                                    std::to_string(
-                                        resolved.spec.schema_version)),
-                             unit.semantic_key,
-                             lowered});
-        for (const auto& binding : lowered.constants()) {
-            if (result.constants.count(binding->key) &&
-                result.constants.at(binding->key).get() != binding->value.get()) {
-                throw std::invalid_argument(
-                    "Stable constant key resolved to different payloads");
-            }
-            result.constants.Set(binding->key, binding->value);
-        }
-    }
-
-    result.plan = BuildStaticExecutablePlan(prepared);
-    ValidateLoweredGraph(result);
-    return result;
-}
-
 runtime::ExecutablePlan BuildStaticExecutablePlan(
     const PreparedStaticGraph& prepared) {
     ValidatePartition(prepared.partitioned);
@@ -321,56 +266,6 @@ runtime::ExecutablePlan BuildStaticExecutablePlan(
         prepared.partitioned.output_value_ids);
     plan.Validate();
     return plan;
-}
-
-LoweredGraph LowerGraph(Function function, Device device, Target target,
-                        String pipeline_fingerprint) {
-    if (!target.defined()) target = BuildTarget(device);
-    PreparedStaticGraph prepared = PrepareStaticGraph(
-        std::move(function), device, std::move(target),
-        std::move(pipeline_fingerprint));
-    return LowerPreparedStaticGraph(prepared);
-}
-
-void ValidateLoweredGraph(const LoweredGraph& graph) {
-    ValidatePartition(graph.partitioned);
-    graph.plan.Validate();
-    if (graph.primitives.size() != graph.partitioned.units.size()) {
-        throw std::invalid_argument(
-            "LoweredGraph requires one primitive per PrimitiveUnit");
-    }
-    for (size_t index = 0; index < graph.primitives.size(); ++index) {
-        const LoweredPrimitive& primitive = graph.primitives[index];
-        const PrimitiveUnit& unit = graph.partitioned.units[index];
-        primitive.lowered.Validate();
-        const tir::PrimFunc& function = primitive.lowered->prim_func;
-        int64_t unit_id = -1;
-        if (primitive.unit_id != unit.id ||
-            !(primitive.symbol == unit.symbol) ||
-            primitive.semantic_key != unit.semantic_key) {
-            throw std::invalid_argument(
-                "Lowered primitive record drifted from its PrimitiveUnit");
-        }
-        if (!ReadIntAttr(function, "kxc.unit_id", &unit_id) ||
-            unit_id != unit.id) {
-            throw std::invalid_argument("PrimFunc unit id metadata mismatch");
-        }
-        if (!(ReadStringAttr(function, "global_symbol") == unit.symbol)) {
-            throw std::invalid_argument("PrimFunc symbol metadata mismatch");
-        }
-        const String actual_operator_identity =
-            ReadStringAttr(function, "kxc.operator_identity");
-        if (!(actual_operator_identity == primitive.operator_identity)) {
-            throw std::invalid_argument(
-                "PrimFunc operator identity metadata mismatch: expected " +
-                std::string(primitive.operator_identity) + ", got " +
-                std::string(actual_operator_identity));
-        }
-        if (!(ReadStringAttr(function, "kxc.structural_hash") ==
-              String(unit.semantic_key.digest()))) {
-            throw std::invalid_argument("PrimFunc structural hash metadata mismatch");
-        }
-    }
 }
 
 }  // namespace kxc::api::internal

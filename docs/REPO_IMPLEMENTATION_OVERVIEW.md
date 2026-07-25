@@ -3,7 +3,9 @@
 > **状态：已归档。** 本文混有旧目录、whole-graph lowering 和单-entry
 > RuntimeSession 描述，不再是当前实现入口。当前生产路径以
 > `Compiler::Compile -> PrepareRelayProgram -> CompilePrimitiveUnits -> AssembleCompiledGraph -> RuntimeSession`
-> 为准；当前边界见 [`ARCHITECTURE_STATUS.md`](ARCHITECTURE_STATUS.md)，历史基线审查见
+> 为准；whole-graph lowering 仅作为 `test/support/primitive_lowering.h` 中组合
+> `PrepareStaticGraph` 与 `LowerPrimitiveUnit` 的 test fixture 存在。当前边界见
+> [`ARCHITECTURE_STATUS.md`](ARCHITECTURE_STATUS.md)，历史基线审查见
 > [`COMPILER_FOUNDATION_BASELINE_REVIEW.md`](COMPILER_FOUNDATION_BASELINE_REVIEW.md)。
 
 本文档保留历史实现导览。

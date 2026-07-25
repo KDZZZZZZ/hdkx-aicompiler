@@ -127,7 +127,7 @@ Compiler / Relay / TE / TIR / Codegen  --->  CompiledModule + ExecutablePlan
 | 严重 | kernel semantic key 混入 graph-local value id | `src/compiler/graph/partition.cc::BuildStructuralHash` 序列化 input/output id；`src/compiler/cache/primitive_cache.cc` 以该 hash 建 key | 跨图/跨位置等价单元缓存碎片；身份概念混淆，后续重分区/融合会不稳定 | 拆分 unit locator、semantic key、dispatch key；从 semantic key 删除 value id。 |
 | 严重 | `-1` 被误读为 dynamic shape | `include/kxc/runtime/kernel_abi.h`；`src/runtime/session.cc::ValidateShape` | 没有约束、extent、输出函数时，任何“动态支持”都是不完整的；可能将不兼容物理 layout 当作兼容 | 将 `-1` 限定为 legacy input ABI sentinel，禁止向 plan/kernel capability 传播；迁移到显式 Dim/Constraint。 |
 | 严重 | Relay IR 能表达的节点集合大于可执行子集，却缺少统一 capability verifier | `If`/`Let` 可由 IR/InferType 表达，但 `src/compiler/graph/value_graph.cc` 明确拒绝 | 错误在 partition/lowering 后期暴露；上层容易把“IR 可构造”误认为“可编译” | 在编译入口、Pass 后和 partition 前验证 executable dialect/capability，错误必须定位到节点和缺失能力。 |
-| 严重 | 生产 per-unit lowering 与 legacy whole-graph `LowerToTIR` 并存 | `src/compiler/lowering/lowered_graph.cc` 与 `src/compiler/lowering/relay_to_tir.cc` | 两套 cardinality、常量和测试语义导致文档漂移，扩展可能只接通其中一条 | 将 whole-graph API 明确标为兼容/测试入口并逐步弃用；共享前端校验和 lowering primitives，以生产路径为唯一能力判定。 |
+| 已解决 | whole-graph lowering aggregate 曾与 production per-unit lowering 并存 | `test/support/primitive_lowering.h` 仅组合 `PrepareStaticGraph` 和 `LowerPrimitiveUnit` | 不再存在第二个 production cardinality、constant 或 plan aggregate | whole-graph test fixture 不扩展能力；production 只保留 per-unit lowering。 |
 | 严重 | 无 variant 选择、去重编译、失败状态或安全热替换协议 | 当前 `RuntimeSessionNode` 只持有 module+plan，见 `src/runtime/internal/session_node.h` | Issue #14 所需的热替换无法安全落地；重复请求可发生编译风暴 | 新增上层 `CompileCoordinator`、`KernelSlot`、`PlanVariant`，不修改静态 session 职责。 |
 | 已解决 | primitive cache hit 的 artifact ownership | `CompiledPrimitiveBatch` 直接保留 immutable pin，`AssembleCompiledGraph` 消费 ordered pins | cache eviction 不会使已命中的编译事务失效 | 保持 same-key singleflight 与引用感知淘汰。 |
 | 高 | 当前“一 Call 一 `CompilationUnit`”被误认为永久抽象 | `src/compiler/internal/compilation_unit.h`、`src/compiler/graph/partition.cc` | fusion、library region、控制流区域、通信 region 无法演进；unit identity 与 partition policy 耦合 | 保持当前策略为 Phase-0 policy；演进为可验证的 region/unit partition，不改变 runtime plan ABI。 |
@@ -181,9 +181,11 @@ Compiler / Relay / TE / TIR / Codegen  --->  CompiledModule + ExecutablePlan
 
    `InferCategoryFromName`、`FillLegacyDefaults` 适合兼容迁移，不适合作为长期扩展机制。operator JSON、C++ metadata、FFI 和 docs 应由一个 schema source 派生；新字段遗漏应 fail closed，而不是被名字启发式或默认值掩盖。
 
-9. **让 legacy whole-graph lowering 与生产 per-unit lowering长期拥有同等能力地位：禁止。**
+9. **让 whole-graph lowering 与生产 per-unit lowering 长期拥有同等能力地位：禁止。**
 
-   两条路径可以短期共存，但能力矩阵、数值测试和扩展契约必须以 `Compiler::Compile`/`LowerGraph` 为准。旧入口应明确标记为 compatibility/testing，并最终收敛到共享的 validated lowering building blocks。
+   production 已删除 whole-graph aggregate；`test/support/primitive_lowering.h` 的
+   fixture 只组合 `PrepareStaticGraph` 与逐 unit `LowerPrimitiveUnit`。能力矩阵、
+   数值测试和扩展契约以 `Compiler::Compile` 为准。
 
 10. **把 cache hit 压缩成 bool 后丢失 artifact 所有权：已修正。**
 
