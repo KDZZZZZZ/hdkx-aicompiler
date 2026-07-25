@@ -128,11 +128,11 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
         Fail("requires at least one real branch kernel; a pure structural If has no production artifact");
     }
     CompiledModule module = internal::AssemblePrimitiveModule(
-        compiled, config->target);
+        compiled, lowered.primitive_units, config->target);
     std::vector<ArtifactPin> pins;
     pins.reserve(compiled.primitives.size());
     for (const internal::CompiledPrimitive& primitive : compiled.primitives) {
-        pins.push_back(primitive.pin);
+        pins.push_back(internal::ArtifactPinAccess::Wrap(primitive.pin));
     }
     const std::shared_ptr<const void> retention_owner =
         std::make_shared<const std::vector<ArtifactPin>>(std::move(pins));
@@ -156,14 +156,12 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
             const internal::CompiledPrimitive& primitive =
                 compiled.primitives[
                     static_cast<std::size_t>(task.primitive_unit_id)];
-            if (primitive.unit_id != unit.id ||
-                !(primitive.symbol == unit.symbol) ||
-                !primitive.pin.defined() ||
-                !module.HasFunction(primitive.symbol)) {
+            if (primitive.unit_id != unit.id || !primitive.pin.defined() ||
+                !module.HasFunction(unit.symbol)) {
                 Fail("PrimitiveUnit did not resolve to its immutable compiler artifact");
             }
             bindings.push_back(internal::ControlKernelBinding{
-                unit.id, module, primitive.symbol,
+                unit.id, module, unit.symbol,
                 AbiNonOutputs(task, lowered.plan), retention_owner});
         }
     }

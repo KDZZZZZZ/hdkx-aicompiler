@@ -15,6 +15,7 @@
 
 #include "../src/compiler/internal/lowered_graph.h"
 #include "../src/compiler/internal/primitive_cache.h"
+#include "../src/compiler/internal/primitive_compiler.h"
 #include "kxc/compiler/compiler.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/op_attr_types.h"
@@ -340,6 +341,49 @@ bool TestSingleUnitSupportsMultipleOutputs() {
     return true;
 }
 
+bool TestRequestedPrimitiveUnitsRejectInvalidIdsBeforeLookup() {
+    using namespace kxc;
+    const api::internal::LoweredGraph lowered =
+        LowerForTest(MakeFixtures()[0].function);
+    const api::CompileConfig config =
+        api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+    const api::internal::CompilerExecutionContract contract =
+        api::internal::ResolveCompilerExecutionContract(config);
+    const auto rejects = [&](const std::vector<api::internal::PrimitiveUnitId>& ids) {
+        try {
+            (void)api::internal::CompilePrimitiveUnits(
+                lowered.partitioned.units,
+                lowered.partitioned.value_graph.values, config, contract, ids);
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    std::vector<api::internal::PrimitiveUnit> non_dense =
+        lowered.partitioned.units;
+    non_dense[1].id = 0;
+
+    api::internal::ClearPrimitiveCacheForTesting();
+    const bool rejects_duplicate = rejects(
+        {api::internal::PrimitiveUnitId{1}, api::internal::PrimitiveUnitId{1}});
+    const bool rejects_out_of_range = rejects({api::internal::PrimitiveUnitId{2}});
+    bool rejects_non_dense = false;
+    try {
+        (void)api::internal::CompilePrimitiveUnits(
+            non_dense, lowered.partitioned.value_graph.values, config,
+            contract, {api::internal::PrimitiveUnitId{0}});
+    } catch (const std::exception&) {
+        rejects_non_dense = true;
+    }
+    const api::internal::PrimitiveCacheStats stats =
+        api::internal::GetPrimitiveCacheStats();
+    api::internal::ClearPrimitiveCacheForTesting();
+    TEST_CHECK(rejects_duplicate && rejects_out_of_range && rejects_non_dense &&
+                   stats.hits == 0 && stats.misses == 0 && stats.in_flight == 0,
+               "invalid ids or non-dense units must fail before cache lookup");
+    return true;
+}
+
 #if KXC_USE_LLVM
 
 kxc::runtime::NDArray FilledTensor(float value) {
@@ -467,6 +511,50 @@ bool TestPrimitiveCacheUsesFullStableIdentity() {
     return true;
 }
 
+bool TestRequestedPrimitiveUnitsAreStrictAndCacheScoped() {
+    using namespace kxc;
+    const api::internal::LoweredGraph lowered = LowerForTest(MakeFixtures()[0].function);
+    const api::CompileConfig config =
+        api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+    const api::internal::CompilerExecutionContract contract =
+        api::internal::ResolveCompilerExecutionContract(config);
+    const auto compile = [&](const std::vector<api::internal::PrimitiveUnitId>& ids) {
+        return api::internal::CompilePrimitiveUnits(
+            lowered.partitioned.units, lowered.partitioned.value_graph.values,
+            config, contract, ids);
+    };
+
+    api::internal::ClearPrimitiveCacheForTesting();
+    const auto selected = compile({api::internal::PrimitiveUnitId{1}});
+    const api::internal::PrimitiveCacheStats after_selected =
+        api::internal::GetPrimitiveCacheStats();
+    const auto repeated = compile({api::internal::PrimitiveUnitId{1}});
+    const api::internal::PrimitiveCacheStats after_repeated =
+        api::internal::GetPrimitiveCacheStats();
+    const auto full = api::internal::CompilePrimitiveUnits(
+        lowered.partitioned.units, lowered.partitioned.value_graph.values,
+        config, contract);
+    const api::internal::PrimitiveCacheStats after_full =
+        api::internal::GetPrimitiveCacheStats();
+
+    api::internal::ClearPrimitiveCacheForTesting();
+
+    TEST_CHECK(selected.primitives.size() == 1 &&
+                   selected.primitives[0].unit_id == 1 &&
+                   selected.primitives[0].diagnostic_tir.defined() &&
+                   selected.primitives[0].pin.defined() &&
+                   selected.primitives[0].pin.key().unit_semantic_key() ==
+                       lowered.partitioned.units[1].semantic_key &&
+                   after_selected.misses == 1 && after_selected.hits == 0 &&
+                   repeated.primitives.size() == 1 &&
+                   repeated.primitives[0].cache_hit &&
+                   after_repeated.misses == 1 && after_repeated.hits == 1 &&
+                   full.primitives.size() == 2 && after_full.misses == 2 &&
+                   after_full.hits == 2,
+               "subset compilation must only compile and look up requested units");
+    return true;
+}
+
 bool TestPrimitiveCacheReusesRenumberedUnit() {
     using namespace kxc;
     api::internal::ClearPrimitiveCacheForTesting();
@@ -516,6 +604,8 @@ int main() {
          TestProductionLoweringRejectsStaticSizeOverflow},
         {"shared_constant_uses_stable_key", TestSharedConstantUsesStableGraphValueKey},
         {"single_unit_supports_multiple_outputs", TestSingleUnitSupportsMultipleOutputs},
+        {"requested_primitive_units_reject_invalid_ids",
+         TestRequestedPrimitiveUnitsRejectInvalidIdsBeforeLookup},
 #if KXC_USE_LLVM
         {"operator_graphs_execute_numerically",
          TestOperatorGraphsExecuteNumerically},
@@ -525,6 +615,8 @@ int main() {
          TestMultiOutputExecutesNumerically},
         {"primitive_cache_uses_full_stable_identity",
          TestPrimitiveCacheUsesFullStableIdentity},
+        {"requested_primitive_units_are_strict_and_cache_scoped",
+         TestRequestedPrimitiveUnitsAreStrictAndCacheScoped},
         {"primitive_cache_reuses_renumbered_unit",
          TestPrimitiveCacheReusesRenumberedUnit},
 #endif

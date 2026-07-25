@@ -9,6 +9,7 @@
 #include <cctype>
 #include <memory>
 #include <optional>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -274,21 +275,35 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
     const std::vector<PrimitiveUnit>& units,
     const std::vector<LogicalValueContract>& values,
     const CompileConfig& config,
-    const CompilerExecutionContract& contract) {
-    config.Validate();
+    const CompilerExecutionContract& contract,
+    const std::vector<PrimitiveUnitId>& requested_unit_ids) {
     if (units.empty()) {
         throw std::invalid_argument(
             "CompilePrimitiveUnits requires at least one PrimitiveUnit");
     }
-    std::vector<std::pair<const PrimitiveUnit*, tir::PrimFunc>> lowered_units;
-    lowered_units.reserve(units.size());
-    Map<String, runtime::NDArray> constants;
     for (std::size_t index = 0; index < units.size(); ++index) {
-        const PrimitiveUnit& unit = units[index];
-        if (unit.id != static_cast<PrimitiveUnitId>(index)) {
+        if (units[index].id != static_cast<PrimitiveUnitId>(index)) {
             throw std::invalid_argument(
                 "CompilePrimitiveUnits requires dense ordered unit ids");
         }
+    }
+    for (std::size_t index = 0; index < requested_unit_ids.size(); ++index) {
+        const PrimitiveUnitId id = requested_unit_ids[index];
+        if (id < 0 || static_cast<std::size_t>(id) >= units.size()) {
+            throw std::invalid_argument(
+                "CompilePrimitiveUnits requested unit id is out of range");
+        }
+        if (index != 0 && id <= requested_unit_ids[index - 1]) {
+            throw std::invalid_argument(
+                "CompilePrimitiveUnits requested unit ids must be strictly increasing");
+        }
+    }
+    config.Validate();
+    std::vector<std::pair<const PrimitiveUnit*, tir::PrimFunc>> lowered_units;
+    lowered_units.reserve(requested_unit_ids.size());
+    Map<String, runtime::NDArray> constants;
+    for (const PrimitiveUnitId id : requested_unit_ids) {
+        const PrimitiveUnit& unit = units[static_cast<std::size_t>(id)];
         ValidatePrimitiveUnit(unit, values);
         relay::LoweredFunction lowered = RunUnitPhase(
             "per_unit_lowering", unit,
@@ -381,27 +396,28 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
             item.pin =
                 RequirePrimitivePin(item.lease, Context(*item.unit));
         }
-        const CachedPrimitive& artifact = item.pin.artifact();
-        codegen::CompiledKernel kernel = RelocateCachedKernel(
-            item.pin, item.signature, Context(*item.unit));
         result.primitives.push_back(CompiledPrimitive{
-            item.unit->id,
-            item.unit->symbol,
-            item.unit->semantic_key,
-            item.artifact_key,
-            item.tir,
-            item.signature,
-            artifact.launch_metadata,
-            std::move(kernel),
-            ArtifactPinAccess::Wrap(item.pin),
+            item.unit->id, std::move(item.tir), std::move(item.pin),
             item.lease.access() != PrimitiveCacheAccess::kOwner});
     }
     owner_guard.Dismiss();
     return result;
 }
 
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const std::vector<PrimitiveUnit>& units,
+    const std::vector<LogicalValueContract>& values,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract) {
+    std::vector<PrimitiveUnitId> requested_unit_ids(units.size());
+    std::iota(requested_unit_ids.begin(), requested_unit_ids.end(), 0);
+    return CompilePrimitiveUnits(
+        units, values, config, contract, requested_unit_ids);
+}
+
 CompiledModule AssemblePrimitiveModule(
-    const CompiledPrimitiveBatch& batch, const Target& target,
+    const CompiledPrimitiveBatch& batch,
+    const std::vector<PrimitiveUnit>& units, const Target& target,
     std::shared_ptr<profiling::ProfileContext> profile_context) {
     if (batch.primitives.empty()) {
         throw std::invalid_argument(
@@ -410,8 +426,23 @@ CompiledModule AssemblePrimitiveModule(
     std::vector<CompiledModuleEntry> entries;
     entries.reserve(batch.primitives.size());
     for (const CompiledPrimitive& primitive : batch.primitives) {
+        if (primitive.unit_id < 0 ||
+            static_cast<std::size_t>(primitive.unit_id) >= units.size()) {
+            throw std::invalid_argument(
+                "AssemblePrimitiveModule primitive unit id is out of range");
+        }
+        const PrimitiveUnit& unit =
+            units[static_cast<std::size_t>(primitive.unit_id)];
+        if (unit.id != primitive.unit_id || !primitive.pin.defined()) {
+            throw std::invalid_argument(
+                "AssemblePrimitiveModule primitive artifact is invalid");
+        }
+        const CachedPrimitive& artifact = primitive.pin.artifact();
+        const codegen::KernelSignature signature(
+            unit.symbol, artifact.signature.arguments());
         entries.push_back(CompiledModuleEntry{
-            primitive.signature, primitive.launch_metadata, primitive.kernel});
+            signature, artifact.launch_metadata,
+            RelocateCachedKernel(primitive.pin, signature, Context(unit))});
     }
     return BuildCompiledModule(
         target, std::move(entries), batch.constants,

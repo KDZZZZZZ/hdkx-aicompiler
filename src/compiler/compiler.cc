@@ -373,21 +373,31 @@ CompileResult CompilePreparedPrimitiveUnits(
         const internal::PrimitiveUnit& unit =
             prepared.partitioned.units.at(
                 static_cast<std::size_t>(compiled.unit_id));
+        const internal::CachedPrimitive& artifact = compiled.pin.artifact();
+        const codegen::KernelSignature signature(
+            unit.symbol, artifact.signature.arguments());
+        if (!internal::SamePhysicalKernelAbi(artifact.signature, signature) ||
+            !artifact.kernel.IsReady() || !artifact.kernel->launcher) {
+            throw std::logic_error(
+                "compiled primitive cache artifact cannot be relocated");
+        }
+        const codegen::CompiledKernel kernel(
+            signature, artifact.launch_metadata, artifact.kernel->launcher);
         PrimitiveCompileState primitive;
         primitive.unit_id = compiled.unit_id;
-        primitive.symbol = compiled.symbol;
+        primitive.symbol = unit.symbol;
         primitive.operator_identity =
             String(unit.call.spec.name + "@v" +
                    std::to_string(unit.call.spec.schema_version));
-        primitive.semantic_key = compiled.semantic_key;
-        primitive.tir = compiled.tir;
+        primitive.semantic_key = unit.semantic_key;
+        primitive.tir = compiled.diagnostic_tir;
         primitives.push_back(std::move(primitive));
-        optimized_tir.push_back(compiled.tir);
-        signatures.push_back(compiled.signature);
-        metadata.push_back(compiled.launch_metadata);
-        kernels.push_back(compiled.kernel);
+        optimized_tir.push_back(compiled.diagnostic_tir);
+        signatures.push_back(signature);
+        metadata.push_back(artifact.launch_metadata);
+        kernels.push_back(kernel);
         cache_hits.push_back(compiled.cache_hit);
-        pins.push_back(compiled.pin);
+        pins.push_back(internal::ArtifactPinAccess::Wrap(compiled.pin));
     }
     CompileResult result = input.AfterLowering(
         std::move(primitives),

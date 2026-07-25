@@ -7,10 +7,9 @@
 #include <memory>
 #include <vector>
 
-#include "../../codegen/internal/compiled_kernel.h"
 #include "execution_contract.h"
 #include "primitive_unit.h"
-#include "kxc/compiler/artifact.h"
+#include "primitive_cache.h"
 #include "kxc/compiler/compile_config.h"
 #include "kxc/runtime/compiled_module.h"
 
@@ -22,14 +21,8 @@ namespace kxc::api::internal {
 
 struct CompiledPrimitive final {
     PrimitiveUnitId unit_id{-1};
-    String symbol;
-    UnitSemanticKey semantic_key;
-    PrimitiveArtifactKey artifact_key;
-    tir::PrimFunc tir;
-    codegen::KernelSignature signature;
-    codegen::KernelLaunchMetadata launch_metadata;
-    codegen::CompiledKernel kernel;
-    ArtifactPin pin;
+    tir::PrimFunc diagnostic_tir;
+    PrimitiveArtifactPin pin;
     bool cache_hit{false};
 };
 
@@ -44,8 +37,16 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
     const CompileConfig& config,
     const CompilerExecutionContract& contract);
 
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const std::vector<PrimitiveUnit>& units,
+    const std::vector<LogicalValueContract>& values,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract,
+    const std::vector<PrimitiveUnitId>& requested_unit_ids);
+
 CompiledModule AssemblePrimitiveModule(
-    const CompiledPrimitiveBatch& batch, const Target& target,
+    const CompiledPrimitiveBatch& batch,
+    const std::vector<PrimitiveUnit>& units, const Target& target,
     std::shared_ptr<profiling::ProfileContext> profile_context = nullptr);
 
 }  // namespace kxc::api::internal
