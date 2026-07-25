@@ -1,17 +1,26 @@
 #include "kxc/compiler/shape_exact.h"
 
 #include <algorithm>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "internal/execution_contract.h"
+#include "internal/lowered_graph.h"
 #include "internal/primitive_cache.h"
+#include "internal/primitive_compiler.h"
 #include "../runtime/internal/memory_plan.h"
 #include "support/canonical.h"
 #include "support/hash.h"
+#include "kxc/pass/context.h"
+#include "kxc/profiling/profiling.h"
+#include "kxc/relay/visitor.h"
+#include "kxc/tir/printer/print_ir.h"
 #include "kxc/runtime/device_api.h"
 
 #ifndef KXC_ENABLE_SHAPE_PRODUCTION_EXACT
@@ -52,6 +61,89 @@ void RequireBackendAvailable(const Target& target) {
         Reject("CUDA exact assembly requires KXC_ENABLE_CUDA=ON");
     }
 #endif
+}
+
+uint64_t PlannedStorageBytes(const runtime::ExecutablePlan& plan) {
+    std::unordered_map<int64_t, uint64_t> bytes_by_storage;
+    for (const auto& value : plan.values()) {
+        uint64_t elements = 1;
+        for (int64_t dimension : value.shape()) {
+            if (dimension < 0) return std::numeric_limits<uint64_t>::max();
+            if (dimension != 0 &&
+                elements > std::numeric_limits<uint64_t>::max() /
+                               static_cast<uint64_t>(dimension)) {
+                return std::numeric_limits<uint64_t>::max();
+            }
+            elements *= static_cast<uint64_t>(dimension);
+        }
+        const uint64_t element_bytes =
+            static_cast<uint64_t>(value->dtype.bits / 8) *
+            static_cast<uint64_t>(value->dtype.lanes);
+        if (element_bytes != 0 &&
+            elements > std::numeric_limits<uint64_t>::max() / element_bytes) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        bytes_by_storage[value->storage_id] = std::max(
+            bytes_by_storage[value->storage_id], elements * element_bytes);
+    }
+    uint64_t total = 0;
+    for (const auto& item : bytes_by_storage) {
+        if (total > std::numeric_limits<uint64_t>::max() - item.second) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        total += item.second;
+    }
+    return total;
+}
+
+void AddPrimitiveBatchFields(
+    profiling::ScopedSpan* span,
+    const internal::PreparedCompilerGraph& prepared,
+    const internal::CompiledPrimitiveBatch& batch) {
+    const runtime::ExecutablePlan plan =
+        internal::BuildStaticExecutablePlan(prepared.graph);
+    span->AddMetric("primitive_count",
+                    static_cast<double>(batch.primitives.size()));
+    span->AddMetric("value_count", static_cast<double>(plan.values().size()));
+    std::unordered_set<int64_t> storage_ids;
+    for (const auto& value : plan.values()) storage_ids.insert(value->storage_id);
+    span->AddMetric("storage_slot_count",
+                    static_cast<double>(storage_ids.size()));
+    span->AddMetric("storage_reuse_count",
+                    static_cast<double>(plan.values().size() - storage_ids.size()));
+    span->AddMetric("planned_peak_storage_bytes",
+                    static_cast<double>(PlannedStorageBytes(plan)));
+    size_t cache_hits = 0;
+    for (const internal::CompiledPrimitive& primitive : batch.primitives) {
+        const internal::PrimitiveUnit& unit = prepared.graph.partitioned.units.at(
+            static_cast<std::size_t>(primitive.unit_id));
+        const std::string prefix = "unit." +
+            std::to_string(primitive.unit_id) + ".";
+        std::ostringstream stream;
+        tir::printer::DumpPrimFunc(primitive.diagnostic_tir, stream);
+        const std::string text = stream.str();
+        const internal::CachedPrimitive& artifact = primitive.pin.artifact();
+        span->AddField(prefix + "symbol", std::string(unit.symbol));
+        span->AddField(
+            prefix + "operator", std::string(unit.call.spec.name) + "@v" +
+                std::to_string(unit.call.spec.schema_version));
+        span->AddField(prefix + "ir_hash", support::HashText(text));
+        span->AddMetric(prefix + "ir_bytes",
+                        static_cast<double>(text.size()));
+        span->AddField(prefix + "backend",
+                       artifact.launch_metadata->backend ==
+                               codegen::CodeGenBackend::kLLVM
+                           ? "llvm"
+                           : "cuda");
+        span->AddMetric(prefix + "cache_hit", primitive.cache_hit ? 1.0 : 0.0);
+        if (primitive.cache_hit) ++cache_hits;
+    }
+    span->AddMetric("cache_hits", static_cast<double>(cache_hits));
+    span->AddMetric(
+        "cache_hit_rate", batch.primitives.empty()
+                              ? 0.0
+                              : static_cast<double>(cache_hits) /
+                                    static_cast<double>(batch.primitives.size()));
 }
 
 Array<int64_t> CloneIntArray(const Array<int64_t>& source) {
@@ -823,13 +915,80 @@ ExactPlanVariant ProductionExactShapeAdapter::AssembleExactPlan(
     VerifyOracle(prepared.impl_->graph, oracle);
     const std::vector<shape::UnitSpecializationRequest> requests =
         shape::MakeExactSpecializationRequests(prepared.impl_->graph, oracle);
-    RequireBackendAvailable(prepared.impl_->config->target);
-    CompiledGraph compiled = internal::FinishCompilerGraph(
-        prepared.impl_->prepared, prepared.impl_->config,
-        prepared.impl_->contract);
-    VerifyVariant(prepared.impl_->graph, requests,
-                  prepared.impl_->prepared, prepared.impl_->config,
-                  prepared.impl_->contract, oracle, compiled);
+    const internal::PreparedCompilerGraph& compiler_prepared =
+        prepared.impl_->prepared;
+    const CompileConfig& config = prepared.impl_->config;
+    const internal::CompilerExecutionContract& contract =
+        prepared.impl_->contract;
+    RequireBackendAvailable(config->target);
+    config.Validate();
+    if (compiler_prepared.execution_contract_canonical !=
+            contract.canonical_bytes ||
+        internal::CanonicalTargetSnapshot(compiler_prepared.target) !=
+            internal::CanonicalTargetSnapshot(config->target) ||
+        internal::CanonicalTargetSnapshot(compiler_prepared.optimized.target()) !=
+            internal::CanonicalTargetSnapshot(config->target) ||
+        internal::CanonicalTargetSnapshot(compiler_prepared.graph.target) !=
+            internal::CanonicalTargetSnapshot(config->target) ||
+        compiler_prepared.graph.device !=
+            Device(config->target->device_type, config->target->device_id) ||
+        std::string(compiler_prepared.graph.pipeline_fingerprint) !=
+            contract.fingerprint) {
+        Reject("prepared target or execution contract changed before assembly");
+    }
+    const auto stage_event = [&config](const char* stage) {
+        profiling::EventSpec event;
+        event.component = "compiler";
+        event.event_type = "compile_stage";
+        event.pass_name = stage;
+        event.fields = profiling::MakeFields({
+            {"stage", stage},
+            {"target_kind", config->target->kind},
+            {"device_type",
+             std::to_string(static_cast<int>(config->target->device_type))},
+            {"device_id", std::to_string(config->target->device_id)},
+            {"opt_level", std::to_string(config->opt_level)},
+        });
+        return event;
+    };
+    const auto profile_context = compiler_prepared.profile_context;
+    const std::string& run_id = compiler_prepared.profile_run_id;
+    profiling::ActivationScope activation(profile_context, run_id);
+    internal::CompiledPrimitiveBatch batch;
+    {
+        const PassContext pass_context = PassContext::MergeTarget(
+            relay::PassContextFromRelay(
+                compiler_prepared.optimized.optimized_relay()), config->target);
+        PassContext::Scope pass_scope(pass_context);
+        profiling::ScopedSpan compile_span(
+            profile_context, stage_event("compile_primitives"), run_id);
+        try {
+            batch = internal::CompilePrimitiveUnits(
+                compiler_prepared.graph.partitioned.units,
+                compiler_prepared.graph.partitioned.value_graph.values,
+                config, contract);
+            AddPrimitiveBatchFields(&compile_span, compiler_prepared, batch);
+        } catch (const std::exception& error) {
+            compile_span.SetStatus("error");
+            compile_span.SetMessage(error.what());
+            throw std::runtime_error(
+                std::string("Compiler stage 'compile_primitives' failed: ") +
+                error.what());
+        }
+    }
+    std::vector<internal::PrimitiveArtifactPin> pins;
+    pins.reserve(batch.primitives.size());
+    for (const internal::CompiledPrimitive& primitive : batch.primitives) {
+        pins.push_back(primitive.pin);
+    }
+    profiling::ScopedSpan assemble_span(
+        profile_context, stage_event("assemble"), run_id);
+    CompiledGraph compiled = internal::AssembleCompiledGraph(
+        compiler_prepared, pins, batch.constants);
+    AddPrimitiveBatchFields(&assemble_span, compiler_prepared, batch);
+    if (profile_context) profile_context->Flush();
+    VerifyVariant(prepared.impl_->graph, requests, compiler_prepared, config,
+                  contract, oracle, compiled);
     std::vector<OrderedArtifactSelectionIdentity> selections;
     selections.reserve(compiled.plan().calls().size());
     for (size_t i = 0; i < compiled.plan().calls().size(); ++i) {

@@ -8,6 +8,7 @@
 
 #include "../src/compiler/internal/lowered_graph.h"
 #include "../src/compiler/internal/primitive_cache.h"
+#include "kxc/compiler/experimental_identity.h"
 #include "kxc/compiler/shape_exact.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
@@ -64,6 +65,20 @@ bool SameCounters(const shape_exact::ShapeExactPreparationCounters& left,
                right.capability_boundary_checks &&
            left.value_graph_builds == right.value_graph_builds &&
            left.partitions == right.partitions;
+}
+
+kxc::api::PlanAbiFingerprint PlanAbi(
+    const kxc::api::CompiledModule& module,
+    const kxc::runtime::ExecutablePlan& plan,
+    const std::vector<kxc::api::ArtifactPin>& pins) {
+    std::vector<kxc::api::OrderedArtifactIdentity> artifacts;
+    const kxc::Array<kxc::runtime::KernelCall> calls = plan.calls();
+    artifacts.reserve(calls.size());
+    for (size_t index = 0; index < calls.size(); ++index) {
+        artifacts.push_back({index, std::string(calls[index]->symbol),
+                             pins[index].record().artifact_key});
+    }
+    return kxc::api::BuildPlanAbiFingerprint(module, plan, artifacts);
 }
 
 kxc::runtime::NDArray FloatArray(const std::vector<float>& values) {
@@ -440,6 +455,35 @@ bool TestLLVMRelayAttrsTypesAndBodySnapshot() {
     return true;
 }
 
+bool TestLLVMNormalAndExactShareStaticAssembly() {
+    using shape_exact::ProductionExactShapeAdapter;
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    const kxc::api::CompiledGraph normal =
+        kxc::api::Compiler::Compile(TwoUnitGraph(), Config());
+    const auto prepared = ProductionExactShapeAdapter::PrepareGraphTemplate(
+        TwoUnitGraph(), Config());
+    const auto oracle = ProductionExactShapeAdapter::InstantiateExactProfile(
+        prepared, kxc::shape::experimental::v1::BindingSet());
+    const auto exact = ProductionExactShapeAdapter::AssembleExactPlan(
+        prepared, oracle);
+    bool same_ordered_keys =
+        normal.artifact_pins().size() == exact.artifact_pins().size();
+    for (size_t index = 0; index < normal.artifact_pins().size(); ++index) {
+        same_ordered_keys = same_ordered_keys &&
+            normal.artifact_pins()[index].record().artifact_key ==
+                exact.artifact_pins()[index].record().artifact_key;
+    }
+    const bool same_plan_abi = PlanAbi(
+        normal.module(), normal.plan(), normal.artifact_pins()) == PlanAbi(
+            exact.module(), exact.plan(), exact.artifact_pins());
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    CHECK(normal.graph_semantic_key() ==
+              exact.plan_variant_key().graph_semantic_key() &&
+              same_ordered_keys && same_plan_abi,
+          "normal and exact paths must publish the same static graph ABI");
+    return true;
+}
+
 bool TestLLVMExactCacheRuntimeAndLifecycle() {
     using shape_exact::ProductionExactShapeAdapter;
     const auto inputs = kxc::Array<kxc::runtime::NDArray>{
@@ -624,6 +668,7 @@ int main() {
 #if KXC_USE_LLVM && KXC_ENABLE_SHAPE_PRODUCTION_EXACT
     tests.push_back({"llvm_relay_mutation_cache_safety", TestLLVMRelayMutationCannotPoisonCache});
     tests.push_back({"llvm_relay_attrs_types_body_snapshot", TestLLVMRelayAttrsTypesAndBodySnapshot});
+    tests.push_back({"llvm_normal_exact_static_assembly", TestLLVMNormalAndExactShareStaticAssembly});
     tests.push_back({"llvm_exact_cache_runtime_lifecycle", TestLLVMExactCacheRuntimeAndLifecycle});
 #endif
     int failed = 0;

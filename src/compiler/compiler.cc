@@ -5,7 +5,6 @@
 #include "kxc/compiler/compiler.h"
 
 #include <algorithm>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -27,13 +26,11 @@
 #include "internal/relay_program.h"
 #include "../runtime/internal/compiled_module_node.h"
 #include "kxc/compiler/pipeline.h"
-#include "../runtime/internal/memory_plan.h"
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
 #include "kxc/runtime/session.h"
 #include "support/canonical.h"
 #include "support/hash.h"
-#include "kxc/relay/printer/print_ir.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/tir/printer/print_ir.h"
 
@@ -171,12 +168,6 @@ void AppendPipelineIdentityField(std::string* canonical,
     *canonical += std::move(field).Take();
 }
 
-bool SameTargetSnapshot(const Target& left, const Target& right) {
-    if (!left.defined() || !right.defined()) return false;
-    return internal::CanonicalTargetSnapshot(left) ==
-           internal::CanonicalTargetSnapshot(right);
-}
-
 std::shared_ptr<profiling::ProfileContext> MaybeCreateProfileContext(
     const CompileConfig& config) {
     if (profiling::CurrentContext()) return profiling::CurrentContext();
@@ -240,83 +231,6 @@ uint64_t PlannedStorageBytes(const runtime::ExecutablePlan& plan) {
     return total;
 }
 
-void AddResultFields(profiling::ScopedSpan* span, const CompileResult& result) {
-    const CompileStage stage = result.stage();
-    if (stage == CompileStage::kRelayOptimized) {
-        const std::string text = relay::printer::ToText(result.optimized_relay());
-        span->AddField("ir_hash", support::HashText(text));
-        span->AddMetric("ir_bytes", static_cast<double>(text.size()));
-        return;
-    }
-    if (static_cast<int>(stage) < static_cast<int>(CompileStage::kLowered)) {
-        return;
-    }
-    const std::vector<PrimitiveCompileState> primitives = result.primitives();
-    span->AddMetric("primitive_count", static_cast<double>(primitives.size()));
-    std::unordered_set<int64_t> storage_ids;
-    for (const auto& value : result.plan().values()) {
-        storage_ids.insert(value->storage_id);
-    }
-    span->AddMetric("value_count",
-                    static_cast<double>(result.plan().values().size()));
-    span->AddMetric("storage_slot_count",
-                    static_cast<double>(storage_ids.size()));
-    span->AddMetric(
-        "storage_reuse_count",
-        static_cast<double>(result.plan().values().size() -
-                            storage_ids.size()));
-    span->AddMetric("planned_peak_storage_bytes",
-                    static_cast<double>(PlannedStorageBytes(result.plan())));
-    size_t cache_hits = 0;
-    for (const PrimitiveCompileState& primitive : primitives) {
-        const std::string prefix = "unit." + std::to_string(primitive.unit_id) + ".";
-        std::ostringstream stream;
-        tir::printer::DumpPrimFunc(primitive.tir, stream);
-        const std::string text = stream.str();
-        span->AddField(prefix + "symbol", std::string(primitive.symbol));
-        span->AddField(prefix + "operator",
-                       std::string(primitive.operator_identity));
-        span->AddField(prefix + "ir_hash", support::HashText(text));
-        span->AddMetric(prefix + "ir_bytes", static_cast<double>(text.size()));
-        if (primitive.launch_metadata) {
-            span->AddField(
-                prefix + "backend",
-                (*primitive.launch_metadata)->backend ==
-                        codegen::CodeGenBackend::kLLVM
-                    ? "llvm"
-                    : "cuda");
-            span->AddMetric(prefix + "cache_hit",
-                            primitive.cache_hit ? 1.0 : 0.0);
-            if (primitive.cache_hit) ++cache_hits;
-        }
-    }
-    if (stage == CompileStage::kBackendCompiled) {
-        span->AddMetric("cache_hits", static_cast<double>(cache_hits));
-        span->AddMetric(
-            "cache_hit_rate",
-            primitives.empty()
-                ? 0.0
-                : static_cast<double>(cache_hits) /
-                      static_cast<double>(primitives.size()));
-    }
-}
-
-template <typename Fn>
-CompileResult RunStage(const char* stage, const CompileConfig& config, Fn&& fn) {
-    profiling::ScopedSpan span(profiling::CurrentContext(),
-                               MakeStageEvent(stage, config));
-    try {
-        CompileResult result = fn();
-        AddResultFields(&span, result);
-        return result;
-    } catch (const std::exception& error) {
-        span.SetStatus("error");
-        span.SetMessage(error.what());
-        throw std::runtime_error(std::string("Compiler stage '") + stage +
-                                 "' failed: " + error.what());
-    }
-}
-
 NormalizedPipeline ResolveRelayPipeline(
     const CompileConfig& config,
     const Array<String>& required_control_capabilities = {}) {
@@ -341,74 +255,54 @@ NormalizedPipeline ResolveTIRPipeline(const CompileConfig& config) {
     return PipelineResolver::Resolve(request);
 }
 
-CompileResult CompilePreparedPrimitiveUnits(
-    const CompileResult& input, const internal::PreparedStaticGraph& prepared,
-    const CompileConfig& config,
-    const internal::CompilerExecutionContract& contract) {
-    const Device device(input.target()->device_type, input.target()->device_id);
-    if (prepared.device != device ||
-        !SameTargetSnapshot(prepared.target, input.target())) {
-        throw std::invalid_argument(
-            "CompilePreparedPrimitiveUnits requires prepared Device/Target identity unchanged");
+void AddPrimitiveBatchFields(
+    profiling::ScopedSpan* span,
+    const internal::PreparedCompilerGraph& prepared,
+    const internal::CompiledPrimitiveBatch& batch) {
+    const runtime::ExecutablePlan plan =
+        internal::BuildStaticExecutablePlan(prepared.graph);
+    span->AddMetric("primitive_count",
+                    static_cast<double>(batch.primitives.size()));
+    span->AddMetric("value_count", static_cast<double>(plan.values().size()));
+    std::unordered_set<int64_t> storage_ids;
+    for (const auto& value : plan.values()) storage_ids.insert(value->storage_id);
+    span->AddMetric("storage_slot_count",
+                    static_cast<double>(storage_ids.size()));
+    span->AddMetric("storage_reuse_count",
+                    static_cast<double>(plan.values().size() - storage_ids.size()));
+    span->AddMetric("planned_peak_storage_bytes",
+                    static_cast<double>(PlannedStorageBytes(plan)));
+    size_t cache_hits = 0;
+    for (const internal::CompiledPrimitive& primitive : batch.primitives) {
+        const internal::PrimitiveUnit& unit = prepared.graph.partitioned.units.at(
+            static_cast<std::size_t>(primitive.unit_id));
+        const std::string prefix = "unit." +
+            std::to_string(primitive.unit_id) + ".";
+        std::ostringstream stream;
+        tir::printer::DumpPrimFunc(primitive.diagnostic_tir, stream);
+        const std::string text = stream.str();
+        const internal::CachedPrimitive& artifact = primitive.pin.artifact();
+        span->AddField(prefix + "symbol", std::string(unit.symbol));
+        span->AddField(
+            prefix + "operator", std::string(unit.call.spec.name) + "@v" +
+                std::to_string(unit.call.spec.schema_version));
+        span->AddField(prefix + "ir_hash", support::HashText(text));
+        span->AddMetric(prefix + "ir_bytes",
+                        static_cast<double>(text.size()));
+        span->AddField(prefix + "backend",
+                       artifact.launch_metadata->backend ==
+                               codegen::CodeGenBackend::kLLVM
+                           ? "llvm"
+                           : "cuda");
+        span->AddMetric(prefix + "cache_hit", primitive.cache_hit ? 1.0 : 0.0);
+        if (primitive.cache_hit) ++cache_hits;
     }
-    internal::CompiledPrimitiveBatch batch =
-        internal::CompilePrimitiveUnits(
-            prepared.partitioned.units,
-            prepared.partitioned.value_graph.values, config, contract);
-    std::vector<PrimitiveCompileState> primitives;
-    std::vector<tir::PrimFunc> optimized_tir;
-    std::vector<codegen::KernelSignature> signatures;
-    std::vector<codegen::KernelLaunchMetadata> metadata;
-    std::vector<codegen::CompiledKernel> kernels;
-    std::vector<bool> cache_hits;
-    std::vector<ArtifactPin> pins;
-    primitives.reserve(batch.primitives.size());
-    optimized_tir.reserve(batch.primitives.size());
-    signatures.reserve(batch.primitives.size());
-    metadata.reserve(batch.primitives.size());
-    kernels.reserve(batch.primitives.size());
-    cache_hits.reserve(batch.primitives.size());
-    pins.reserve(batch.primitives.size());
-    for (const internal::CompiledPrimitive& compiled : batch.primitives) {
-        const internal::PrimitiveUnit& unit =
-            prepared.partitioned.units.at(
-                static_cast<std::size_t>(compiled.unit_id));
-        const internal::CachedPrimitive& artifact = compiled.pin.artifact();
-        const codegen::KernelSignature signature(
-            unit.symbol, artifact.signature.arguments());
-        if (!internal::SamePhysicalKernelAbi(artifact.signature, signature) ||
-            !artifact.kernel.IsReady() || !artifact.kernel->launcher) {
-            throw std::logic_error(
-                "compiled primitive cache artifact cannot be relocated");
-        }
-        const codegen::CompiledKernel kernel(
-            signature, artifact.launch_metadata, artifact.kernel->launcher);
-        PrimitiveCompileState primitive;
-        primitive.unit_id = compiled.unit_id;
-        primitive.symbol = unit.symbol;
-        primitive.operator_identity =
-            String(unit.call.spec.name + "@v" +
-                   std::to_string(unit.call.spec.schema_version));
-        primitive.semantic_key = unit.semantic_key;
-        primitive.tir = compiled.diagnostic_tir;
-        primitives.push_back(std::move(primitive));
-        optimized_tir.push_back(compiled.diagnostic_tir);
-        signatures.push_back(signature);
-        metadata.push_back(artifact.launch_metadata);
-        kernels.push_back(kernel);
-        cache_hits.push_back(compiled.cache_hit);
-        pins.push_back(internal::ArtifactPinAccess::Wrap(compiled.pin));
-    }
-    CompileResult result = input.AfterLowering(
-        std::move(primitives),
-        runtime::internal::PlanMemory(
-            internal::BuildStaticExecutablePlan(prepared)),
-        batch.constants);
-    result = result.AfterTIROptimization(std::move(optimized_tir));
-    result = result.AfterSignatures(std::move(signatures));
-    return result.AfterBackends(
-        std::move(metadata), std::move(kernels), std::move(cache_hits),
-        std::move(pins));
+    span->AddMetric("cache_hits", static_cast<double>(cache_hits));
+    span->AddMetric(
+        "cache_hit_rate", batch.primitives.empty()
+                              ? 0.0
+                              : static_cast<double>(cache_hits) /
+                                    static_cast<double>(batch.primitives.size()));
 }
 
 const char* BackendVersion(const Target& target) {
@@ -421,94 +315,58 @@ const char* BackendVersion(const Target& target) {
     throw std::invalid_argument("Primitive cache target has no backend version");
 }
 
-CompiledModule AssembleModule(
-    const CompileResult& result,
-    std::shared_ptr<profiling::ProfileContext> profile_context) {
-    result.ValidateState();
-    if (result.stage() != CompileStage::kBackendCompiled) {
-        throw std::logic_error("AssembleModule requires backend_compiled state");
-    }
-    std::vector<internal::CompiledModuleEntry> entries;
-    for (const PrimitiveCompileState& primitive : result.primitives()) {
-        entries.push_back(internal::CompiledModuleEntry{
-            *primitive.signature, *primitive.launch_metadata, *primitive.kernel});
-    }
-    return internal::BuildCompiledModule(
-        result.target(), std::move(entries), result.constants(),
-        std::move(profile_context));
-}
-
 CompiledGraph CompilePipeline(
     Function function, CompileConfig config,
-    const internal::ControlFlowPolicy& policy,
     const internal::CompilerExecutionContract* expected_contract = nullptr) {
     config.Validate();
-    const GraphSemanticKey graph_semantic_key =
-        Compiler::BuildGraphSemanticKey(function);
     auto profile_context = MaybeCreateProfileContext(config);
     const std::string run_id =
         profile_context ? profile_context->NextRunId("compile") : "";
     profiling::ActivationScope activation(profile_context, run_id);
     profiling::ScopedSpan compile_span(
         profile_context, MakeStageEvent("compile", config), run_id);
-
-    const PassContext pass_context = PassContext::MergeTarget(
-        relay::PassContextFromRelay(function), config->target);
-    PassContext::Scope pass_scope(pass_context);
-
-    internal::PreparedRelayProgram prepared = [&] {
-        profiling::ScopedSpan span(
-            profiling::CurrentContext(),
-            MakeStageEvent("prepare_relay", config));
-        try {
-            return internal::PrepareRelayProgram(function, config, policy);
-        } catch (const std::exception& error) {
-            span.SetStatus("error");
-            span.SetMessage(error.what());
-            throw std::runtime_error(
-                std::string("Compiler stage 'prepare_relay' failed: ") +
-                error.what());
-        }
-    }();
-    const internal::PreparedProgramPlan program_plan =
-        internal::PlanRelayProgram(prepared);
-    if (!std::holds_alternative<internal::PreparedStaticPlan>(program_plan)) {
-        throw std::logic_error(
-            "Compiler::Compile cannot publish a structured-control plan");
-    }
-    const internal::CompilerExecutionContract& contract =
-        prepared.execution_contract();
+    const internal::CompilerExecutionContract contract =
+        internal::ResolveCompilerExecutionContract(config);
     if (expected_contract &&
         expected_contract->canonical_bytes != contract.canonical_bytes) {
         throw std::invalid_argument(
             "Compiler execution contract does not match prepared Relay program");
     }
-    CompileResult result =
-        CompileResult::Validate(config->target, prepared.typed_anf())
-            .AfterRelayOptimization(prepared.typed_anf());
-    const Device device(result.target()->device_type,
-                        result.target()->device_id);
-    internal::PreparedStaticGraph static_graph =
-        internal::PrepareStaticGraph(
-            result.optimized_relay(), device, result.target(),
-            String(contract.fingerprint));
-    result = RunStage(
-        "compile_primitives", config,
-        [&] {
-            return CompilePreparedPrimitiveUnits(
-                result, static_graph, config, contract);
-        });
-
+    const internal::PreparedCompilerGraph prepared =
+        internal::PrepareCompilerGraph(function, config, contract);
+    internal::CompiledPrimitiveBatch batch;
+    {
+        const PassContext pass_context = PassContext::MergeTarget(
+            relay::PassContextFromRelay(
+                prepared.optimized.optimized_relay()), config->target);
+        PassContext::Scope pass_scope(pass_context);
+        profiling::ScopedSpan primitive_span(
+            profile_context, MakeStageEvent("compile_primitives", config), run_id);
+        try {
+            batch = internal::CompilePrimitiveUnits(
+                prepared.graph.partitioned.units,
+                prepared.graph.partitioned.value_graph.values, config, contract);
+            AddPrimitiveBatchFields(&primitive_span, prepared, batch);
+        } catch (const std::exception& error) {
+            primitive_span.SetStatus("error");
+            primitive_span.SetMessage(error.what());
+            throw std::runtime_error(
+                std::string("Compiler stage 'compile_primitives' failed: ") +
+                error.what());
+        }
+    }
+    std::vector<internal::PrimitiveArtifactPin> pins;
+    pins.reserve(batch.primitives.size());
+    for (const internal::CompiledPrimitive& primitive : batch.primitives) {
+        pins.push_back(primitive.pin);
+    }
     profiling::ScopedSpan assemble_span(
         profile_context, MakeStageEvent("assemble", config), run_id);
-    CompiledModule module = AssembleModule(result, profile_context);
-    runtime::ExecutablePlan plan = result.plan();
-    std::vector<ArtifactPin> artifact_pins = result.artifact_pins();
-    AddResultFields(&assemble_span, result);
+    CompiledGraph result = internal::AssembleCompiledGraph(
+        prepared, pins, batch.constants);
+    AddPrimitiveBatchFields(&assemble_span, prepared, batch);
     if (profile_context) profile_context->Flush();
-    return internal::CompiledGraphAccess::Create(
-        std::move(module), std::move(plan), std::move(artifact_pins),
-        graph_semantic_key);
+    return result;
 }
 
 }  // namespace
@@ -613,9 +471,7 @@ internal::ResolveCompilerExecutionContract(
 void internal::ProbeCompilerExecution(
     Function function, CompileConfig config,
     const CompilerExecutionContract& contract) {
-    (void)CompilePipeline(
-        std::move(function), std::move(config),
-        ControlFlowPolicy::StaticOnly(), &contract);
+    (void)CompilePipeline(std::move(function), std::move(config), &contract);
 }
 
 internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
@@ -626,10 +482,25 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
         Compiler::BuildGraphSemanticKey(function);
     auto profile_context = MaybeCreateProfileContext(config);
     const std::string run_id =
-        profile_context ? profile_context->NextRunId("shape_exact") : "";
+        profile_context && profiling::CurrentContext() == profile_context &&
+                !profiling::CurrentRunId().empty()
+            ? profiling::CurrentRunId()
+            : profile_context ? profile_context->NextRunId("shape_exact") : "";
     profiling::ActivationScope activation(profile_context, run_id);
-    PreparedRelayProgram prepared = PrepareRelayProgram(
-        std::move(function), config, ControlFlowPolicy::StaticOnly());
+    PreparedRelayProgram prepared = [&] {
+        profiling::ScopedSpan span(
+            profile_context, MakeStageEvent("prepare_relay", config), run_id);
+        try {
+            return PrepareRelayProgram(
+                std::move(function), config, ControlFlowPolicy::StaticOnly());
+        } catch (const std::exception& error) {
+            span.SetStatus("error");
+            span.SetMessage(error.what());
+            throw std::runtime_error(
+                std::string("Compiler stage 'prepare_relay' failed: ") +
+                error.what());
+        }
+    }();
     if (prepared.execution_contract().canonical_bytes !=
         contract.canonical_bytes) {
         throw std::invalid_argument(
@@ -639,7 +510,9 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
     CompileResult result =
         CompileResult::Validate(config->target, prepared.typed_anf())
             .AfterRelayOptimization(prepared.typed_anf());
-    size_t capability_boundary_checks = 1;
+    // PrepareRelayProgram validates input capabilities, residual policy, and
+    // executable capability before this frozen static graph is observable.
+    size_t capability_boundary_checks = 3;
     size_t relay_graph_pipelines = 1;
     const Device device(result.target()->device_type, result.target()->device_id);
     profiling::ScopedSpan prepare_span(
@@ -718,44 +591,6 @@ CompiledGraph internal::AssembleCompiledGraph(
         prepared.graph_semantic_key);
 }
 
-CompiledGraph internal::FinishCompilerGraph(
-    const PreparedCompilerGraph& prepared, CompileConfig config,
-    const CompilerExecutionContract& contract) {
-    config.Validate();
-    if (prepared.execution_contract_canonical != contract.canonical_bytes ||
-        !SameTargetSnapshot(prepared.target, config->target) ||
-        !SameTargetSnapshot(prepared.optimized.target(), config->target) ||
-        !SameTargetSnapshot(prepared.graph.target, config->target) ||
-        prepared.graph.device !=
-            Device(config->target->device_type, config->target->device_id) ||
-        std::string(prepared.graph.pipeline_fingerprint) !=
-            contract.fingerprint) {
-        throw std::invalid_argument(
-            "FinishCompilerGraph requires the prepared target and execution contract unchanged");
-    }
-    const PassContext pass_context = PassContext::MergeTarget(
-        relay::PassContextFromRelay(prepared.optimized.optimized_relay()), config->target);
-    PassContext::Scope pass_scope(pass_context);
-    auto profile_context = prepared.profile_context;
-    const std::string& run_id = prepared.profile_run_id;
-    profiling::ActivationScope activation(profile_context, run_id);
-    CompileResult result = RunStage(
-        "compile_primitives", config,
-        [&] {
-            return CompilePreparedPrimitiveUnits(
-                prepared.optimized, prepared.graph, config, contract);
-        });
-    profiling::ScopedSpan assemble_span(profile_context, MakeStageEvent("assemble", config), run_id);
-    CompiledModule module = AssembleModule(result, profile_context);
-    runtime::ExecutablePlan plan = result.plan();
-    std::vector<ArtifactPin> artifact_pins = result.artifact_pins();
-    AddResultFields(&assemble_span, result);
-    if (profile_context) profile_context->Flush();
-    return internal::CompiledGraphAccess::Create(
-        std::move(module), std::move(plan), std::move(artifact_pins),
-        prepared.graph_semantic_key);
-}
-
 GraphSemanticKey Compiler::BuildGraphSemanticKey(
     const Function& function) {
     if (!function.defined()) {
@@ -766,8 +601,6 @@ GraphSemanticKey Compiler::BuildGraphSemanticKey(
 }
 
 CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
-    return CompilePipeline(
-        std::move(function), std::move(config),
-        internal::ControlFlowPolicy::StaticOnly());
+    return CompilePipeline(std::move(function), std::move(config));
 }
 }  // namespace kxc::api

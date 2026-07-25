@@ -60,8 +60,5 @@ CompiledGraph AssembleCompiledGraph(
     const PreparedCompilerGraph& prepared,
     const std::vector<PrimitiveArtifactPin>& ordered_pins,
     const Map<String, runtime::NDArray>& constants);
-CompiledGraph FinishCompilerGraph(const PreparedCompilerGraph& prepared,
-                                  CompileConfig config,
-                                  const CompilerExecutionContract& contract);
 
 }  // namespace kxc::api::internal
