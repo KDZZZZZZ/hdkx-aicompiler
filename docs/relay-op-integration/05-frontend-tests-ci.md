@@ -71,7 +71,6 @@ checker 静态扫描 `test` 目录：
 | --- | --- |
 | `tests = true` | 测试中有 `"<op>"` 字符串引用 |
 | `lowering = single` / `multi` | 同一个测试函数块里有 `"<op>"` 和 `LowerToTIR` |
-| `lowering = exec_plan` | 同一个测试函数块里有 `"<op>"` 和 `LowerRelayToExecPlanPass` |
 | backend required | 同一个测试函数块里有 `"<op>"` 和 `Compiler::Compile` / `CompileAndRun` / LLVM 信号 |
 
 为了让扫描准确，不要把一堆 op name 放在无关 helper 或全局注释里冒充测试覆盖。

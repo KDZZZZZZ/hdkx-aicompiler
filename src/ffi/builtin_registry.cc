@@ -6,7 +6,6 @@
 
 namespace kxc::builtin_anchor {
 
-void CompilerDistributed();
 void DistributedCclCpu();
 void DistributedSession();
 void DistributedWorker();
@@ -30,7 +29,6 @@ void TirPasses();
 namespace kxc {
 
 void RegisterBuiltins() {
-  builtin_anchor::CompilerDistributed();
   builtin_anchor::DistributedCclCpu();
   builtin_anchor::DistributedSession();
   builtin_anchor::DistributedWorker();

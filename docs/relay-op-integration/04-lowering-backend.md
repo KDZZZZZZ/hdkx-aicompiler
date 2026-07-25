@@ -18,7 +18,6 @@ using FRelayToTEMulti =
 | --- | --- | --- | --- |
 | `FRelayToTE` | `single` | `TensorType` | 一个 defined `te::Tensor` |
 | `FRelayToTEMulti` | `multi` | `TupleType` | 与 `TupleType.fields` 等长的 defined tensor 数组 |
-| 不注册 TE hook | `exec_plan` | 设备通信语义 | 由 `LowerRelayToExecPlanPass` 处理 |
 
 ## `LowerToTIR` 当前能力
 
@@ -34,7 +33,7 @@ using FRelayToTEMulti =
 | `Call` + `TupleType` | 调 `FRelayToTEMulti` |
 | `Tuple` | 展平为多个 TE tensor；不支持嵌套 tuple field |
 | `TupleGetItem` | 从多输出数组取对应 tensor |
-| `device.` op | 不走 `LowerToTIR`，要求先走 execution plan |
+| `device.` op | 当前 Compiler 不支持 |
 
 输出 ABI：
 
@@ -129,15 +128,9 @@ Array<te::Tensor> XxxCompute(const Attrs& attrs,
 | 输出唯一 | 不重复返回同一个 tensor |
 | shape/dtype | 每个 tensor 和对应 field 一致 |
 
-## Execution plan op
+## Device communication boundary
 
-`device.` op 不注册 `FRelayToTE` 或 `FRelayToTEMulti`。它们通过：
-
-```cpp
-kxc::relay::LowerRelayToExecPlanPass(func)
-```
-
-生成 execution plan。测试需要在同一个测试函数块里引用 op name 和 `LowerRelayToExecPlanPass`，checker 才会认为 execution plan 覆盖存在。
+`device.` 通信语义不注册 `FRelayToTE` 或 `FRelayToTEMulti`，也不属于当前 Compiler lowering。独立 ExecutionPlan/CCL runtime 保留；只有它能启动真实 `CompiledModule` 且有数值集成测试后，才可重新设计 compiler 入口。
 
 ## 后端能力扩展规则
 

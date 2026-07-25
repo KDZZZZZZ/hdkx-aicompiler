@@ -215,13 +215,6 @@ bool TestRelayOperatorRegistryLookupAndSpecs() {
                    !ffi_where->attrs.defined(),
                "Where FFI invocation must preserve fieldless attrs and argument order");
 
-    const kxc::relay::Op& copy = kxc::relay::Op::Get("device.copy");
-    TEST_CHECK(copy.has_spec(), "explicitly registered control op should expose metadata");
-    TEST_CHECK(copy.spec().effect == kxc::relay::OperatorEffectKind::kDeviceCommunication,
-               "device external op should be marked as device communication");
-    TEST_CHECK(copy.spec().lowering_kind == kxc::relay::OperatorLoweringKind::kExecPlan,
-               "device external op should be routed through exec_plan lowering");
-
     kxc::relay::CheckOperatorRegistry();
     TEST_CHECK(ExpectThrow([&] {
                    kxc::relay::Op::Register("kxc.test.registry.after_freeze");

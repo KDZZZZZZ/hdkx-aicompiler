@@ -267,7 +267,7 @@ Issue #2 的命名规范只是算子扩展链路的入口。一个 Relay op 只�
 
 - 单输出 Tensor/NN op：matrix 中 `lowering = single`，注册 `FRelayToTE`。
 - 多输出 Tuple op：matrix 中 `lowering = multi`，注册 `FRelayToTEMulti`。
-- 设备通信 op：matrix 中 `lowering = exec_plan`，由 `LowerRelayToExecPlanPass` 转成 `CommExec` / execution plan 节点，不注册 `FRelayToTE` / `FRelayToTEMulti`。
+- 设备通信语义目前不属于 Compiler 的可执行 lowering；在 ExecutionPlan 能启动真实 `CompiledModule` 并有数值集成测试前，不得将其标记为 supported。
 - 暂不支持 lowering 的 op：不得伪装为 supported；matrix 中 `lowering` 必须标为 `none`。
 
 `FRelayToTE` / `FRelayToTEMulti` 的职责：

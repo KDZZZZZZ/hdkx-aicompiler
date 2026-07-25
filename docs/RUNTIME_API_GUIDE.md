@@ -287,10 +287,9 @@ kxc::tir::Stmt MyTIRPass(const kxc::tir::Stmt& s);
 
 Phase-1 supports exporting ExecutionPlan to JSON at compile time, then loading JSON at runtime.
 
-### 7.1 Compile-side APIs
+### 7.1 Compiler boundary
 
-- `kxc.relay.transform.lower_to_exec_plan_json(func) -> string`
-- `kxc.relay.transform.lower_to_exec_plan_json_file(func, path) -> string`
+Compiler-side ExecutionPlan export is not available. The standalone JSON APIs below operate on an already constructed `ExecutionPlan`.
 
 ### 7.2 Runtime-side APIs
 

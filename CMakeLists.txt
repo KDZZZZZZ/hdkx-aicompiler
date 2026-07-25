@@ -92,7 +92,6 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/pass/context.h
   include/kxc/pass/pass.h
   include/kxc/profiling/profiling.h
-  include/kxc/compiler/distributed/multi_device.h
   include/kxc/relay/op.h
   include/kxc/relay/op_attr_types.h
   include/kxc/relay/op_macros.h
@@ -497,7 +496,6 @@ set(KXC_COMPILER_SOURCES
   src/compiler/lowering/lowered_function.cc
   src/compiler/lowering/lowered_graph.cc
   src/compiler/lowering/te_to_tir.cc
-  src/compiler/distributed/multi_device.cc
 )
 
 set(KXC_RUNTIME_SESSION_SOURCES

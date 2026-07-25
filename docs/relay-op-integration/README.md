@@ -10,7 +10,7 @@
 | 1 | [01-relay.md](01-relay.md) | Relay schema、attrs、`_make` helper | canonical op 注册完整，无 alias，无半拉 helper |
 | 2 | [02-type-inference.md](02-type-inference.md) | `FInferType` | shape/dtype 可推断，错误立即失败 |
 | 3 | [03-topi-te.md](03-topi-te.md) | TOPI helper 或本地 `te::compute` | 不返回空 tensor，不写假实现，能生成后端可承接的 TE |
-| 4 | [04-lowering-backend.md](04-lowering-backend.md) | `FRelayToTE` / `FRelayToTEMulti` / execution plan | `LowerToTIR` 或 `LowerRelayToExecPlanPass` 通过 |
+| 4 | [04-lowering-backend.md](04-lowering-backend.md) | `FRelayToTE` / `FRelayToTEMulti` | `LowerToTIR` 通过 |
 | 5 | [05-frontend-tests-ci.md](05-frontend-tests-ci.md) | FFI、ONNX、测试、CI | checker、type、lowering、LLVM numeric tests 通过 |
 | 6 | [DRIFT.md](DRIFT.md) | 漂移核对记录 | 确认旧 guide 没有继续指导错误实现 |
 

@@ -498,7 +498,7 @@ PrepareRelayProgram -> BuildValueGraph -> PartitionValueGraph
   -> AssembleCompiledGraph
 ```
 
-`CompilePrimitiveUnits` 一次返回完整 backend batch；内部 phase 由调用栈和错误上下文表达，不重放为可观察状态。`opt_level` 只选择 pass 集合。backend 按 Target dispatch：`llvm` + CPU 进入 LLVM ORC JIT，`cuda` + CUDA Device 进入 CUDA emitter、NVRTC 和 Driver API。缺少对应构建特性时返回明确错误，Compiler 不创建 RuntimeSession。
+`CompilePrimitiveUnits` 一次返回完整 backend batch；内部 phase 由调用栈和错误上下文表达，不重放为可观察状态。`opt_level` 只选择 pass 集合。Compiler 只发布单 target static/control plan；backend 按 Target dispatch：`llvm` + CPU 进入 LLVM ORC JIT，`cuda` + CUDA Device 进入 CUDA emitter、NVRTC 和 Driver API。缺少对应构建特性时返回明确错误，Compiler 不创建 RuntimeSession。
 
 ### 11.3 CompiledModule
 
@@ -636,7 +636,7 @@ CUDA backend：
 
 ### 14.2 ExecutionPlan
 
-`ExecutionPlan` 是多设备执行计划：
+`ExecutionPlan` 是独立的多设备执行计划数据结构，不是 Compiler lowering 的输出：
 
 - `nodes`：执行节点列表。
 - `value_virtual_devices`：值到 virtual device。
@@ -694,7 +694,7 @@ CUDA backend：
 - Comm node 调 CCLBackend 的通信方法。
 - Barrier node 调 `SyncWorker`。
 
-所以 Disco 目前更像执行计划和通信语义验证层，不是完整分布式 kernel runtime。
+所以 Disco 目前更像独立的执行计划和通信语义验证层，不是完整分布式 kernel runtime，也不接收 Compiler 发布的模块。重新引入 compiler lowering 前，ExecutionPlan 必须能查找并启动真实 `CompiledModule`，并有数值集成测试。
 
 ## 15. Profiling 系统
 

@@ -517,9 +517,7 @@ def count_test_refs(root: Path, op_names: set[str]) -> dict[str, dict[str, int]]
                 or "CompileAndRun" in region
             )
             has_exec_plan_signal = (
-                "LowerRelayToExecPlanPass" in region
-                or "lower_to_exec_plan" in region
-                or "SerializeExecutionPlan" in region
+                "SerializeExecutionPlan" in region
                 or "CommExec" in region
                 or "ExecutionPlanExecutor" in region
             )
@@ -801,7 +799,7 @@ def analyze(
 
         requires_exec_plan_test = expected_lowering == "exec_plan"
         if expected and requires_exec_plan_test and exec_plan_test_ref_count == 0:
-            issues.append("missing LowerRelayToExecPlan contract test reference")
+            issues.append("missing execution-plan contract test reference")
 
         requires_backend_test = bool(
             expected

@@ -593,7 +593,6 @@ profiling 不参与编译语义，不允许为了记录事件而改变 IR。
 核心实现：
 
 - [execution_plan.h](../include/kxc/distributed/execution_plan.h)
-- [multi_device.cc](../src/compiler/distributed/multi_device.cc)
 - [executor.cc](../src/distributed/executor.cc)
 - [ccl_cpu.cc](../src/distributed/ccl_cpu.cc)
 
@@ -603,7 +602,6 @@ profiling 不参与编译语义，不允许为了记录事件而改变 IR。
 - VirtualDevice 到 worker set 的放置解析。
 - DRef 和 ThreadedSession。
 - CPU CCL 模拟的 copy、broadcast、scatter、gather、allgather、allreduce、reduce_scatter。
-- 通信 op 到 CommExec 的 lowering。
 
 尚未实现的关键能力：
 
@@ -611,7 +609,9 @@ profiling 不参与编译语义，不允许为了记录事件而改变 IR。
 - ExecutionPlanExecutor 不查找或启动 CompiledModule。
 - NCCL 集合通信后端尚未实现。
 
-该路径目前只能验证放置、计划结构和 CPU 通信语义，不能执行 kernel 数值计算。
+该路径目前只能验证放置、计划结构和 CPU 通信语义，不能执行 kernel 数值计算；Compiler
+只发布单 target static/control plan，不再提供 multi-device lowering。重新引入该路径前，
+ExecutionPlan 必须能查找并启动真实 `CompiledModule`，并有至少一个数值集成测试。
 旧的 `kxc.disco.execute_plan*` 公共 FFI 已删除；直接执行 KernelExec 会明确抛出
 `ExecutionPlan CompiledModule launch is not implemented`，不会再返回零张量或复制输入伪装执行成功。
 
@@ -667,7 +667,8 @@ profiling 不参与编译语义，不允许为了记录事件而改变 IR。
 3. `AddAttrs`、`ReluAttrs` 等无字段 attrs 仍有 importer/诊断构图调用，待 schema 统一后再删除。
 4. production compiler state is carried only by prepared graphs and complete primitive batches; no replay state machine is retained.
 5. the public executable-capability facade and its duplicate result vocabulary are deleted; executable proof is `Compiler::Compile`, while focused checks use the internal policy at its real boundary.
-6. `CSourceEmitter` 仍由 LLVM 诊断测试使用，明确保持“只生成可读 C、不是 backend”的定位。
+6. multi-device compiler lowering is deleted until ExecutionPlan can launch real modules with numerical coverage; distributed runtime, CCL, worker/session, and plan structures remain independent.
+7. `CSourceEmitter` 仍由 LLVM 诊断测试使用，明确保持“只生成可读 C、不是 backend”的定位。
 
 ### 12.5 已知陈旧文档
 
@@ -762,7 +763,7 @@ Omen 当前仍位于旧分支 device-info-query-contract@c3b007f，且工作区�
 7. [src/relay/type_infer.cc](../src/relay/type_infer.cc) 与 [src/relay/op](../src/relay/op)：19 个算子语义。
 8. [src/relay/transforms](../src/relay/transforms) 与 [src/tir/transforms](../src/tir/transforms)：Pass。
 9. [src/runtime/device_api.cc](../src/runtime/device_api.cc)、[src/runtime/ndarray.cc](../src/runtime/ndarray.cc) 和 [src/runtime/device_stream.cc](../src/runtime/device_stream.cc)：设备和异步生命周期。
-10. [src/compiler/distributed/multi_device.cc](../src/compiler/distributed/multi_device.cc) 与 [src/distributed/executor.cc](../src/distributed/executor.cc)：尚未闭环的多设备路径。
+10. [src/distributed/executor.cc](../src/distributed/executor.cc)：独立的 execution-plan/CCL runtime；它尚未绑定 `CompiledModule`，不属于 Compiler 发布路径。
 
 ## 16. 文档更新规则
 

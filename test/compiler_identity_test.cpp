@@ -93,15 +93,6 @@ kxc::Function PlacementGraph(const kxc::VirtualDevice& virtual_device) {
     return kxc::Function({input}, body);
 }
 
-kxc::Function DeviceCopyGraph(const kxc::VirtualDevice& source,
-                              const kxc::VirtualDevice& destination) {
-    kxc::Var input("input", kxc::TensorType({2}, "float32"));
-    return kxc::Function(
-        {input}, kxc::Call(kxc::relay::Op::Get("device.copy"), {input},
-                           kxc::relay::DeviceCopyAttrs::Create(
-                               source, destination)));
-}
-
 template <typename DerivedCall>
 kxc::Function MakeDerivedCallFunction() {
     kxc::Var input("input", kxc::TensorType({2}, "float32"));
@@ -299,18 +290,6 @@ bool TestGraphSemanticIdentityCanonicalizesLogicalPlacement() {
                    target_only_first != target_only_different_id,
                "target-only placement retains kind/id while excluding capabilities");
 
-    const GraphSemanticKey copy_first = Compiler::BuildGraphSemanticKey(
-        DeviceCopyGraph(first, VirtualDevice(cpu, TargetSnapshot(0, "arch-a"),
-                                              "global", 8)));
-    const GraphSemanticKey copy_same = Compiler::BuildGraphSemanticKey(
-        DeviceCopyGraph(same, VirtualDevice(cpu, TargetSnapshot(0, "arch-b"),
-                                             "global", 8)));
-    const GraphSemanticKey copy_different = Compiler::BuildGraphSemanticKey(
-        DeviceCopyGraph(same, VirtualDevice(
-            Device::CUDA(1), TargetSnapshot(1, "arch-b", "cuda", kCUDA),
-            "global", 8)));
-    TEST_CHECK(copy_first == copy_same && copy_first != copy_different,
-               "DeviceCopy attrs retain source/destination logical placement");
     return true;
 }
 

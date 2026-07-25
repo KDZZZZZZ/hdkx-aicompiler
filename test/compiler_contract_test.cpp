@@ -26,7 +26,6 @@
 #include "../src/compiler/internal/primitive_cache.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
-#include "kxc/compiler/distributed/multi_device.h"
 #include "support/primitive_lowering.h"
 
 namespace {
@@ -483,27 +482,6 @@ bool TestLoweredObjectValidation() {
     return true;
 }
 
-// 生产 per-primitive lowering 必须保活常量，同时旧转发 PackedFunc 不得继续暴露。
-bool TestMultiDeviceLoweringEntry() {
-    using namespace kxc;
-
-    runtime::NDArray data = runtime::NDArray::Zeros(
-        {2}, runtime::DataTypeFromString("float32"), Device::CPU());
-    Var input("input", TensorType({2}, "float32"));
-    Constant constant(data);
-    Function function({input}, Call(relay::Op::Get("add"), {input, constant}));
-
-    relay::LoweredFunction direct = kxc::test_support::LowerFirstPrimitive(function);
-    TEST_CHECK(direct.constants().size() == 1 &&
-                   SamePayload(direct.constants()[0]->value, data),
-               "production primitive lowering lost constant payload");
-    TEST_CHECK(!Registry::Global()
-                    .Get("kxc.relay.transform.lower_compute_to_tir")
-                    .defined(),
-               "obsolete lower_compute_to_tir forwarding entry should be removed");
-    return true;
-}
-
 // ExecutionPlan 尚未绑定 CompiledModule 时必须明确失败，不能伪造零值或复制输入。
 bool TestExecutionPlanKernelFailsClosed() {
     using namespace kxc;
@@ -713,7 +691,6 @@ int main() {
         {"input_constant_output_order", TestInputConstantOutputOrder},
         {"constant_binding_identity", TestConstantBindingIdentity},
         {"lowered_object_validation", TestLoweredObjectValidation},
-        {"multi_device_lowering_entry", TestMultiDeviceLoweringEntry},
         {"execution_plan_kernel_fails_closed", TestExecutionPlanKernelFailsClosed},
         {"multi_output_metadata", TestMultiOutputMetadata},
 #if KXC_USE_LLVM
