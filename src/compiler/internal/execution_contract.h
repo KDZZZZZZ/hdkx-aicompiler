@@ -3,9 +3,11 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "compile_state.h"
 #include "prepared_static_graph.h"
+#include "primitive_cache.h"
 #include "kxc/compiler/compiler.h"
 #include "kxc/compiler/pipeline.h"
 #include "kxc/relay/relay.h"
@@ -54,6 +56,10 @@ void ProbeCompilerExecution(Function function, CompileConfig config,
 PreparedCompilerGraph PrepareCompilerGraph(
     Function function, CompileConfig config,
     const CompilerExecutionContract& contract);
+CompiledGraph AssembleCompiledGraph(
+    const PreparedCompilerGraph& prepared,
+    const std::vector<PrimitiveArtifactPin>& ordered_pins,
+    const Map<String, runtime::NDArray>& constants);
 CompiledGraph FinishCompilerGraph(const PreparedCompilerGraph& prepared,
                                   CompileConfig config,
                                   const CompilerExecutionContract& contract);

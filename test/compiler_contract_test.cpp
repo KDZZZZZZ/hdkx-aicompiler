@@ -15,11 +15,14 @@
 #include "kxc/distributed/executor.h"
 #include "kxc/distributed/session.h"
 #include "kxc/runtime/ndarray.h"
+#include "kxc/runtime/session.h"
 #include "kxc/pass/context.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/ffi/registry.h"
 #include "kxc/runtime/kernel_abi.h"
 #include "../src/compiler/internal/compile_state.h"
+#include "../src/compiler/internal/execution_contract.h"
+#include "../src/compiler/internal/primitive_compiler.h"
 #include "../src/compiler/internal/kernel_abi_builder.h"
 #include "../src/compiler/internal/lowered_graph.h"
 #include "kxc/relay/op.h"
@@ -579,6 +582,73 @@ bool TestMultiOutputMetadata() {
     return true;
 }
 
+#if KXC_USE_LLVM
+
+bool TestAssembleCompiledGraphFromOrderedPins() {
+    using namespace kxc;
+    using namespace api::internal;
+    TensorType type({4}, "float32");
+    Var lhs("lhs", type);
+    Var rhs("rhs", type);
+    Var factor("factor", type);
+    Call add(relay::Op::Get("add"), {lhs, rhs});
+    Function function({lhs, rhs, factor}, Call(relay::Op::Get("mul"), {add, factor}));
+    const api::CompileConfig config =
+        api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+    const CompilerExecutionContract contract =
+        ResolveCompilerExecutionContract(config);
+    const PassContext pass_context = PassContext::MergeTarget(
+        relay::PassContextFromRelay(function), config->target);
+    PassContext::Scope scope(pass_context);
+    ClearPrimitiveCacheForTesting();
+    const PreparedCompilerGraph prepared =
+        PrepareCompilerGraph(function, config, contract);
+    const CompiledPrimitiveBatch batch = CompilePrimitiveUnits(
+        prepared.graph.partitioned.units,
+        prepared.graph.partitioned.value_graph.values, config, contract);
+    std::vector<PrimitiveArtifactPin> pins;
+    pins.reserve(batch.primitives.size());
+    for (const CompiledPrimitive& primitive : batch.primitives) {
+        pins.push_back(primitive.pin);
+    }
+    const api::CompiledGraph compiled = AssembleCompiledGraph(
+        prepared, pins, batch.constants);
+    std::vector<PrimitiveArtifactPin> missing = pins;
+    missing.pop_back();
+    std::vector<PrimitiveArtifactPin> swapped = pins;
+    std::swap(swapped[0], swapped[1]);
+
+    auto filled = [](float value) {
+        runtime::NDArray array = runtime::NDArray::Empty(
+            {4}, runtime::DataTypeFromString("float32"), Device::CPU());
+        const std::vector<float> data(4, value);
+        array.CopyFromBytes(data.data(), data.size() * sizeof(float));
+        return array;
+    };
+    runtime::RuntimeSession session(compiled.module(), compiled.plan());
+    const Array<runtime::NDArray> outputs =
+        session.Run({filled(1.0f), filled(2.0f), filled(3.0f)});
+    std::vector<float> values(4);
+    outputs[0].CopyToBytes(values.data(), values.size() * sizeof(float));
+    ClearPrimitiveCacheForTesting();
+
+    TEST_CHECK(compiled.plan().calls().size() == batch.primitives.size() &&
+                   compiled.artifact_pins().size() == batch.primitives.size() &&
+                   outputs.size() == 1 && values == std::vector<float>(4, 9.0f) &&
+                   Throws([&] {
+                       (void)AssembleCompiledGraph(
+                           prepared, missing, batch.constants);
+                   }) &&
+                   Throws([&] {
+                       (void)AssembleCompiledGraph(
+                           prepared, swapped, batch.constants);
+                   }),
+               "ordered pins must assemble one executable graph and reject drift");
+    return true;
+}
+
+#endif
+
 bool TestMultiPrimitiveCompileStateIdentity() {
     using namespace kxc;
     using namespace kxc::api;
@@ -656,6 +726,10 @@ int main() {
         {"multi_device_lowering_entry", TestMultiDeviceLoweringEntry},
         {"execution_plan_kernel_fails_closed", TestExecutionPlanKernelFailsClosed},
         {"multi_output_metadata", TestMultiOutputMetadata},
+#if KXC_USE_LLVM
+        {"assemble_compiled_graph_ordered_pins",
+         TestAssembleCompiledGraphFromOrderedPins},
+#endif
         {"multi_primitive_compile_state", TestMultiPrimitiveCompileStateIdentity},
     };
 
