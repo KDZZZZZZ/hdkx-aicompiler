@@ -34,24 +34,29 @@ Relay 控制结构
 目标架构建立以下唯一权威：
 
 ```text
-PreparedRelayProgram
-  -> ResolvedRelayCall
-  -> LogicalValueContract
-  -> PrimitiveUnit
+PrepareRelayProgram
+  -> PreparedRelayProgram / compiler-derived residual features
+  -> PlanRelayProgram
+       -> ResolvedRelayCall
+       -> LogicalValueContract
+       -> PrimitiveUnit
+       -> PreparedStaticPlan | PreparedControlPlan
   -> CompilePrimitiveUnits
   -> PrimitiveArtifact
 ```
 
-静态数据流 planner 与控制流 planner 可以保留不同拓扑，但必须消费和产出上述共同合同。
+静态数据流是结构化 Relay 程序在消除常量控制结构后“不含残留 `If`/`While`”的退化情况，不是第二种 Relay 语义。调用方只配置允许的 capability；Compiler 自己推导程序特征，并在编译期一次性选择静态或控制拓扑。两种 topology builder 可以保留不同算法，但只能位于一个规划入口之后，并且必须消费和产出上述共同合同。
 
 ## 2. 目标、非目标与约束
 
 ### 2.1 功能目标
 
 - 支持静态数据流与 static-exact 控制流使用同一套 Relay Call 语义。
+- 使用一个 `PreparedRelayProgram` 表达普通数据流和结构化控制流；静态性由 Compiler 从规范化后的程序推导。
 - 支持 `If`、bounded `While`、Phi 和 loop-carried value 的显式控制拓扑。
 - 每个 ordinary compute Call 形成一个正式 `PrimitiveUnit`。
 - 静态与控制流路径使用同一 primitive lowering、TIR pipeline、Kernel ABI、artifact identity、cache 和 backend 编译实现。
+- 无残留控制结构的程序必须专门化为静态 `ExecutablePlan`，不得进入通用控制执行循环。
 - Runtime 只接收已绑定、不可变、无需 Relay/TE/TIR/Compiler 回调的执行计划。
 - 保留当前 fail-closed 行为；目标架构不扩大已批准的 operator、shape、device 或 backend 能力。
 
@@ -62,7 +67,7 @@ PreparedRelayProgram
 | 确定性 | 相同 Relay 语义、target 和 pipeline 产生相同 `UnitSemanticKey` 与 `PrimitiveArtifactKey` |
 | 可维护性 | Operator Call 合同解析、tensor leaf 展开、primitive 编译各只有一个实现 |
 | 可测试性 | analysis、planner、primitive compiler、plan binder 可以分别做纯单元测试 |
-| 性能 | 每个 primitive 只准备和 lowering 一次；backend 支持批量编译，不按叶子重复运行完整 graph compiler |
+| 性能 | 每个 primitive 只准备和 lowering 一次；backend 支持批量编译；静态程序只在编译期做一次 topology 选择，Runtime 不承担 Region、predicate、Phi、loop state 或 task-kind dispatch |
 | 资源安全 | artifact pin、module owner 和 control-plan retention 只有一个明确所有者链 |
 | 可观测性 | graph、region、task、unit、artifact 的诊断身份分层且可关联 |
 | 兼容性 | 删除 legacy public API 前，仓库内调用方全部迁移并提供明确的编译期失败信息 |
@@ -71,6 +76,7 @@ PreparedRelayProgram
 
 - 不把 `ControlPlan` 和 `ExecutablePlan` 强行合成一个拓扑类型。
 - 不把 `If`、`While`、Phi 或 loop-carried value 塞进普通静态 `ValueGraph`。
+- 不为了统一 Relay 抽象而让静态图使用通用控制流解释器。
 - 不让 Runtime 读取 Relay、Operator registry、TE、TIR 或 Compiler cache。
 - 不在本次收口中引入 dynamic shape、shape specialization、adaptive publication 或 hot swap。
 - 不改变当前“一 ordinary Call 一 primitive unit”的 partition 策略；未来融合必须通过新的显式 partition policy。
@@ -78,8 +84,9 @@ PreparedRelayProgram
 ### 2.4 约束
 
 - C++17。
-- 现有 `Compiler::Compile` 继续是静态数据流生产入口。
-- `Compiler::CompileControlFlowExact` 在 capability 完全对齐前继续是显式、独立、默认关闭的控制流入口。
+- 迁移期间，现有 `Compiler::Compile` 继续是静态数据流生产入口。
+- `Compiler::CompileControlFlowExact` 在 capability 完全对齐前继续作为显式、默认关闭的兼容入口，但它只能设置 capability policy 并调用共同 preparation/planning 实现，不能形成第二套 Relay front-end。
+- 调用方不得提供或修改“程序是静态还是控制流”的事实；topology kind 只能由 Compiler 对规范化后 Relay 的分析结果决定。
 - `CompiledModule`、`ExecutablePlan`、`ControlExecutionPlan` 与 artifact cache 的不可变性不能倒退。
 - 诊断字符串不能成为 ABI、artifact identity 或 binding authority。
 
@@ -142,45 +149,53 @@ relay::LowerToTIR
 ## 4. 目标高层架构
 
 ```text
-                           +-------------------------+
-Relay Function ---------->| PrepareRelayProgram     |
-CompileConfig / Target --->| - mode-safe pipeline    |
-                           | - typed ANF             |
-                           | - one capability engine |
-                           +------------+------------+
-                                        |
-                              PreparedRelayProgram
-                                        |
-                    +-------------------+-------------------+
-                    |                                       |
-         +----------v-----------+               +-----------v----------+
-         | StaticDataflowPlanner|               | ControlFlowPlanner   |
-         | ordered dataflow     |               | region/branch/loop   |
-         +----------+-----------+               +-----------+----------+
-                    |                                       |
-          PreparedStaticPlan                     PreparedControlPlan
-                    |                                       |
-                    +-------------------+-------------------+
-                                        |
-                              vector<PrimitiveUnit>
-                                        |
-                           +------------v-------------+
-                           | CompilePrimitiveUnits    |
-                           | - unit -> TE             |
-                           | - TE -> TIR              |
-                           | - TIR pipeline           |
-                           | - Kernel ABI             |
-                           | - identity/cache/backend |
-                           +------+-------------+-----+
-                                  |             |
-                    +-------------v--+       +--v----------------+
-                    | Static binder  |       | Control binder    |
-                    | module + plan  |       | bound regions     |
-                    +--------+-------+       +---------+---------+
-                             |                         |
-                   CompiledGraph            CompiledControlFlowGraph
-                             |                         |
-                   RuntimeSession            ControlRuntimeSession
+Relay Function ---------->+------------------------------+
+CompileConfig / Target --->| PrepareRelayProgram          |
+                           | - structural pre-scan        |
+                           | - feature-safe pipeline      |
+                           | - typed ANF                  |
+                           | - constant-control simplify  |
+                           | - one capability engine      |
+                           | - residual feature analysis  |
+                           +---------------+--------------+
+                                           |
+                                 PreparedRelayProgram
+                                           |
+                           +---------------v--------------+
+                           | PlanRelayProgram             |
+                           | one compile-time dispatch    |
+                           +------+----------------+------+
+                                  |                |
+                     no residual  |                | residual
+                     If / While   |                | If / While
+                     +------------v------+   +-----v----------------+
+                     | Dataflow topology |   | Structured control  |
+                     | builder           |   | topology builder    |
+                     +------------+------+   +-----+----------------+
+                                  |                |
+                       PreparedStaticPlan   PreparedControlPlan
+                                  |                |
+                                  +-------+--------+
+                                          |
+                                vector<PrimitiveUnit>
+                                          |
+                             +------------v-------------+
+                             | CompilePrimitiveUnits    |
+                             | - unit -> TE             |
+                             | - TE -> TIR              |
+                             | - TIR pipeline           |
+                             | - Kernel ABI             |
+                             | - identity/cache/backend |
+                             +------+-------------+-----+
+                                    |             |
+                      +-------------v--+       +--v----------------+
+                      | Static binder  |       | Control binder    |
+                      | module + plan  |       | bound regions     |
+                      +--------+-------+       +---------+---------+
+                               |                         |
+                     CompiledGraph            CompiledControlFlowGraph
+                               |                         |
+                     RuntimeSession            ControlRuntimeSession
 ```
 
 ## 5. 分层责任
@@ -188,8 +203,9 @@ CompileConfig / Target --->| - mode-safe pipeline    |
 | 层 | 唯一责任 | 可以依赖 | 禁止依赖 |
 |---|---|---|---|
 | Relay | IR、OperatorSpec、attrs、type relation、lowering binding 注册 | support、target type vocabulary | Compiler cache、Runtime session |
-| Compiler analysis | mode-safe pipeline、typed ANF、Call 合同解析、logical tensor contract | Relay、Pass、Target | backend handle、Runtime executor |
-| Planner | value routing、partition、region、branch、loop、Phi、依赖 | analysis contract、identity | TE/TIR 实现细节、cache mutation |
+| Compiler analysis | structural feature scan、feature-safe pipeline、typed ANF、Call 合同解析、logical tensor contract | Relay、Pass、Target | backend handle、Runtime executor |
+| Planner facade | 根据 residual features 一次性选择 topology builder | analysis contract | Relay 重写、TE/TIR、Runtime execution |
+| Topology builder | value routing、partition、region、branch、loop、Phi、依赖 | analysis contract、identity | TE/TIR 实现细节、cache mutation |
 | Primitive lowering | 一个 `PrimitiveUnit` 到 TE/TIR | resolved call、logical values、TE/TIR | graph/control topology |
 | Primitive compiler | TIR pass、Kernel ABI、artifact key、cache、backend | lowering、identity、codegen | Relay traversal、control execution |
 | Plan binder | 将已编译 primitive 绑定到静态或控制执行拓扑 | artifacts、runtime plan contracts | Operator registry、TE/TIR |
@@ -200,11 +216,12 @@ CompileConfig / Target --->| - mode-safe pipeline    |
 ```text
 Relay/Pass
    -> Compiler Analysis
-       -> Planner
-           -> Primitive Lowering
-               -> Primitive Compiler
-                   -> Plan Binder
-                       -> Runtime Contracts
+       -> Planner Facade
+           -> Topology Builder
+               -> Primitive Lowering
+                   -> Primitive Compiler
+                       -> Plan Binder
+                           -> Runtime Contracts
 
 Runtime Executor 不得反向依赖以上 Compiler 层。
 ```
@@ -216,33 +233,51 @@ Runtime Executor 不得反向依赖以上 Compiler 层。
 ### 6.1 `PreparedRelayProgram`
 
 ```cpp
-enum class RelayProgramMode {
-    kStaticDataflow,
-    kControlFlow,
+enum class ControlFlowPolicy {
+    kReject,
+    kAllowStaticExactControlFlow,
+};
+
+struct RelayProgramFeatures {
+    bool has_if{false};
+    bool has_while{false};
+
+    bool has_residual_control_flow() const noexcept {
+        return has_if || has_while;
+    }
 };
 
 struct PreparedRelayProgram {
     Function typed_anf;
-    RelayProgramMode mode;
+    RelayProgramFeatures residual_features;
     Target target;
     CompilerExecutionContract execution_contract;
 };
 
 PreparedRelayProgram PrepareRelayProgram(
     Function function,
-    const CompileConfig& config,
-    RelayProgramMode mode);
+    const CompileConfig& config);
 ```
 
 职责：
 
+- 在运行 graph passes 前做只读 structural pre-scan。
 - 解析并冻结 target 与 pipeline contract。
-- 执行该 mode 明确允许的 Relay passes。
+- 根据输入结构和 pass 的显式 capability declaration 解析 feature-safe pipeline。
 - 建立 typed ANF。
-- 调用唯一 capability engine。
+- 折叠编译期可判定的 `If`，并按有界成本策略选择性展开固定循环。
+- 在规范化和控制简化后重新计算 `residual_features`。
+- 使用 `CompileConfig` 中的 `ControlFlowPolicy` 调用唯一 capability engine。
 - 不分配 runtime storage，不创建 TIR，不访问 primitive cache。
 
-控制流 mode 只运行明确声明为 control-safe 的 graph passes。未知 pass 必须拒绝，不得默认假定可以跨 `If`/`While` 改写。
+约束：
+
+- `ControlFlowPolicy` 是“允许哪些能力”的 fail-closed 配置，不是程序类别，也不参与 topology 事实判定。
+- `RelayProgramFeatures` 只能由 Compiler 生成；调用方不得构造或覆盖。
+- `PreparedRelayProgram` 与其中的 features 是 immutable Compiler-internal result；示意代码省略了 private construction/accessor 细节。
+- 对含控制结构的输入，只能运行明确声明为 control-safe 的 graph passes。请求了未知或 control-unsafe pass 时必须拒绝，不得默认假定可以跨 `If`/`While` 改写。
+- `kAllowStaticExactControlFlow` 不强制使用控制拓扑。控制结构被完全消除后，程序仍选择静态 plan。
+- profile 只记录规范化后仍影响 topology 的最小事实，不复制 dtype、shape、device、identity 或 ABI。
 
 ### 6.2 `ResolvedRelayCall`
 
@@ -302,7 +337,7 @@ struct LogicalValueContract {
 - `checked_type` 是 compiler 侧唯一 dtype/shape 权威。
 - value id 只标识计划内连线，不进入 primitive semantic key。
 - storage id 不属于 logical value。
-- control planner 可以增加 Phi/loop-carried origin，但不得重建 string dtype/shape ABI。
+- structured-control topology builder 可以增加 Phi/loop-carried origin，但不得重建 string dtype/shape ABI。
 - compiler/runtime 边界只进行一次 `Type -> runtime::ValueSpec` 转换。
 
 ### 6.4 `PrimitiveUnit`
@@ -330,7 +365,7 @@ struct PrimitiveUnit {
 - `semantic_key` 只组合 operator、attrs、logical argument mapping、tensor contract 与必要 lowering policy。
 - graph-local unit id、value id、symbol 和 source locator 不得进入数学语义。
 
-静态 planner 与控制 planner 都必须产出这个类型，不允许再建立 `task_id -> Function` 平行 sidecar。
+两个 topology builder 都必须产出这个类型，不允许再建立 `task_id -> Function` 平行 sidecar。
 
 ### 6.5 `CompilePrimitiveUnits`
 
@@ -368,13 +403,41 @@ PrimitiveUnit
 
 该接口接受一批 units，以保留 LLVM/CUDA backend batch build 和 cache owner/waiter 顺序。
 
-## 7. Planner 设计
+## 7. 一个规划入口、两种内部拓扑算法
 
-### 7.1 `StaticDataflowPlanner`
+### 7.1 `PlanRelayProgram`
+
+```cpp
+using PreparedProgramPlan =
+    std::variant<PreparedStaticPlan, PreparedControlPlan>;
+
+PreparedProgramPlan PlanRelayProgram(
+    const PreparedRelayProgram& program);
+```
+
+这是 analysis 之后唯一允许选择 topology 的入口：
+
+```text
+residual_features.has_residual_control_flow() == false
+  -> BuildDataflowTopology
+
+residual_features.has_residual_control_flow() == true
+  -> BuildStructuredControlTopology
+```
+
+选择只发生一次且只发生在编译期。`CompilePrimitiveUnits`、plan binder 和 Runtime 不得再次根据 Relay feature 猜测路径。
+
+如果常量条件折叠、不可达分支删除或受控循环展开消除了全部控制节点，必须选择 `PreparedStaticPlan`。不得为了保留来源信息而生成只含一个 entry Region 的控制计划；来源信息应进入独立诊断元数据。
+
+`PreparedProgramPlan` 是 Compiler internal typestate，必须在 plan binding 阶段被消费。它不能作为每个 task 的 runtime variant，也不能让 `std::visit` 或 plan-kind 分支进入 kernel launch loop。
+
+该 facade 不需要 virtual interface、heap boxing 或通用 visitor。目标实现是一个普通函数、一个基于两个布尔 feature bit 的编译期路径分支，以及 move-only/不可变 plan 结果。feature analysis 最多执行 graph pass 前后的两次线性只读遍历，不得因此重复 InferType、ANF、OperatorSpec 解析或 tensor leaf 展开。
+
+### 7.2 Dataflow topology builder
 
 保留当前 `ValueGraph -> PartitionedGraph` 的基本职责：
 
-- 接收不含 `If`/`While` 的 `PreparedRelayProgram`。
+- 接收 `residual_features.has_residual_control_flow() == false` 的 `PreparedRelayProgram`。
 - 建立确定性的 ordinary value routing。
 - 为每个 ordinary Call 生成一个 `PrimitiveUnit`。
 - 生成有序 `KernelCall` 拓扑。
@@ -386,7 +449,7 @@ PrimitiveUnit
 - 自己实现 tensor leaf 展开规则。
 - 直接调用 backend。
 
-### 7.2 `ControlFlowPlanner`
+### 7.3 Structured-control topology builder
 
 保留当前 ControlPlan 中真正独有的逻辑：
 
@@ -408,7 +471,7 @@ PrimitiveUnit
 
 目标内部类型应命名为 `PreparedControlPlan` 或 `UnresolvedControlPlan`，并位于 Compiler internal namespace。它不是 Runtime 可直接执行的对象。
 
-### 7.3 为什么两个 planner 不合并
+### 7.4 为什么两个拓扑算法不合并
 
 静态数据流与控制流具有不同的拓扑不变量：
 
@@ -419,7 +482,27 @@ PrimitiveUnit
 | 无条件执行 | predicate 与 bounded iteration |
 | 普通 storage lifetime | 分支选择与 loop-carried retention |
 
-强行使用一个 planner 会把大量 mode 条件散落到同一个 visitor 中。目标是共享语义合同，不共享拓扑算法。
+强行使用一个 topology visitor 会把 Branch、Phi、backedge 和 storage-retention 条件散落到普通数据流路径。目标是共享程序抽象和语义合同，通过一个 facade 做编译期路由，而不是共享所有拓扑算法。
+
+这两个 builder 不是两套 compiler front-end：
+
+- 它们不运行 Relay pass。
+- 它们不各自解析 OperatorSpec。
+- 它们不各自建立 tensor contract。
+- 它们不决定 capability。
+- 它们只处理各自独有的 topology invariants。
+
+### 7.5 静态零控制开销不变量
+
+当 `residual_features.has_residual_control_flow() == false` 时，必须同时满足：
+
+- 不构造 Region、Branch、Loop、Phi 或 loop-carried state。
+- 不构造只有 entry Region 的退化 `ControlExecutionPlan`。
+- Runtime kernel loop 中没有 plan variant、task kind 或 control predicate 分支。
+- 不为控制流来源保留运行时 map、event 或 interpreter frame；诊断信息使用静态 plan metadata。
+- plan 类型选择最多产生一次编译期分支；不得把该选择下沉到每个 kernel call。
+
+固定 trip-count 循环不要求无条件展开。Compiler 使用显式、确定性的 unroll policy；未展开的循环保留 structured-control topology，避免代码尺寸爆炸。只有控制结构实际从 residual Relay 中消失时，才进入静态 fast path。
 
 ## 8. Runtime 边界
 
@@ -433,6 +516,8 @@ CompiledPrimitive[]
   -> ExecutablePlan
   -> CompiledGraph
 ```
+
+该路径是所有无残留控制结构程序的默认结果，与调用方是否允许 control-flow capability 无关。
 
 ### 8.2 控制流路径
 
@@ -448,15 +533,16 @@ CompiledPrimitive[]
 ### 8.3 必须满足的不变量
 
 - Runtime plan 不含 Relay `Expr`、`Call`、OperatorSpec 或 compiler callback。
+- Runtime plan kind 由 `PlanRelayProgram` 固定；Runtime 不重新分析或猜测程序类别。
 - 每个 kernel task 绑定一个 ready artifact、正式 symbol、KernelSignature 和 retention owner。
 - `runtime::ValueSpec` 是静态与控制流执行计划共享的 tensor/value contract。
 - source locator 可以作为独立诊断元数据存在，但不参与 ABI 或 artifact identity。
 - 未绑定 plan 不能由 public Runtime API 构造或执行。
 - Runtime 不得根据 `kernel_ref`、诊断文本或 source locator 查找 artifact。
 
-## 9. Public API 目标
+## 9. Public API 与迁移期入口
 
-保留：
+迁移期保留：
 
 ```cpp
 class Compiler {
@@ -466,6 +552,14 @@ public:
         Function, CompileConfig);
 };
 ```
+
+约束：
+
+- 两个入口必须调用同一 `PrepareRelayProgram`、`ResolveRelayCall` 和 `PlanRelayProgram`。
+- `CompileControlFlowExact` 只能施加 `ControlFlowPolicy::kAllowStaticExactControlFlow` 和兼容返回类型约束，不能把 `RelayProgramMode` 传入内部实现。
+- `Compiler::Compile` 的默认 policy 继续拒绝尚未正式开放的 residual control flow。
+- 兼容入口不得迫使无残留控制结构的程序使用 `ControlRuntimeSession`。在统一 immutable compiled bundle 完成前，它应在 API 边界转发到静态入口或明确拒绝不符合其兼容返回类型的调用。
+- 最终单一 `Compiler::Compile -> CompiledProgram` facade 属于 immutable compiled bundle 收口；无论该 API 何时落地，本文件定义的内部单 preparation/单 planning 入口不得等待它。
 
 删除正式 public API：
 
@@ -555,43 +649,54 @@ include/kxc/compiler/lowering/relay_to_tir.h
 
 - 保留并扩展 `compiler_contract_test`、`operator_compilation_test`。
 - 保留 `relay_control_plan_test`、`control_runtime_integration_test`。
+- 增加同一 preparation 入口对 dataflow-only、constant-folded `If`、residual `If` 和 residual bounded `While` 的 feature classification 测试。
+- 增加断言：dataflow-only 和被完全折叠的控制程序不生成 Region/Branch/Loop/Phi，也不进入 `ControlRuntimeSession`。
 - 增加静态与控制路径对同一 leaf Call 生成相同 semantic key 的测试。
 - 增加 argument duplicate、constant ordering、多输出和 tuple leaf 的交叉路径测试。
 
-### 阶段 1：统一 Operator Call 合同
+### 阶段 1：统一程序 preparation 与 topology 选择
+
+- 删除 `RelayProgramMode` 输入。
+- 引入 compiler-owned `RelayProgramFeatures` 与 capability-only `ControlFlowPolicy`。
+- 建立 `PrepareRelayProgram` 与 `PlanRelayProgram` 唯一入口。
+- pass registry 为 graph pass 声明 control-safety capability；pipeline resolver 根据 structural pre-scan fail closed。
+- 在 constant-control simplification 后重新计算 residual features。
+- 验收：无残留控制结构时只生成 `PreparedStaticPlan`，Runtime hot path 不出现 control task dispatch。
+
+### 阶段 2：统一 Operator Call 合同
 
 - 新增 `ResolvedRelayCall`。
-- 将 capability、static lowering 和 control planner 切换到同一 resolver。
+- 将 capability 与两个 topology builder 切换到同一 resolver。
 - 删除本地 `ValidateInputArity`、`ValidateAttrs`、`ValidateOperatorBindings`。
 - 验收：Compiler 内只有 resolver 可以读取 OperatorSpec implementation binding。
 
-### 阶段 2：统一 logical tensor/value contract
+### 阶段 3：统一 logical tensor/value contract
 
 - 抽取 tensor leaf 展开与 placement 解析。
-- `ValueGraphBuilder` 和 `ControlFlowPlanner` 使用同一 `LogicalValueContract`。
+- dataflow 与 structured-control topology builder 使用同一 `LogicalValueContract`。
 - 保留各自确定性的 value-id 分配算法，但禁止复制 dtype/shape 权威。
 - 验收：control preparation 不再创建 string dtype/shape contract。
 
-### 阶段 3：引入正式 `PrimitiveUnit`
+### 阶段 4：引入正式 `PrimitiveUnit`
 
 - 扩展当前 `CompilationUnit` 为共同 `PrimitiveUnit`。
-- 静态 partition 与 control planner 均产出该类型。
+- dataflow 与 structured-control topology builder 均产出该类型。
 - Control task 只引用 `PrimitiveUnitId`。
 - 删除 `task_id -> Function` sidecar 和 `kernel_ref` binding 语义。
 
-### 阶段 4：抽取 primitive compiler
+### 阶段 5：抽取 primitive compiler
 
 - 从 `compiler.cc` 抽取 `CompilePrimitiveUnits`。
 - 静态和控制路径共享 TIR、signature、identity、cache 与 backend batch build。
 - Control path 不再为每个 leaf 递归执行完整 `Compiler::Compile`。
 
-### 阶段 5：收口 Runtime value plan
+### 阶段 6：收口 Runtime value plan
 
 - `ControlExecutionPlan` 复用 `runtime::ValueSpec`。
 - unresolved `ControlPlan` 移入 Compiler internal namespace。
 - adapter 只负责 plan typestate 与 artifact binding。
 
-### 阶段 6：删除 legacy whole-graph lowering
+### 阶段 7：删除 legacy whole-graph lowering
 
 - 迁移仓库内全部 `LowerToTIR` 测试调用。
 - 从 `KXC_PUBLIC_HEADERS` 删除 `relay_to_tir.h`。
@@ -605,8 +710,9 @@ include/kxc/compiler/lowering/relay_to_tir.h
 |---|---|---|
 | stale checked type | `ResolveRelayCall` | 在 planner 前拒绝，报告 Relay locator |
 | attrs 或 arity 不匹配 | `ResolveRelayCall` | fail closed，不进入 unit 生成 |
-| mode 不支持 If/While | `PrepareRelayProgram` capability policy | 报告所需 capability |
+| policy 不允许 residual If/While | `PrepareRelayProgram` capability policy | 报告所需 capability，不伪装成另一程序类别 |
 | control-unsafe graph pass | pipeline resolver | 配置阶段拒绝 |
+| residual feature 与选择的 plan kind 不一致 | `PlanRelayProgram` | 构造 plan 前拒绝，视为 Compiler invariant violation |
 | value placement 冲突 | planner | 要求显式 copy task 或拒绝 |
 | primitive ABI 与 task value 顺序不一致 | plan binder | 绑定前拒绝 |
 | artifact cache 编译失败 | `CompilePrimitiveUnits` | 保留分类失败状态，不发布半成品 |
@@ -620,7 +726,9 @@ include/kxc/compiler/lowering/relay_to_tir.h
 
 ```text
 graph_semantic_key
-relay_program_mode
+relay_program_features
+selected_topology_kind
+control_flow_policy
 region_id
 task_id
 primitive_unit_id
@@ -634,6 +742,7 @@ cache_hit
 约束：
 
 - `region_id`、`task_id`、`unit_id` 是一次 plan 内的 locator，不是跨图 semantic identity。
+- `relay_program_features` 与 `selected_topology_kind` 由 Compiler 生成；`control_flow_policy` 只记录 capability 配置，三者不得互相冒充。
 - `entry_symbol` 是 module lookup key，不是 mathematical identity。
 - profiling 可以消费 canonical identity digest，但不能拥有 identity hash 算法。
 
@@ -642,10 +751,13 @@ cache_hit
 | 层 | 必须验证 |
 |---|---|
 | Relay Call resolver | fixed/variadic arity、attrs type、type relation、single/multi lowering、effect/alias policy |
+| Program preparation | structural pre-scan、control-safe pass gate、constant If folding、bounded unroll policy、residual feature recomputation |
+| Planning facade | dataflow-only 选择 static、residual If/While 选择 control、选择确定性、plan kind/profile 一致性 |
 | Logical values | parameter、constant、tuple、nested tuple、duplicate argument、placement |
-| Static planner | stable ids、ordered units、multi-output、constant ordering、plan determinism |
-| Control planner | If/Phi、bounded While、loop-carried values、captures、live-in/out、dependency determinism |
+| Dataflow topology builder | stable ids、ordered units、multi-output、constant ordering、plan determinism |
+| Structured-control topology builder | If/Phi、bounded While、loop-carried values、captures、live-in/out、dependency determinism |
 | Cross-path | 相同 leaf Call 的 `UnitSemanticKey`、KernelSignature 和 artifact cache 命中一致 |
+| Static fast path | 无 Region/Branch/Loop/Phi、无 control executor、无 per-kernel plan/task-kind dispatch |
 | Primitive lowering | input/constant/output ABI、shape overflow、dtype、multi-output、symbol identity |
 | Primitive compiler | cache owner/waiter、failure publication、LLVM/CUDA batch build、pin retention |
 | Plan binder | missing/extra binding、signature mismatch、value order mismatch、immutable snapshot |
@@ -681,7 +793,7 @@ check_relay_op_contract
 
 **正面影响：**
 
-- 控制 planner 不理解 TE/TIR。
+- structured-control topology builder 不理解 TE/TIR。
 - primitive compiler 不理解 Branch/Loop。
 - 两层可以独立测试和扩展。
 
@@ -695,26 +807,31 @@ check_relay_op_contract
 - 一个 visitor 同时生成 control topology 和 TIR：职责混合，难以验证。
 - Runtime 遇到 control task 时动态回调 Compiler：破坏不可变执行边界。
 
-### ADR-002：静态与控制流共享 Relay Call 和 value 合同，不共享 topology builder
+### ADR-002：统一 Relay 程序抽象，Compiler 推导 topology
 
 **状态：** Proposed
 
-**决策：** 建立 `PreparedRelayProgram`、`ResolvedRelayCall` 和 `LogicalValueContract`；保留独立的 StaticDataflowPlanner 与 ControlFlowPlanner。
+**决策：** 删除调用方提供的 `RelayProgramMode`。建立单一 `PreparedRelayProgram`、`ResolvedRelayCall` 和 `LogicalValueContract`；Compiler 在控制简化后生成 residual features，并通过唯一 `PlanRelayProgram` 入口一次性选择 dataflow 或 structured-control topology builder。
 
 **正面影响：**
 
+- 静态数据流成为结构化 Relay 程序的自然退化情况，不再是平行语义宇宙。
 - 消除 OperatorSpec 和 tensor contract 多重权威。
-- 不牺牲两类拓扑各自清晰的不变量。
+- topology 选择不依赖调用方猜测。
+- 静态 Runtime 不承担控制解释开销，同时保留两类拓扑各自清晰的不变量。
 
 **负面影响：**
 
-- analysis contract 必须支持两种 planner 所需的最小公共信息。
-- mode policy 需要严格测试。
+- pass registry 必须声明 graph pass 是否能安全处理结构化控制。
+- constant-control simplification 后必须重新分析 residual features。
+- planning facade 与两个内部 builder 的不变量都需要测试。
 
 **拒绝的替代方案：**
 
 - 完全独立的两个 compiler front-end：继续产生规则漂移。
-- 一个巨型通用 planner：大量 mode 分支，控制与静态不变量混杂。
+- 调用方传入 static/control mode：把程序事实变成可伪造配置，并可能让静态图误入控制 executor。
+- 一个巨型通用 topology visitor：Branch/Phi/backedge 条件污染静态规划 hot path。
+- 所有程序统一生成 ControlExecutionPlan：抽象表面统一，但静态 Runtime 支付无必要的解释、状态和同步成本。
 
 ### ADR-003：控制流叶子使用正式 `PrimitiveUnit`
 
@@ -778,6 +895,9 @@ check_relay_op_contract
 | 一次性重写过大 | 回归难定位 | 按第 11 节分阶段，每阶段保持 green |
 | common analysis 变成巨型万能层 | 新的耦合中心 | 只提供 Call、value、policy 数据，不生成任何 topology |
 | control-safe pass 定义不足 | 控制语义被错误改写 | 默认拒绝，逐个 pass 声明并测试 |
+| feature 分析时机错误 | 已消除的控制仍进入 control executor，或 residual control 被误判为 static | graph pass 前做 structural pre-scan，控制简化后重新计算 residual features，plan 构造时复核 |
+| 统一 facade 把分支下沉到 Runtime | 静态 kernel loop 增加 dispatch | 只允许 `PlanRelayProgram` 做一次编译期选择；增加 static fast-path 结构测试与基准 |
+| 固定循环一律展开 | 编译时间和代码尺寸膨胀 | 使用显式、确定性的 bounded unroll policy；未展开循环继续走 structured-control topology |
 | identity 在迁移中变化 | cache miss 或错误复用 | 增加跨路径 canonical bytes golden tests |
 | `LowerToTIR` 外部用户未知 | API break | release note、deprecated 周期或明确 major-version 变更 |
 | 复用 `ValueSpec` 时混入 storage 语义 | logical/physical 再次混淆 | logical analysis 不持有 storage id；只在 runtime plan 构造时赋值 |
@@ -788,9 +908,13 @@ check_relay_op_contract
 满足以下全部条件后，才可以认为本目标架构收口完成：
 
 - [ ] `Compiler::Compile` 与 `CompileControlFlowExact` 共享 `PrepareRelayProgram`。
+- [ ] Compiler internal 不存在调用方可设置的 `RelayProgramMode`。
+- [ ] `RelayProgramFeatures` 在控制简化后由 Compiler 重新计算，并由唯一 `PlanRelayProgram` 消费。
+- [ ] 无残留 `If`/`While` 的程序只生成静态 plan，不构造退化 control Region，也不进入 `ControlRuntimeSession`。
+- [ ] 静态 Runtime kernel loop 不包含 plan variant、control predicate 或 task-kind dispatch。
 - [ ] Compiler 内只有一个 `ResolvedRelayCall` 合同解析实现。
 - [ ] tensor leaf 和 logical tensor contract 只有一个权威实现。
-- [ ] 静态与控制 planner 均产出同一 `PrimitiveUnit`。
+- [ ] dataflow 与 structured-control topology builder 均产出同一 `PrimitiveUnit`。
 - [ ] ControlPlan 不再包含或旁挂 frozen Function。
 - [ ] 控制流叶子不再递归调用完整 `Compiler::Compile`。
 - [ ] TIR、Kernel ABI、artifact identity、cache、backend 使用唯一 primitive compiler。
