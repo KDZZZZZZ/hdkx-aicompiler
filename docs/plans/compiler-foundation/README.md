@@ -1,10 +1,10 @@
-# 编译器基础路线图
+# 编译器基础迁移计划（归档）
 
-> **状态：** W1 isolated/default-off baseline 已集成；W2 production adapters 与跨轨闭环实施中。LLVM workflow 已配置，但本机无 LLVM 绿色记录。
+> **状态：已归档。** 本目录记录早期迁移拆解，不是当前 roadmap、能力或待办权威。当前事实以源码、可复现测试、[`ARCHITECTURE_STATUS.md`](../../ARCHITECTURE_STATUS.md) 和 [compiler-foundation handoff](../../handoffs/compiler-foundation/INTEGRATION.md) 为准。
 >
-> **集成证据：** [`../../handoffs/compiler-foundation/INTEGRATION.md`](../../handoffs/compiler-foundation/INTEGRATION.md)
+> 文中 bucket/polymorphic、region Task-DAG 及平行 coordinator/fake 路径均无近期实施承诺；相关 contract universe 已删除或隔离为 default-OFF、非安装实验。
 >
-> **历史输入：** [`docs/COMPILER_FOUNDATION_BASELINE_REVIEW.md`](../../COMPILER_FOUNDATION_BASELINE_REVIEW.md)。本目录是迁移计划归档，不是当前能力权威。
+> **历史输入：** [`docs/COMPILER_FOUNDATION_BASELINE_REVIEW.md`](../../COMPILER_FOUNDATION_BASELINE_REVIEW.md)。
 >
 > **并行协作：** [`BRANCHING.md`](BRANCHING.md)
 >
@@ -21,7 +21,7 @@
 - fail closed：没有已证明适用的版本时等待、编译或明确报错，绝不按“缓存维度更大”猜测可运行。
 - identity 分层：value locator、unit semantic key、artifact key、dispatch key、symbol、storage id 不得混用。
 - 发布不可变对象：执行中的 executable、module 与 plan variant 必须有引用保活；发布新 generation 不修改旧对象。
-- 先 exact、后 bucket、再 polymorphic；`kDynamicDimension = -1` 只保留为 legacy input ABI sentinel。
+- 历史草案曾按 exact、bucket、polymorphic 排序；当前仅以已验证的 static-exact 主链为权威，后两者未排期。
 - 每轨先定义可验证契约和正反例，再扩展功能或性能策略。
 
 ## 2. 三个概念必须分开
@@ -36,13 +36,13 @@ dynamic shape 可以在静态图模板上发生；hot swap 可以优化一个静
 
 ## 3. 能力轨道与固定文档链接
 
-| # | 能力轨道 | 文档 | 当前状态 | 首要交付 |
+| # | 能力轨道 | 文档 | 归档时状态 | 当时首要交付 |
 |---|---|---|---|---|
 | 01 | 共同基础：契约、identity、cache | [01 core](01-core-contracts-identity-cache.md) | 进行中（待 LLVM 绿色记录/终审） | executable capability/invariant、static-exact production transaction/pin adapter、key 分离、pinned singleflight cache |
-| 02 | shape profile 与 dynamic shape | [02 shape](02-shape-system-and-specialization.md) | 规划中 | `GraphTemplate`、Shape IR、exact profile |
+| 02 | shape profile 与 dynamic shape | [02 shape](02-shape-system-and-specialization.md) | 已归档；bucket/polymorphic 未排期 | `GraphTemplate`、Shape IR、exact profile |
 | 03 | 自适应编译与安全 hot swap | [03 adaptive hot swap](03-adaptive-compilation-hot-swap.md) | 规划中 | coordinator、singleflight、slot generation |
 | 04 | dynamic graph | [04 dynamic graph](04-dynamic-graph-control-flow.md) | 规划中 | 受限控制流/结构化 region/CFG 契约 |
-| 05 | region execution | [05 region execution](05-region-execution-plan-runtime.md) | 规划中 | 可验证 region unit 与 dependency-aware plan |
+| 05 | region execution | [05 region execution](05-region-execution-plan-runtime.md) | 已归档；Region Task-DAG 已删除 | 可验证 region unit 与 dependency-aware plan |
 | 06 | NLP/GPU validation | [06 NLP/GPU validation](06-nlp-gpu-validation.md) | 规划中 | 可变序列与 GPU 端到端验收矩阵 |
 
 六条能力轨道各自维护独立的设计、实施步骤、测试和 Done 条件。README 只维护跨轨依赖、并行边界和集成状态，不复制各轨任务清单。
@@ -125,7 +125,9 @@ flowchart LR
 - **集成点：** 汇总 frontend、template/profile、artifact/cache、plan/session、CPU/GPU 数值和性能证据；不向核心轨道注入 NLP op 名特判。
 - **阻塞关系：** unknown/symbolic dim 被静默填 `1`、fuzzy bucket、或 target/ABI fingerprint 不匹配时，验收必须失败而不是降级通过。
 
-## 6. 集成里程碑与状态
+## 6. 历史集成里程碑（不再跟踪）
+
+下表只保留当时的拆解，不表示当前排期或未完成待办。
 
 | 里程碑 | 进入条件 | 集成产物 | 状态 |
 |---|---|---|---|

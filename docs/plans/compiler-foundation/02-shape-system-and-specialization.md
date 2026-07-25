@@ -1,7 +1,8 @@
 # 02：Shape 系统与特化
 
-> **状态：** 规划中；不表示当前已支持 dynamic shape  
-> **所属路线：** [编译器基础路线图](README.md)  
+> **状态：已归档设计草案。** 当前只保留 default-OFF、非安装的 exact/restricted Shape 实验；guarded bucket/polymorphic contract universe 已删除，且无近期实施排期。本文不是当前 roadmap 或能力权威。
+>
+> **所属路线：** [已归档的编译器基础迁移计划](README.md)
 > **共同基础：** [01：契约、identity 与 cache](01-core-contracts-identity-cache.md)  
 > **并行轨道：** [03：自适应编译与安全热替换](03-adaptive-compilation-hot-swap.md)  
 > **历史输入：** [编译器基础架构基线审查](../../COMPILER_FOUNDATION_BASELINE_REVIEW.md)；本文为迁移计划归档。
@@ -15,7 +16,7 @@ Frontend fidelity -> typed symbolic graph -> GraphTemplate
   -> static RuntimeSession
 ```
 `RuntimeSession` 继续只执行冻结 module + plan/runtime 数据，不能依赖 Compiler、Relay、frontend registry 或 ShapePredictor。
-阶段顺序固定为：**exact -> bucket -> polymorphic -> dynamic output**；未证明适用时必须编译、等待或拒绝，绝不猜测执行。
+下文的 **exact -> bucket -> polymorphic -> dynamic output** 仅是历史排序草案，不是当前实施承诺；当前生产主链只接受已验证的 static-exact contract。
 `kDynamicDimension = -1` 当前只是 legacy 输入 ABI 校验哨兵，不表示符号、约束、输出公式、物理容量、valid extent 或 tail-safe kernel。
 当前 lowering 将 shape 固化为 `IntImm`，`ValueSpec` 只有静态 shape/dtype/device，`RuntimeSession::ValidateShape` 仅对 input 忽略 `-1`。
 当前 output `ValueSpec`/`KernelSignature` 没有端到端动态输出分配协议，因此 exact 是首个正确性闭环。
@@ -113,15 +114,15 @@ plan call id、storage id、entry symbol 是运行时/链接身份，不能代�
 ### Phase 1：exact
 全部 ABI 参与的 logical shape、layout、约束精确相等；physical=logical，extent 覆盖全 logical domain。
 miss 时编译、同步等待或报 unavailable；不找“较大”版本。exact 复用 static `RuntimeSession(module, plan)`。
-### Phase 2：bucket
+### Phase 2：bucket（历史草案，未排期）
 bucket 将请求映射到有限、显式 physical profile，目标是减少 artifact cardinality。
 每 bucket 必须声明 logical 接受域、physical capacity/layout、tail/mask、workspace、output crop；pad/mask/crop 是可审计 plan 步骤。
 超出 bucket 时走 exact、另一个已声明 bucket 或拒绝；正确性依赖 valid extent，而非 capacity 足够。
-### Phase 3：polymorphic
+### Phase 3：polymorphic（历史草案，未排期）
 仅接收 runtime extent/shape scalar 且 guard 已验证的 kernel 可标记 polymorphic。
 初期 allowlist 为 elementwise、copy、简单 transform 等 tail-safe unit；applicability 含范围、整除、rank、dtype、layout、target、workspace 上界。
 `-1`、未绑定 symbol、“每维更大”均不是 polymorphic 证明。
-### Phase 4：dynamic output
+### Phase 4：dynamic output（历史草案，未排期）
 仅 ShapeProgram 能确定 output logical extent 时，加入：
 ```text
 ShapeEvalTask -> AllocateTask -> KernelTask
@@ -138,7 +139,7 @@ prefill `[B,S,H]` 使用 sequence profile bucket，选择计入 attention 近似
 decode 通常 token=1，不为每个 token position 重新编译；变化项是 past-KV logical context 与 KV capacity/page bucket。
 kernel 使用 runtime valid context 或已验证 bucket extent；capacity 不能冒充 context。prefill/decode 使用独立 policy、统计、阈值。
 
-## 8. 实施步骤
+## 8. 历史实施草案（未排期）
 1. 冻结术语、DTO、shape-ABI version、legacy `-1` 适配边界和负例。
 2. 实现纯 DimExpr/Constraint evaluator 与确定性 ShapeProgram 单测。
 3. 修正 frontend 为 preserve/bind/reject，禁止新路径 silent concretization。
@@ -162,7 +163,7 @@ kernel 使用 runtime valid context 或已验证 bucket extent；capacity 不能
 | NLP | prefill/decode 数值与统计 | KV capacity 当 valid context |
 bucket/polymorphic CPU 路径配合 ASan 越界测试。
 
-## 10. Done 条件
+## 10. 历史验收草案
 - template、binding、constraint、ShapeProgram、exact profile、frozen static plan 已闭环。
 - 同 template 多 profile 不重跑无关 graph Pass/partition，只有受影响 unit specialization miss。
 - 每个 runtime value 可区分 logical/physical/valid extent；exact 可相等但不混同。

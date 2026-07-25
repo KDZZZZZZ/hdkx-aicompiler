@@ -132,8 +132,8 @@ jobs:
       - name: Build v2 sanitizer targets
         run: >
           cmake --build out/build/ci-runtime-asan --parallel 2 --target
-          task_plan_test task_executor_test runtime_session_test
-          shape_production_exact_test restricted_symbolic_shape_test compiled_module_test
+          runtime_session_test shape_production_exact_test
+          restricted_symbolic_shape_test compiled_module_test
           relay_control_plan_test control_runtime_integration_test
           adaptive_hot_swap_v2_test
 
@@ -144,7 +144,7 @@ jobs:
         run: >
           ctest --test-dir out/build/ci-runtime-asan
           --output-on-failure --no-tests=error
-          --tests-regex '^(task_plan_test|task_executor_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|relay_control_plan_test|control_runtime_integration_test|adaptive_hot_swap_v2_test)$'
+          --tests-regex '^(runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|relay_control_plan_test|control_runtime_integration_test|adaptive_hot_swap_v2_test)$'
 
   cpu-tsan-adaptive-v2:
     name: CPU adaptive v2 TSan
