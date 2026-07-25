@@ -1,14 +1,15 @@
-# Compiler Relay、ControlPlan 与 Primitive Lowering 目标架构
+# Compiler Relay、ControlPlan 与 Primitive Lowering 实现架构
 
-> **状态：** Proposed
-> **文档类型：** 目标架构与迁移合同，不是当前能力声明
+> **状态：** Accepted / Implemented
+> **文档类型：** 架构决策、实现边界与验收记录
 > **编写日期：** 2026-07-25
-> **取证基线：** `compiler-foundation-acceptance-cleanup` / `affea3ecf8a7`
+> **改造前取证基线：** `compiler-foundation-acceptance-cleanup` / `affea3ecf8a7`
+> **实现提交：** `3f9d9dd` 至 `6891877`
 > **适用范围：** Relay 程序准备、静态数据流规划、控制流规划、primitive lowering、artifact 编译及 runtime plan 绑定
 
 ## 1. 执行摘要
 
-当前代码中以下主链路是合理的，必须保留：
+改造前审计确认以下主链路合理，因此实现中保留了这条单向边界：
 
 ```text
 Relay 控制结构
@@ -21,7 +22,7 @@ Relay 控制结构
             -> backend artifact
 ```
 
-需要收口的不是“控制流规划”和“primitive 物理 lowering”这两个阶段，而是它们之间及其前后的平行合同：
+需要收口的不是“控制流规划”和“primitive 物理 lowering”这两个阶段，而是它们之间及其前后的平行合同。以下是改造前基线中已经确认的问题：
 
 1. 静态编译与控制流编译分别准备和解释 Relay。
 2. Operator Call 的 arity、attrs、type relation 和 lowering binding 被多处重复验证。
@@ -31,7 +32,7 @@ Relay 控制结构
 6. 公共 `relay::LowerToTIR` 仍保留 whole-graph lowering，与正式 per-unit lowering 并行。
 7. `ValueSpec`、`ControlValueSpec` 与 `ControlExecutionValueSpec` 重复表达 dtype、shape 和 device。
 
-目标架构建立以下唯一权威：
+当前实现已经建立以下唯一权威：
 
 ```text
 PrepareRelayProgram
@@ -46,6 +47,18 @@ PrepareRelayProgram
 ```
 
 静态数据流是结构化 Relay 程序在消除常量控制结构后“不含残留 `If`/`While`”的退化情况，不是第二种 Relay 语义。调用方只配置允许的 capability；Compiler 自己推导程序特征，并在编译期一次性选择静态或控制拓扑。两种 topology builder 可以保留不同算法，但只能位于一个规划入口之后，并且必须消费和产出上述共同合同。
+
+### 1.1 实现状态
+
+| 阶段 | 结果 | 提交 |
+|---|---|---|
+| Relay preparation 与 topology 选择 | 静态和控制入口共享 `PrepareRelayProgram` / `PlanRelayProgram` | `3f9d9dd` |
+| Operator Call 合同 | capability、静态规划和控制规划共享 `ResolvedRelayCall` | `9dc1ab3` |
+| Logical value 合同 | tensor leaf、dtype、shape、device 使用 `LogicalValueContract` | `17abc8e` |
+| Primitive 边界 | 两种 topology 均产出 `PrimitiveUnit` | `49ba5e1` |
+| Primitive 编译 | TIR、ABI、identity、cache 和 backend 统一到 `CompilePrimitiveUnits` | `228aea6` |
+| Control typestate | unresolved plan 移入 Compiler internal；Runtime 复用 `runtime::ValueSpec` | `1554df9` |
+| Legacy lowering | 删除 public whole-graph `LowerToTIR`，只保留 internal/test primitive seam | `6891877` |
 
 ## 2. 目标、非目标与约束
 
@@ -100,9 +113,9 @@ PrepareRelayProgram
 - module、constant payload、artifact pin 和异步执行对象必须通过不可变 owner 链保活。
 - 未识别的 operator、pass、control node、alias/effect 或 placement 一律 fail closed。
 
-## 3. 当前架构与双轨位置
+## 3. 改造前架构与双轨位置
 
-### 3.1 当前三条路径
+### 3.1 改造前三条路径
 
 ```text
 正式静态路径
@@ -134,12 +147,12 @@ relay::LowerToTIR
   -> whole-graph PrimFunc
 ```
 
-### 3.2 双轨清单
+### 3.2 改造前双轨清单
 
-| 责任 | 当前实现 A | 当前实现 B/C | 漂移风险 |
+| 责任 | 改造前实现 A | 改造前实现 B/C | 漂移风险 |
 |---|---|---|---|
 | Relay 准备 | [`src/compiler/compiler.cc`](../src/compiler/compiler.cc) | [`src/compiler/control_flow/relay_control_plan.cc`](../src/compiler/control_flow/relay_control_plan.cc) | pass、ANF、capability 顺序和模式不一致 |
-| Operator Call 合同 | [`src/compiler/control_flow/executable_capability.cc`](../src/compiler/control_flow/executable_capability.cc) | `relay_control_plan.cc`、[`src/compiler/lowering/lowered_graph.cc`](../src/compiler/lowering/lowered_graph.cc)、[`src/compiler/lowering/relay_to_tir.cc`](../src/compiler/lowering/relay_to_tir.cc) | arity、attrs、type relation、lowering binding 规则分叉 |
+| Operator Call 合同 | [`src/compiler/control_flow/executable_capability.cc`](../src/compiler/control_flow/executable_capability.cc) | `relay_control_plan.cc`、[`src/compiler/lowering/lowered_graph.cc`](../src/compiler/lowering/lowered_graph.cc)、已删除的 `src/compiler/lowering/relay_to_tir.cc` | arity、attrs、type relation、lowering binding 规则分叉 |
 | Tensor leaf 展开 | [`src/compiler/graph/value_graph.cc`](../src/compiler/graph/value_graph.cc) | `relay_control_plan.cc`、`executable_capability.cc` | nested tuple、output arity、静态形状规则漂移 |
 | Logical value | `ValueInfo` | `ControlValueSpec` | dtype、shape、device、origin 和 locator 重复建模 |
 | Primitive 边界 | `CompilationUnit` | `task_id -> Function` sidecar | semantic key、参数顺序、常量顺序和 device 边界可能不一致 |
@@ -552,9 +565,9 @@ CompiledPrimitive[]
 - 未绑定 plan 不能由 public Runtime API 构造或执行。
 - Runtime 不得根据 `kernel_ref`、诊断文本或 source locator 查找 artifact。
 
-## 9. Public API 与迁移期入口
+## 9. Public API 与兼容入口
 
-迁移期保留：
+当前保留：
 
 ```cpp
 class Compiler {
@@ -573,7 +586,7 @@ public:
 - 兼容入口不得迫使无残留控制结构的程序使用 `ControlRuntimeSession`。在统一 immutable compiled bundle 完成前，它应在 API 边界转发到静态入口或明确拒绝不符合其兼容返回类型的调用。
 - 最终单一 `Compiler::Compile -> CompiledProgram` facade 属于 immutable compiled bundle 收口；无论该 API 何时落地，本文件定义的内部单 preparation/单 planning 入口不得等待它。
 
-删除正式 public API：
+已经删除的正式 public API：
 
 ```cpp
 relay::LowerToTIR(Function);
@@ -587,13 +600,13 @@ relay::ConstantBinding;
 - whole-graph 单 PrimFunc 语义与正式 per-unit module/plan 语义不一致。
 - focused 测试需求不能成为安装 public API 的理由。
 
-迁移后：
+当前约束：
 
 - 生产调用方使用 `Compiler`。
 - compiler 单元测试链接 internal test target。
 - TE/TIR focused 测试使用 `test/support/primitive_lowering.h` 或直接测试 `LowerTensorGraphToTIR` 的 internal seam。
 
-## 10. 目标文件布局
+## 10. 已实现文件布局
 
 ```text
 include/kxc/compiler/
@@ -613,35 +626,39 @@ src/compiler/
     relay_program.cc
     resolved_relay_call.cc
     logical_value.cc
-  planning/
-    static_dataflow_plan.cc
-    control_flow_plan.cc
+    primitive_unit.cc
+  graph/
+    value_graph.cc
+    partition.cc
   lowering/
-    primitive_to_te.cc
+    lowered_graph.cc
     te_to_tir.cc
   primitive_compiler.cc
   control_flow/
+    relay_control_plan.cc
     control_plan_adapter.cc
     production_control_flow.cc
   internal/
-    analyzed_relay_program.h
+    relay_program.h
+    resolved_relay_call.h
+    logical_value.h
     primitive_unit.h
     primitive_compiler.h
-    prepared_static_plan.h
-    prepared_control_plan.h
+    lowered_function.h
+    te_to_tir.h
 ```
 
-以下 public 文件退出安装集：
+以下 public 文件已经退出安装集并从仓库删除：
 
 ```text
 include/kxc/compiler/lowering/relay_to_tir.h
 ```
 
-以下当前文件的职责迁移：
+以下职责迁移已经完成：
 
-| 当前文件 | 目标处置 |
+| 改造前文件 | 已完成处置 |
 |---|---|
-| `src/compiler/lowering/relay_to_tir.cc` | 拆出 `te_to_tir.cc`，删除 public whole-graph converter |
+| `src/compiler/lowering/relay_to_tir.cc` | 共享 TE-to-TIR 实现迁入 `te_to_tir.cc`，public whole-graph converter 已删除 |
 | `src/compiler/lowering/lowered_function.cc` | 移入 internal primitive lowering result |
 | `src/compiler/lowering/lowered_graph.cc` | 拆为 static planner consumer 与 primitive lowering |
 | `src/compiler/graph/value_graph.cc` | 收敛为 static planner，复用 common analysis |
@@ -653,9 +670,9 @@ include/kxc/compiler/lowering/relay_to_tir.h
 | `src/compiler/control_flow/control_plan_adapter.cc` | 只做 unresolved-to-bound typestate conversion |
 | `include/kxc/runtime/control_execution_plan.h` | value contract 复用 `runtime::ValueSpec` |
 
-## 11. 迁移方案
+## 11. 迁移执行记录
 
-迁移必须保持每一步可构建、可回退并有回归证据。
+迁移按以下阶段完成；每个阶段独立提交、构建、测试并推送。
 
 ### 阶段 0：锁定行为
 
@@ -666,7 +683,7 @@ include/kxc/compiler/lowering/relay_to_tir.h
 - 增加静态与控制路径对同一 leaf Call 生成相同 semantic key 的测试。
 - 增加 argument duplicate、constant ordering、多输出和 tuple leaf 的交叉路径测试。
 
-### 阶段 1：统一程序 preparation 与 topology 选择
+### 阶段 1：统一程序 preparation 与 topology 选择（已完成）
 
 - 删除 `RelayProgramMode` 输入。
 - 引入 compiler-owned `RelayProgramProfile`、可扩展 `RelayControlCapabilitySet` 与 capability-only `ControlFlowPolicy`。
@@ -675,40 +692,40 @@ include/kxc/compiler/lowering/relay_to_tir.h
 - 在 constant-control simplification 后重新计算 residual profile。
 - 验收：无残留控制结构时只生成 `PreparedStaticPlan`，Runtime hot path 不出现 control task dispatch。
 
-### 阶段 2：统一 Operator Call 合同
+### 阶段 2：统一 Operator Call 合同（已完成）
 
 - 新增 `ResolvedRelayCall`。
 - 将 capability 与两个 topology builder 切换到同一 resolver。
 - 删除本地 `ValidateInputArity`、`ValidateAttrs`、`ValidateOperatorBindings`。
 - 验收：Compiler 内只有 resolver 可以读取 OperatorSpec implementation binding。
 
-### 阶段 3：统一 logical tensor/value contract
+### 阶段 3：统一 logical tensor/value contract（已完成）
 
 - 抽取 tensor leaf 展开与 placement 解析。
 - dataflow 与 structured-control topology builder 使用同一 `LogicalValueContract`。
 - 保留各自确定性的 value-id 分配算法，但禁止复制 dtype/shape 权威。
 - 验收：control preparation 不再创建 string dtype/shape contract。
 
-### 阶段 4：引入正式 `PrimitiveUnit`
+### 阶段 4：引入正式 `PrimitiveUnit`（已完成）
 
 - 扩展当前 `CompilationUnit` 为共同 `PrimitiveUnit`。
 - dataflow 与 structured-control topology builder 均产出该类型。
 - Control task 只引用 `PrimitiveUnitId`。
 - 删除 `task_id -> Function` sidecar 和 `kernel_ref` binding 语义。
 
-### 阶段 5：抽取 primitive compiler
+### 阶段 5：抽取 primitive compiler（已完成）
 
 - 从 `compiler.cc` 抽取 `CompilePrimitiveUnits`。
 - 静态和控制路径共享 TIR、signature、identity、cache 与 backend batch build。
 - Control path 不再为每个 leaf 递归执行完整 `Compiler::Compile`。
 
-### 阶段 6：收口 Runtime value plan
+### 阶段 6：收口 Runtime value plan（已完成）
 
 - `ControlExecutionPlan` 复用 `runtime::ValueSpec`。
 - unresolved `ControlPlan` 移入 Compiler internal namespace。
 - adapter 只负责 plan typestate 与 artifact binding。
 
-### 阶段 7：删除 legacy whole-graph lowering
+### 阶段 7：删除 legacy whole-graph lowering（已完成）
 
 - 迁移仓库内全部 `LowerToTIR` 测试调用。
 - 从 `KXC_PUBLIC_HEADERS` 删除 `relay_to_tir.h`。
@@ -797,7 +814,7 @@ check_relay_op_contract
 
 ### ADR-001：保留 ControlPlan 与 primitive lowering 两阶段
 
-**状态：** Proposed
+**状态：** Accepted / Implemented
 
 **背景：** 控制拓扑与 kernel 物理实现具有不同不变量。前者包含 Region、Phi 和 loop backedge，后者包含 TE/TIR、ABI 和 backend artifact。
 
@@ -821,7 +838,7 @@ check_relay_op_contract
 
 ### ADR-002：统一 Relay 程序抽象，Compiler 推导 topology
 
-**状态：** Proposed
+**状态：** Accepted / Implemented
 
 **决策：** 删除调用方提供的 `RelayProgramMode`。建立单一 `PreparedRelayProgram`、`ResolvedRelayCall` 和 `LogicalValueContract`；Compiler 在控制简化后生成包含可扩展 required-control capability set 的 residual profile，并通过唯一 `PlanRelayProgram` 入口一次性选择 dataflow 或 structured-control topology builder。是否需要控制 topology 从 capability set 的 `any()` 派生，不保存第二份布尔权威。
 
@@ -847,7 +864,7 @@ check_relay_op_contract
 
 ### ADR-003：控制流叶子使用正式 `PrimitiveUnit`
 
-**状态：** Proposed
+**状态：** Accepted / Implemented
 
 **决策：** 删除 `task_id -> Function` sidecar；control task 引用与静态 partition 相同的 `PrimitiveUnit`。
 
@@ -864,7 +881,7 @@ check_relay_op_contract
 
 ### ADR-004：删除 public whole-graph `LowerToTIR`
 
-**状态：** Proposed
+**状态：** Accepted / Implemented
 
 **决策：** 正式 public API 只保留返回 immutable compiled bundle 的 `Compiler` 入口；TE/TIR focused seam 变成 test/internal API。
 
@@ -886,7 +903,7 @@ check_relay_op_contract
 
 ### ADR-005：只有 bound immutable plan 可以进入 Runtime
 
-**状态：** Proposed
+**状态：** Accepted / Implemented
 
 **决策：** unresolved control plan 保持 Compiler internal；Runtime 只接收使用正式 artifact 和 `runtime::ValueSpec` 完成绑定的 `ControlExecutionPlan`。
 
@@ -917,24 +934,24 @@ check_relay_op_contract
 
 ## 17. 完成定义
 
-满足以下全部条件后，才可以认为本目标架构收口完成：
+以下收口条件已经全部满足：
 
-- [ ] `Compiler::Compile` 与 `CompileControlFlowExact` 共享 `PrepareRelayProgram`。
-- [ ] Compiler internal 不存在调用方可设置的 `RelayProgramMode`。
-- [ ] `RelayProgramProfile` 在控制简化后由 Compiler 重新计算，并由唯一 `PlanRelayProgram` 消费。
-- [ ] topology 选择只由 `required_control_capabilities.any()` 派生，不存在第二个可漂移布尔字段。
-- [ ] `required_control_capabilities` 为空的程序只生成静态 plan，不构造退化 control Region，也不进入 `ControlRuntimeSession`。
-- [ ] 静态 Runtime kernel loop 不包含 plan variant、control predicate 或 task-kind dispatch。
-- [ ] Compiler 内只有一个 `ResolvedRelayCall` 合同解析实现。
-- [ ] tensor leaf 和 logical tensor contract 只有一个权威实现。
-- [ ] dataflow 与 structured-control topology builder 均产出同一 `PrimitiveUnit`。
-- [ ] ControlPlan 不再包含或旁挂 frozen Function。
-- [ ] 控制流叶子不再递归调用完整 `Compiler::Compile`。
-- [ ] TIR、Kernel ABI、artifact identity、cache、backend 使用唯一 primitive compiler。
-- [ ] unresolved ControlPlan 位于 Compiler internal namespace。
-- [ ] Runtime control plan 复用正式 `runtime::ValueSpec`。
-- [ ] public 安装集不再包含 `relay_to_tir.h`。
-- [ ] 仓库内不存在 `relay::LowerToTIR` 调用。
-- [ ] Runtime public headers 和实现不依赖 Relay、TE、TIR 或 Compiler internal。
-- [ ] 第 14 节测试矩阵全部通过。
-- [ ] 文档、样例、public-header compile check 与真实代码一致。
+- [x] `Compiler::Compile` 与 `CompileControlFlowExact` 共享 `PrepareRelayProgram`。
+- [x] Compiler internal 不存在调用方可设置的 `RelayProgramMode`。
+- [x] `RelayProgramProfile` 在控制简化后由 Compiler 重新计算，并由唯一 `PlanRelayProgram` 消费。
+- [x] topology 选择只由 `required_control_capabilities.any()` 派生，不存在第二个可漂移布尔字段。
+- [x] `required_control_capabilities` 为空的程序只生成静态 plan，不构造退化 control Region，也不进入 `ControlRuntimeSession`。
+- [x] 静态 Runtime kernel loop 不包含 plan variant、control predicate 或 task-kind dispatch。
+- [x] Compiler 内只有一个 `ResolvedRelayCall` 合同解析实现。
+- [x] tensor leaf 和 logical tensor contract 只有一个权威实现。
+- [x] dataflow 与 structured-control topology builder 均产出同一 `PrimitiveUnit`。
+- [x] ControlPlan 不再包含或旁挂 frozen Function。
+- [x] 控制流叶子不再递归调用完整 `Compiler::Compile`。
+- [x] TIR、Kernel ABI、artifact identity、cache、backend 使用唯一 primitive compiler。
+- [x] unresolved ControlPlan 位于 Compiler internal namespace。
+- [x] Runtime control plan 复用正式 `runtime::ValueSpec`。
+- [x] public 安装集不再包含 `relay_to_tir.h`。
+- [x] 仓库内不存在 `relay::LowerToTIR` 调用。
+- [x] Runtime public headers 和实现不依赖 Relay、TE、TIR 或 Compiler internal。
+- [x] 第 14 节测试矩阵全部通过。
+- [x] 文档、样例、public-header compile check 与真实代码一致。
