@@ -121,7 +121,7 @@ PrepareRelayProgram
 Compiler::Compile
   -> ValidateInput
   -> Relay pipeline
-  -> CapabilityVerifier
+  -> PrepareRelayProgram
   -> ValueGraph
   -> PartitionedGraph / CompilationUnit
   -> LowerCompilationUnit
@@ -636,7 +636,6 @@ relay::ConstantBinding;
 ```text
 include/kxc/compiler/
   compiler.h
-  capability.h
   compile_config.h
   identity.h
 

@@ -666,7 +666,8 @@ profiling 不参与编译语义，不允许为了记录事件而改变 IR。
 2. `base::Tensor` 仍被 PackedFunc 特化和 Relay 公共头引用，必须先迁移 API，不能直接删除。
 3. `AddAttrs`、`ReluAttrs` 等无字段 attrs 仍有 importer/诊断构图调用，待 schema 统一后再删除。
 4. production compiler state is carried only by prepared graphs and complete primitive batches; no replay state machine is retained.
-5. `CSourceEmitter` 仍由 LLVM 诊断测试使用，明确保持“只生成可读 C、不是 backend”的定位。
+5. the public executable-capability facade and its duplicate result vocabulary are deleted; executable proof is `Compiler::Compile`, while focused checks use the internal policy at its real boundary.
+6. `CSourceEmitter` 仍由 LLVM 诊断测试使用，明确保持“只生成可读 C、不是 backend”的定位。
 
 ### 12.5 已知陈旧文档
 

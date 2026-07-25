@@ -4,7 +4,9 @@
 > RuntimeSession 描述，不再是当前实现入口。当前生产路径以
 > `Compiler::Compile -> PrepareRelayProgram -> CompilePrimitiveUnits -> AssembleCompiledGraph -> RuntimeSession`
 > 为准；whole-graph lowering 仅作为 `test/support/primitive_lowering.h` 中组合
-> `PrepareStaticGraph` 与 `LowerPrimitiveUnit` 的 test fixture 存在。当前边界见
+> `PrepareStaticGraph` 与 `LowerPrimitiveUnit` 的 test fixture 存在。已删除 public
+> executable-capability facade；executable proof 只经 `Compiler::Compile`，focused checks 直接测试
+> internal policy。当前边界见
 > [`ARCHITECTURE_STATUS.md`](ARCHITECTURE_STATUS.md)，历史基线审查见
 > [`COMPILER_FOUNDATION_BASELINE_REVIEW.md`](COMPILER_FOUNDATION_BASELINE_REVIEW.md)。
 

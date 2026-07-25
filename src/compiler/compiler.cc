@@ -467,12 +467,6 @@ internal::ResolveCompilerExecutionContract(
     return contract;
 }
 
-void internal::ProbeCompilerExecution(
-    Function function, CompileConfig config,
-    const CompilerExecutionContract& contract) {
-    (void)CompilePipeline(std::move(function), std::move(config), &contract);
-}
-
 internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
     Function function, CompileConfig config,
     const CompilerExecutionContract& contract) {

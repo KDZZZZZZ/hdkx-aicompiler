@@ -48,9 +48,6 @@ CompilerExecutionContract ResolveCompilerExecutionContract(
 Target CloneTargetSnapshot(const Target& target);
 std::string CanonicalTargetSnapshot(const Target& target);
 
-/*! \brief Executes the real compiler path; success is executable proof. */
-void ProbeCompilerExecution(Function function, CompileConfig config,
-                            const CompilerExecutionContract& contract);
 PreparedCompilerGraph PrepareCompilerGraph(
     Function function, CompileConfig config,
     const CompilerExecutionContract& contract);

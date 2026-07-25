@@ -70,7 +70,6 @@ set(KXC_DLPACK_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dlpack/inclu
 # Installed/exported SDK headers. Repository experiments are tracked separately
 # below so a source build can test them without publishing them as package API.
 set(KXC_PUBLIC_HEADERS
-  include/kxc/compiler/capability.h
   include/kxc/compiler/compile_config.h
   include/kxc/compiler/compiler.h
   include/kxc/compiler/artifact.h
@@ -482,7 +481,6 @@ set(KXC_COMPILER_SOURCES
   src/compiler/analysis/relay_program.cc
   src/compiler/analysis/resolved_relay_call.cc
   src/compiler/cache/primitive_cache.cc
-  src/compiler/capability.cc
   src/compiler/compile_config.cc
   src/compiler/control_flow/control_plan.cc
   src/compiler/control_flow/control_plan_adapter.cc
@@ -969,7 +967,6 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(onnx_import_spec_contract_test test/onnx_import_spec_contract_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
-  kxc_add_runtime_exe(compiler_capability_test test/compiler_capability_test.cpp)
   kxc_add_runtime_exe(compiler_identity_test test/compiler_identity_test.cpp)
   if(TARGET kxc_experimental_identity_test_obj)
     target_sources(compiler_identity_test PRIVATE
@@ -1267,7 +1264,7 @@ foreach(_kxc_cpu_core_test IN ITEMS
     pass_pipeline_test pipeline_resolver_test device_info_test device_runtime_test
     executable_plan_test graph_partition_test infer_type_test
     onnx_import_spec_contract_test profile_bundle_test
-    compiler_contract_test compiler_capability_test compiler_identity_test
+    compiler_contract_test compiler_identity_test
     operator_compilation_test primitive_cache_test
     compiler_extension_contract_test kernel_signature_test compiled_module_test
     cuda_schedule_test)

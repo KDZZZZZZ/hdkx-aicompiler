@@ -153,10 +153,10 @@ No pass may mutate the operator or pass registry while a pipeline is running.
 
 ## 7. Required checks
 
-`CapabilityVerifier` runs at compiler entry, after graph passes and immediately
-before partition. `PipelineResolver` is the production source of pass order,
-invariant transitions and artifact fingerprint; direct named pipelines remain
-compatibility/testing entry points.
+Compiler preparation and the selected topology builder enforce the fail-closed
+Relay contract at their actual boundaries. `PipelineResolver` is the production
+source of pass order, invariant transitions and artifact fingerprint; direct
+named pipelines remain compatibility/testing entry points.
 
 The minimum local verification for extension-contract changes is:
 

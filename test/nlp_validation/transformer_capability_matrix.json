@@ -252,7 +252,7 @@
         "reason": "The generic CUDA schedule rejects Gather's indirect Load index before backend execution; no device numeric support is claimed.",
         "evidence": [
           "test/codegen_cuda_test.cpp",
-          "test/compiler_capability_test.cpp",
+          "test/executable_capability_test.cpp",
           "test/cuda_schedule_test.cpp"
         ]
       },
@@ -396,7 +396,7 @@
         "reason": "CUDA nested reductions are rejected by the normalized generic target schedule; no CPU fallback or device numeric support is claimed.",
         "evidence": [
           "test/codegen_cuda_test.cpp",
-          "test/compiler_capability_test.cpp"
+          "test/executable_capability_test.cpp"
         ]
       },
       "runtime": {

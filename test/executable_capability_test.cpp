@@ -17,7 +17,7 @@
 #include "../src/compiler/internal/relay_program.h"
 #include "../src/compiler/internal/resolved_relay_call.h"
 #include "../src/compiler/internal/value_graph.h"
-#include "kxc/compiler/compile_config.h"
+#include "kxc/compiler/compiler.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/pass_utils.h"
@@ -44,6 +44,25 @@ std::string ErrorText(const std::function<void()>& fn) {
 
 kxc::Call Add(const kxc::Expr& lhs, const kxc::Expr& rhs) {
     return kxc::Call(kxc::relay::Op::Get("add"), {lhs, rhs});
+}
+
+kxc::Target FakeCudaTarget() {
+    auto* node = new kxc::TargetNode();
+    node->kind = "cuda";
+    node->device_type = kxc::kCUDA;
+    node->device_id = 0;
+    node->attrs.exists = 1;
+    node->attrs.device_name = "capability-cuda";
+    node->attrs.arch = "sm_80";
+    node->attrs.max_threads_per_block = 128;
+    node->attrs.max_threads_per_multiprocessor = 2048;
+    node->attrs.max_shared_memory_per_block = 48 * 1024;
+    node->attrs.warp_size = 32;
+    node->attrs.multi_processor_count = 1;
+    node->attrs.compute_version = "8.0";
+    node->attrs.compute_version_major = 8;
+    node->attrs.compute_version_minor = 0;
+    return kxc::Target(kxc::ObjectRef(node));
 }
 
 const kxc::relay::Op& NestedMultiOutputOp() {
@@ -231,7 +250,7 @@ bool TestValueGraphLetMatchesNestedTopology() {
     return true;
 }
 
-bool TestPlacementAndOperatorContractsFailClosed() {
+bool TestTargetPlacementAndOperatorContractsFailClosed() {
     using namespace kxc;
     using namespace kxc::api::internal;
     const TensorType type({4}, "float32");
@@ -339,6 +358,40 @@ bool TestPlacementAndOperatorContractsFailClosed() {
                 std::string::npos &&
             empty_relation_error.find("empty") != std::string::npos,
         "empty type relations must fail in the capability gate");
+    return true;
+}
+
+bool TestCompilerRejectsUnsupportedCudaSchedules() {
+    using namespace kxc;
+    const api::CompileConfig config =
+        api::CompileConfig::Create(FakeCudaTarget(), 3);
+
+    Var data("data", TensorType({2, 4}, "float32"));
+    Var scale("scale", TensorType({4}, "float32"));
+    Var bias("bias", TensorType({4}, "float32"));
+    Function layer_norm(
+        {data, scale, bias},
+        Call(relay::Op::Get("nn_layer_norm"), {data, scale, bias},
+             relay::LayerNormAttrs::Create(-1, 1e-5f, "float64")));
+    const std::string layer_norm_error = ErrorText([&] {
+        (void)api::Compiler::Compile(layer_norm, config);
+    });
+    TEST_CHECK(layer_norm_error.find("BindCudaThreads") != std::string::npos,
+               "LayerNorm must fail at the CUDA schedule boundary: " +
+                   layer_norm_error);
+
+    Var gather_data("gather_data", TensorType({4}, "float32"));
+    Var indices("indices", TensorType({3}, "int64"));
+    Function gather(
+        {gather_data, indices},
+        Call(relay::Op::Get("gather"), {gather_data, indices},
+             relay::GatherAttrs::Create(0)));
+    const std::string gather_error = ErrorText([&] {
+        (void)api::Compiler::Compile(gather, config);
+    });
+    TEST_CHECK(gather_error.find("indirect Load") != std::string::npos,
+               "Gather must fail at the CUDA schedule boundary: " +
+                   gather_error);
     return true;
 }
 
@@ -601,6 +654,17 @@ bool TestRelayProgramTopologyCapabilities() {
             prepared_nested.residual_profile().Requires(
                 RelayControlCapability::kBoundedPreTestLoop),
         "residual profiling must retain every nested control capability");
+
+    const std::string static_if_error = ErrorText([&] {
+        (void)Compiler::Compile(conditional, config);
+    });
+    TEST_CHECK(static_if_error.find("conditional_branch") != std::string::npos,
+               "Compiler::Compile must reject residual If through its static policy");
+    const std::string static_while_error = ErrorText([&] {
+        (void)Compiler::Compile(bounded_loop, config);
+    });
+    TEST_CHECK(static_while_error.find("bounded_pre_test_loop") != std::string::npos,
+               "Compiler::Compile must reject residual While through its static policy");
     return true;
 }
 
@@ -654,8 +718,9 @@ int main() {
         {"static_exact_diagnostics_and_if_gate", TestStaticExactDiagnosticsAndIfGate},
         {"function_value_rejected", TestFunctionValueIsRejected},
         {"value_graph_let_matches_nested", TestValueGraphLetMatchesNestedTopology},
-        {"placement_and_operator_contracts",
-         TestPlacementAndOperatorContractsFailClosed},
+        {"target_placement_and_operator_contracts",
+         TestTargetPlacementAndOperatorContractsFailClosed},
+        {"cuda_schedule_rejections", TestCompilerRejectsUnsupportedCudaSchedules},
         {"te_output_contracts", TestTEOutputContractsFailClosed},
         {"nested_tuple_get_item_leaves", TestNestedTupleGetItemKeepsAllLeaves},
         {"tuple_parameter_gate", TestTupleParameterCapabilityIsNotOverclaimed},
