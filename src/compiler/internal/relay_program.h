@@ -7,7 +7,6 @@
 #include <bitset>
 #include <cstddef>
 #include <string>
-#include <variant>
 #include <vector>
 
 #include "execution_contract.h"
@@ -84,21 +83,8 @@ private:
     CompilerExecutionContract execution_contract_;
 };
 
-struct PreparedStaticPlan final {
-    Function typed_anf;
-};
-
-struct PreparedControlPlan final {
-    Function typed_anf;
-};
-
-using PreparedProgramPlan =
-    std::variant<PreparedStaticPlan, PreparedControlPlan>;
-
 PreparedRelayProgram PrepareRelayProgram(
     Function function, const CompileConfig& config,
     const ControlFlowPolicy& policy);
-
-PreparedProgramPlan PlanRelayProgram(const PreparedRelayProgram& program);
 
 }  // namespace kxc::api::internal

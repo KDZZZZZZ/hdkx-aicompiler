@@ -107,10 +107,7 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
         internal::PrepareRelayProgram(
             std::move(function), config,
             internal::ControlFlowPolicy::NativeExact());
-    const internal::PreparedProgramPlan program_plan =
-        internal::PlanRelayProgram(prepared);
-    if (!std::holds_alternative<internal::PreparedControlPlan>(
-            program_plan)) {
+    if (!prepared.residual_profile().requires_control_topology()) {
         Fail("has no residual control topology after preparation; use "
              "Compiler::Compile for the static fast path");
     }

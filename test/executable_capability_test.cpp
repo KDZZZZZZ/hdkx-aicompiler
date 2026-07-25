@@ -516,7 +516,7 @@ bool TestValueGraphFreeVarRejects() {
     return true;
 }
 
-bool TestRelayProgramPreparationAndPlanning() {
+bool TestRelayProgramTopologyCapabilities() {
     using namespace kxc;
     using namespace kxc::api;
     using namespace kxc::api::internal;
@@ -530,9 +530,7 @@ bool TestRelayProgramPreparationAndPlanning() {
     Var y("y", tensor);
     PreparedRelayProgram dataflow = PrepareRelayProgram(
         Function({x, y}, Add(x, y)), config, ControlFlowPolicy::StaticOnly());
-    TEST_CHECK(!dataflow.residual_profile().requires_control_topology() &&
-                   std::holds_alternative<PreparedStaticPlan>(
-                       PlanRelayProgram(dataflow)),
+    TEST_CHECK(!dataflow.residual_profile().requires_control_topology(),
                "ordinary dataflow must select the static topology");
 
     runtime::NDArray true_data = runtime::NDArray::Empty(
@@ -547,9 +545,7 @@ bool TestRelayProgramPreparationAndPlanning() {
                     Add(folded_y, folded_y))),
         config, ControlFlowPolicy::StaticOnly());
     TEST_CHECK(!folded.residual_profile().requires_control_topology() &&
-                   !folded.typed_anf()->body.As<IfNode>() &&
-                   std::holds_alternative<PreparedStaticPlan>(
-                       PlanRelayProgram(folded)),
+                   !folded.typed_anf()->body.As<IfNode>(),
                "constant If must be removed before residual profiling, including at O0");
 
     Var predicate("predicate", predicate_type);
@@ -568,13 +564,12 @@ bool TestRelayProgramPreparationAndPlanning() {
     PreparedRelayProgram prepared_if = PrepareRelayProgram(
         conditional, config, ControlFlowPolicy::NativeExact());
     TEST_CHECK(
-        prepared_if.residual_profile().Requires(
-            RelayControlCapability::kConditionalBranch) &&
+        prepared_if.residual_profile().requires_control_topology() &&
+            prepared_if.residual_profile().Requires(
+                RelayControlCapability::kConditionalBranch) &&
             !prepared_if.residual_profile().Requires(
-                RelayControlCapability::kBoundedPreTestLoop) &&
-            std::holds_alternative<PreparedControlPlan>(
-                PlanRelayProgram(prepared_if)),
-        "a residual If must select structured control exactly once");
+                RelayControlCapability::kBoundedPreTestLoop),
+        "a residual If must require structured control");
 
     Var initial("initial", predicate_type);
     Var state("state", predicate_type);
@@ -583,13 +578,12 @@ bool TestRelayProgramPreparationAndPlanning() {
     PreparedRelayProgram prepared_loop = PrepareRelayProgram(
         bounded_loop, config, ControlFlowPolicy::NativeExact());
     TEST_CHECK(
-        prepared_loop.residual_profile().Requires(
-            RelayControlCapability::kBoundedPreTestLoop) &&
+        prepared_loop.residual_profile().requires_control_topology() &&
+            prepared_loop.residual_profile().Requires(
+                RelayControlCapability::kBoundedPreTestLoop) &&
             !prepared_loop.residual_profile().Requires(
-                RelayControlCapability::kConditionalBranch) &&
-            std::holds_alternative<PreparedControlPlan>(
-                PlanRelayProgram(prepared_loop)),
-        "a residual bounded pre-test loop must select structured control");
+                RelayControlCapability::kConditionalBranch),
+        "a residual bounded pre-test loop must require structured control");
 
     Var nested_predicate("nested_predicate", predicate_type);
     Var nested_initial("nested_initial", predicate_type);
@@ -666,8 +660,8 @@ int main() {
         {"nested_tuple_get_item_leaves", TestNestedTupleGetItemKeepsAllLeaves},
         {"tuple_parameter_gate", TestTupleParameterCapabilityIsNotOverclaimed},
         {"value_graph_free_var_rejected", TestValueGraphFreeVarRejects},
-        {"relay_program_preparation_and_planning",
-         TestRelayProgramPreparationAndPlanning},
+        {"relay_program_topology_capabilities",
+         TestRelayProgramTopologyCapabilities},
         {"resolved_relay_call_authority",
          TestResolvedRelayCallIsTheOperatorAuthority},
     };

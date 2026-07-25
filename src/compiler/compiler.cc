@@ -500,6 +500,10 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
                 error.what());
         }
     }();
+    if (prepared.residual_profile().requires_control_topology()) {
+        throw std::logic_error(
+            "Compiler::Compile cannot publish a structured-control plan");
+    }
     if (prepared.execution_contract().canonical_bytes !=
         contract.canonical_bytes) {
         throw std::invalid_argument(

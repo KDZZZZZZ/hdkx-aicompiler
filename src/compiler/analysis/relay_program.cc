@@ -254,16 +254,4 @@ PreparedRelayProgram PrepareRelayProgram(
         CloneTargetSnapshot(config->target), std::move(contract));
 }
 
-PreparedProgramPlan PlanRelayProgram(
-    const PreparedRelayProgram& program) {
-    if (!program.typed_anf().defined()) {
-        throw std::logic_error(
-            "PlanRelayProgram requires a defined prepared typed ANF");
-    }
-    if (program.residual_profile().requires_control_topology()) {
-        return PreparedControlPlan{program.typed_anf()};
-    }
-    return PreparedStaticPlan{program.typed_anf()};
-}
-
 }  // namespace kxc::api::internal
