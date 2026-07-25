@@ -581,17 +581,7 @@ CompiledModule module = Compiler::Compile(function, config);
 
 不存在独立 backend 字段，也不存在 AOT、JIT 或 Adaptive mode。Target 是 backend 选择的唯一事实来源：`llvm + CPU` 进入 LLVM ORC JIT，`cuda + CUDA` 进入线程绑定、CUDA C++ 发射、NVRTC PTX 编译和 Driver module 加载；kind、DeviceType、device id 或能力快照不一致时在编译入口失败。
 
-Compiler 使用不可回退的 `CompileResult` 状态机按以下顺序推进：
-
-1. `validate`：校验 CompileConfig、Target 和入口 Relay Function；
-2. `optimize_relay`：强制类型推导并执行 `opt_level` 对应的确定性 Relay pass；
-3. `lower`：原子产出 PrimFunc 和稳定常量表；
-4. `optimize_tir`：执行确定性 TIR pass，并只保留最终 TIR 事实；
-5. `build_signature`：从最终 TIR、常量表和 Target 构建 KernelSignature；
-6. `build_backend`：按 Target 构建 metadata 和 CompiledKernel；
-7. `assemble`：把所有同源对象组装为 CompiledModule。
-
-每次状态转移只允许前进一个阶段；常量表从 lowering 开始持续保活，后续阶段不能重新扫描 Relay。PassContext 会合并 CompileConfig Target 与 Relay placement，存在冲突时失败，不静默覆盖。
+Compiler 的真实阶段是 preparation、primitive compilation 和 final assembly：preparation 运行 Relay pipeline、构建并分区 value graph；`CompilePrimitiveUnits` 为每个 unit 产生完整 backend artifact batch；`AssembleCompiledGraph` 只从该 batch 的 ordered pins 发布 module、static plan 和 public pins。primitive compiler 内部 phase 由调用栈和错误上下文表达；完整 backend batch 返回后不再伪造可观察的中间状态。PassContext 会合并 CompileConfig Target 与 Relay placement，存在冲突时失败，不静默覆盖。
 
 当前 Compiler 输出包括：
 
@@ -613,11 +603,10 @@ sequenceDiagram
     participant M as CompiledModule
 
     R->>C: Function + CompileConfig(Target, opt_level)
-    C->>C: Relay passes -> Lower -> TIR passes
-    C->>C: Build KernelSignature
-    C->>G: final TIR + shared Signature
-    G-->>C: CompiledKernel + launch metadata
-    C-->>M: assemble target/TIR/constants/contracts/executable
+    C->>C: PrepareRelayProgram -> BuildValueGraph -> PartitionValueGraph
+    C->>G: CompilePrimitiveUnits
+    G-->>C: CompiledPrimitiveBatch
+    C-->>M: AssembleCompiledGraph(batch pins, constants)
 ```
 
 ## 10. 与 RuntimeSession 的交互

@@ -15,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "internal/compile_state.h"
 #include "internal/compiled_graph_access.h"
 #include "internal/execution_contract.h"
 #include "internal/identity_private.h"
@@ -507,20 +506,16 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
             "PrepareCompilerGraph execution contract does not match "
             "prepared Relay program");
     }
-    CompileResult result =
-        CompileResult::Validate(config->target, prepared.typed_anf())
-            .AfterRelayOptimization(prepared.typed_anf());
-    // PrepareRelayProgram validates input capabilities, residual policy, and
-    // executable capability before this frozen static graph is observable.
-    size_t capability_boundary_checks = 3;
+    size_t capability_boundary_checks =
+        prepared.capability_boundary_checks();
     size_t relay_graph_pipelines = 1;
-    const Device device(result.target()->device_type, result.target()->device_id);
+    const Target target = prepared.target();
+    const Device device(target->device_type, target->device_id);
     profiling::ScopedSpan prepare_span(
         profile_context, MakeStageEvent("prepare_graph", config), run_id);
     PreparedStaticGraph graph;
     try {
-        graph = PrepareStaticGraph(result.optimized_relay(), device,
-                                   result.target(),
+        graph = PrepareStaticGraph(prepared.typed_anf(), device, target,
                                    String(contract.fingerprint));
     } catch (const std::exception& error) {
         prepare_span.SetStatus("error");
@@ -533,7 +528,7 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
     const size_t value_graph_builds = graph.value_graph_builds;
     const size_t partitions = graph.partitions;
     return PreparedCompilerGraph{
-        graph_semantic_key, result, std::move(graph), result.target(),
+        graph_semantic_key, std::move(graph), target,
         contract.canonical_bytes,
         std::move(profile_context), run_id, relay_graph_pipelines,
         capability_boundary_checks, value_graph_builds, partitions};

@@ -2,7 +2,7 @@
 
 > **状态：已归档。** 本文混有旧目录、whole-graph lowering 和单-entry
 > RuntimeSession 描述，不再是当前实现入口。当前生产路径以
-> `Compiler::Compile -> per-unit LowerGraph -> CompiledModule + ExecutablePlan -> RuntimeSession`
+> `Compiler::Compile -> PrepareRelayProgram -> CompilePrimitiveUnits -> AssembleCompiledGraph -> RuntimeSession`
 > 为准；当前边界见 [`ARCHITECTURE_STATUS.md`](ARCHITECTURE_STATUS.md)，历史基线审查见
 > [`COMPILER_FOUNDATION_BASELINE_REVIEW.md`](COMPILER_FOUNDATION_BASELINE_REVIEW.md)。
 
@@ -486,19 +486,15 @@ CUDA launcher 仅在后端内部把已校验 NDArray 转成 Driver 参数数组�
 
 ### 11.2 Compiler::Compile
 
-Compiler 执行七个步骤；前六步由单向 `CompileResult` 状态机承载，最后的 assemble 在状态机完成后构造 `CompiledModule`：
+Compiler 只经过 preparation、primitive compilation 和 final assembly：
 
 ```text
-validate
-  -> optimize_relay
-  -> lower
-  -> optimize_tir
-  -> build_signature
-  -> build_backend
-  -> assemble
+PrepareRelayProgram -> BuildValueGraph -> PartitionValueGraph
+  -> CompilePrimitiveUnits
+  -> AssembleCompiledGraph
 ```
 
-`opt_level` 只选择 pass 集合。`build_backend` 完全按 Target dispatch：`llvm` + CPU 进入 LLVM ORC JIT，`cuda` + CUDA Device 进入 CUDA emitter、NVRTC 和 Driver API。缺少对应构建特性时返回明确错误，Compiler 不创建 RuntimeSession。
+`CompilePrimitiveUnits` 一次返回完整 backend batch；内部 phase 由调用栈和错误上下文表达，不重放为可观察状态。`opt_level` 只选择 pass 集合。backend 按 Target dispatch：`llvm` + CPU 进入 LLVM ORC JIT，`cuda` + CUDA Device 进入 CUDA emitter、NVRTC 和 Driver API。缺少对应构建特性时返回明确错误，Compiler 不创建 RuntimeSession。
 
 ### 11.3 CompiledModule
 

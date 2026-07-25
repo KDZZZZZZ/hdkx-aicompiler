@@ -53,7 +53,6 @@ bool TestStableRegistrations() {
         "TargetNode",
         "VirtualDeviceNode",
         "CompileConfigNode",
-        "kxc.api.CompileResultNode",
         "kxc.api.CompiledModuleNode",
         "kxc.codegen.CompiledKernelNode",
         "kxc.codegen.KernelConstantKeysNode",

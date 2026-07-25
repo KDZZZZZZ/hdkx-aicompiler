@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 
-#include "compile_state.h"
 #include "prepared_static_graph.h"
 #include "primitive_cache.h"
 #include "kxc/compiler/compiler.h"
@@ -21,7 +20,6 @@ namespace kxc::api::internal {
 /*! \brief One immutable description of the production plan actually executed. */
 struct PreparedCompilerGraph final {
     GraphSemanticKey graph_semantic_key;
-    CompileResult optimized;
     PreparedStaticGraph graph;
     Target target;
     std::string execution_contract_canonical;

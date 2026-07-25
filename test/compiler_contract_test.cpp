@@ -20,14 +20,12 @@
 #include "kxc/relay/visitor.h"
 #include "kxc/ffi/registry.h"
 #include "kxc/runtime/kernel_abi.h"
-#include "../src/compiler/internal/compile_state.h"
 #include "../src/compiler/internal/execution_contract.h"
 #include "../src/compiler/internal/primitive_compiler.h"
 #include "../src/compiler/internal/kernel_abi_builder.h"
-#include "../src/compiler/internal/lowered_graph.h"
+#include "../src/compiler/internal/primitive_cache.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
-#include "kxc/relay/transforms/infer_type.h"
 #include "kxc/compiler/distributed/multi_device.h"
 #include "support/primitive_lowering.h"
 
@@ -649,67 +647,59 @@ bool TestAssembleCompiledGraphFromOrderedPins() {
 
 #endif
 
-bool TestMultiPrimitiveCompileStateIdentity() {
+bool TestCompilerCompilePublishesOrderedArtifacts() {
     using namespace kxc;
-    using namespace kxc::api;
-    TensorType type({4}, "float32");
-    Var lhs("lhs", type);
-    Var rhs("rhs", type);
-    Call first(relay::Op::Get("add"), {lhs, rhs});
-    Function function({lhs, rhs}, Call(relay::Op::Get("mul"), {first, rhs}));
-    Function typed = relay::InferTypePass(function);
-    api::internal::LoweredGraph lowered =
-        api::internal::LowerGraph(typed, Device::CPU());
+    using namespace api;
 
-    std::vector<PrimitiveCompileState> primitives;
-    std::vector<tir::PrimFunc> tir_functions;
-    for (const api::internal::LoweredPrimitive& source : lowered.primitives) {
-        PrimitiveCompileState primitive;
-        primitive.unit_id = source.unit_id;
-        primitive.symbol = source.symbol;
-        primitive.operator_identity = source.operator_identity;
-        primitive.semantic_key = source.semantic_key;
-        primitive.tir = source.lowered->prim_func;
-        primitives.push_back(primitive);
-        tir_functions.push_back(primitive.tir);
+    internal::ClearPrimitiveCacheForTesting();
+    const TensorType type({4}, "float32");
+    const Var lhs("lhs", type), rhs("rhs", type);
+    const Call add(relay::Op::Get("add"), {lhs, rhs});
+    const Function graph({lhs, rhs},
+                         Call(relay::Op::Get("mul"), {add, rhs}));
+    const CompileConfig config =
+        CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+    const CompiledGraph first = Compiler::Compile(graph, config);
+    const internal::PrimitiveCacheStats after_first =
+        internal::GetPrimitiveCacheStats();
+    const CompiledGraph second = Compiler::Compile(graph, config);
+    const internal::PrimitiveCacheStats after_second =
+        internal::GetPrimitiveCacheStats();
+    const internal::PreparedCompilerGraph prepared =
+        internal::PrepareCompilerGraph(
+            graph, config, internal::ResolveCompilerExecutionContract(config));
+
+    bool ordered = first.plan().calls().size() == 2 &&
+                   first.artifact_pins().size() == 2 &&
+                   second.plan().calls().size() == 2 &&
+                   second.artifact_pins().size() == 2;
+    for (size_t index = 0; ordered && index < first.artifact_pins().size();
+         ++index) {
+        const internal::PrimitiveUnit& unit =
+            prepared.graph.partitioned.units[index];
+        ordered = unit.id == static_cast<internal::PrimitiveUnitId>(index) &&
+                  first.plan().calls()[index]->symbol == unit.symbol &&
+                  first.artifact_pins()[index].record().artifact_key
+                          .unit_semantic_key() == unit.semantic_key &&
+                  second.plan().calls()[index]->symbol ==
+                      first.plan().calls()[index]->symbol &&
+                  second.artifact_pins()[index].record().artifact_key ==
+                      first.artifact_pins()[index].record().artifact_key;
     }
-
-    CompileResult state = CompileResult::Validate(BuildTarget(Device::CPU()), typed)
-                              .AfterRelayOptimization(typed)
-                              .AfterLowering(primitives, lowered.plan,
-                                             lowered.constants);
-    TEST_CHECK(state.primitives().size() == 2 && state.plan().calls().size() == 2,
-               "compile state must preserve two ordered operator units");
-    state = state.AfterTIROptimization(tir_functions);
-
-    std::vector<codegen::KernelSignature> signatures;
-    for (const PrimitiveCompileState& primitive : state.primitives()) {
-        signatures.push_back(codegen::BuildKernelSignature(
-            primitive.tir, state.constants(), state.target(), primitive.symbol));
-    }
-    state = state.AfterSignatures(signatures);
-    TEST_CHECK(state.stage() == CompileStage::kSignatureBuilt &&
-                   state.primitives()[0].signature.has_value() &&
-                   state.primitives()[1].signature.has_value(),
-               "signature stage must bind one signature to each unit");
-
-    std::swap(tir_functions[0], tir_functions[1]);
-    CompileResult lowered_state =
-        CompileResult::Validate(BuildTarget(Device::CPU()), typed)
-            .AfterRelayOptimization(typed)
-            .AfterLowering(primitives, lowered.plan, lowered.constants);
-    TEST_CHECK(Throws([&] {
-                   (void)lowered_state.AfterTIROptimization(tir_functions);
-               }),
-               "reordered PrimFuncs must fail unit identity validation");
-
-    std::swap(signatures[0], signatures[1]);
-    CompileResult optimized_state = lowered_state.AfterTIROptimization(
-        {primitives[0].tir, primitives[1].tir});
-    TEST_CHECK(Throws([&] { (void)optimized_state.AfterSignatures(signatures); }),
-               "reordered signatures must fail symbol validation");
+    runtime::RuntimeSession session(second.module(), second.plan());
+    const Array<runtime::NDArray> outputs = session.Run(
+        {runtime::NDArray::Zeros({4}, runtime::DataTypeFromString("float32"),
+                                 Device::CPU()),
+         runtime::NDArray::Zeros({4}, runtime::DataTypeFromString("float32"),
+                                 Device::CPU())});
+    TEST_CHECK(ordered && second.module().IsReady() && outputs.size() == 1 &&
+                   after_first.misses == 2 && after_first.hits == 0 &&
+                   after_second.misses == 2 && after_second.hits == 2,
+               "Compiler::Compile must preserve ordered symbols, unit ids, "
+               "keys, and cache-hit executability");
     return true;
 }
+#endif
 
 }  // namespace
 
@@ -729,8 +719,9 @@ int main() {
 #if KXC_USE_LLVM
         {"assemble_compiled_graph_ordered_pins",
          TestAssembleCompiledGraphFromOrderedPins},
+        {"compiler_compile_ordered_artifacts",
+         TestCompilerCompilePublishesOrderedArtifacts},
 #endif
-        {"multi_primitive_compile_state", TestMultiPrimitiveCompileStateIdentity},
     };
 
     int failures = 0;

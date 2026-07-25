@@ -265,19 +265,15 @@ ExecutionPlan、Disco worker 和 CCL 是另一条实验性路径，目前没有�
 公共入口为 [compiler.h](../include/kxc/compiler/compiler.h) 中的 Compiler::Compile。
 实现位于 [compiler.cc](../src/compiler/compiler.cc)。
 
-### 5.1 七个固定阶段
+### 5.1 三个真实阶段
 
 | 阶段 | 输入 | 输出 | 当前行为 |
 |---|---|---|---|
-| validate | Relay Function、CompileConfig | Validated CompileResult | 校验 Function、Target、设备和 opt_level |
-| optimize_relay | validated Relay | typed/optimized Relay | InferType、等级策略、再次 InferType |
-| lower | optimized Relay | PrimFunc、常量表 | Relay 到 TE，再将整个 TE DAG 降为一个 PrimFunc |
-| optimize_tir | lowered PrimFunc | optimized PrimFunc | TIR 等级策略；CUDA 再执行 thread binding |
-| build_signature | 最终 PrimFunc、常量、Target | KernelSignature | 冻结参数顺序、角色、dtype、shape、device 和 alignment |
-| build_backend | PrimFunc、Signature、Target | CompiledKernel、LaunchMetadata | LLVM ORC JIT 或 CUDA NVRTC/Driver |
-| assemble | 全部阶段产物 | CompiledModule | 校验跨对象一致性并转移所有权 |
+| preparation | Relay Function、CompileConfig | `PreparedCompilerGraph` | Relay pipeline 后构建并分区 value graph |
+| primitive compilation | prepared units | `CompiledPrimitiveBatch` | 对每个 unit 完成 lowering、TIR、signature、cache 和 backend |
+| final assembly | prepared graph、ordered pins、constants | `CompiledGraph` | `AssembleCompiledGraph` 发布 module、static plan 和 public pins |
 
-七阶段顺序是 Compiler 的公共可观测契约，不允许后端自行跳过 Signature 或直接暴露裸函数指针。
+primitive compiler 内部 phase 只由调用栈和错误上下文表达；完整 backend batch 返回后不再伪造可观察中间状态。
 
 ### 5.2 Relay 到 TE/TIR
 
@@ -669,7 +665,7 @@ profiling 不参与编译语义，不允许为了记录事件而改变 IR。
 1. Relay/TIR pipeline 仍有重复的名称表、instrumentation 和 PackedFunc 注册框架；这是独立重构，不在本次死代码删除中扩张。
 2. `base::Tensor` 仍被 PackedFunc 特化和 Relay 公共头引用，必须先迁移 API，不能直接删除。
 3. `AddAttrs`、`ReluAttrs` 等无字段 attrs 仍有 importer/诊断构图调用，待 schema 统一后再删除。
-4. `CompileResult` 可以内部化，但其阶段状态机不应删除。
+4. production compiler state is carried only by prepared graphs and complete primitive batches; no replay state machine is retained.
 5. `CSourceEmitter` 仍由 LLVM 诊断测试使用，明确保持“只生成可读 C、不是 backend”的定位。
 
 ### 12.5 已知陈旧文档
@@ -756,7 +752,7 @@ Omen 当前仍位于旧分支 device-info-query-contract@c3b007f，且工作区�
 
 建议按以下顺序审查：
 
-1. [src/compiler/compiler.cc](../src/compiler/compiler.cc)：七阶段管线和优化等级。
+1. [src/compiler/compiler.cc](../src/compiler/compiler.cc)：preparation、primitive batch 和 final assembly。
 2. [src/compiler/lowering/relay_to_tir.cc](../src/compiler/lowering/relay_to_tir.cc)：Relay、TE、TIR 和参数 ABI。
 3. [src/runtime/kernel_abi.cc](../src/runtime/kernel_abi.cc)：Signature 冻结规则。
 4. [src/codegen/llvm/codegen_llvm.cc](../src/codegen/llvm/codegen_llvm.cc) 与 [src/codegen/llvm/llvm_jit.cc](../src/codegen/llvm/llvm_jit.cc)：CPU 后端。
