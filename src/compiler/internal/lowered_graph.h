@@ -27,7 +27,10 @@ struct LoweredGraph {
 };
 
 relay::LoweredFunction LowerPrimitiveUnit(
-    const ValueGraph& graph, const PrimitiveUnit& unit);
+    const std::vector<LogicalValueContract>& values,
+    const PrimitiveUnit& unit);
+runtime::ExecutablePlan BuildStaticExecutablePlan(
+    const PreparedStaticGraph& prepared);
 PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
                                        Target target,
                                        String pipeline_fingerprint);

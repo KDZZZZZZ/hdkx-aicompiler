@@ -8,12 +8,14 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "internal_lowering.h"
+#include "../internal/primitive_compiler.h"
+#include "kxc/pass/context.h"
+#include "kxc/relay/visitor.h"
 
 namespace kxc::api {
 
@@ -89,47 +91,6 @@ void RequireProductionSubset(const runtime::ControlPlan& plan,
 #endif
 }
 
-struct ResolvedBinding final {
-    internal::PrimitiveUnitId primitive_unit_id{-1};
-    CompiledModule module;
-    String entry_symbol;
-    std::vector<runtime::ValueId> abi_non_output_value_ids;
-    ArtifactPin artifact_pin;
-};
-
-Function BuildCompatibilityFunction(const internal::PrimitiveUnit& unit) {
-    const auto* call = unit.call.call.As<CallNode>();
-    if (!call) Fail("PrimitiveUnit does not contain a Relay Call");
-    Array<Var> parameters;
-    Array<Expr> arguments;
-    std::unordered_map<const Object*, Expr> substitutions;
-    for (std::size_t index = 0; index < call->args.size(); ++index) {
-        const Expr& argument = call->args[index];
-        if (argument.As<ConstantNode>()) {
-            arguments.push_back(argument);
-            continue;
-        }
-        const auto* variable = argument.As<VarNode>();
-        if (!variable || !argument.checked_type().defined()) {
-            Fail("PrimitiveUnit compatibility compile requires typed ANF atomic arguments");
-        }
-        auto found = substitutions.find(argument.get());
-        if (found == substitutions.end()) {
-            Var fresh(
-                "primitive_unit_" + std::to_string(unit.id) + "_arg_" +
-                    std::to_string(parameters.size()),
-                argument.checked_type());
-            found =
-                substitutions.emplace(argument.get(), Expr(fresh)).first;
-            parameters.push_back(std::move(fresh));
-        }
-        arguments.push_back(found->second);
-    }
-    return Function(
-        std::move(parameters),
-        Call(call->op, std::move(arguments), call->attrs));
-}
-
 }  // namespace
 
 CompiledControlFlowGraph Compiler::CompileControlFlowExact(
@@ -155,9 +116,28 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
     internal::ControlPlanLowering lowered =
         internal::LowerPreparedRelayToControlPlanWithSidecar(prepared);
     RequireProductionSubset(lowered.plan, config);
+    const PassContext pass_context = PassContext::MergeTarget(
+        relay::PassContextFromRelay(prepared.typed_anf()), config->target);
+    PassContext::Scope pass_scope(pass_context);
+    internal::CompiledPrimitiveBatch compiled =
+        internal::CompilePrimitiveUnits(
+            lowered.primitive_units, lowered.plan.values, config,
+            prepared.execution_contract());
+    if (compiled.primitives.empty()) {
+        Fail("requires at least one real branch kernel; a pure structural If has no production artifact");
+    }
+    CompiledModule module = internal::AssemblePrimitiveModule(
+        compiled, config->target);
+    std::vector<ArtifactPin> pins;
+    pins.reserve(compiled.primitives.size());
+    for (const internal::CompiledPrimitive& primitive : compiled.primitives) {
+        pins.push_back(primitive.pin);
+    }
+    const std::shared_ptr<const void> retention_owner =
+        std::make_shared<const std::vector<ArtifactPin>>(std::move(pins));
 
-    std::vector<ResolvedBinding> resolved;
-    resolved.reserve(lowered.primitive_units.size());
+    std::vector<internal::ControlKernelBinding> bindings;
+    bindings.reserve(compiled.primitives.size());
     for (const auto& region : lowered.plan.regions) {
         for (const auto& task : region.tasks) {
             if (task.kind != runtime::ControlTaskKind::kKernel) continue;
@@ -172,42 +152,22 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
             if (unit.id != task.primitive_unit_id) {
                 Fail("control PrimitiveUnit ids must be dense and ordered");
             }
-            // This is the unchanged real Compiler path on an If-free branch
-            // fragment. Phase 5 replaces this compatibility adapter with the
-            // shared primitive batch compiler.
-            CompiledGraph compiled =
-                Compiler::Compile(BuildCompatibilityFunction(unit), config);
-            const auto& pins = compiled.artifact_pins();
-            const auto& calls = compiled.plan().calls();
-            if (!compiled.module().IsReady() || pins.size() != 1 ||
-                calls.size() != 1 || !pins.front().defined() ||
-                !compiled.module().HasFunction(calls[0]->symbol)) {
-                Fail("branch Call must resolve to exactly one real immutable compiler artifact");
+            const internal::CompiledPrimitive& primitive =
+                compiled.primitives[
+                    static_cast<std::size_t>(task.primitive_unit_id)];
+            if (primitive.unit_id != unit.id ||
+                !(primitive.symbol == unit.symbol) ||
+                !primitive.pin.defined() ||
+                !module.HasFunction(primitive.symbol)) {
+                Fail("PrimitiveUnit did not resolve to its immutable compiler artifact");
             }
-            resolved.push_back(ResolvedBinding{
-                unit.id, compiled.module(), calls[0]->symbol,
-                AbiNonOutputs(task, lowered.plan), pins.front()});
+            bindings.push_back(internal::ControlKernelBinding{
+                unit.id, module, primitive.symbol,
+                AbiNonOutputs(task, lowered.plan), retention_owner});
         }
     }
-    if (resolved.empty()) {
-        Fail("requires at least one real branch kernel; a pure structural If has no production artifact");
-    }
-
-    std::vector<ArtifactPin> pins;
-    pins.reserve(resolved.size());
-    for (const ResolvedBinding& binding : resolved) {
-        pins.push_back(binding.artifact_pin);
-    }
-    const std::shared_ptr<const void> retention_owner =
-        std::make_shared<const std::vector<ArtifactPin>>(std::move(pins));
-
-    std::vector<internal::ControlKernelBinding> bindings;
-    bindings.reserve(resolved.size());
-    for (ResolvedBinding& binding : resolved) {
-        bindings.push_back(internal::ControlKernelBinding{
-            binding.primitive_unit_id, std::move(binding.module),
-            std::move(binding.entry_symbol),
-            std::move(binding.abi_non_output_value_ids), retention_owner});
+    if (bindings.size() != compiled.primitives.size()) {
+        Fail("control topology and compiled PrimitiveUnit cardinality differ");
     }
     runtime::ControlExecutionPlan plan =
         internal::BindControlPlanForRuntime(lowered.plan, bindings);

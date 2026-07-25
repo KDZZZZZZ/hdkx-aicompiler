@@ -17,12 +17,13 @@
 namespace kxc::api::internal {
 namespace {
 
-const ValueInfo& GetValue(const ValueGraph& graph, int64_t value_id) {
-    if (value_id < 0 || static_cast<size_t>(value_id) >= graph.values.size() ||
-        graph.values[static_cast<size_t>(value_id)].id != value_id) {
+const ValueInfo& GetValue(const std::vector<LogicalValueContract>& values,
+                          int64_t value_id) {
+    if (value_id < 0 || static_cast<size_t>(value_id) >= values.size() ||
+        values[static_cast<size_t>(value_id)].id != value_id) {
         throw std::invalid_argument("PrimitiveUnit references an invalid value id");
     }
-    return graph.values[static_cast<size_t>(value_id)];
+    return values[static_cast<size_t>(value_id)];
 }
 
 tir::DataType TIRDataType(const TensorTypeNode* type) {
@@ -61,8 +62,9 @@ te::Tensor MakeBoundaryTensor(const ValueInfo& value) {
 }
 
 const ResolvedRelayCall& ValidateUnitOperator(
-    const ValueGraph& graph, const PrimitiveUnit& unit) {
-    ValidatePrimitiveUnit(unit, graph.values);
+    const std::vector<LogicalValueContract>& values,
+    const PrimitiveUnit& unit) {
+    ValidatePrimitiveUnit(unit, values);
     return unit.call;
 }
 
@@ -97,10 +99,10 @@ Array<te::Tensor> InvokeCurrentCall(const ResolvedRelayCall& resolved,
     return outputs;
 }
 
-void ValidateTEOutputContracts(const ValueGraph& graph,
-                               const PrimitiveUnit& unit,
-                               const Array<te::Tensor>& outputs,
-                               const std::string& op_name) {
+void ValidateTEOutputContracts(
+    const std::vector<LogicalValueContract>& values,
+    const PrimitiveUnit& unit, const Array<te::Tensor>& outputs,
+    const std::string& op_name) {
     if (outputs.size() != unit.output_value_ids.size()) {
         throw std::invalid_argument(
             "Unit TE output count does not match stable output values for op: " +
@@ -113,7 +115,7 @@ void ValidateTEOutputContracts(const ValueGraph& graph,
                 "Unit TE output is undefined at index " + std::to_string(i) +
                 " for op: " + op_name);
         }
-        const ValueInfo& value = GetValue(graph, unit.output_value_ids[i]);
+        const ValueInfo& value = GetValue(values, unit.output_value_ids[i]);
         const auto* expected = value.checked_type.As<TensorTypeNode>();
         if (!expected) {
             throw std::invalid_argument(
@@ -178,10 +180,11 @@ void FreezeConstantPayloads(ValueGraph* graph) {
 
 }  // namespace
 
-relay::LoweredFunction LowerPrimitiveUnit(const ValueGraph& graph,
-                                          const PrimitiveUnit& unit) {
+relay::LoweredFunction LowerPrimitiveUnit(
+    const std::vector<LogicalValueContract>& values,
+    const PrimitiveUnit& unit) {
     const ResolvedRelayCall& resolved =
-        ValidateUnitOperator(graph, unit);
+        ValidateUnitOperator(values, unit);
     const relay::OperatorSpec& spec = resolved.spec;
     const auto* call = unit.call.call.As<CallNode>();
 
@@ -189,7 +192,7 @@ relay::LoweredFunction LowerPrimitiveUnit(const ValueGraph& graph,
     Array<te::Tensor> abi_inputs;
     std::vector<relay::internal::ConstantTensor> constants;
     for (int64_t value_id : unit.boundary_input_value_ids) {
-        const ValueInfo& value = GetValue(graph, value_id);
+        const ValueInfo& value = GetValue(values, value_id);
         te::Tensor tensor = MakeBoundaryTensor(value);
         boundary_tensors.emplace(value_id, tensor);
         if (value.origin == ValueOrigin::kConstant) {
@@ -208,26 +211,19 @@ relay::LoweredFunction LowerPrimitiveUnit(const ValueGraph& graph,
     }
 
     Array<te::Tensor> logical_inputs;
-    for (const auto& argument : call->args) {
-        const auto ids_it = graph.value_ids_by_expr.find(argument.get());
-        if (ids_it == graph.value_ids_by_expr.end()) {
+    for (const int64_t value_id : unit.argument_value_ids) {
+        const auto tensor_it = boundary_tensors.find(value_id);
+        if (tensor_it == boundary_tensors.end()) {
             throw std::invalid_argument(
-                "Unit argument is absent from the stable ValueGraph");
+                "PrimitiveUnit argument is outside its boundary map");
         }
-        for (int64_t value_id : ids_it->second) {
-            const auto tensor_it = boundary_tensors.find(value_id);
-            if (tensor_it == boundary_tensors.end()) {
-                throw std::invalid_argument(
-                    "Unit lowering attempted to read outside its boundary map");
-            }
-            logical_inputs.push_back(tensor_it->second);
-        }
+        logical_inputs.push_back(tensor_it->second);
     }
 
     const Array<te::Tensor> outputs =
         InvokeCurrentCall(
             resolved, logical_inputs, unit.call.call.checked_type());
-    ValidateTEOutputContracts(graph, unit, outputs, spec.name);
+    ValidateTEOutputContracts(values, unit, outputs, spec.name);
     return relay::internal::LowerTensorGraphToTIR(
         abi_inputs, constants, outputs,
         relay::internal::PrimFuncIdentity{
@@ -276,7 +272,7 @@ LoweredGraph LowerPreparedStaticGraph(const PreparedStaticGraph& prepared) {
 
     for (const PrimitiveUnit& unit : result.partitioned.units) {
         relay::LoweredFunction lowered =
-            LowerPrimitiveUnit(result.partitioned.value_graph, unit);
+            LowerPrimitiveUnit(result.partitioned.value_graph.values, unit);
         const ResolvedRelayCall& resolved = unit.call;
         result.primitives.push_back(
             LoweredPrimitive{unit.id,
@@ -296,26 +292,34 @@ LoweredGraph LowerPreparedStaticGraph(const PreparedStaticGraph& prepared) {
         }
     }
 
+    result.plan = BuildStaticExecutablePlan(prepared);
+    ValidateLoweredGraph(result);
+    return result;
+}
+
+runtime::ExecutablePlan BuildStaticExecutablePlan(
+    const PreparedStaticGraph& prepared) {
+    ValidatePartition(prepared.partitioned);
     Array<runtime::ValueSpec> value_specs;
-    for (const ValueInfo& value : result.partitioned.value_graph.values) {
+    for (const ValueInfo& value : prepared.partitioned.value_graph.values) {
         const auto* type = value.checked_type.As<TensorTypeNode>();
         const bool is_graph_output =
-            std::find(result.partitioned.output_value_ids.begin(),
-                      result.partitioned.output_value_ids.end(),
-                      value.id) != result.partitioned.output_value_ids.end();
+            std::find(prepared.partitioned.output_value_ids.begin(),
+                      prepared.partitioned.output_value_ids.end(),
+                      value.id) != prepared.partitioned.output_value_ids.end();
         value_specs.push_back(runtime::ValueSpec(
             value.id, value.id, type->shape,
             runtime::DataTypeFromString(type->dtype), value.device,
             value.origin == ValueOrigin::kParameter,
             value.origin == ValueOrigin::kConstant, is_graph_output));
     }
-    result.plan = runtime::ExecutablePlan(
-        value_specs, result.partitioned.calls,
-        result.partitioned.input_value_ids,
-        result.partitioned.constant_value_ids,
-        result.partitioned.output_value_ids);
-    ValidateLoweredGraph(result);
-    return result;
+    runtime::ExecutablePlan plan(
+        value_specs, prepared.partitioned.calls,
+        prepared.partitioned.input_value_ids,
+        prepared.partitioned.constant_value_ids,
+        prepared.partitioned.output_value_ids);
+    plan.Validate();
+    return plan;
 }
 
 LoweredGraph LowerGraph(Function function, Device device, Target target,

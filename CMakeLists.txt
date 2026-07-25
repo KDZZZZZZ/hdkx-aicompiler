@@ -493,6 +493,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/compile_state.cc
   src/compiler/identity.cc
   src/compiler/pipeline_resolver.cc
+  src/compiler/primitive_compiler.cc
   src/compiler/compiler.cc
 
   src/compiler/graph/partition.cc
