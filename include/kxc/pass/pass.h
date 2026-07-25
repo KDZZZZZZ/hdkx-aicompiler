@@ -36,6 +36,8 @@ struct PassSpec {
     Array<String> declarative_only_invariants;
     Array<String> preserved_analyses;
     Array<String> invalidated_analyses;
+    /*! \brief Relay control capabilities this graph pass is audited to preserve. */
+    Array<String> supported_control_capabilities;
     bool may_change_ir{true};
     bool deterministic{true};
     bool idempotent{false};

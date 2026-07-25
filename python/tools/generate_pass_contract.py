@@ -58,6 +58,7 @@ def render(contract: dict[str, Any]) -> str:
                 f"            spec.declarative_only_invariants = {cpp_array(spec['declarative_only_invariants'])};",
                 f"            spec.preserved_analyses = {cpp_array(spec['preserved_analyses'])};",
                 f"            spec.invalidated_analyses = {cpp_array(spec['invalidated_analyses'])};",
+                f"            spec.supported_control_capabilities = {cpp_array(spec['supported_control_capabilities'])};",
                 f"            spec.may_change_ir = {'true' if spec['may_change_ir'] else 'false'};",
                 f"            spec.deterministic = {'true' if spec['deterministic'] else 'false'};",
                 f"            spec.idempotent = {'true' if spec['idempotent'] else 'false'};",

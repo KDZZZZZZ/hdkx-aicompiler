@@ -10,7 +10,7 @@
 
 namespace kxc::pass_contract_generated {
 
-inline constexpr int kContractVersion = 2;
+inline constexpr int kContractVersion = 3;
 
 inline const std::vector<PassSpec>& Specs() {
     static const std::vector<PassSpec> specs = [] {
@@ -28,6 +28,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -49,6 +50,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -70,6 +72,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -91,6 +94,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -112,6 +116,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -133,6 +138,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -154,6 +160,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -175,6 +182,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -196,6 +204,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -217,6 +226,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -238,6 +248,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -259,6 +270,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -280,6 +292,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -301,6 +314,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -322,6 +336,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -343,6 +358,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -364,6 +380,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -385,6 +402,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -406,6 +424,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
@@ -427,6 +446,7 @@ inline const std::vector<PassSpec>& Specs() {
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
+            spec.supported_control_capabilities = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = false;
@@ -456,7 +476,7 @@ inline bool IsRepeatable(IRDialect dialect, const std::string& name) {
 inline Array<String> Pipeline(const std::string& name) {
     if (name == "relay.optimize_default") return {String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("canonicalize_cast"), String("remove_standalone_reshapes"), String("eliminate_dead_let"), String("annotate_memory_scope"), String("capture_post_dfs_index_in_spans"), String("infer_type")};
     if (name == "tir.optimize_default") return {String("fold_constant"), String("simplify_expr"), String("force_narrow_index_to_i32"), String("convert_for_loops_serial"), String("loop_partition"), String("unroll_loop"), String("vectorize_loop"), String("remove_no_op")};
-    if (name == "relay.compiler.o0") return {String("infer_type"), String("infer_type"), String("normalize_to_anf")};
+    if (name == "relay.compiler.o0") return {String("infer_type"), String("fold_constant"), String("infer_type"), String("normalize_to_anf")};
     if (name == "relay.compiler.o1") return {String("infer_type"), String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("infer_type"), String("normalize_to_anf")};
     if (name == "relay.compiler.o2") return {String("infer_type"), String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("canonicalize_cast"), String("remove_standalone_reshapes"), String("eliminate_dead_let"), String("infer_type"), String("normalize_to_anf")};
     if (name == "relay.compiler.o3") return {String("infer_type"), String("fold_tuple_get_item"), String("fold_constant"), String("simplify_expr"), String("canonicalize_cast"), String("remove_standalone_reshapes"), String("eliminate_dead_let"), String("infer_type"), String("normalize_to_anf")};

@@ -135,6 +135,14 @@ void ValidatePassSpec(const PassSpec& spec) {
     }
     (void)ValidateNames(spec.preserved_analyses, "preserved_analyses", pass_key);
     (void)ValidateNames(spec.invalidated_analyses, "invalidated_analyses", pass_key);
+    (void)ValidateNames(spec.supported_control_capabilities,
+                        "supported_control_capabilities", pass_key);
+    if (spec.dialect != IRDialect::kRelay &&
+        !spec.supported_control_capabilities.empty()) {
+        throw std::invalid_argument(
+            "PassSpec " + pass_key +
+            " declares Relay control capabilities for a non-Relay dialect");
+    }
     if (spec.dialect == IRDialect::kRelay && spec.scope == PassScope::kPrimFunc) {
         throw std::invalid_argument("PassSpec " + pass_key +
                                     " cannot use prim_func scope for Relay dialect");

@@ -180,7 +180,8 @@ private:
             const std::string detail = error.what();
             std::string capability = "backend_executable";
             std::string node_kind = "Target";
-            if (detail.find("optimize_relay") != std::string::npos ||
+            if (detail.find("prepare_relay") != std::string::npos ||
+                detail.find("optimize_relay") != std::string::npos ||
                 detail.find("infer_type") != std::string::npos) {
                 capability = "relay_pipeline";
                 node_kind = "Function";

@@ -107,8 +107,19 @@ CompiledControlFlowGraph Compiler::CompileControlFlowExact(
         "CompileControlFlowExact is disabled by KXC_ENABLE_CONTROL_RUNTIME");
 #else
     config.Validate();
+    internal::PreparedRelayProgram prepared =
+        internal::PrepareRelayProgram(
+            std::move(function), config,
+            internal::ControlFlowPolicy::NativeExact());
+    const internal::PreparedProgramPlan program_plan =
+        internal::PlanRelayProgram(prepared);
+    if (!std::holds_alternative<internal::PreparedControlPlan>(
+            program_plan)) {
+        Fail("has no residual control topology after preparation; use "
+             "Compiler::Compile for the static fast path");
+    }
     internal::ControlPlanLowering lowered =
-        internal::LowerRelayToControlPlanWithSidecar(std::move(function));
+        internal::LowerPreparedRelayToControlPlanWithSidecar(prepared);
     RequireProductionSubset(lowered.plan, config);
 
     std::vector<ResolvedBinding> resolved;

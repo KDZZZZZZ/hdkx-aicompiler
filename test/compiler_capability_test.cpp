@@ -152,8 +152,9 @@ bool TestRepresentableControlFlowRejectedWithLocator() {
                            function, CompileConfig::Create(
                                          BuildTarget(Device::CPU()), 0));
                    },
-                   "CapabilityVerifier[compiler_entry]"),
-               "Compiler entry must reject unsupported control flow");
+                   "conditional_branch"),
+               "Compiler entry must reject unsupported residual control flow "
+               "through the shared capability policy");
 
     Var state("state", TensorType({4}, "float32"));
     Function while_function = relay::InferTypePass(
@@ -166,8 +167,9 @@ bool TestRepresentableControlFlowRejectedWithLocator() {
                        (void)Compiler::Compile(
                            while_function, CompileConfig::Create(
                                BuildTarget(Device::CPU()), 0));
-                   }, "control_flow.loop"),
-               "Compiler::Compile must reject While before ValueGraph with a stable loop diagnostic");
+                   }, "bounded_pre_test_loop"),
+               "Compiler::Compile must reject While before ValueGraph with the "
+               "shared residual capability diagnostic");
     return true;
 }
 

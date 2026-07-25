@@ -3,18 +3,23 @@
  */
 
 #include <any>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "../src/compiler/internal/executable_capability.h"
 #include "../src/compiler/internal/lowered_graph.h"
+#include "../src/compiler/internal/relay_program.h"
 #include "../src/compiler/internal/value_graph.h"
+#include "kxc/compiler/compile_config.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/op_attr_types.h"
+#include "kxc/relay/pass_utils.h"
 #include "kxc/relay/transforms/infer_type.h"
 
 namespace {
@@ -501,6 +506,100 @@ bool TestValueGraphFreeVarRejects() {
     return true;
 }
 
+bool TestRelayProgramPreparationAndPlanning() {
+    using namespace kxc;
+    using namespace kxc::api;
+    using namespace kxc::api::internal;
+
+    const TensorType tensor({4}, "float32");
+    const TensorType predicate_type({}, "bool");
+    const CompileConfig config =
+        CompileConfig::Create(BuildTarget(Device::CPU()), 0);
+
+    Var x("x", tensor);
+    Var y("y", tensor);
+    PreparedRelayProgram dataflow = PrepareRelayProgram(
+        Function({x, y}, Add(x, y)), config, ControlFlowPolicy::StaticOnly());
+    TEST_CHECK(!dataflow.residual_profile().requires_control_topology() &&
+                   std::holds_alternative<PreparedStaticPlan>(
+                       PlanRelayProgram(dataflow)),
+               "ordinary dataflow must select the static topology");
+
+    runtime::NDArray true_data = runtime::NDArray::Empty(
+        {}, runtime::DataTypeFromString("bool"), Device::CPU());
+    const std::uint8_t true_value = 1;
+    true_data.CopyFromBytes(&true_value, sizeof(true_value));
+    Var folded_x("folded_x", tensor);
+    Var folded_y("folded_y", tensor);
+    PreparedRelayProgram folded = PrepareRelayProgram(
+        Function({folded_x, folded_y},
+                 If(Constant(true_data), Add(folded_x, folded_y),
+                    Add(folded_y, folded_y))),
+        config, ControlFlowPolicy::StaticOnly());
+    TEST_CHECK(!folded.residual_profile().requires_control_topology() &&
+                   !folded.typed_anf()->body.As<IfNode>() &&
+                   std::holds_alternative<PreparedStaticPlan>(
+                       PlanRelayProgram(folded)),
+               "constant If must be removed before residual profiling, including at O0");
+
+    Var predicate("predicate", predicate_type);
+    Var if_x("if_x", tensor);
+    Var if_y("if_y", tensor);
+    Function conditional({predicate, if_x, if_y},
+                         If(predicate, Add(if_x, if_y), Add(if_y, if_y)));
+    const std::string policy_error = ErrorText([&] {
+        (void)PrepareRelayProgram(
+            conditional, config, ControlFlowPolicy::StaticOnly());
+    });
+    TEST_CHECK(
+        policy_error.find("conditional_branch") != std::string::npos,
+        "a residual If must report the missing conditional capability");
+
+    PreparedRelayProgram prepared_if = PrepareRelayProgram(
+        conditional, config, ControlFlowPolicy::NativeExact());
+    TEST_CHECK(
+        prepared_if.residual_profile().Requires(
+            RelayControlCapability::kConditionalBranch) &&
+            !prepared_if.residual_profile().Requires(
+                RelayControlCapability::kBoundedPreTestLoop) &&
+            std::holds_alternative<PreparedControlPlan>(
+                PlanRelayProgram(prepared_if)),
+        "a residual If must select structured control exactly once");
+
+    Var initial("initial", predicate_type);
+    Var state("state", predicate_type);
+    Function bounded_loop(
+        {initial}, While(initial, state, state, state, 3));
+    PreparedRelayProgram prepared_loop = PrepareRelayProgram(
+        bounded_loop, config, ControlFlowPolicy::NativeExact());
+    TEST_CHECK(
+        prepared_loop.residual_profile().Requires(
+            RelayControlCapability::kBoundedPreTestLoop) &&
+            !prepared_loop.residual_profile().Requires(
+                RelayControlCapability::kConditionalBranch) &&
+            std::holds_alternative<PreparedControlPlan>(
+                PlanRelayProgram(prepared_loop)),
+        "a residual bounded pre-test loop must select structured control");
+
+    Var nested_predicate("nested_predicate", predicate_type);
+    Var nested_initial("nested_initial", predicate_type);
+    Var nested_state("nested_state", predicate_type);
+    Function nested(
+        {nested_predicate, nested_initial},
+        If(nested_predicate,
+           While(nested_initial, nested_state, nested_state, nested_state, 2),
+           nested_initial));
+    PreparedRelayProgram prepared_nested = PrepareRelayProgram(
+        nested, config, ControlFlowPolicy::NativeExact());
+    TEST_CHECK(
+        prepared_nested.residual_profile().Requires(
+            RelayControlCapability::kConditionalBranch) &&
+            prepared_nested.residual_profile().Requires(
+                RelayControlCapability::kBoundedPreTestLoop),
+        "residual profiling must retain every nested control capability");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -514,6 +613,8 @@ int main() {
         {"nested_tuple_get_item_leaves", TestNestedTupleGetItemKeepsAllLeaves},
         {"tuple_parameter_gate", TestTupleParameterCapabilityIsNotOverclaimed},
         {"value_graph_free_var_rejected", TestValueGraphFreeVarRejects},
+        {"relay_program_preparation_and_planning",
+         TestRelayProgramPreparationAndPlanning},
     };
     for (const auto& test : tests) {
         try {

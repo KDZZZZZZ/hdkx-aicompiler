@@ -42,6 +42,9 @@ struct CompilerExecutionContract final {
 
 CompilerExecutionContract ResolveCompilerExecutionContract(
     const CompileConfig& config);
+CompilerExecutionContract ResolveCompilerExecutionContract(
+    const CompileConfig& config,
+    const Array<String>& required_relay_control_capabilities);
 Target CloneTargetSnapshot(const Target& target);
 std::string CanonicalTargetSnapshot(const Target& target);
 

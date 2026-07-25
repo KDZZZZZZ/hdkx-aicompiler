@@ -139,23 +139,28 @@ struct RegionState {
 
 class ControlPlanBuilder final {
 public:
-    explicit ControlPlanBuilder(Function function) : function_(std::move(function)) {}
+    explicit ControlPlanBuilder(Function function, bool prepared = false)
+        : function_(std::move(function)), prepared_(prepared) {}
 
     internal::ControlPlanLowering BuildWithSidecar() {
         if (!function_.defined()) {
             throw std::invalid_argument("LowerRelayToControlPlan requires a defined Function");
         }
-        function_ = relay::InferTypePass(function_);
-        function_ = relay::NormalizeToANF(function_);
-        relay::VerifyANF(function_);
-        internal::ExecutableCapabilityOptions options;
-        options.version = internal::ExecutableCapabilityOptions::kVersion;
-        options.allow_if = true;
-        options.allow_while = true;
-        options.allow_tuple_parameters = true;
-        options.allow_nested_tuple_call_outputs = true;
-        options.allow_device_regions = true;
-        internal::VerifyExecutableCapability(function_, options);
+        if (!prepared_) {
+            function_ = relay::InferTypePass(function_);
+            function_ = relay::NormalizeToANF(function_);
+            relay::VerifyANF(function_);
+            internal::ExecutableCapabilityOptions options;
+            options.version = internal::ExecutableCapabilityOptions::kVersion;
+            options.allow_if = true;
+            options.allow_while = true;
+            options.allow_tuple_parameters = true;
+            options.allow_nested_tuple_call_outputs = true;
+            options.allow_device_regions = true;
+            internal::VerifyExecutableCapability(function_, options);
+        } else {
+            relay::VerifyANF(function_);
+        }
 
         const runtime::RegionId root = NewRegion("function");
         plan_.entry_region = root;
@@ -195,6 +200,7 @@ private:
     using Env = std::unordered_map<const Object*, Leaves>;
 
     Function function_;
+    bool prepared_{false};
     runtime::ControlPlan plan_;
     runtime::ValueId next_value_{0};
     runtime::RegionId next_region_{0};
@@ -628,6 +634,16 @@ private:
 namespace internal {
 ControlPlanLowering LowerRelayToControlPlanWithSidecar(Function function) {
     return ControlPlanBuilder(std::move(function)).BuildWithSidecar();
+}
+
+ControlPlanLowering LowerPreparedRelayToControlPlanWithSidecar(
+    const PreparedRelayProgram& program) {
+    if (!program.residual_profile().requires_control_topology()) {
+        throw std::invalid_argument(
+            "LowerPreparedRelayToControlPlanWithSidecar requires residual "
+            "structured control");
+    }
+    return ControlPlanBuilder(program.typed_anf(), true).BuildWithSidecar();
 }
 }  // namespace internal
 

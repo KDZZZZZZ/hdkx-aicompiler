@@ -50,6 +50,46 @@ bool EqualArray(const Array<String>& lhs, const Array<String>& rhs) {
     return true;
 }
 
+std::set<std::string> UniqueValues(const Array<String>& values,
+                                   const char* field);
+
+void ValidateRelayControlCapabilities(
+    IRDialect dialect, const Array<String>& capabilities,
+    const char* caller) {
+    const std::set<std::string> unique =
+        UniqueValues(capabilities, "required control capabilities");
+    if (dialect != IRDialect::kRelay && !unique.empty()) {
+        throw std::invalid_argument(
+            std::string(caller) +
+            " cannot require Relay control capabilities for a non-Relay pipeline");
+    }
+    for (const std::string& capability : unique) {
+        if (capability != "conditional_branch" &&
+            capability != "bounded_pre_test_loop") {
+            throw std::invalid_argument(
+                std::string(caller) +
+                " contains unknown Relay control capability '" +
+                capability + "'");
+        }
+    }
+}
+
+void RequirePassControlSafety(
+    const PassSpec& spec, const Array<String>& required_capabilities,
+    const char* caller) {
+    const std::set<std::string> supported =
+        UniqueValues(spec.supported_control_capabilities,
+                     "supported control capabilities");
+    for (const String& required : required_capabilities) {
+        if (!supported.count(AsString(required))) {
+            throw std::invalid_argument(
+                std::string(caller) + " rejects control-unsafe pass " +
+                PassSpecKey(spec.dialect, spec.name) +
+                ": missing explicit support for '" + AsString(required) + "'");
+        }
+    }
+}
+
 int PhaseRank(const PassSpec& spec) {
     const std::string phase = AsString(spec.phase);
     if (spec.dialect == IRDialect::kRelay && phase == "relay_optimize") return 0;
@@ -152,6 +192,8 @@ std::string CanonicalBytes(const NormalizedPipeline& pipeline) {
     AppendField(&canonical, "named_pipeline", AsString(pipeline.named_pipeline));
     AppendArray(&canonical, "initial_invariant", pipeline.initial_invariants);
     AppendArray(&canonical, "initial_analysis", pipeline.initial_analyses);
+    AppendArray(&canonical, "required_control_capability",
+                pipeline.required_control_capabilities);
     AppendArray(&canonical, "target_requirement", pipeline.target_requirements);
     for (const PipelineExecutionStep& step : pipeline.execution_steps) {
         AppendField(&canonical, "step_dialect", ToString(step.dialect));
@@ -352,9 +394,11 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
         }
     }
     if (IsCompilerPipeline(request) &&
-        (disabled.count("infer_type") || disabled.count("normalize_to_anf"))) {
+        (disabled.count("infer_type") || disabled.count("normalize_to_anf") ||
+         disabled.count("fold_constant"))) {
         throw std::invalid_argument(
-            "PipelineResolver cannot disable mandatory compiler infer_type or ANF steps");
+            "PipelineResolver cannot disable mandatory compiler infer_type, "
+            "control simplification, or ANF steps");
     }
 
     Array<String> ordered;
@@ -384,6 +428,12 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
                                      "PipelineResolver initial invariants");
     std::set<std::string> analyses =
         UniqueValues(request.initial_analyses, "initial analyses");
+    const std::set<std::string> required_control_capabilities =
+        UniqueValues(request.required_control_capabilities,
+                     "required control capabilities");
+    ValidateRelayControlCapabilities(
+        request.dialect, request.required_control_capabilities,
+        "PipelineResolver");
 
     NormalizedPipeline result;
     result.dialect = request.dialect;
@@ -392,6 +442,8 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
     result.named_pipeline = request.named_pipeline;
     result.initial_invariants = request.initial_invariants;
     result.initial_analyses = request.initial_analyses;
+    result.required_control_capabilities =
+        SetToArray(required_control_capabilities);
     result.target_requirements = {
         String(request.target->kind + ":" +
                std::to_string(static_cast<int>(request.target->device_type)))};
@@ -400,6 +452,8 @@ NormalizedPipeline PipelineResolver::Resolve(const PipelineRequest& request) {
     for (const String& name : ordered) {
         const PassSpec& spec = PassRegistry::Global().Get(request.dialect, name);
         PipelineInvariantValidator::ValidateProductionContract(spec);
+        RequirePassControlSafety(
+            spec, result.required_control_capabilities, "PipelineResolver");
         if (spec.scope != expected_scope) {
             throw std::invalid_argument(
                 "PipelineResolver pass scope does not match request: " +
@@ -486,6 +540,17 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
                                      "PipelineExecutor initial invariants");
     std::set<std::string> analyses =
         UniqueValues(pipeline.initial_analyses, "initial analyses");
+    const std::set<std::string> required_control_capabilities =
+        UniqueValues(pipeline.required_control_capabilities,
+                     "required control capabilities");
+    ValidateRelayControlCapabilities(
+        pipeline.dialect, pipeline.required_control_capabilities,
+        "PipelineExecutor");
+    if (!EqualArray(pipeline.required_control_capabilities,
+                    SetToArray(required_control_capabilities))) {
+        throw std::invalid_argument(
+            "PipelineExecutor required control capabilities are not canonical");
+    }
     std::unordered_map<std::string, size_t> occurrences;
     int previous_phase = -1;
     bool has_cuda_schedule = false;
@@ -499,6 +564,8 @@ void PipelineExecutor::Validate(const NormalizedPipeline& pipeline,
         }
         const PassSpec& spec = PassRegistry::Global().Get(step.dialect, step.pass_name);
         PipelineInvariantValidator::ValidateProductionContract(spec);
+        RequirePassControlSafety(
+            spec, pipeline.required_control_capabilities, "PipelineExecutor");
         if (spec.scope != expected_scope || step.phase != spec.phase ||
             step.schema_version != spec.schema_version ||
             step.implementation_key != spec.implementation_key ||

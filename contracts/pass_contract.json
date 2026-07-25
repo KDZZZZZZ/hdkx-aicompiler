@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "rules": {
     "single_registration": true,
     "deterministic_order": true,
@@ -18,6 +18,7 @@
       "declarative_only_invariants",
       "preserved_analyses",
       "invalidated_analyses",
+      "supported_control_capabilities",
       "may_change_ir",
       "deterministic",
       "idempotent",
@@ -32,6 +33,7 @@
     "declarative_only_invariants": [],
     "preserved_analyses": [],
     "invalidated_analyses": [],
+    "supported_control_capabilities": [],
     "may_change_ir": true,
     "deterministic": true,
     "thread_safe": false,
@@ -61,6 +63,7 @@
     ],
     "relay.compiler.o0": [
       "infer_type",
+      "fold_constant",
       "infer_type",
       "normalize_to_anf"
     ],
@@ -132,6 +135,10 @@
       "phase": "relay_optimize",
       "opt_level": 1,
       "implementation_key": "kxc.relay.transform.fold_tuple_get_item",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false
@@ -144,6 +151,10 @@
       "phase": "relay_optimize",
       "opt_level": 1,
       "implementation_key": "kxc.relay.transform.fold_constant",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false
@@ -156,6 +167,10 @@
       "phase": "relay_optimize",
       "opt_level": 1,
       "implementation_key": "kxc.relay.transform.simplify_expr",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false
@@ -168,6 +183,10 @@
       "phase": "relay_optimize",
       "opt_level": 1,
       "implementation_key": "kxc.relay.transform.canonicalize_cast",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false
@@ -180,6 +199,10 @@
       "phase": "relay_optimize",
       "opt_level": 1,
       "implementation_key": "kxc.relay.transform.remove_standalone_reshapes",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false
@@ -192,6 +215,7 @@
       "phase": "relay_optimize",
       "opt_level": 3,
       "implementation_key": "kxc.relay.transform.eliminate_common_subexpr",
+      "supported_control_capabilities": [],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false
@@ -204,6 +228,10 @@
       "phase": "relay_optimize",
       "opt_level": 1,
       "implementation_key": "kxc.relay.transform.eliminate_dead_let",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false
@@ -216,6 +244,10 @@
       "phase": "relay_optimize",
       "opt_level": 1,
       "implementation_key": "kxc.relay.transform.annotate_memory_scope",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false
@@ -228,6 +260,10 @@
       "phase": "relay_optimize",
       "opt_level": 1,
       "implementation_key": "kxc.relay.transform.capture_post_dfs_index_in_spans",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false
@@ -240,6 +276,10 @@
       "phase": "relay_optimize",
       "opt_level": 1,
       "implementation_key": "kxc.relay.transform.infer_type",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false,
@@ -255,6 +295,10 @@
       "phase": "relay_optimize",
       "opt_level": 0,
       "implementation_key": "kxc.relay.transform.normalize_to_anf",
+      "supported_control_capabilities": [
+        "conditional_branch",
+        "bounded_pre_test_loop"
+      ],
       "deterministic": true,
       "idempotent": true,
       "target_dependent": false,

@@ -18,6 +18,29 @@ namespace {
 // 重写可在编译期求值的二元标量调用，并保留原表达式的设备放置信息。
 class FoldConstantRewriter : public RelayPass {
 protected:
+    Expr VisitIf(const IfNode* op, const Expr& ref) override {
+        const Expr condition = Mutate(op->cond);
+        double value = 0.0;
+        DLDataType dtype{0, 0, 0};
+        if (pass_utils::TryGetScalarConstantValueWithDType(
+                condition, &value, &dtype) &&
+            dtype.code == kDLBool && dtype.bits == 8 && dtype.lanes == 1) {
+            const Expr selected =
+                Mutate(value != 0.0 ? op->true_branch : op->false_branch);
+            return pass_utils::CopyVirtualDevice(ref, selected);
+        }
+
+        const Expr true_branch = Mutate(op->true_branch);
+        const Expr false_branch = Mutate(op->false_branch);
+        if (condition.get() == op->cond.get() &&
+            true_branch.get() == op->true_branch.get() &&
+            false_branch.get() == op->false_branch.get()) {
+            return ref;
+        }
+        return pass_utils::CopyVirtualDevice(
+            ref, If(condition, true_branch, false_branch));
+    }
+
     // 递归改写调用，在两个参数均为标量常量时执行受支持的算术或比较。
     Expr VisitCall(const CallNode* op, const Expr& ref) override {
         Expr rewritten = RelayPass::VisitCall(op, ref);

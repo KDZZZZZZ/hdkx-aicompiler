@@ -526,8 +526,8 @@ bool TestCompilerDefaultStillRejectsIf() {
             function,
             kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU())));
     });
-    CHECK(error.find("missing control_flow.if") != std::string::npos,
-          "Compiler::Compile must keep the default Relay If rejection");
+    CHECK(error.find("conditional_branch") != std::string::npos,
+          "Compiler::Compile must keep the default residual If rejection");
     return true;
 }
 
@@ -547,8 +547,8 @@ bool TestRelayWhileCompileGates() {
     const std::string default_error = ErrorText([&] {
         (void)kxc::api::Compiler::Compile(function, config);
     });
-    CHECK(default_error.find("missing control_flow.loop") != std::string::npos,
-          "Compiler::Compile must reject Relay While before ValueGraph");
+    CHECK(default_error.find("bounded_pre_test_loop") != std::string::npos,
+          "Compiler::Compile must reject residual Relay While before ValueGraph");
     const std::string control_error = ErrorText([&] {
         (void)kxc::api::Compiler::CompileControlFlowExact(function, config);
     });

@@ -25,6 +25,7 @@ struct PipelineRequest final {
     Array<String> disabled;
     Array<String> initial_invariants;
     Array<String> initial_analyses;
+    Array<String> required_control_capabilities;
 };
 
 struct PipelineExecutionStep final {
@@ -56,6 +57,7 @@ struct NormalizedPipeline final {
     String named_pipeline;
     Array<String> initial_invariants;
     Array<String> initial_analyses;
+    Array<String> required_control_capabilities;
     std::vector<PipelineExecutionStep> execution_steps;
     std::vector<PipelineInvariantTransition> invariant_transitions;
     Array<String> target_requirements;

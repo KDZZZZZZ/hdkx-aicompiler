@@ -28,8 +28,8 @@
 #include "internal/kernel_abi_equivalence.h"
 #include "internal/lowered_graph.h"
 #include "internal/primitive_cache.h"
+#include "internal/relay_program.h"
 #include "../runtime/internal/compiled_module_node.h"
-#include "kxc/compiler/capability.h"
 #include "kxc/compiler/pipeline.h"
 #include "../runtime/internal/memory_plan.h"
 #include "kxc/pass/context.h"
@@ -401,13 +401,17 @@ Map<String, runtime::NDArray> PlaceConstants(
     return result;
 }
 
-NormalizedPipeline ResolveRelayPipeline(const CompileConfig& config) {
+NormalizedPipeline ResolveRelayPipeline(
+    const CompileConfig& config,
+    const Array<String>& required_control_capabilities = {}) {
     PipelineRequest request;
     request.dialect = IRDialect::kRelay;
     request.requested_scope = PassScope::kGraph;
     request.target = config->target;
     request.opt_level = config->opt_level;
     request.named_pipeline = String("compiler");
+    request.required_control_capabilities =
+        required_control_capabilities;
     return PipelineResolver::Resolve(request);
 }
 
@@ -419,27 +423,6 @@ NormalizedPipeline ResolveTIRPipeline(const CompileConfig& config) {
     request.opt_level = config->opt_level;
     request.named_pipeline = String("compiler");
     return PipelineResolver::Resolve(request);
-}
-
-CompileResult ValidateInput(
-    Function function, const CompileConfig& config,
-    const internal::CompilerExecutionContract& contract) {
-    config.Validate();
-    CapabilityVerifier::RequireEligible(CapabilityRequest{
-        function, config->target, "graph", contract.fingerprint,
-        CapabilityBoundary::kCompilerEntry, false, config->opt_level});
-    return CompileResult::Validate(config->target, std::move(function));
-}
-
-CompileResult OptimizeRelay(
-    const CompileResult& input, const CompileConfig& config,
-    const internal::CompilerExecutionContract& contract) {
-    Function optimized = PipelineExecutor::ExecuteRelay(
-        contract.relay_pipeline, input.validated_relay(), input.target());
-    CapabilityVerifier::RequireEligible(CapabilityRequest{
-        optimized, input.target(), "graph", contract.fingerprint,
-        CapabilityBoundary::kPostGraphPass, true, config->opt_level});
-    return input.AfterRelayOptimization(std::move(optimized));
 }
 
 CompileResult LowerPreparedOperators(
@@ -776,7 +759,8 @@ CompiledModule AssembleModule(
 
 CompiledGraph CompilePipeline(
     Function function, CompileConfig config,
-    const internal::CompilerExecutionContract& contract) {
+    const internal::ControlFlowPolicy& policy,
+    const internal::CompilerExecutionContract* expected_contract = nullptr) {
     config.Validate();
     const GraphSemanticKey graph_semantic_key =
         Compiler::BuildGraphSemanticKey(function);
@@ -791,12 +775,36 @@ CompiledGraph CompilePipeline(
         relay::PassContextFromRelay(function), config->target);
     PassContext::Scope pass_scope(pass_context);
 
-    CompileResult result = RunStage(
-        "validate", config,
-        [&] { return ValidateInput(function, config, contract); });
-    result = RunStage(
-        "optimize_relay", config,
-        [&] { return OptimizeRelay(result, config, contract); });
+    internal::PreparedRelayProgram prepared = [&] {
+        profiling::ScopedSpan span(
+            profiling::CurrentContext(),
+            MakeStageEvent("prepare_relay", config));
+        try {
+            return internal::PrepareRelayProgram(function, config, policy);
+        } catch (const std::exception& error) {
+            span.SetStatus("error");
+            span.SetMessage(error.what());
+            throw std::runtime_error(
+                std::string("Compiler stage 'prepare_relay' failed: ") +
+                error.what());
+        }
+    }();
+    const internal::PreparedProgramPlan program_plan =
+        internal::PlanRelayProgram(prepared);
+    if (!std::holds_alternative<internal::PreparedStaticPlan>(program_plan)) {
+        throw std::logic_error(
+            "Compiler::Compile cannot publish a structured-control plan");
+    }
+    const internal::CompilerExecutionContract& contract =
+        prepared.execution_contract();
+    if (expected_contract &&
+        expected_contract->canonical_bytes != contract.canonical_bytes) {
+        throw std::invalid_argument(
+            "Compiler execution contract does not match prepared Relay program");
+    }
+    CompileResult result =
+        CompileResult::Validate(config->target, prepared.typed_anf())
+            .AfterRelayOptimization(prepared.typed_anf());
     result = RunStage("lower", config,
                       [&] { return LowerOperators(result, contract); });
     result = RunStage("optimize_tir", config,
@@ -884,9 +892,17 @@ std::string internal::CanonicalTargetSnapshot(const Target& target) {
 
 internal::CompilerExecutionContract
 internal::ResolveCompilerExecutionContract(const CompileConfig& config) {
+    return ResolveCompilerExecutionContract(config, {});
+}
+
+internal::CompilerExecutionContract
+internal::ResolveCompilerExecutionContract(
+    const CompileConfig& config,
+    const Array<String>& required_relay_control_capabilities) {
     config.Validate();
     CompilerExecutionContract contract;
-    contract.relay_pipeline = ResolveRelayPipeline(config);
+    contract.relay_pipeline = ResolveRelayPipeline(
+        config, required_relay_control_capabilities);
     contract.tir_pipeline = ResolveTIRPipeline(config);
     contract.schedule_version = "per-unit-schedule-v2";
     contract.backend_version = BackendVersion(config->target);
@@ -913,7 +929,9 @@ internal::ResolveCompilerExecutionContract(const CompileConfig& config) {
 void internal::ProbeCompilerExecution(
     Function function, CompileConfig config,
     const CompilerExecutionContract& contract) {
-    (void)CompilePipeline(std::move(function), std::move(config), contract);
+    (void)CompilePipeline(
+        std::move(function), std::move(config),
+        ControlFlowPolicy::StaticOnly(), &contract);
 }
 
 internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
@@ -922,23 +940,23 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
     config.Validate();
     const GraphSemanticKey graph_semantic_key =
         Compiler::BuildGraphSemanticKey(function);
-    const PassContext pass_context = PassContext::MergeTarget(
-        relay::PassContextFromRelay(function), config->target);
-    PassContext::Scope pass_scope(pass_context);
     auto profile_context = MaybeCreateProfileContext(config);
     const std::string run_id =
         profile_context ? profile_context->NextRunId("shape_exact") : "";
     profiling::ActivationScope activation(profile_context, run_id);
-    size_t capability_boundary_checks = 0;
-    size_t relay_graph_pipelines = 0;
-    CompileResult result = RunStage(
-        "validate", config,
-        [&] { return ValidateInput(std::move(function), config, contract); });
-    ++capability_boundary_checks;
-    result = RunStage("optimize_relay", config,
-                      [&] { return OptimizeRelay(result, config, contract); });
-    ++relay_graph_pipelines;
-    ++capability_boundary_checks;
+    PreparedRelayProgram prepared = PrepareRelayProgram(
+        std::move(function), config, ControlFlowPolicy::StaticOnly());
+    if (prepared.execution_contract().canonical_bytes !=
+        contract.canonical_bytes) {
+        throw std::invalid_argument(
+            "PrepareCompilerGraph execution contract does not match "
+            "prepared Relay program");
+    }
+    CompileResult result =
+        CompileResult::Validate(config->target, prepared.typed_anf())
+            .AfterRelayOptimization(prepared.typed_anf());
+    size_t capability_boundary_checks = 1;
+    size_t relay_graph_pipelines = 1;
     const Device device(result.target()->device_type, result.target()->device_id);
     profiling::ScopedSpan prepare_span(
         profile_context, MakeStageEvent("prepare_graph", config), run_id);
@@ -1014,8 +1032,8 @@ GraphSemanticKey Compiler::BuildGraphSemanticKey(
 }
 
 CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
-    const internal::CompilerExecutionContract contract =
-        internal::ResolveCompilerExecutionContract(config);
-    return CompilePipeline(std::move(function), std::move(config), contract);
+    return CompilePipeline(
+        std::move(function), std::move(config),
+        internal::ControlFlowPolicy::StaticOnly());
 }
 }  // namespace kxc::api

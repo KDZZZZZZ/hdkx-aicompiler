@@ -10,6 +10,7 @@
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/control_execution_plan.h"
+#include "../internal/relay_program.h"
 #include "control_plan.h"
 
 namespace kxc::api::internal {
@@ -22,6 +23,8 @@ struct ControlPlanLowering final {
 };
 
 ControlPlanLowering LowerRelayToControlPlanWithSidecar(Function function);
+ControlPlanLowering LowerPreparedRelayToControlPlanWithSidecar(
+    const PreparedRelayProgram& program);
 
 struct ControlKernelBinding final {
     runtime::TaskId task_id{-1};

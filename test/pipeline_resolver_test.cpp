@@ -101,7 +101,7 @@ bool TestProductionPlanHasExplicitInferBoundaries() {
     using namespace kxc;
     using namespace kxc::api;
     const Target cpu = BuildTarget(Device::CPU());
-    const std::vector<size_t> relay_sizes = {3, 6, 9, 9};
+    const std::vector<size_t> relay_sizes = {4, 6, 9, 9};
     const std::vector<size_t> tir_sizes = {0, 2, 4, 8};
     for (int level = 0; level <= 3; ++level) {
         const NormalizedPipeline relay =
@@ -260,7 +260,7 @@ bool TestCanonicalChangesAndNoHiddenCompatibilityPass() {
     const Target cpu = BuildTarget(Device::CPU());
     PipelineRequest request = Request(IRDialect::kRelay, 1, cpu);
     const NormalizedPipeline baseline = PipelineResolver::Resolve(request);
-    request.disabled = {String("fold_constant")};
+    request.disabled = {String("simplify_expr")};
     const NormalizedPipeline changed = PipelineResolver::Resolve(request);
     TEST_CHECK(baseline.fingerprint != changed.fingerprint &&
                    baseline.canonical_bytes != changed.canonical_bytes &&
@@ -279,6 +279,24 @@ bool TestCanonicalChangesAndNoHiddenCompatibilityPass() {
     forbidden.disabled = {String("normalize_to_anf")};
     TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(forbidden); }),
                "mandatory compiler ANF normalization cannot be disabled");
+    forbidden.disabled = {String("fold_constant")};
+    TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(forbidden); }),
+               "mandatory compiler control simplification cannot be disabled");
+
+    PipelineRequest control = Request(IRDialect::kRelay, 2, cpu);
+    control.required_control_capabilities = {
+        String("conditional_branch")};
+    const NormalizedPipeline control_safe =
+        PipelineResolver::Resolve(control);
+    TEST_CHECK(
+        control_safe.required_control_capabilities.size() == 1 &&
+            Contains(control_safe.required_control_capabilities,
+                     "conditional_branch"),
+        "the normalized pipeline must retain its structural control requirements");
+    control.enabled = {String("eliminate_common_subexpr")};
+    TEST_CHECK(
+        Throws([&] { (void)PipelineResolver::Resolve(control); }),
+        "a graph pass without an explicit control-safety declaration must fail closed");
     return true;
 }
 
