@@ -58,12 +58,13 @@ dynamic-module coverage.  No callback completion is used by the module ABI.
 
 ### Local verification
 
-The combined W4-1 branch was rebuilt after the final scalar-ABI preflight fix:
+The post-cleanup branch was rebuilt after the final contract and gate isolation fixes:
 
 | Configuration | Result | Evidence tier |
 |---|---:|---|
-| LLVM OFF, CUDA OFF, dynamic ABI OFF, CPU label | **44/44 passed** | validated locally |
-| LLVM OFF, CUDA OFF, dynamic ABI ON, CPU label | **44/44 passed** | validated locally |
+| LLVM OFF, CUDA OFF, all foundation gates OFF, CPU label | **37/37 passed** | validated locally |
+| LLVM OFF, CUDA OFF, all foundation gates ON, CPU label | **38/38 passed** | validated locally |
+| LLVM OFF, CUDA OFF, adaptive ON with Shape gates OFF, CPU label | **38/38 passed** | validated locally |
 | ASan+UBSan: module/session/control focused set | **3/3 passed** | validated locally |
 | Relay operator contract | **24/24 passed** | validated locally |
 | Pass contract | **20/20 passed** | validated locally |
