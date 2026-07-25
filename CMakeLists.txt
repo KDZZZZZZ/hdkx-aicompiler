@@ -98,7 +98,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/relay/op.h
   include/kxc/relay/op_attr_types.h
   include/kxc/relay/op_macros.h
-  include/kxc/relay/pass/print_ir.h
+  include/kxc/relay/printer/print_ir.h
   include/kxc/relay/pass_utils.h
   include/kxc/relay/relay.h
   include/kxc/relay/transforms/annotate_memory_scope.h
@@ -146,7 +146,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/te/topi/transform.h
   include/kxc/te/topi/utils.h
   include/kxc/tir/expr.h
-  include/kxc/tir/pass/print_ir.h
+  include/kxc/tir/printer/print_ir.h
   include/kxc/tir/pass_utils.h
   include/kxc/tir/stmt.h
   include/kxc/tir/transforms/bind_cuda_threads.h
@@ -399,6 +399,7 @@ set(KXC_DISTRIBUTED_RUNTIME_SOURCES
 set(KXC_RELAY_IR_SOURCES
   src/relay/visitor.cc
   src/relay/relay.cc
+  src/relay/printer/print_ir.cc
   src/relay/type_infer.cc
   src/relay/op_attrs.cc
   src/relay/op_macros.cc
@@ -417,7 +418,6 @@ set(KXC_RELAY_IR_SOURCES
 
 set(KXC_RELAY_PASS_SOURCES
   src/relay/pass_utils.cc
-  src/relay/pass/print_ir.cc
   src/relay/transforms/pipeline.cc
   src/relay/transforms/fold_constant.cc
   src/relay/transforms/simplify_expr.cc
@@ -437,11 +437,11 @@ set(KXC_RELAY_DISTRIBUTED_SOURCES
 set(KXC_TIR_IR_SOURCES
   src/tir/visitor.cc
   src/tir/expr.cc
-  src/tir/stmt.cc)
+  src/tir/stmt.cc
+  src/tir/printer/print_ir.cc)
 
 set(KXC_TIR_PASS_SOURCES
   src/tir/pass_utils.cc
-  src/tir/pass/print_ir.cc
   src/tir/transforms/pipeline.cc
   src/tir/transforms/fold_constant.cc
   src/tir/transforms/force_narrow_index_to_i32.cc

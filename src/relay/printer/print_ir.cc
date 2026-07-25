@@ -1,8 +1,8 @@
-/*! \file src/relay/pass/print_ir.cc
+/*! \file src/relay/printer/print_ir.cc
  * \brief 实现 Relay IR 文本打印和调试工具。
  */
 
-#include "kxc/relay/pass/print_ir.h"
+#include "kxc/relay/printer/print_ir.h"
 
 #include <sstream>
 
@@ -10,7 +10,7 @@
 
 namespace kxc {
 namespace relay {
-namespace pass {
+namespace printer {
 
 namespace {
 
@@ -149,24 +149,24 @@ private:
 
 }  // namespace
 
-// 配置公开 IR 打印 pass 的缩进宽度。
-IRPrinterPass::IRPrinterPass(int indent_spaces) : indent_spaces_(indent_spaces) {}
+// 配置公开 IR 打印器的缩进宽度。
+IRPrinter::IRPrinter(int indent_spaces) : indent_spaces_(indent_spaces) {}
 
 // 打印任意 Relay 表达式。
-void IRPrinterPass::Run(const Expr& expr, std::ostream& os) const {
+void IRPrinter::Run(const Expr& expr, std::ostream& os) const {
     RelayIRPrinter printer(os, indent_spaces_);
     printer.Print(expr, 0);
 }
 
 // 将 Function 适配为 Expr 后打印。
-void IRPrinterPass::Run(const Function& func, std::ostream& os) const {
+void IRPrinter::Run(const Function& func, std::ostream& os) const {
     Run(Expr(ObjectRef(func)), os);
 }
 
 // 直接把表达式转储到调用方流。
 void DumpExpr(const Expr& expr, std::ostream& os, int indent_spaces) {
-    IRPrinterPass pass(indent_spaces);
-    pass.Run(expr, os);
+    IRPrinter printer(indent_spaces);
+    printer.Run(expr, os);
 }
 
 // 直接把函数转储到调用方流。
@@ -188,6 +188,6 @@ std::string ToText(const Function& func, int indent_spaces) {
     return os.str();
 }
 
-}  // namespace pass
+}  // namespace printer
 }  // namespace relay
 }  // namespace kxc

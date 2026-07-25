@@ -5,7 +5,7 @@
 #include "kxc/relay/relay.h"
 #include "kxc/relay/op.h"
 #include "kxc/compiler/lowering/relay_to_tir.h"
-#include "kxc/tir/pass/print_ir.h"
+#include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/pipeline.h"
 
 #include <fstream>
@@ -482,7 +482,7 @@ int main() {
         tir::PrimFunc pf = LowerToTIR(f)->prim_func;
         pf = tir::RunTIRPassPipeline(
             pf, {kxc::String("fold_constant"), kxc::String("simplify_expr")});
-        tir::pass::DumpPrimFunc(pf, ofs);
+        tir::printer::DumpPrimFunc(pf, ofs);
         std::cout.rdbuf(old_cout_buf);
 
         std::cout << "\nIR dump written to test/resnet18_ir_dump.txt" << std::endl;

@@ -397,7 +397,7 @@ Compiler 在策略前后各执行一次强制 InferType；策略本身不重复�
 ### 7.3 CSE 正确性风险
 
 [pass_utils.cc](../src/relay/pass_utils.cc) 使用 Relay debug printer 文本作为 ExprStructuralKey。
-[print_ir.cc](../src/relay/pass/print_ir.cc) 对 Constant 只打印 shape/dtype，对 Call 不打印 attrs。
+[print_ir.cc](../src/relay/printer/print_ir.cc) 对 Constant 只打印 shape/dtype，对 Call 不打印 attrs。
 
 因此以下表达式可能得到相同结构键：
 

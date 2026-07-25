@@ -13,7 +13,7 @@
 
 #include "kxc/pass/context.h"
 #include "kxc/tir/visitor.h"
-#include "kxc/tir/pass/print_ir.h"
+#include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/pipeline.h"
 
@@ -102,7 +102,7 @@ bool TestElementwiseSchedule() {
                "tail threads must be protected by a bounds guard");
 
     std::ostringstream text;
-    pass::DumpPrimFunc(scheduled, text);
+    printer::DumpPrimFunc(scheduled, text);
     TEST_CHECK(text.str().find("blockIdx.x") != std::string::npos &&
                    text.str().find("threadIdx.x") != std::string::npos,
                "IR printer did not expose structured thread bindings");

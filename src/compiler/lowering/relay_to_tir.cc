@@ -12,8 +12,8 @@
 #include "support/hash.h"
 #include "kxc/runtime/kernel_abi.h"
 #include "kxc/te/te.h"
-#include "kxc/relay/pass/print_ir.h"
-#include "kxc/tir/pass/print_ir.h"
+#include "kxc/relay/printer/print_ir.h"
+#include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/expr.h"
 #include "kxc/tir/visitor.h"
 
@@ -897,7 +897,7 @@ LoweredFunction LowerToTIR(Function func) {
     spec.component = "lowering";
     spec.event_type = "lower_to_tir";
     profiling::ScopedSpan span(profile_context, std::move(spec));
-    const std::string relay_text = relay::pass::ToText(func);
+    const std::string relay_text = relay::printer::ToText(func);
     const std::string relay_hash = support::HashText(relay_text);
     span.AddField("relay_ir_hash", relay_hash);
     span.AddMetric("relay_ir_bytes", static_cast<double>(relay_text.size()));
@@ -919,7 +919,7 @@ LoweredFunction LowerToTIR(Function func) {
             internal::PrimFuncIdentity{String("main")});
         const tir::PrimFunc& lowered = lowered_result->prim_func;
         std::ostringstream tir_os;
-        tir::pass::DumpPrimFunc(lowered, tir_os);
+        tir::printer::DumpPrimFunc(lowered, tir_os);
         const std::string tir_text = tir_os.str();
         const std::string tir_hash = support::HashText(tir_text);
         const bool changed = relay_hash != tir_hash;

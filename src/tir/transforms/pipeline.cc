@@ -18,7 +18,7 @@
 #include "kxc/pass/pass.h"
 #include "kxc/profiling/profiling.h"
 #include "support/hash.h"
-#include "kxc/tir/pass/print_ir.h"
+#include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/convert_for_loops_serial.h"
 #include "kxc/tir/transforms/fold_constant.h"
@@ -59,7 +59,7 @@ std::string SanitizeArtifactName(const std::string& pass_name) {
 
 std::string PrimFuncToText(const PrimFunc& func) {
     std::ostringstream os;
-    tir::pass::DumpPrimFunc(func, os);
+    tir::printer::DumpPrimFunc(func, os);
     return os.str();
 }
 

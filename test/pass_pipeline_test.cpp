@@ -5,7 +5,7 @@
 #include "kxc/target/target.h"
 #include "kxc/pass/pass.h"
 #include "kxc/relay/op.h"
-#include "kxc/relay/pass/print_ir.h"
+#include "kxc/relay/printer/print_ir.h"
 #include "kxc/relay/transforms/annotate_memory_scope.h"
 #include "kxc/relay/transforms/canonicalize_cast.h"
 #include "kxc/relay/transforms/capture_post_dfs_index_in_spans.h"
@@ -17,7 +17,7 @@
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/relay/transforms/remove_standalone_reshapes.h"
 #include "kxc/relay/transforms/simplify_expr.h"
-#include "kxc/tir/pass/print_ir.h"
+#include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/convert_for_loops_serial.h"
 #include "kxc/tir/transforms/fold_constant.h"
 #include "kxc/tir/transforms/force_narrow_index_to_i32.h"
@@ -84,12 +84,12 @@ kxc::Call MakeRelayBinary(const std::string& op_name, const kxc::Expr& lhs,
 }
 
 // 将 Relay 函数序列化为便于断言的稳定文本。
-std::string RelayText(const kxc::Function& func) { return kxc::relay::pass::ToText(func); }
+std::string RelayText(const kxc::Function& func) { return kxc::relay::printer::ToText(func); }
 
 // 将 TIR PrimFunc 序列化为便于断言的稳定文本。
 std::string TIRText(const kxc::tir::PrimFunc& func) {
     std::ostringstream os;
-    kxc::tir::pass::DumpPrimFunc(func, os);
+    kxc::tir::printer::DumpPrimFunc(func, os);
     return os.str();
 }
 

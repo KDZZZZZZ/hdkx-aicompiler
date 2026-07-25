@@ -18,7 +18,7 @@
 #include "kxc/pass/pass.h"
 #include "kxc/profiling/profiling.h"
 #include "support/hash.h"
-#include "kxc/relay/pass/print_ir.h"
+#include "kxc/relay/printer/print_ir.h"
 #include "kxc/relay/transforms/annotate_memory_scope.h"
 #include "kxc/relay/transforms/canonicalize_cast.h"
 #include "kxc/relay/transforms/capture_post_dfs_index_in_spans.h"
@@ -116,14 +116,14 @@ Function RunInstrumentedPass(const Function& func, const std::string& pass_name)
     spec.pass_name = pass_name;
     profiling::ScopedSpan span(profile_context, std::move(spec));
 
-    const std::string before_text = relay::pass::ToText(func);
+    const std::string before_text = relay::printer::ToText(func);
     const std::string before_hash = support::HashText(before_text);
     span.AddField("ir_before_hash", before_hash);
     span.AddMetric("ir_before_bytes", static_cast<double>(before_text.size()));
 
     try {
         Function updated = RunSinglePass(func, pass_name);
-        const std::string after_text = relay::pass::ToText(updated);
+        const std::string after_text = relay::printer::ToText(updated);
         const std::string after_hash = support::HashText(after_text);
         const bool changed = before_hash != after_hash;
         span.AddField("ir_after_hash", after_hash);

@@ -135,7 +135,7 @@ Codegen
 
 ### 2.6 Debug 输出不显示 checked type
 
-[src/relay/pass/print_ir.cc](../src/relay/pass/print_ir.cc) 打印 Var、Constant、Call、Tuple、Let、Function，但不打印 `checked_type_`。这会让 typed Relay 难以调试，也会降低 profiling IR artifact 的价值。
+[src/relay/printer/print_ir.cc](../src/relay/printer/print_ir.cc) 打印 Var、Constant、Call、Tuple、Let、Function，但不打印 `checked_type_`。这会让 typed Relay 难以调试，也会降低 profiling IR artifact 的价值。
 
 ## 3. 必要性
 
@@ -613,7 +613,7 @@ LowerToTIR also runs InferTypePass for direct callers, then validates typed Rela
 
 修改：
 
-- [src/relay/pass/print_ir.cc](../src/relay/pass/print_ir.cc)
+- [src/relay/printer/print_ir.cc](../src/relay/printer/print_ir.cc)
 - [docs/OPERATOR_REGISTRATION_GUIDE.md](OPERATOR_REGISTRATION_GUIDE.md)
 - [docs/PASS_IMPLEMENTATION_SUMMARY.md](PASS_IMPLEMENTATION_SUMMARY.md)
 

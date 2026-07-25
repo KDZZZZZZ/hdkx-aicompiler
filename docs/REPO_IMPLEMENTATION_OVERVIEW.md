@@ -253,7 +253,7 @@ TOPI 层在 `include/te/topi/` 中，用 TE 表达常见算子：
 - `src/tir/stmt.cc`
 - `include/tir/pass_utils.h`
 - `src/tir/pass_utils.cc`
-- `src/tir/pass/print_ir.cc`
+- `src/tir/printer/print_ir.cc`
 
 ### 7.1 PrimExpr
 

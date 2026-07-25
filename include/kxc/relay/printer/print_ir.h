@@ -1,4 +1,4 @@
-/*! \file include/kxc/relay/pass/print_ir.h
+/*! \file include/kxc/relay/printer/print_ir.h
  * \brief 声明 Relay IR 文本打印和调试工具。
  */
 
@@ -11,11 +11,11 @@
 
 namespace kxc {
 namespace relay {
-namespace pass {
+namespace printer {
 
-class IRPrinterPass {
+class IRPrinter {
 public:
-    explicit IRPrinterPass(int indent_spaces = 2);
+    explicit IRPrinter(int indent_spaces = 2);
 
     void Run(const Expr& expr, std::ostream& os) const;
     void Run(const Function& func, std::ostream& os) const;
@@ -29,6 +29,6 @@ void DumpFunction(const Function& func, std::ostream& os, int indent_spaces = 2)
 std::string ToText(const Expr& expr, int indent_spaces = 2);
 std::string ToText(const Function& func, int indent_spaces = 2);
 
-}  // namespace pass
+}  // namespace printer
 }  // namespace relay
 }  // namespace kxc

@@ -113,11 +113,11 @@
 ### 3.3 调试打印
 
 - Relay 打印：
-  - `include/relay/pass/print_ir.h`
-  - `src/relay/pass/print_ir.cc`
+  - `include/relay/printer/print_ir.h`
+  - `src/relay/printer/print_ir.cc`
 - TIR 打印：
-  - `include/tir/pass/print_ir.h`
-  - `src/tir/pass/print_ir.cc`
+  - `include/tir/printer/print_ir.h`
+  - `src/tir/printer/print_ir.cc`
 
 ---
 

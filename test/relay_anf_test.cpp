@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "kxc/relay/op.h"
-#include "kxc/relay/pass/print_ir.h"
+#include "kxc/relay/printer/print_ir.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/normalize_to_anf.h"
 
@@ -90,8 +90,8 @@ bool TestNestedSharedTupleIsDeterministicAndIdempotent() {
     Call shared2 = Add(x2, y2);
     Function equivalent({x2, y2}, Tuple({Add(shared2, y2), Multiply(shared2, x2)}));
     equivalent = relay::InferTypePass(equivalent);
-    TEST_CHECK(relay::pass::ToText(normalized) ==
-                   relay::pass::ToText(relay::NormalizeToANF(equivalent)),
+    TEST_CHECK(relay::printer::ToText(normalized) ==
+                   relay::printer::ToText(relay::NormalizeToANF(equivalent)),
                "equivalent input must receive deterministic ANF names and order");
     return true;
 }
@@ -138,7 +138,7 @@ bool TestWhileIsDeterministicAndLexical() {
     TEST_CHECK(relay::IsANF(normalized, &diagnostic), diagnostic);
     TEST_CHECK(relay::NormalizeToANF(normalized).get() == normalized.get(),
                "While ANF normalization must be idempotent by identity");
-    TEST_CHECK(relay::pass::ToText(normalized).find("While(max_trip_count=2, var=state)") !=
+    TEST_CHECK(relay::printer::ToText(normalized).find("While(max_trip_count=2, var=state)") !=
                    std::string::npos,
                "printer must deterministically include the bounded lexical loop");
     return true;

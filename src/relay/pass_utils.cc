@@ -12,7 +12,7 @@
 
 #include "kxc/relay/visitor.h"
 #include "kxc/relay/op.h"
-#include "kxc/relay/pass/print_ir.h"
+#include "kxc/relay/printer/print_ir.h"
 
 namespace kxc {
 namespace relay {
@@ -370,7 +370,7 @@ std::string GetCallOpName(const CallNode* call) {
 
 // 生成用于 pass 去重和比较的稳定结构文本键。
 std::string ExprStructuralKey(const Expr& expr) {
-    return relay::pass::ToText(expr);
+    return relay::printer::ToText(expr);
 }
 
 // 在遵守函数参数与 let 绑定遮蔽规则的前提下替换自由变量。

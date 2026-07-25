@@ -37,9 +37,9 @@
 #include "kxc/runtime/session.h"
 #include "support/canonical.h"
 #include "support/hash.h"
-#include "kxc/relay/pass/print_ir.h"
+#include "kxc/relay/printer/print_ir.h"
 #include "kxc/relay/visitor.h"
-#include "kxc/tir/pass/print_ir.h"
+#include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 
 #if KXC_USE_LLVM
@@ -266,7 +266,7 @@ uint64_t PlannedStorageBytes(const runtime::ExecutablePlan& plan) {
 void AddResultFields(profiling::ScopedSpan* span, const CompileResult& result) {
     const CompileStage stage = result.stage();
     if (stage == CompileStage::kRelayOptimized) {
-        const std::string text = relay::pass::ToText(result.optimized_relay());
+        const std::string text = relay::printer::ToText(result.optimized_relay());
         span->AddField("ir_hash", support::HashText(text));
         span->AddMetric("ir_bytes", static_cast<double>(text.size()));
         return;
@@ -294,7 +294,7 @@ void AddResultFields(profiling::ScopedSpan* span, const CompileResult& result) {
     for (const PrimitiveCompileState& primitive : primitives) {
         const std::string prefix = "unit." + std::to_string(primitive.unit_id) + ".";
         std::ostringstream stream;
-        tir::pass::DumpPrimFunc(primitive.tir, stream);
+        tir::printer::DumpPrimFunc(primitive.tir, stream);
         const std::string text = stream.str();
         span->AddField(prefix + "symbol", std::string(primitive.symbol));
         span->AddField(prefix + "operator",
@@ -522,7 +522,7 @@ codegen::CompiledKernel RelocateCachedKernel(
 
 uint64_t AccountedTIRBytes(const tir::PrimFunc& function) {
     std::ostringstream out;
-    tir::pass::DumpPrimFunc(function, out);
+    tir::printer::DumpPrimFunc(function, out);
     return std::max<uint64_t>(1, static_cast<uint64_t>(out.str().size()));
 }
 

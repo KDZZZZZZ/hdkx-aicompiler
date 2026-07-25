@@ -1,8 +1,8 @@
-/*! \file src/tir/pass/print_ir.cc
+/*! \file src/tir/printer/print_ir.cc
  * \brief 实现 TIR IR 文本打印工具。
  */
 
-#include "kxc/tir/pass/print_ir.h"
+#include "kxc/tir/printer/print_ir.h"
 
 #include "kxc/tir/visitor.h"
 
@@ -11,7 +11,7 @@
 
 namespace kxc {
 namespace tir {
-namespace pass {
+namespace printer {
 
 namespace {
 
@@ -276,18 +276,18 @@ private:
 
 }  // namespace
 
-IRPrinterPass::IRPrinterPass(int indent_spaces) : indent_spaces_(indent_spaces) {}
+IRPrinter::IRPrinter(int indent_spaces) : indent_spaces_(indent_spaces) {}
 
-void IRPrinterPass::Run(const PrimFunc& func, std::ostream& os) const {
+void IRPrinter::Run(const PrimFunc& func, std::ostream& os) const {
     IRPrinterImpl printer(os, indent_spaces_);
     printer.PrintPrimFunc(func);
 }
 
 void DumpPrimFunc(const PrimFunc& func, std::ostream& os, int indent_spaces) {
-    IRPrinterPass pass(indent_spaces);
-    pass.Run(func, os);
+    IRPrinter printer(indent_spaces);
+    printer.Run(func, os);
 }
 
-}  // namespace pass
+}  // namespace printer
 }  // namespace tir
 }  // namespace kxc
