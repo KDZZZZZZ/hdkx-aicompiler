@@ -727,7 +727,7 @@
         "gate": "static_lowering_size_contract",
         "reason": "Shared whole-graph and production per-unit lowering rejects negative or >INT32_MAX iteration extents and checked row-major element/flatten/byte overflow against int64 and size_t, while preserving zero-element tensors.",
         "evidence": [
-          "src/compiler/lowering/relay_to_tir.cc",
+          "src/compiler/lowering/te_to_tir.cc",
           "src/compiler/lowering/lowered_graph.cc",
           "test/infer_type_test.cpp"
         ]

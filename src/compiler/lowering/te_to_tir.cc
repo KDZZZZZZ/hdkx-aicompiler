@@ -1,26 +1,16 @@
-/*! \file src/compiler/lowering/relay_to_tir.cc
- * \brief 实现 Relay/TE 到 TIR 的 lowering 主流程。
+/*! \file src/compiler/lowering/te_to_tir.cc
+ * \brief Private TE DAG to TIR primitive lowering.
  */
 
-#include "kxc/compiler/lowering/relay_to_tir.h"
-#include "../internal/resolved_relay_call.h"
 #include "../internal/te_to_tir.h"
-#include "kxc/relay/transforms/infer_type.h"
-#include "kxc/relay/op_attr_types.h"
-#include "kxc/relay/op.h"
-#include "kxc/relay/visitor.h"
-#include "kxc/profiling/profiling.h"
-#include "support/hash.h"
+#include "kxc/pass/context.h"
 #include "kxc/runtime/kernel_abi.h"
 #include "kxc/te/te.h"
-#include "kxc/relay/printer/print_ir.h"
-#include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/expr.h"
 #include "kxc/tir/visitor.h"
 
 #include <algorithm>
 #include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -32,256 +22,50 @@ namespace relay {
 
 namespace {
 
-// 判断调用是否属于执行计划处理而非 TE 计算处理的设备通信算子。
-bool IsDeviceCommunicationOpName(const std::string& op_name) {
-    return op_name.rfind("device.", 0) == 0;
-}
-
-// 将 Relay 文本 dtype 转换为 TIR DataType。
-tir::DataType DTypeFromString(const std::string& dtype) {
-    if (dtype == "float32") return tir::DataType::Float(32);
-    if (dtype == "float64") return tir::DataType::Float(64);
-    if (dtype == "int32") return tir::DataType::Int(32);
-    if (dtype == "int64") return tir::DataType::Int(64);
-    if (dtype == "int8") return tir::DataType::Int(8);
-    if (dtype == "uint8") return tir::DataType::UInt(8);
-    if (dtype == "bool") return tir::DataType::Bool();
-    throw std::runtime_error("Unsupported dtype string: " + dtype);
-}
-
-// 将 DLPack dtype 显式映射为 TIR DataType，包括独立的 bool 类型码。
-tir::DataType DTypeFromDL(const DLDataType& dl_dtype) {
-    if (dl_dtype.code == kDLFloat) return tir::DataType::Float(dl_dtype.bits, dl_dtype.lanes);
-    if (dl_dtype.code == kDLInt) return tir::DataType::Int(dl_dtype.bits, dl_dtype.lanes);
-    if (dl_dtype.code == kDLUInt) return tir::DataType::UInt(dl_dtype.bits, dl_dtype.lanes);
-    if (dl_dtype.code == kDLBool) return tir::DataType::Bool(dl_dtype.lanes);
-    throw std::runtime_error("Unsupported DLDataType code in constant");
-}
-
-// 将 TensorType 的静态维度转换为 TIR shape 表达式。
-Array<tir::PrimExpr> ShapeFromTensorType(const TensorTypeNode* type) {
-    Array<tir::PrimExpr> shape;
-    for (size_t axis = 0; axis < type->shape.size(); ++axis) {
-        const int64_t dim = type->shape[axis];
-        if (dim < 0) {
-            throw std::runtime_error(
-                "LowerToTIR requires non-negative static dimensions; axis " +
-                std::to_string(axis) + " is " + std::to_string(dim));
-        }
-        shape.push_back(tir::IntImm(dim, tir::DataType::Int(64)));
-    }
-    internal::ValidateStaticLoweringTensor(
-        shape, DTypeFromString(type->dtype), "LowerToTIR TensorType");
-    return shape;
-}
-
-// 按行主序把多维索引展平为一维 buffer 索引。
-tir::PrimExpr FlattenIndex(const Array<tir::PrimExpr>& indices, const Array<tir::PrimExpr>& shape) {
-    if (shape.empty()) {
-        return tir::IntImm(0);
-    }
+tir::PrimExpr FlattenIndex(const Array<tir::PrimExpr>& indices,
+                           const Array<tir::PrimExpr>& shape) {
+    if (shape.empty()) return tir::IntImm(0);
     if (indices.size() != shape.size()) {
         throw std::runtime_error("Index rank mismatch during flattening");
     }
     tir::PrimExpr linear = indices[0];
-    for (size_t i = 1; i < indices.size(); ++i) {
-        linear = linear * shape[i] + indices[i];
+    for (size_t index = 1; index < indices.size(); ++index) {
+        linear = linear * shape[index] + indices[index];
     }
     return linear;
 }
 
-// 为 sum、max、min 归约生成与 dtype 匹配的单位元。
-tir::PrimExpr MakeIdentityForReduce(te::ReduceType rtype, tir::DataType dtype) {
-    if (rtype == te::ReduceType::kSum) {
+tir::PrimExpr MakeIdentityForReduce(te::ReduceType type,
+                                    tir::DataType dtype) {
+    if (type == te::ReduceType::kSum) {
         if (dtype.code == 2) {
-            return dtype.bits == 64 ? tir::FloatImm(0.0, dtype) : tir::FloatImm(0.0f, dtype);
+            return dtype.bits == 64 ? tir::FloatImm(0.0, dtype)
+                                    : tir::FloatImm(0.0f, dtype);
         }
         return tir::IntImm(0, dtype);
     }
-    if (rtype == te::ReduceType::kMax) {
+    if (type == te::ReduceType::kMax) {
         if (dtype.code == 2) {
-            if (dtype.bits == 64) return tir::FloatImm(-std::numeric_limits<double>::infinity(), dtype);
-            return tir::FloatImm(-std::numeric_limits<float>::infinity(), dtype);
+            return dtype.bits == 64
+                       ? tir::FloatImm(
+                             -std::numeric_limits<double>::infinity(), dtype)
+                       : tir::FloatImm(
+                             -std::numeric_limits<float>::infinity(), dtype);
         }
         return tir::IntImm(std::numeric_limits<int64_t>::min(), dtype);
     }
-    if (rtype == te::ReduceType::kMin) {
+    if (type == te::ReduceType::kMin) {
         if (dtype.code == 2) {
-            if (dtype.bits == 64) return tir::FloatImm(std::numeric_limits<double>::infinity(), dtype);
-            return tir::FloatImm(std::numeric_limits<float>::infinity(), dtype);
+            return dtype.bits == 64
+                       ? tir::FloatImm(
+                             std::numeric_limits<double>::infinity(), dtype)
+                       : tir::FloatImm(
+                             std::numeric_limits<float>::infinity(), dtype);
         }
         return tir::IntImm(std::numeric_limits<int64_t>::max(), dtype);
     }
     throw std::runtime_error("Unsupported reduce type");
 }
-
-// 返回 Relay 节点类别名称，用于 lowering 错误诊断。
-std::string RelayNodeKind(const Expr& expr) {
-    if (!expr.defined()) return "<undefined>";
-    if (expr.As<VarNode>()) return "Var";
-    if (expr.As<ConstantNode>()) return "Constant";
-    if (expr.As<CallNode>()) return "Call";
-    if (expr.As<FunctionNode>()) return "Function";
-    if (expr.As<TupleNode>()) return "Tuple";
-    if (expr.As<TupleGetItemNode>()) return "TupleGetItem";
-    if (expr.As<IfNode>()) return "If";
-    if (expr.As<WhileNode>()) return "While";
-    if (expr.As<LetNode>()) return "Let";
-    if (expr.As<OpNode>()) return "Op";
-    return "<unknown>";
-}
-
-// 把已完成类型推导的 Relay 数据流转换为 TE Tensor 图。
-class RelayToTEConverter : public RelayPassFunctor<Array<te::Tensor>> {
-public:
-    using ConstantRecord = internal::ConstantTensor;
-
-    // 为函数参数建立 TE placeholder 与变量映射。
-    explicit RelayToTEConverter(const Function& func) {
-        for (const auto& param : func->params) {
-            const TensorTypeNode* ttype = param->type_annotation.As<TensorTypeNode>();
-            if (!ttype) {
-                throw std::runtime_error("LowerToTIR requires TensorType on function parameters: " +
-                                         param->vid->name_hint);
-            }
-            tir::DataType dtype = DTypeFromString(ttype->dtype);
-            Array<tir::PrimExpr> shape = ShapeFromTensorType(ttype);
-            te::Tensor tensor = te::placeholder(shape, dtype, param->vid->name_hint);
-            var_map_[param.get()] = tensor;
-            input_tensors_.push_back(tensor);
-        }
-    }
-
-    // 转换指定 Relay 表达式。
-    Array<te::Tensor> Convert(const Expr& expr) { return Visit(expr); }
-
-    // 返回按函数参数顺序创建的输入 placeholder。
-    const Array<te::Tensor>& input_tensors() const { return input_tensors_; }
-    // 返回按确定性 Relay 遍历顺序建立的常量记录。
-    const std::vector<ConstantRecord>& constant_records() const {
-        return constant_records_;
-    }
-
-protected:
-    std::unordered_map<const Object*, Array<te::Tensor>> memo_;
-    std::unordered_map<const Object*, te::Tensor> var_map_;
-    Array<te::Tensor> input_tensors_;
-    std::vector<ConstantRecord> constant_records_;
-
-    // 按表达式对象身份记忆化 TE 输出集合。
-    Array<te::Tensor> Visit(const Expr& expr) override {
-        auto it = memo_.find(expr.get());
-        if (it != memo_.end()) return it->second;
-        auto res = RelayPassFunctor::Visit(expr);
-        memo_[expr.get()] = res;
-        return res;
-    }
-
-    // 解析函数参数变量对应的 TE placeholder。
-    Array<te::Tensor> VisitVar(const VarNode* op, const Expr& ref) override {
-        auto it = var_map_.find(ref.get());
-        if (it == var_map_.end()) {
-            throw std::runtime_error("Unexpected free var in LowerToTIR: " + op->vid->name_hint);
-        }
-        return {it->second};
-    }
-
-    // 从 Storage-backed NDArray 创建 placeholder，并同步记录 payload 与稳定 key。
-    Array<te::Tensor> VisitConstant(const ConstantNode* op, const Expr& ref) override {
-        Array<tir::PrimExpr> shape;
-        for (const auto dim : op->data->shape_storage) {
-            shape.push_back(tir::IntImm(dim, tir::DataType::Int(64)));
-        }
-        tir::DataType dtype = DTypeFromDL(op->data->dl_tensor.dtype);
-        internal::ValidateStaticLoweringTensor(
-            shape, dtype, "LowerToTIR constant");
-        const size_t ordinal = constant_records_.size();
-        std::string name = "const_" + std::to_string(ordinal);
-        String key("relay.constant." + std::to_string(ordinal));
-        te::Tensor t = te::placeholder(shape, dtype, name);
-        // 单条记录避免 tensor、key 和 NDArray 使用平行数组后发生位置漂移。
-        constant_records_.push_back(ConstantRecord{t, std::move(key), op->data});
-        return {t};
-    }
-
-    // 转换实参并调用算子的 Relay-to-TE 注册规则。
-    Array<te::Tensor> VisitCall(const CallNode* op, const Expr& ref) override {
-        Array<te::Tensor> inputs;
-        for (const auto& arg : op->args) {
-            auto arg_tensors = Visit(arg);
-            for (const auto& t : arg_tensors) inputs.push_back(t);
-        }
-
-        auto* op_node = op->op.As<OpNode>();
-        if (!op_node) {
-            throw std::runtime_error("Call.op is not OpNode in LowerToTIR");
-        }
-        if (IsDeviceCommunicationOpName(op_node->name)) {
-            throw std::runtime_error(
-                "LowerToTIR does not lower device communication ops. "
-                "Run LowerRelayToExecPlanPass before LowerToTIR.");
-        }
-
-        const kxc::api::internal::ResolvedRelayCall resolved =
-            kxc::api::internal::ResolveRelayCall(
-                ref,
-                kxc::api::internal::OperatorCapabilityPolicy::StaticDataflow(),
-                "lower_to_tir.call");
-        if (std::holds_alternative<FRelayToTE>(resolved.lowering)) {
-            te::Tensor output = std::get<FRelayToTE>(resolved.lowering)(
-                resolved.attrs, inputs, ref.checked_type());
-            if (!output.defined()) {
-                throw std::runtime_error(
-                    "LowerToTIR operator returned undefined tensor: " +
-                    resolved.spec.name);
-            }
-            return {output};
-        }
-        Array<te::Tensor> outputs =
-            std::get<FRelayToTEMulti>(resolved.lowering)(
-                resolved.attrs, inputs, ref.checked_type());
-        if (outputs.size() != resolved.output_leaf_types.size()) {
-            throw std::runtime_error(
-                "LowerToTIR multi-output count mismatch for op: " +
-                resolved.spec.name);
-        }
-        return outputs;
-    }
-
-    // 按字段顺序展平 tuple 的 TE 输出。
-    Array<te::Tensor> VisitTuple(const TupleNode* op, const Expr& ref) override {
-        (void)ref;
-        Array<te::Tensor> outputs;
-        for (size_t i = 0; i < op->fields.size(); ++i) {
-            Array<te::Tensor> field_outputs = Visit(op->fields[i]);
-            if (field_outputs.size() != 1) {
-                throw std::runtime_error("LowerToTIR does not support nested tuple field " +
-                                         std::to_string(i) + "; field produced " +
-                                         std::to_string(field_outputs.size()) + " tensors");
-            }
-            outputs.push_back(field_outputs[0]);
-        }
-        return outputs;
-    }
-
-    // 从 tuple 展平输出中选取指定字段。
-    Array<te::Tensor> VisitTupleGetItem(const TupleGetItemNode* op, const Expr& ref) override {
-        (void)ref;
-        Array<te::Tensor> tuple_outputs = Visit(op->tuple);
-        if (op->index < 0 || static_cast<size_t>(op->index) >= tuple_outputs.size()) {
-            throw std::runtime_error("TupleGetItem index out of range during LowerToTIR: " +
-                                     std::to_string(op->index) + ", tuple size " +
-                                     std::to_string(tuple_outputs.size()));
-        }
-        return {tuple_outputs[static_cast<size_t>(op->index)]};
-    }
-
-    // 拒绝当前 TE lowering 尚未支持的 Relay 节点。
-    Array<te::Tensor> VisitDefault(const Expr& expr) override {
-        throw std::runtime_error("Unsupported Relay node in LowerToTIR: " +
-                                 RelayNodeKind(expr));
-    }
-};
 
 // 递归收集 TE 表达式中的 ProducerLoad 依赖。
 void FindProducerLoads(const tir::PrimExpr& expr, std::vector<te::Tensor>* deps) {
@@ -588,6 +372,11 @@ std::string MakeOutputVarName(const te::Tensor& tensor,
 
 namespace internal {
 
+bool EvaluateStaticLoweringInt64(const tir::PrimExpr& expression,
+                                 int64_t* result) {
+    return EvaluateStaticInt64(expression, result);
+}
+
 void ValidateStaticLoweringTensor(const Array<tir::PrimExpr>& shape,
                                   tir::DataType dtype,
                                   const std::string& context) {
@@ -857,75 +646,6 @@ LoweredFunction LowerTensorGraphToTIR(
 }
 
 }  // namespace internal
-
-// 完成类型推导、Relay-to-TE 转换、拓扑排序并保留常量绑定。
-LoweredFunction LowerToTIR(Function func) {
-    if (!func.defined()) {
-        throw std::runtime_error("LowerToTIR expects a defined function");
-    }
-    func = InferTypePass(func);
-    if (!func->body.defined()) {
-        throw std::runtime_error("LowerToTIR expects function body to be defined");
-    }
-
-    auto profile_context = profiling::CurrentContext();
-    profiling::EventSpec spec;
-    spec.component = "lowering";
-    spec.event_type = "lower_to_tir";
-    profiling::ScopedSpan span(profile_context, std::move(spec));
-    const std::string relay_text = relay::printer::ToText(func);
-    const std::string relay_hash = support::HashText(relay_text);
-    span.AddField("relay_ir_hash", relay_hash);
-    span.AddMetric("relay_ir_bytes", static_cast<double>(relay_text.size()));
-
-    PassContext inferred_pass_ctx = PassContext::Current();
-    if (!inferred_pass_ctx.defined()) {
-        inferred_pass_ctx = relay::PassContextFromRelay(func);
-    }
-    try {
-        PassContext::Scope pass_scope(inferred_pass_ctx);
-
-        RelayToTEConverter converter(func);
-        Array<te::Tensor> outputs = converter.Convert(func->body);
-        if (outputs.empty()) {
-            throw std::runtime_error("LowerToTIR produced no output tensors");
-        }
-        LoweredFunction lowered_result = internal::LowerTensorGraphToTIR(
-            converter.input_tensors(), converter.constant_records(), outputs,
-            internal::PrimFuncIdentity{String("main")});
-        const tir::PrimFunc& lowered = lowered_result->prim_func;
-        std::ostringstream tir_os;
-        tir::printer::DumpPrimFunc(lowered, tir_os);
-        const std::string tir_text = tir_os.str();
-        const std::string tir_hash = support::HashText(tir_text);
-        const bool changed = relay_hash != tir_hash;
-        span.AddField("tir_ir_hash", tir_hash);
-        span.AddField("ir_changed", changed ? "true" : "false");
-        span.AddMetric("tir_ir_bytes", static_cast<double>(tir_text.size()));
-
-        if (profiling::ShouldCaptureIR(profile_context, changed, false)) {
-            const std::string prefix = profiling::CurrentRunId() + "/lower/lower_to_tir";
-            profile_context->WriteArtifact(prefix + ".before.relay.txt", relay_text);
-            profile_context->WriteArtifact(prefix + ".after.tir.txt", tir_text);
-        }
-        return lowered_result;
-    } catch (const std::exception& e) {
-        span.SetStatus("error");
-        span.SetMessage(e.what());
-        if (profile_context) {
-            const std::string prefix = profiling::CurrentRunId() + "/lower/lower_to_tir";
-            if (profiling::ShouldCaptureIR(profile_context, true, true)) {
-                profile_context->WriteArtifact(prefix + ".failed.relay.txt", relay_text);
-            }
-            profile_context->RecordLog(profiling::LogSeverity::kError, "lowering", e.what(),
-                                       profiling::MakeFields({
-                                           {"relay_ir_hash", relay_hash},
-                                           {"stage", "lower_to_tir"},
-                                       }));
-        }
-        throw;
-    }
-}
 
 }  // namespace relay
 }  // namespace kxc

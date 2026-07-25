@@ -132,15 +132,16 @@ void ValidateTEOutputContracts(
                 std::to_string(i) + " for op: " + op_name);
         }
         for (std::size_t axis = 0; axis < expected->shape.size(); ++axis) {
-            const auto* extent = output->shape[axis].As<tir::IntImmNode>();
-            if (!extent) {
+            int64_t extent = 0;
+            if (!relay::internal::EvaluateStaticLoweringInt64(
+                    output->shape[axis], &extent)) {
                 throw std::invalid_argument(
                     "Unit TE output shape is not static at index " +
                     std::to_string(i) + ", axis " + std::to_string(axis) +
                     " for op: " + op_name);
             }
             if (expected->shape[axis] < 0 ||
-                extent->value != expected->shape[axis]) {
+                extent != expected->shape[axis]) {
                 throw std::invalid_argument(
                     "Unit TE output shape mismatch at index " +
                     std::to_string(i) + ", axis " + std::to_string(axis) +

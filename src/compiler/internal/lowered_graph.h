@@ -6,8 +6,8 @@
 
 #include <vector>
 
+#include "lowered_function.h"
 #include "prepared_static_graph.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
 
 namespace kxc::api::internal {
 

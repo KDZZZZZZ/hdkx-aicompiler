@@ -1,5 +1,5 @@
 /*! \file src/compiler/internal/te_to_tir.h
- * \brief Private TE-DAG to PrimFunc assembly shared by graph and unit lowering.
+ * \brief Private TE-DAG to PrimFunc assembly for primitive units.
  */
 
 #pragma once
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "lowered_function.h"
 #include "kxc/te/te.h"
 
 namespace kxc::relay::internal {
@@ -29,6 +29,8 @@ struct PrimFuncIdentity {
 
 // Shared fail-closed contract for the current int32 iteration domain and
 // int64/size_t row-major addressing/allocation domain.
+bool EvaluateStaticLoweringInt64(const tir::PrimExpr& expression,
+                                 int64_t* result);
 void ValidateStaticLoweringTensor(const Array<tir::PrimExpr>& shape,
                                   tir::DataType dtype,
                                   const std::string& context);

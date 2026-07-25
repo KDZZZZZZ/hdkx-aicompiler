@@ -2,6 +2,7 @@
  * \brief 锁定 Compiler 前端与 Relay-to-TIR lowering 的公共契约。
  */
 
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -24,8 +25,8 @@
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
 #include "kxc/relay/transforms/infer_type.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/compiler/distributed/multi_device.h"
+#include "support/primitive_lowering.h"
 
 namespace {
 
@@ -110,6 +111,26 @@ kxc::Map<kxc::String, kxc::runtime::NDArray> ConstantMap(
     return result;
 }
 
+bool SamePayload(const kxc::runtime::NDArray& lhs,
+                 const kxc::runtime::NDArray& rhs) {
+    if (!lhs.defined() || !rhs.defined() ||
+        lhs.dtype().code != rhs.dtype().code ||
+        lhs.dtype().bits != rhs.dtype().bits ||
+        lhs.dtype().lanes != rhs.dtype().lanes ||
+        lhs.shape().size() != rhs.shape().size() ||
+        lhs.NBytes() != rhs.NBytes()) {
+        return false;
+    }
+    for (size_t axis = 0; axis < lhs.shape().size(); ++axis) {
+        if (lhs.shape()[axis] != rhs.shape()[axis]) return false;
+    }
+    std::vector<std::uint8_t> lhs_bytes(lhs.NBytes());
+    std::vector<std::uint8_t> rhs_bytes(rhs.NBytes());
+    lhs.CopyToBytes(lhs_bytes.data(), lhs_bytes.size());
+    rhs.CopyToBytes(rhs_bytes.data(), rhs_bytes.size());
+    return lhs_bytes == rhs_bytes;
+}
+
 // 深拷贝 attrs，确保负例修改不会通过共享 Map 别名污染基准 PrimFunc。
 kxc::Map<kxc::String, kxc::ObjectRef> CloneAttrs(const kxc::tir::PrimFunc& function) {
     kxc::Map<kxc::String, kxc::ObjectRef> result;
@@ -131,12 +152,12 @@ kxc::Map<kxc::tir::Var, kxc::tir::Buffer> CloneBufferMapExcept(
 
 // 未定义 Function 或未定义函数体必须在进入 TE/TIR 转换前被拒绝。
 bool TestInvalidFunctionRejected() {
-    TEST_CHECK(Throws([] { kxc::relay::LowerToTIR(kxc::Function()); }),
+    TEST_CHECK(Throws([] { kxc::test_support::LowerFirstPrimitive(kxc::Function()); }),
                "undefined Function should be rejected");
 
     kxc::Var input("input", kxc::TensorType({2}, "float32"));
     kxc::Function missing_body({input}, kxc::Expr());
-    TEST_CHECK(Throws([&] { kxc::relay::LowerToTIR(missing_body); }),
+    TEST_CHECK(Throws([&] { kxc::test_support::LowerFirstPrimitive(missing_body); }),
                "Function with undefined body should be rejected");
     return true;
 }
@@ -267,7 +288,7 @@ bool TestInputConstantOutputOrder() {
         {3}, runtime::DataTypeFromString("float32"), Device::CPU());
     Constant constant(constant_data);
     Call add(relay::Op::Get("add"), {input, constant});
-    relay::LoweredFunction result = relay::LowerToTIR(Function({input}, add));
+    relay::LoweredFunction result = kxc::test_support::LowerFirstPrimitive(Function({input}, add));
     tir::PrimFunc lowered = result->prim_func;
 
     int64_t input_count = -1;
@@ -289,15 +310,15 @@ bool TestInputConstantOutputOrder() {
     const Array<relay::ConstantBinding> bindings = result.constants();
     TEST_CHECK(bindings.size() == 1,
                "lowering must retain one constant binding");
-    TEST_CHECK(std::string(bindings[0]->key) == "relay.constant.0" &&
+    TEST_CHECK(std::string(bindings[0]->key) == "relay.constant.v1" &&
                    bindings[0]->param_index == 1 &&
-                   bindings[0]->value.get() == constant_data.get(),
+                   SamePayload(bindings[0]->value, constant_data),
                "constant binding key, parameter slot, or payload mismatch");
     const codegen::KernelConstantKeys constant_key_list(
         lowered->attrs.at(String("kxc.constant_keys")));
     const Array<String> constant_keys = constant_key_list.keys();
     TEST_CHECK(constant_keys.size() == 1 &&
-                   std::string(constant_keys[0]) == "relay.constant.0",
+                   std::string(constant_keys[0]) == "relay.constant.v1",
                "PrimFunc constant key metadata mismatch");
 
     for (const auto& parameter : lowered->params) {
@@ -323,7 +344,7 @@ bool TestInputConstantOutputOrder() {
                    arguments[1]->role == codegen::KernelArgRole::kConstant &&
                    arguments[2]->role == codegen::KernelArgRole::kOutput,
                "signature roles do not match lowered parameter order");
-    TEST_CHECK(std::string(arguments[1]->constant_key) == "relay.constant.0" &&
+    TEST_CHECK(std::string(arguments[1]->constant_key) == "relay.constant.v1" &&
                    arguments[2]->mutable_data,
                "signature constant key or output mutability mismatch");
 
@@ -349,21 +370,21 @@ bool TestConstantBindingIdentity() {
         {4}, runtime::DataTypeFromString("float32"), Device::CPU());
     Constant shared(data);
     Function shared_function({}, Call(relay::Op::Get("add"), {shared, shared}));
-    relay::LoweredFunction shared_lowered = relay::LowerToTIR(shared_function);
+    relay::LoweredFunction shared_lowered = kxc::test_support::LowerFirstPrimitive(shared_function);
     TEST_CHECK(shared_lowered.constants().size() == 1,
                "shared Constant node should occupy one binding");
 
     Constant first(data);
     Constant second(data);
     Function distinct_function({}, Call(relay::Op::Get("add"), {first, second}));
-    relay::LoweredFunction first_lowering = relay::LowerToTIR(distinct_function);
-    relay::LoweredFunction second_lowering = relay::LowerToTIR(distinct_function);
+    relay::LoweredFunction first_lowering = kxc::test_support::LowerFirstPrimitive(distinct_function);
+    relay::LoweredFunction second_lowering = kxc::test_support::LowerFirstPrimitive(distinct_function);
     const Array<relay::ConstantBinding> first_bindings = first_lowering.constants();
     const Array<relay::ConstantBinding> second_bindings = second_lowering.constants();
     TEST_CHECK(first_bindings.size() == 2,
                "distinct Constant nodes should occupy separate bindings");
-    TEST_CHECK(std::string(first_bindings[0]->key) == "relay.constant.0" &&
-                   std::string(first_bindings[1]->key) == "relay.constant.1",
+    TEST_CHECK(std::string(first_bindings[0]->key) == "relay.constant.v0" &&
+                   std::string(first_bindings[1]->key) == "relay.constant.v1",
                "distinct Constant keys must follow deterministic traversal order");
     TEST_CHECK(first_bindings[0]->param_index == 0 &&
                    first_bindings[1]->param_index == 1,
@@ -385,7 +406,7 @@ bool TestLoweredObjectValidation() {
     Var input("input", TensorType({2, 3}, "float32"));
     Constant constant(data);
     Function function({input}, Call(relay::Op::Get("add"), {input, constant}));
-    relay::LoweredFunction valid = relay::LowerToTIR(function);
+    relay::LoweredFunction valid = kxc::test_support::LowerFirstPrimitive(function);
     const tir::PrimFunc base = valid->prim_func;
     const Array<relay::ConstantBinding> valid_bindings = valid.constants();
 
@@ -461,7 +482,7 @@ bool TestLoweredObjectValidation() {
     return true;
 }
 
-// 唯一 LowerToTIR 入口必须保活常量，同时旧转发 PackedFunc 不得继续暴露。
+// 生产 per-primitive lowering 必须保活常量，同时旧转发 PackedFunc 不得继续暴露。
 bool TestMultiDeviceLoweringEntry() {
     using namespace kxc;
 
@@ -471,10 +492,10 @@ bool TestMultiDeviceLoweringEntry() {
     Constant constant(data);
     Function function({input}, Call(relay::Op::Get("add"), {input, constant}));
 
-    relay::LoweredFunction direct = relay::LowerToTIR(function);
+    relay::LoweredFunction direct = kxc::test_support::LowerFirstPrimitive(function);
     TEST_CHECK(direct.constants().size() == 1 &&
-                   direct.constants()[0]->value.get() == data.get(),
-               "LowerToTIR lost constant payload");
+                   SamePayload(direct.constants()[0]->value, data),
+               "production primitive lowering lost constant payload");
     TEST_CHECK(!Registry::Global()
                     .Get("kxc.relay.transform.lower_compute_to_tir")
                     .defined(),
@@ -513,7 +534,7 @@ bool TestExecutionPlanKernelFailsClosed() {
     return true;
 }
 
-// 多输出必须各占一个独立参数槽，并共享同一个稳定 output 起点。
+// Tuple 图输出由各自 primitive 产生，不再伪装成一个 whole-graph PrimFunc。
 bool TestMultiOutputMetadata() {
     using namespace kxc;
 
@@ -523,41 +544,37 @@ bool TestMultiOutputMetadata() {
     Call multiply(relay::Op::Get("mul"), {lhs, rhs});
     Function function({lhs, rhs}, Tuple({add, multiply}));
 
-    relay::LoweredFunction first_result = relay::LowerToTIR(function);
-    relay::LoweredFunction second_result = relay::LowerToTIR(function);
-    tir::PrimFunc first = first_result->prim_func;
-    tir::PrimFunc second = second_result->prim_func;
-    int64_t output_count = -1;
-    int64_t output_start = -1;
-    TEST_CHECK(ReadIntAttr(first, "kxc.output_count", &output_count) && output_count == 2,
-               "tuple lowering must expose two output parameters");
-    TEST_CHECK(ReadIntAttr(first, "kxc.output_param_start", &output_start) &&
-                   output_start == 2,
-               "tuple outputs must start after both inputs");
-    TEST_CHECK(first->params.size() == 4,
-               "two inputs and two outputs should produce four parameters");
-    TEST_CHECK(BufferHasShape(ParamBuffer(first, 2), {4}) &&
-                   BufferHasShape(ParamBuffer(first, 3), {4}),
-               "tuple output Buffer shapes mismatch");
-    const codegen::KernelSignature signature = codegen::BuildKernelSignature(
-        first, ConstantMap(first_result), BuildTarget(Device::CPU()), "tuple_kernel");
-    const Array<codegen::KernelArgSpec> arguments = signature.arguments();
-    TEST_CHECK(arguments.size() == 4 &&
-                   arguments[2]->role == codegen::KernelArgRole::kOutput &&
-                   arguments[3]->role == codegen::KernelArgRole::kOutput,
-               "multi-output signature roles mismatch");
-
-    // 重复 lowering 必须至少保持参数数量、顺序元数据和 Buffer shape 确定。
-    int64_t second_output_start = -1;
-    TEST_CHECK(ReadIntAttr(second, "kxc.output_param_start", &second_output_start) &&
-                   second_output_start == output_start,
-               "repeated lowering changed output parameter order");
-    TEST_CHECK(second->params.size() == first->params.size(),
-               "repeated lowering changed parameter count");
-    for (size_t i = 0; i < first->params.size(); ++i) {
-        TEST_CHECK(BufferHasShape(ParamBuffer(first, i), {4}) &&
-                       BufferHasShape(ParamBuffer(second, i), {4}),
-                   "repeated lowering changed Buffer shape");
+    const auto first =
+        kxc::test_support::LowerPrimitiveUnits(function);
+    const auto second =
+        kxc::test_support::LowerPrimitiveUnits(function);
+    TEST_CHECK(first.size() == 2 && second.size() == 2,
+               "two tuple-producing Calls must remain two primitives");
+    for (size_t index = 0; index < first.size(); ++index) {
+        int64_t output_count = -1;
+        int64_t output_start = -1;
+        const tir::PrimFunc& first_tir = first[index]->prim_func;
+        const tir::PrimFunc& second_tir = second[index]->prim_func;
+        TEST_CHECK(
+            ReadIntAttr(first_tir, "kxc.output_count", &output_count) &&
+                output_count == 1 &&
+                ReadIntAttr(first_tir, "kxc.output_param_start",
+                            &output_start) &&
+                output_start == 2 && first_tir->params.size() == 3,
+            "each tuple producer must have two inputs and one output");
+        const codegen::KernelSignature signature =
+            codegen::BuildKernelSignature(
+                first_tir, ConstantMap(first[index]),
+                BuildTarget(Device::CPU()), "tuple_primitive");
+        const Array<codegen::KernelArgSpec> arguments =
+            signature.arguments();
+        TEST_CHECK(
+            arguments.size() == 3 &&
+                arguments[2]->role ==
+                    codegen::KernelArgRole::kOutput &&
+                BufferHasShape(ParamBuffer(first_tir, 2), {4}) &&
+                second_tir->params.size() == first_tir->params.size(),
+            "tuple primitive ABI must be stable across repeated lowering");
     }
     return true;
 }

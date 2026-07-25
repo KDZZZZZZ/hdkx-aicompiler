@@ -4,7 +4,7 @@
 
 #include "kxc/relay/relay.h"
 #include "kxc/relay/op.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "support/primitive_lowering.h"
 #include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/pipeline.h"
 
@@ -479,10 +479,14 @@ int main() {
 
         DumpRelay(f, ofs);
 
-        tir::PrimFunc pf = LowerToTIR(f)->prim_func;
-        pf = tir::RunTIRPassPipeline(
-            pf, {kxc::String("fold_constant"), kxc::String("simplify_expr")});
-        tir::printer::DumpPrimFunc(pf, ofs);
+        for (const auto& lowered :
+             test_support::LowerPrimitiveUnits(f)) {
+            tir::PrimFunc primitive = tir::RunTIRPassPipeline(
+                lowered->prim_func,
+                {kxc::String("fold_constant"),
+                 kxc::String("simplify_expr")});
+            tir::printer::DumpPrimFunc(primitive, ofs);
+        }
         std::cout.rdbuf(old_cout_buf);
 
         std::cout << "\nIR dump written to test/resnet18_ir_dump.txt" << std::endl;

@@ -502,7 +502,14 @@ def count_test_refs(root: Path, op_names: set[str]) -> dict[str, dict[str, int]]
             else [text]
         )
         for region in regions:
-            has_tir_signal = "LowerToTIR" in region
+            has_tir_signal = any(
+                signal in region
+                for signal in (
+                    "LowerPrimitiveUnits",
+                    "LowerFirstPrimitive",
+                    "LowerGraph",
+                )
+            )
             has_backend_signal = (
                 "Compiler::Compile" in region
                 or "CompileConfig" in region
@@ -789,7 +796,9 @@ def analyze(
         has_ffi = ffi_present
         requires_tir_test = expected_lowering in {"single", "multi"}
         if expected and requires_tir_test and tir_test_ref_count == 0:
-            issues.append("missing LowerToTIR contract test reference")
+            issues.append(
+                "missing production primitive lowering contract test reference"
+            )
 
         requires_exec_plan_test = expected_lowering == "exec_plan"
         if expected and requires_exec_plan_test and exec_plan_test_ref_count == 0:

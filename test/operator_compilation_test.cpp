@@ -1,5 +1,5 @@
 /*! \file test/operator_compilation_test.cpp
- * \brief Characterizes whole-graph lowering and locks per-operator unit counts.
+ * \brief Locks production per-operator lowering units and ABI contracts.
  */
 
 #include <cstdint>
@@ -16,7 +16,6 @@
 #include "../src/compiler/internal/lowered_graph.h"
 #include "../src/compiler/internal/primitive_cache.h"
 #include "kxc/compiler/compiler.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/op_macros.h"
@@ -104,16 +103,6 @@ bool ReadIntAttr(const kxc::tir::PrimFunc& function, const char* key,
     return true;
 }
 
-bool HasGlobalSymbol(const kxc::tir::PrimFunc& function, const char* expected) {
-    const kxc::String key("global_symbol");
-    if (!function.defined() || !function->attrs.count(key)) return false;
-    try {
-        return kxc::String(function->attrs.at(key)) == expected;
-    } catch (const std::exception&) {
-        return false;
-    }
-}
-
 bool ReadStringAttr(const kxc::tir::PrimFunc& function, const char* key,
                     std::string* value) {
     const kxc::String attr_key(key);
@@ -167,25 +156,6 @@ std::vector<GraphFixture> MakeFixtures() {
         {"tuple_output", Function({tuple_x, tuple_y}, Tuple({tuple_left, tuple_right})),
          2, 2},
     };
-}
-
-bool TestWholeGraphCompatibilityBaseline() {
-    for (const auto& fixture : MakeFixtures()) {
-        const kxc::relay::LoweredFunction lowered =
-            kxc::relay::LowerToTIR(fixture.function);
-        TEST_CHECK(lowered.defined() && lowered->prim_func.defined(),
-                   std::string(fixture.name) + " did not produce a PrimFunc");
-        TEST_CHECK(CountUniqueCalls(fixture.function) == fixture.expected_compute_calls,
-                   std::string(fixture.name) + " fixture call count changed");
-        TEST_CHECK(HasGlobalSymbol(lowered->prim_func, "main"),
-                   std::string(fixture.name) +
-                       " no longer uses the current whole-graph main symbol");
-        int64_t output_count = -1;
-        TEST_CHECK(ReadIntAttr(lowered->prim_func, "kxc.output_count", &output_count) &&
-                       output_count == fixture.expected_graph_outputs,
-                   std::string(fixture.name) + " graph output ABI changed");
-    }
-    return true;
 }
 
 bool TestPerOperatorTargetCardinality() {
@@ -539,7 +509,6 @@ bool TestPrimitiveCacheReusesRenumberedUnit() {
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
-        {"whole_graph_compatibility_baseline", TestWholeGraphCompatibilityBaseline},
         {"per_operator_target_cardinality", TestPerOperatorTargetCardinality},
         {"producer_calls_remain_outside_consumer",
          TestProducerCallsRemainOutsideConsumerPrimFunc},

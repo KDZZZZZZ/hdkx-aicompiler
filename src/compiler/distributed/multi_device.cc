@@ -13,7 +13,6 @@
 #include "kxc/ffi/packed_func.h"
 #include "kxc/ffi/registration.h"
 #include "kxc/relay/op.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
 #include "../../relay/distributed/plan_adapter.h"
 
 namespace kxc {

@@ -7,7 +7,6 @@
 #include "kxc/distributed/execution_plan.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/relay/relay.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
 
 namespace kxc {
 namespace relay {

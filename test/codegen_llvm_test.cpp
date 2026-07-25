@@ -17,7 +17,7 @@
 #include "../src/codegen/c/internal/codegen_c.h"
 #include "kxc/relay/relay.h"
 #include "kxc/relay/op.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "support/primitive_lowering.h"
 #include "kxc/runtime/session.h"
 
 #if KXC_USE_LLVM
@@ -443,8 +443,9 @@ void TestRelayLLVM() {
     Var x("x", TensorType({8}, "float32"));
     Var y("y", TensorType({8}, "float32"));
     Function relay_function({x, y}, Call(relay::Op::Get("add"), {x, y}));
-    relay::LoweredFunction lowered = relay::LowerToTIR(relay_function);
-    const String symbol("relay_add");
+    relay::LoweredFunction lowered = kxc::test_support::LowerFirstPrimitive(relay_function);
+    const String symbol(
+        lowered->prim_func->attrs.at(String("global_symbol")));
     Map<String, runtime::NDArray> constants;
     Target target = BuildTarget(Device::CPU());
     KernelSignature signature = BuildKernelSignature(

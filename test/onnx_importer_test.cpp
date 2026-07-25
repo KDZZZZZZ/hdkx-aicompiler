@@ -5,7 +5,6 @@
 #include "kxc/compiler/compiler.h"
 #include "kxc/frontend/onnx_importer.h"
 #include "kxc/relay/transforms/infer_type.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/runtime/session.h"
 

@@ -5,9 +5,8 @@
 #include "kxc/ffi/registry.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/relay/transforms/pipeline.h"
-#include "../src/compiler/internal/lowered_graph.h"
+#include "support/primitive_lowering.h"
 
 #include <cstdint>
 #include <exception>
@@ -67,13 +66,7 @@ bool ExpectOverflow(const std::function<void()>& fn) {
 }
 
 std::vector<kxc::relay::LoweredFunction> LowerUnits(kxc::Function function) {
-    function = kxc::relay::InferTypePass(std::move(function));
-    const kxc::api::internal::LoweredGraph graph =
-        kxc::api::internal::LowerGraph(std::move(function));
-    std::vector<kxc::relay::LoweredFunction> result;
-    result.reserve(graph.primitives.size());
-    for (const auto& primitive : graph.primitives) result.push_back(primitive.lowered);
-    return result;
+    return kxc::test_support::LowerPrimitiveUnits(std::move(function));
 }
 
 bool TestElementwiseBroadcast() {
@@ -332,7 +325,7 @@ bool TestGatherInferAndLoweringContract() {
     kxc::relay::InferTypePass(func);
     TEST_CHECK(CheckTensor(axis_one.checked_type(), {2, 5, 6, 4}, "float32"),
                "gather must insert indices shape at axis");
-    TEST_CHECK(kxc::relay::LowerToTIR(func)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
                "static gather should lower to TIR");
 
     kxc::Call negative_axis(kxc::relay::Op::Get("gather"), {data, indices},
@@ -382,7 +375,7 @@ bool TestConcatenateInferAndLoweringContract() {
     kxc::relay::InferTypePass(function);
     TEST_CHECK(CheckTensor(concatenate.checked_type(), {2, 7}, "float32"),
                "concatenate must normalize a negative axis and sum its extent");
-    TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(function)->prim_func.defined(),
                "static concatenate should lower to TIR");
     TEST_CHECK(LowerUnits(function).size() == 1,
                "one concatenate call must produce one lowering unit");
@@ -402,7 +395,7 @@ bool TestConcatenateInferAndLoweringContract() {
     kxc::relay::InferTypePass(empty_function);
     TEST_CHECK(CheckTensor(empty_axis.checked_type(), {2, 3}, "int32"),
                "concatenate must accept an empty axis side");
-    TEST_CHECK(kxc::relay::LowerToTIR(empty_function)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(empty_function)->prim_func.defined(),
                "empty-axis concatenate should lower to a fresh compute");
 
     kxc::Var bool_lhs("bool_lhs", kxc::TensorType({1, 2}, "bool"));
@@ -413,7 +406,7 @@ bool TestConcatenateInferAndLoweringContract() {
     kxc::relay::InferTypePass(bool_function);
     TEST_CHECK(CheckTensor(bool_concatenate.checked_type(), {1, 3}, "bool"),
                "concatenate must preserve bool output type");
-    TEST_CHECK(kxc::relay::LowerToTIR(bool_function)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(bool_function)->prim_func.defined(),
                "bool concatenate should lower through DataType::Bool");
 
     kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
@@ -456,7 +449,7 @@ bool TestConcatenateInferAndLoweringContract() {
     kxc::Call dynamic_extent(kxc::relay::Op::Get("concatenate"), {dynamic, dynamic},
                              kxc::relay::ConcatenateAttrs::Create(1));
     TEST_CHECK(ExpectThrow([&] {
-                   kxc::relay::LowerToTIR(kxc::Function({dynamic}, dynamic_extent));
+                   kxc::test_support::LowerFirstPrimitive(kxc::Function({dynamic}, dynamic_extent));
                }), "concatenate dynamic or negative extents must fail lowering");
     const int64_t maximum = std::numeric_limits<int64_t>::max();
     kxc::Var huge_lhs("huge_lhs", kxc::TensorType({maximum}, "int64"));
@@ -464,7 +457,7 @@ bool TestConcatenateInferAndLoweringContract() {
     kxc::Call overflow(kxc::relay::Op::Get("concatenate"), {huge_lhs, huge_rhs},
                        kxc::relay::ConcatenateAttrs::Create(0));
     TEST_CHECK(ExpectThrow([&] {
-                   kxc::relay::LowerToTIR(kxc::Function({huge_lhs, huge_rhs}, overflow));
+                   kxc::test_support::LowerFirstPrimitive(kxc::Function({huge_lhs, huge_rhs}, overflow));
                }), "concatenate axis sum overflow must fail lowering");
     return true;
 }
@@ -477,7 +470,7 @@ bool TestSliceInferAndLoweringContract() {
     kxc::relay::InferTypePass(function);
     TEST_CHECK(CheckTensor(slice.checked_type(), {2, 3, 3}, "float32"),
                "slice must normalize negative axes and clamp negative/huge endpoints");
-    TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined() &&
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(function)->prim_func.defined() &&
                    LowerUnits(function).size() == 1,
                "slice must lower to one fresh indexed compute");
     TEST_CHECK(kxc::Registry::Global().Get("kxc.relay.op._make.slice").defined(),
@@ -494,14 +487,14 @@ bool TestSliceInferAndLoweringContract() {
                        kxc::relay::SliceAttrs::Create({0}, {3}, {1}, {1}));
     kxc::Function identity_function({data}, identity);
     kxc::relay::InferTypePass(identity_function);
-    TEST_CHECK(kxc::relay::LowerToTIR(identity_function)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(identity_function)->prim_func.defined(),
                "identity slice must lower as a fresh compute rather than a view");
     kxc::Call empty(kxc::relay::Op::Get("slice"), {data},
                     kxc::relay::SliceAttrs::Create({3}, {1}, {1}, {1}));
     kxc::Function empty_function({data}, empty);
     kxc::relay::InferTypePass(empty_function);
     TEST_CHECK(CheckTensor(empty.checked_type(), {2, 0, 4}, "float32") &&
-                   kxc::relay::LowerToTIR(empty_function)->prim_func.defined(),
+                   kxc::test_support::LowerFirstPrimitive(empty_function)->prim_func.defined(),
                "empty slice output must be legal and lower");
 
     const auto bad = [&](kxc::Var value, kxc::relay::SliceAttrs attrs) {
@@ -541,7 +534,7 @@ bool TestWhereInferAndLoweringContract() {
     kxc::relay::InferTypePass(func);
     TEST_CHECK(CheckTensor(where.checked_type(), {2, 3, 4}, "float32"),
                "where must jointly broadcast scalar and rank-misaligned inputs");
-    TEST_CHECK(kxc::relay::LowerToTIR(func)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
                "static where should lower to TIR");
 
     kxc::runtime::NDArray condition_bytes = kxc::runtime::NDArray::Empty(
@@ -555,7 +548,7 @@ bool TestWhereInferAndLoweringContract() {
     kxc::Function constant_function({constant_x, constant_y}, constant_where);
     kxc::relay::InferTypePass(constant_function);
     TEST_CHECK(CheckTensor(constant_where.checked_type(), {2, 3}, "bool") &&
-                   kxc::relay::LowerToTIR(constant_function)->prim_func.defined(),
+                   kxc::test_support::LowerFirstPrimitive(constant_function)->prim_func.defined(),
                "byte-backed bool Constant and bool branches must lower as TIR bool");
 
     kxc::Var zero_condition("zero_condition", kxc::TensorType({0, 1}, "bool"));
@@ -567,7 +560,7 @@ bool TestWhereInferAndLoweringContract() {
     kxc::relay::InferTypePass(zero_func);
     TEST_CHECK(CheckTensor(zero_where.checked_type(), {0, 3}, "float32"),
                "where must preserve broadcast zero extents");
-    TEST_CHECK(kxc::relay::LowerToTIR(zero_func)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(zero_func)->prim_func.defined(),
                "zero-extent where should lower to TIR");
 
     kxc::Var non_bool("non_bool", kxc::TensorType({2, 1}, "uint8"));
@@ -615,7 +608,7 @@ bool TestLayerNormInferAndLoweringContract() {
     kxc::relay::InferTypePass(function);
     TEST_CHECK(CheckTensor(layer_norm.checked_type(), {2, 3, 4}, "float32"),
                "LayerNorm must preserve data shape and dtype");
-    TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(function)->prim_func.defined(),
                "valid static LayerNorm should lower to TIR");
     TEST_CHECK(LowerUnits(function).size() == 1,
                "one LayerNorm Relay Call must produce one lowering unit");
@@ -701,7 +694,7 @@ bool TestLayerNormInferAndLoweringContract() {
                           {huge_data, huge_scale, huge_bias},
                           kxc::relay::LayerNormAttrs::Create(0));
     TEST_CHECK(ExpectThrow([&] {
-                   kxc::relay::LowerToTIR(
+                   kxc::test_support::LowerFirstPrimitive(
                        kxc::Function({huge_data, huge_scale, huge_bias}, overflowing));
                }),
                "LayerNorm lowering must reject normalized element-count overflow");
@@ -744,7 +737,7 @@ bool TestExactTransformerOperatorSliceComposition() {
                    CheckTensor(sequence.checked_type(), {3, 2}, "float32") &&
                    CheckTensor(context.checked_type(), {3, 2}, "float32"),
                "exact Transformer operator slice shapes must compose without dynamic claims");
-    TEST_CHECK(kxc::relay::LowerToTIR(function)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(function)->prim_func.defined(),
                "exact Transformer operator slice must lower to TIR");
     TEST_CHECK(LowerUnits(function).size() == 9,
                "exact Transformer operator slice must preserve nine per-op units");
@@ -784,8 +777,8 @@ bool TestNegativeExtentLoweringGates() {
     kxc::relay::InferTypePass(func);
     TEST_CHECK(CheckTensor(add.checked_type(), {-1, 3}, "float32"),
                "negative extent TensorType may type-infer before lowering");
-    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(func); }),
-               "LowerToTIR must reject negative static extents before producing TIR");
+    TEST_CHECK(ExpectThrow([&] { kxc::test_support::LowerFirstPrimitive(func); }),
+               "production primitive lowering must reject negative static extents");
     TEST_CHECK(ExpectThrow([&] { LowerUnits(func); }),
                "per-unit lowering must reject negative static extents before producing TIR");
     return true;
@@ -802,7 +795,7 @@ bool TestStaticLoweringSizeGates() {
     };
     const auto rejected_by_both = [&](const std::vector<int64_t>& shape) {
         const kxc::Function function = make_add(shape);
-        return ExpectThrow([&] { kxc::relay::LowerToTIR(function); }) &&
+        return ExpectThrow([&] { kxc::test_support::LowerFirstPrimitive(function); }) &&
                ExpectThrow([&] { LowerUnits(function); });
     };
 
@@ -815,7 +808,7 @@ bool TestStaticLoweringSizeGates() {
                "all lowering entries must reject tensor byte counts above int64/size_t");
 
     const kxc::Function zero = make_add({0, kInt32Max, kInt32Max});
-    TEST_CHECK(kxc::relay::LowerToTIR(zero)->prim_func.defined() &&
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(zero)->prim_func.defined() &&
                    LowerUnits(zero).size() == 1,
                "zero-element tensors with individually legal extents must remain lowerable");
 
@@ -824,7 +817,7 @@ bool TestStaticLoweringSizeGates() {
     kxc::Call flatten(kxc::relay::Op::Get("nn_flatten"), {flatten_data},
                       kxc::relay::FlattenAttrs::Create(0));
     const kxc::Function flatten_function({flatten_data}, flatten);
-    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(flatten_function); }) &&
+    TEST_CHECK(ExpectThrow([&] { kxc::test_support::LowerFirstPrimitive(flatten_function); }) &&
                    ExpectThrow([&] { LowerUnits(flatten_function); }),
                "flattened iteration extents above INT32_MAX must fail closed");
 
@@ -834,7 +827,7 @@ bool TestStaticLoweringSizeGates() {
         kxc::relay::Op::Get("concatenate"), {concat_lhs, concat_rhs},
         kxc::relay::ConcatenateAttrs::Create(0));
     const kxc::Function concatenate_function({concat_lhs, concat_rhs}, concatenate);
-    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(concatenate_function); }) &&
+    TEST_CHECK(ExpectThrow([&] { kxc::test_support::LowerFirstPrimitive(concatenate_function); }) &&
                    ExpectThrow([&] { LowerUnits(concatenate_function); }),
                "Concatenate output extents above INT32_MAX must fail closed");
 
@@ -843,13 +836,13 @@ bool TestStaticLoweringSizeGates() {
     kxc::Call slice(kxc::relay::Op::Get("slice"), {slice_data},
                     kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1}));
     const kxc::Function slice_function({slice_data}, slice);
-    TEST_CHECK(ExpectThrow([&] { kxc::relay::LowerToTIR(slice_function); }) &&
+    TEST_CHECK(ExpectThrow([&] { kxc::test_support::LowerFirstPrimitive(slice_function); }) &&
                    ExpectThrow([&] { LowerUnits(slice_function); }),
                "Slice input extents above INT32_MAX must fail closed");
     return true;
 }
 
-bool TestMvpElementwiseLowerToTIR() {
+bool TestMvpElementwisePrimitiveLowering() {
     kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
     kxc::Var y("y", kxc::TensorType({3}, "float32"));
     kxc::Call add(kxc::relay::Op::Get("add"), {x, y});
@@ -859,7 +852,7 @@ bool TestMvpElementwiseLowerToTIR() {
     kxc::Call sqrt(kxc::relay::Op::Get("sqrt"), {divide});
     kxc::Function func({x, y}, sqrt);
 
-    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
+    kxc::tir::PrimFunc lowered = kxc::test_support::LowerFirstPrimitive(func)->prim_func;
     TEST_CHECK(lowered.defined(), "elementwise MVP ops should lower to TIR");
     const std::vector<kxc::relay::LoweredFunction> units = LowerUnits(func);
     TEST_CHECK(units.size() == 5,
@@ -871,26 +864,26 @@ bool TestMvpElementwiseLowerToTIR() {
     return true;
 }
 
-bool TestMvpMatrixLowerToTIR() {
+bool TestMvpMatrixPrimitiveLowering() {
     kxc::Var a("a", kxc::TensorType({2, 3}, "float32"));
     kxc::Var b("b", kxc::TensorType({3, 4}, "float32"));
     kxc::Call matmul(kxc::relay::Op::Get("matmul"), {a, b});
     kxc::Function matmul_func({a, b}, matmul);
-    TEST_CHECK(kxc::relay::LowerToTIR(matmul_func)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(matmul_func)->prim_func.defined(),
                "matmul should lower to TIR");
 
     kxc::Var batched_a("batched_a", kxc::TensorType({2, 3, 4}, "float32"));
     kxc::Var batched_b("batched_b", kxc::TensorType({1, 4, 5}, "float32"));
     kxc::Call batched_matmul(kxc::relay::Op::Get("matmul"), {batched_a, batched_b});
     kxc::Function batched_matmul_func({batched_a, batched_b}, batched_matmul);
-    TEST_CHECK(kxc::relay::LowerToTIR(batched_matmul_func)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(batched_matmul_func)->prim_func.defined(),
                "batched broadcast matmul should lower to TIR");
 
     kxc::Var dense_weight("dense_weight", kxc::TensorType({5, 3}, "float32"));
     kxc::Call dense(kxc::relay::Op::Get("nn_dense"), {a, dense_weight},
                     kxc::relay::DenseAttrs::Create(5, ""));
     kxc::Function dense_func({a, dense_weight}, dense);
-    TEST_CHECK(kxc::relay::LowerToTIR(dense_func)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(dense_func)->prim_func.defined(),
                "nn_dense should lower to TIR");
 
     kxc::Var gemm_b("gemm_b", kxc::TensorType({4, 3}, "float32"));
@@ -898,12 +891,12 @@ bool TestMvpMatrixLowerToTIR() {
     kxc::Call gemm(kxc::relay::Op::Get("nn_gemm"), {a, gemm_b, gemm_bias},
                    kxc::relay::GemmAttrs::Create(1.0f, 1.0f, 0, 1));
     kxc::Function gemm_func({a, gemm_b, gemm_bias}, gemm);
-    TEST_CHECK(kxc::relay::LowerToTIR(gemm_func)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(gemm_func)->prim_func.defined(),
                "nn_gemm should lower to TIR");
     return true;
 }
 
-bool TestMvpNNLowerToTIR() {
+bool TestMvpNNPrimitiveLowering() {
     kxc::Var data("data", kxc::TensorType({1, 3, 8, 8}, "float32"));
     kxc::Var weight("weight", kxc::TensorType({4, 3, 3, 3}, "float32"));
     auto conv_attrs = kxc::relay::Conv2DAttrs::Create(
@@ -921,12 +914,12 @@ bool TestMvpNNLowerToTIR() {
                       kxc::relay::FlattenAttrs::Create(1));
     kxc::Function func({data, weight}, kxc::Tuple({max_pool, avg_pool, flatten}));
 
-    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
+    kxc::tir::PrimFunc lowered = kxc::test_support::LowerFirstPrimitive(func)->prim_func;
     TEST_CHECK(lowered.defined(), "NN MVP ops should lower to TIR");
     return true;
 }
 
-bool TestMvpTransformReduceSoftmaxLowerToTIR() {
+bool TestMvpTransformReduceSoftmaxPrimitiveLowering() {
     kxc::Var x("x", kxc::TensorType({2, 3, 4}, "float32"));
     kxc::Call reshape(kxc::relay::Op::Get("reshape"), {x},
                       kxc::relay::ReshapeAttrs::Create({2, 12}));
@@ -939,7 +932,7 @@ bool TestMvpTransformReduceSoftmaxLowerToTIR() {
     kxc::Call cast(kxc::relay::Op::Get("cast"), {softmax}, kxc::relay::CastAttrs::Create(1));
     kxc::Function func({x}, cast);
 
-    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
+    kxc::tir::PrimFunc lowered = kxc::test_support::LowerFirstPrimitive(func)->prim_func;
     TEST_CHECK(lowered.defined(), "transform/reduce/softmax MVP ops should lower to TIR");
     return true;
 }
@@ -955,10 +948,11 @@ bool TestPipelineAndLoweringIntegration() {
     TEST_CHECK(CheckTensor(optimized->body.checked_type(), {4}, "float32"),
                "optimize_default should leave checked_type on body");
 
-    kxc::tir::PrimFunc lowered = kxc::relay::LowerToTIR(func)->prim_func;
-    TEST_CHECK(lowered.defined(), "LowerToTIR should infer missing checked_type internally");
+    kxc::tir::PrimFunc lowered = kxc::test_support::LowerFirstPrimitive(func)->prim_func;
+    TEST_CHECK(lowered.defined(),
+               "production lowering helper should infer checked_type");
     TEST_CHECK(CheckTensor(add.checked_type(), {4}, "float32"),
-               "LowerToTIR should write checked_type through InferTypePass");
+               "production lowering should write checked_type through InferTypePass");
 
     kxc::Var untyped("untyped");
     kxc::Function invalid({untyped}, untyped);
@@ -985,10 +979,12 @@ int main() {
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},
         {"negative_extent_lowering_gates", TestNegativeExtentLoweringGates},
         {"static_lowering_size_gates", TestStaticLoweringSizeGates},
-        {"mvp_elementwise_lower_to_tir", TestMvpElementwiseLowerToTIR},
-        {"mvp_matrix_lower_to_tir", TestMvpMatrixLowerToTIR},
-        {"mvp_nn_lower_to_tir", TestMvpNNLowerToTIR},
-        {"mvp_transform_reduce_softmax_lower_to_tir", TestMvpTransformReduceSoftmaxLowerToTIR},
+        {"mvp_elementwise_primitive_lowering",
+         TestMvpElementwisePrimitiveLowering},
+        {"mvp_matrix_primitive_lowering", TestMvpMatrixPrimitiveLowering},
+        {"mvp_nn_primitive_lowering", TestMvpNNPrimitiveLowering},
+        {"mvp_transform_reduce_softmax_primitive_lowering",
+         TestMvpTransformReduceSoftmaxPrimitiveLowering},
         {"pipeline_and_lowering_integration", TestPipelineAndLoweringIntegration},
     };
 

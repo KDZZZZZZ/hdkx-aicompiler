@@ -5,9 +5,9 @@
 #include "kxc/profiling/profiling.h"
 #include "kxc/compiler/compiler.h"
 #include "kxc/relay/op.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/tir/transforms/pipeline.h"
+#include "support/primitive_lowering.h"
 
 #include <filesystem>
 #include <fstream>
@@ -44,7 +44,7 @@ int main() {
 
     Function relay_out =
         relay::RunRelayPassPipeline(func, {String("optimize_default")});
-    tir::PrimFunc tir_out = relay::LowerToTIR(relay_out)->prim_func;
+    tir::PrimFunc tir_out = kxc::test_support::LowerFirstPrimitive(relay_out)->prim_func;
     tir_out = tir::RunTIRPassPipeline(tir_out, {String("optimize_default")});
     (void)tir_out;
 
@@ -68,11 +68,12 @@ int main() {
     } catch (const std::exception& error) {
         const std::string message = error.what();
         compile_failure_observed =
-            message.find("Compiler stage 'validate' failed") != std::string::npos &&
-            message.find("free or unbound variables") != std::string::npos;
+            message.find("Compiler stage 'prepare_relay' failed") !=
+                std::string::npos &&
+            message.find("Var 'free' is free") != std::string::npos;
     }
     if (!compile_failure_observed) {
-        std::cerr << "Compiler validate failure did not preserve stage context\n";
+        std::cerr << "Compiler preparation failure did not preserve stage context\n";
         return 1;
     }
 
@@ -105,13 +106,11 @@ int main() {
     }
 
     bool saw_relay_pass = false;
-    bool saw_lower = false;
     bool saw_tir_pass = false;
-    bool saw_validate_failure = false;
+    bool saw_prepare_failure = false;
 #if KXC_USE_LLVM
     const std::vector<std::string> compiler_stages = {
-        "validate", "optimize_relay", "lower", "optimize_tir",
-        "build_signature", "build_backend", "assemble"};
+        "prepare_relay", "compile_primitives", "assemble"};
     size_t next_compiler_stage = 0;
     bool compiler_stage_fields_valid = true;
 #endif
@@ -119,14 +118,13 @@ int main() {
     std::string line;
     while (std::getline(ifs, line)) {
         saw_relay_pass = saw_relay_pass || line.find("\"component\":\"relay_pass\"") != std::string::npos;
-        saw_lower = saw_lower || line.find("\"event_type\":\"lower_to_tir\"") != std::string::npos;
         saw_tir_pass = saw_tir_pass || line.find("\"component\":\"tir_pass\"") != std::string::npos;
-        saw_validate_failure =
-            saw_validate_failure ||
+        saw_prepare_failure =
+            saw_prepare_failure ||
             (line.find("\"component\":\"compiler\"") != std::string::npos &&
-             line.find("\"pass_name\":\"validate\"") != std::string::npos &&
+             line.find("\"pass_name\":\"prepare_relay\"") != std::string::npos &&
              line.find("\"status\":\"error\"") != std::string::npos &&
-             line.find("free or unbound variables") != std::string::npos);
+             line.find("Var 'free' is free") != std::string::npos);
 #if KXC_USE_LLVM
         // 事件按阶段 span 关闭顺序写入，顺序检查同时证明管线没有跳步。
         if (next_compiler_stage < compiler_stages.size() &&
@@ -140,30 +138,16 @@ int main() {
                 line.find("\"device_type\":\"0\"") != std::string::npos &&
                 line.find("\"device_id\":\"0\"") != std::string::npos &&
                 line.find("\"opt_level\":\"1\"") != std::string::npos;
-            if (stage != "validate") {
+            if (stage != "prepare_relay") {
                 fields_valid = fields_valid &&
-                               (stage == "optimize_relay"
-                                    ? line.find("\"ir_hash\":") !=
-                                          std::string::npos
-                                    : line.find("\"unit.0.ir_hash\":") !=
-                                          std::string::npos);
-            }
-            if (stage == "build_signature" || stage == "build_backend" ||
-                stage == "assemble") {
-                fields_valid = fields_valid &&
+                               line.find("\"unit.0.ir_hash\":") !=
+                                   std::string::npos &&
                                line.find("\"unit.0.symbol\":") !=
-                                   std::string::npos;
-            }
-            if (stage == "build_backend" || stage == "assemble") {
-                fields_valid = fields_valid &&
+                                   std::string::npos &&
                                line.find("\"unit.0.backend\":\"llvm\"") !=
                                    std::string::npos &&
                                line.find("\"cache_hit_rate\":") !=
                                    std::string::npos;
-            }
-            if (stage == "lower" || stage == "optimize_tir" ||
-                stage == "build_signature" || stage == "build_backend" ||
-                stage == "assemble") {
                 fields_valid = fields_valid &&
                                line.find("\"primitive_count\":") !=
                                    std::string::npos &&
@@ -178,12 +162,12 @@ int main() {
 #endif
     }
 
-    if (!saw_relay_pass || !saw_lower || !saw_tir_pass) {
-        std::cerr << "Bundle did not contain expected relay/lower/tir events\n";
+    if (!saw_relay_pass || !saw_tir_pass) {
+        std::cerr << "Bundle did not contain expected Relay/TIR pass events\n";
         return 1;
     }
-    if (!saw_validate_failure) {
-        std::cerr << "Bundle did not contain the failed Compiler validate span\n";
+    if (!saw_prepare_failure) {
+        std::cerr << "Bundle did not contain the failed Compiler preparation span\n";
         return 1;
     }
 #if KXC_USE_LLVM

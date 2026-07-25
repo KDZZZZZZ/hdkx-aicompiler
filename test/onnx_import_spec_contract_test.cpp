@@ -3,7 +3,7 @@
  */
 
 #include "kxc/frontend/onnx_importer.h"
-#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "support/primitive_lowering.h"
 
 #include <chrono>
 #include <cstdint>
@@ -278,7 +278,7 @@ bool TestExactTransformerOperatorSliceReifier() {
     TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
                            {3, 2}, "float32"),
                "exact Transformer operator slice must preserve its declared output contract");
-    TEST_CHECK(kxc::relay::LowerToTIR(imported.function)->prim_func.defined(),
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(imported.function)->prim_func.defined(),
                "reified bool Constant and exact Transformer operator slice must lower to TIR");
     return true;
 }

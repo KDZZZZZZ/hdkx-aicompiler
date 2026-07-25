@@ -77,7 +77,6 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/compiler/identity.h
   include/kxc/compiler/pipeline.h
 
-  include/kxc/compiler/lowering/relay_to_tir.h
   include/kxc/distributed/ccl_backend.h
   include/kxc/distributed/dref.h
   include/kxc/distributed/execution_plan.h
@@ -501,7 +500,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/kernel_abi_builder.cc
   src/compiler/lowering/lowered_function.cc
   src/compiler/lowering/lowered_graph.cc
-  src/compiler/lowering/relay_to_tir.cc
+  src/compiler/lowering/te_to_tir.cc
   src/compiler/distributed/multi_device.cc
 )
 

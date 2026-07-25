@@ -1,8 +1,8 @@
 /*! \file src/compiler/lowering/lowered_function.cc
- * \brief Owns validated Relay-to-TIR lowering result objects.
+ * \brief Owns validated private primitive TE-to-TIR result objects.
  */
 
-#include "kxc/compiler/lowering/relay_to_tir.h"
+#include "../internal/lowered_function.h"
 
 #include "kxc/runtime/kernel_abi.h"
 #include "kxc/support/object_registration.h"
@@ -24,8 +24,10 @@ tir::DataType DTypeFromDL(const DLDataType& dtype) {
 
 }  // namespace
 
-KXC_OBJECT_DEFINE_WITH_KEY(ConstantBindingNode, "kxc.relay.ConstantBindingNode")
-KXC_OBJECT_DEFINE_WITH_KEY(LoweredFunctionNode, "kxc.relay.LoweredFunctionNode")
+KXC_OBJECT_DEFINE_WITH_KEY(
+    ConstantBindingNode, "kxc.compiler.internal.ConstantBindingNode")
+KXC_OBJECT_DEFINE_WITH_KEY(
+    LoweredFunctionNode, "kxc.compiler.internal.LoweredFunctionNode")
 
 ConstantBinding::ConstantBinding(String key, runtime::NDArray value,
                                  int64_t param_index) {
