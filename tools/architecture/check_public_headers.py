@@ -23,6 +23,11 @@ SEALED_MODULE_CONTRACT = re.compile(
     r'ModuleInputContract|ModuleTensorContract|ModuleRuntimeExtentScalar|'
     r'ModuleInvocationContract)\b'
 )
+LEGACY_ADAPTIVE_SURFACE = re.compile(
+    r'\b(?:ProductionPathCompilerAdapter|PreparedPlanTemplate|'
+    r'PreparedCompilerProgram|PrimitiveArtifactSelection|PlanAssembler|'
+    r'RecompilePolicy|PrimitiveVariantCompiler)\b'
+)
 
 
 def manifest(cmake: str, variable: str) -> set[str]:
@@ -110,6 +115,10 @@ def main() -> int:
             if relative_path in installed and SEALED_MODULE_CONTRACT.search(line):
                 failures.append(
                     f"{path.relative_to(root)}:{line_no}: sealed module contract in installed header"
+                )
+            if LEGACY_ADAPTIVE_SURFACE.search(line):
+                failures.append(
+                    f"{path.relative_to(root)}:{line_no}: legacy adaptive public surface"
                 )
 
     if args.compile:

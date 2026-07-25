@@ -202,8 +202,8 @@ CompileConfig / Target --->| PrepareRelayProgram          |
                              +------+-------------+-----+
                                     |             |
                       +-------------v--+       +--v----------------+
-                      | Static binder  |       | Control binder    |
-                      | module + plan  |       | bound regions     |
+                      | AssembleCompiledGraph | | Control binder    |
+                      | module + static plan  | | bound regions     |
                       +--------+-------+       +---------+---------+
                                |                         |
                      CompiledGraph            CompiledControlFlowGraph
@@ -397,18 +397,28 @@ struct PrimitiveUnit {
 ```cpp
 struct CompiledPrimitive {
     PrimitiveUnitId unit_id;
-    PrimitiveArtifactKey artifact_key;
-    codegen::KernelSignature signature;
-    codegen::KernelLaunchMetadata launch_metadata;
-    codegen::CompiledKernel kernel;
-    ArtifactPin pin;
+    tir::PrimFunc diagnostic_tir;
+    PrimitiveArtifactPin pin;
+    bool cache_hit;
 };
 
-std::vector<CompiledPrimitive> CompilePrimitiveUnits(
+struct CompiledPrimitiveBatch {
+    std::vector<CompiledPrimitive> primitives;
+    Map<String, runtime::NDArray> constants;
+};
+
+CompiledPrimitiveBatch CompilePrimitiveUnits(
     const std::vector<PrimitiveUnit>& units,
     const std::vector<LogicalValueContract>& values,
     const CompileConfig& config,
     const CompilerExecutionContract& contract);
+
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const std::vector<PrimitiveUnit>& units,
+    const std::vector<LogicalValueContract>& values,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract,
+    const std::vector<PrimitiveUnitId>& requested_unit_ids);
 ```
 
 唯一流水线：
@@ -555,7 +565,44 @@ CompiledPrimitive[]
   -> CompiledControlFlowGraph
 ```
 
-### 8.3 必须满足的不变量
+### 8.3 Static artifact 重组与 Adaptive publication
+
+`PrimitiveUnit` 是 backend 重编译的唯一粒度。一个完整的有序
+`PrimitiveArtifactPin` vector 是静态 plan 的完整 artifact selection；vector
+下标就是 `PrimitiveUnitId`，不再引入 selection wrapper、slot map 或第二套排序。
+
+Normal 编译、Shape exact 和 Adaptive 都使用同一个 compiler-internal free function：
+
+```text
+PreparedCompilerGraph + ordered PrimitiveArtifactPin[] + constants
+  -> AssembleCompiledGraph
+  -> immutable CompiledGraph
+```
+
+`AssembleCompiledGraph` 只验证 ordered pin 与 prepared unit 的语义/target，重建
+`CompiledModule` 和静态 `ExecutablePlan`，并发布不可变 `CompiledGraph`。它不运行
+Relay pass、lowering、cache lookup、backend codegen 或 Adaptive routing。
+
+Adaptive 只为用户显式请求的 unit ids 调用 `CompilePrimitiveUnits`，把结果替换进
+baseline `CompiledGraph` 的完整 ordered pin vector，然后调用该 free assembler。
+未替换 pin 的 owner 保持不变；相同 ordered artifact keys 相对于当前 route 是 no-op。
+`CompiledGraph` generation 是 publication 粒度，`GenerationLease` 保持旧 generation
+可执行，直到所有 lease 释放。
+
+控制流继续使用其独立的 resolved-plan assembler：它把 primitive artifacts 绑定为
+`ControlExecutionPlan`，而不是错误地伪装成静态 `CompiledGraph`。
+
+编译意图只能来自用户显式的 `CompileAndPublish()` 或 `Submit()`。`Acquire()`、
+`RunAsync()`、Runtime、Shape 和 profiler 永不隐式编译。三种产品使用方式由现有 API
+组合表达，不增加 mode、policy 或 compiler-adapter hierarchy：
+
+```text
+CompileAndPublish(request)                         // 先完整编译再运行
+Acquire(execution_request)                          // 只运行当前 generation
+runnable = Acquire(...); Submit(replacement);       // 旧 lease 运行，同时热替换
+```
+
+### 8.4 必须满足的不变量
 
 - Runtime plan 不含 Relay `Expr`、`Call`、OperatorSpec 或 compiler callback。
 - Runtime plan kind 由 `PlanRelayProgram` 固定；Runtime 不重新分析或猜测程序类别。

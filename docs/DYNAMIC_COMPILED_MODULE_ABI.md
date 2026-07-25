@@ -22,3 +22,23 @@ symbolic lowering, buckets/polymorphic execution, ragged/data-dependent
 shapes, workspace schemas, and tail transforms remain unsupported. A backend
 must explicitly register and consume a generated scalar descriptor; no bridge
 path exists.
+
+## Static artifact reassembly and publication
+
+For static plans, backend recompilation is per `PrimitiveUnit`. A complete ordered
+`PrimitiveArtifactPin` vector is the artifact selection: its index is the unit id,
+and its pins remain the sole ABI, executable, and lifetime authority.
+`AssembleCompiledGraph()` is the shared compiler-internal free assembler for Normal,
+Shape exact, and Adaptive paths. It consumes prepared static topology, ordered pins,
+and immutable constants to create a new immutable `CompiledGraph`; that graph is the
+Adaptive publication generation, while leases retain old generations for execution.
+
+Adaptive replaces only explicitly requested units, then reassembles the complete
+static graph. Equal ordered artifact keys against the current route are a no-op.
+Control flow remains separate: its resolved-plan assembler produces
+`ControlExecutionPlan`, not a static `CompiledGraph`.
+
+Only callers of `CompileAndPublish()` or `Submit()` create compile intent.
+`Acquire()` and `RunAsync()` only select and execute an already published generation.
+Thus compile-before-run, use-current-generation, and run-old-while-submitting-a-
+replacement are API compositions, not a mode enum or policy hierarchy.
