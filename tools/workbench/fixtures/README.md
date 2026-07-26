@@ -46,6 +46,10 @@ node tools/workbench/scripts/make-fixture.mjs
 
 生成器会自动把目录名以 `real-` 开头的 bundle 纳入 `bundles/index.json`。
 
+> 仓库里提交的 `index.json` 只含三个合成样例。本地生成真实产物后索引会多出两条，
+> `git status` 会显示它被修改——这是预期的，**不要提交**，
+> 否则新克隆会在下拉框里看到两个加载即失败的条目。
+
 ### 这两份产物验证过什么
 
 - 合成样例的字段命名与真实产物一致（发现过三处失真并已修正）
