@@ -828,6 +828,7 @@ struct ExactPlanVariant::Impl final {
     CompiledGraph graph;
     ShapeProfileKey profile;
     PlanVariantKey key;
+    DispatchKey dispatch;
 };
 
 PreparedGraphTemplate::PreparedGraphTemplate() = default;
@@ -859,6 +860,7 @@ const CompiledModule& ExactPlanVariant::module() const { if (!impl_) Reject("exa
 const runtime::ExecutablePlan& ExactPlanVariant::plan() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->graph.plan(); }
 const ShapeProfileKey& ExactPlanVariant::shape_profile_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->profile; }
 const PlanVariantKey& ExactPlanVariant::plan_variant_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->key; }
+const DispatchKey& ExactPlanVariant::dispatch_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->dispatch; }
 const std::vector<ArtifactPin>& ExactPlanVariant::artifact_pins() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->graph.artifact_pins(); }
 
 bool ProductionExactShapeAdapter::IsEnabled() noexcept {
@@ -997,7 +999,9 @@ ExactPlanVariant ProductionExactShapeAdapter::AssembleExactPlan(
         std::move(compiled), oracle.profile().key(),
         BuildPlanVariantKey(
             prepared.impl_->graph.key(), oracle.profile().key(),
-            selections, runtime::internal::kStaticMemoryPlanVersion)});
+            selections, runtime::internal::kStaticMemoryPlanVersion),
+        BuildStaticExactDispatchKey(prepared.impl_->graph.key(),
+                                    oracle.profile().key())});
     return ExactPlanVariant(std::move(impl));
 }
 

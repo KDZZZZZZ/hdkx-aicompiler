@@ -91,6 +91,9 @@ public:
     const runtime::ExecutablePlan& plan() const;
     const ShapeProfileKey& shape_profile_key() const;
     const PlanVariantKey& plan_variant_key() const;
+    // static-exact route identity；与 adaptive 的
+    // BuildStaticExactDispatchKey(模板 key, profile key) 逐字节一致
+    const DispatchKey& dispatch_key() const;
     const std::vector<ArtifactPin>& artifact_pins() const;
 
 private:
