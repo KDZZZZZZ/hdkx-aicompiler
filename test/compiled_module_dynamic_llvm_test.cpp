@@ -105,7 +105,7 @@ CompiledModule BuildDynamicLLVMModule() {
             ModuleShapeExpr::InputAxis(0, 0)}});
     return internal::BuildCompiledModule(
         BuildTarget(Device::CPU()),
-        {{function, signature, metadata, kernel, std::move(contract)}}, {});
+        {{signature, metadata, kernel, std::move(contract)}}, {});
 }
 
 void TestDynamicInvokeUsesGeneratedScalarInLLVM() {
