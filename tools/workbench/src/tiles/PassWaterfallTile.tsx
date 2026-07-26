@@ -30,57 +30,92 @@ export function PassWaterfallTile(props: PassWaterfallTileProps): JSX.Element {
 
   const option = useMemo(() => {
     if (!query.data) return null
-
     const data = query.data
     const items = data.items
+    if (items.length === 0) return null
 
-    // 构造 ECharts 数据
-    const categories = items.map((_, i) => `Pass ${i}`)
-    const seriesData = items.map((item) => ({
-      name: item.passName,
-      value: [item.startNs, item.startNs + item.durationNs],
-      passName: item.passName,
-      component: item.component,
-      changed: item.changed,
-      depth: item.depth,
-      irBefore: item.irBeforeBytes,
-      irAfter: item.irAfterBytes,
-      itemStyle: {
-        color: item.changed ? 'var(--series-1)' : 'var(--text-muted)',
-        opacity: item.changed ? 1 : 0.5,
-      },
-    }))
+    // 瀑布图 = 两段水平柱：一段透明占位把柱子推到起始时刻，一段是真实耗时。
+    // （早先这里错用了 heatmap 系列，还把 visualMap 塞进 series 里，
+    //  ECharts 直接抛异常，把整个工作台带白屏了。）
+    const css = getComputedStyle(document.documentElement)
+    const colorChanged = css.getPropertyValue('--series-1').trim() || '#5b9dd9'
+    const colorUnchanged = css.getPropertyValue('--text-muted').trim() || '#67727f'
+    const axisColor = css.getPropertyValue('--text-secondary').trim() || '#98a4b3'
+
+    const labels = items.map((it) => {
+      // 用缩进体现 span 嵌套层级
+      const indent = '  '.repeat(Math.min(it.depth, 4))
+      return `${indent}${it.passName}`
+    })
 
     return {
       tooltip: {
-        trigger: 'item',
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
         formatter: (params: any) => {
-          if (!params.value) return ''
-          const delta = params.value[1] - params.value[0]
-          let html = `<strong>${params.name}</strong><br/>耗时: ${formatNs(delta)}`
-          if (params.irBefore !== null && params.irAfter !== null) {
-            html += `<br/>IR: ${formatBytes(params.irBefore)} → ${formatBytes(params.irAfter)}`
+          const idx = Array.isArray(params) ? params[0]?.dataIndex : params.dataIndex
+          const it = items[idx]
+          if (!it) return ''
+          let html = `<strong>${it.passName}</strong><br/>耗时 ${formatNs(it.durationNs)}`
+          if (it.irBeforeBytes != null && it.irAfterBytes != null) {
+            html += `<br/>IR ${formatBytes(it.irBeforeBytes)} → ${formatBytes(it.irAfterBytes)}`
           }
-          if (!params.changed) html += '<br/>⚠ 未改动 IR'
+          // 花了时间却没改 IR，本身就是个值得注意的结论
+          if (!it.changed) html += '<br/>⚠ 未改动 IR'
+          if (it.status !== 'ok') html += `<br/>状态 ${it.status}`
           return html
         },
       },
-      grid: { left: 100, right: 20, top: 20, bottom: 30 },
+      grid: {
+        left: density === 'compact' || density === 'thumbnail' ? 8 : 140,
+        right: 16,
+        top: 8,
+        bottom: 24,
+        containLabel: density === 'compact' || density === 'thumbnail',
+      },
       xAxis: {
-        type: 'time',
-        min: data.startNs,
-        max: data.endNs,
+        type: 'value',
+        min: 0,
+        max: Math.max(1, data.endNs - data.startNs),
+        axisLabel: {
+          color: axisColor,
+          formatter: (v: number) => formatNs(v),
+          show: density !== 'thumbnail',
+        },
+        splitLine: { show: false },
       },
       yAxis: {
         type: 'category',
-        data: categories,
-        axisLabel: { formatter: (v: string) => v },
+        data: labels,
+        inverse: true,
+        axisLabel: {
+          color: axisColor,
+          show: density !== 'compact' && density !== 'thumbnail',
+          fontSize: 11,
+        },
+        axisTick: { show: false },
       },
       series: [
         {
-          type: 'heatmap',
-          data: seriesData.map((item, i) => [(item.value?.[0] ?? 0), i, ((item.value?.[1] ?? 0) - (item.value?.[0] ?? 0))]),
-          visualMap: { min: 0, max: (data.endNs ?? 0) - (data.startNs ?? 0), show: false },
+          // 透明占位段
+          type: 'bar',
+          stack: 'wf',
+          silent: true,
+          itemStyle: { color: 'transparent' },
+          data: items.map((it) => it.startNs - data.startNs),
+        },
+        {
+          type: 'bar',
+          stack: 'wf',
+          data: items.map((it) => ({
+            value: Math.max(it.durationNs, 1),
+            // 未改动 IR 的 Pass 视觉上弱化
+            itemStyle: {
+              color: it.changed ? colorChanged : colorUnchanged,
+              opacity: it.changed ? 1 : 0.45,
+            },
+          })),
+          barMaxWidth: 14,
         },
       ],
     } as echarts.EChartsOption
@@ -89,7 +124,8 @@ export function PassWaterfallTile(props: PassWaterfallTileProps): JSX.Element {
   const containerRef = useECharts(option, {
     onEvents: {
       click: (params: any) => {
-        const item = query.data?.items.find((it) => it.passName === params.name)
+        // y 轴标签带缩进，不能拿 params.name 去匹配，用下标定位。
+        const item = query.data?.items[params.dataIndex]
         if (item?.passName) {
           setTileSelection(tile.id, { kind: 'pass', value: item.passName })
         }

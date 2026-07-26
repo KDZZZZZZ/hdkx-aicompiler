@@ -19,8 +19,15 @@ import { createServer } from 'node:http'
 
 const PORT = Number(process.env.KXC_WB_PORT ?? 5274)
 
-/** 已连接的浏览器（SSE 响应流）。允许多开，命令会广播给所有页面。 */
-const clients = new Set()
+/**
+ * 已连接的浏览器（SSE 响应流），按连接先后排列。
+ *
+ * 命令**只发给最近连接的那一个**，不广播。
+ * 早期版本是广播的，结果开两个标签页时：两边都会执行同一条命令（文档被改两次），
+ * 而只有最先回执的那个算数——如果那个标签页跑的是旧代码，agent 会收到一个
+ * 来自"看不见的第二个页面"的错误，完全无从排查。命令必须有确定的作用对象。
+ */
+const clients = []
 
 /** 浏览器最近一次推上来的状态快照。 */
 let latestState = null
@@ -52,14 +59,25 @@ async function readBody(req) {
   }
 }
 
-function broadcast(event, payload) {
-  const frame = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
-  for (const res of clients) {
-    try {
-      res.write(frame)
-    } catch {
-      clients.delete(res)
-    }
+function frameOf(event, payload) {
+  return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
+}
+
+function removeClient(res) {
+  const i = clients.indexOf(res)
+  if (i !== -1) clients.splice(i, 1)
+}
+
+/** 只发给最近连接的页面，保证命令有确定的作用对象。 */
+function sendToActive(event, payload) {
+  const target = clients[clients.length - 1]
+  if (!target) return false
+  try {
+    target.write(frameOf(event, payload))
+    return true
+  } catch {
+    removeClient(target)
+    return false
   }
 }
 
@@ -83,8 +101,8 @@ const server = createServer(async (req, res) => {
       connection: 'keep-alive',
       'access-control-allow-origin': '*',
     })
-    res.write(`event: hello\ndata: ${JSON.stringify({ port: PORT })}\n\n`)
-    clients.add(res)
+    res.write(frameOf('hello', { port: PORT }))
+    clients.push(res)
     // 心跳，避免中间层把空闲连接掐掉。
     const ping = setInterval(() => {
       try {
@@ -95,7 +113,7 @@ const server = createServer(async (req, res) => {
     }, 25_000)
     req.on('close', () => {
       clearInterval(ping)
-      clients.delete(res)
+      removeClient(res)
     })
     return
   }
@@ -106,14 +124,16 @@ const server = createServer(async (req, res) => {
     if (!body || typeof body.cmd !== 'string') {
       return json(res, 400, { ok: false, error: '需要 {cmd, args}' })
     }
-    if (clients.size === 0) {
+    if (clients.length === 0) {
       return json(res, 409, {
         ok: false,
-        error: '没有页面连上控制服务。请先打开工作台（npm run dev），确认右上角显示"agent 已连接"',
+        error: '没有页面连上控制服务。请先打开工作台（npm run dev:all），确认右下角显示"agent 已连接"',
       })
     }
     const id = `c${++commandSeq}`
-    broadcast('command', { id, cmd: body.cmd, args: body.args ?? {} })
+    if (!sendToActive('command', { id, cmd: body.cmd, args: body.args ?? {} })) {
+      return json(res, 409, { ok: false, error: '目标页面连接已断开，请刷新工作台' })
+    }
 
     // 等页面回执，让 CLI 能如实告诉 agent 命令到底成没成。
     const ack = await new Promise((resolve) => {
@@ -166,13 +186,13 @@ const server = createServer(async (req, res) => {
     return json(res, 200, {
       ok: true,
       ageMs: Date.now() - latestStateAt,
-      clients: clients.size,
+      clients: clients.length,
       state: latestState,
     })
   }
 
   if (url.pathname === '/health') {
-    return json(res, 200, { ok: true, clients: clients.size, hasState: Boolean(latestState) })
+    return json(res, 200, { ok: true, clients: clients.length, hasState: Boolean(latestState) })
   }
 
   json(res, 404, { ok: false, error: `未知路径 ${url.pathname}` })
