@@ -11,7 +11,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "../../runtime/internal/control_execution_plan_access.h"
+#include "runtime/internal/control_execution_plan_access.h"
 
 namespace kxc::api::internal {
 namespace {

@@ -4,7 +4,7 @@
 
 #include "kxc/compiler/experimental_identity.h"
 
-#include "internal/identity_canonical.h"
+#include "../internal/identity_canonical.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "../runtime/internal/compiled_module_node.h"
+#include "runtime/internal/compiled_module_node.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
 

@@ -30,7 +30,7 @@ the control builder is `src/compiler/control_flow/relay_control_plan.cc`.
 Each builder validates the nodes it owns and resolves an ordinary call once.
 
 `PrimitiveUnit` is the shared boundary. The implementation in
-`src/compiler/primitive_compiler.cc` lowers each unit, runs the TIR pipeline,
+`src/compiler/primitive/primitive_compiler.cc` lowers each unit, runs the TIR pipeline,
 builds the kernel ABI and artifact identity, uses the primitive cache, and
 returns ready artifact pins. `AssembleCompiledGraph` in
 `src/compiler/compiler.cc` creates the static module and plan from ordered

@@ -2,7 +2,7 @@
  * \brief Builds the runtime kernel ABI from compiler-owned TIR metadata.
  */
 
-#include "internal/kernel_abi_builder.h"
+#include "../internal/kernel_abi_builder.h"
 
 #include <limits>
 #include <stdexcept>

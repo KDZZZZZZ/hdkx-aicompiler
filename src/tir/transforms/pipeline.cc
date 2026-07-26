@@ -29,7 +29,7 @@
 #include "kxc/tir/transforms/unroll_loop.h"
 #include "kxc/tir/transforms/vectorize_loop.h"
 #include "kxc/tir/visitor.h"
-#include "../../pass/generated/pass_contract.inc"
+#include "pass/generated/pass_contract.inc"
 
 namespace kxc {
 namespace tir {

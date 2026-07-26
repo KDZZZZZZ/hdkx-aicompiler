@@ -30,7 +30,7 @@
 #include "kxc/relay/transforms/normalize_to_anf.h"
 #include "kxc/relay/transforms/remove_standalone_reshapes.h"
 #include "kxc/relay/transforms/simplify_expr.h"
-#include "../../pass/generated/pass_contract.inc"
+#include "pass/generated/pass_contract.inc"
 
 namespace kxc {
 namespace relay {

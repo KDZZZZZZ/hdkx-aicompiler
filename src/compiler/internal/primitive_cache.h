@@ -5,7 +5,7 @@
 #include <memory>
 #include <string>
 
-#include "../../codegen/internal/compiled_kernel.h"
+#include "codegen/internal/compiled_kernel.h"
 #include "kxc/compiler/artifact.h"
 #include "kxc/target/target.h"
 
