@@ -9,7 +9,6 @@
 #include "kxc/support/container.h"
 #include "kxc/distributed/placement.h"
 #include "kxc/pass/context.h"
-#include "kxc/tir/stmt.h"
 
 namespace kxc {
 
@@ -42,7 +41,6 @@ class KernelExecNode : public ExecNodeBaseNode {
 public:
     std::string op_name;
     std::string kernel_symbol;
-    tir::PrimFunc primfunc;
 
     KXC_OBJECT_DECLARE
 };
@@ -51,7 +49,7 @@ class KernelExec : public ExecNodeBase {
 public:
     using ExecNodeBase::ExecNodeBase;
     explicit KernelExec(const ObjectRef& ref) : ExecNodeBase(ref) {}
-    KernelExec(std::string op_name, tir::PrimFunc primfunc, Array<int> input_values,
+    KernelExec(std::string op_name, Array<int> input_values,
                Array<int> output_values, Array<int> worker_set,
                std::string kernel_symbol = "");
     const KernelExecNode* operator->() const {

@@ -763,8 +763,7 @@ ExecutionPlan DeserializeExecutionPlanFromJson(const std::string& json_text) {
         if (kind == "kernel") {
             std::string op_name = RS(RF(n, "op_name", ctx), ctx + ".op_name");
             std::string kernel_symbol = OS(n, "kernel_symbol", "", ctx);
-            nodes.push_back(ObjectRef(KernelExec(op_name, tir::PrimFunc(), in, out, workers,
-                                                 kernel_symbol)));
+            nodes.push_back(ObjectRef(KernelExec(op_name, in, out, workers, kernel_symbol)));
         } else if (kind == "comm") {
             std::string op_name = RS(RF(n, "op_name", ctx), ctx + ".op_name");
             const J* attrs = FF(n, "attrs");
