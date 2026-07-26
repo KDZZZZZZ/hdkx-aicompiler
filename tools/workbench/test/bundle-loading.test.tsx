@@ -54,10 +54,15 @@ describe('bundle IO', () => {
   beforeEach(stubFetchFromDisk)
   afterEach(() => vi.unstubAllGlobals())
 
-  it('listFixtures 能读出样例索引，且包含真实产物 real-compile', async () => {
+  it('listFixtures 能读出样例索引', async () => {
     const list = await listFixtures()
     expect(list.length).toBeGreaterThan(0)
-    expect(list.some((f) => f.id === 'real-compile' && f.variant === 'real')).toBe(true)
+    // 合成样例是仓库资产，必须在
+    expect(list.some((f) => f.id === 'baseline')).toBe(true)
+    expect(list.some((f) => f.id === 'candidate')).toBe(true)
+    // 真实产物不入库，存在时才校验其标记正确
+    const real = list.find((f) => f.variant === 'real')
+    if (real) expect(real.event_count).toBeGreaterThan(0)
   })
 
   it('loadFromUrl 组装出的 payload 含 events 与其余 bundle 文件', async () => {
@@ -120,6 +125,7 @@ describe('顶栏暴露了加载入口', () => {
       await Promise.resolve()
     })
     const select = container.querySelector<HTMLSelectElement>('[aria-label="选择当前 Bundle"]')!
-    expect(select.textContent).toContain('real-compile')
+    // 断言合成样例，不要断言真实产物——后者不入库，本地没有时会误报失败
+    expect(select.textContent).toContain('candidate')
   })
 })
