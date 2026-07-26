@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "kxc/relay/op.h"
+#include "kxc/runtime/ndarray.h"
 
 #ifndef KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE
 #define KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE 0
@@ -116,7 +117,8 @@ void ValidateFrozenUnits(const shape::GraphTemplate& graph,
 }
 
 void CollectOperations(const Expr& expression, const std::set<const Object*>& parameters,
-                       std::set<const Object*>* seen, std::vector<std::string>* operations) {
+                       std::set<const Object*>* seen, std::vector<std::string>* operations,
+                       std::vector<std::string>* registry_operations) {
     if (expression.As<VarNode>()) {
         if (!parameters.count(expression.get())) Reject("graph references a non-parameter variable");
         return;
@@ -132,11 +134,20 @@ void CollectOperations(const Expr& expression, const std::set<const Object*>& pa
     }
     const size_t arity = (op->name == "add" || op->name == "mul") ? 2 : 1;
     if (call->args.size() != arity) Reject("unsupported Relay operation arity");
-    for (const Expr& argument : call->args) CollectOperations(argument, parameters, seen, operations);
+    for (const Expr& argument : call->args) {
+        CollectOperations(argument, parameters, seen, operations, registry_operations);
+    }
     operations->push_back(op->name == "nn_relu" ? "relu" : op->name);
+    // 物化必须用注册表原名重放，不能用规范化别名。
+    registry_operations->push_back(op->name);
 }
 
-std::vector<std::string> ValidateSyntax(const Function& function) {
+struct RestrictedSyntax final {
+    std::vector<std::string> operations;           // 规范化名，供 frozen unit 校验
+    std::vector<std::string> registry_operations;  // 注册表原名，供物化重放
+};
+
+RestrictedSyntax ValidateSyntax(const Function& function) {
     if (!function.defined() || function->params.empty()) {
         Reject("a nonempty fixed-rank parameter list is required");
     }
@@ -152,9 +163,10 @@ std::vector<std::string> ValidateSyntax(const Function& function) {
         if (!parameters.insert(parameter.get()).second) Reject("duplicate input parameter");
     }
     std::set<const Object*> seen;
-    std::vector<std::string> operations;
-    CollectOperations(function->body, parameters, &seen, &operations);
-    return operations;
+    RestrictedSyntax result;
+    CollectOperations(function->body, parameters, &seen, &result.operations,
+                      &result.registry_operations);
+    return result;
 }
 
 std::vector<int64_t> Dimensions(const shape::NamedTensorContract& value) {
@@ -226,6 +238,9 @@ struct PreparedRestrictedSymbolicTemplate::Impl final {
     shape::GraphTemplate graph;
     std::vector<InputAxisSymbol> symbols;
     shape_exact::v1::ShapeExactPreparationCounters counters;
+    // 物化重放所需：注册表原名的有序调用序列与参数 dtype 快照。
+    std::vector<std::string> registry_operations;
+    std::vector<std::string> input_dtypes;
 };
 
 PreparedRestrictedSymbolicTemplate::PreparedRestrictedSymbolicTemplate() = default;
@@ -250,7 +265,14 @@ bool RestrictedSymbolicShapeAdapter::IsEnabled() noexcept {
 PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
     Function representative, CompileConfig config, std::vector<InputAxisSymbol> input_axis_symbols) {
     RequireEnabled();
-    const std::vector<std::string> operations = ValidateSyntax(representative);
+    const RestrictedSyntax syntax = ValidateSyntax(representative);
+    const std::vector<std::string>& operations = syntax.operations;
+    std::vector<std::string> input_dtypes;
+    input_dtypes.reserve(representative->params.size());
+    for (const Var& parameter : representative->params) {
+        input_dtypes.push_back(
+            parameter->type_annotation.As<TensorTypeNode>()->dtype);
+    }
     if (input_axis_symbols.empty()) Reject("at least one explicit input-axis symbol is required");
     std::sort(input_axis_symbols.begin(), input_axis_symbols.end(), [](const auto& a, const auto& b) {
         return std::tie(a.parameter_index, a.axis, a.symbol) < std::tie(b.parameter_index, b.axis, b.symbol);
@@ -315,7 +337,8 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
     const auto counters = frozen.counters();
     return PreparedRestrictedSymbolicTemplate(std::make_shared<PreparedRestrictedSymbolicTemplate::Impl>(
         PreparedRestrictedSymbolicTemplate::Impl{std::move(frozen), std::move(graph),
-            std::move(input_axis_symbols), counters}));
+            std::move(input_axis_symbols), counters, syntax.registry_operations,
+            std::move(input_dtypes)}));
 }
 
 RestrictedDispatchDecision::RestrictedDispatchDecision(std::shared_ptr<const Impl> impl)
@@ -371,6 +394,220 @@ std::vector<size_t> RestrictedSymbolicShapeAdapter::ChangedUnitIndices(
         }
     }
     return changed;
+}
+
+namespace {
+
+// 决策必须由同一个 prepared 模板铸出（key 与模板全文一致）。
+void RequireDecisionOwnership(
+    const shape::GraphTemplate& prepared_graph,
+    const RestrictedDispatchDecision::Impl& decision) {
+    if (!(decision.graph.key() == prepared_graph.key()) ||
+        decision.graph.CanonicalBytes() != prepared_graph.CanonicalBytes()) {
+        Reject("decision does not belong to this prepared template");
+    }
+}
+
+// ShapeProgram::outputs() 按 BuildTemplate 语义收录全部计算值（含被后续
+// unit 消费的中间值）；图输出是其中未被任何 unit 消费的那些。
+std::vector<shape::NamedTensorContract> GraphOutputs(
+    const shape::GraphTemplate& graph) {
+    std::set<std::string> consumed;
+    for (const auto& unit : graph.ordered_units()) {
+        consumed.insert(unit.input_value_names.begin(),
+                        unit.input_value_names.end());
+    }
+    std::vector<shape::NamedTensorContract> outputs;
+    for (const auto& value : graph.shape_program().outputs()) {
+        if (!consumed.count(value.name)) outputs.push_back(value);
+    }
+    return outputs;
+}
+
+}  // namespace
+
+Function RestrictedSymbolicShapeAdapter::MaterializeExactFunction(
+    const PreparedRestrictedSymbolicTemplate& prepared,
+    const RestrictedDispatchDecision& decision) {
+    RequireEnabled();
+    if (!prepared.impl_ || !decision.impl_) {
+        Reject("prepared template or decision is undefined");
+    }
+    VerifyDecision(*decision.impl_);
+    RequireDecisionOwnership(prepared.impl_->graph, *decision.impl_);
+    const shape::ExactShapeProfile& profile =
+        decision.impl_->exact_oracle.profile();
+    const auto& program = prepared.impl_->graph.shape_program();
+    const auto graph_outputs = GraphOutputs(prepared.impl_->graph);
+    if (graph_outputs.size() != 1) {
+        Reject("restricted template must have exactly one graph output");
+    }
+    // 参数：决策求值后的 concrete shape + representative dtype 快照。
+    Array<Var> params;
+    std::map<std::string, Expr> values;
+    for (size_t i = 0; i < program.inputs().size(); ++i) {
+        const auto& named = program.inputs()[i];
+        const auto& concrete = profile.Value(named.name).contract;
+        Array<int64_t> dims;
+        for (int64_t extent : concrete.logical) dims.push_back(extent);
+        Var parameter(named.name,
+                      TensorType(dims, prepared.impl_->input_dtypes[i]));
+        params.push_back(parameter);
+        values.emplace(named.name, parameter);
+    }
+    // 按 ordered unit 数据流重放受限调用序列（注册表原名）。
+    const auto& units = prepared.impl_->graph.ordered_units();
+    if (units.size() != prepared.impl_->registry_operations.size()) {
+        Reject("frozen unit sequence does not match the recorded call replay");
+    }
+    for (size_t i = 0; i < units.size(); ++i) {
+        Array<Expr> args;
+        for (const std::string& input : units[i].input_value_names) {
+            const auto found = values.find(input);
+            if (found == values.end()) Reject("unit consumes an unknown value");
+            args.push_back(found->second);
+        }
+        const Call call(
+            relay::Op::Get(prepared.impl_->registry_operations[i]), args);
+        if (units[i].output_value_names.size() != 1 ||
+            !values.emplace(units[i].output_value_names[0], call).second) {
+            Reject("frozen unit output wiring is not a single-assignment tree");
+        }
+    }
+    const auto output = values.find(graph_outputs[0].name);
+    if (output == values.end()) Reject("graph output was never produced");
+    return Function(params, output->second);
+}
+
+DispatchKey RestrictedSymbolicShapeAdapter::ExactDispatchKey(
+    const PreparedRestrictedSymbolicTemplate& prepared,
+    const RestrictedDispatchDecision& decision) {
+    RequireEnabled();
+    if (!prepared.impl_ || !decision.impl_) {
+        Reject("prepared template or decision is undefined");
+    }
+    VerifyDecision(*decision.impl_);
+    RequireDecisionOwnership(prepared.impl_->graph, *decision.impl_);
+    return BuildStaticExactDispatchKey(
+        prepared.impl_->graph.key(),
+        decision.impl_->exact_oracle.profile().key());
+}
+
+void RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
+    const PreparedRestrictedSymbolicTemplate& prepared,
+    const RestrictedDispatchDecision& decision,
+    const CompiledGraph& compiled) {
+    RequireEnabled();
+    if (!prepared.impl_ || !decision.impl_) {
+        Reject("prepared template or decision is undefined");
+    }
+    VerifyDecision(*decision.impl_);
+    RequireDecisionOwnership(prepared.impl_->graph, *decision.impl_);
+    if (!compiled.defined()) {
+        throw std::runtime_error(
+            "restricted exact variant: compiled graph is undefined");
+    }
+    const runtime::ExecutablePlan& plan = compiled.plan();
+    const auto& units = prepared.impl_->graph.ordered_units();
+    if (plan.calls().size() != units.size()) {
+        throw std::runtime_error(
+            "restricted exact variant: call count differs from template units");
+    }
+    const shape::ExactShapeProfile& profile =
+        decision.impl_->exact_oracle.profile();
+    const auto& program = prepared.impl_->graph.shape_program();
+    std::map<int64_t, runtime::ValueSpec> specs;
+    for (const auto& value : plan.values()) specs.emplace(value->value_id, value);
+    const auto check_boundary =
+        [&](const Array<int64_t>& ids,
+            const std::vector<shape::NamedTensorContract>& named,
+            const char* what) {
+            if (ids.size() != named.size()) {
+                throw std::runtime_error(
+                    std::string("restricted exact variant: ") + what +
+                    " arity differs from the decision");
+            }
+            for (size_t i = 0; i < ids.size(); ++i) {
+                const auto found = specs.find(ids[i]);
+                if (found == specs.end()) {
+                    throw std::runtime_error(
+                        std::string("restricted exact variant: ") + what +
+                        " references an unknown plan value");
+                }
+                const auto& expected =
+                    profile.Value(named[i].name).contract.logical;
+                const Array<int64_t> actual = found->second.shape();
+                bool same = actual.size() == expected.size();
+                for (size_t axis = 0; same && axis < expected.size(); ++axis) {
+                    same = actual[axis] == expected[axis];
+                }
+                if (!same) {
+                    throw std::runtime_error(
+                        std::string("restricted exact variant: ") + what +
+                        " boundary shape differs from the decision");
+                }
+            }
+        };
+    check_boundary(plan.input_value_ids(), program.inputs(), "input");
+    check_boundary(plan.output_value_ids(), GraphOutputs(prepared.impl_->graph),
+                   "output");
+    for (size_t i = 0; i < plan.input_value_ids().size(); ++i) {
+        const DLDataType expected =
+            runtime::DataTypeFromString(prepared.impl_->input_dtypes[i]);
+        const DLDataType actual = specs.at(plan.input_value_ids()[i])->dtype;
+        if (actual.code != expected.code || actual.bits != expected.bits ||
+            actual.lanes != expected.lanes) {
+            throw std::runtime_error(
+                "restricted exact variant: input dtype differs from the "
+                "representative");
+        }
+    }
+    // 语义绑定：边界一致不构成授权——同 shape/dtype/call 数但算子不同的
+    // 图（如 sqrt 换 relu）必须被拒绝。产物身份必须等于按本决策物化出的
+    // concrete Function 的语义身份；类型（含输出 dtype）是身份的一部分。
+    const Function expected_function =
+        MaterializeExactFunction(prepared, decision);
+    if (!(compiled.graph_semantic_key() ==
+          Compiler::BuildGraphSemanticKey(expected_function))) {
+        throw std::runtime_error(
+            "restricted exact variant: compiled graph semantic identity does "
+            "not match the decision's materialized function");
+    }
+}
+
+shape::BindingSet RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(
+    const PreparedRestrictedSymbolicTemplate& prepared,
+    const std::vector<std::vector<int64_t>>& input_shapes) {
+    RequireEnabled();
+    if (!prepared.impl_) Reject("prepared template is undefined");
+    const auto& program = prepared.impl_->graph.shape_program();
+    if (input_shapes.size() != program.inputs().size()) {
+        Reject("input shape count differs from the template parameters");
+    }
+    std::map<std::string, int64_t> bound;
+    for (const InputAxisSymbol& symbol : prepared.impl_->symbols) {
+        if (symbol.parameter_index >= input_shapes.size() ||
+            symbol.axis >= input_shapes[symbol.parameter_index].size()) {
+            Reject("input rank does not cover an overlay axis");
+        }
+        const int64_t extent = input_shapes[symbol.parameter_index][symbol.axis];
+        const auto existing = bound.emplace(symbol.symbol, extent);
+        if (!existing.second && existing.first->second != extent) {
+            Reject("conflicting extents for a shared overlay symbol");
+        }
+    }
+    std::vector<shape::Binding> bindings_list;
+    bindings_list.reserve(bound.size());
+    for (const auto& [name, value] : bound) bindings_list.push_back({name, value});
+    const shape::BindingSet bindings(std::move(bindings_list));
+    // 非 overlay 静态轴与 rank 必须与模板求值结果一致。
+    for (size_t i = 0; i < program.inputs().size(); ++i) {
+        const auto evaluated = program.inputs()[i].contract.Evaluate(bindings);
+        if (evaluated.logical != input_shapes[i]) {
+            Reject("input shape does not match the template contract");
+        }
+    }
+    return bindings;
 }
 
 }  // namespace kxc::api::experimental::restricted_symbolic_shape::v1

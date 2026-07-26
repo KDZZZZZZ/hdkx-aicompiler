@@ -634,15 +634,19 @@ void VerifyVariant(
     const internal::CompilerExecutionContract& contract,
     const shape::ExactOracle& oracle, const CompiledGraph& compiled) {
     const auto& partitioned = prepared.graph.partitioned;
+    // values()/calls() 每次调用都深拷贝出临时 Array；元素引用必须指向
+    // 本地持有的数组，否则悬垂。
+    const Array<runtime::ValueSpec> plan_values = compiled.plan().values();
+    const Array<runtime::KernelCall> plan_calls = compiled.plan().calls();
     if (requests.size() != partitioned.units.size() ||
-        compiled.plan().calls().size() != requests.size() ||
+        plan_calls.size() != requests.size() ||
         compiled.artifact_pins().size() != requests.size() ||
         compiled.module().entry_count() != requests.size() ||
-        compiled.plan().values().size() != partitioned.value_graph.values.size()) {
+        plan_values.size() != partitioned.value_graph.values.size()) {
         Reject("compiled module/plan/pin cardinality does not match exact requests");
     }
-    for (size_t i = 0; i < compiled.plan().values().size(); ++i) {
-        const runtime::ValueSpec& value = compiled.plan().values()[i];
+    for (size_t i = 0; i < plan_values.size(); ++i) {
+        const runtime::ValueSpec& value = plan_values[i];
         const auto& source = partitioned.value_graph.values[i];
         const auto& exact = ProfileValue(oracle, ValueName(source.id));
         const auto* expected_type = source.checked_type.As<TensorTypeNode>();
@@ -705,7 +709,7 @@ void VerifyVariant(
                 Reject("exact request output contract drifted");
             }
         }
-        const runtime::KernelCall& call = compiled.plan().calls()[i];
+        const runtime::KernelCall& call = plan_calls[i];
         if (!(call->symbol == unit.symbol) || !compiled.module().HasFunction(call->symbol) ||
             !SameIds(call.input_value_ids(),
                      unit.boundary_input_value_ids) ||
@@ -787,6 +791,7 @@ struct ExactPlanVariant::Impl final {
     CompiledGraph graph;
     ShapeProfileKey profile;
     PlanVariantKey key;
+    DispatchKey dispatch;
 };
 
 PreparedGraphTemplate::PreparedGraphTemplate() = default;
@@ -818,6 +823,7 @@ const CompiledModule& ExactPlanVariant::module() const { if (!impl_) Reject("exa
 const runtime::ExecutablePlan& ExactPlanVariant::plan() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->graph.plan(); }
 const ShapeProfileKey& ExactPlanVariant::shape_profile_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->profile; }
 const PlanVariantKey& ExactPlanVariant::plan_variant_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->key; }
+const DispatchKey& ExactPlanVariant::dispatch_key() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->dispatch; }
 const std::vector<ArtifactPin>& ExactPlanVariant::artifact_pins() const { if (!impl_) Reject("exact plan variant is undefined"); return impl_->graph.artifact_pins(); }
 
 bool ProductionExactShapeAdapter::IsEnabled() noexcept {
@@ -956,7 +962,9 @@ ExactPlanVariant ProductionExactShapeAdapter::AssembleExactPlan(
         std::move(compiled), oracle.profile().key(),
         BuildPlanVariantKey(
             prepared.impl_->graph.key(), oracle.profile().key(),
-            selections, runtime::internal::kStaticMemoryPlanVersion)});
+            selections, runtime::internal::kStaticMemoryPlanVersion),
+        BuildStaticExactDispatchKey(prepared.impl_->graph.key(),
+                                    oracle.profile().key())});
     return ExactPlanVariant(std::move(impl));
 }
 

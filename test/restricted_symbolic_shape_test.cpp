@@ -7,8 +7,10 @@
 #include <vector>
 
 #include "../src/compiler/internal/primitive_cache.h"
+#include "kxc/compiler/compiler.h"
 #include "kxc/compiler/restricted_symbolic_shape.h"
 #include "kxc/relay/op.h"
+#include "kxc/runtime/session.h"
 
 namespace {
 namespace restricted = kxc::api::experimental::restricted_symbolic_shape::v1;
@@ -124,12 +126,139 @@ bool TestGateAndRestrictedExactSlice() {
 #endif
 }
 
+kxc::Function Rank2Unary(int64_t rows = 4, int64_t cols = 3) {
+    const kxc::Var x("x", kxc::TensorType({rows, cols}, "float32"));
+    return kxc::Function({x}, kxc::Call(kxc::relay::Op::Get("nn_relu"), {x}));
+}
+
+bool TestMaterializedVariantClosure() {
+#if !KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE || !KXC_ENABLE_SHAPE_PRODUCTION_EXACT
+    return true;
+#else
+    using restricted::RestrictedSymbolicShapeAdapter;
+    const auto prep = RestrictedSymbolicShapeAdapter::Prepare(
+        UnaryGraph("nn_relu"), Config(), {{0, 0, "n", 2, 8, 2}});
+    const auto d6 = RestrictedSymbolicShapeAdapter::MintExact(prep, Bindings(6));
+    const auto d4 = RestrictedSymbolicShapeAdapter::MintExact(prep, Bindings(4));
+
+    // 不变量 5：不同 binding 不同 route，相同 binding 相同 route。
+    CHECK(!(RestrictedSymbolicShapeAdapter::ExactDispatchKey(prep, d6) ==
+            RestrictedSymbolicShapeAdapter::ExactDispatchKey(prep, d4)),
+          "different bindings must mint different dispatch keys");
+    CHECK(RestrictedSymbolicShapeAdapter::ExactDispatchKey(prep, d6) ==
+              RestrictedSymbolicShapeAdapter::ExactDispatchKey(
+                  prep, RestrictedSymbolicShapeAdapter::MintExact(prep, Bindings(6))),
+          "identical bindings must mint identical dispatch keys");
+
+    // 物化：参数类型必须携带决策求值后的 concrete shape 和原 dtype。
+    const kxc::Function fn6 =
+        RestrictedSymbolicShapeAdapter::MaterializeExactFunction(prep, d6);
+    CHECK(fn6.defined() && fn6->params.size() == 1,
+          "materialized function must keep the representative arity");
+    const auto* materialized_type =
+        fn6->params[0]->type_annotation.As<kxc::TensorTypeNode>();
+    CHECK(materialized_type && materialized_type->shape.size() == 1 &&
+              materialized_type->shape[0] == 6 &&
+              materialized_type->dtype == "float32",
+          "materialized parameter must carry the bound concrete extent");
+
+    // 归属校验：别的模板铸出的决策必须被拒绝。
+    const auto other = RestrictedSymbolicShapeAdapter::Prepare(
+        UnaryGraph("sqrt"), Config(), {{0, 0, "n", 2, 8, 2}});
+    const auto other6 = RestrictedSymbolicShapeAdapter::MintExact(other, Bindings(6));
+    CHECK(Throws([&] { (void)RestrictedSymbolicShapeAdapter::MaterializeExactFunction(
+              prep, other6); }),
+          "foreign decision must not materialize against this template");
+    CHECK(Throws([&] { (void)RestrictedSymbolicShapeAdapter::ExactDispatchKey(
+              prep, other6); }),
+          "foreign decision must not mint a route for this template");
+
+    // 请求边界换算：输入 shape → bindings。
+    CHECK(RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(prep, {{6}}) ==
+              Bindings(6),
+          "input shapes must convert to the canonical binding set");
+    CHECK(Throws([&] { (void)RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(
+              prep, {{6}, {6}}); }),
+          "input count mismatch must fail closed");
+    CHECK(Throws([&] { (void)RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(
+              prep, {{6, 2}}); }),
+          "input rank mismatch must fail closed");
+
+    // 非 overlay 静态轴必须与模板一致。
+    const auto rank2 = RestrictedSymbolicShapeAdapter::Prepare(
+        Rank2Unary(), Config(), {{0, 0, "n", 2, 8, 2}});
+    CHECK(RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(rank2, {{6, 3}}) ==
+              Bindings(6),
+          "static non-overlay axis must pass through unchanged");
+    CHECK(Throws([&] { (void)RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(
+              rank2, {{6, 7}}); }),
+          "static non-overlay axis mismatch must fail closed");
+
+    // 共享 symbol 的输入必须一致。
+    const auto mixed = RestrictedSymbolicShapeAdapter::Prepare(
+        MixedGraph(), Config(), {{0, 0, "n", 1, 8, 1}, {1, 0, "n", 1, 8, 1}});
+    CHECK(Throws([&] { (void)RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(
+              mixed, {{4}, {5}}); }),
+          "conflicting shared-symbol extents must fail closed");
+    CHECK(RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(mixed, {{5}, {5}}) ==
+              Bindings(5),
+          "consistent shared-symbol extents must bind once");
+
+#if KXC_USE_LLVM
+    // 物化 variant 经用户显式 Compiler::Compile 编译并被验证函数绑定。
+    const kxc::api::CompiledGraph g6 = kxc::api::Compiler::Compile(fn6, Config());
+    RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(prep, d6, g6);
+    const kxc::Function fn4 =
+        RestrictedSymbolicShapeAdapter::MaterializeExactFunction(prep, d4);
+    const kxc::api::CompiledGraph g4 = kxc::api::Compiler::Compile(fn4, Config());
+    CHECK(Throws([&] { RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
+              prep, d6, g4); }),
+          "verification must reject a variant compiled for other bindings");
+
+    // 语义绑定回归：同边界（shape/dtype/call 数）但算子不同的产物必须被
+    // 拒绝——sqrt(N=6) 与授权的 relu(N=6) 边界完全一致，只有语义身份不同。
+    const kxc::Function fn6_sqrt =
+        RestrictedSymbolicShapeAdapter::MaterializeExactFunction(other, other6);
+    const kxc::api::CompiledGraph g6_sqrt =
+        kxc::api::Compiler::Compile(fn6_sqrt, Config());
+    RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
+        other, other6, g6_sqrt);
+    CHECK(Throws([&] { RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
+              prep, d6, g6_sqrt); }),
+          "same-boundary wrong-operator artifact must fail semantic binding");
+
+    // 数值：relu(N=6) 输入含负值。
+    kxc::runtime::NDArray input = kxc::runtime::NDArray::Zeros(
+        {6}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    const std::vector<float> raw = {-2, -1, 0, 1, 2, 3};
+    input.CopyFromBytes(raw.data(), raw.size() * sizeof(float));
+    kxc::runtime::RuntimeSession session(g6.module(), g6.plan());
+    const auto outputs = session.Run({input});
+    std::vector<float> actual(6);
+    outputs[0].CopyToBytes(actual.data(), actual.size() * sizeof(float));
+    CHECK(actual == std::vector<float>({0, 0, 0, 1, 2, 3}),
+          "materialized relu variant must execute with the bound extent");
+#endif
+    return true;
+#endif
+}
+
 }  // namespace
 
 int main() {
-    try { return TestGateAndRestrictedExactSlice() ? 0 : 1; }
-    catch (const std::exception& error) {
-        std::cerr << "[FAIL] " << error.what() << "\n";
-        return 1;
+    std::vector<std::pair<const char*, bool (*)()>> tests = {
+        {"gate_and_restricted_exact_slice", TestGateAndRestrictedExactSlice},
+        {"materialized_variant_closure", TestMaterializedVariantClosure},
+    };
+    int failed = 0;
+    for (const auto& test : tests) {
+        try {
+            if (test.second()) std::cout << "[PASS] " << test.first << "\n";
+            else ++failed;
+        } catch (const std::exception& error) {
+            std::cerr << "[FAIL] " << test.first << ": " << error.what() << "\n";
+            ++failed;
+        }
     }
+    return failed == 0 ? 0 : 1;
 }

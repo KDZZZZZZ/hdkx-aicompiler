@@ -8,6 +8,8 @@
 
 #include "../src/compiler/internal/lowered_graph.h"
 #include "../src/compiler/internal/primitive_cache.h"
+#include "../src/runtime/internal/memory_plan.h"
+#include "kxc/compiler/compiler.h"
 #include "kxc/compiler/experimental_identity.h"
 #include "kxc/compiler/shape_exact.h"
 #include "kxc/relay/op.h"
@@ -375,6 +377,67 @@ bool TestNegativesBeforeCache() {
 #endif
 }
 
+bool TestDispatchIdentityClosure() {
+#if !KXC_ENABLE_SHAPE_PRODUCTION_EXACT
+    return true;
+#else
+    using shape_exact::ProductionExactShapeAdapter;
+    const kxc::Function fn = TwoUnitGraph();
+    const auto prepared =
+        ProductionExactShapeAdapter::PrepareGraphTemplate(fn, Config());
+
+    // 不变量 4：模板 key 就是 compiler 的 graph semantic key，无第二套 identity。
+    const kxc::api::GraphSemanticKey semantic =
+        kxc::api::Compiler::BuildGraphSemanticKey(fn);
+    CHECK(prepared.graph_template().key() == semantic,
+          "graph template key must equal the compiler graph semantic key");
+
+    const auto oracle = ProductionExactShapeAdapter::InstantiateExactProfile(
+        prepared, kxc::shape::experimental::v1::BindingSet());
+    const kxc::api::DispatchKey expected_dispatch =
+        kxc::api::BuildStaticExactDispatchKey(semantic, oracle.profile().key());
+    CHECK(expected_dispatch.defined(),
+          "static-exact dispatch key must be constructible from template identity");
+
+#if KXC_USE_LLVM
+    // 不变量 1：variant 的 dispatch key 可由公开 builder 重建。
+    const auto variant =
+        ProductionExactShapeAdapter::AssembleExactPlan(prepared, oracle);
+    CHECK(variant.dispatch_key() == expected_dispatch,
+          "exact variant dispatch key must match the public static-exact builder");
+
+    // 不变量 2（2026-07-26 修订）：oracle 派生与 plan 派生的 profile key
+    // 当前属于两个有意不同的键空间——前者编码模板全文 + bindings +
+    // policy "exact"，后者只编码 plan 输入边界 + policy
+    // "static-exact-plan-v2"。本断言锁定该分叉事实；identity 对齐属于
+    // 独立计划（见 issue #46）。若此断言开始失败，说明对齐已落地，
+    // 应把它翻转为相等断言。
+    const kxc::api::CompiledGraph normal =
+        kxc::api::Compiler::Compile(fn, Config());
+    CHECK(!(variant.shape_profile_key() ==
+            kxc::api::BuildStaticExactShapeProfileKey(semantic, normal.plan())),
+          "profile key spaces unexpectedly aligned; flip this lock to equality "
+          "and update the dispatch closure contract");
+
+    // 不变量 3：PlanVariantKey 可由普通编译结果经公开 builder 重建。
+    std::vector<kxc::api::OrderedArtifactSelectionIdentity> selections;
+    const kxc::Array<kxc::runtime::KernelCall> calls = normal.plan().calls();
+    selections.reserve(calls.size());
+    for (size_t index = 0; index < calls.size(); ++index) {
+        selections.push_back(kxc::api::OrderedArtifactSelectionIdentity{
+            index, std::string(calls[index]->symbol),
+            normal.artifact_pins()[index].record().artifact_key, 0});
+    }
+    CHECK(variant.plan_variant_key() ==
+              kxc::api::BuildPlanVariantKey(
+                  semantic, variant.shape_profile_key(), selections,
+                  kxc::runtime::internal::kStaticMemoryPlanVersion),
+          "exact plan variant key must be reconstructible from the normal compile");
+#endif
+    return true;
+#endif
+}
+
 #if KXC_USE_LLVM && KXC_ENABLE_SHAPE_PRODUCTION_EXACT
 bool TestLLVMRelayMutationCannotPoisonCache() {
     using shape_exact::ProductionExactShapeAdapter;
@@ -679,6 +742,7 @@ int main() {
         {"caller_relay_isolation", TestCallerRelayIsolation},
         {"prepared_constant_snapshot", TestPreparedConstantSnapshot},
         {"negatives_before_cache", TestNegativesBeforeCache},
+        {"dispatch_identity_closure", TestDispatchIdentityClosure},
     };
 #if KXC_USE_LLVM && KXC_ENABLE_SHAPE_PRODUCTION_EXACT
     tests.push_back({"llvm_relay_mutation_cache_safety", TestLLVMRelayMutationCannotPoisonCache});

@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "kxc/compiler/compiler.h"
+#include "kxc/compiler/experimental_identity.h"
 #include "kxc/compiler/shape_exact.h"
 #include "kxc/compiler/shape_specialization.h"
 
@@ -95,6 +97,39 @@ public:
     static std::vector<size_t> ChangedUnitIndices(
         const RestrictedDispatchDecision& previous,
         const RestrictedDispatchDecision& next);
+
+    // 按决策把 representative 物化为可编译的 concrete Function。
+    // 从模板 ordered unit 数据流重放受限调用序列；参数类型携带决策求值后
+    // 的 concrete shape 与 representative dtype。不编译、不缓存、不执行；
+    // 编译意图必须由调用方显式调用 Compiler::Compile。决策不属于该模板时
+    // fail closed。
+    static Function MaterializeExactFunction(
+        const PreparedRestrictedSymbolicTemplate& prepared,
+        const RestrictedDispatchDecision& decision);
+
+    // 铸造该决策的 static-exact route identity：
+    // BuildStaticExactDispatchKey(模板 semantic key, 决策 profile key)。
+    // 同一模板下的所有决策构成同一 route family。键属于 oracle 键空间；
+    // 与 adaptive plan 派生键的对齐是独立计划（见 issue #46）。
+    static DispatchKey ExactDispatchKey(
+        const PreparedRestrictedSymbolicTemplate& prepared,
+        const RestrictedDispatchDecision& decision);
+
+    // 验证编译产物与决策边界契约一致（plan I/O shape/dtype、unit 数量）。
+    // 决策授权 route identity，编译产物提供 artifact，两者由本函数绑定。
+    // 比较的是边界，不是 semantic key（物化图有自己的 concrete semantic
+    // key，与 family key 有意不同）。不匹配抛出。
+    static void VerifyCompiledExactVariant(
+        const PreparedRestrictedSymbolicTemplate& prepared,
+        const RestrictedDispatchDecision& decision,
+        const CompiledGraph& compiled);
+
+    // 把实际输入 shape 换算成 canonical BindingSet。冲突的共享 symbol、
+    // 输入个数/rank 不匹配、非 overlay 静态轴不一致均 fail closed；
+    // 范围/整除约束由随后的 MintExact 检查。
+    static specialization::BindingSet BindingsFromInputShapes(
+        const PreparedRestrictedSymbolicTemplate& prepared,
+        const std::vector<std::vector<int64_t>>& input_shapes);
 };
 
 }  // namespace kxc::api::experimental::restricted_symbolic_shape::v1
