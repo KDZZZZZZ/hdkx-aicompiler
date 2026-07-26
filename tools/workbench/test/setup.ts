@@ -35,7 +35,11 @@ if (!window.matchMedia) {
   })) as unknown as typeof window.matchMedia
 }
 
-// jsdom 的 Element 没有 scrollTo，StripView 定位聚焦列时会调用。
+// jsdom 的 Element 缺少这两个滚动方法：StripView 定位聚焦列、
+// 命令面板把选中项滚进视野时都会调用。
 if (!Element.prototype.scrollTo) {
   Element.prototype.scrollTo = function scrollTo() {}
+}
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function scrollIntoView() {}
 }

@@ -42,7 +42,10 @@ export interface BundleActions {
 }
 
 export function useBundleActions(): BundleActions {
-  const store = useWorkbench()
+  // 这里刻意不订阅 store：本 hook 只需要在回调里"写"，不需要跟着状态重渲染。
+  // 订阅整个 store 会让每次 set() 都换掉引用，进而使依赖它的 useCallback/useEffect
+  // 每轮都重建，很容易和 effect 里的 setState 组成死循环。
+  const store = useWorkbench.getState()
   const [fixtures, setFixtures] = useState<
     Array<{ id: string; path: string; variant: string; event_count: number }>
   >([])
