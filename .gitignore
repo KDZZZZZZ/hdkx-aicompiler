@@ -15,6 +15,14 @@ compile_commands.json
 .idea/
 .vscode/
 
+# Machine-local agent tooling state and worktrees.
+# .claude/worktrees/ holds full checkouts; committing it would nest the
+# repository inside itself. Note .agents/ is tracked and must stay tracked.
+.claude/
+.omo/
+.omx/
+.codegraph
+
 # Machine-local agent instructions
 /AGENTS.md
 
