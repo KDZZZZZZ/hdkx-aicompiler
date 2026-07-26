@@ -13,7 +13,8 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "resolveJsonModule": true,
-    "allowImportingTsExtensions": false,
+    // CLI 用 Node 原生 ESM 直接 import 源码里的 .ts，必须允许带扩展名的导入。
+    "allowImportingTsExtensions": true,
     "noEmit": true,
     "types": ["vite/client"]
   },

@@ -4,8 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "description": "KXC 性能分析图表桌布 (Performance Analysis Workbench Canvas)",
+  "bin": {
+    "kxc-wb": "cli/kxc-wb.mjs"
+  },
   "scripts": {
     "dev": "vite",
+    "dev:all": "node scripts/dev-all.mjs",
+    "control": "node server/control-server.mjs",
+    "wb": "node cli/kxc-wb.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit false --emitDeclarationOnly false --pretty",

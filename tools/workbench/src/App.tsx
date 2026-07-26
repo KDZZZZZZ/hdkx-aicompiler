@@ -11,6 +11,7 @@ import { CommandPalette } from './ui/command/CommandPalette'
 import { useKeymap } from './ui/keyboard/useKeymap'
 import { usePersistence } from './state/persist'
 import { Toast } from './ui/shell/Toast'
+import { useAgentBridge, AgentStatusBadge } from './ui/agent/useAgentBridge'
 import './styles/tokens.css'
 import './App.css'
 
@@ -18,6 +19,8 @@ export default function App() {
   const mode = useWorkbench((s) => s.mode)
   useKeymap()
   usePersistence()
+  // 控制服务没起时它会安静退避重试，不影响正常使用。
+  const agentStatus = useAgentBridge()
 
   // 顶层只切换主区域，TopBar / Rail / Minimap 在所有模式下保持可见，
   // 这样 Overview 与 Gather 也能一眼看到当前 bundle 与保存状态。
@@ -36,6 +39,7 @@ export default function App() {
       {mode === 'strip' && <Minimap />}
       <CommandPalette />
       <Toast />
+      <AgentStatusBadge status={agentStatus} />
     </div>
   )
 }
