@@ -1,10 +1,10 @@
-/*! \file src/compiler/adaptive/production_path_experimental.cc
+/*! \file src/compiler/adaptive/adaptive_hot_swap_preparation.cc
  * \brief Static-exact candidate preparation for production adaptive compilers.
  */
 
-#include "kxc/compiler/adaptive_production_experimental.h"
+#include "kxc/compiler/adaptive_hot_swap_preparation.h"
 
-#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP
 
 #include <algorithm>
 #include <stdexcept>
@@ -15,7 +15,7 @@
 #include "../../runtime/internal/compiled_module_node.h"
 #include "../../runtime/internal/memory_plan.h"
 
-namespace kxc::api::adaptive::experimental::production_path {
+namespace kxc::api::adaptive::hot_swap::preparation {
 namespace {
 
 void RequireStaticShape(const Array<int64_t>& shape, const char* context) {
@@ -260,6 +260,6 @@ std::shared_ptr<const PreparedCandidate> PrepareCandidate(
         std::move(validation_receipt)));
 }
 
-}  // namespace kxc::api::adaptive::experimental::production_path
+}  // namespace kxc::api::adaptive::hot_swap::preparation
 
-#endif  // KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#endif  // KXC_ENABLE_ADAPTIVE_HOT_SWAP

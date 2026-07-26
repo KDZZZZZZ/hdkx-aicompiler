@@ -1,4 +1,4 @@
-/*! \file test/adaptive_preparation_v2_test.cpp
+/*! \file test/adaptive_preparation_test.cpp
  * \brief CPU tests for adaptive preparation and primitive replacement.
  */
 
@@ -17,9 +17,9 @@
 #include <utility>
 #include <vector>
 
-#include "kxc/compiler/adaptive_production_experimental.h"
-#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
-#include "kxc/compiler/adaptive_hot_swap_v2.h"
+#include "kxc/compiler/adaptive_hot_swap_preparation.h"
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP
+#include "kxc/compiler/adaptive_hot_swap.h"
 #endif
 #include "kxc/relay/op.h"
 #include "../src/compiler/internal/compiled_graph_access.h"
@@ -37,7 +37,7 @@ namespace {
     } while (0)
 
 namespace production_path =
-    kxc::api::adaptive::experimental::production_path;
+    kxc::api::adaptive::hot_swap::preparation;
 using ProductionRequest = production_path::ProductionCompileRequest;
 using ExecutionRequest = production_path::ProductionExecutionRequest;
 
@@ -304,42 +304,42 @@ bool TestMalformedGraphRejectedBeforePreparation() {
     return true;
 }
 
-#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
-namespace v2 = kxc::api::adaptive::hot_swap::v2;
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP
+namespace hot_swap = kxc::api::adaptive::hot_swap;
 
 bool TestNoBackendAdmissionDoesNotCompile() {
     using namespace kxc;
     api::internal::ClearPrimitiveCacheForTesting();
     const ProductionRequest request = MakeRequest();
     std::atomic<size_t> queued_events{0};
-    v2::Options options;
-    options.observer = [&queued_events](const v2::Event& event) {
-        if (event.kind == v2::EventKind::kQueued) ++queued_events;
+    hot_swap::Options options;
+    options.observer = [&queued_events](const hot_swap::Event& event) {
+        if (event.kind == hot_swap::EventKind::kQueued) ++queued_events;
     };
-    v2::AdaptiveHotSwapController controller(options);
+    hot_swap::AdaptiveHotSwapController controller(options);
     const api::internal::PrimitiveCacheStats before =
         api::internal::GetPrimitiveCacheStats();
     TEST_CHECK(Throws([&] { (void)controller.Acquire(Execute(request)); }),
                "Acquire without a route must fail");
 
-    v2::CancellationSource cancellation;
+    hot_swap::CancellationSource cancellation;
     cancellation.Cancel();
-    const v2::CompileResult cancelled = controller.Submit(
+    const hot_swap::CompileResult cancelled = controller.Submit(
         {request, std::chrono::steady_clock::time_point::max(),
          cancellation.token()}).Wait();
     const api::internal::PrimitiveCacheStats after =
         api::internal::GetPrimitiveCacheStats();
     TEST_CHECK(!cancelled.ready() &&
-                   cancelled.failure.category == v2::FailureCategory::kCancelled &&
+                   cancelled.failure.category == hot_swap::FailureCategory::kCancelled &&
                    after.misses == before.misses &&
                    after.in_flight == before.in_flight && queued_events == 0,
                "Acquire and pre-cancelled Submit must not create compile work");
     return true;
 }
 
-class ValidationGate final : public v2::CandidateValidationAuthority {
+class ValidationGate final : public hot_swap::CandidateValidationAuthority {
 public:
-    v2::ValidationReceipt Validate(const ProductionRequest&,
+    hot_swap::ValidationReceipt Validate(const ProductionRequest&,
                                    const kxc::api::CompiledGraph&) override {
         std::unique_lock<std::mutex> lock(mutex_);
         ++calls_;
@@ -396,32 +396,32 @@ bool TestRealValidationSingleflightAndCancellation() {
     const ProductionRequest request(graph, config, baseline, {0, 1});
 
     auto validation = std::make_shared<ValidationGate>();
-    v2::Options options;
+    hot_swap::Options options;
     options.worker_count = 1;
     options.validation_authority = validation;
-    v2::AdaptiveHotSwapController controller(options);
-    const v2::CompileTicket first = controller.Submit({request});
+    hot_swap::AdaptiveHotSwapController controller(options);
+    const hot_swap::CompileTicket first = controller.Submit({request});
     if (!validation->WaitForFirstCall()) {
         validation->Release();
         TEST_CHECK(false, "singleflight validation gate was not reached");
     }
-    const v2::CompileTicket second = controller.Submit({request});
+    const hot_swap::CompileTicket second = controller.Submit({request});
     validation->Release();
-    const v2::CompileResult first_result = first.Wait();
-    const v2::CompileResult second_result = second.Wait();
+    const hot_swap::CompileResult first_result = first.Wait();
+    const hot_swap::CompileResult second_result = second.Wait();
     TEST_CHECK(first_result.ready() && second_result.ready() &&
                    first_result.lease == second_result.lease &&
                    validation->calls() == 1,
                "identical in-flight Submit requests must share validation and generation");
 
     auto cancelled_validation = std::make_shared<ValidationGate>();
-    v2::Options cancelled_options;
+    hot_swap::Options cancelled_options;
     cancelled_options.worker_count = 1;
     cancelled_options.validation_authority = cancelled_validation;
-    v2::AdaptiveHotSwapController cancelled(cancelled_options);
-    v2::CancellationSource cancellation;
+    hot_swap::AdaptiveHotSwapController cancelled(cancelled_options);
+    hot_swap::CancellationSource cancellation;
     const ProductionRequest cancelled_request(graph, config, baseline, {0, 1});
-    const v2::CompileTicket cancelled_ticket = cancelled.Submit(
+    const hot_swap::CompileTicket cancelled_ticket = cancelled.Submit(
         {cancelled_request, std::chrono::steady_clock::time_point::max(),
          cancellation.token()});
     if (!cancelled_validation->WaitForFirstCall()) {
@@ -435,7 +435,7 @@ bool TestRealValidationSingleflightAndCancellation() {
     TEST_CHECK(Throws([&] { (void)cancelled.CompileAndPublish({follow_up}); }) &&
                    !cancelled_ticket.Wait().ready() &&
                    cancelled_ticket.Wait().failure.category ==
-                       v2::FailureCategory::kCancelled &&
+                       hot_swap::FailureCategory::kCancelled &&
                    Throws([&] { (void)cancelled.Acquire(Execute(cancelled_request)); }),
                "final cancellation must suppress publication after validation");
     return true;
@@ -459,14 +459,14 @@ bool TestRealPrimitiveReplacementProductionPath() {
     std::condition_variable observer_wake;
     uint64_t events{0};
     uint64_t publications{0};
-    v2::Options options;
-    options.observer = [&](const v2::Event& event) {
+    hot_swap::Options options;
+    options.observer = [&](const hot_swap::Event& event) {
         std::lock_guard<std::mutex> lock(observer_mutex);
         ++events;
-        if (event.kind == v2::EventKind::kPublished) ++publications;
+        if (event.kind == hot_swap::EventKind::kPublished) ++publications;
         observer_wake.notify_all();
     };
-    v2::AdaptiveHotSwapController controller(options);
+    hot_swap::AdaptiveHotSwapController controller(options);
     const ProductionRequest initial_request(
         graph, baseline_config, baseline_graph, {0, 1});
     const auto initial = controller.CompileAndPublish({initial_request});
@@ -553,7 +553,7 @@ bool TestRealPrimitiveReplacementProductionPath() {
     const auto old_lease = controller.Acquire(execution);
     const ProductionRequest later_request(
         graph, later_config, replacement->compiled_graph(), {1});
-    const v2::CompileTicket ticket = controller.Submit({later_request});
+    const hot_swap::CompileTicket ticket = controller.Submit({later_request});
     auto held_run = old_lease->session()->RunAsync(
         inputs, DeviceStream::Default(Device::CPU()));
     held_run.completion.Wait();
@@ -578,7 +578,7 @@ int main() {
         {"prepared_candidate_validation_retention", TestPreparedCandidateValidationAndRetention},
         {"malformed_graph_rejected_before_preparation", TestMalformedGraphRejectedBeforePreparation},
     };
-#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP
     tests.push_back({"no_backend_admission_does_not_compile",
                      TestNoBackendAdmissionDoesNotCompile});
 #endif

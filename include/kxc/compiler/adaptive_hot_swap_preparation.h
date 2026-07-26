@@ -1,17 +1,17 @@
-/*! \file include/kxc/compiler/adaptive_production_experimental.h
- * \brief Internal preparation contracts for adaptive hot-swap v2.
+/*! \file include/kxc/compiler/adaptive_hot_swap_preparation.h
+ * \brief Internal preparation contracts for adaptive hot-swap.
  *
- * This header is enabled only with the v2 lifecycle. It prepares and validates
+ * This header is enabled only with the hot-swap lifecycle. It prepares and validates
  * static-exact candidates; routing, generation, leases, health, quarantine,
- * and execution remain owned by v2.
+ * and execution remain owned by the hot-swap controller.
  */
 #pragma once
 
-#ifndef KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
-#define KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2 0
+#ifndef KXC_ENABLE_ADAPTIVE_HOT_SWAP
+#define KXC_ENABLE_ADAPTIVE_HOT_SWAP 0
 #endif
 
-#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP
 
 #include <cstdint>
 #include <memory>
@@ -22,7 +22,7 @@
 #include "kxc/compiler/experimental_identity.h"
 #include "kxc/runtime/session.h"
 
-namespace kxc::api::adaptive::experimental::production_path {
+namespace kxc::api::adaptive::hot_swap::preparation {
 
 inline constexpr uint32_t kAdaptivePreparationContractVersion = 1;
 
@@ -103,6 +103,6 @@ std::shared_ptr<const PreparedCandidate> PrepareCandidate(
     const ProductionCompileRequest& request, CompiledGraph graph,
     std::string validation_receipt);
 
-}  // namespace kxc::api::adaptive::experimental::production_path
+}  // namespace kxc::api::adaptive::hot_swap::preparation
 
-#endif  // KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#endif  // KXC_ENABLE_ADAPTIVE_HOT_SWAP

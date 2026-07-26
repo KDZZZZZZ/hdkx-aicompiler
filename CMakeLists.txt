@@ -26,7 +26,10 @@ if(DEFINED KXC_ENABLE_RUNTIME_SHAPE_TASKS OR DEFINED KXC_ENABLE_RUNTIME_SHAPE_CU
   message(FATAL_ERROR "Legacy RuntimeShape/bridge CMake cache variables were removed by W4-1; use KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI")
 endif()
 if(DEFINED KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION)
-  message(FATAL_ERROR "KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION was removed; use KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2")
+  message(FATAL_ERROR "KXC_ENABLE_EXPERIMENTAL_ADAPTIVE_PRODUCTION was removed; use KXC_ENABLE_ADAPTIVE_HOT_SWAP")
+endif()
+if(DEFINED KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
+  message(FATAL_ERROR "KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2 was renamed; use KXC_ENABLE_ADAPTIVE_HOT_SWAP (there was never a v1)")
 endif()
 option(KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
   "Enable nonconstant CompiledModule invocation contracts" OFF)
@@ -40,8 +43,8 @@ if(KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE AND NOT KXC_ENABLE_SHAPE_PRODUCTION_EXAC
     "Enable the production exact Relay/compiler/shape adapter" FORCE)
 endif()
 
-option(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
-  "Enable default-off bounded v2 whole-plan adaptive control plane" OFF)
+option(KXC_ENABLE_ADAPTIVE_HOT_SWAP
+  "Enable default-off bounded whole-plan adaptive control plane" OFF)
 option(KXC_BUILD_RESNET18_IR_DUMP "Build the diagnostic ResNet18 IR dump tool" OFF)
 option(KXC_BUILD_PASS_TESTS "Build pass tests in test/" ON)
 option(KXC_BUILD_CODEGEN_TESTS "Build codegen tests" ON)
@@ -160,9 +163,9 @@ set(KXC_PUBLIC_HEADERS
 )
 
 set(KXC_EXPERIMENTAL_HEADERS
-  include/kxc/compiler/adaptive_hot_swap_v2.h
+  include/kxc/compiler/adaptive_hot_swap.h
   include/kxc/compiler/experimental_identity.h
-  include/kxc/compiler/adaptive_production_experimental.h
+  include/kxc/compiler/adaptive_hot_swap_preparation.h
   include/kxc/compiler/restricted_symbolic_shape.h
   include/kxc/compiler/shape_exact.h
   include/kxc/compiler/shape_specialization.h
@@ -503,13 +506,13 @@ set(KXC_RUNTIME_SESSION_SOURCES
   src/runtime/session.cc
 )
 
-if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE OR KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
+if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE OR KXC_ENABLE_ADAPTIVE_HOT_SWAP)
   list(APPEND KXC_COMPILER_SOURCES src/compiler/experimental_identity.cc)
 endif()
-if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
+if(KXC_ENABLE_ADAPTIVE_HOT_SWAP)
   list(APPEND KXC_COMPILER_SOURCES
-    src/compiler/adaptive/production_path_experimental.cc
-    src/compiler/adaptive/adaptive_hot_swap_v2.cc)
+    src/compiler/adaptive/adaptive_hot_swap_preparation.cc
+    src/compiler/adaptive/adaptive_hot_swap.cc)
 endif()
 if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
   list(APPEND KXC_COMPILER_SOURCES
@@ -545,7 +548,7 @@ function(kxc_configure_module_obj target)
     KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
-    KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2}>)
+    KXC_ENABLE_ADAPTIVE_HOT_SWAP=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP}>)
 endfunction()
 
 function(kxc_enable_cuda target)
@@ -571,7 +574,7 @@ if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
 else()
   add_library(kxc_shape_test_obj OBJECT src/shape/shape.cc)
   kxc_configure_module_obj(kxc_shape_test_obj)
-  if(NOT KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
+  if(NOT KXC_ENABLE_ADAPTIVE_HOT_SWAP)
     add_library(kxc_experimental_identity_test_obj OBJECT
       src/compiler/experimental_identity.cc)
     kxc_configure_module_obj(kxc_experimental_identity_test_obj)
@@ -740,7 +743,7 @@ function(kxc_add_runtime_exe target source_file)
     KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
-    KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2}>)
+    KXC_ENABLE_ADAPTIVE_HOT_SWAP=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP}>)
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
   endif()
@@ -851,7 +854,7 @@ if(Python3_Interpreter_FOUND)
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
             --compile
             --compiler "${CMAKE_CXX_COMPILER}"
-            --define "KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2}>"
+            --define "KXC_ENABLE_ADAPTIVE_HOT_SWAP=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP}>"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     USES_TERMINAL
     COMMENT "Check and compile public headers"
@@ -905,9 +908,9 @@ if(KXC_BUILD_PASS_TESTS)
       endif()
     endforeach()
   endif()
-  if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
-    kxc_add_runtime_exe(adaptive_hot_swap_v2_test
-      test/adaptive_preparation_v2_test.cpp)
+  if(KXC_ENABLE_ADAPTIVE_HOT_SWAP)
+    kxc_add_runtime_exe(adaptive_hot_swap_test
+      test/adaptive_preparation_test.cpp)
   endif()
   if(BUILD_TESTING)
     add_custom_target(run_restricted_symbolic_shape_test
@@ -920,28 +923,28 @@ if(KXC_BUILD_PASS_TESTS)
       DEPENDS shape_production_exact_test
       USES_TERMINAL
       COMMENT "Run shape production exact adapter test")
-    if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
-      add_test(NAME adaptive_hot_swap_v2_test
-        COMMAND "$<TARGET_FILE:adaptive_hot_swap_v2_test>")
-      set_tests_properties(adaptive_hot_swap_v2_test PROPERTIES
-        LABELS "adaptive;adaptive-hot-swap-v2;cpu" TIMEOUT 60)
-      add_custom_target(run_adaptive_hot_swap_v2_tests
+    if(KXC_ENABLE_ADAPTIVE_HOT_SWAP)
+      add_test(NAME adaptive_hot_swap_test
+        COMMAND "$<TARGET_FILE:adaptive_hot_swap_test>")
+      set_tests_properties(adaptive_hot_swap_test PROPERTIES
+        LABELS "adaptive;adaptive-hot-swap;cpu" TIMEOUT 60)
+      add_custom_target(run_adaptive_hot_swap_tests
         COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
-                -L adaptive-hot-swap-v2 -L cpu
+                -L adaptive-hot-swap -L cpu
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-        DEPENDS adaptive_hot_swap_v2_test
+        DEPENDS adaptive_hot_swap_test
         USES_TERMINAL
-        COMMENT "Run bounded adaptive v2 CPU CTest suite")
+        COMMENT "Run bounded adaptive hot-swap CPU CTest suite")
     endif()
 
-    if(KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2)
+    if(KXC_ENABLE_ADAPTIVE_HOT_SWAP)
       add_custom_target(run_adaptive_tests
         COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
                 -L adaptive -L cpu
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-        DEPENDS adaptive_hot_swap_v2_test
+        DEPENDS adaptive_hot_swap_test
         USES_TERMINAL
-        COMMENT "Run adaptive v2 CPU CTest suite")
+        COMMENT "Run adaptive hot-swap CPU CTest suite")
     endif()
   endif()
   kxc_add_runtime_exe(object_test test/object_test.cpp)
@@ -1302,7 +1305,7 @@ if(Python3_Interpreter_FOUND)
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
             --compile
             --compiler "${CMAKE_CXX_COMPILER}"
-            --define "KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2}>")
+            --define "KXC_ENABLE_ADAPTIVE_HOT_SWAP=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP}>")
   set_tests_properties(relay_op_contract pass_contract include_layers public_headers
     PROPERTIES LABELS "cpu;contract")
 endif()
