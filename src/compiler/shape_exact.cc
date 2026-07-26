@@ -566,47 +566,6 @@ bool SameIds(const Array<int64_t>& actual, const Array<int64_t>& expected) {
     return true;
 }
 
-std::string FrozenPlanCanonical(const runtime::ExecutablePlan& plan) {
-    plan.Validate();
-    std::string result;
-    AppendField(&result, "kind", "frozen-static-executable-plan-v1");
-    AppendField(&result, "memory_plan_version",
-                runtime::internal::kStaticMemoryPlanVersion);
-    AppendField(&result, "inputs", IdsCanonical(plan.input_value_ids()));
-    AppendField(&result, "constants", IdsCanonical(plan.constant_value_ids()));
-    AppendField(&result, "outputs", IdsCanonical(plan.output_value_ids()));
-    AppendField(&result, "value_count", std::to_string(plan.values().size()));
-    for (const runtime::ValueSpec& value : plan.values()) {
-        std::string encoded;
-        AppendField(&encoded, "value_id", std::to_string(value->value_id));
-        AppendField(&encoded, "storage_id", std::to_string(value->storage_id));
-        AppendField(&encoded, "shape", IdsCanonical(value.shape()));
-        AppendField(&encoded, "dtype_code", std::to_string(value->dtype.code));
-        AppendField(&encoded, "dtype_bits", std::to_string(value->dtype.bits));
-        AppendField(&encoded, "dtype_lanes", std::to_string(value->dtype.lanes));
-        AppendField(&encoded, "device_type",
-                    std::to_string(static_cast<int>(value->device.device_type())));
-        AppendField(&encoded, "device_id",
-                    std::to_string(value->device.device_id()));
-        AppendField(&encoded, "is_input", value->is_input ? "1" : "0");
-        AppendField(&encoded, "is_constant", value->is_constant ? "1" : "0");
-        AppendField(&encoded, "is_output", value->is_output ? "1" : "0");
-        AppendField(&encoded, "is_alias", value->is_alias ? "1" : "0");
-        AppendField(&encoded, "is_async_live",
-                    value->is_async_live ? "1" : "0");
-        AppendField(&result, "value", encoded);
-    }
-    AppendField(&result, "call_count", std::to_string(plan.calls().size()));
-    for (const runtime::KernelCall& call : plan.calls()) {
-        std::string encoded;
-        AppendField(&encoded, "symbol", std::string(call->symbol));
-        AppendField(&encoded, "inputs", IdsCanonical(call.input_value_ids()));
-        AppendField(&encoded, "outputs", IdsCanonical(call.output_value_ids()));
-        AppendField(&result, "call", encoded);
-    }
-    return result;
-}
-
 const shape::ConcreteTensorShapeContract& ProfileValue(
     const shape::ExactOracle& oracle, const std::string& name) {
     return oracle.profile().Value(name).contract;
