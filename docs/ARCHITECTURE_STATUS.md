@@ -54,7 +54,10 @@ cache.
 Exact shape and adaptive replacement reuse the static preparation/primitive
 compilation/assembly chain. Restricted symbolic shape only makes exact
 concrete decisions; it does not create a generic symbolic compilation or
-execution path.
+execution path. A restricted decision can be materialized into a compilable
+concrete Function and routed at the request boundary by a caller-owned map
+keyed on oracle-space dispatch keys; compile intent stays with the caller's
+explicit `Compiler::Compile`, and a route miss never compiles implicitly.
 
 ## Deliberate limits
 
