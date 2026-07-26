@@ -30,8 +30,11 @@ diverge today: the oracle key encodes the full template canonical plus
 bindings under policy `"exact"`, while the adaptive plan-derived key encodes
 only the plan input boundary under policy `"static-exact-plan-v2"`. The
 divergence is locked by an explicit inequality assertion in
-`test/shape_production_exact_test.cpp`; aligning the two spaces (including
-adaptive route-identity migration) is a separate future plan (issue #46).
+`test/shape_production_exact_test.cpp`. Aligning the two spaces (including
+adaptive route-identity migration) is deliberately deferred: it becomes
+necessary only when controller publication's revisit condition below fires,
+and a dedicated plan should be written then. Background and the alignment
+options are recorded on issue #46 (closed).
 
 `restricted_symbolic_shape.h`, gated by
 `KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE`, is exact-decision-only. `Prepare`
