@@ -1,16 +1,16 @@
-/*! \file adaptive_hot_swap_v2.h
- * \brief Default-OFF v2 whole-plan adaptive lifecycle control plane.
+/*! \file adaptive_hot_swap.h
+ * \brief Default-OFF whole-plan adaptive lifecycle control plane.
  *
  * This API is process-local experimental control-plane evidence only; it is
  * not authentication or attestation.
  */
 #pragma once
 
-#ifndef KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
-#define KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2 0
+#ifndef KXC_ENABLE_ADAPTIVE_HOT_SWAP
+#define KXC_ENABLE_ADAPTIVE_HOT_SWAP 0
 #endif
 
-#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP
 
 #include <atomic>
 #include <chrono>
@@ -22,13 +22,13 @@
 #include <stdexcept>
 #include <string>
 
-#include "kxc/compiler/adaptive_production_experimental.h"
+#include "kxc/compiler/adaptive_hot_swap_preparation.h"
 
 // =============================================================================
-// 轨 03 W3 — AdaptiveHotSwapController v2（default-OFF，依赖 preparation contracts）
+// 轨 03 W3 — AdaptiveHotSwapController（default-OFF，依赖 preparation contracts）
 // -----------------------------------------------------------------------------
 // 进程内 experimental 控制面；内建 Generation/Health authority 是测试权威，
-// 不是认证/attestation。CMake：KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=ON
+// 不是认证/attestation。CMake：KXC_ENABLE_ADAPTIVE_HOT_SWAP=ON
 //
 // 典型用法：
 //   CancellationSource cancel;
@@ -46,8 +46,8 @@
 //
 // 发布条件：DispatchKey + PlanAbiFingerprint 均匹配才可换 future routing
 // =============================================================================
-namespace kxc::api::adaptive::hot_swap::v2 {
-namespace preparation = experimental::production_path;
+namespace kxc::api::adaptive::hot_swap {
+
 using ProductionCompileRequest = preparation::ProductionCompileRequest;
 using ProductionExecutionRequest = preparation::ProductionExecutionRequest;
 using PreparedCandidate = preparation::PreparedCandidate;
@@ -200,7 +200,7 @@ struct HealthDecision final {
     std::string evidence_id;
     std::string replay_token;
 };
-// Evaluate 可在 v2 锁外并发；VerifyAndConsume 在 route/health 锁下串行、
+// Evaluate 可在热替换锁外并发；VerifyAndConsume 在 route/health 锁下串行、
 // 仅当 lease 仍是 route head 时生效，且 noexcept；同 controller reentry fail-fast。
 class HealthAuthority {
 public:
@@ -276,5 +276,5 @@ public:
 private:
     class State; std::shared_ptr<State> state_;
 };
-}  // namespace kxc::api::adaptive::hot_swap::v2
+}  // namespace kxc::api::adaptive::hot_swap
 #endif

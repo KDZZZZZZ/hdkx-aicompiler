@@ -1,6 +1,6 @@
-/*! \file adaptive_hot_swap_v2.cc */
-#include "kxc/compiler/adaptive_hot_swap_v2.h"
-#if KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2
+/*! \file adaptive_hot_swap.cc */
+#include "kxc/compiler/adaptive_hot_swap.h"
+#if KXC_ENABLE_ADAPTIVE_HOT_SWAP
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
@@ -24,7 +24,7 @@
 #include "kxc/tir/printer/print_ir.h"
 #include "support/hash.h"
 
-namespace kxc::api::adaptive::hot_swap::v2 {
+namespace kxc::api::adaptive::hot_swap {
 namespace {
 std::string Part(const std::string& x) { return std::to_string(x.size()) + ":" + x + ";"; }
 std::string FlightKey(const ProductionCompileRequest& request) {
@@ -62,7 +62,7 @@ uint64_t ProducerBytes(const PreparedCandidate& c) {
     uint64_t n = 0;
     for (const auto& pin : c.compiled_graph().artifact_pins()) {
         const uint64_t add = pin.record().byte_size;
-        if (add > std::numeric_limits<uint64_t>::max() - n) throw std::overflow_error("adaptive v2 producer byte sum overflow");
+        if (add > std::numeric_limits<uint64_t>::max() - n) throw std::overflow_error("adaptive hot-swap producer byte sum overflow");
         n += add;
     }
     return n;
@@ -216,7 +216,7 @@ public:
     explicit LocalGenerationAuthority(Generation initial) : next_(initial) {}
     std::shared_ptr<const GenerationLease> Issue(const GenerationAuthorityRequest& request) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (next_ == std::numeric_limits<Generation>::max()) throw std::overflow_error("adaptive v2 generation space is exhausted");
+        if (next_ == std::numeric_limits<Generation>::max()) throw std::overflow_error("adaptive hot-swap generation space is exhausted");
         const auto lease = MakeLease(next_, request);
         ++next_;  // Allocation/freeze failure above never consumes a generation.
         return lease;
@@ -334,7 +334,7 @@ public:
             !options.max_quarantine_tombstone_bytes ||
             options.max_queued_flights >
                 std::numeric_limits<size_t>::max() - options.max_in_flight) {
-            throw std::invalid_argument("adaptive v2 bounds are invalid");
+            throw std::invalid_argument("adaptive hot-swap bounds are invalid");
         }
         validation = options.validation_authority ? options.validation_authority : std::make_shared<LocalValidation>();
         generations = options.generation_authority ? options.generation_authority : std::make_shared<LocalGenerationAuthority>(options.initial_generation);
@@ -342,7 +342,7 @@ public:
     ~State() { Stop(); }
     void Start() { for (size_t i=0;i<options.worker_count;++i) workers.emplace_back([this]{ Worker(); }); }
     void Stop() { { std::lock_guard<std::mutex> lock(mutex); stopping=true; } wake.notify_all(); for (auto& worker:workers) if (worker.joinable()) { if (worker.get_id()==std::this_thread::get_id()) worker.detach(); else worker.join(); } }
-    void RejectReentry() const { if (callbacks.load(std::memory_order_acquire) || locked_authority_controller == this) throw std::logic_error("adaptive v2 API called while callback is active"); }
+    void RejectReentry() const { if (callbacks.load(std::memory_order_acquire) || locked_authority_controller == this) throw std::logic_error("adaptive hot-swap API called while callback is active"); }
     void Emit(Event e) const noexcept { if (!options.observer) return; try { CallbackScope s(callbacks); options.observer(e); } catch (...) {} }
     bool Live(const Flight& f) const { const auto now=std::chrono::steady_clock::now(); return std::any_of(f.waiters.begin(),f.waiters.end(),[&](const std::shared_ptr<Waiter>& w){ return w->active && now < w->deadline; }); }
     size_t LiveCount(const Flight& f) const { const auto now=std::chrono::steady_clock::now(); return static_cast<size_t>(std::count_if(f.waiters.begin(),f.waiters.end(),[&](const std::shared_ptr<Waiter>& w){ return w->active && now < w->deadline; })); }
@@ -394,16 +394,16 @@ public:
             CompiledGraph graph=CompileReplacement(f->request);
             const ValidationReceipt receipt=validation->Validate(f->request,graph);
             const auto candidate=preparation::PrepareCandidate(f->request,std::move(graph),receipt.value());
-            const uint64_t bytes=ProducerBytes(*candidate); if(bytes>options.max_producer_reported_bytes) throw CompileError(FailureCategory::kPermanent,"candidate exceeds adaptive v2 producer byte budget");
+            const uint64_t bytes=ProducerBytes(*candidate); if(bytes>options.max_producer_reported_bytes) throw CompileError(FailureCategory::kPermanent,"candidate exceeds adaptive hot-swap producer byte budget");
             std::shared_ptr<const GenerationLease> lease;
             std::shared_ptr<const GenerationLease> no_op_lease;
             Event published;
             std::vector<Event> evictions;
             { std::lock_guard<std::mutex> lock(mutex);
                 if(!Live(*f)) { FinishUnlockedCancelled(f); return; }
-                if(negative_blocked) throw CompileError(FailureCategory::kPermanent,"adaptive v2 permanent negative-cache capacity is fail-closed");
+                if(negative_blocked) throw CompileError(FailureCategory::kPermanent,"adaptive hot-swap permanent negative-cache capacity is fail-closed");
                 auto staged=routes; auto staged_discoverable=discoverable; uint64_t staged_bytes=discoverable_bytes;
-                auto route=staged.find(f->route_key); if(route==staged.end()){size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>=options.max_routes)throw CompileError(FailureCategory::kPermanent,"adaptive v2 global route capacity is fail-closed"); route=staged.emplace(f->route_key,Route{}).first;}
+                auto route=staged.find(f->route_key); if(route==staged.end()){size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>=options.max_routes)throw CompileError(FailureCategory::kPermanent,"adaptive hot-swap global route capacity is fail-closed"); route=staged.emplace(f->route_key,Route{}).first;}
                 if(route->second.compile_blocked)throw CompileError(FailureCategory::kPermanent,"route compilation is fail-closed after tombstone saturation");
                 if(route->second.tombstones.count(candidate->selection_plan_key().canonical_bytes()))throw CompileError(FailureCategory::kPermanent,"candidate selection identity is quarantined");
                 if(!Live(*f)) { FinishUnlockedCancelled(f); return; }
@@ -413,9 +413,9 @@ public:
                     no_op_lease = route->second.current;
                     flights.erase(f->key);
                 } else {
-                    if(bytes>std::numeric_limits<uint64_t>::max()-staged_bytes)throw std::overflow_error("adaptive v2 discoverable byte accounting overflow");
+                    if(bytes>std::numeric_limits<uint64_t>::max()-staged_bytes)throw std::overflow_error("adaptive hot-swap discoverable byte accounting overflow");
                     const Generation predecessor=route->second.current?route->second.current->generation():0;
-                    size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>options.max_routes||rb>options.max_route_metadata_bytes||tc>options.max_quarantine_tombstones||tb>options.max_quarantine_tombstone_bytes)throw CompileError(FailureCategory::kPermanent,"adaptive v2 global route metadata capacity is fail-closed");
+                    size_t rc;uint64_t rb;size_t tc;uint64_t tb;Metrics(staged,&rc,&rb,&tc,&tb);if(rc>options.max_routes||rb>options.max_route_metadata_bytes||tc>options.max_quarantine_tombstones||tb>options.max_quarantine_tombstone_bytes)throw CompileError(FailureCategory::kPermanent,"adaptive hot-swap global route metadata capacity is fail-closed");
                     // Every fallible container/event operation completes before Issue.
                     route->second.history.reserve(route->second.history.size()+1);
                     staged_discoverable.reserve(staged_discoverable.size()+1);
@@ -459,10 +459,10 @@ public:
 AdaptiveHotSwapController::AdaptiveHotSwapController(Options o):state_(std::make_shared<State>(std::move(o))){state_->Start();}
 AdaptiveHotSwapController::~AdaptiveHotSwapController(){if(state_)state_->Stop();}
 CompileTicket AdaptiveHotSwapController::Submit(CompileRequest request) {
-    state_->RejectReentry();request.production.Validate();const std::string key=FlightKey(request.production),route=RouteKey(request.production.dispatch_key(),request.production.plan_abi());std::shared_future<CompileResult> future;Event event;{std::lock_guard<std::mutex> lock(state_->mutex);const auto now=std::chrono::steady_clock::now();auto immediate=[&](Failure f,EventKind k){std::promise<CompileResult> p;future=p.get_future().share();p.set_value(Failed(std::move(f)));event.kind=k;};if(request.cancellation.cancelled())immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);else if(now>=request.deadline)immediate(Fail(FailureCategory::kTimeout,"waiter deadline expired",{},true),EventKind::kCancelled);else if(auto it=state_->negative.find(key);it!=state_->negative.end()&&it->second.expires>now){immediate(it->second.failure,EventKind::kRetryCached);}else {if(state_->negative.count(key))state_->EraseNegative(key);if(state_->negative_blocked)immediate(Fail(FailureCategory::kPermanent,"adaptive v2 permanent negative-cache capacity is fail-closed",{},false),EventKind::kRejected);else if(auto it=state_->flights.find(key);it!=state_->flights.end()){if(it->second->waiters.size()>=state_->options.max_waiters_per_flight)immediate(Fail(FailureCategory::kBackpressure,"adaptive v2 waiter budget is full",{},true),EventKind::kRejected);else if(state_->AddWaiter(it->second,request.cancellation,request.deadline)){future=it->second->future;event.kind=EventKind::kMerged;}else immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);}else if(state_->queue.size()>=state_->options.max_queued_flights||state_->flights.size()>=state_->options.max_in_flight)immediate(Fail(FailureCategory::kBackpressure,"adaptive v2 queue or in-flight budget is full",{},true),EventKind::kRejected);else{auto f=std::make_shared<State::Flight>(request.production,key,route);if(state_->AddWaiter(f,request.cancellation,request.deadline)){future=f->future;state_->flights.emplace(key,f);state_->queue.push_back(std::move(f));event.kind=EventKind::kQueued;state_->wake.notify_one();}else immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);}}}event.dispatch_key_digest=request.production.dispatch_key().digest();event.plan_abi_digest=request.production.plan_abi().digest();state_->Emit(std::move(event));return CompileTicket(std::move(future),request.deadline,std::move(request.cancellation));
+    state_->RejectReentry();request.production.Validate();const std::string key=FlightKey(request.production),route=RouteKey(request.production.dispatch_key(),request.production.plan_abi());std::shared_future<CompileResult> future;Event event;{std::lock_guard<std::mutex> lock(state_->mutex);const auto now=std::chrono::steady_clock::now();auto immediate=[&](Failure f,EventKind k){std::promise<CompileResult> p;future=p.get_future().share();p.set_value(Failed(std::move(f)));event.kind=k;};if(request.cancellation.cancelled())immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);else if(now>=request.deadline)immediate(Fail(FailureCategory::kTimeout,"waiter deadline expired",{},true),EventKind::kCancelled);else if(auto it=state_->negative.find(key);it!=state_->negative.end()&&it->second.expires>now){immediate(it->second.failure,EventKind::kRetryCached);}else {if(state_->negative.count(key))state_->EraseNegative(key);if(state_->negative_blocked)immediate(Fail(FailureCategory::kPermanent,"adaptive hot-swap permanent negative-cache capacity is fail-closed",{},false),EventKind::kRejected);else if(auto it=state_->flights.find(key);it!=state_->flights.end()){if(it->second->waiters.size()>=state_->options.max_waiters_per_flight)immediate(Fail(FailureCategory::kBackpressure,"adaptive hot-swap waiter budget is full",{},true),EventKind::kRejected);else if(state_->AddWaiter(it->second,request.cancellation,request.deadline)){future=it->second->future;event.kind=EventKind::kMerged;}else immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);}else if(state_->queue.size()>=state_->options.max_queued_flights||state_->flights.size()>=state_->options.max_in_flight)immediate(Fail(FailureCategory::kBackpressure,"adaptive hot-swap queue or in-flight budget is full",{},true),EventKind::kRejected);else{auto f=std::make_shared<State::Flight>(request.production,key,route);if(state_->AddWaiter(f,request.cancellation,request.deadline)){future=f->future;state_->flights.emplace(key,f);state_->queue.push_back(std::move(f));event.kind=EventKind::kQueued;state_->wake.notify_one();}else immediate(Fail(FailureCategory::kCancelled,"waiter cancelled",{},false),EventKind::kCancelled);}}}event.dispatch_key_digest=request.production.dispatch_key().digest();event.plan_abi_digest=request.production.plan_abi().digest();state_->Emit(std::move(event));return CompileTicket(std::move(future),request.deadline,std::move(request.cancellation));
 }
 std::shared_ptr<const GenerationLease> AdaptiveHotSwapController::CompileAndPublish(CompileRequest r){auto result=Submit(std::move(r)).Wait();if(result.ready())return result.lease;throw CompileError(result.failure.category,result.failure.diagnostic);}
-std::shared_ptr<const GenerationLease> AdaptiveHotSwapController::Acquire(const ProductionExecutionRequest& r) const {state_->RejectReentry();r.Validate();std::shared_ptr<const GenerationLease> out;{std::lock_guard<std::mutex> lock(state_->mutex);auto it=state_->routes.find(RouteKey(r.dispatch_key(),r.plan_abi()));if(it!=state_->routes.end()&&it->second.current&&it->second.current->plan_abi()==r.plan_abi()&&!it->second.tombstones.count(it->second.current->selection_plan_key().canonical_bytes()))out=it->second.current;}if(!out)throw std::out_of_range("no exact published adaptive v2 generation");return out;}
+std::shared_ptr<const GenerationLease> AdaptiveHotSwapController::Acquire(const ProductionExecutionRequest& r) const {state_->RejectReentry();r.Validate();std::shared_ptr<const GenerationLease> out;{std::lock_guard<std::mutex> lock(state_->mutex);auto it=state_->routes.find(RouteKey(r.dispatch_key(),r.plan_abi()));if(it!=state_->routes.end()&&it->second.current&&it->second.current->plan_abi()==r.plan_abi()&&!it->second.tombstones.count(it->second.current->selection_plan_key().canonical_bytes()))out=it->second.current;}if(!out)throw std::out_of_range("no exact published adaptive hot-swap generation");return out;}
 RunAsyncResult AdaptiveHotSwapController::RunAsync(const ProductionExecutionRequest& r,const Array<runtime::NDArray>& inputs,const DeviceStream& stream) const {auto lease=Acquire(r);auto result=lease->session()->RunAsync(inputs,stream);result.completion.RetainDependencies({},std::make_shared<RunRetention>(RunRetention{lease}));return {std::move(result.outputs),std::move(result.completion),std::move(lease)};}
 bool AdaptiveHotSwapController::EvaluateHealth(
     const std::shared_ptr<const GenerationLease>& lease) {
@@ -563,5 +563,5 @@ bool AdaptiveHotSwapController::EvaluateHealth(
     }
     return true;
 }
-}  // namespace kxc::api::adaptive::hot_swap::v2
+}  // namespace kxc::api::adaptive::hot_swap
 #endif

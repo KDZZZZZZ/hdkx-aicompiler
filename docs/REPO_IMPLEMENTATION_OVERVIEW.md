@@ -68,7 +68,7 @@ until an execution plan can launch real compiled modules with numerical proof.
   binding.
 - `test/shape_production_exact_test.cpp`,
   `test/restricted_symbolic_shape_test.cpp`, and
-  `test/adaptive_hot_swap_v2_test.cpp` cover the adjacent feature boundaries.
+  `test/adaptive_preparation_test.cpp` cover the adjacent feature boundaries.
 - `check_include_layers`, `check_public_headers`,
   `python/tools/check_relay_op_contract.py`, and
   `python/tools/check_pass_contract.py` protect source contracts.
