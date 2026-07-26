@@ -252,6 +252,17 @@ struct ConcreteTensorShapeContract {
   [[nodiscard]] bool operator==(const ConcreteTensorShapeContract& other) const noexcept;
 };
 
+// 契约良构性的唯一判定：rank 三向一致、axis_names 为空或同 rank、
+// 各维非负、valid <= logical <= physical。返回缺陷描述，nullptr 表示良构。
+// 上层做 shape 校验时必须委托这里，不得自写第二份判定。
+[[nodiscard]] const char* ContractDefect(
+    const ConcreteTensorShapeContract& contract) noexcept;
+
+// exact 语义：logical == physical == valid（整向量相等，含 rank）。
+// 不包含良构性；需要时与 ContractDefect 组合。
+[[nodiscard]] bool IsExactContract(
+    const ConcreteTensorShapeContract& contract) noexcept;
+
 // ---------------------------------------------------------------------------
 // TensorShapeContract — 符号化 logical / physical capacity / valid extent
 // 用法：

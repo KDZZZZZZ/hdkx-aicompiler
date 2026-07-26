@@ -37,17 +37,7 @@ void RequireEnabled() {
 }
 
 bool ValidContract(const shape::ConcreteTensorShapeContract& value) {
-    if (value.logical.size() != value.physical.size() ||
-        value.logical.size() != value.valid.size() ||
-        (!value.axis_names.empty() &&
-         value.axis_names.size() != value.logical.size())) {
-        return false;
-    }
-    for (size_t i = 0; i < value.logical.size(); ++i) {
-        if (value.logical[i] < 0 || value.physical[i] < value.logical[i] ||
-            value.valid[i] < 0 || value.valid[i] > value.logical[i]) return false;
-    }
-    return true;
+    return ContractDefect(value) == nullptr;
 }
 
 void VerifyContracts(const std::vector<shape::UnitSpecializationRequest>& requests) {

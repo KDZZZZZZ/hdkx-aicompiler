@@ -555,6 +555,29 @@ bool ConcreteTensorShapeContract::operator==(const ConcreteTensorShapeContract& 
          axis_names == other.axis_names;
 }
 
+const char* ContractDefect(const ConcreteTensorShapeContract& contract) noexcept {
+  if (contract.logical.size() != contract.physical.size() ||
+      contract.logical.size() != contract.valid.size() ||
+      (!contract.axis_names.empty() &&
+       contract.axis_names.size() != contract.logical.size())) {
+    return "concrete tensor contract rank mismatch";
+  }
+  for (size_t i = 0; i < contract.logical.size(); ++i) {
+    if (contract.logical[i] < 0 || contract.physical[i] < 0 || contract.valid[i] < 0) {
+      return "concrete tensor contract contains a negative dimension";
+    }
+    if (contract.valid[i] > contract.logical[i] ||
+        contract.logical[i] > contract.physical[i]) {
+      return "concrete tensor contract violates valid <= logical <= physical";
+    }
+  }
+  return nullptr;
+}
+
+bool IsExactContract(const ConcreteTensorShapeContract& contract) noexcept {
+  return contract.logical == contract.physical && contract.logical == contract.valid;
+}
+
 TensorShapeContract::TensorShapeContract(LogicalShape logical,
                                          PhysicalCapacity physical,
                                          ValidExtent valid)

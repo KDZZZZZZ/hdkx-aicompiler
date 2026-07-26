@@ -12,8 +12,8 @@
 
 #include "../internal/kernel_abi_equivalence.h"
 #include "../internal/primitive_cache.h"
-#include "../../runtime/internal/compiled_module_node.h"
-#include "../../runtime/internal/memory_plan.h"
+#include "runtime/internal/compiled_module_node.h"
+#include "runtime/internal/memory_plan.h"
 
 namespace kxc::api::adaptive::hot_swap::preparation {
 namespace {
