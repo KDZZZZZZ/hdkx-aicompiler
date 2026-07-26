@@ -21,7 +21,7 @@
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 #include "kxc/tir/transforms/pipeline.h"
-#include "../pass/generated/pass_contract.inc"
+#include "pass/generated/pass_contract.inc"
 
 namespace kxc::api {
 namespace {

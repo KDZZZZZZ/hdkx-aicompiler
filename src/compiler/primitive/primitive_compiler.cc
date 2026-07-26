@@ -2,7 +2,7 @@
  * \brief One production primitive compiler shared by all Relay topologies.
  */
 
-#include "internal/primitive_compiler.h"
+#include "../internal/primitive_compiler.h"
 
 #include <algorithm>
 #include <chrono>
@@ -15,11 +15,11 @@
 #include <string>
 #include <utility>
 
-#include "internal/kernel_abi_builder.h"
-#include "internal/kernel_abi_equivalence.h"
-#include "internal/lowered_graph.h"
-#include "internal/primitive_cache.h"
-#include "../runtime/internal/compiled_module_node.h"
+#include "../internal/kernel_abi_builder.h"
+#include "../internal/kernel_abi_equivalence.h"
+#include "../internal/lowered_graph.h"
+#include "../internal/primitive_cache.h"
+#include "runtime/internal/compiled_module_node.h"
 #include "kxc/compiler/pipeline.h"
 #include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
@@ -27,13 +27,13 @@
 #if KXC_USE_LLVM
 #include <llvm/IR/LLVMContext.h>
 
-#include "../codegen/llvm/internal/codegen_llvm.h"
-#include "../codegen/llvm/internal/llvm_jit.h"
+#include "codegen/llvm/internal/codegen_llvm.h"
+#include "codegen/llvm/internal/llvm_jit.h"
 #endif
 
 #if KXC_USE_CUDA
-#include "../codegen/cuda/internal/codegen_cuda.h"
-#include "../codegen/cuda/internal/cuda_module.h"
+#include "codegen/cuda/internal/codegen_cuda.h"
+#include "codegen/cuda/internal/cuda_module.h"
 #endif
 
 namespace kxc::api::internal {

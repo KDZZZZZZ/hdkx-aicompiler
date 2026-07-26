@@ -497,14 +497,14 @@ set(KXC_COMPILER_SOURCES
   src/compiler/control_flow/control_plan_adapter.cc
   src/compiler/control_flow/relay_control_plan.cc
   src/compiler/control_flow/production_control_flow.cc
-  src/compiler/identity.cc
+  src/compiler/identity/identity.cc
   src/compiler/pipeline_resolver.cc
-  src/compiler/primitive_compiler.cc
+  src/compiler/primitive/primitive_compiler.cc
   src/compiler/compiler.cc
 
   src/compiler/graph/partition.cc
   src/compiler/graph/value_graph.cc
-  src/compiler/kernel_abi_builder.cc
+  src/compiler/abi/kernel_abi_builder.cc
   src/compiler/lowering/lowered_function.cc
   src/compiler/lowering/lowered_graph.cc
   src/compiler/lowering/te_to_tir.cc
@@ -516,7 +516,7 @@ set(KXC_RUNTIME_SESSION_SOURCES
 )
 
 if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE OR KXC_ENABLE_ADAPTIVE_HOT_SWAP)
-  list(APPEND KXC_COMPILER_SOURCES src/compiler/experimental_identity.cc)
+  list(APPEND KXC_COMPILER_SOURCES src/compiler/identity/experimental_identity.cc)
 endif()
 if(KXC_ENABLE_ADAPTIVE_HOT_SWAP)
   list(APPEND KXC_COMPILER_SOURCES
@@ -585,7 +585,7 @@ else()
   kxc_configure_module_obj(kxc_shape_test_obj)
   if(NOT KXC_ENABLE_ADAPTIVE_HOT_SWAP)
     add_library(kxc_experimental_identity_test_obj OBJECT
-      src/compiler/experimental_identity.cc)
+      src/compiler/identity/experimental_identity.cc)
     kxc_configure_module_obj(kxc_experimental_identity_test_obj)
   endif()
   add_library(kxc_shape_experimental_test_obj OBJECT
@@ -744,6 +744,8 @@ function(kxc_add_runtime_exe target source_file)
   )
   # Ensure module objects build before linking executables.
   add_dependencies(${target} ${KXC_MODULE_OBJECT_TARGETS})
+  # Tests reach src-private headers whose includes are src-rooted.
+  target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(${target} PRIVATE kxc_public_api Threads::Threads)
   target_compile_definitions(${target} PRIVATE
     KXC_USE_CUDA=${KXC_USE_CUDA}

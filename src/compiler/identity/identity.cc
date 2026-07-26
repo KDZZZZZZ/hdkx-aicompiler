@@ -4,8 +4,8 @@
 
 #include "kxc/compiler/identity.h"
 
-#include "internal/identity_canonical.h"
-#include "internal/identity_private.h"
+#include "../internal/identity_canonical.h"
+#include "../internal/identity_private.h"
 
 #include <functional>
 #include <stdexcept>

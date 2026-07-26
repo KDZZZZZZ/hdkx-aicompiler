@@ -10,7 +10,7 @@
 #include "kxc/target/target.h"
 #include "kxc/runtime/compiled_module.h"
 #include "module_invocation_contract.h"
-#include "../../codegen/internal/compiled_kernel.h"
+#include "codegen/internal/compiled_kernel.h"
 
 namespace kxc::api {
 
