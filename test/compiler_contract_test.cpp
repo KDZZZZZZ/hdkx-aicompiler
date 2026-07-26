@@ -650,8 +650,6 @@ bool TestAssembleCompiledGraphFromOrderedPins() {
     return true;
 }
 
-#endif
-
 bool TestCompilerCompilePublishesOrderedArtifacts() {
     using namespace kxc;
     using namespace api;

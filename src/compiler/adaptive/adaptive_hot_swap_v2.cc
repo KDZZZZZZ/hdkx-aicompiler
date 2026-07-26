@@ -14,7 +14,6 @@
 #include <utility>
 #include <vector>
 
-#include "../internal/compile_state.h"
 #include "../internal/execution_contract.h"
 #include "../internal/primitive_cache.h"
 #include "../internal/primitive_compiler.h"
@@ -156,7 +155,8 @@ CompiledGraph CompileReplacement(const ProductionCompileRequest& request) {
     {
         const PassContext pass_context = PassContext::MergeTarget(
             relay::PassContextFromRelay(
-                prepared.optimized.optimized_relay()), config->target);
+                prepared.graph.partitioned.value_graph.function),
+            config->target);
         PassContext::Scope pass_scope(pass_context);
         profiling::ScopedSpan primitive_span(
             prepared.profile_context,

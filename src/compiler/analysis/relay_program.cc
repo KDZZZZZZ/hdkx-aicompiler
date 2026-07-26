@@ -185,11 +185,13 @@ RelayProgramProfile::RequiredCapabilityNames() const {
 
 PreparedRelayProgram::PreparedRelayProgram(
     Function typed_anf, RelayProgramProfile residual_profile,
-    Target target, CompilerExecutionContract execution_contract)
+    Target target, CompilerExecutionContract execution_contract,
+    size_t capability_boundary_checks)
     : typed_anf_(std::move(typed_anf)),
       residual_profile_(std::move(residual_profile)),
       target_(std::move(target)),
-      execution_contract_(std::move(execution_contract)) {}
+      execution_contract_(std::move(execution_contract)),
+      capability_boundary_checks_(capability_boundary_checks) {}
 
 const Function& PreparedRelayProgram::typed_anf() const noexcept {
     return typed_anf_;
@@ -209,6 +211,10 @@ PreparedRelayProgram::execution_contract() const noexcept {
     return execution_contract_;
 }
 
+size_t PreparedRelayProgram::capability_boundary_checks() const noexcept {
+    return capability_boundary_checks_;
+}
+
 PreparedRelayProgram PrepareRelayProgram(
     Function function, const CompileConfig& config,
     const ControlFlowPolicy& policy) {
@@ -217,8 +223,10 @@ PreparedRelayProgram PrepareRelayProgram(
             "PrepareRelayProgram requires a defined Function");
     }
 
+    size_t capability_boundary_checks = 0;
     const RelayControlCapabilitySet input_capabilities =
         AnalyzeRelayControlCapabilities(function);
+    ++capability_boundary_checks;
     CompilerExecutionContract contract =
         ResolveCompilerExecutionContract(
             config, CapabilityNames(input_capabilities));
@@ -231,11 +239,13 @@ PreparedRelayProgram PrepareRelayProgram(
 
     RelayProgramProfile residual_profile(
         AnalyzeRelayControlCapabilities(typed_anf));
+    ++capability_boundary_checks;
     RequireAllowedCapabilities(residual_profile, policy);
 
     return PreparedRelayProgram(
         std::move(typed_anf), std::move(residual_profile),
-        config->target, std::move(contract));
+        config->target, std::move(contract),
+        capability_boundary_checks);
 }
 
 }  // namespace kxc::api::internal

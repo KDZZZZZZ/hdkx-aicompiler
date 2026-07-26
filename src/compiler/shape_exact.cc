@@ -918,12 +918,9 @@ ExactPlanVariant ProductionExactShapeAdapter::AssembleExactPlan(
     const internal::CompilerExecutionContract& contract =
         prepared.impl_->contract;
     RequireBackendAvailable(config->target);
-    config.Validate();
     if (compiler_prepared.execution_contract_canonical !=
             contract.canonical_bytes ||
         internal::CanonicalTargetSnapshot(compiler_prepared.target) !=
-            internal::CanonicalTargetSnapshot(config->target) ||
-        internal::CanonicalTargetSnapshot(compiler_prepared.optimized.target()) !=
             internal::CanonicalTargetSnapshot(config->target) ||
         internal::CanonicalTargetSnapshot(compiler_prepared.graph.target) !=
             internal::CanonicalTargetSnapshot(config->target) ||
@@ -955,7 +952,8 @@ ExactPlanVariant ProductionExactShapeAdapter::AssembleExactPlan(
     {
         const PassContext pass_context = PassContext::MergeTarget(
             relay::PassContextFromRelay(
-                compiler_prepared.optimized.optimized_relay()), config->target);
+                compiler_prepared.graph.partitioned.value_graph.function),
+            config->target);
         PassContext::Scope pass_scope(pass_context);
         profiling::ScopedSpan compile_span(
             profile_context, stage_event("compile_primitives"), run_id);

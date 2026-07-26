@@ -337,7 +337,8 @@ CompiledGraph CompilePipeline(
     {
         const PassContext pass_context = PassContext::MergeTarget(
             relay::PassContextFromRelay(
-                prepared.optimized.optimized_relay()), config->target);
+                prepared.graph.partitioned.value_graph.function),
+            config->target);
         PassContext::Scope pass_scope(pass_context);
         profiling::ScopedSpan primitive_span(
             profile_context, MakeStageEvent("compile_primitives", config), run_id);
@@ -489,7 +490,8 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
             "PrepareCompilerGraph execution contract does not match "
             "prepared Relay program");
     }
-    size_t capability_boundary_checks = 0;
+    size_t capability_boundary_checks =
+        prepared.capability_boundary_checks();
     size_t relay_graph_pipelines = 1;
     const Target target = prepared.target();
     const Device device(target->device_type, target->device_id);

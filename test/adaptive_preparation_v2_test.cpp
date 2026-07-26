@@ -210,17 +210,22 @@ bool TestRequestSnapshotAndExactIdentity() {
     using namespace kxc;
     api::internal::ClearPrimitiveCacheForTesting();
     const Function graph = MakeFunction();
-    api::CompileConfig original = api::CompileConfig::Create(
-        BuildTarget(Device::CPU()), 1);
-    const Target original_target = original->target;
+    const Target discovered = BuildTarget(Device::CPU());
+    auto* source_node = new TargetNode();
+    source_node->kind = discovered->kind;
+    source_node->device_type = discovered->device_type;
+    source_node->device_id = discovered->device_id;
+    source_node->attrs = discovered->attrs;
+    const Target source{ObjectRef(source_node)};
+    const api::CompileConfig original =
+        api::CompileConfig::Create(source, 1);
     const std::string frozen_target =
-        api::internal::BuildTargetCapabilityFingerprint(original_target);
+        api::internal::BuildTargetCapabilityFingerprint(original->target);
     const api::GraphSemanticKey graph_key = api::Compiler::BuildGraphSemanticKey(graph);
     const ProductionRequest request(
         graph, original, MakeGraph(graph_key, original), {0});
 
-    auto* mutable_target = const_cast<TargetNode*>(original_target.operator->());
-    mutable_target->attrs.arch += "-mutated";
+    source_node->attrs.arch += "-mutated";
     TEST_CHECK(request.config()->opt_level == 1 &&
                    api::internal::BuildTargetCapabilityFingerprint(
                        request.config()->target) == frozen_target &&

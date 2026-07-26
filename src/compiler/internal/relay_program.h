@@ -67,6 +67,7 @@ public:
     const RelayProgramProfile& residual_profile() const noexcept;
     const Target& target() const noexcept;
     const CompilerExecutionContract& execution_contract() const noexcept;
+    size_t capability_boundary_checks() const noexcept;
 
 private:
     friend PreparedRelayProgram PrepareRelayProgram(
@@ -75,12 +76,14 @@ private:
 
     PreparedRelayProgram(Function typed_anf, RelayProgramProfile residual_profile,
                          Target target,
-                         CompilerExecutionContract execution_contract);
+                         CompilerExecutionContract execution_contract,
+                         size_t capability_boundary_checks);
 
     Function typed_anf_;
     RelayProgramProfile residual_profile_;
     Target target_;
     CompilerExecutionContract execution_contract_;
+    size_t capability_boundary_checks_{0};
 };
 
 PreparedRelayProgram PrepareRelayProgram(
