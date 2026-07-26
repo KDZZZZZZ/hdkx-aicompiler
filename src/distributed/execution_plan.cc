@@ -16,14 +16,13 @@ KXC_OBJECT_DEFINE(CommExecNode)
 KXC_OBJECT_DEFINE(BarrierExecNode)
 KXC_OBJECT_DEFINE(ExecutionPlanNode)
 
-KernelExec::KernelExec(std::string op_name, tir::PrimFunc primfunc,
+KernelExec::KernelExec(std::string op_name,
                        Array<int> input_values, Array<int> output_values,
                        Array<int> worker_set, std::string kernel_symbol) {
   auto* node = new KernelExecNode();
   node->kind = ExecNodeKind::kKernel;
   node->op_name = std::move(op_name);
   node->kernel_symbol = std::move(kernel_symbol);
-  node->primfunc = std::move(primfunc);
   node->input_values = std::move(input_values);
   node->output_values = std::move(output_values);
   node->worker_set = std::move(worker_set);

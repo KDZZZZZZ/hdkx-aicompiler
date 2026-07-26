@@ -514,7 +514,7 @@ bool TestExecutionPlanKernelFailsClosed() {
     using namespace kxc;
 
     const PassContext pass_ctx = PassContext::FromTarget(BuildTarget(Device::CPU()));
-    KernelExec kernel("add", tir::PrimFunc(), {0}, {1}, {0}, "missing_module");
+    KernelExec kernel("add", {0}, {1}, {0}, "missing_module");
     Map<int, Array<int64_t>> shapes;
     shapes.Set(0, {1});
     shapes.Set(1, {1});
