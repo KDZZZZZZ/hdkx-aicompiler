@@ -2,6 +2,17 @@
 
 > **For implementer:** REQUIRED SKILL: `executing-plans`，按任务顺序实现并在每个提交后验证。
 
+> **修订记录（2026-07-26，Task 1 执行中）：** 停止条件 §4.1 第一条已触发——
+> oracle 派生（`shape_specialization.cc` `InstantiateExactProfile`：模板全文
+> canonical + bindings + policy `"exact"`）与 plan 派生
+> （`experimental_identity.cc` `BuildStaticExactShapeProfileKey`：仅输入边界
+> + 固定 bindings 串 + policy `"static-exact-plan-v2"`）的 `ShapeProfileKey`
+> 在四个 canonical 字段上分叉。经用户决定：本计划范围收窄为 **oracle 键空间
+> 内的 dispatch 闭环**（Tasks 2-3 全部 identity 来自同一 prepared 模板，
+> 自洽）；验收不变量 2 改为**锁定分叉事实**的不等断言；oracle/plan 键空间
+> 对齐（含 adaptive route identity 迁移决策）是独立的后续计划，证据回填
+> issue #46。
+
 **Goal:** 闭合 shape 子系统的消费侧（issue #46）：让 `ExactPlanVariant` 铸造与
 adaptive 一致的 `DispatchKey`，让受限符号模板可以按 binding 物化出可编译的
 concrete Relay Function，并用一个确定性测试锁定“输入 shape → profile →
