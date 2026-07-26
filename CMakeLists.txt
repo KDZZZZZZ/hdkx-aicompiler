@@ -889,9 +889,10 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kxcConfig.cmake"
 if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(shape_production_exact_test test/shape_production_exact_test.cpp)
   kxc_add_runtime_exe(restricted_symbolic_shape_test test/restricted_symbolic_shape_test.cpp)
+  kxc_add_runtime_exe(shape_exact_dispatch_test test/shape_exact_dispatch_test.cpp)
   if(TARGET kxc_shape_experimental_test_obj)
     foreach(_kxc_shape_test IN ITEMS shape_production_exact_test
-        restricted_symbolic_shape_test)
+        restricted_symbolic_shape_test shape_exact_dispatch_test)
       target_sources(${_kxc_shape_test} PRIVATE
         $<TARGET_OBJECTS:kxc_shape_test_obj>
         $<TARGET_OBJECTS:kxc_shape_experimental_test_obj>)
@@ -1255,6 +1256,7 @@ kxc_add_ctest_if_target(shape_system_test "shape;cpu")
 kxc_add_ctest_if_target(shape_specialization_test "shape;cpu")
 kxc_add_ctest_if_target(shape_production_exact_test "shape;shape-production;cpu")
 kxc_add_ctest_if_target(restricted_symbolic_shape_test "shape;shape-restricted-symbolic;cpu")
+kxc_add_ctest_if_target(shape_exact_dispatch_test "shape;shape-dispatch;cpu")
 
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test
