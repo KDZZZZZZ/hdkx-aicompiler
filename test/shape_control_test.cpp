@@ -125,6 +125,23 @@ spec::GraphTemplate NonExactInputTemplate() {
           {"source"}, {"result"}}});
 }
 
+spec::GraphTemplate NonExactOutputTemplate() {
+    const spec::DimExpr n = spec::DimExpr::Symbol("n");
+    const spec::TensorShapeContract output(
+        spec::LogicalShape({n}),
+        spec::PhysicalCapacity({spec::DimExpr::Const(8)}),
+        spec::ValidExtent({n}));
+    return spec::GraphTemplate(
+        kxc::api::Compiler::BuildGraphSemanticKey(ReluAddGraph()),
+        spec::ShapeProgram(
+            {"n"}, {{"source", ExactContract({n})}},
+            {{"result", output}},
+            {spec::Constraint::Range(n, 0, 8)}),
+        {{spec::GraphLocalCallLocator("nonexact-output.call"),
+          kxc::api::UnitSemanticKey("shape-control.nonexact-output-unit.v1"),
+          {"source"}, {"result"}}});
+}
+
 spec::BindingSet BindFour(const spec::GraphTemplate& graph) {
     return control::BindExactInputShapes(
         graph, {{"right", {2, 4}}, {"left", {4, 3}}});
@@ -209,11 +226,16 @@ bool TestBindingFailures() {
           }),
           "arithmetic input expressions must not be inverted");
     const spec::GraphTemplate nonexact = NonExactInputTemplate();
+    const spec::GraphTemplate nonexact_output = NonExactOutputTemplate();
     CHECK(Throws([&] {
               (void)control::BindExactInputShapes(
                   nonexact, {{"source", {4}}});
-          }),
-          "logical/physical/valid disagreement must fail closed");
+          }) &&
+              Throws([&] {
+                  (void)control::BindExactInputShapes(
+                      nonexact_output, {{"source", {4}}});
+              }),
+          "input or output logical/physical/valid disagreement must fail closed");
     return true;
 }
 
