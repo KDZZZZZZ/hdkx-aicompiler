@@ -69,7 +69,15 @@ function query<T>(bundleId: string, spec: WorkerRequest extends { spec: infer S 
   return res.data as T
 }
 
-describe('真实产物 real-compile', () => {
+/**
+ * 真实产物不入库（体积与来源都不适合当仓库资产），所以这组用例按需跳过。
+ * 重新生成：构建 profile_bundle_test 后运行它，把 profile_bundle_test_output
+ * 拷进 fixtures/bundles/real-compile，详见 fixtures/README.md。
+ * 这里刻意用 skipIf 而不是让断言静默通过——跳过要看得见。
+ */
+const hasReal = existsSync(join(FIXTURES, 'real-compile', 'events.jsonl'))
+
+describe.skipIf(!hasReal)('真实产物 real-compile', () => {
   beforeAll(() => load('real', 'real-compile'))
 
   it('解析出全部 22 个事件且没有损坏行', () => {
