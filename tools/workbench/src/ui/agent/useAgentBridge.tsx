@@ -71,10 +71,18 @@ const COMMANDS: Record<string, CommandHandler> = {
         error: `未知样例 ${id}；可用：${deps.fixtures.map((f) => f.id).join(', ')}`,
       }
     }
-    await deps.loadFixtureById(id)
-    const s = useWorkbench.getState()
-    const loaded = Object.keys(s.bundles)
-    return { ok: true, result: { loadedBundleIds: loaded } }
+    await deps.loadFixtureById(id) // 失败会抛，外层统一转成 ok:false
+    // 最后一道校验：加载函数正常返回但目标没进 store（被某条路径静默吞掉）
+    // 也必须如实报失败——agent 基于假成功继续跑是最难排查的一类错。
+    const loaded = Object.keys(useWorkbench.getState().bundles)
+    const hit = loaded.find((b) => b === `url:${known.path}` || b.endsWith(`/${id}`))
+    if (!hit) {
+      return {
+        ok: false,
+        error: `加载流程返回了，但 ${id} 不在已加载列表里：${loaded.join(', ') || '（空）'}`,
+      }
+    }
+    return { ok: true, result: { bundleId: hit, loadedBundleIds: loaded } }
   },
 
   'new-column': (a) => {

@@ -37,6 +37,10 @@ npm run dev:all --prefix tools/workbench
 node tools/workbench/cli/kxc-wb.mjs query kpi --bundle <目录>
 ```
 
+**Node 版本要求**：`query` / `compare` 直接运行 TypeScript 源码（与界面共用同一份
+聚合实现），需要 **Node 23.6+**（或 22.6+ 并设 `NODE_OPTIONS=--experimental-strip-types`）。
+`ui` 与 `help` 在任何 Node 上可用；版本不足时 CLI 会给出明确指引而不是模块解析报错。
+
 ---
 
 ## 3. 给 agent 的使用约定

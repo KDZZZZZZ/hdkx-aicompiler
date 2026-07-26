@@ -14,6 +14,7 @@ import React, { useMemo } from 'react'
 import type { Tile, TileDensity, AnalysisContext } from '../state/types'
 import { useQuery, toQueryFilter } from '../kxc/query-client'
 import { irArtifactPath } from '../kxc/contract'
+import { lcsDiff } from '../ui/chart/line-diff'
 
 export interface IrDiffTileProps {
   tile: Tile
@@ -21,37 +22,8 @@ export interface IrDiffTileProps {
   density: TileDensity
 }
 
-/** 简化的行级 diff：0=unchanged, 1=added, -1=removed */
-function simpleLcsDiff(before: string[], after: string[]): Array<{ line: string; status: -1 | 0 | 1 }> {
-  const result: Array<{ line: string; status: -1 | 0 | 1 }> = []
-
-  // 极简 LCS：只标记最后一批删除和最后一批添加
-  let i = 0
-  let j = 0
-  while (i < before.length && j < after.length) {
-    if (before[i] === after[j]) {
-      result.push({ line: before[i] ?? '', status: 0 })
-      i++
-      j++
-    } else {
-      break
-    }
-  }
-
-  // 剩余部分作为删除
-  while (i < before.length) {
-    result.push({ line: before[i] ?? '', status: -1 })
-    i++
-  }
-
-  // 剩余部分作为添加
-  while (j < after.length) {
-    result.push({ line: after[j] ?? '', status: 1 })
-    j++
-  }
-
-  return result
-}
+// 行级 diff 实现在 ../ui/chart/line-diff（真 LCS + 前后缀剥离 + 规模保护）。
+// 旧的"极简 LCS"只同步公共前缀，顶部改一行就把整个文件标成增删，已废弃。
 
 export function IrDiffTile(props: IrDiffTileProps): JSX.Element {
   const { tile, context, density } = props
@@ -93,7 +65,7 @@ export function IrDiffTile(props: IrDiffTileProps): JSX.Element {
     if (!beforeQuery.data || !afterQuery.data) return null
     const before = beforeQuery.data.content?.split('\n') ?? []
     const after = afterQuery.data.content?.split('\n') ?? []
-    return simpleLcsDiff(before, after)
+    return lcsDiff(before, after)
   }, [beforeQuery.data, afterQuery.data])
 
   if (!ready) {

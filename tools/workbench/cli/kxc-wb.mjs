@@ -14,10 +14,39 @@
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve, basename } from 'node:path'
-import { parseBundle, runQuery } from '../src/kxc/query.worker.ts'
 
 const PORT = process.env.KXC_WB_PORT ?? 5274
 const CONTROL = `http://127.0.0.1:${PORT}`
+
+/**
+ * 查询引擎按需加载。
+ *
+ * 引擎是 TypeScript 源码（与界面共用同一份聚合实现），依赖 Node 的原生
+ * 类型剥离：23.6+/24 开箱即用，22.6~23.5 需要 --experimental-strip-types。
+ * 不能放在顶层静态 import——那样在 Node 20 上连 `kxc-wb help` 都会直接
+ * ERR_UNKNOWN_FILE_EXTENSION 崩掉。改成惰性加载后，help 与全部 ui 命令
+ * 在任何 Node 上可用；只有 query/compare 需要新版本，且失败时给出
+ * 可执行的指引而不是一段模块解析栈。
+ */
+let engine = null
+async function ensureEngine() {
+  if (engine) return engine
+  try {
+    engine = await import('../src/kxc/query.worker.ts')
+    return engine
+  } catch (err) {
+    const text = String((err && err.message) || err)
+    if ((err && err.code === 'ERR_UNKNOWN_FILE_EXTENSION') || /Unknown file extension/i.test(text)) {
+      fail(
+        `当前 Node ${process.version} 无法直接运行 TypeScript，query/compare 不可用。` +
+          `请升级到 Node 23.6+（或 22.6+ 并设置 NODE_OPTIONS=--experimental-strip-types）。` +
+          `ui 与 help 命令不受影响。`,
+        { node: process.version, required: '>=22.6' },
+      )
+    }
+    throw err
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 参数解析
@@ -65,7 +94,8 @@ function fail(message, extra = {}) {
 // bundle 读取
 // ---------------------------------------------------------------------------
 
-function loadBundleFromDisk(dir) {
+async function loadBundleFromDisk(dir) {
+  const { parseBundle } = await ensureEngine()
   const root = resolve(process.cwd(), dir)
   if (!existsSync(root)) fail(`目录不存在：${root}`)
   const read = (f) => (existsSync(join(root, f)) ? readFileSync(join(root, f), 'utf8') : null)
@@ -163,14 +193,15 @@ const QUERY_KINDS = {
   timeline: (f) => ({ kind: 'timeline', buckets: Number(f.buckets ?? 60) }),
 }
 
-function cmdQuery() {
+async function cmdQuery() {
   const kind = positional[1]
   if (!kind || !QUERY_KINDS[kind]) {
     fail(`未知查询 ${kind ?? '(空)'}`, { available: Object.keys(QUERY_KINDS) })
   }
   if (!flags.bundle) fail('需要 --bundle <目录>')
 
-  const bundle = loadBundleFromDisk(String(flags.bundle))
+  const { runQuery } = await ensureEngine()
+  const bundle = await loadBundleFromDisk(String(flags.bundle))
   const data = runQuery(bundle, QUERY_KINDS[kind](flags), buildFilter(flags))
 
   out({ ok: true, kind, bundle: String(flags.bundle), data }, () => {
@@ -251,10 +282,11 @@ function cmdQuery() {
 // compare —— agent 最常用的一条，直接给出可行动的结论
 // ---------------------------------------------------------------------------
 
-function cmdCompare() {
+async function cmdCompare() {
   if (!flags.baseline || !flags.candidate) fail('需要 --baseline <目录> --candidate <目录>')
-  const base = loadBundleFromDisk(String(flags.baseline))
-  const cand = loadBundleFromDisk(String(flags.candidate))
+  const { runQuery } = await ensureEngine()
+  const base = await loadBundleFromDisk(String(flags.baseline))
+  const cand = await loadBundleFromDisk(String(flags.candidate))
   const filter = buildFilter(flags)
   const q = (b, spec) => runQuery(b, spec, filter)
 
@@ -511,8 +543,8 @@ const HELP = `kxc-wb —— 性能分析桌布命令行
 const cmd = positional[0]
 try {
   if (!cmd || cmd === 'help' || flags.help) process.stdout.write(HELP)
-  else if (cmd === 'query') cmdQuery()
-  else if (cmd === 'compare') cmdCompare()
+  else if (cmd === 'query') await cmdQuery()
+  else if (cmd === 'compare') await cmdCompare()
   else if (cmd === 'ui') await cmdUi()
   else fail(`未知命令 ${cmd}`, { available: ['query', 'compare', 'ui', 'help'] })
 } catch (err) {

@@ -455,16 +455,17 @@ function queryHotspot(
 }
 
 function queryKernelDist(evts: KxcEvent[], buckets: number): KernelDurationDistResult {
-  const durations: number[] = []
-  let sawCupti = false
+  // CUPTI 硬件耗时与逻辑 span 是两种量纲，绝不能混进同一个直方图——
+  // 混合后的 p50/p95 既不是 GPU 统计也不是逻辑统计，却看起来像硬件测量。
+  // 有 CUPTI 事件就只用 CUPTI；完全没有时才退回逻辑 span，并保留 caveat 说明。
+  const cupti: number[] = []
+  const logical: number[] = []
   for (const e of evts) {
-    if (e.event_type === EVENT_TYPE.cudaKernel) {
-      sawCupti = true
-      durations.push(e.duration_ns)
-    } else if (e.event_type === EVENT_TYPE.kernelExec) {
-      durations.push(e.duration_ns)
-    }
+    if (e.event_type === EVENT_TYPE.cudaKernel) cupti.push(e.duration_ns)
+    else if (e.event_type === EVENT_TYPE.kernelExec) logical.push(e.duration_ns)
   }
+  const sawCupti = cupti.length > 0
+  const durations = sawCupti ? cupti : logical
   if (durations.length === 0) {
     return { buckets: [], totalCount: 0, p50Ns: null, p95Ns: null, maxNs: null, caveat: null }
   }

@@ -18,6 +18,34 @@ export interface UseEChartsOpts {
 }
 
 /**
+ * 把 option 里的 'var(--xxx)' 字符串解析成实际色值。
+ *
+ * ECharts 画在 canvas 上，不经过 CSS 层，`var(--series-1)` 这种字符串
+ * 它并不认识——各 Tile 里这么写的颜色实际上全部失效，只是被 dark 主题的
+ * 默认色板兜住了才没露馅。统一在 setOption 前解析一遍，图表代码可以
+ * 继续写语义化的变量名（§20 不许硬编码颜色的要求仍然成立）。
+ */
+function resolveCssVars<T>(value: T, css: CSSStyleDeclaration): T {
+  if (typeof value === 'string') {
+    const m = /^var\((--[\w-]+)\)$/.exec(value)
+    if (m && m[1]) {
+      const resolved = css.getPropertyValue(m[1]).trim()
+      return (resolved || value) as unknown as T
+    }
+    return value
+  }
+  if (Array.isArray(value)) return value.map((v) => resolveCssVars(v, css)) as unknown as T
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = resolveCssVars(v, css)
+    }
+    return out as unknown as T
+  }
+  return value
+}
+
+/**
  * ECharts 实例容器管理。
  *
  * 用法：
@@ -34,12 +62,7 @@ export function useECharts(
   const instanceRef = useRef<echarts.ECharts | null>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
 
-  // 从 tokens.css 读取颜色
-  const getSeriesColor = (index: number): string => {
-    const varName = `--series-${Math.min(index + 1, 8)}`
-    const computed = getComputedStyle(document.documentElement)
-    return computed.getPropertyValue(varName).trim() || '#5b9dd9'
-  }
+  // （颜色解析统一在 resolveCssVars 里做，见下）
 
   useEffect(() => {
     const container = containerRef.current
@@ -69,8 +92,11 @@ export function useECharts(
       }
     }
 
-    // 设置 option
-    instanceRef.current.setOption(option, true)
+    // 设置 option（先把 var(--xxx) 解析成实际色值，canvas 不认 CSS 变量）
+    instanceRef.current.setOption(
+      resolveCssVars(option, getComputedStyle(document.documentElement)),
+      true,
+    )
 
     // 设置 ResizeObserver 以在容器尺寸变化时 resize
     if (!resizeObserverRef.current && container.parentElement) {

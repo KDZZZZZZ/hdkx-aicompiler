@@ -176,25 +176,20 @@ function GatherLayoutRenderer({
         return
       }
 
-      // 交换两个位置的所有 tile
-      const newSlots = [...layout.slots]
-      const sourceSlots = newSlots.filter((s) => `${s.col}:${s.row}` === sourceKey)
-      const targetSlots = newSlots.filter((s) => `${s.col}:${s.row}` === targetKey)
-
-      sourceSlots.forEach((s) => {
-        s.col = targetCol
-        s.row = targetRow
-      })
-      targetSlots.forEach((s) => {
-        s.col = dragState.sourceCol ?? 0
-        s.row = dragState.sourceRow ?? 0
+      // 交换两个位置的所有 tile。
+      // 必须 map 出**新的 slot 对象**：浅拷贝数组后就地改 col/row，改的仍是
+      // 当前 doc 里的对象——commit() 克隆的 prev 已被污染，Undo 快照里
+      // 存的就是换位后的坐标，撤销等于没撤（Codex review 抓到）。
+      const newSlots = layout.slots.map((s: GatherSlot) => {
+        const key = `${s.col}:${s.row}`
+        if (key === sourceKey) return { ...s, col: targetCol, row: targetRow }
+        if (key === targetKey)
+          return { ...s, col: dragState.sourceCol ?? 0, row: dragState.sourceRow ?? 0 }
+        return s
       })
 
-      // 标记为手工调整
+      // updateGatherSlots 会记录 commit 并置 auto=false
       updateGatherSlots(newSlots)
-      if (layout.auto) {
-        // updateGatherSlots 会置 auto=false
-      }
 
       setDragState(null)
     },

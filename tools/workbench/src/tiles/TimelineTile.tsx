@@ -73,25 +73,44 @@ export function TimelineTile(props: TimelineTileProps): JSX.Element {
     if (!query.data) return null
 
     const data = query.data
-    const numBuckets = Math.ceil((data.endNs - data.startNs) / data.bucketNs)
+    const bucketCount = Math.max(...data.series.map((s) => s.values.length), data.counts.length)
+
+    // x 轴必须是**时间桶**。旧实现把 series.values（每桶一个值）直接塞给
+    // "类目=component" 的坐标系，ECharts 把第 i 个桶的值对到第 i 个 component
+    // 类目上——整张图的坐标语义都是错的（Codex review 抓到）。
+    // 正确形态：x=桶起始时刻，y=该桶内耗时，每个 component 一条堆叠柱序列。
+    const bucketLabels = Array.from({ length: bucketCount }, (_, i) =>
+      formatNs(data.startNs + i * data.bucketNs),
+    )
+    const compact = density === 'compact' || density === 'thumbnail'
 
     return {
-      tooltip: { trigger: 'axis', axisPointer: { type: 'line' } },
-      grid: { left: 80, right: 20, top: 20, bottom: 30 },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      legend: compact ? undefined : { top: 0, textStyle: { fontSize: 10 } },
+      grid: { left: 60, right: 16, top: compact ? 8 : 28, bottom: compact ? 20 : 44 },
       xAxis: {
-        type: 'value',
-        axisLabel: { formatter: (v: number) => formatNs(v) },
+        type: 'category',
+        data: bucketLabels,
+        axisLabel: { show: !compact, fontSize: 10, interval: Math.ceil(bucketCount / 8) },
       },
-      yAxis: { type: 'category', data: data.series.map((s) => s.component) },
-      series: data.series.map((s) => ({
+      yAxis: {
+        type: 'value',
+        axisLabel: { show: !compact, formatter: (v: number) => formatNs(v) },
+      },
+      // dataZoom 是把框选写回全局时间范围的入口（下方 datazoom 事件依赖它）。
+      dataZoom: compact
+        ? undefined
+        : [{ type: 'inside' }, { type: 'slider', height: 14, bottom: 4 }],
+      series: data.series.map((s, idx) => ({
         name: s.component,
-        type: 'bar',
-        stack: true,
+        type: 'bar' as const,
+        stack: 'total',
+        barCategoryGap: '10%',
         data: s.values,
-        itemStyle: { color: `var(--series-${(data.series.indexOf(s) % 8) + 1})` },
+        itemStyle: { color: `var(--series-${(idx % 8) + 1})` },
       })),
     } as echarts.EChartsOption
-  }, [query.data])
+  }, [query.data, density])
 
   const containerRef = useECharts(option, {
     onEvents: {

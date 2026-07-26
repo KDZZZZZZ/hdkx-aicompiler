@@ -113,6 +113,10 @@ export function useBundleActions(): BundleActions {
         store.setLoading(null, msg)
         store.showToast('error', `加载 Bundle 失败: ${msg}`)
         setLoading(false)
+        // 必须向上抛。之前这里吞掉异常，agent 的 load-bundle 命令会拿到
+        // ok:true 和一份旧的 bundle 列表，然后基于根本没加载成功的数据继续跑。
+        // UI 调用方（下拉、按钮）自行 .catch——toast 已经发过，界面不需要再炸。
+        throw err
       }
     },
     [store, queryClient]
@@ -128,38 +132,34 @@ export function useBundleActions(): BundleActions {
       return
     }
 
+    let result
     try {
-      const result = await pickBundleDirectory()
-      if (!result) {
-        // 用户取消
-        return
-      }
-      await loadBundle(result)
+      result = await pickBundleDirectory()
     } catch (err) {
       const msg = err instanceof Error ? err.message : '未知错误'
       setError(msg)
       store.showToast('error', `目录选择失败: ${msg}`)
+      throw err
     }
+    if (!result) return // 用户取消
+    // loadBundle 失败自带 toast 并 rethrow；这里不再包一层，避免双重提示。
+    await loadBundle(result)
   }, [loadBundle, store])
 
-  // 从 fixtures 加载
+  // 从 fixtures 加载。失败必须抛出：agent 桥接靠异常判断命令成败，
+  // 这里吞错的话 load-bundle 会假报成功（Codex review 抓到的真问题）。
   const loadFixtureById = useCallback(
     async (fixtureId: string) => {
-      try {
-        const fixture = fixtures.find((f) => f.id === fixtureId)
-        if (!fixture) {
-          throw new Error(`Fixture not found: ${fixtureId}`)
-        }
-
-        const result = await loadFromUrl(fixture.path, fixture.id)
-        await loadBundle(result)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : '未知错误'
+      const fixture = fixtures.find((f) => f.id === fixtureId)
+      if (!fixture) {
+        const msg = `未知样例 ${fixtureId}；可用：${fixtures.map((f) => f.id).join(', ') || '（无）'}`
         setError(msg)
-        store.showToast('error', `加载 Fixture 失败: ${msg}`)
+        throw new Error(msg)
       }
+      const result = await loadFromUrl(fixture.path, fixture.id)
+      await loadBundle(result) // 失败会抛，toast 由 loadBundle 负责
     },
-    [fixtures, loadBundle, store]
+    [fixtures, loadBundle]
   )
 
   // 设置为 Baseline

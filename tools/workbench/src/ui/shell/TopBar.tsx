@@ -81,8 +81,9 @@ export function TopBar(): JSX.Element {
               const v = e.target.value
               if (!v) return
               // 已加载过的直接绑定，没加载过的先按样例 id 拉取。
+              // 加载函数失败会 rethrow（agent 链路靠它判断成败）；UI 侧 toast 已发，吞掉即可。
               if (loadedIds.includes(v)) bindBundle(v)
-              else void bundle.loadFixtureById(v)
+              else void bundle.loadFixtureById(v).catch(() => {})
             }}
           >
             <option value="">{bundle.loading ? '加载中…' : '— 选择 Bundle —'}</option>
@@ -106,7 +107,7 @@ export function TopBar(): JSX.Element {
             )}
           </select>
           <button
-            onClick={() => void bundle.openDirectory()}
+            onClick={() => void bundle.openDirectory().catch(() => {})}
             disabled={bundle.loading}
             title="从本机选择一个 KXC profiling bundle 目录；文件不会离开本机"
             aria-label="打开本地 bundle 目录"

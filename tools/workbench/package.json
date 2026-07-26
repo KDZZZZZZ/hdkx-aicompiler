@@ -7,6 +7,9 @@
   "bin": {
     "kxc-wb": "cli/kxc-wb.mjs"
   },
+  "engines": {
+    "node": ">=22.6"
+  },
   "scripts": {
     "dev": "vite",
     "dev:all": "node scripts/dev-all.mjs",

@@ -28,8 +28,11 @@ export function RegressionDeltaTile(props: RegressionDeltaTileProps): JSX.Elemen
   const baselineFilter = { ...filter, ... context.baselineBundleId ? { bundleId: context.baselineBundleId } : {} }
   const candidateFilter = { ...filter, ... context.bundleId ? { bundleId: context.bundleId } : {} }
 
-  const baselineQuery = useQuery(context.baselineBundleId, { kind: 'pass_ranking', limit: 20 }, baselineFilter)
-  const candidateQuery = useQuery(context.bundleId, { kind: 'pass_ranking', limit: 20 }, candidateFilter)
+  // limit 要足够大：截断必须发生在**两侧对齐之后**。
+  // 之前两边各取 top20 再按 Set 插入序 slice(0,15)，baseline 的 key 恒排在前，
+  // candidate 侧新出现的大回归——恰恰是最该看的——会被挤出显示范围（Codex review 抓到）。
+  const baselineQuery = useQuery(context.baselineBundleId, { kind: 'pass_ranking', limit: 500 }, baselineFilter)
+  const candidateQuery = useQuery(context.bundleId, { kind: 'pass_ranking', limit: 500 }, candidateFilter)
 
   const option = useMemo(() => {
     if (!baselineQuery.data || !candidateQuery.data) return null
@@ -37,7 +40,15 @@ export function RegressionDeltaTile(props: RegressionDeltaTileProps): JSX.Elemen
     const baseline = new Map(baselineQuery.data.items.map((it) => [it.passName, it]))
     const candidate = new Map(candidateQuery.data.items.map((it) => [it.passName, it]))
     const allPasses = new Set([...baseline.keys(), ...candidate.keys()])
-    const passes = Array.from(allPasses).slice(0, 15)
+    // 全量对齐后按差异绝对值降序，取影响最大的展示
+    const shown = density === 'compact' || density === 'thumbnail' ? 8 : 15
+    const passes = Array.from(allPasses)
+      .sort((x, y) => {
+        const dx = Math.abs((candidate.get(x)?.totalNs ?? 0) - (baseline.get(x)?.totalNs ?? 0))
+        const dy = Math.abs((candidate.get(y)?.totalNs ?? 0) - (baseline.get(y)?.totalNs ?? 0))
+        return dy - dx
+      })
+      .slice(0, shown)
 
     const baselineData: number[] = []
     const candidateData: number[] = []
@@ -75,7 +86,7 @@ export function RegressionDeltaTile(props: RegressionDeltaTileProps): JSX.Elemen
         },
       ],
     } as echarts.EChartsOption
-  }, [baselineQuery.data, candidateQuery.data])
+  }, [baselineQuery.data, candidateQuery.data, density])
 
   const containerRef = useECharts(option, {
     onEvents: {

@@ -84,15 +84,16 @@ export async function loadFromDirectoryHandle(dir: FsDirectoryHandle): Promise<B
     // 没有 artifacts 目录是正常的
   }
 
+  const manifest = await readText(BUNDLE_FILES.manifest)
   return {
     ref: {
-      id: `dir:${dir.name}`,
+      id: makeDirectoryBundleId(dir.name, manifest, events),
       label: dir.name,
       hint: '本地目录（数据未离开本机）',
       kind: 'directory',
     },
     payload: {
-      manifest: await readText(BUNDLE_FILES.manifest),
+      manifest,
       events,
       summary: await readText(BUNDLE_FILES.summary),
       diagnosis: await readText(BUNDLE_FILES.diagnosisJson),
@@ -100,6 +101,37 @@ export async function loadFromDirectoryHandle(dir: FsDirectoryHandle): Promise<B
       artifacts,
     },
   }
+}
+
+/**
+ * 目录来源的 bundle ID。
+ *
+ * 不能只用目录名：baseline 和 candidate 的输出目录经常同名（都叫
+ * profile_bundle_test_output 之类）。ID 相同时 QueryClient.load() 会命中
+ * 第一份的缓存直接返回，第二份根本不解析——对比时两侧读的是同一份数据，
+ * 而且不会有任何报错。
+ * trace_id 每次 profiling 运行都唯一（C++ 侧生成），优先用它；
+ * manifest 缺失或损坏时退化为 events 内容指纹（FNV-1a，只求区分，不求防碰撞攻击）。
+ */
+export function makeDirectoryBundleId(
+  dirName: string,
+  manifestText: string | null,
+  eventsText: string,
+): string {
+  if (manifestText) {
+    try {
+      const m = JSON.parse(manifestText) as { trace_id?: string }
+      if (m.trace_id) return `dir:${m.trace_id}`
+    } catch {
+      // manifest 损坏，落到内容指纹
+    }
+  }
+  let h = 0x811c9dc5
+  for (let i = 0; i < eventsText.length; i += 1) {
+    h ^= eventsText.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return `dir:${dirName}:${h.toString(16)}`
 }
 
 async function collectArtifacts(
