@@ -1,0 +1,1 @@
+{"schema_version":1,"trace_id":"kxc-candidate-0001","session_id":"sess-candidate","bundle_dir":"/home/kxc/profile_bundles/kxc-candidate-0001","log_level":"info","ir_capture_mode":"on_change","enable_nvtx":false,"enable_cupti":false,"cupti_available":false,"record_execution_plan_details":true,"event_count":223}

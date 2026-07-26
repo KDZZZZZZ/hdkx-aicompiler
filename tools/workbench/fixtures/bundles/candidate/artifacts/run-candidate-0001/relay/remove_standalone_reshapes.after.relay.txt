@@ -1,0 +1,8 @@
+#[version = "0.0.5"]
+// remove_standalone_reshapes after (136093 bytes)
+fn @main(%x: Tensor[(1, 3, 224, 224), float32]) -> Tensor[(1, 1000), float32] {
+  %0 = fused_nn_conv2d_batch_norm_relu(%x, meta[relay.Constant][0]);
+  %2 = %0;
+  %3 = nn.max_pool2d(%2, pool_size=[3, 3], strides=[2, 2]);
+  nn.dense(nn.batch_flatten(%3), meta[relay.Constant][3])
+}
