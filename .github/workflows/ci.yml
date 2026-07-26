@@ -36,7 +36,7 @@ jobs:
         run: python python/tools/check_relay_op_contract.py --root .
 
   cpu-smoke:
-    name: CPU smoke (control ${{ matrix.control_runtime }}, shape ${{ matrix.shape_exact }}, restricted ${{ matrix.restricted_shape }}, adaptive ${{ matrix.adaptive_v2 }}, dynamic ABI ${{ matrix.dynamic_module_abi }})
+    name: CPU smoke (control ${{ matrix.control_runtime }}, shape ${{ matrix.shape_exact }}, restricted ${{ matrix.restricted_shape }}, adaptive ${{ matrix.adaptive_hot_swap }}, dynamic ABI ${{ matrix.dynamic_module_abi }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -45,27 +45,27 @@ jobs:
           - control_runtime: "OFF"
             shape_exact: "OFF"
             restricted_shape: "OFF"
-            adaptive_v2: "OFF"
+            adaptive_hot_swap: "OFF"
             dynamic_module_abi: "OFF"
           - control_runtime: "OFF"
             shape_exact: "OFF"
             restricted_shape: "OFF"
-            adaptive_v2: "OFF"
+            adaptive_hot_swap: "OFF"
             dynamic_module_abi: "ON"
           - control_runtime: "OFF"
             shape_exact: "ON"
             restricted_shape: "OFF"
-            adaptive_v2: "OFF"
+            adaptive_hot_swap: "OFF"
             dynamic_module_abi: "ON"
           - control_runtime: "ON"
             shape_exact: "ON"
             restricted_shape: "ON"
-            adaptive_v2: "ON"
+            adaptive_hot_swap: "ON"
             dynamic_module_abi: "OFF"
           - control_runtime: "OFF"
             shape_exact: "ON"
             restricted_shape: "ON"
-            adaptive_v2: "ON"
+            adaptive_hot_swap: "ON"
             dynamic_module_abi: "ON"
 
     steps:
@@ -82,7 +82,7 @@ jobs:
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=${{ matrix.shape_exact }}
           -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=${{ matrix.restricted_shape }}
           -DKXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=${{ matrix.dynamic_module_abi }}
-          -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=${{ matrix.adaptive_v2 }}
+          -DKXC_ENABLE_ADAPTIVE_HOT_SWAP=${{ matrix.adaptive_hot_swap }}
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_PASS_TESTS=ON
           -DKXC_BUILD_CODEGEN_TESTS=OFF
@@ -125,32 +125,32 @@ jobs:
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
           -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON
           -DKXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON
-          -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=ON
+          -DKXC_ENABLE_ADAPTIVE_HOT_SWAP=ON
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_PASS_TESTS=ON
           -DKXC_BUILD_CODEGEN_TESTS=OFF
           -DCMAKE_CXX_FLAGS_DEBUG="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
-      - name: Build v2 sanitizer targets
+      - name: Build runtime sanitizer targets
         run: >
           cmake --build out/build/ci-runtime-asan --parallel 2 --target
           runtime_session_test shape_production_exact_test
           restricted_symbolic_shape_test compiled_module_test
           relay_control_plan_test control_runtime_integration_test
-          adaptive_hot_swap_v2_test
+          adaptive_hot_swap_test
 
-      - name: Run v2 sanitizer suite
+      - name: Run runtime sanitizer suite
         env:
           ASAN_OPTIONS: abort_on_error=1:detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: >
           ctest --test-dir out/build/ci-runtime-asan
           --output-on-failure --no-tests=error
-          --tests-regex '^(runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|relay_control_plan_test|control_runtime_integration_test|adaptive_hot_swap_v2_test)$'
+          --tests-regex '^(runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|relay_control_plan_test|control_runtime_integration_test|adaptive_hot_swap_test)$'
 
-  cpu-tsan-adaptive-v2:
-    name: CPU adaptive v2 TSan
+  cpu-tsan-adaptive-hot-swap:
+    name: CPU adaptive hot-swap TSan
     runs-on: ubuntu-latest
 
     steps:
@@ -159,11 +159,11 @@ jobs:
 
       - name: Configure TSan build
         run: >
-          cmake -S . -B out/build/ci-adaptive-v2-tsan
+          cmake -S . -B out/build/ci-adaptive-hot-swap-tsan
           -DCMAKE_BUILD_TYPE=Debug
           -DKXC_ENABLE_CUDA=OFF
           -DKXC_ENABLE_LLVM=OFF
-          -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=ON
+          -DKXC_ENABLE_ADAPTIVE_HOT_SWAP=ON
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_PASS_TESTS=ON
           -DKXC_BUILD_CODEGEN_TESTS=OFF
@@ -172,16 +172,16 @@ jobs:
 
       - name: Build adaptive-only TSan targets
         run: >
-          cmake --build out/build/ci-adaptive-v2-tsan --parallel 2
-          --target adaptive_hot_swap_v2_test shape_specialization_test
+          cmake --build out/build/ci-adaptive-hot-swap-tsan --parallel 2
+          --target adaptive_hot_swap_test shape_specialization_test
 
-      - name: Run adaptive v2 TSan test
+      - name: Run adaptive hot-swap TSan test
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: >
-          ctest --test-dir out/build/ci-adaptive-v2-tsan
+          ctest --test-dir out/build/ci-adaptive-hot-swap-tsan
           --output-on-failure --no-tests=error
-          --tests-regex '^adaptive_hot_swap_v2_test$'
+          --tests-regex '^adaptive_hot_swap_test$'
 
   llvm-resnet18:
     name: ResNet18 LLVM compile
@@ -214,7 +214,7 @@ jobs:
           -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON
           -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON
           -DKXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON
-          -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=ON
+          -DKXC_ENABLE_ADAPTIVE_HOT_SWAP=ON
           -DKXC_BUILD_RESNET18_IR_DUMP=OFF
           -DKXC_BUILD_DEBUG_EXAMPLES=OFF
           -DKXC_BUILD_PASS_TESTS=ON
@@ -227,7 +227,7 @@ jobs:
           onnx_importer_test runtime_session_test shape_production_exact_test
           restricted_symbolic_shape_test compiled_module_test
           compiled_module_dynamic_llvm_test control_runtime_integration_test
-          adaptive_hot_swap_v2_test
+          adaptive_hot_swap_test
 
       - name: Run production compiler-to-ExecutablePlan E2E
         run: >
@@ -238,7 +238,7 @@ jobs:
         run: >
           ctest --test-dir out/build/ci-llvm --output-on-failure
           --no-tests=error
-          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|compiled_module_dynamic_llvm_test|onnx_importer_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|control_runtime_integration_test|adaptive_hot_swap_v2_test)$'
+          --tests-regex '^(codegen_llvm_test|op_numeric_llvm_test|compiled_module_dynamic_llvm_test|onnx_importer_test|runtime_session_test|compiled_module_test|shape_production_exact_test|restricted_symbolic_shape_test|control_runtime_integration_test|adaptive_hot_swap_test)$'
 
   python-onnx-importer:
     name: Python ONNX importer tests
@@ -260,3 +260,4 @@ jobs:
         env:
           PYTHONPATH: python
         run: python -m pytest test/onnx_importer_py_test.py -q
+
