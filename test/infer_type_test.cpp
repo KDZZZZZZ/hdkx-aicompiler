@@ -6,6 +6,8 @@
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/pipeline.h"
+#include "kxc/te/topi/nn.h"
+#include "kxc/tir/visitor.h"
 #include "support/primitive_lowering.h"
 
 #include <cstdint>
@@ -67,6 +69,38 @@ bool ExpectOverflow(const std::function<void()>& fn) {
 
 std::vector<kxc::relay::LoweredFunction> LowerUnits(kxc::Function function) {
     return kxc::test_support::LowerPrimitiveUnits(std::move(function));
+}
+
+class FlattenedIndexInspector final : public kxc::TIRPass {
+public:
+    bool saw_index = false;
+    bool all_indices_are_int64 = true;
+
+protected:
+    kxc::tir::PrimExpr VisitLoad(const kxc::tir::LoadNode* op,
+                                 const kxc::tir::PrimExpr& ref) override {
+        Check(op->index);
+        return TIRPass::VisitLoad(op, ref);
+    }
+
+    kxc::tir::Stmt VisitStore(const kxc::tir::StoreNode* op,
+                              const kxc::tir::Stmt& ref) override {
+        Check(op->index);
+        return TIRPass::VisitStore(op, ref);
+    }
+
+private:
+    void Check(const kxc::tir::PrimExpr& index) {
+        saw_index = true;
+        all_indices_are_int64 =
+            all_indices_are_int64 && index.dtype() == kxc::tir::DataType::Int(64);
+    }
+};
+
+bool HasInt64FlattenedIndices(const kxc::relay::LoweredFunction& lowered) {
+    FlattenedIndexInspector inspector;
+    inspector.Mutate(lowered->prim_func);
+    return inspector.saw_index && inspector.all_indices_are_int64;
 }
 
 bool TestElementwiseBroadcast() {
@@ -156,6 +190,65 @@ bool TestMatrixAndDenseOps() {
     return true;
 }
 
+bool TestTopiWindowApiCompatibility() {
+    using HistoricConv2D = kxc::te::Tensor (*)(
+        const kxc::te::Tensor&, const kxc::te::Tensor&, int, int, int, int, int, int,
+        std::string, std::string);
+    using TransitionalConv2D = kxc::te::Tensor (*)(
+        const kxc::te::Tensor&, const kxc::te::Tensor&, int, int,
+        kxc::te::topi::Padding2D, int, int, std::string, std::string);
+    using HistoricPool2D = kxc::te::Tensor (*)(
+        const kxc::te::Tensor&, kxc::Array<int>, kxc::Array<int>, kxc::Array<int>,
+        std::string, bool, std::string, std::string);
+    using TransitionalPool2D = kxc::te::Tensor (*)(
+        const kxc::te::Tensor&, kxc::Array<int>, kxc::Array<int>,
+        kxc::te::topi::Padding2D, kxc::Array<int>, std::string, bool, std::string,
+        std::string);
+    const auto historic_conv =
+        static_cast<HistoricConv2D>(&kxc::te::topi::conv2d_nchw);
+    const auto transitional_conv =
+        static_cast<TransitionalConv2D>(&kxc::te::topi::conv2d_nchw);
+    const auto historic_pool =
+        static_cast<HistoricPool2D>(&kxc::te::topi::pool2d);
+    const auto transitional_pool =
+        static_cast<TransitionalPool2D>(&kxc::te::topi::pool2d);
+
+    const kxc::te::Tensor data = kxc::te::placeholder(
+        {kxc::tir::IntImm(1), kxc::tir::IntImm(1), kxc::tir::IntImm(4),
+         kxc::tir::IntImm(4)},
+        kxc::tir::DataType::Float(32), "legacy_window_data");
+    const kxc::te::Tensor weight = kxc::te::placeholder(
+        {kxc::tir::IntImm(1), kxc::tir::IntImm(1), kxc::tir::IntImm(2),
+         kxc::tir::IntImm(2)},
+        kxc::tir::DataType::Float(32), "legacy_window_weight");
+    const kxc::te::Tensor historic_conv_result = historic_conv(
+        data, weight, 1, 1, 1, 0, 1, 1, "historic_conv", kxc::te::topi::kConv2d);
+    const kxc::te::Tensor transitional_conv_result = transitional_conv(
+        data, weight, 1, 1, kxc::te::topi::Padding2D{1, 0, 1, 0}, 1, 1,
+        "transitional_conv", kxc::te::topi::kConv2d);
+    const kxc::te::Tensor historic_pool_result = historic_pool(
+        data, {2, 2}, {2, 2}, {1, 0}, "max", false, "historic_pool",
+        kxc::te::topi::kPool);
+    const kxc::te::Tensor transitional_pool_result = transitional_pool(
+        data, {2, 2}, {2, 2}, kxc::te::topi::Padding2D{1, 0, 1, 0}, {2, 2},
+        "max", false, "transitional_pool", kxc::te::topi::kPool);
+
+    for (const kxc::te::Tensor& result :
+         {historic_conv_result, transitional_conv_result, historic_pool_result,
+          transitional_pool_result}) {
+        TEST_CHECK(result.defined() && result->shape.size() == 4,
+                   "each retained TOPI window signature must produce a rank-4 tensor");
+    }
+    TEST_CHECK(
+        ExpectThrow([&] {
+            transitional_pool(data, {2}, {2}, kxc::te::topi::Padding2D{}, {1},
+                              "max", false, "invalid_transitional_pool",
+                              kxc::te::topi::kPool);
+        }),
+        "transitional pool overload must preserve its two-element input requirement");
+    return true;
+}
+
 bool TestConvAndPoolOps() {
     kxc::Var data("data", kxc::TensorType({1, 3, 32, 32}, "float32"));
     kxc::Var weight("weight", kxc::TensorType({8, 3, 3, 3}, "float32"));
@@ -181,6 +274,131 @@ bool TestConvAndPoolOps() {
                "pool2d output shape mismatch");
     TEST_CHECK(CheckTensor(flatten.checked_type(), {1, 8}, "float32"),
                "flatten after global pool shape mismatch");
+    return true;
+}
+
+// 非对称 padding 下，类型推导与 TE compute 必须给出同一个输出 shape。
+// 回归此前的缺陷：conv2d 的 TE compute 只读取 padding 的前两个分量并按对称
+// 处理，而类型推导按四边处理，导致合法模型在 unit lowering 的边界校验处
+// 抛出 "Unit TE output shape mismatch"。
+bool TestAsymmetricPaddingShapeAgreement() {
+    kxc::Var data("data", kxc::TensorType({1, 3, 8, 8}, "float32"));
+    kxc::Var weight("weight", kxc::TensorType({4, 3, 3, 3}, "float32"));
+    // padding = [top=1, left=1, bottom=2, right=2]
+    auto conv_attrs = kxc::relay::Conv2DAttrs::Create(
+        {1, 1}, {1, 1, 2, 2}, {1, 1}, 1, 4, {3, 3}, "NCHW", "OIHW", "", "");
+    kxc::Call conv(kxc::relay::Op::Get("nn_conv2d"), {data, weight}, conv_attrs);
+    kxc::Function conv_func({data, weight}, conv);
+    kxc::relay::InferTypePass(conv_func);
+    // H: (8 + 1 + 2 - 3) / 1 + 1 = 9，W 同理。对称处理会算成 8。
+    TEST_CHECK(CheckTensor(conv.checked_type(), {1, 4, 9, 9}, "float32"),
+               "asymmetric padding conv2d infer shape mismatch");
+    // lowering 会把 TE compute 的 shape 与推导出的 TensorType 逐轴比对，
+    // 两者不一致时抛出，因此这一步才是真正的回归点。
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(conv_func)->prim_func.defined(),
+               "asymmetric padding conv2d should lower to TIR");
+
+    // 非对称 padding 的池化走同一条公式。
+    auto pool_attrs =
+        kxc::relay::MaxPool2DAttrs::Create({2, 2}, {1, 0, 0, 1}, {1, 1}, {2, 2},
+                                           "NCHW", false);
+    kxc::Call pool(kxc::relay::Op::Get("nn_max_pool2d"), {data}, pool_attrs);
+    kxc::Function pool_func({data}, pool);
+    kxc::relay::InferTypePass(pool_func);
+    // H: (8 + 1 + 0 - 2) / 2 + 1 = 4，W: (8 + 0 + 1 - 2) / 2 + 1 = 4。
+    TEST_CHECK(CheckTensor(pool.checked_type(), {1, 3, 4, 4}, "float32"),
+               "asymmetric padding pool2d infer shape mismatch");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(pool_func)->prim_func.defined(),
+               "asymmetric padding pool2d should lower to TIR");
+
+    // 池化的 dilation 也必须两侧一致。ONNX MaxPool 的 dilations 经 importer 传入
+    // MaxPool2DAttrs::dilation，类型推导一直读取它，而 TE compute 曾固定按
+    // dilation=1 计算，因此 dilation != 1 的合法模型会在 lowering 处形状冲突。
+    auto dilated_attrs =
+        kxc::relay::MaxPool2DAttrs::Create({1, 1}, {0, 0, 0, 0}, {2, 2}, {3, 3},
+                                           "NCHW", false);
+    kxc::Call dilated(kxc::relay::Op::Get("nn_max_pool2d"), {data}, dilated_attrs);
+    kxc::Function dilated_func({data}, dilated);
+    kxc::relay::InferTypePass(dilated_func);
+    // effective kernel = 2 * (3 - 1) + 1 = 5；(8 + 0 + 0 - 5) / 1 + 1 = 4。
+    TEST_CHECK(CheckTensor(dilated.checked_type(), {1, 3, 4, 4}, "float32"),
+               "dilated pool2d infer shape mismatch");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(dilated_func)->prim_func.defined(),
+               "dilated pool2d should lower to TIR");
+
+    // 单元素的 strides / dilation / pool_size 必须在两侧展开成同一组高宽。
+    // 类型推导一直是"复制到两轴"，而 lowering 侧曾分别是"整体取默认值"（池化）
+    // 和"第二轴取默认值"（卷积），所以 {2} 这类合法写法两侧结果不同。
+    auto single_pool_attrs =
+        kxc::relay::MaxPool2DAttrs::Create({1}, {0, 0, 0, 0}, {2}, {3},
+                                           "NCHW", false);
+    kxc::Call single_pool(kxc::relay::Op::Get("nn_max_pool2d"), {data}, single_pool_attrs);
+    kxc::Function single_pool_func({data}, single_pool);
+    kxc::relay::InferTypePass(single_pool_func);
+    // pool_size={3}->3x3, strides={1}->1x1, dilation={2}->2x2，与上面的显式二元组同解。
+    TEST_CHECK(CheckTensor(single_pool.checked_type(), {1, 3, 4, 4}, "float32"),
+               "single-element pool attrs infer shape mismatch");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(single_pool_func)->prim_func.defined(),
+               "single-element pool attrs should lower to TIR");
+
+    kxc::Var conv_weight("conv_weight", kxc::TensorType({4, 3, 3, 3}, "float32"));
+    auto single_conv_attrs = kxc::relay::Conv2DAttrs::Create(
+        {2}, {0, 0, 0, 0}, {1}, 1, 4, {3, 3}, "NCHW", "OIHW", "", "");
+    kxc::Call single_conv(kxc::relay::Op::Get("nn_conv2d"), {data, conv_weight},
+                          single_conv_attrs);
+    kxc::Function single_conv_func({data, conv_weight}, single_conv);
+    kxc::relay::InferTypePass(single_conv_func);
+    // strides={2} 必须两轴都是 2：(8 - 3) / 2 + 1 = 3。W 轴若退回 1 则会得到 6。
+    TEST_CHECK(CheckTensor(single_conv.checked_type(), {1, 4, 3, 3}, "float32"),
+               "single-element conv strides infer shape mismatch");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(single_conv_func)->prim_func.defined(),
+               "single-element conv strides should lower to TIR");
+
+    constexpr int64_t wide_stride = int64_t{1} << 32;
+    auto wide_pool_attrs =
+        kxc::relay::MaxPool2DAttrs::Create({wide_stride}, {0, 0, 0, 0}, {1}, {3},
+                                           "NCHW", false);
+    kxc::Call wide_pool(kxc::relay::Op::Get("nn_max_pool2d"), {data}, wide_pool_attrs);
+    kxc::Function wide_pool_func({data}, wide_pool);
+    kxc::relay::InferTypePass(wide_pool_func);
+    TEST_CHECK(CheckTensor(wide_pool.checked_type(), {1, 3, 1, 1}, "float32"),
+               "pool stride wider than int32 must retain its int64 value");
+    const auto wide_pool_lowered =
+        kxc::test_support::LowerFirstPrimitive(wide_pool_func);
+    TEST_CHECK(wide_pool_lowered->prim_func.defined(),
+               "pool stride wider than int32 should lower without narrowing to zero");
+    TEST_CHECK(HasInt64FlattenedIndices(wide_pool_lowered),
+               "pool lowering must keep flattened Load/Store indices in int64");
+
+    auto wide_conv_attrs = kxc::relay::Conv2DAttrs::Create(
+        {wide_stride}, {0, 0, 0, 0}, {1}, 1, 4, {3, 3}, "NCHW", "OIHW", "", "");
+    kxc::Call wide_conv(kxc::relay::Op::Get("nn_conv2d"), {data, conv_weight},
+                        wide_conv_attrs);
+    kxc::Function wide_conv_func({data, conv_weight}, wide_conv);
+    kxc::relay::InferTypePass(wide_conv_func);
+    TEST_CHECK(CheckTensor(wide_conv.checked_type(), {1, 4, 1, 1}, "float32"),
+               "conv stride wider than int32 must retain its int64 value");
+    const auto wide_conv_lowered =
+        kxc::test_support::LowerFirstPrimitive(wide_conv_func);
+    TEST_CHECK(wide_conv_lowered->prim_func.defined(),
+               "conv stride wider than int32 should lower without narrowing to zero");
+    TEST_CHECK(HasInt64FlattenedIndices(wide_conv_lowered),
+               "conv lowering must keep flattened Load/Store indices in int64");
+
+    // 只有 0/1/2/4 个元素有约定含义。长度 3 或 5 必须报错，静默截断会把配置
+    // 错误变成一个看似成功但形状错误的编译产物。
+    for (const kxc::Array<int64_t>& bad : {kxc::Array<int64_t>{1, 1, 1},
+                                           kxc::Array<int64_t>{1, 1, 1, 1, 1}}) {
+        auto bad_attrs = kxc::relay::MaxPool2DAttrs::Create({1, 1}, bad, {1, 1}, {2, 2},
+                                                            "NCHW", false);
+        kxc::Call bad_pool(kxc::relay::Op::Get("nn_max_pool2d"), {data}, bad_attrs);
+        kxc::Function bad_func({data}, bad_pool);
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(bad_func);
+                       kxc::test_support::LowerFirstPrimitive(bad_func);
+                   }),
+                   "padding with 3 or 5 elements must be rejected");
+    }
     return true;
 }
 
@@ -967,7 +1185,9 @@ int main() {
     const std::vector<std::pair<std::string, bool (*)()>> tests = {
         {"elementwise_broadcast", TestElementwiseBroadcast},
         {"matrix_and_dense_ops", TestMatrixAndDenseOps},
+        {"topi_window_api_compatibility", TestTopiWindowApiCompatibility},
         {"conv_and_pool_ops", TestConvAndPoolOps},
+        {"asymmetric_padding_shape_agreement", TestAsymmetricPaddingShapeAgreement},
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
         {"flatten_and_reshape_product_arithmetic", TestFlattenAndReshapeProductArithmetic},
         {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},

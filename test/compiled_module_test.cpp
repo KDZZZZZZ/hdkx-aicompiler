@@ -103,7 +103,7 @@ bool PublicSourceValidation() {
     return true;
 }
 bool ObjectReadinessZeroByteAndSymbols() {
-    CHECK(Throws([&]{ CompiledModule invalid(ObjectRef(Device::CPU())); }));
+    CHECK(Throws([&]{ CompiledModule invalid{ObjectRef(Device::CPU())}; }));
     KernelSignature one("one",{KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),4,true)});
     KernelLaunchMetadata metadata(Device::CPU(),CodeGenBackend::kLLVM);
     auto not_ready=std::make_shared<Recorder>(false,false);

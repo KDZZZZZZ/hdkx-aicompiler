@@ -127,6 +127,30 @@ bool TestReluPipelineRegistration() {
     return true;
 }
 
+// int32 循环变量可安全扩宽成 int64 地址；这种单射变换不应阻断 CUDA 调度。
+bool TestWidenedStoreIndexSchedule() {
+    using namespace kxc;
+    using namespace kxc::tir;
+    const DataType i32 = DataType::Int(32);
+    const DataType i64 = DataType::Int(64);
+    const DataType f32 = DataType::Float(32);
+    tir::Var out("out", f32);
+    tir::Var i("i", i32);
+    PrimExpr widened_i = Call(i64, "cast", {i});
+    Stmt body = For(i, IntImm(0, i32), IntImm(8, i32), ForType::Serial,
+                    Store(out, FloatImm(1.0, f32), widened_i));
+    Map<tir::Var, Buffer> buffers;
+    buffers.Set(out, Buffer(out, f32, {IntImm(8, i64)}, {},
+                            IntImm(0, i64), "out", 4, 0));
+
+    CudaScheduleResult result =
+        BindCudaThreads(PrimFunc({out}, body, buffers, {}), MakeCudaTarget());
+    TEST_CHECK(result.launch_config().grid_x == 1 &&
+                   result.launch_config().block_x == 128,
+               "widening cast around the loop index should preserve injectivity");
+    return true;
+}
+
 // reduction 具有内层循环和输出读写依赖，第一阶段必须在 codegen 前拒绝。
 bool TestRejectReductionAndWriteConflict() {
     using namespace kxc;
@@ -247,6 +271,7 @@ int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"elementwise_schedule", TestElementwiseSchedule},
         {"relu_pipeline_registration", TestReluPipelineRegistration},
+        {"widened_store_index_schedule", TestWidenedStoreIndexSchedule},
         {"reject_reduction_and_conflict", TestRejectReductionAndWriteConflict},
         {"reject_indirect_gather_load", TestRejectIndirectGatherLoad},
         {"reject_invalid_contracts", TestRejectInvalidContracts},

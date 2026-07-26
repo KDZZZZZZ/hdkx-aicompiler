@@ -142,6 +142,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/te/topi/tags.h
   include/kxc/te/topi/transform.h
   include/kxc/te/topi/utils.h
+  include/kxc/te/topi/window.h
   include/kxc/tir/expr.h
   include/kxc/tir/printer/print_ir.h
   include/kxc/tir/pass_utils.h

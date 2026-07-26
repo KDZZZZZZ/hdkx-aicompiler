@@ -56,6 +56,20 @@ compilation/assembly chain. Restricted symbolic shape only makes exact
 concrete decisions; it does not create a generic symbolic compilation or
 execution path.
 
+### Data contracts
+
+The one-way rule constrains *control and execution* dependencies, not the
+naming of shared data types. `NDArray`, `DeviceStream`, and the types in
+`include/kxc/runtime/kernel_abi.h` are neutral data contracts: compiler-tier
+code may name them, because the artifacts it produces must conform to them.
+`relay::Constant` holding a `runtime::NDArray` is therefore correct and not a
+layering violation.
+
+What the rule forbids is the reverse edge. Runtime must not include
+`kxc/compiler/`, `kxc/relay/`, `kxc/te/`, or `kxc/tir/` headers, and must not
+inspect Relay, lower primitives, or select variants. That direction is what
+keeps `RuntimeSession` a static plan executor.
+
 ## Deliberate limits
 
 - Dynamic, ragged, data-dependent, bucketed, and polymorphic execution are not

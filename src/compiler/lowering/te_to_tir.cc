@@ -24,13 +24,19 @@ namespace {
 
 tir::PrimExpr FlattenIndex(const Array<tir::PrimExpr>& indices,
                            const Array<tir::PrimExpr>& shape) {
-    if (shape.empty()) return tir::IntImm(0);
+    const tir::DataType index_dtype = tir::DataType::Int(64);
+    if (shape.empty()) return tir::IntImm(0, index_dtype);
     if (indices.size() != shape.size()) {
         throw std::runtime_error("Index rank mismatch during flattening");
     }
-    tir::PrimExpr linear = indices[0];
+    const auto widen = [&](const tir::PrimExpr& value) {
+        return value.dtype() == index_dtype
+                   ? value
+                   : tir::PrimExpr(tir::Call(index_dtype, "cast", {value}));
+    };
+    tir::PrimExpr linear = widen(indices[0]);
     for (size_t index = 1; index < indices.size(); ++index) {
-        linear = linear * shape[index] + indices[index];
+        linear = linear * widen(shape[index]) + widen(indices[index]);
     }
     return linear;
 }

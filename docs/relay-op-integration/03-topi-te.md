@@ -83,9 +83,26 @@ TOPI 是构造 TE compute 的 helper 集合。它是“可用于搭算子”的�
 | `leaky_relu(x, alpha)` | `nn.h` | tensor | shape 不变 | 仅作为内部构造件 |
 | `dense(A, B, bias)` | `nn.h` | `[M,K]`, `[N,K]`, optional `[N]` | `[M,N]` | weight 语义是转置布局 `[N,K]` |
 | `matmul(A, B)` | `nn.h` | `[M,K]`, `[K,N]` | `[M,N]` | rank-2 MVP |
-| `conv2d_nchw(data, kernel, ...)` | `nn.h` | NCHW, OIHW | NCHW | groups/layout 由 Relay type rule 限制 |
-| `pool2d(data, kernel, stride, padding, type, ceil)` | `nn.h` | NCHW | NCHW | `pool_type` 只支持 `max` / `avg` |
+| `conv2d_nchw(data, kernel, strides, padding, dilation)` | `nn.h` | NCHW, OIHW | NCHW | `strides` / `dilation` 为 `AxisPair2D`，`padding` 为 `Padding2D`；groups/layout 由 Relay type rule 限制 |
+| `pool2d(data, kernel, stride, padding, dilation, type, ceil)` | `nn.h` | NCHW | NCHW | kernel/stride/dilation 为 `AxisPair2D`；`pool_type` 只支持 `max` / `avg` |
 | `global_avg_pool2d(data)` | `nn.h` | NCHW | `[N,C,1,1]` | NCHW |
+
+> **属性规范化必须走共享 helper。** `strides`、`dilation`、`pool_size` 用
+> `te::topi::ExpandPair2D`，`padding` 用 `te::topi::ExpandPadding2D`，两者都在
+> `kxc/te/topi/window.h`。输出尺寸公式用同一头文件的 `WindowOutputExtent`。
+>
+> 不要在 lowering 里自己展开这些属性。类型推导和 TE compute 必须对同一属性得出
+> 同一组值，否则推导出的 `TensorType` 与 compute 出的 shape 不一致，会在
+> `LowerCompilationUnit` 的边界校验处报 `Unit TE output shape mismatch`——错误
+> 指向编译器内部不变量，而不是真正出错的算子属性。单元素写法（如 `{2}`）和
+> 非对称 `padding` 是最容易出分歧的两处。
+
+旧的 TOPI 调用签名仍作为兼容重载保留：`conv2d_nchw` 的两个 padding 整数继续按
+高、宽方向对称展开；`pool2d` 的 `Array<int>` 形式继续默认 `dilation={1,1}`。
+此前使用 `Padding2D` 但仍分别传递 int/`Array<int>` stride、dilation 的过渡签名也
+保留为转发重载。
+新代码应先用上述共享 helper 规范化属性，再调用 `AxisPair2D` / `Padding2D` 主接口，
+从而保留 Relay 的 `int64_t` 属性精度并支持非对称 padding 与显式 dilation。
 
 ## 选择规则
 
