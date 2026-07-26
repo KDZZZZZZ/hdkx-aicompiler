@@ -1,0 +1,1 @@
+{"trace_id":"kxc-baseline-0001","session_id":"sess-baseline","event_count":222,"component_counts":{"compiler":"2","relay_pipeline":"1","relay_pass":"10","lowering":"2","tir_pipeline":"1","tir_pass":"8","runtime_session":"53","execution_plan":"72","device_api":"72","backend.cuda":"1"}}

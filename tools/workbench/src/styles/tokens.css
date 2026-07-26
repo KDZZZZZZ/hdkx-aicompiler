@@ -1,0 +1,161 @@
+/*
+ * 视觉基线（需求 §20）。
+ * 深色优先、低饱和、高信息密度；不使用装饰性渐变与大面积高亮色。
+ * Warning/Error 与 Baseline/Candidate 使用稳定语义色，任何图表都不得另起一套。
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* 层次：背景越靠前越亮，用于区分 Strip / Column / Tile / 浮层 */
+  --bg-app: #0d1013;
+  --bg-strip: #10141a;
+  --bg-column: #151a21;
+  --bg-tile: #1a2028;
+  --bg-raised: #202832;
+  --bg-overlay: #262f3a;
+  --bg-input: #0f1419;
+
+  --border-subtle: #232b35;
+  --border: #2e3742;
+  --border-strong: #3d4854;
+
+  --text-primary: #dfe5ec;
+  --text-secondary: #98a4b3;
+  --text-muted: #67727f;
+  --text-inverse: #0d1013;
+
+  /* 语义色：只用于状态，不用于装饰 */
+  --sem-error: #d9636b;
+  --sem-error-bg: #2a1a1d;
+  --sem-warn: #d3a04b;
+  --sem-warn-bg: #2a2318;
+  --sem-ok: #6fae72;
+  --sem-ok-bg: #182417;
+  --sem-info: #5b9dd9;
+  --sem-info-bg: #16212b;
+
+  /* Baseline / Candidate：全局唯一编码，§20.1 要求一致 */
+  --cmp-baseline: #7b8794;
+  --cmp-candidate: #5b9dd9;
+  --cmp-regress: #d9636b;
+  --cmp-improve: #6fae72;
+
+  /* 图表序列色：低饱和，保证 8 条以内可区分 */
+  --series-1: #5b9dd9;
+  --series-2: #6fae72;
+  --series-3: #d3a04b;
+  --series-4: #a67fb5;
+  --series-5: #4fa3a5;
+  --series-6: #c98a6a;
+  --series-7: #8896a8;
+  --series-8: #b56f7f;
+
+  --focus-ring: #5b9dd9;
+  --pin-accent: #d3a04b;
+
+  --radius: 3px;
+  --radius-lg: 5px;
+
+  --font-ui: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'Courier New', monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+
+  --gap-column: 8px;
+  --h-topbar: 40px;
+  --h-tile-header: 28px;
+  --w-rail: 176px;
+  --h-minimap: 26px;
+}
+
+/* §21：尊重减少动态效果设置 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  overflow: hidden;
+}
+
+/* 焦点可见性（§21 聚焦顺序必须稳定且可见） */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  padding: 2px 6px;
+}
+button:hover:not(:disabled) {
+  background: var(--bg-raised);
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px 6px;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 屏幕阅读器专用文本（§21 图表必须提供文本摘要） */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

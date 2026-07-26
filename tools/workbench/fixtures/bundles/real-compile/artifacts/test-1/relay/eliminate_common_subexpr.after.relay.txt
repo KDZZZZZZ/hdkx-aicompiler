@@ -1,0 +1,9 @@
+Function(params=2)
+  param[0]=x
+  param[1]=y
+  body:
+    Call(op=add, args=2)
+      arg[0]:
+        Var(x)
+      arg[1]:
+        Var(y)
