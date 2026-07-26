@@ -1183,6 +1183,16 @@ bool TestBindingAndValidationNegatives() {
         predicate_spec->device, predicate_spec->is_input,
         predicate_spec->is_constant, predicate_spec->is_output,
         predicate_spec->is_alias, predicate_spec->is_async_live);
+    PrivatePlanSpec unsupported_runtime_extent =
+        PrivatePlanAccess::CopySpec(valid);
+    const ValueSpec extent_spec = unsupported_runtime_extent.values[0];
+    unsupported_runtime_extent.values[0] = ValueSpec(
+        extent_spec->value_id, extent_spec->storage_id, extent_spec.shape(),
+        extent_spec->dtype, extent_spec->device, extent_spec->is_input,
+        extent_spec->is_constant, extent_spec->is_output,
+        extent_spec->is_alias, extent_spec->is_async_live,
+        extent_spec->is_state, extent_spec->alias_source_value_id,
+        extent_spec->write_mode, 0);
     PrivatePlanSpec bad_phi = PrivatePlanAccess::CopySpec(valid);
     bad_phi.regions[0].tasks[0].branch.phis[0].then_value = 1;
     PrivatePlanSpec bad_placement = PrivatePlanAccess::CopySpec(valid);
@@ -1201,6 +1211,8 @@ bool TestBindingAndValidationNegatives() {
     PrivatePlanSpec bad_backedge = PrivatePlanAccess::CopySpec(valid_loop);
     bad_backedge.regions[0].tasks[0].loop.carried[0].backedge = 0;
     CHECK(Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_predicate)); }) &&
+              Throws([&] { (void)PrivatePlanAccess::Create(
+                  std::move(unsupported_runtime_extent)); }) &&
               Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_phi)); }) &&
               Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_placement)); }) &&
               Throws([&] { (void)PrivatePlanAccess::Create(std::move(bad_scope)); }) &&

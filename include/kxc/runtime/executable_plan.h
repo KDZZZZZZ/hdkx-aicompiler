@@ -13,6 +13,12 @@
 
 namespace kxc::runtime {
 
+/*! \brief Defines whether a produced value owns storage or writes its alias source. */
+enum class ValueWriteMode : uint8_t {
+    kAllocate = 0,
+    kInPlace = 1,
+};
+
 /*! \brief Complete runtime metadata for one stable graph value. */
 class ValueSpecNode final : public Object {
 public:
@@ -25,6 +31,10 @@ public:
     bool is_output{false};
     bool is_alias{false};
     bool is_async_live{false};
+    bool is_state{false};
+    int64_t alias_source_value_id{-1};
+    ValueWriteMode write_mode{ValueWriteMode::kAllocate};
+    int64_t valid_bytes{-1};
 
     KXC_OBJECT_DECLARE
 
@@ -40,7 +50,10 @@ public:
     ValueSpec(int64_t value_id, int64_t storage_id, Array<int64_t> shape,
               DLDataType dtype, Device device, bool is_input = false,
               bool is_constant = false, bool is_output = false,
-              bool is_alias = false, bool is_async_live = false);
+              bool is_alias = false, bool is_async_live = false,
+              bool is_state = false, int64_t alias_source_value_id = -1,
+              ValueWriteMode write_mode = ValueWriteMode::kAllocate,
+              int64_t valid_bytes = -1);
     explicit ValueSpec(const ObjectRef& ref);
 
     Array<int64_t> shape() const;
@@ -86,6 +99,7 @@ private:
     Array<int64_t> input_value_ids_;
     Array<int64_t> constant_value_ids_;
     Array<int64_t> output_value_ids_;
+    Array<int64_t> state_value_ids_;
 };
 
 /*! \brief Validated immutable graph ABI and kernel call order. */
@@ -95,7 +109,8 @@ public:
     ExecutablePlan(Array<ValueSpec> values, Array<KernelCall> calls,
                    Array<int64_t> input_value_ids,
                    Array<int64_t> constant_value_ids,
-                   Array<int64_t> output_value_ids);
+                   Array<int64_t> output_value_ids,
+                   Array<int64_t> state_value_ids = {});
     explicit ExecutablePlan(const ObjectRef& ref);
 
     Array<ValueSpec> values() const;
@@ -103,6 +118,7 @@ public:
     Array<int64_t> input_value_ids() const;
     Array<int64_t> constant_value_ids() const;
     Array<int64_t> output_value_ids() const;
+    Array<int64_t> state_value_ids() const;
     void Validate() const;
     const ExecutablePlanNode* operator->() const;
 };

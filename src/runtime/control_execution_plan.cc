@@ -671,6 +671,11 @@ void VerifyControlExecutionPlan(const ControlExecutionPlanSpec& plan) {
             !value_locators.count(value->value_id)) {
             Fail("value ids/specs must be unique static CPU:0 contracts");
         }
+        if (value->is_state || value->alias_source_value_id != -1 ||
+            value->write_mode != ValueWriteMode::kAllocate ||
+            value->valid_bytes != -1) {
+            Fail("state, in-place alias, and valid-byte contracts require RuntimeSession");
+        }
         for (const auto dimension : value.shape()) {
             if (dimension < 0) Fail("dynamic shapes are unsupported everywhere");
         }

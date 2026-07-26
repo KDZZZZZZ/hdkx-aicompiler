@@ -3,11 +3,13 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -121,6 +123,59 @@ public:
     mutable std::atomic<int> calls{0};
 };
 
+class StateAccumulatorLauncher final : public kxc::codegen::KernelLauncher {
+public:
+    explicit StateAccumulatorLauncher(bool delay = false) : delay_(delay) {}
+
+    bool IsReady() const noexcept override { return true; }
+
+    kxc::AsyncOperation Launch(
+        const kxc::Array<kxc::runtime::NDArray>& arguments,
+        const kxc::DeviceStream& stream,
+        const kxc::ObjectRef&) const override {
+        if (arguments.size() != 3 ||
+            arguments[0].storage().get() != arguments[2].storage().get()) {
+            throw std::invalid_argument(
+                "state accumulator requires aliased source/output storage");
+        }
+        const int current =
+            active.fetch_add(1, std::memory_order_relaxed) + 1;
+        int observed = max_active.load(std::memory_order_relaxed);
+        while (observed < current &&
+               !max_active.compare_exchange_weak(
+                   observed, current, std::memory_order_relaxed)) {
+        }
+        if (delay_) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        {
+            std::lock_guard<std::mutex> lock(update_mutex_);
+            std::vector<float> state(4);
+            std::vector<float> increment(4);
+            arguments[0].CopyToBytes(state.data(), state.size() * sizeof(float));
+            arguments[1].CopyToBytes(increment.data(),
+                                     increment.size() * sizeof(float));
+            for (size_t i = 0; i < state.size(); ++i) state[i] += increment[i];
+            arguments[2].CopyFromBytes(state.data(), state.size() * sizeof(float));
+        }
+        calls.fetch_add(1, std::memory_order_relaxed);
+        saw_storage_alias.store(true, std::memory_order_relaxed);
+        active.fetch_sub(1, std::memory_order_relaxed);
+        kxc::Array<kxc::Storage> retained;
+        for (const auto& argument : arguments) {
+            retained.push_back(argument.storage());
+        }
+        return kxc::AsyncOperation::Completed(stream, std::move(retained));
+    }
+
+    mutable std::atomic<int> calls{0};
+    mutable std::atomic<int> active{0};
+    mutable std::atomic<int> max_active{0};
+    mutable std::atomic<bool> saw_storage_alias{false};
+
+private:
+    bool delay_{false};
+    mutable std::mutex update_mutex_;
+};
+
 class BinaryElementwiseLauncher final : public kxc::codegen::KernelLauncher {
 public:
     explicit BinaryElementwiseLauncher(bool multiply)
@@ -213,7 +268,7 @@ struct SessionFixture {
 kxc::api::CompiledModule MakeModule(
     const kxc::codegen::KernelSignature& signature,
     const kxc::Map<kxc::String, kxc::runtime::NDArray>& constants,
-    const std::shared_ptr<RecordingLauncher>& launcher) {
+    std::shared_ptr<kxc::codegen::KernelLauncher> launcher) {
     using namespace kxc;
     using namespace kxc::codegen;
     KernelLaunchMetadata metadata(Device::CPU(), CodeGenBackend::kLLVM);
@@ -242,6 +297,78 @@ SessionFixture MakeStaticFixture() {
     auto launcher = std::make_shared<RecordingLauncher>();
     return {MakeModule(signature, constants, launcher), MakePlan(signature),
             constant,
+            std::move(launcher)};
+}
+
+struct StateFixture {
+    kxc::api::CompiledModule module;
+    kxc::runtime::ExecutablePlan plan;
+    std::shared_ptr<StateAccumulatorLauncher> launcher;
+};
+
+kxc::codegen::KernelSignature AccumulatorSignature(
+    kxc::String symbol, uint64_t output_alignment) {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    return KernelSignature(
+        std::move(symbol),
+        {KernelArgSpec("state", KernelArgRole::kInput, Float32(), {4},
+                       Device::CPU(), 4),
+         KernelArgSpec("increment", KernelArgRole::kInput, Float32(), {4},
+                       Device::CPU(), 4),
+         KernelArgSpec("next_state", KernelArgRole::kOutput, Float32(), {4},
+                       Device::CPU(), output_alignment, true)});
+}
+
+kxc::codegen::KernelSignature StateSignature() {
+    return AccumulatorSignature("state_accumulate", 64);
+}
+
+kxc::runtime::ExecutablePlan MakeStatePlan(
+    kxc::Array<int64_t> state_shape = {4}, DLDataType state_dtype = Float32(),
+    kxc::Device state_device = kxc::Device::CPU()) {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    return ExecutablePlan(
+        {ValueSpec(0, 0, state_shape, state_dtype, state_device, false, false,
+                   false, false, false, true),
+         ValueSpec(1, 1, {4}, Float32(), Device::CPU(), true),
+         ValueSpec(2, 0, std::move(state_shape), state_dtype,
+                   std::move(state_device), false, false, true, true, false,
+                   false, 0, ValueWriteMode::kInPlace)},
+        {KernelCall("state_accumulate", {0, 1}, {2})}, {1}, {}, {2}, {0});
+}
+
+kxc::runtime::ExecutablePlan MakeDonationPlan() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    return ExecutablePlan(
+        {ValueSpec(0, 0, {4}, Float32(), Device::CPU(), true),
+         ValueSpec(1, 1, {4}, Float32(), Device::CPU(), true),
+         ValueSpec(2, 0, {4}, Float32(), Device::CPU(), false, false, true,
+                   true, false, false, 0, ValueWriteMode::kInPlace)},
+        {KernelCall("state_accumulate", {0, 1}, {2})}, {0, 1}, {}, {2});
+}
+
+kxc::runtime::ExecutablePlan MakeDonationChainPlan() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    return ExecutablePlan(
+        {ValueSpec(0, 0, {4}, Float32(), Device::CPU(), true),
+         ValueSpec(1, 1, {4}, Float32(), Device::CPU(), true),
+         ValueSpec(2, 0, {4}, Float32(), Device::CPU(), false, false, false,
+                   true, false, false, 0, ValueWriteMode::kInPlace),
+         ValueSpec(3, 0, {4}, Float32(), Device::CPU(), false, false, true,
+                   true, false, false, 2, ValueWriteMode::kInPlace)},
+        {KernelCall("donate_0", {0, 1}, {2}),
+         KernelCall("donate_1", {2, 1}, {3})},
+        {0, 1}, {}, {3});
+}
+
+StateFixture MakeStateFixture() {
+    const kxc::codegen::KernelSignature signature = StateSignature();
+    auto launcher = std::make_shared<StateAccumulatorLauncher>();
+    return {MakeModule(signature, {}, launcher), MakeStatePlan(),
             std::move(launcher)};
 }
 
@@ -399,6 +526,200 @@ bool TestAsyncResultLifetime() {
     TEST_CHECK(result.completion->retained_storage.size() == 3,
                "completion should retain input, constant, and output Storage");
     result.completion.Wait();
+    return true;
+}
+
+bool TestStateAliasPersistenceAndLifetime() {
+    using namespace kxc;
+    StateFixture fixture = MakeStateFixture();
+    AsyncOperation escaped_completion;
+    const Object* state_storage = nullptr;
+    {
+        runtime::RuntimeSession session(fixture.module, fixture.plan);
+        runtime::NDArray first_increment = runtime::NDArray::Empty(
+            {4}, Float32(), Device::CPU());
+        const std::vector<float> first_values{1, 2, 3, 4};
+        first_increment.CopyFromBytes(first_values.data(),
+                                      first_values.size() * sizeof(float));
+        Array<runtime::NDArray> first = session.Run({first_increment});
+        std::vector<float> first_actual(4);
+        first[0].CopyToBytes(first_actual.data(),
+                             first_actual.size() * sizeof(float));
+        TEST_CHECK(first_actual == first_values,
+                   "session state must be zero-initialized on its first run");
+
+        runtime::NDArray second_increment = runtime::NDArray::Empty(
+            {4}, Float32(), Device::CPU());
+        const std::vector<float> second_values{10, 20, 30, 40};
+        second_increment.CopyFromBytes(second_values.data(),
+                                       second_values.size() * sizeof(float));
+        runtime::RunAsyncResult second = session.RunAsync(
+            {second_increment}, DeviceStream::Default(Device::CPU()));
+        second.completion.Wait();
+        std::vector<float> second_actual(4);
+        second.outputs[0].CopyToBytes(second_actual.data(),
+                                      second_actual.size() * sizeof(float));
+        TEST_CHECK(second_actual == std::vector<float>({11, 22, 33, 44}) &&
+                       first[0].storage().get() ==
+                           second.outputs[0].storage().get() &&
+                       reinterpret_cast<uintptr_t>(
+                           second.outputs[0].storage().data()) % 64 == 0 &&
+                       fixture.launcher->calls.load(std::memory_order_relaxed) == 2 &&
+                       fixture.launcher->saw_storage_alias.load(
+                           std::memory_order_relaxed),
+                   "state must persist and use the alias output storage across runs");
+        state_storage = second.outputs[0].storage().get();
+        escaped_completion = second.completion;
+    }
+
+    bool completion_retains_state = false;
+    for (const auto& storage : escaped_completion->retained_storage) {
+        completion_retains_state =
+            completion_retains_state || storage.get() == state_storage;
+    }
+    TEST_CHECK(escaped_completion.IsReady() && completion_retains_state,
+               "completion must keep session-owned state alive after session destruction");
+
+    runtime::RuntimeSession independent(fixture.module, fixture.plan);
+    runtime::NDArray increment =
+        runtime::NDArray::Empty({4}, Float32(), Device::CPU());
+    const std::vector<float> values{1, 1, 1, 1};
+    increment.CopyFromBytes(values.data(), values.size() * sizeof(float));
+    const Array<runtime::NDArray> fresh = independent.Run({increment});
+    std::vector<float> fresh_actual(4);
+    fresh[0].CopyToBytes(fresh_actual.data(),
+                         fresh_actual.size() * sizeof(float));
+    TEST_CHECK(fresh_actual == values &&
+                   fresh[0].storage().get() != state_storage,
+               "each RuntimeSession must own an independent zeroed state");
+    return true;
+}
+
+bool TestStateRunAsyncSerialization() {
+    using namespace kxc;
+    const codegen::KernelSignature signature = StateSignature();
+    auto launcher = std::make_shared<StateAccumulatorLauncher>(true);
+    runtime::RuntimeSession session(MakeModule(signature, {}, launcher),
+                                    MakeStatePlan());
+    constexpr int kThreads = 4;
+    std::atomic<int> failures{0};
+    std::vector<runtime::NDArray> outputs(kThreads);
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&, i] {
+            try {
+                runtime::NDArray increment =
+                    runtime::NDArray::Empty({4}, Float32(), Device::CPU());
+                const std::vector<float> ones{1, 1, 1, 1};
+                increment.CopyFromBytes(ones.data(),
+                                        ones.size() * sizeof(float));
+                runtime::RunAsyncResult result = session.RunAsync(
+                    {increment}, DeviceStream::Default(Device::CPU()));
+                result.completion.Wait();
+                outputs[i] = result.outputs[0];
+            } catch (...) {
+                failures.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    std::vector<float> actual(4);
+    if (outputs[0].defined()) {
+        outputs[0].CopyToBytes(actual.data(), actual.size() * sizeof(float));
+    }
+    TEST_CHECK(failures.load(std::memory_order_relaxed) == 0 &&
+                   launcher->calls.load(std::memory_order_relaxed) == kThreads &&
+                   launcher->max_active.load(std::memory_order_relaxed) == 1 &&
+                   actual == std::vector<float>({4, 4, 4, 4}),
+               "stateful RunAsync submissions must serialize within one session");
+    return true;
+}
+
+bool TestInputDonationAliasAndPreflight() {
+    using namespace kxc;
+    const codegen::KernelSignature signature = StateSignature();
+    auto launcher = std::make_shared<StateAccumulatorLauncher>();
+    runtime::RuntimeSession session(MakeModule(signature, {}, launcher),
+                                    MakeDonationPlan());
+
+    runtime::NDArray source =
+        runtime::NDArray::Empty({4}, Float32(), Device::CPU(), 64);
+    runtime::NDArray increment =
+        runtime::NDArray::Empty({4}, Float32(), Device::CPU());
+    const std::vector<float> source_values{1, 2, 3, 4};
+    const std::vector<float> increment_values{10, 20, 30, 40};
+    source.CopyFromBytes(source_values.data(), source_values.size() * sizeof(float));
+    increment.CopyFromBytes(increment_values.data(),
+                            increment_values.size() * sizeof(float));
+    const Array<runtime::NDArray> outputs = session.Run({source, increment});
+    std::vector<float> actual(4);
+    outputs[0].CopyToBytes(actual.data(), actual.size() * sizeof(float));
+    TEST_CHECK(actual == std::vector<float>({11, 22, 33, 44}) &&
+                   outputs[0].storage().get() == source.storage().get() &&
+                   launcher->calls.load(std::memory_order_relaxed) == 1,
+               "declared input donation must bind the output to source storage");
+
+    runtime::NDArray backing =
+        runtime::NDArray::Zeros({5}, Float32(), Device::CPU(), 64);
+    runtime::NDArray misaligned =
+        backing.CreateView({4}, {1}, sizeof(float));
+    TEST_CHECK(Throws([&] {
+                   session.RunAsync(
+                       {misaligned, increment},
+                       DeviceStream::Default(Device::CPU()));
+               }) &&
+                   launcher->calls.load(std::memory_order_relaxed) == 1,
+               "donated input must satisfy alias-output alignment before launch");
+
+    const codegen::KernelSignature first =
+        AccumulatorSignature("donate_0", 4);
+    const codegen::KernelSignature second =
+        AccumulatorSignature("donate_1", 64);
+    const codegen::KernelLaunchMetadata metadata(
+        Device::CPU(), codegen::CodeGenBackend::kLLVM);
+    auto chain_launcher = std::make_shared<StateAccumulatorLauncher>();
+    const api::CompiledModule chain_module = api::internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()),
+        {{first, metadata,
+          codegen::CompiledKernel(first, metadata, chain_launcher)},
+         {second, metadata,
+          codegen::CompiledKernel(second, metadata, chain_launcher)}},
+        {});
+    runtime::RuntimeSession chain_session(chain_module,
+                                          MakeDonationChainPlan());
+    TEST_CHECK(Throws([&] {
+                   chain_session.RunAsync(
+                       {misaligned, increment},
+                       DeviceStream::Default(Device::CPU()));
+               }) &&
+                   chain_launcher->calls.load(std::memory_order_relaxed) == 0,
+               "donation-chain alignment must fail before its first launch");
+    return true;
+}
+
+bool TestStateContractMismatchRejected() {
+    using namespace kxc;
+    StateFixture fixture = MakeStateFixture();
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(
+                       fixture.module, MakeStatePlan({2}, Float32(), Device::CPU()));
+               }),
+               "state shape mismatch must fail at session construction");
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(
+                       fixture.module,
+                       MakeStatePlan({4}, runtime::DataTypeFromString("int32"),
+                                     Device::CPU()));
+               }),
+               "state dtype mismatch must fail at session construction");
+    TEST_CHECK(Throws([&] {
+                   runtime::RuntimeSession invalid(
+                       fixture.module,
+                       MakeStatePlan({4}, Float32(), Device::CUDA(0)));
+               }),
+               "state device mismatch must fail before state allocation");
+    TEST_CHECK(fixture.launcher->calls.load(std::memory_order_relaxed) == 0,
+               "invalid state contracts must never reach the backend");
     return true;
 }
 
@@ -804,6 +1125,13 @@ int main() {
         {"synchronous_assembly", TestSynchronousAssembly},
         {"module_owned_constant_execution", TestModuleOwnedConstantExecution},
         {"async_result_lifetime", TestAsyncResultLifetime},
+        {"state_alias_persistence_and_lifetime",
+         TestStateAliasPersistenceAndLifetime},
+        {"state_run_async_serialization", TestStateRunAsyncSerialization},
+        {"input_donation_alias_and_preflight",
+         TestInputDonationAliasAndPreflight},
+        {"state_contract_mismatch_rejected",
+         TestStateContractMismatchRejected},
         {"input_validation", TestInputValidation},
         {"stream_validation", TestStreamValidation},
         {"input_device_validation_before_allocation",

@@ -4,6 +4,7 @@
 
 #include "kxc/runtime/executable_plan.h"
 
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -37,27 +38,31 @@ bool IsSupportedDType(DLDataType dtype) {
 }
 
 bool IsSourceValue(const ValueSpec& value) {
-    return value->is_input || value->is_constant;
+    return value->is_input || value->is_constant || value->is_state;
 }
 
-bool SameStorageContract(const ValueSpec& lhs, const ValueSpec& rhs) {
-    if (lhs->dtype.code != rhs->dtype.code ||
-        lhs->dtype.bits != rhs->dtype.bits ||
-        lhs->dtype.lanes != rhs->dtype.lanes || lhs->device != rhs->device) {
-        return false;
+size_t StaticNBytes(const ValueSpec& value) {
+    size_t elements = 1;
+    bool has_zero_dimension = false;
+    for (int64_t dimension : value.shape()) {
+        if (dimension < 0) {
+            throw std::invalid_argument("ValueSpec valid bytes require a static shape");
+        }
+        has_zero_dimension = has_zero_dimension || dimension == 0;
+        if (dimension != 0 &&
+            elements > std::numeric_limits<size_t>::max() /
+                           static_cast<size_t>(dimension)) {
+            throw std::overflow_error("ValueSpec element count overflow");
+        }
+        if (dimension != 0) elements *= static_cast<size_t>(dimension);
     }
-    const Array<int64_t> lhs_shape = lhs.shape();
-    const Array<int64_t> rhs_shape = rhs.shape();
-    if (lhs_shape.size() != rhs_shape.size()) return false;
-    for (size_t i = 0; i < lhs_shape.size(); ++i) {
-        if (lhs_shape[i] != rhs_shape[i]) return false;
+    if (has_zero_dimension) return 0;
+    const size_t element_bytes =
+        static_cast<size_t>(value->dtype.bits / 8) * value->dtype.lanes;
+    if (elements > std::numeric_limits<size_t>::max() / element_bytes) {
+        throw std::overflow_error("ValueSpec byte size overflow");
     }
-    return true;
-}
-
-bool CanShareStorage(const ValueSpec& value) {
-    return !IsSourceValue(value) && !value->is_output && !value->is_alias &&
-           !value->is_async_live;
+    return elements * element_bytes;
 }
 
 template <typename T>
@@ -99,10 +104,36 @@ void ValidateOrderedRoleList(
 
 }  // namespace
 
+namespace internal {
+
+bool SameValueStorageContract(const ValueSpec& lhs, const ValueSpec& rhs) {
+    if (lhs->dtype.code != rhs->dtype.code ||
+        lhs->dtype.bits != rhs->dtype.bits ||
+        lhs->dtype.lanes != rhs->dtype.lanes || lhs->device != rhs->device) {
+        return false;
+    }
+    const Array<int64_t> lhs_shape = lhs.shape();
+    const Array<int64_t> rhs_shape = rhs.shape();
+    if (lhs_shape.size() != rhs_shape.size()) return false;
+    for (size_t i = 0; i < lhs_shape.size(); ++i) {
+        if (lhs_shape[i] != rhs_shape[i]) return false;
+    }
+    return true;
+}
+
+bool IsValueStorageReusable(const ValueSpec& value) {
+    return !value->is_input && !value->is_constant && !value->is_output &&
+           !value->is_alias && !value->is_async_live && !value->is_state;
+}
+
+}  // namespace internal
+
 ValueSpec::ValueSpec(int64_t value_id, int64_t storage_id, Array<int64_t> shape,
                      DLDataType dtype, Device device, bool is_input,
                      bool is_constant, bool is_output, bool is_alias,
-                     bool is_async_live) {
+                     bool is_async_live, bool is_state,
+                     int64_t alias_source_value_id, ValueWriteMode write_mode,
+                     int64_t valid_bytes) {
     auto* node = new ValueSpecNode();
     node->value_id = value_id;
     node->storage_id = storage_id;
@@ -115,6 +146,10 @@ ValueSpec::ValueSpec(int64_t value_id, int64_t storage_id, Array<int64_t> shape,
     node->is_output = is_output;
     node->is_alias = is_alias;
     node->is_async_live = is_async_live;
+    node->is_state = is_state;
+    node->alias_source_value_id = alias_source_value_id;
+    node->write_mode = write_mode;
+    node->valid_bytes = valid_bytes;
     SetData(node);
     Validate();
 }
@@ -143,6 +178,31 @@ void ValueSpec::Validate() const {
         throw std::invalid_argument(
             "ValueSpec cannot be both an input and a constant");
     }
+    if (node->is_state &&
+        (node->is_input || node->is_constant || node->is_output ||
+         node->is_alias)) {
+        throw std::invalid_argument(
+            "ValueSpec state cannot also be an input, constant, graph output, or alias");
+    }
+    if (node->alias_source_value_id < -1) {
+        throw std::invalid_argument("ValueSpec alias source id is invalid");
+    }
+    if (node->alias_source_value_id == -1 &&
+        node->write_mode != ValueWriteMode::kAllocate) {
+        throw std::invalid_argument(
+            "ValueSpec write mode requires an alias source");
+    }
+    if (node->alias_source_value_id != -1 &&
+        (!node->is_alias || node->write_mode != ValueWriteMode::kInPlace ||
+         node->is_input || node->is_constant || node->is_state)) {
+        throw std::invalid_argument(
+            "ValueSpec alias source requires a produced in-place alias");
+    }
+    if (node->alias_source_value_id != -1 &&
+        (node->is_input || node->is_constant || node->is_state)) {
+        throw std::invalid_argument(
+            "ValueSpec in-place alias must be a produced value");
+    }
     if (!node->shape_defined_) {
         throw std::invalid_argument("ValueSpec shape metadata must be defined");
     }
@@ -163,7 +223,13 @@ void ValueSpec::Validate() const {
                 "Only input ValueSpecs may contain dynamic dimensions");
         }
     }
-
+    if (node->valid_bytes < -1) {
+        throw std::invalid_argument("ValueSpec valid bytes is invalid");
+    }
+    if (node->valid_bytes != -1 &&
+        static_cast<uint64_t>(node->valid_bytes) > StaticNBytes(*this)) {
+        throw std::invalid_argument("ValueSpec valid bytes exceeds tensor capacity");
+    }
 }
 
 const ValueSpecNode* ValueSpec::operator->() const {
@@ -229,13 +295,15 @@ const KernelCallNode* KernelCall::operator->() const {
 ExecutablePlan::ExecutablePlan(Array<ValueSpec> values, Array<KernelCall> calls,
                                Array<int64_t> input_value_ids,
                                Array<int64_t> constant_value_ids,
-                               Array<int64_t> output_value_ids) {
+                               Array<int64_t> output_value_ids,
+                               Array<int64_t> state_value_ids) {
     auto* node = new ExecutablePlanNode();
     node->values_ = CopyArray(values);
     node->calls_ = CopyArray(calls);
     node->input_value_ids_ = CopyArray(input_value_ids);
     node->constant_value_ids_ = CopyArray(constant_value_ids);
     node->output_value_ids_ = CopyArray(output_value_ids);
+    node->state_value_ids_ = CopyArray(state_value_ids);
     SetData(node);
     Validate();
 }
@@ -266,6 +334,10 @@ Array<int64_t> ExecutablePlan::constant_value_ids() const {
 
 Array<int64_t> ExecutablePlan::output_value_ids() const {
     return CopyArray(operator->()->output_value_ids_);
+}
+
+Array<int64_t> ExecutablePlan::state_value_ids() const {
+    return CopyArray(operator->()->state_value_ids_);
 }
 
 void ExecutablePlan::Validate() const {
@@ -301,6 +373,7 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
     const Array<int64_t> input_ids = plan.input_value_ids();
     const Array<int64_t> constant_ids = plan.constant_value_ids();
     const Array<int64_t> output_ids = plan.output_value_ids();
+    const Array<int64_t> state_ids = plan.state_value_ids();
     ValidateOrderedRoleList(input_ids, &ValueSpecNode::is_input, "input_value_ids",
                             values_by_id);
     ValidateOrderedRoleList(constant_ids, &ValueSpecNode::is_constant,
@@ -308,10 +381,13 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
     ValidateOrderedRoleList(output_ids, &ValueSpecNode::is_output,
                             "output_value_ids",
                             values_by_id);
+    ValidateOrderedRoleList(state_ids, &ValueSpecNode::is_state,
+                            "state_value_ids", values_by_id);
 
     std::unordered_set<int64_t> available;
     for (int64_t id : input_ids) available.insert(id);
     for (int64_t id : constant_ids) available.insert(id);
+    for (int64_t id : state_ids) available.insert(id);
 
     std::unordered_map<int64_t, int> producer_counts;
     std::unordered_map<int64_t, int64_t> producer_index;
@@ -359,11 +435,60 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
                 "Every non-source ExecutablePlan value requires exactly one producer");
         }
     }
+    for (int64_t state_id : state_ids) {
+        if (last_use.count(state_id) == 0) {
+            throw std::invalid_argument(
+                "ExecutablePlan state value is never consumed");
+        }
+    }
     for (int64_t output_id : output_ids) {
         if (available.count(output_id) == 0) {
             throw std::invalid_argument("ExecutablePlan graph output is unavailable");
         }
     }
+    std::unordered_set<int64_t> donated_sources;
+    for (const auto& value : values) {
+        if (value->alias_source_value_id == -1) continue;
+        const auto source_it = values_by_id.find(value->alias_source_value_id);
+        if (source_it == values_by_id.end() ||
+            source_it->first == value->value_id || source_it->second->is_constant ||
+            source_it->second->is_output ||
+            source_it->second->storage_id != value->storage_id ||
+            !SameValueStorageContract(source_it->second, value)) {
+            throw std::invalid_argument("ExecutablePlan alias source violates a value contract");
+        }
+        const int64_t write_at = producer_index.at(value->value_id);
+        bool producer_consumes_source = false;
+        for (int64_t input_id : calls[static_cast<size_t>(write_at)].input_value_ids()) {
+            producer_consumes_source =
+                producer_consumes_source || input_id == source_it->first;
+        }
+        if (!producer_consumes_source) {
+            throw std::invalid_argument(
+                "ExecutablePlan alias producer does not consume its source");
+        }
+        if (!donated_sources.insert(source_it->first).second) {
+            throw std::invalid_argument(
+                "ExecutablePlan alias source is donated more than once");
+        }
+        if (last_use.at(source_it->first) > write_at) {
+            throw std::invalid_argument(
+                "ExecutablePlan alias source remains live after an in-place write");
+        }
+    }
+
+    const auto alias_root = [&](int64_t value_id) {
+        for (size_t depth = 0; depth <= values.size(); ++depth) {
+            const auto value = values_by_id.find(value_id);
+            if (value == values_by_id.end()) {
+                throw std::logic_error(
+                    "ExecutablePlan alias root references an unknown value");
+            }
+            if (value->second->alias_source_value_id == -1) return value_id;
+            value_id = value->second->alias_source_value_id;
+        }
+        throw std::logic_error("ExecutablePlan alias chain contains a cycle");
+    };
 
     std::unordered_map<int64_t, std::vector<ValueSpec>> values_by_storage;
     for (const auto& value : values) {
@@ -373,12 +498,17 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
         const auto& shared = storage.second;
         for (size_t i = 0; i < shared.size(); ++i) {
             for (size_t j = i + 1; j < shared.size(); ++j) {
-                if (!CanShareStorage(shared[i]) ||
-                    !CanShareStorage(shared[j]) ||
-                    !SameStorageContract(shared[i], shared[j])) {
+                const bool declared_alias =
+                    alias_root(shared[i]->value_id) ==
+                    alias_root(shared[j]->value_id);
+                if (!declared_alias &&
+                    (!IsValueStorageReusable(shared[i]) ||
+                     !IsValueStorageReusable(shared[j]) ||
+                     !SameValueStorageContract(shared[i], shared[j]))) {
                     throw std::invalid_argument(
                         "ExecutablePlan storage sharing violates a value contract");
                 }
+                if (declared_alias) continue;
                 const int64_t first_begin =
                     producer_index.at(shared[i]->value_id);
                 const int64_t first_end = last_use.at(shared[i]->value_id);

@@ -83,6 +83,9 @@ void AppendValueContract(std::string* out,
     AppendInteger(out, "is_output", value->is_output);
     AppendInteger(out, "is_alias", value->is_alias);
     AppendInteger(out, "is_async_live", value->is_async_live);
+    AppendInteger(out, "is_state", value->is_state);
+    AppendInteger(out, "write_mode", static_cast<uint8_t>(value->write_mode));
+    AppendInteger(out, "valid_bytes", value->valid_bytes);
     AppendShape(out, value.shape(), "plan ABI");
 }
 
@@ -161,7 +164,7 @@ std::string StaticExactInputProfileCanonical(
         values.emplace(value->value_id, value);
     }
     std::string profile;
-    AppendField(&profile, "kind", "static-exact-input-profile-v2");
+    AppendField(&profile, "kind", "static-exact-input-profile-v3-state-contract");
     for (int64_t value_id : plan.input_value_ids()) {
         const auto found = values.find(value_id);
         if (found == values.end()) {
@@ -363,10 +366,10 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     plan.Validate();
     std::string canonical;
-    // v5 is intentionally a new byte contract.  It covers callable/runtime
-    // ABI only; selected artifacts and their generations/receipts are PlanVariant
+    // v6 covers callable/runtime ABI, including state and explicit donation.
+    // Selected artifacts and their generations/receipts are PlanVariant
     // selection identity and must never affect compatibility.
-    AppendField(&canonical, "kind", "static-exact-plan-abi-v5-canonical-kernel-abi");
+    AppendField(&canonical, "kind", "static-exact-plan-abi-v6-state-alias");
     AppendTargetContract(&canonical, ModuleTarget(module));
     const Array<runtime::KernelCall> calls = plan.calls();
     if (ordered_artifacts.size() != calls.size()) {
@@ -381,13 +384,19 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
                 "plan ABI ordered artifact mapping differs from its call");
         }
     }
-    for (const auto& value : plan.values()) {
-        AppendField(&canonical, "value_begin", "v1");
-        AppendValueContract(&canonical, value);
-    }
+    const Array<runtime::ValueSpec> values = plan.values();
     std::unordered_map<int64_t, size_t> value_ordinals;
-    for (size_t ordinal = 0; ordinal < plan.values().size(); ++ordinal) {
-        value_ordinals.emplace(plan.values()[ordinal]->value_id, ordinal);
+    for (size_t ordinal = 0; ordinal < values.size(); ++ordinal) {
+        value_ordinals.emplace(values[ordinal]->value_id, ordinal);
+    }
+    for (const auto& value : values) {
+        AppendField(&canonical, "value_begin", "v2");
+        AppendValueContract(&canonical, value);
+        const auto source = value_ordinals.find(value->alias_source_value_id);
+        AppendInteger(&canonical, "alias_source_ordinal",
+                      source == value_ordinals.end()
+                          ? int64_t{-1}
+                          : static_cast<int64_t>(source->second));
     }
     for (const auto& call : calls) {
         AppendField(&canonical, "call_symbol", std::string(call->symbol));
@@ -424,6 +433,10 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
         AppendInteger(&canonical, "graph_output_ordinal", value_ordinals.at(id));
     }
     AppendField(&canonical, "graph_outputs_end", "v2");
+    for (int64_t id : plan.state_value_ids()) {
+        AppendInteger(&canonical, "state_ordinal", value_ordinals.at(id));
+    }
+    AppendField(&canonical, "states_end", "v1");
     std::vector<std::pair<std::string, runtime::NDArray>> constants;
     for (const auto& item : module.constants()) {
         constants.emplace_back(std::string(item.first), item.second);

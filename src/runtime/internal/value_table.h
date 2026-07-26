@@ -25,6 +25,7 @@ public:
             throw std::invalid_argument(
                 "ValueTable bindings require a ValueSpec and NDArray");
         }
+        ValidateValidBytes(spec, value);
         if (!storage_by_value_
                  .emplace(spec->value_id, spec->storage_id)
                  .second) {
@@ -37,6 +38,18 @@ public:
         } else {
             values_by_storage_.emplace(spec->storage_id, std::move(value));
         }
+    }
+
+    void Alias(const ValueSpec& spec, int64_t source_value_id) {
+        if (!spec.defined() || Contains(spec->value_id) ||
+            !Contains(source_value_id) || !spec->is_alias ||
+            spec->write_mode != ValueWriteMode::kInPlace ||
+            spec->alias_source_value_id != source_value_id ||
+            spec->storage_id != storage_by_value_.at(source_value_id)) {
+            throw std::logic_error("ValueTable alias contract is not bound");
+        }
+        ValidateValidBytes(spec, Get(source_value_id));
+        storage_by_value_.emplace(spec->value_id, spec->storage_id);
     }
 
     NDArray Allocate(const ValueSpec& spec, uint64_t alignment) {
@@ -59,6 +72,7 @@ public:
             value = NDArray::Empty(spec.shape(), spec->dtype, spec->device,
                                    alignment);
         }
+        ValidateValidBytes(spec, value);
         storage_by_value_.emplace(spec->value_id, spec->storage_id);
         values_by_storage_.insert_or_assign(spec->storage_id, value);
         return value;
@@ -86,6 +100,15 @@ public:
     }
 
 private:
+    static void ValidateValidBytes(const ValueSpec& spec,
+                                   const NDArray& array) {
+        if (spec->valid_bytes != -1 &&
+            static_cast<uint64_t>(spec->valid_bytes) > array.NBytes()) {
+            throw std::invalid_argument(
+                "ValueTable valid bytes exceed the bound tensor");
+        }
+    }
+
     static bool Compatible(const NDArray& array, const ValueSpec& spec,
                            uint64_t alignment) {
         if (array.dtype().code != spec->dtype.code ||

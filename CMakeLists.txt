@@ -1040,7 +1040,7 @@ if(KXC_BUILD_PASS_TESTS)
     USES_TERMINAL
     COMMENT "Run resolved control-runtime CTest suite")
 
-  foreach(_kxc_runtime_plan_test IN ITEMS runtime_session_test)
+  foreach(_kxc_runtime_plan_test IN ITEMS executable_plan_test runtime_session_test)
     add_test(NAME ${_kxc_runtime_plan_test}
       COMMAND "$<TARGET_FILE:${_kxc_runtime_plan_test}>")
     set_tests_properties(${_kxc_runtime_plan_test} PROPERTIES
@@ -1198,7 +1198,7 @@ if(KXC_BUILD_PASS_TESTS)
   add_custom_target(run_runtime_plan_tests
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L runtime-plan
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-    DEPENDS runtime_session_test control_runtime_integration_test
+    DEPENDS executable_plan_test runtime_session_test control_runtime_integration_test
     USES_TERMINAL
     COMMENT "Run runtime plan CTest suite"
   )
@@ -1290,7 +1290,7 @@ kxc_add_ctest_if_target(shape_exact_dispatch_test "shape;shape-dispatch;cpu")
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test
     pass_pipeline_test pipeline_resolver_test device_info_test device_runtime_test
-    executable_plan_test graph_partition_test infer_type_test
+    graph_partition_test infer_type_test
     onnx_import_spec_contract_test profile_bundle_test
     compiler_contract_test compiler_identity_test
     operator_compilation_test primitive_cache_test

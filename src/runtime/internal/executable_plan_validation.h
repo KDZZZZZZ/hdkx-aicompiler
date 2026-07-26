@@ -8,6 +8,12 @@
 
 namespace kxc::runtime::internal {
 
+/*! \brief Return whether two values require the same physical tensor layout. */
+bool SameValueStorageContract(const ValueSpec& lhs, const ValueSpec& rhs);
+
+/*! \brief Return whether last-use planning may assign a value to a reused slot. */
+bool IsValueStorageReusable(const ValueSpec& value);
+
 /*! \brief Validate cross-value producer, availability, and ordering invariants. */
 void ValidateExecutablePlan(const ExecutablePlan& plan);
 

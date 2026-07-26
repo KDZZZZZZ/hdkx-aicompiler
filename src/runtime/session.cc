@@ -5,7 +5,10 @@
 #include "kxc/runtime/session.h"
 #include "kxc/support/object_registration.h"
 
+#include <algorithm>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -26,6 +29,7 @@ namespace {
 struct ValidatedPlanContract final {
     Device device;
     std::unordered_map<int64_t, String> constant_keys_by_value;
+    std::unordered_map<int64_t, size_t> required_alignment_by_storage;
 };
 
 struct RuntimeExecutionState final {
@@ -198,6 +202,14 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
             const ValueSpec& value = FindValue(values, value_id, context);
             ValidateValueContract(value, argument,
                                   context + " value " + std::to_string(value_id));
+            if (argument->alignment > std::numeric_limits<size_t>::max()) {
+                throw std::invalid_argument(
+                    context + " alignment exceeds the host size type");
+            }
+            size_t& required_alignment =
+                result.required_alignment_by_storage[value->storage_id];
+            required_alignment = std::max(
+                required_alignment, static_cast<size_t>(argument->alignment));
             if (argument->role == codegen::KernelArgRole::kConstant) {
                 const std::string key = std::string(argument->constant_key);
                 if (!module_constants.count(argument->constant_key)) {
@@ -255,7 +267,10 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
 void ValidateStoredSession(const RuntimeSessionNode& node) {
     const ValidatedPlanContract checked = ValidateModuleAndPlan(node.module, node.plan);
     if (checked.device != node.device ||
-        checked.constant_keys_by_value.size() != node.constant_keys_by_value.size()) {
+        checked.constant_keys_by_value.size() != node.constant_keys_by_value.size() ||
+        checked.required_alignment_by_storage.size() !=
+            node.required_alignment_by_storage.size() ||
+        node.states_by_value.size() != node.plan.state_value_ids().size()) {
         throw std::invalid_argument("RuntimeSession stored plan or metadata is inconsistent");
     }
     for (const auto& item : checked.constant_keys_by_value) {
@@ -265,6 +280,36 @@ void ValidateStoredSession(const RuntimeSessionNode& node) {
             throw std::invalid_argument(
                 "RuntimeSession stored constant mapping is inconsistent");
         }
+    }
+    for (const auto& item : checked.required_alignment_by_storage) {
+        const auto stored = node.required_alignment_by_storage.find(item.first);
+        if (stored == node.required_alignment_by_storage.end() ||
+            stored->second != item.second) {
+            throw std::invalid_argument(
+                "RuntimeSession stored alignment mapping is inconsistent");
+        }
+    }
+    const auto values = IndexValues(node.plan);
+    for (int64_t value_id : node.plan.state_value_ids()) {
+        const auto state = node.states_by_value.find(value_id);
+        const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession state");
+        const auto alignment =
+            node.required_alignment_by_storage.find(spec->storage_id);
+        if (state == node.states_by_value.end() ||
+            alignment == node.required_alignment_by_storage.end() ||
+            state->second.storage()->alignment < alignment->second) {
+            throw std::invalid_argument(
+                "RuntimeSession stored state mapping is inconsistent");
+        }
+        ValidateRuntimeValue(spec, state->second,
+                             "RuntimeSession state value " +
+                                 std::to_string(value_id));
+    }
+    std::lock_guard<std::mutex> lock(node.state_mutex);
+    if (node.state_completion.defined() &&
+        node.state_completion.device() != node.device) {
+        throw std::invalid_argument(
+            "RuntimeSession stored state completion is inconsistent");
     }
 }
 
@@ -298,6 +343,7 @@ AsyncOperation InvokeOrderedModuleEntry(const api::CompiledModule& module,
 Array<NDArray> PrepareCallArguments(
     const api::CompiledModule& module, const KernelCall& call,
     const std::unordered_map<int64_t, ValueSpec>& values,
+    const std::unordered_map<int64_t, size_t>& required_alignment_by_storage,
     const std::shared_ptr<internal::ValueTable>& table) {
     const codegen::KernelSignature signature = module.signature(call->symbol);
     Array<int64_t> regular_inputs;
@@ -333,7 +379,17 @@ Array<NDArray> PrepareCallArguments(
                 }
                 const ValueSpec& value =
                     FindValue(values, value_id, "RuntimeSession output");
-                table->Allocate(value, argument->alignment);
+                if (value->write_mode == ValueWriteMode::kInPlace) {
+                    table->Alias(value, value->alias_source_value_id);
+                } else {
+                    const auto alignment =
+                        required_alignment_by_storage.find(value->storage_id);
+                    if (alignment == required_alignment_by_storage.end()) {
+                        throw std::logic_error(
+                            "RuntimeSession output has no alignment contract");
+                    }
+                    table->Allocate(value, alignment->second);
+                }
                 break;
             }
         }
@@ -357,13 +413,31 @@ void ValidateBoundSourceArguments(
                 FindValue(values, value_id, "RuntimeSession source preflight");
             (value->is_constant ? constant_inputs : regular_inputs).push_back(value_id);
         }
+        const Array<int64_t> output_ids = call.output_value_ids();
         size_t regular_index = 0;
         size_t constant_index = 0;
+        size_t output_index = 0;
         const Array<codegen::KernelArgSpec> arguments = signature.arguments();
         for (size_t argument_index = 0; argument_index < arguments.size();
              ++argument_index) {
             const auto& argument = arguments[argument_index];
-            if (argument->role == codegen::KernelArgRole::kOutput) continue;
+            if (argument->role == codegen::KernelArgRole::kOutput) {
+                const ValueSpec& output = FindValue(
+                    values, output_ids[output_index++],
+                    "RuntimeSession alias preflight");
+                int64_t bound_source = output->alias_source_value_id;
+                while (bound_source != -1 && !table->Contains(bound_source)) {
+                    bound_source = FindValue(values, bound_source,
+                                             "RuntimeSession alias preflight")
+                                       ->alias_source_value_id;
+                }
+                if (bound_source != -1) {
+                    api::ValidateKernelArgument(
+                        signature, argument_index, argument,
+                        table->Get(bound_source), constants);
+                }
+                continue;
+            }
             const int64_t value_id =
                 argument->role == codegen::KernelArgRole::kConstant
                     ? constant_inputs[constant_index++]
@@ -379,9 +453,24 @@ void ValidateBoundSourceArguments(
 
 RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan) {
     ValidatedPlanContract contract = ValidateModuleAndPlan(module, plan);
-    SetData(new RuntimeSessionNode(std::move(module), std::move(plan),
-                                   std::move(contract.device),
-                                   std::move(contract.constant_keys_by_value)));
+    const auto values = IndexValues(plan);
+    std::unordered_map<int64_t, NDArray> states;
+    for (int64_t value_id : plan.state_value_ids()) {
+        const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession state");
+        const auto alignment =
+            contract.required_alignment_by_storage.find(spec->storage_id);
+        if (alignment == contract.required_alignment_by_storage.end()) {
+            throw std::logic_error(
+                "RuntimeSession state has no alignment contract");
+        }
+        states.emplace(value_id, NDArray::Zeros(
+                                     spec.shape(), spec->dtype, spec->device,
+                                     alignment->second));
+    }
+    SetData(new RuntimeSessionNode(
+        std::move(module), std::move(plan), std::move(contract.device),
+        std::move(contract.constant_keys_by_value),
+        std::move(contract.required_alignment_by_storage), std::move(states)));
 }
 
 RuntimeSession::RuntimeSession(const ObjectRef& ref) : ObjectRef(ref) {
@@ -440,13 +529,34 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
         const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession constant");
         table->Bind(spec, constants.at(key->second));
     }
+
+    std::unique_lock<std::mutex> state_lock;
+    if (!node->states_by_value.empty()) {
+        state_lock = std::unique_lock<std::mutex>(node->state_mutex);
+        if (node->state_completion.defined() &&
+            !node->state_completion.IsReady()) {
+            throw std::runtime_error(
+                "RuntimeSession state execution is still pending");
+        }
+        for (int64_t value_id : node->plan.state_value_ids()) {
+            const auto state = node->states_by_value.find(value_id);
+            if (state == node->states_by_value.end()) {
+                throw std::logic_error(
+                    "RuntimeSession validated state binding disappeared");
+            }
+            const ValueSpec& spec =
+                FindValue(values, value_id, "RuntimeSession state");
+            table->Bind(spec, state->second);
+        }
+    }
     ValidateBoundSourceArguments(node->module, node->plan, values, table);
 
     const Array<KernelCall> calls = node->plan.calls();
     Array<AsyncOperation> operations;
     for (const auto& call : calls) {
-        Array<NDArray> arguments =
-            PrepareCallArguments(node->module, call, values, table);
+        Array<NDArray> arguments = PrepareCallArguments(
+            node->module, call, values,
+            node->required_alignment_by_storage, table);
         operations.push_back(InvokeOrderedModuleEntry(
             node->module, call->symbol, arguments, stream));
     }
@@ -466,6 +576,7 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
     auto state = std::make_shared<RuntimeExecutionState>(RuntimeExecutionState{
         node->module, node->plan, table, std::move(prior_operations)});
     completion.RetainDependencies(table->RetainedStorage(), std::move(state));
+    if (state_lock.owns_lock()) node->state_completion = completion;
     return RunAsyncResult{std::move(outputs), std::move(completion)};
 }
 

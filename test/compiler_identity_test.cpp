@@ -2,6 +2,7 @@
  * \brief Verifies canonical compiler identity separation and full equality.
  */
 
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -211,7 +212,8 @@ public:
     }
 };
 
-kxc::api::PlanAbiFingerprint PlanAbiForAlignment(uint64_t alignment) {
+kxc::api::PlanAbiFingerprint PlanAbiForAlignment(
+    uint64_t alignment, bool state_alias = false, int64_t valid_bytes = -1) {
     using namespace kxc;
     using namespace kxc::api;
     using namespace kxc::codegen;
@@ -227,10 +229,25 @@ kxc::api::PlanAbiFingerprint PlanAbiForAlignment(uint64_t alignment) {
         BuildTarget(Device::CPU()),
         {internal::CompiledModuleEntry{signature, metadata,
                                        CompiledKernel(signature, metadata, launcher)}}, {});
-    const runtime::ExecutablePlan plan(
-        {runtime::ValueSpec(0, 0, {2}, dtype, Device::CPU(), true),
-         runtime::ValueSpec(1, 1, {2}, dtype, Device::CPU(), false, false, true)},
-        {runtime::KernelCall("entry", {0}, {1})}, {0}, {}, {1});
+    runtime::ExecutablePlan plan;
+    if (state_alias) {
+        plan = runtime::ExecutablePlan(
+            {runtime::ValueSpec(0, 0, {2}, dtype, Device::CPU(), false,
+                                false, false, false, false, true),
+             runtime::ValueSpec(1, 0, {2}, dtype, Device::CPU(), false,
+                                false, true, true, false, false, 0,
+                                runtime::ValueWriteMode::kInPlace,
+                                valid_bytes)},
+            {runtime::KernelCall("entry", {0}, {1})}, {}, {}, {1}, {0});
+    } else {
+        plan = runtime::ExecutablePlan(
+            {runtime::ValueSpec(0, 0, {2}, dtype, Device::CPU(), true),
+             runtime::ValueSpec(1, 1, {2}, dtype, Device::CPU(), false,
+                                false, true, false, false, false, -1,
+                                runtime::ValueWriteMode::kAllocate,
+                                valid_bytes)},
+            {runtime::KernelCall("entry", {0}, {1})}, {0}, {}, {1});
+    }
     const PrimitiveArtifactKey artifact(
         UnitSemanticKey("identity-plan-unit"), "cpu", "pipeline", 1,
         "schedule", "backend");
@@ -248,6 +265,21 @@ bool TestPlanAbiUsesKernelCanonicalBytes() {
                    first.canonical_bytes().find("KernelSignature(") ==
                        std::string::npos,
                "Plan ABI must embed canonical kernel contracts rather than diagnostics");
+    return true;
+}
+
+bool TestPlanAbiIncludesStateAliasAndExtent() {
+    const kxc::api::PlanAbiFingerprint baseline = PlanAbiForAlignment(4);
+    const kxc::api::PlanAbiFingerprint state_alias =
+        PlanAbiForAlignment(4, true);
+    const kxc::api::PlanAbiFingerprint bounded =
+        PlanAbiForAlignment(4, false, 4);
+    TEST_CHECK(baseline != state_alias && baseline != bounded &&
+                   state_alias.canonical_bytes().find("alias_source_ordinal") !=
+                       std::string::npos &&
+                   state_alias.canonical_bytes().find("states_end") !=
+                       std::string::npos,
+               "Plan ABI identity must include state, alias topology, and valid bytes");
     return true;
 }
 
@@ -368,6 +400,7 @@ int main() {
         {"artifact_field_safe_miss", TestEveryArtifactSemanticFieldCausesSafeMiss},
         {"dispatch_and_plan_are_separate", TestDispatchAndPlanVariantRemainSeparate},
         {"plan_abi_kernel_canonical", TestPlanAbiUsesKernelCanonicalBytes},
+        {"plan_abi_state_alias_extent", TestPlanAbiIncludesStateAliasAndExtent},
         {"graph_identity_logical_placement",
          TestGraphSemanticIdentityCanonicalizesLogicalPlacement},
         {"graph_identity_rejects_undefined_exprs",

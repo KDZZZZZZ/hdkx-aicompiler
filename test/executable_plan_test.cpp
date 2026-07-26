@@ -105,6 +105,199 @@ bool TestInvalidValueIdsAndMetadata() {
     return true;
 }
 
+bool TestStateAliasAndExtentContracts() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const ValueSpec state(0, 13, {4}, Float32(), Device::CPU(), false,
+                          false, false, false, false, true, -1,
+                          ValueWriteMode::kAllocate, 8);
+    const ValueSpec input(1, 1, {4}, Float32(), Device::CPU(), true);
+    const ValueSpec alias(2, 13, {4}, Float32(), Device::CPU(), false,
+                          false, true, true, false, false, 0,
+                          ValueWriteMode::kInPlace, 16);
+    const ExecutablePlan plan(
+        {state, input, alias}, {KernelCall("state_update", {0, 1}, {2})},
+        {1}, {}, {2}, {0});
+    TEST_CHECK(plan.state_value_ids().size() == 1 &&
+                   plan.state_value_ids()[0] == 0 && plan.values()[0]->is_state &&
+                   plan.values()[2]->write_mode == ValueWriteMode::kInPlace &&
+                   plan.values()[2]->alias_source_value_id == 0,
+               "state and in-place alias metadata must remain explicit");
+
+    const ExecutablePlan planned = internal::PlanMemory(plan);
+    TEST_CHECK(planned.values()[0]->storage_id ==
+                       planned.values()[2]->storage_id &&
+                   planned.values()[0]->valid_bytes == 8 &&
+                   planned.values()[2]->valid_bytes == 16 &&
+                   planned.state_value_ids()[0] == 0,
+               "memory planning must preserve state, alias, and valid-byte contracts");
+
+    const ExecutablePlan alias_chain = internal::PlanMemory(
+        ExecutablePlan(
+            {state, input,
+             ValueSpec(2, 13, {4}, Float32(), Device::CPU(), false,
+                       false, false, true, false, false, 0,
+                       ValueWriteMode::kInPlace),
+             ValueSpec(3, 13, {4}, Float32(), Device::CPU(), false,
+                       false, true, true, false, false, 2,
+                       ValueWriteMode::kInPlace)},
+            {KernelCall("state_update_0", {0, 1}, {2}),
+             KernelCall("state_update_1", {2, 1}, {3})},
+            {1}, {}, {3}, {0}));
+    TEST_CHECK(alias_chain.values()[0]->storage_id ==
+                       alias_chain.values()[2]->storage_id &&
+                   alias_chain.values()[2]->storage_id ==
+                       alias_chain.values()[3]->storage_id,
+               "sequential donation chains must retain one state storage slot");
+
+    const ExecutablePlan intermediate_alias = internal::PlanMemory(
+        ExecutablePlan(
+            {ValueSpec(0, 0, {4}, Float32(), Device::CPU(), true),
+             ValueSpec(1, 17, {4}, Float32(), Device::CPU()),
+             ValueSpec(2, 17, {4}, Float32(), Device::CPU(), false,
+                       false, true, true, false, false, 1,
+                       ValueWriteMode::kInPlace)},
+            {KernelCall("produce", {0}, {1}),
+             KernelCall("donate", {1}, {2})},
+            {0}, {}, {2}));
+    TEST_CHECK(intermediate_alias.values()[1]->storage_id ==
+                   intermediate_alias.values()[2]->storage_id,
+               "an alias must follow its planned source storage slot");
+
+    const ExecutablePlan dedicated_source = internal::PlanMemory(
+        ExecutablePlan(
+            {ValueSpec(0, 0, {4}, Float32(), Device::CPU(), true),
+             ValueSpec(1, 1, {4}, Float32(), Device::CPU()),
+             ValueSpec(2, 2, {4}, Float32(), Device::CPU()),
+             ValueSpec(3, 3, {4}, Float32(), Device::CPU()),
+             ValueSpec(4, 3, {4}, Float32(), Device::CPU(), false,
+                       false, true, true, false, false, 3,
+                       ValueWriteMode::kInPlace)},
+            {KernelCall("prepare_0", {0}, {1}),
+             KernelCall("prepare_1", {1}, {2}),
+             KernelCall("make_source", {2}, {3}),
+             KernelCall("donate_source", {3}, {4})},
+            {0}, {}, {4}));
+    TEST_CHECK(dedicated_source.values()[3]->storage_id ==
+                       dedicated_source.values()[4]->storage_id &&
+                   dedicated_source.values()[1]->storage_id !=
+                       dedicated_source.values()[3]->storage_id,
+               "a donated intermediate needs a slot dedicated to its alias pair");
+    return true;
+}
+
+bool TestInvalidStateAliasAndExtentContracts() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const auto state = [] {
+        return ValueSpec(0, 9, {4}, Float32(), Device::CPU(), false,
+                         false, false, false, false, true);
+    };
+    const auto alias = [] {
+        return ValueSpec(2, 9, {4}, Float32(), Device::CPU(), false,
+                         false, true, true, false, false, 0,
+                         ValueWriteMode::kInPlace);
+    };
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(
+                       {state(), ValueSpec(1, 1, {4}, Float32(), Device::CPU(), true),
+                        alias()},
+                       {KernelCall("update", {0, 1}, {2})}, {1}, {}, {2});
+               }),
+               "state role list must cover every state value");
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(
+                       {state(), ValueSpec(1, 1, {4}, Float32(), Device::CPU(),
+                                           true, false, true)},
+                       {}, {1}, {}, {1}, {0});
+               }),
+               "an unused state declaration must fail closed");
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(
+                       {state(), ValueSpec(1, 1, {4}, Float32(), Device::CPU(), true),
+                        ValueSpec(2, 9, {4}, Float32(), Device::CPU(), false,
+                                  false, false, true, false, false, 0,
+                                  ValueWriteMode::kInPlace),
+                        ValueSpec(3, 3, {4}, Float32(), Device::CPU(), false,
+                                  false, true)},
+                       {KernelCall("bad_update", {1}, {2}),
+                        KernelCall("consume_state", {0}, {3})},
+                       {1}, {}, {3}, {0});
+               }),
+               "alias producer must consume its declared source");
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(
+                       {state(), ValueSpec(1, 1, {4}, Float32(), Device::CPU(), true),
+                        ValueSpec(2, 9, {4}, Float32(), Device::CPU(), false,
+                                  false, false, true, false, false, 0,
+                                  ValueWriteMode::kInPlace),
+                        ValueSpec(3, 3, {4}, Float32(), Device::CPU(), false,
+                                  false, true)},
+                       {KernelCall("update", {0, 1}, {2}),
+                        KernelCall("read_old_state", {0}, {3})},
+                       {1}, {}, {3}, {0});
+               }),
+               "alias source must be dead after its in-place producer");
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(
+                       {state(), ValueSpec(1, 1, {4}, Float32(), Device::CPU(), true),
+                        ValueSpec(2, 10, {4}, Float32(), Device::CPU(), false,
+                                  false, true, true, false, false, 0,
+                                  ValueWriteMode::kInPlace)},
+                       {KernelCall("update", {0, 1}, {2})}, {1}, {}, {2}, {0});
+               }),
+               "alias and source must declare the same storage id");
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(
+                       {state(), ValueSpec(1, 1, {4}, Float32(), Device::CPU(), true),
+                        ValueSpec(2, 9, {4}, Float32(), Device::CPU(), false,
+                                  false, false, true, false, false, 0,
+                                  ValueWriteMode::kInPlace),
+                        ValueSpec(3, 9, {4}, Float32(), Device::CPU(), false,
+                                  false, true, true, false, false, 0,
+                                  ValueWriteMode::kInPlace)},
+                       {KernelCall("double_donate", {0, 1}, {2, 3})},
+                       {1}, {}, {3}, {0});
+               }),
+               "one source cannot be donated to multiple alias values");
+    TEST_CHECK(Throws([] {
+                   ValueSpec invalid(0, 0, {4}, Float32(), Device::CPU(),
+                                     false, false, false, true, false, true);
+               }),
+               "a state source cannot also carry the legacy alias marker");
+    TEST_CHECK(Throws([] {
+                   ValueSpec invalid(0, 0, {4}, Float32(), Device::CPU(),
+                                     false, false, false, false, false, false,
+                                     -1, ValueWriteMode::kInPlace);
+               }),
+               "in-place mode requires an alias source");
+    TEST_CHECK(Throws([] {
+                   ValueSpec invalid(0, 0, {4}, Float32(), Device::CPU(),
+                                     false, false, false, true, false, false,
+                                     1, ValueWriteMode::kAllocate);
+               }),
+               "an alias source requires in-place mode");
+    TEST_CHECK(Throws([] {
+                   ValueSpec invalid(0, 0, {4}, Float32(), Device::CPU(),
+                                     true, false, false, true, false, false,
+                                     1, ValueWriteMode::kInPlace);
+               }),
+               "an in-place alias must be produced rather than a source role");
+    TEST_CHECK(Throws([] {
+                   ValueSpec invalid(0, 0, {4}, Float32(), Device::CPU(),
+                                     false, false, false, false, false, false,
+                                     -1, ValueWriteMode::kAllocate, 17);
+               }),
+               "valid bytes cannot exceed static tensor capacity");
+    TEST_CHECK(Throws([] {
+                   ValueSpec invalid(0, 0, {-1}, Float32(), Device::CPU(), true,
+                                     false, false, false, false, false, -1,
+                                     ValueWriteMode::kAllocate, 4);
+               }),
+               "finite valid bytes require a static shape");
+    return true;
+}
+
 bool TestMemoryReuseAndSharingGuards() {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -266,6 +459,9 @@ int main() {
          TestDuplicateProducerAndUndefinedInput},
         {"call_order_and_missing_output", TestCallOrderAndMissingOutput},
         {"role_lists_and_object_type_checks", TestRoleListsAndObjectTypeChecks},
+        {"state_alias_and_extent_contracts", TestStateAliasAndExtentContracts},
+        {"invalid_state_alias_and_extent_contracts",
+         TestInvalidStateAliasAndExtentContracts},
         {"memory_reuse_and_sharing_guards", TestMemoryReuseAndSharingGuards},
     };
 

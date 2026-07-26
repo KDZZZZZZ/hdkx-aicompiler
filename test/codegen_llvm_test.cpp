@@ -547,6 +547,67 @@ void TestCompilerIntermediateAllocate() {
     ExpectNear(ReadFloats(outputs[0]), {21, 42, 63, 84});
 }
 
+kxc::runtime::ExecutablePlan MakeLLVMStateAliasPlan(
+    const kxc::runtime::ExecutablePlan& source,
+    kxc::Array<int64_t> state_shape = {4}) {
+    using namespace kxc;
+    const Array<int64_t> inputs = source.input_value_ids();
+    const Array<int64_t> outputs = source.output_value_ids();
+    Require(inputs.size() == 2 && outputs.size() == 1 &&
+                source.calls().size() == 1,
+            "LLVM state test requires one binary kernel");
+    const auto find = [&](int64_t value_id) {
+        for (const auto& value : source.values()) {
+            if (value->value_id == value_id) return value;
+        }
+        throw std::runtime_error("LLVM state test value id is missing");
+    };
+    const runtime::ValueSpec state_source = find(inputs[0]);
+    const runtime::ValueSpec increment = find(inputs[1]);
+    return runtime::ExecutablePlan(
+        {runtime::ValueSpec(inputs[0], inputs[0], state_shape,
+                            state_source->dtype, state_source->device, false,
+                            false, false, false, false, true),
+         runtime::ValueSpec(inputs[1], inputs[1], increment.shape(),
+                            increment->dtype, increment->device, true),
+         runtime::ValueSpec(outputs[0], inputs[0], std::move(state_shape),
+                            state_source->dtype, state_source->device, false,
+                            false, true, true, false, false, inputs[0],
+                            runtime::ValueWriteMode::kInPlace)},
+        source.calls(), {inputs[1]}, {}, {outputs[0]}, {inputs[0]});
+}
+
+void TestRuntimeSessionLLVMStateAlias() {
+    using namespace kxc;
+    Var state("state", TensorType({4}, "float32"));
+    Var increment("increment", TensorType({4}, "float32"));
+    Function function(
+        {state, increment}, Call(relay::Op::Get("add"), {state, increment}));
+    api::CompiledGraph compiled = api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    runtime::RuntimeSession session(
+        compiled.module(), MakeLLVMStateAliasPlan(compiled.plan()));
+
+    Array<runtime::NDArray> first =
+        session.Run({FloatArray({4}, {1, 2, 3, 4})});
+    ExpectNear(ReadFloats(first[0]), {1, 2, 3, 4});
+    runtime::RunAsyncResult second = session.RunAsync(
+        {FloatArray({4}, {10, 20, 30, 40})},
+        DeviceStream::Default(Device::CPU()));
+    second.completion.Wait();
+    Require(first[0].storage().get() == second.outputs[0].storage().get(),
+            "LLVM state output must alias the persistent state storage");
+    ExpectNear(ReadFloats(second.outputs[0]), {11, 22, 33, 44});
+
+    RequireThrowsContaining(
+        [&] {
+            runtime::RuntimeSession invalid(
+                compiled.module(),
+                MakeLLVMStateAliasPlan(compiled.plan(), {2}));
+        },
+        "shape does not match");
+}
+
 /*! \brief RuntimeSession 只接收 inputs，并自动分配 add 输出。 */
 void TestRuntimeSessionLLVM() {
     using namespace kxc;
@@ -620,6 +681,8 @@ int main() {
         {"llvm_batch_module", TestLLVMBatchModule},
         {"compiler_llvm", TestCompilerLLVM},
         {"compiler_intermediate_allocate", TestCompilerIntermediateAllocate},
+        {"runtime_session_llvm_state_alias",
+         TestRuntimeSessionLLVMStateAlias},
         {"runtime_session_llvm", TestRuntimeSessionLLVM},
         {"runtime_session_llvm_constant", TestRuntimeSessionLLVMConstant},
 #endif
