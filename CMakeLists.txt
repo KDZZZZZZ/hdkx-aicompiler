@@ -242,6 +242,14 @@ if(KXC_ENABLE_LLVM)
   find_package(LLVM QUIET CONFIG)
 endif()
 
+if(KXC_ENABLE_LLVM AND LLVM_FOUND AND LLVM_PACKAGE_VERSION VERSION_LESS 20)
+  message(FATAL_ERROR
+    "KXC LLVM codegen requires LLVM >= 20 "
+    "(src/codegen/llvm uses Intrinsic::getOrInsertDeclaration); "
+    "found ${LLVM_PACKAGE_VERSION}. Install llvm-20-dev and configure with "
+    "-DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm, or set KXC_ENABLE_LLVM=OFF.")
+endif()
+
 if(KXC_ENABLE_LLVM AND LLVM_FOUND)
   set(KXC_USE_LLVM 1)
   message(STATUS "LLVM support: enabled (version ${LLVM_PACKAGE_VERSION})")
