@@ -218,6 +218,19 @@ bool TestManualScheduleChangesTIRAndIdentity() {
         relay::internal::CanonicalTEScheduleContract(identity, cpu);
     CHECK(actual == expected && actual != baseline,
           "PrimFunc does not retain its exact schedule contract");
+
+    const te::Tensor renamed_input = te::placeholder(
+        {2, 3, 8}, tir::DataType::Float(32), "renumbered_value_17");
+    const te::Tensor renamed_output = te::compute(
+        {2, 3, 8}, [renamed_input](const Array<tir::Var>& axis) {
+            return renamed_input(axis) + tir::FloatImm(1.0f);
+        }, "renumbered_output_23");
+    const te::Schedule renamed_identity =
+        te::create_schedule({renamed_output->op});
+    CHECK(baseline == relay::internal::CanonicalTEScheduleContract(
+                          renamed_identity, cpu),
+          "schedule identity depends on graph-local tensor names");
+
     const api::PrimitiveArtifactKey scheduled_key =
         api::internal::BuildPrimitiveArtifactKey(
             api::UnitSemanticKey("te-schedule-unit"), cpu, "pipeline", actual.c_str(),
@@ -233,6 +246,14 @@ bool TestManualScheduleChangesTIRAndIdentity() {
 
 bool TestScheduleValidation() {
     using namespace kxc;
+    const tir::Var malformed_axis("malformed_axis");
+    const te::ComputeOp malformed(
+        "malformed", "", {}, {malformed_axis}, {tir::FloatImm(0.0f)}, {});
+    CHECK(Throws([&] {
+              (void)te::create_schedule({te::Operation(malformed)});
+          }),
+          "a ComputeOp with missing axis extents was accepted");
+
     const te::Tensor input = te::placeholder({2, 8}, tir::DataType::Float(32), "input");
     const te::Tensor output = te::compute(
         {2, 8}, [input](const Array<tir::Var>& axis) { return input(axis); },

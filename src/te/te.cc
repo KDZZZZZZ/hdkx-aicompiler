@@ -298,10 +298,32 @@ Stage::Stage(Operation op) {
     if (!op.defined()) {
         throw std::invalid_argument("Stage requires a defined operation");
     }
+    const auto* compute_op = op.As<ComputeOpNode>();
+    if (compute_op && compute_op->axis.size() != compute_op->shape.size()) {
+        throw std::invalid_argument(
+            "Stage requires one output shape extent per ComputeOp axis");
+    }
+    if (compute_op) {
+        for (size_t index = 0; index < compute_op->axis.size(); ++index) {
+            if (!compute_op->axis[index].defined() ||
+                !compute_op->shape[index].defined()) {
+                throw std::invalid_argument(
+                    "Stage requires defined ComputeOp axes and extents");
+            }
+        }
+        for (const IterVar& reduction : compute_op->reduce_axis) {
+            if (!reduction.defined() || !reduction->var.defined() ||
+                !reduction->dom_min.defined() ||
+                !reduction->dom_extent.defined()) {
+                throw std::invalid_argument(
+                    "Stage requires defined reduction axes and domains");
+            }
+        }
+    }
+
     auto* node = new StageNode();
     node->op = std::move(op);
-
-    if (const auto* compute_op = node->op.As<ComputeOpNode>()) {
+    if (compute_op) {
         for (size_t index = 0; index < compute_op->axis.size(); ++index) {
             const tir::Var& var = compute_op->axis[index];
             IterVar axis = MakeIterVar(
@@ -320,7 +342,6 @@ Stage::Stage(Operation op) {
             node->all_iter_vars.push_back(axis);
         }
     }
-
     SetData(node);
 }
 

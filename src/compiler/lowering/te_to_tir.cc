@@ -822,12 +822,24 @@ std::string CanonicalTEScheduleContract(const te::Schedule& schedule,
     encoder.Field("target_kind", target->kind);
     encoder.IntegerField("target_device_type",
                          static_cast<int>(target->device_type));
-    for (const te::Operation& output : schedule->outputs) {
-        if (!output.defined()) {
+    std::unordered_map<const Object*, size_t> stage_indices;
+    for (size_t index = 0; index < schedule->stages.size(); ++index) {
+        const te::Stage& stage = schedule->stages[index];
+        if (!stage.defined() || !stage->op.defined() ||
+            !stage_indices.emplace(stage->op.get(), index).second) {
             throw std::invalid_argument(
-                "TE schedule contains an undefined output operation");
+                "TE schedule stages must have unique defined operations");
         }
-        encoder.Field("output_operation", output->name);
+    }
+    for (const te::Operation& output : schedule->outputs) {
+        const auto stage = output.defined()
+                               ? stage_indices.find(output.get())
+                               : stage_indices.end();
+        if (stage == stage_indices.end()) {
+            throw std::invalid_argument(
+                "TE schedule output operation has no stage");
+        }
+        encoder.IntegerField("output_stage", stage->second);
     }
 
     for (size_t stage_index = 0; stage_index < schedule->stages.size();
@@ -841,7 +853,6 @@ std::string CanonicalTEScheduleContract(const te::Schedule& schedule,
         }
         encoder.IntegerField("stage", stage_index);
         encoder.Field("operation_kind", OperationKind(stage->op));
-        encoder.Field("operation_name", stage->op->name);
 
         std::unordered_map<const Object*, size_t> axis_ids;
         for (size_t axis_index = 0;
@@ -860,7 +871,6 @@ std::string CanonicalTEScheduleContract(const te::Schedule& schedule,
                     "TE schedule canonical identity requires static axis domains");
             }
             encoder.IntegerField("axis", axis_index);
-            encoder.Field("axis_name", axis->var->name_hint);
             encoder.IntegerField("axis_min", minimum);
             encoder.IntegerField("axis_extent", extent);
             encoder.BoolField("axis_reduction", axis->is_reduction);

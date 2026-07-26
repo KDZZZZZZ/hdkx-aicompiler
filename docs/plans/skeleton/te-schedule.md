@@ -85,6 +85,7 @@ Authority rules:
    `bind` or `thread_axis` API in this subset.
 5. The exact canonical schedule contract is attached to the `PrimFunc` and is
    used in `PrimitiveArtifactKey`; a policy-version placeholder is insufficient.
+   It uses structural stage/axis ordinals, never graph-local tensor names or IDs.
 
 ## 4. Safe semantics
 
@@ -115,7 +116,8 @@ Authority rules:
 4. Materialize leaf order, split substitution/tails, and `ForType` in TIR; make
    the TIR printer expose non-serial loop kinds.
 5. Canonicalize the actual stage/axis/primitive trace, attach it as
-   `kxc.te.schedule_contract`, and feed that value into primitive artifact keys.
+   `kxc.te.schedule_contract`, and feed that value into primitive artifact keys
+   without graph-local names defeating cross-graph cache reuse.
 6. Add focused schedule consumer/negative/identity tests. Reuse existing LLVM
    compiler numerical tests and CUDA `BindCudaThreads`/compiler tests.
 7. Run build, full CTest, public-header/include-layer checks, and `rg` audits.
