@@ -10,10 +10,10 @@ import './tiles.css'
  * 重型 Tile（heavy: true）。
  */
 
-import React, { useMemo, useState } from 'react'
+import React, { useCallback, useMemo, useState } from 'react'
 import * as echarts from 'echarts'
 import type { Tile, TileDensity, AnalysisContext } from '../state/types'
-import { useQuery, toQueryFilter } from '../kxc/query-client'
+import { useQuery, toQueryFilter, getQueryClient } from '../kxc/query-client'
 import { useECharts } from '../ui/chart/useECharts'
 import { formatNs } from '../ui/chart/format'
 import { useWorkbench } from '../state/store'
@@ -32,6 +32,42 @@ export function TimelineTile(props: TimelineTileProps): JSX.Element {
   const filter = toQueryFilter(context)
   const buckets = density === 'compact' ? 50 : 200
   const query = useQuery(context.bundleId, { kind: 'timeline', buckets }, filter)
+
+  const traceText = context.bundleId ? getQueryClient().getTrace(context.bundleId) : null
+
+  /**
+   * 把 trace 交给 ui.perfetto.dev。
+   *
+   * Perfetto 的对接方式是固定握手：先开窗口，反复发 'PING' 直到对方回 'PONG'，
+   * 再把 ArrayBuffer 通过 postMessage 送过去。不能直接用 URL 传——trace 动辄几十 MB。
+   * 只有用户在上面的确认框里点了"继续"才会走到这里（§19.2：未经用户操作不得上传）。
+   */
+  const openInPerfetto = useCallback(() => {
+    if (!traceText) return
+    const win = window.open('https://ui.perfetto.dev', '_blank')
+    if (!win) {
+      setShowPerfettoWarn(false)
+      return
+    }
+    const buffer = new TextEncoder().encode(traceText).buffer
+    const timer = window.setInterval(() => win.postMessage('PING', 'https://ui.perfetto.dev'), 250)
+    const onMessage = (ev: MessageEvent) => {
+      if (ev.data !== 'PONG') return
+      window.clearInterval(timer)
+      window.removeEventListener('message', onMessage)
+      win.postMessage(
+        { perfetto: { buffer, title: `KXC ${context.bundleId ?? ''}`, fileName: 'trace.json' } },
+        'https://ui.perfetto.dev',
+      )
+    }
+    window.addEventListener('message', onMessage)
+    // 对方一直不回就放弃，避免定时器泄漏。
+    window.setTimeout(() => {
+      window.clearInterval(timer)
+      window.removeEventListener('message', onMessage)
+    }, 20_000)
+    setShowPerfettoWarn(false)
+  }, [traceText, context.bundleId])
 
   const option = useMemo(() => {
     if (!query.data) return null
@@ -93,22 +129,21 @@ export function TimelineTile(props: TimelineTileProps): JSX.Element {
 
       {showPerfettoWarn && (
         <div className="modal-overlay" onClick={() => setShowPerfettoWarn(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <h3>确认发送到外部站点</h3>
             <p>
-              点击后，您的 trace.json 将被发送到 <strong>ui.perfetto.dev</strong>（外部站点）。
-              请确保您已充分了解数据外流的风险，并同意此操作。
+              继续后，本 bundle 的 <code>trace.json</code> 会被发送到{' '}
+              <strong>ui.perfetto.dev</strong>（Google 运营的外部站点）。
+              trace 里含有 pass 名、算子名与耗时，可能反映你的模型结构。
+            </p>
+            <p style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-sm)' }}>
+              注意：当前 trace.json 的 args 只有 status/severity/message，不含 span_id，
+              因此在 Perfetto 里选中事件无法回跳到本工作台。
             </p>
             <div className="modal-actions">
               <button onClick={() => setShowPerfettoWarn(false)}>取消</button>
-              <button
-                onClick={() => {
-                  // 实际实现时在这里打开 Perfetto，但当前没有 trace.json 的实际链接
-                  alert('打开 Perfetto... (功能待完成)')
-                  setShowPerfettoWarn(false)
-                }}
-              >
-                继续打开
+              <button onClick={openInPerfetto} disabled={!traceText}>
+                {traceText ? '继续打开' : '该 bundle 没有 trace.json'}
               </button>
             </div>
           </div>

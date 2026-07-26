@@ -260,10 +260,16 @@ export function useKeymap(): void {
       return
     }
 
-    // Search (打开搜索框，暂时只是 toast 提示，真实实现由 TopBar 或其他组件提供)
+    // Search：把焦点送进顶栏的全局搜索框。
+    // 这里用 aria-label 定位而不是往 store 里加一个 searchFocused 状态——
+    // 聚焦是纯 DOM 行为，塞进 store 只会多一个不该进 Undo 历史的字段（§17）。
     if (shouldHandle(ev, 'search')) {
-      ev.preventDefault()
-      // TODO: 打开搜索框组件
+      const input = document.querySelector<HTMLInputElement>('input[aria-label="全局搜索"]')
+      if (input) {
+        ev.preventDefault()
+        input.focus()
+        input.select()
+      }
       return
     }
   }

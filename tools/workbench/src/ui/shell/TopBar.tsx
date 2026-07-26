@@ -1,4 +1,5 @@
 import { useWorkbench, useGlobalContext } from '../../state/store'
+import { useBundleActions } from '../bundle/useBundleActions'
 import './shell.css'
 
 /**
@@ -17,6 +18,11 @@ export function TopBar(): JSX.Element {
   const mode = useWorkbench((s) => s.mode)
   const setMode = useWorkbench((s) => s.setMode)
   const setCommandPaletteOpen = useWorkbench((s) => s.setCommandPaletteOpen)
+  const bindBundle = useWorkbench((s) => s.bindBundle)
+  const bindBaseline = useWorkbench((s) => s.bindBaseline)
+  const setGlobalFilter = useWorkbench((s) => s.setGlobalFilter)
+  const bundle = useBundleActions()
+  const loadedIds = Object.keys(bundles)
 
   if (!ws) return <></>
 
@@ -63,20 +69,88 @@ export function TopBar(): JSX.Element {
           <span className="topbar-context-value">{ws.name}</span>
         </div>
 
-        {/* Bundle 显示和数据位置提示（§19.3） */}
-        <div className="topbar-context-item" title={`数据来源：${bundleRef?.hint || '本地'}`}>
+        {/* Bundle 选择、加载与数据位置提示（§2.1、§19.3） */}
+        <div className="topbar-context-item" title={`数据来源：${bundleRef?.hint || '尚未加载'}`}>
           <span className="topbar-context-label">Bundle:</span>
-          <span className="topbar-context-value">{getBundleDisplay()}</span>
-          {bundleRef && <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>🔒 本地</span>}
+          <select
+            className="topbar-select"
+            aria-label="选择当前 Bundle"
+            value={ws.bundleId ?? ''}
+            disabled={bundle.loading}
+            onChange={(e) => {
+              const v = e.target.value
+              if (!v) return
+              // 已加载过的直接绑定，没加载过的先按样例 id 拉取。
+              if (loadedIds.includes(v)) bindBundle(v)
+              else void bundle.loadFixtureById(v)
+            }}
+          >
+            <option value="">{bundle.loading ? '加载中…' : '— 选择 Bundle —'}</option>
+            {loadedIds.length > 0 && (
+              <optgroup label="已加载">
+                {loadedIds.map((id) => (
+                  <option key={id} value={id}>
+                    {bundles[id]?.ref.label ?? id}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {bundle.fixtures.length > 0 && (
+              <optgroup label="样例 / 本地开发服务">
+                {bundle.fixtures.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.id}（{f.event_count} 事件{f.variant === 'real' ? '，真实产物' : ''}）
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+          <button
+            onClick={() => void bundle.openDirectory()}
+            disabled={bundle.loading}
+            title="从本机选择一个 KXC profiling bundle 目录；文件不会离开本机"
+            aria-label="打开本地 bundle 目录"
+            style={{ fontSize: '11px' }}
+          >
+            打开目录…
+          </button>
+          {bundleRef && (
+            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }} title={bundleRef.hint}>
+              🔒 本地
+            </span>
+          )}
         </div>
 
-        {/* Baseline（Compare 时显示） */}
-        {ws.compareEnabled && (
-          <div className="topbar-context-item">
-            <span className="topbar-context-label">Baseline:</span>
-            <span className="topbar-context-value">{getBaselineDisplay()}</span>
+        {bundle.error && (
+          <div className="topbar-context-item" role="alert" style={{ color: 'var(--sem-error)' }}>
+            ⚠ {bundle.error}
           </div>
         )}
+
+        {/* Baseline：选了就进入 Compare（§4.5） */}
+        <div className="topbar-context-item">
+          <span className="topbar-context-label">Baseline:</span>
+          <select
+            className="topbar-select"
+            aria-label="选择 Baseline Bundle"
+            value={ws.baselineBundleId ?? ''}
+            onChange={(e) => bindBaseline(e.target.value || null)}
+          >
+            <option value="">— 无 —</option>
+            {loadedIds
+              .filter((id) => id !== ws.bundleId)
+              .map((id) => (
+                <option key={id} value={id}>
+                  {bundles[id]?.ref.label ?? id}
+                </option>
+              ))}
+          </select>
+          {ws.compareEnabled && (
+            <span style={{ fontSize: '11px', color: 'var(--cmp-candidate)' }}>
+              对比中：{getBaselineDisplay()}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="topbar-center">
@@ -84,14 +158,25 @@ export function TopBar(): JSX.Element {
         <div className="topbar-context-item">
           <span className="topbar-context-label">Range:</span>
           <span className="topbar-context-value">{getTimeRangeDisplay()}</span>
+          {globalContext.timeRange && (
+            <button
+              onClick={() => setGlobalFilter({ timeRange: null })}
+              title="清除时间范围过滤"
+              aria-label="清除时间范围过滤"
+              style={{ fontSize: '11px' }}
+            >
+              ✕
+            </button>
+          )}
         </div>
 
-        {/* 搜索框 */}
+        {/* 全局搜索：写入 context.search，所有 Tile 的查询都会带上它 */}
         <input
-          type="text"
-          placeholder="搜索（§15 未实现）"
-          disabled
-          style={{ width: '120px' }}
+          type="search"
+          placeholder="搜索 pass / 算子 / kernel / 消息"
+          value={globalContext.search ?? ''}
+          onChange={(e) => setGlobalFilter({ search: e.target.value || null })}
+          style={{ width: '200px' }}
           aria-label="全局搜索"
         />
       </div>
