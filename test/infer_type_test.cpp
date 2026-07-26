@@ -217,6 +217,36 @@ bool TestAsymmetricPaddingShapeAgreement() {
                "asymmetric padding pool2d infer shape mismatch");
     TEST_CHECK(kxc::test_support::LowerFirstPrimitive(pool_func)->prim_func.defined(),
                "asymmetric padding pool2d should lower to TIR");
+
+    // 池化的 dilation 也必须两侧一致。ONNX MaxPool 的 dilations 经 importer 传入
+    // MaxPool2DAttrs::dilation，类型推导一直读取它，而 TE compute 曾固定按
+    // dilation=1 计算，因此 dilation != 1 的合法模型会在 lowering 处形状冲突。
+    auto dilated_attrs =
+        kxc::relay::MaxPool2DAttrs::Create({1, 1}, {0, 0, 0, 0}, {2, 2}, {3, 3},
+                                           "NCHW", false);
+    kxc::Call dilated(kxc::relay::Op::Get("nn_max_pool2d"), {data}, dilated_attrs);
+    kxc::Function dilated_func({data}, dilated);
+    kxc::relay::InferTypePass(dilated_func);
+    // effective kernel = 2 * (3 - 1) + 1 = 5；(8 + 0 + 0 - 5) / 1 + 1 = 4。
+    TEST_CHECK(CheckTensor(dilated.checked_type(), {1, 3, 4, 4}, "float32"),
+               "dilated pool2d infer shape mismatch");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(dilated_func)->prim_func.defined(),
+               "dilated pool2d should lower to TIR");
+
+    // 只有 0/1/2/4 个元素有约定含义。长度 3 或 5 必须报错，静默截断会把配置
+    // 错误变成一个看似成功但形状错误的编译产物。
+    for (const kxc::Array<int64_t>& bad : {kxc::Array<int64_t>{1, 1, 1},
+                                           kxc::Array<int64_t>{1, 1, 1, 1, 1}}) {
+        auto bad_attrs = kxc::relay::MaxPool2DAttrs::Create({1, 1}, bad, {1, 1}, {2, 2},
+                                                            "NCHW", false);
+        kxc::Call bad_pool(kxc::relay::Op::Get("nn_max_pool2d"), {data}, bad_attrs);
+        kxc::Function bad_func({data}, bad_pool);
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(bad_func);
+                       kxc::test_support::LowerFirstPrimitive(bad_func);
+                   }),
+                   "padding with 3 or 5 elements must be rejected");
+    }
     return true;
 }
 

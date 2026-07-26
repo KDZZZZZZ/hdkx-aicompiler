@@ -174,13 +174,16 @@ Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int s
 }
 
 Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Padding2D padding,
-                     std::string pool_type, bool ceil_mode , std::string name ,
+                     Array<int> dilation, std::string pool_type, bool ceil_mode , std::string name ,
                      std::string tag ){
     if (kernel_size.size() < 2) {
         throw std::runtime_error("topi::pool2d expects kernel_size with at least 2 elements");
     }
     if (stride.size() < 2) {
         throw std::runtime_error("topi::pool2d expects stride with at least 2 elements");
+    }
+    if (dilation.size() < 2) {
+        throw std::runtime_error("topi::pool2d expects dilation with at least 2 elements");
     }
     if (pool_type != "max" && pool_type != "avg") {
         throw std::runtime_error("topi::pool2d only supports pool_type=max/avg");
@@ -196,11 +199,13 @@ Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Pad
     int KW = kernel_size[1];
     int SH = stride[0];
     int SW = stride[1];
+    int DH = dilation[0];
+    int DW = dilation[1];
 
-    // 与 Relay 类型推导共用同一公式；池化不做 dilation。
-    PrimExpr OH = WindowOutputExtent<PrimExpr>(H, KH, padding.top, padding.bottom, SH, /*dilation=*/1,
+    // 与 Relay 类型推导共用同一公式和同一 dilation。
+    PrimExpr OH = WindowOutputExtent<PrimExpr>(H, KH, padding.top, padding.bottom, SH, DH,
                                                ceil_mode);
-    PrimExpr OW = WindowOutputExtent<PrimExpr>(W, KW, padding.left, padding.right, SW, /*dilation=*/1,
+    PrimExpr OW = WindowOutputExtent<PrimExpr>(W, KW, padding.left, padding.right, SW, DW,
                                                ceil_mode);
 
     IterVar rh = reduce_axis(0, KH, "rh");
@@ -215,8 +220,8 @@ Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Pad
                 tir::Var h = indices[2];
                 tir::Var w = indices[3];
 
-                PrimExpr h_in = h * SH + rh - padding.top;
-                PrimExpr w_in = w * SW + rw - padding.left;
+                PrimExpr h_in = h * SH + rh * DH - padding.top;
+                PrimExpr w_in = w * SW + rw * DW - padding.left;
 
                 PrimExpr in_val = Select(
                     (h_in >= 0) && (h_in < H) && (w_in >= 0) && (w_in < W),
@@ -236,8 +241,8 @@ Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Pad
             tir::Var h = indices[2];
             tir::Var w = indices[3];
 
-            PrimExpr h_in = h * SH + rh - padding.top;
-            PrimExpr w_in = w * SW + rw - padding.left;
+            PrimExpr h_in = h * SH + rh * DH - padding.top;
+            PrimExpr w_in = w * SW + rw * DW - padding.left;
 
             PrimExpr in_val = Select(
                 (h_in >= 0) && (h_in < H) && (w_in >= 0) && (w_in < W),

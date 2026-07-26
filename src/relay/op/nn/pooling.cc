@@ -45,8 +45,10 @@ te::Tensor MaxPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
 
     Array<int> pool_size = Read2DPair(p->pool_size, 1);
     Array<int> strides = Read2DPair(p->strides, 1);
+    Array<int> dilation = Read2DPair(p->dilation, 1);
     te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
-    return te::topi::pool2d(inputs[0], pool_size, strides, padding, "max", p->ceil_mode, "T_max_pool2d");
+    return te::topi::pool2d(inputs[0], pool_size, strides, padding, dilation, "max",
+                            p->ceil_mode, "T_max_pool2d");
 }
 
 // 校验并生成平均池化的 TE 计算；属性布局与最大池化共享。
@@ -65,8 +67,10 @@ te::Tensor AvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
 
     Array<int> pool_size = Read2DPair(p->pool_size, 1);
     Array<int> strides = Read2DPair(p->strides, 1);
+    Array<int> dilation = Read2DPair(p->dilation, 1);
     te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
-    return te::topi::pool2d(inputs[0], pool_size, strides, padding, "avg", p->ceil_mode, "T_avg_pool2d");
+    return te::topi::pool2d(inputs[0], pool_size, strides, padding, dilation, "avg",
+                            p->ceil_mode, "T_avg_pool2d");
 }
 
 // 将 NCHW 输入的全部空间维归约为 1x1 TE 张量。

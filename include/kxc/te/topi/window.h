@@ -48,13 +48,14 @@ Padding2D ExpandPadding2D(const Container& values) {
         out.left = out.right = static_cast<int64_t>(values[1]);
         return out;
     }
-    if (count >= 4) {
+    if (count == 4) {
         out.top = static_cast<int64_t>(values[0]);
         out.left = static_cast<int64_t>(values[1]);
         out.bottom = static_cast<int64_t>(values[2]);
         out.right = static_cast<int64_t>(values[3]);
         return out;
     }
+    // 长度 3 或 5 以上没有约定含义，静默截断会把配置错误变成错误的输出 shape。
     throw std::runtime_error("padding expects 0, 1, 2 or 4 elements");
 }
 

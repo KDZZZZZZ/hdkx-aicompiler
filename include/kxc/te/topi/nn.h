@@ -39,9 +39,11 @@ Tensor matmul(const Tensor& A, const Tensor& B, std::string name = "matmul", std
 Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w, Padding2D padding, int dilation_h, int dilation_w, std::string name = "conv2d_nchw", std::string tag = kConv2d);
 
 // Pool2D
+// dilation 与 Relay 类型推导读取的 MaxPool2DAttrs::dilation 必须一致，否则推导出的
+// 输出 shape 与 compute 出的不一致。
 Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Padding2D padding,
-                     std::string pool_type, bool ceil_mode = false, std::string name = "pool2d",
-                     std::string tag = kPool);
+                     Array<int> dilation, std::string pool_type, bool ceil_mode = false,
+                     std::string name = "pool2d", std::string tag = kPool);
 
 Tensor global_avg_pool2d(const Tensor& data, std::string name = "global_avg_pool2d",
                                 std::string tag = kPool);
