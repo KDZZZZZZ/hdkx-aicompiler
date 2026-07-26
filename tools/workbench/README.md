@@ -1,7 +1,10 @@
 # KXC 性能分析图表桌布
 
-面向 KXC 编译器与推理性能分析的可组合 GUI 工作台。需求基线见
-[docs/plans/2026-07-26-performance-workbench-requirements.md](../../docs/plans/2026-07-26-performance-workbench-requirements.md)。
+面向 KXC 编译器与推理性能分析的可组合 GUI 工作台。
+
+- **要用它** → 看[使用手册](../../docs/workbench-user-guide.md)
+- **要改它** → 继续往下读
+- 需求基线：[2026-07-26-performance-workbench-requirements.md](../../docs/plans/2026-07-26-performance-workbench-requirements.md)
 
 ## 快速开始
 

@@ -19,6 +19,22 @@ class NoopObserver {
 globalThis.ResizeObserver ??= NoopObserver as unknown as typeof ResizeObserver
 globalThis.IntersectionObserver ??= NoopObserver as unknown as typeof IntersectionObserver
 
+/**
+ * jsdom 没有 Worker。查询层在模块初始化时就会 new Worker()，缺了它任何
+ * 渲染到顶栏的测试都会直接抛错。
+ * 这里用直接赋值而不是 vi.stubGlobal —— 后者会被 vi.unstubAllGlobals() 清掉，
+ * 于是"先跑的用例把后跑的用例搞崩"。查询逻辑本身由 query-pipeline.test.ts 覆盖。
+ */
+class NoopWorker {
+  onmessage: unknown = null
+  onerror: unknown = null
+  postMessage() {}
+  terminate() {}
+  addEventListener() {}
+  removeEventListener() {}
+}
+globalThis.Worker ??= NoopWorker as unknown as typeof Worker
+
 // React 18 要求显式声明处于 act 环境，否则 act() 会打警告并可能吞掉更新。
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
