@@ -1,0 +1,22 @@
+{
+  "bundles": [
+    {
+      "id": "baseline",
+      "path": "bundles/baseline",
+      "variant": "baseline",
+      "event_count": 222
+    },
+    {
+      "id": "candidate",
+      "path": "bundles/candidate",
+      "variant": "candidate",
+      "event_count": 223
+    },
+    {
+      "id": "raw-unanalyzed",
+      "path": "bundles/raw-unanalyzed",
+      "variant": "baseline",
+      "event_count": 222
+    }
+  ]
+}
