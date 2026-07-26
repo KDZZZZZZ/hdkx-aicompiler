@@ -120,9 +120,21 @@ export interface KxcDiagnostic {
   next_steps?: string[]
 }
 
+/**
+ * diagnosis.json 的顶层结构。
+ *
+ * C++ 只写 { trace_id, diagnostics }；Python 的 analyze_bundle 覆盖写入后
+ * 会多出 bundle_path 与 schema_version（已用真实产物核验）。
+ * 注意 **bundle_path 是生成机器上的绝对路径，含用户名**，
+ * 分享前必须脱敏，见 sanitizeForShare()。
+ */
 export interface KxcDiagnosisFile {
   trace_id: string
   diagnostics: KxcDiagnostic[]
+  /** 仅 Python 分析后存在。 */
+  bundle_path?: string
+  /** 仅 Python 分析后存在。 */
+  schema_version?: number
 }
 
 /** trace.json。(profiling.cc:1088-1102) */

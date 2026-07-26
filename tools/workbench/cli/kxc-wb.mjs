@@ -266,6 +266,15 @@ function cmdCompare() {
   const baseByPass = new Map(bp.items.map((i) => [i.passName, i]))
   const candByPass = new Map(cp.items.map((i) => [i.passName, i]))
   const threshold = Number(flags.threshold ?? 1.2)
+  /**
+   * 绝对差异下限，低于它一律判为噪声，不管倍数多大。
+   *
+   * 用两次跑同一份代码产出的真实 bundle 验证过：单次运行之间，
+   * 毫秒级的 pass 耗时轻易就能差出 1.4~1.9 倍，纯属抖动。
+   * 只看倍数会把噪声报成回归——项目设计文档也明确要求
+   * "不用单次运行宣称性能回归或收益"。
+   */
+  const minDeltaNs = Number(flags['min-delta-ms'] ?? 1) * 1e6
 
   const passDeltas = []
   for (const [name, c] of candByPass) {
@@ -276,13 +285,25 @@ function cmdCompare() {
       continue
     }
     const ratio = b.totalNs === 0 ? null : c.totalNs / b.totalNs
+    const deltaNs = c.totalNs - b.totalNs
+    // 每侧只观测到一次，就没有资格说"回归"，只能说"疑似"。
+    // 有重复观测（同名 pass 跑了多次）才谈得上统计判断。
+    const repeats = Math.min(b.count ?? 1, c.count ?? 1)
+    const suffix = repeats > 1 ? '' : 'suspected_'
+    let status
+    if (ratio == null) status = 'unknown'
+    else if (Math.abs(deltaNs) < minDeltaNs) status = 'noise'
+    else if (ratio >= threshold) status = `${suffix}regression`
+    else if (ratio <= 1 / threshold) status = `${suffix}improvement`
+    else status = 'stable'
     passDeltas.push({
       passName: name,
       baseNs: b.totalNs,
       candNs: c.totalNs,
-      deltaNs: c.totalNs - b.totalNs,
+      deltaNs,
       ratio,
-      status: ratio == null ? 'unknown' : ratio >= threshold ? 'regression' : ratio <= 1 / threshold ? 'improvement' : 'stable',
+      repeats,
+      status,
     })
   }
   for (const [name, b] of baseByPass) {
@@ -292,7 +313,8 @@ function cmdCompare() {
   }
   passDeltas.sort((a, b) => Math.abs(b.deltaNs ?? 0) - Math.abs(a.deltaNs ?? 0))
 
-  const regressions = passDeltas.filter((d) => d.status === 'regression')
+  const regressions = passDeltas.filter((d) => d.status.endsWith('regression'))
+  const anyRepeated = passDeltas.some((d) => (d.repeats ?? 1) > 1)
   const result = {
     ok: true,
     baseline: String(flags.baseline),
@@ -305,11 +327,21 @@ function cmdCompare() {
     },
     passDeltas: passDeltas.slice(0, Number(flags.limit ?? 20)),
     regressionCount: regressions.length,
-    // 这段是给 agent 直接用的：哪些维度可比、哪些不可比。
+    minDeltaMs: minDeltaNs / 1e6,
+    // 这段是给 agent 直接用的：哪些维度可比、哪些不可比、结论有多强。
     alignment: {
       pass: 'reliable',
       op: 'unavailable：顶层 op_name 未被编译器填充，无法跨 bundle 对齐算子',
       kernel: 'unavailable：CPU 路径下 kernel_symbol 多为空',
+    },
+    confidence: {
+      level: anyRepeated ? 'repeated' : 'single_run',
+      caveat: anyRepeated
+        ? `绝对差小于 ${minDeltaNs / 1e6}ms 的判为 noise。部分 pass 有重复观测，结论相对可靠。`
+        : '每个 pass 在两侧各只观测到一次，因此所有差异只标为 suspected_*，不能当作结论。' +
+          '实测同一份代码连跑两次，毫秒级 pass 的耗时可差出 1.4~1.9 倍——' +
+          `绝对差也可能有 2ms 以上，所以 ${minDeltaNs / 1e6}ms 的下限只能滤掉最明显的抖动。` +
+          '要真正判定回归，需要同一配置重复运行多次后比较分位数。',
     },
   }
 
@@ -327,7 +359,8 @@ function cmdCompare() {
         { header: '判定', get: (r) => r.status },
       ]),
     )
-    process.stdout.write(`\n算子与 Kernel 维度无法对齐（编译器未填充相应字段）\n`)
+    process.stdout.write(`\n⚠ ${result.confidence.caveat}\n`)
+    process.stdout.write(`算子与 Kernel 维度无法对齐（编译器未填充相应字段）\n`)
   })
 }
 
@@ -367,8 +400,22 @@ async function cmdUi() {
   const args = {}
   for (const [k, v] of Object.entries(flags)) {
     if (k === 'json') continue
-    if (k === 'tileIds' || k === 'tile-ids') args.tileIds = String(v).split(',')
-    else args[k.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v === 'true' ? true : v
+    if (k === 'tileIds' || k === 'tile-ids') {
+      args.tileIds = String(v).split(',')
+      continue
+    }
+    const key = k.replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+    // 像 --patch '{"pass":"x"}' 这样的参数在命令行上必然是字符串，
+    // 而页面侧要的是对象。看起来像 JSON 就解析掉，否则原样传。
+    if (typeof v === 'string' && /^\s*[{[]/.test(v)) {
+      try {
+        args[key] = JSON.parse(v)
+        continue
+      } catch {
+        fail(`--${k} 不是合法的 JSON：${v}`)
+      }
+    }
+    args[key] = v === 'true' ? true : v
   }
   if (positional.length > 2 && sub === 'gather') args.tileIds = positional.slice(2)
   if (positional.length > 2 && sub === 'add-tile') args.type = positional[2]

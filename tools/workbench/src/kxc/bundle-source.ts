@@ -202,7 +202,9 @@ export function sanitizeForShare<T extends Record<string, unknown>>(obj: T): T {
     if (node && typeof node === 'object') {
       const o = node as Record<string, unknown>
       for (const key of Object.keys(o)) {
-        if (key === 'bundle_dir' || key === 'hint' || key === 'path') {
+        // bundle_path 来自 Python 分析写回的 diagnosis.json，是含用户名的绝对路径；
+        // 用真实产物核验时才发现它，之前这份名单漏了。
+        if (key === 'bundle_dir' || key === 'bundle_path' || key === 'hint' || key === 'path') {
           if (typeof o[key] === 'string') o[key] = '<redacted>'
         } else {
           o[key] = scrub(o[key])
