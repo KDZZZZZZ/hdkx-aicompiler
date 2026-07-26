@@ -23,7 +23,14 @@ namespace {
 
 // 判断表达式是否正是指定循环变量；第一阶段不猜测复杂下标的单射性。
 bool IsLoopVar(const PrimExpr& expr, const Var& loop_var) {
-    return expr.defined() && expr.get() == loop_var.get();
+    if (!expr.defined()) return false;
+    if (expr.get() == loop_var.get()) return true;
+    const auto* call = expr.As<CallNode>();
+    return call && call->name == "cast" && call->args.size() == 1 &&
+           call->args[0].get() == loop_var.get() &&
+           call->dtype.code == loop_var->dtype.code &&
+           call->dtype.lanes == loop_var->dtype.lanes &&
+           call->dtype.bits >= loop_var->dtype.bits;
 }
 
 // 收集写 buffer 并证明每次写入都由当前循环变量唯一索引。

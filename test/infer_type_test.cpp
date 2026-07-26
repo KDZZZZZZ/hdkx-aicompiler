@@ -7,6 +7,7 @@
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/te/topi/nn.h"
+#include "kxc/tir/visitor.h"
 #include "support/primitive_lowering.h"
 
 #include <cstdint>
@@ -68,6 +69,38 @@ bool ExpectOverflow(const std::function<void()>& fn) {
 
 std::vector<kxc::relay::LoweredFunction> LowerUnits(kxc::Function function) {
     return kxc::test_support::LowerPrimitiveUnits(std::move(function));
+}
+
+class FlattenedIndexInspector final : public kxc::TIRPass {
+public:
+    bool saw_index = false;
+    bool all_indices_are_int64 = true;
+
+protected:
+    kxc::tir::PrimExpr VisitLoad(const kxc::tir::LoadNode* op,
+                                 const kxc::tir::PrimExpr& ref) override {
+        Check(op->index);
+        return TIRPass::VisitLoad(op, ref);
+    }
+
+    kxc::tir::Stmt VisitStore(const kxc::tir::StoreNode* op,
+                              const kxc::tir::Stmt& ref) override {
+        Check(op->index);
+        return TIRPass::VisitStore(op, ref);
+    }
+
+private:
+    void Check(const kxc::tir::PrimExpr& index) {
+        saw_index = true;
+        all_indices_are_int64 =
+            all_indices_are_int64 && index.dtype() == kxc::tir::DataType::Int(64);
+    }
+};
+
+bool HasInt64FlattenedIndices(const kxc::relay::LoweredFunction& lowered) {
+    FlattenedIndexInspector inspector;
+    inspector.Mutate(lowered->prim_func);
+    return inspector.saw_index && inspector.all_indices_are_int64;
 }
 
 bool TestElementwiseBroadcast() {
@@ -330,8 +363,12 @@ bool TestAsymmetricPaddingShapeAgreement() {
     kxc::relay::InferTypePass(wide_pool_func);
     TEST_CHECK(CheckTensor(wide_pool.checked_type(), {1, 3, 1, 1}, "float32"),
                "pool stride wider than int32 must retain its int64 value");
-    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(wide_pool_func)->prim_func.defined(),
+    const auto wide_pool_lowered =
+        kxc::test_support::LowerFirstPrimitive(wide_pool_func);
+    TEST_CHECK(wide_pool_lowered->prim_func.defined(),
                "pool stride wider than int32 should lower without narrowing to zero");
+    TEST_CHECK(HasInt64FlattenedIndices(wide_pool_lowered),
+               "pool lowering must keep flattened Load/Store indices in int64");
 
     auto wide_conv_attrs = kxc::relay::Conv2DAttrs::Create(
         {wide_stride}, {0, 0, 0, 0}, {1}, 1, 4, {3, 3}, "NCHW", "OIHW", "", "");
@@ -341,8 +378,12 @@ bool TestAsymmetricPaddingShapeAgreement() {
     kxc::relay::InferTypePass(wide_conv_func);
     TEST_CHECK(CheckTensor(wide_conv.checked_type(), {1, 4, 1, 1}, "float32"),
                "conv stride wider than int32 must retain its int64 value");
-    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(wide_conv_func)->prim_func.defined(),
+    const auto wide_conv_lowered =
+        kxc::test_support::LowerFirstPrimitive(wide_conv_func);
+    TEST_CHECK(wide_conv_lowered->prim_func.defined(),
                "conv stride wider than int32 should lower without narrowing to zero");
+    TEST_CHECK(HasInt64FlattenedIndices(wide_conv_lowered),
+               "conv lowering must keep flattened Load/Store indices in int64");
 
     // 只有 0/1/2/4 个元素有约定含义。长度 3 或 5 必须报错，静默截断会把配置
     // 错误变成一个看似成功但形状错误的编译产物。
