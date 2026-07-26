@@ -36,14 +36,27 @@ Tensor matmul(const Tensor& A, const Tensor& B, std::string name = "matmul", std
 // Weight: [O, C, KH, KW]
 // Stride: [sh, sw], Dilation: [dh, dw]
 // padding 已由调用方通过 ExpandPadding2D 展开为四边，允许非对称。
-Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w, Padding2D padding, int dilation_h, int dilation_w, std::string name = "conv2d_nchw", std::string tag = kConv2d);
+Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, AxisPair2D strides,
+                   Padding2D padding, AxisPair2D dilation,
+                   std::string name = "conv2d_nchw", std::string tag = kConv2d);
+
+// Legacy symmetric-padding overload retained for source and binary compatibility.
+Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w,
+                   int pad_h, int pad_w, int dilation_h, int dilation_w,
+                   std::string name = "conv2d_nchw", std::string tag = kConv2d);
 
 // Pool2D
 // dilation 与 Relay 类型推导读取的 MaxPool2DAttrs::dilation 必须一致，否则推导出的
 // 输出 shape 与 compute 出的不一致。
-Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Padding2D padding,
-                     Array<int> dilation, std::string pool_type, bool ceil_mode = false,
-                     std::string name = "pool2d", std::string tag = kPool);
+Tensor pool2d(const Tensor& data, AxisPair2D kernel_size, AxisPair2D stride,
+              Padding2D padding, AxisPair2D dilation, std::string pool_type,
+              bool ceil_mode = false, std::string name = "pool2d",
+              std::string tag = kPool);
+
+// Legacy raw-padding/default-dilation overload retained for compatibility.
+Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride,
+              Array<int> padding, std::string pool_type, bool ceil_mode = false,
+              std::string name = "pool2d", std::string tag = kPool);
 
 Tensor global_avg_pool2d(const Tensor& data, std::string name = "global_avg_pool2d",
                                 std::string tag = kPool);

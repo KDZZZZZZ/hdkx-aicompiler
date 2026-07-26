@@ -6,6 +6,7 @@
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/pipeline.h"
+#include "kxc/te/topi/nn.h"
 #include "support/primitive_lowering.h"
 
 #include <cstdint>
@@ -156,6 +157,39 @@ bool TestMatrixAndDenseOps() {
     return true;
 }
 
+bool TestTopiWindowApiCompatibility() {
+    using LegacyConv2D = kxc::te::Tensor (*)(
+        const kxc::te::Tensor&, const kxc::te::Tensor&, int, int, int, int, int, int,
+        std::string, std::string);
+    using LegacyPool2D = kxc::te::Tensor (*)(
+        const kxc::te::Tensor&, kxc::Array<int>, kxc::Array<int>, kxc::Array<int>,
+        std::string, bool, std::string, std::string);
+    const auto legacy_conv =
+        static_cast<LegacyConv2D>(&kxc::te::topi::conv2d_nchw);
+    const auto legacy_pool =
+        static_cast<LegacyPool2D>(&kxc::te::topi::pool2d);
+
+    const kxc::te::Tensor data = kxc::te::placeholder(
+        {kxc::tir::IntImm(1), kxc::tir::IntImm(1), kxc::tir::IntImm(4),
+         kxc::tir::IntImm(4)},
+        kxc::tir::DataType::Float(32), "legacy_window_data");
+    const kxc::te::Tensor weight = kxc::te::placeholder(
+        {kxc::tir::IntImm(1), kxc::tir::IntImm(1), kxc::tir::IntImm(2),
+         kxc::tir::IntImm(2)},
+        kxc::tir::DataType::Float(32), "legacy_window_weight");
+    const kxc::te::Tensor conv =
+        legacy_conv(data, weight, 1, 1, 1, 0, 1, 1, "legacy_conv", kxc::te::topi::kConv2d);
+    const kxc::te::Tensor pool =
+        legacy_pool(data, {2, 2}, {2, 2}, {1, 0}, "max", false, "legacy_pool",
+                    kxc::te::topi::kPool);
+
+    TEST_CHECK(conv.defined() && conv->shape.size() == 4,
+               "legacy conv2d signature must remain callable and produce a tensor");
+    TEST_CHECK(pool.defined() && pool->shape.size() == 4,
+               "legacy pool2d signature must remain callable and produce a tensor");
+    return true;
+}
+
 bool TestConvAndPoolOps() {
     kxc::Var data("data", kxc::TensorType({1, 3, 32, 32}, "float32"));
     kxc::Var weight("weight", kxc::TensorType({8, 3, 3, 3}, "float32"));
@@ -260,6 +294,29 @@ bool TestAsymmetricPaddingShapeAgreement() {
                "single-element conv strides infer shape mismatch");
     TEST_CHECK(kxc::test_support::LowerFirstPrimitive(single_conv_func)->prim_func.defined(),
                "single-element conv strides should lower to TIR");
+
+    constexpr int64_t wide_stride = int64_t{1} << 32;
+    auto wide_pool_attrs =
+        kxc::relay::MaxPool2DAttrs::Create({wide_stride}, {0, 0, 0, 0}, {1}, {3},
+                                           "NCHW", false);
+    kxc::Call wide_pool(kxc::relay::Op::Get("nn_max_pool2d"), {data}, wide_pool_attrs);
+    kxc::Function wide_pool_func({data}, wide_pool);
+    kxc::relay::InferTypePass(wide_pool_func);
+    TEST_CHECK(CheckTensor(wide_pool.checked_type(), {1, 3, 1, 1}, "float32"),
+               "pool stride wider than int32 must retain its int64 value");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(wide_pool_func)->prim_func.defined(),
+               "pool stride wider than int32 should lower without narrowing to zero");
+
+    auto wide_conv_attrs = kxc::relay::Conv2DAttrs::Create(
+        {wide_stride}, {0, 0, 0, 0}, {1}, 1, 4, {3, 3}, "NCHW", "OIHW", "", "");
+    kxc::Call wide_conv(kxc::relay::Op::Get("nn_conv2d"), {data, conv_weight},
+                        wide_conv_attrs);
+    kxc::Function wide_conv_func({data, conv_weight}, wide_conv);
+    kxc::relay::InferTypePass(wide_conv_func);
+    TEST_CHECK(CheckTensor(wide_conv.checked_type(), {1, 4, 1, 1}, "float32"),
+               "conv stride wider than int32 must retain its int64 value");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(wide_conv_func)->prim_func.defined(),
+               "conv stride wider than int32 should lower without narrowing to zero");
 
     // 只有 0/1/2/4 个元素有约定含义。长度 3 或 5 必须报错，静默截断会把配置
     // 错误变成一个看似成功但形状错误的编译产物。
@@ -1061,6 +1118,7 @@ int main() {
     const std::vector<std::pair<std::string, bool (*)()>> tests = {
         {"elementwise_broadcast", TestElementwiseBroadcast},
         {"matrix_and_dense_ops", TestMatrixAndDenseOps},
+        {"topi_window_api_compatibility", TestTopiWindowApiCompatibility},
         {"conv_and_pool_ops", TestConvAndPoolOps},
         {"asymmetric_padding_shape_agreement", TestAsymmetricPaddingShapeAgreement},
         {"transform_and_reduce_ops", TestTransformAndReduceOps},

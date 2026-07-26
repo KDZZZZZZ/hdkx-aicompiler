@@ -344,6 +344,21 @@ void TestMaxPool2D() {
     ExpectNear(out, {6, 8, 14, 16});
 }
 
+void TestDilatedAsymmetricMaxPool2D() {
+    kxc::Var data("data", kxc::TensorType({1, 1, 4, 5}, "float32"));
+    auto attrs = kxc::relay::MaxPool2DAttrs::Create(
+        {1, 2}, {1, 0, 0, 1}, {2, 2}, {2, 2}, "NCHW", false);
+    kxc::Call call(kxc::relay::Op::Get("nn_max_pool2d"), {data}, attrs);
+    kxc::Function func({data}, call);
+
+    std::vector<float> data_buf = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10,
+                                   11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("nn_max_pool2d_dilated_asymmetric", func,
+                  {Input(data_buf), Output(out)});
+    ExpectNear(out, {8, 10, 13, 15, 18, 20});
+}
+
 // 验证 AvgPool2D 的窗口平均结果。
 void TestAvgPool2D() {
     kxc::Var data("data", kxc::TensorType({1, 1, 4, 4}, "float32"));
@@ -922,6 +937,7 @@ int main() {
         {"nn_relu", TestRelu},
         {"nn_conv2d", TestConv2D},
         {"nn_max_pool2d", TestMaxPool2D},
+        {"nn_max_pool2d_dilated_asymmetric", TestDilatedAsymmetricMaxPool2D},
         {"nn_avg_pool2d", TestAvgPool2D},
         {"nn_global_avg_pool2d", TestGlobalAvgPool2D},
         {"nn_flatten", TestFlatten},

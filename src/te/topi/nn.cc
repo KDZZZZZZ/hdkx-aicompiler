@@ -4,6 +4,8 @@
 
 #include "kxc/te/topi/nn.h"
 
+#include <utility>
+
 namespace kxc {
 namespace te {
 namespace topi {
@@ -122,7 +124,9 @@ Tensor matmul(const Tensor& A, const Tensor& B, std::string name , std::string t
     );
 }
 
-Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w, Padding2D padding, int dilation_h, int dilation_w, std::string name , std::string tag ){
+Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, AxisPair2D strides,
+                   Padding2D padding, AxisPair2D dilation, std::string name,
+                   std::string tag) {
     PrimExpr N = data->shape[0];
     PrimExpr C = data->shape[1];
     PrimExpr H = data->shape[2];
@@ -133,10 +137,10 @@ Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int s
     PrimExpr KW = kernel->shape[3];
 
     // 与 Relay 类型推导共用同一公式，保证 compute 出的 shape 与推导出的 TensorType 一致。
-    PrimExpr OH = WindowOutputExtent<PrimExpr>(H, KH, padding.top, padding.bottom, stride_h, dilation_h,
-                                               /*ceil_mode=*/false);
-    PrimExpr OW = WindowOutputExtent<PrimExpr>(W, KW, padding.left, padding.right, stride_w, dilation_w,
-                                               /*ceil_mode=*/false);
+    PrimExpr OH = WindowOutputExtent<PrimExpr>(H, KH, padding.top, padding.bottom, strides.h,
+                                               dilation.h, /*ceil_mode=*/false);
+    PrimExpr OW = WindowOutputExtent<PrimExpr>(W, KW, padding.left, padding.right, strides.w,
+                                               dilation.w, /*ceil_mode=*/false);
 
     // Reduction axes
     IterVar rc = reduce_axis(0, C, "rc");
@@ -152,8 +156,8 @@ Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int s
             tir::Var w = indices[3];
 
             // Input indices
-            PrimExpr h_in = h * stride_h + rh * dilation_h - padding.top;
-            PrimExpr w_in = w * stride_w + rw * dilation_w - padding.left;
+            PrimExpr h_in = h * strides.h + rh * dilation.h - padding.top;
+            PrimExpr w_in = w * strides.w + rw * dilation.w - padding.left;
 
             // Pad handling (PaddedInput)
             // Simplified: Assume Select/If logic or data is already padded.
@@ -173,18 +177,18 @@ Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int s
     );
 }
 
-Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Padding2D padding,
-                     Array<int> dilation, std::string pool_type, bool ceil_mode , std::string name ,
-                     std::string tag ){
-    if (kernel_size.size() < 2) {
-        throw std::runtime_error("topi::pool2d expects kernel_size with at least 2 elements");
-    }
-    if (stride.size() < 2) {
-        throw std::runtime_error("topi::pool2d expects stride with at least 2 elements");
-    }
-    if (dilation.size() < 2) {
-        throw std::runtime_error("topi::pool2d expects dilation with at least 2 elements");
-    }
+Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w,
+                   int pad_h, int pad_w, int dilation_h, int dilation_w,
+                   std::string name, std::string tag) {
+    return conv2d_nchw(data, kernel, AxisPair2D{stride_h, stride_w},
+                       Padding2D{pad_h, pad_w, pad_h, pad_w},
+                       AxisPair2D{dilation_h, dilation_w}, std::move(name),
+                       std::move(tag));
+}
+
+Tensor pool2d(const Tensor& data, AxisPair2D kernel_size, AxisPair2D stride,
+              Padding2D padding, AxisPair2D dilation, std::string pool_type,
+              bool ceil_mode, std::string name, std::string tag) {
     if (pool_type != "max" && pool_type != "avg") {
         throw std::runtime_error("topi::pool2d only supports pool_type=max/avg");
     }
@@ -195,12 +199,12 @@ Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Pad
     PrimExpr H = data->shape[2];
     PrimExpr W = data->shape[3];
 
-    int KH = kernel_size[0];
-    int KW = kernel_size[1];
-    int SH = stride[0];
-    int SW = stride[1];
-    int DH = dilation[0];
-    int DW = dilation[1];
+    const int64_t KH = kernel_size.h;
+    const int64_t KW = kernel_size.w;
+    const int64_t SH = stride.h;
+    const int64_t SW = stride.w;
+    const int64_t DH = dilation.h;
+    const int64_t DW = dilation.w;
 
     // 与 Relay 类型推导共用同一公式和同一 dilation。
     PrimExpr OH = WindowOutputExtent<PrimExpr>(H, KH, padding.top, padding.bottom, SH, DH,
@@ -260,6 +264,28 @@ Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Pad
         },
         name,
         tag);
+}
+
+Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride,
+              Array<int> padding, std::string pool_type, bool ceil_mode,
+              std::string name, std::string tag) {
+    if (kernel_size.size() < 2) {
+        throw std::runtime_error("topi::pool2d expects kernel_size with at least 2 elements");
+    }
+    if (stride.size() < 2) {
+        throw std::runtime_error("topi::pool2d expects stride with at least 2 elements");
+    }
+    Padding2D expanded_padding;
+    if (padding.size() >= 4) {
+        expanded_padding =
+            Padding2D{padding[0], padding[1], padding[2], padding[3]};
+    } else if (padding.size() >= 2) {
+        expanded_padding =
+            Padding2D{padding[0], padding[1], padding[0], padding[1]};
+    }
+    return pool2d(data, AxisPair2D{kernel_size[0], kernel_size[1]},
+                  AxisPair2D{stride[0], stride[1]}, expanded_padding, AxisPair2D{},
+                  std::move(pool_type), ceil_mode, std::move(name), std::move(tag));
 }
 
 Tensor global_avg_pool2d(const Tensor& data, std::string name ,

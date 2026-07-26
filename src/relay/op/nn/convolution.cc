@@ -51,9 +51,8 @@ te::Tensor Conv2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, co
     if (has_bias && inputs[2]->shape.size() != 1) {
         throw std::runtime_error("nn_conv2d bias must be rank-1");
     }
-    te::Tensor conv_out = te::topi::conv2d_nchw(
-        inputs[0], inputs[1], static_cast<int>(strides.h), static_cast<int>(strides.w),
-        padding, static_cast<int>(dilation.h), static_cast<int>(dilation.w), "T_conv2d");
+    te::Tensor conv_out =
+        te::topi::conv2d_nchw(inputs[0], inputs[1], strides, padding, dilation, "T_conv2d");
 
     if (!has_bias) {
         return conv_out;

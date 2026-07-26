@@ -13,18 +13,6 @@
 namespace kxc {
 namespace relay {
 
-namespace {
-// 与 Relay 类型推导共用同一展开语义，避免单元素属性在两侧得出不同高宽。
-Array<int> ReadPair(const Array<int64_t>& values, int64_t default_value) {
-    const te::topi::AxisPair2D pair = te::topi::ExpandPair2D(values, default_value);
-    Array<int> out;
-    out.push_back(static_cast<int>(pair.h));
-    out.push_back(static_cast<int>(pair.w));
-    return out;
-}
-
-}
-
 // 校验并生成最大池化的 TE 计算。
 te::Tensor MaxPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
     (void)out_type;
@@ -39,10 +27,10 @@ te::Tensor MaxPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         throw std::runtime_error("nn_max_pool2d expects NCHW rank-4 input");
     }
 
-    Array<int> pool_size = ReadPair(p->pool_size, 1);
-    Array<int> strides = ReadPair(p->strides, 1);
-    Array<int> dilation = ReadPair(p->dilation, 1);
-    te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
+    const te::topi::AxisPair2D pool_size = te::topi::ExpandPair2D(p->pool_size, 1);
+    const te::topi::AxisPair2D strides = te::topi::ExpandPair2D(p->strides, 1);
+    const te::topi::AxisPair2D dilation = te::topi::ExpandPair2D(p->dilation, 1);
+    const te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
     return te::topi::pool2d(inputs[0], pool_size, strides, padding, dilation, "max",
                             p->ceil_mode, "T_max_pool2d");
 }
@@ -61,10 +49,10 @@ te::Tensor AvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         throw std::runtime_error("nn_avg_pool2d expects NCHW rank-4 input");
     }
 
-    Array<int> pool_size = ReadPair(p->pool_size, 1);
-    Array<int> strides = ReadPair(p->strides, 1);
-    Array<int> dilation = ReadPair(p->dilation, 1);
-    te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
+    const te::topi::AxisPair2D pool_size = te::topi::ExpandPair2D(p->pool_size, 1);
+    const te::topi::AxisPair2D strides = te::topi::ExpandPair2D(p->strides, 1);
+    const te::topi::AxisPair2D dilation = te::topi::ExpandPair2D(p->dilation, 1);
+    const te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
     return te::topi::pool2d(inputs[0], pool_size, strides, padding, dilation, "avg",
                             p->ceil_mode, "T_avg_pool2d");
 }
