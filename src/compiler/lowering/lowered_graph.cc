@@ -167,7 +167,7 @@ void FreezeConstantPayloads(ValueGraph* graph) {
 
 relay::LoweredFunction LowerPrimitiveUnit(
     const std::vector<LogicalValueContract>& values,
-    const PrimitiveUnit& unit) {
+    const PrimitiveUnit& unit, const Target& target) {
     const ResolvedRelayCall& resolved =
         ValidateUnitOperator(values, unit);
     const relay::OperatorSpec& spec = resolved.spec;
@@ -209,8 +209,10 @@ relay::LoweredFunction LowerPrimitiveUnit(
         InvokeCurrentCall(
             resolved, logical_inputs, unit.call.call.checked_type());
     ValidateTEOutputContracts(values, unit, outputs, spec.name);
+    const te::Schedule schedule =
+        relay::internal::BuildDefaultTESchedule(outputs, target);
     return relay::internal::LowerTensorGraphToTIR(
-        abi_inputs, constants, outputs,
+        abi_inputs, constants, outputs, schedule, target,
         relay::internal::PrimFuncIdentity{
             unit.symbol, unit.id, String(spec.name), spec.schema_version,
             String(unit.semantic_key.digest())});

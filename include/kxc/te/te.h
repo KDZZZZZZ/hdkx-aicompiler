@@ -4,10 +4,8 @@
 
 #pragma once
 
-#include <algorithm>
 #include <functional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "kxc/support/container.h"
@@ -118,26 +116,23 @@ public:
     ProducerLoad(Tensor tensor, Array<tir::PrimExpr> indices);
 };
 
-/*! \brief TE 迭代变量的调度语义。 */
+/*! \brief TE leaf 轴的来源或执行语义。 */
 enum class IterVarType : int {
     kDataPar = 0,
-    kThreadIndex = 1,
     kCommReduce = 2,
-    kOrdered = 3,
-    kOpaque = 4,
     kVectorized = 5,
     kParallel = 6,
     kUnrolled = 7,
 };
 
-/*! \brief TE 迭代轴，描述数据并行、归约或线程绑定维度。 */
+/*! \brief TE 迭代轴，保留静态域、归约来源和 lowering 可消费的执行语义。 */
 class IterVarNode : public Object {
 public:
     tir::Var var;
     tir::PrimExpr dom_min;
     tir::PrimExpr dom_extent;
-    IterVarType iter_type;
-    std::string thread_tag;
+    IterVarType iter_type{IterVarType::kDataPar};
+    bool is_reduction{false};
 
     KXC_OBJECT_DECLARE
 };
@@ -148,13 +143,21 @@ public:
     using ObjectRef::ObjectRef;
     explicit IterVar(tir::PrimExpr min, tir::PrimExpr extent,
                      IterVarType type = IterVarType::kDataPar,
-                     std::string thread_tag = "", std::string name = "rv");
+                     std::string name = "rv");
     const IterVarNode* operator->() const { return static_cast<const IterVarNode*>(object_); }
     operator tir::PrimExpr() const { return operator->()->var; }
     operator tir::Var() const { return operator->()->var; }
 
     bool operator==(const IterVar& other) const { return object_ == other.object_; }
     bool operator!=(const IterVar& other) const { return !(*this == other); }
+};
+
+/*! \brief 一次 exact-or-predicated split 的父子关系。 */
+struct SplitRelation final {
+    IterVar parent;
+    IterVar outer;
+    IterVar inner;
+    tir::PrimExpr factor;
 };
 
 inline tir::PrimExpr AsPrimExpr(const tir::PrimExpr& expr) {
@@ -172,17 +175,19 @@ inline tir::PrimExpr AsPrimExpr(const IterVar& iter_var) {
 /*! \brief 创建归约轴，供 sum/max 等归约表达式使用。 */
 IterVar reduce_axis(tir::PrimExpr min, tir::PrimExpr extent, std::string name = "rv");
 
-/*! \brief 单个 operation 的调度状态，保存 leaf/all iter vars。 */
+/*! \brief 单个 operation 的调度状态，保存 root/leaf 轴和 split 关系。 */
 class StageNode : public Object {
 public:
     Operation op;
+    Array<IterVar> root_iter_vars;
     Array<IterVar> leaf_iter_vars;
     Array<IterVar> all_iter_vars;
+    std::vector<SplitRelation> split_relations;
 
     KXC_OBJECT_DECLARE
 };
 
-/*! \brief 单个 operation 的调度接口，提供 split/fuse/reorder/bind 等 primitive。 */
+/*! \brief 单个 operation 的最小可消费调度接口。 */
 class Stage : public ObjectRef {
 public:
     using ObjectRef::ObjectRef;
@@ -191,25 +196,17 @@ public:
     const StageNode* operator->() const { return static_cast<const StageNode*>(object_); }
     StageNode* operator->() { return static_cast<StageNode*>(const_cast<Object*>(object_)); }
 
-    /*! \brief 将 parent 轴按 factor 拆成 outer/inner 两个轴。 */
+    /*! \brief 将当前 leaf parent 按正静态 factor 拆成 outer/inner。 */
     IterVar split(IterVar parent, tir::PrimExpr factor, IterVar* p_outer = nullptr,
                   IterVar* p_inner = nullptr);
-    /*! \brief 将相邻两个轴合并为一个轴。 */
-    IterVar fuse(IterVar outer, IterVar inner);
-    /*! \brief 重排当前 stage 的 leaf iter vars。 */
+    /*! \brief 以当前 leaf 的无重复全排列重排循环。 */
     void reorder(const Array<IterVar>& order);
-    /*! \brief 对两个空间轴执行二维 tile，返回 outer/inner 组合。 */
-    void tile(IterVar x_parent, IterVar y_parent, tir::PrimExpr x_factor,
-              tir::PrimExpr y_factor, IterVar* x_outer, IterVar* y_outer,
-              IterVar* x_inner, IterVar* y_inner);
-    /*! \brief 标记轴为向量化执行。 */
+    /*! \brief 标记最内层数据并行 leaf 为向量化执行。 */
     void vectorize(IterVar var);
-    /*! \brief 标记轴为展开执行。 */
+    /*! \brief 标记 data/reduction leaf 为展开执行。 */
     void unroll(IterVar var);
-    /*! \brief 标记轴为并行执行。 */
+    /*! \brief 标记数据并行 leaf 为并行执行。 */
     void parallel(IterVar var);
-    /*! \brief 将轴绑定到线程轴或 block/thread 语义。 */
-    void bind(IterVar var, IterVar thread_axis);
 };
 
 /*! \brief TE 支持的归约类型。 */
@@ -310,15 +307,13 @@ Tensor compute(Array<tir::PrimExpr> shape, FCompute fcompute,
                std::string name = "compute", std::string tag = "",
                Map<String, ObjectRef> attrs = {});
 
-/*! \brief 创建线程轴，用于 bind 调度 primitive。 */
-IterVar thread_axis(tir::PrimExpr dom, std::string tag);
-
-/*! \brief TE schedule 节点，保存输出 operation 到 stage 的映射。 */
+/*! \brief TE schedule 节点，保存输出 operation 到完整 producer DAG stage 的映射。 */
 class ScheduleNode : public Object {
 public:
     Array<Operation> outputs;
     Array<Stage> stages;
     Map<Operation, Stage> op_map;
+    std::string policy{"manual-v1"};
 
     KXC_OBJECT_DECLARE
 };
@@ -329,12 +324,13 @@ public:
     using ObjectRef::ObjectRef;
 
     Stage operator[](const Operation& op) { return operator->()->op_map.at(op); }
+    Stage operator[](const Operation& op) const { return operator->()->op_map.at(op); }
 
     const ScheduleNode* operator->() const { return static_cast<const ScheduleNode*>(object_); }
     ScheduleNode* operator->() { return static_cast<ScheduleNode*>(const_cast<Object*>(object_)); }
 };
 
-/*! \brief 从输出 operations 创建 schedule，并收集依赖 stage。 */
+/*! \brief 从输出 operations 创建 schedule，并按 producer-first 顺序收集完整依赖 DAG。 */
 Schedule create_schedule(const Array<Operation>& ops);
 
 }  // namespace te

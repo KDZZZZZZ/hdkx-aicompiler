@@ -265,17 +265,17 @@ uint64_t PrimitiveCacheLease::merged_waiter_count() const {
 
 PrimitiveArtifactKey BuildPrimitiveArtifactKey(
     const UnitSemanticKey& semantic_key, const Target& target,
-    const std::string& pipeline_fingerprint, const char* schedule_version,
+    const std::string& pipeline_fingerprint, const char* schedule_contract,
     const char* backend_version) {
     if (!semantic_key.defined() || pipeline_fingerprint.empty() ||
-        schedule_version == nullptr || schedule_version[0] == '\0' ||
+        schedule_contract == nullptr || schedule_contract[0] == '\0' ||
         backend_version == nullptr || backend_version[0] == '\0') {
         throw std::invalid_argument(
             "primitive artifact key requires semantics, pipeline, schedule, and backend");
     }
     return PrimitiveArtifactKey(
         semantic_key, CanonicalTargetSnapshot(target), pipeline_fingerprint,
-        kKernelABIVersion, schedule_version, backend_version);
+        kKernelABIVersion, schedule_contract, backend_version);
 }
 
 PrimitiveArtifactPin LookupPrimitiveCache(const PrimitiveArtifactKey& key) {

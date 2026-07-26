@@ -385,7 +385,8 @@ bool TestTEOutputContractsFailClosed() {
         const PreparedStaticGraph prepared = PrepareStaticGraph(
             single_function, Device::CPU(), BuildTarget(Device::CPU()), String());
         (void)LowerPrimitiveUnit(prepared.partitioned.value_graph.values,
-                                 prepared.partitioned.units.front());
+                                 prepared.partitioned.units.front(),
+                                 prepared.target);
     });
     add_node->attrs[add_key] = saved_add_lowering;
 
@@ -402,7 +403,8 @@ bool TestTEOutputContractsFailClosed() {
             const PreparedStaticGraph prepared = PrepareStaticGraph(
                 function, Device::CPU(), BuildTarget(Device::CPU()), String());
             (void)LowerPrimitiveUnit(prepared.partitioned.value_graph.values,
-                                     prepared.partitioned.units.front());
+                                     prepared.partitioned.units.front(),
+                                     prepared.target);
         });
     };
 

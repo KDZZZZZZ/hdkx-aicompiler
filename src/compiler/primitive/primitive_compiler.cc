@@ -19,6 +19,7 @@
 #include "../internal/kernel_abi_equivalence.h"
 #include "../internal/lowered_graph.h"
 #include "../internal/primitive_cache.h"
+#include "../internal/te_to_tir.h"
 #include "runtime/internal/compiled_module_node.h"
 #include "kxc/compiler/pipeline.h"
 #include "kxc/tir/printer/print_ir.h"
@@ -307,7 +308,7 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
         ValidatePrimitiveUnit(unit, values);
         relay::LoweredFunction lowered = RunUnitPhase(
             "per_unit_lowering", unit,
-            [&] { return LowerPrimitiveUnit(values, unit); });
+            [&] { return LowerPrimitiveUnit(values, unit, config->target); });
         for (const auto& binding : lowered.constants()) {
             if (constants.count(binding->key) &&
                 constants.at(binding->key).get() != binding->value.get()) {
@@ -341,10 +342,11 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
                 return codegen::BuildKernelSignature(
                     lowered.second, constants, config->target, unit.symbol);
             });
+        const std::string schedule_contract =
+            relay::internal::GetTEScheduleContract(lowered.second);
         PrimitiveArtifactKey artifact_key = BuildPrimitiveArtifactKey(
             unit.semantic_key, config->target, contract.canonical_bytes,
-            contract.schedule_version.c_str(),
-            contract.backend_version.c_str());
+            schedule_contract.c_str(), contract.backend_version.c_str());
         work.push_back(PrimitiveWork{
             &unit, std::move(lowered.second), std::move(signature),
             std::move(artifact_key), PrimitiveCacheLease(),

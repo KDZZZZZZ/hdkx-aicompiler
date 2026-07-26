@@ -29,7 +29,8 @@ inline PrimitiveLoweringFixture LowerPrimitivesForTest(Function function) {
     for (const api::internal::PrimitiveUnit& unit :
          result.prepared.partitioned.units) {
         result.lowered.push_back(api::internal::LowerPrimitiveUnit(
-            result.prepared.partitioned.value_graph.values, unit));
+            result.prepared.partitioned.value_graph.values, unit,
+            result.prepared.target));
     }
     return result;
 }

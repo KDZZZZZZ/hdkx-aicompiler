@@ -63,7 +63,7 @@ public:
     PrimitiveArtifactKey(UnitSemanticKey unit_semantic_key,
                          std::string target_capability_fingerprint,
                          std::string pipeline_fingerprint, int abi_version,
-                         std::string schedule_version,
+                         std::string schedule_contract,
                          std::string backend_version);
 
     bool defined() const noexcept;
@@ -80,7 +80,7 @@ private:
     PrimitiveArtifactKey(UnitSemanticKey unit_semantic_key,
                          std::string target_capability_fingerprint,
                          std::string pipeline_fingerprint, int abi_version,
-                         std::string schedule_version,
+                         std::string schedule_contract,
                          std::string backend_version,
                          std::string digest);
 

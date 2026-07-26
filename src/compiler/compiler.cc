@@ -23,6 +23,7 @@
 #include "internal/primitive_cache.h"
 #include "internal/primitive_compiler.h"
 #include "internal/relay_program.h"
+#include "internal/te_to_tir.h"
 #include "runtime/internal/compiled_module_node.h"
 #include "kxc/compiler/pipeline.h"
 #include "kxc/pass/context.h"
@@ -432,10 +433,11 @@ internal::ResolveCompilerExecutionContract(
     contract.relay_pipeline = ResolveRelayPipeline(
         config, required_relay_control_capabilities);
     contract.tir_pipeline = ResolveTIRPipeline(config);
-    contract.schedule_version = "per-unit-schedule-v2";
+    contract.schedule_policy =
+        relay::internal::kDefaultTESchedulePolicy;
     contract.backend_version = BackendVersion(config->target);
     AppendPipelineIdentityField(&contract.canonical_bytes, "kind",
-                                "compiler-execution-plan-v3");
+                                "compiler-execution-plan-v4");
     AppendPipelineIdentityField(
         &contract.canonical_bytes, "relay",
         std::string(contract.relay_pipeline.canonical_bytes));
@@ -446,8 +448,8 @@ internal::ResolveCompilerExecutionContract(
         std::string(contract.tir_pipeline.canonical_bytes));
     AppendPipelineIdentityField(&contract.canonical_bytes, "kernel_abi",
                                 "kernel-abi-v1");
-    AppendPipelineIdentityField(&contract.canonical_bytes, "schedule",
-                                contract.schedule_version);
+    AppendPipelineIdentityField(&contract.canonical_bytes, "schedule_policy",
+                                contract.schedule_policy);
     AppendPipelineIdentityField(&contract.canonical_bytes, "backend",
                                 contract.backend_version);
     contract.fingerprint = support::HashText(contract.canonical_bytes);

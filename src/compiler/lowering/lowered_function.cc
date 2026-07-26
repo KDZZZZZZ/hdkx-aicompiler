@@ -96,6 +96,17 @@ void LoweredFunction::Validate() const {
   if (!prim_func.defined()) {
     throw std::invalid_argument("LoweredFunction prim_func must be defined");
   }
+  const String schedule_key(internal::kTEScheduleContractAttr);
+  if (!prim_func->attrs.count(schedule_key)) {
+    throw std::invalid_argument(
+        "LoweredFunction requires a TE schedule contract");
+  }
+  const auto* schedule_contract =
+      prim_func->attrs.at(schedule_key).As<StringObj>();
+  if (!schedule_contract || schedule_contract->data.empty()) {
+    throw std::invalid_argument(
+        "LoweredFunction TE schedule contract is malformed");
+  }
 
   int64_t input_count = -1;
   int64_t constant_count = -1;

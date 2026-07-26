@@ -8,6 +8,7 @@
 #include "kxc/te/te.h"
 #include "kxc/tir/expr.h"
 #include "kxc/tir/visitor.h"
+#include "support/canonical.h"
 
 #include <algorithm>
 #include <limits>
@@ -15,6 +16,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace kxc {
@@ -142,17 +144,239 @@ void CollectOpsDFS(const te::Tensor& t,
     topo->push_back(t->op);
 }
 
-// 把 TE 表达式中的张量访问改写为 TIR buffer Load。
+bool EvaluateStaticInt64(const tir::PrimExpr& expression, int64_t* result);
+
+tir::PrimExpr CastIndex(const tir::PrimExpr& value,
+                        tir::DataType dtype) {
+    return value.dtype() == dtype
+               ? value
+               : tir::PrimExpr(tir::Call(dtype, "cast", {value}));
+}
+
+class VarSubstituter final : public TIRPass {
+public:
+    VarSubstituter(tir::Var variable, tir::PrimExpr replacement)
+        : variable_(std::move(variable)), replacement_(std::move(replacement)) {}
+
+protected:
+    tir::PrimExpr VisitVar(const tir::VarNode* op,
+                           const tir::PrimExpr& ref) override {
+        (void)op;
+        return ref.get() == variable_.get() ? replacement_ : ref;
+    }
+
+private:
+    tir::Var variable_;
+    tir::PrimExpr replacement_;
+};
+
+struct StageAxisPlan final {
+    std::unordered_map<const Object*, tir::PrimExpr> root_values;
+    Array<te::IterVar> data_leaves;
+    Array<te::IterVar> reduction_leaves;
+    tir::PrimExpr data_predicate;
+    tir::PrimExpr full_predicate;
+};
+
+StageAxisPlan BuildStageAxisPlan(const te::Stage& stage,
+                                 const te::ComputeOpNode* op) {
+    if (!stage.defined() || stage->op.get() != op ||
+        stage->root_iter_vars.size() !=
+            op->axis.size() + op->reduce_axis.size()) {
+        throw std::invalid_argument(
+            "TE schedule stage does not match its ComputeOp axes");
+    }
+
+    StageAxisPlan plan;
+    std::unordered_set<const Object*> all_axes;
+    for (size_t index = 0; index < stage->root_iter_vars.size(); ++index) {
+        const te::IterVar& root = stage->root_iter_vars[index];
+        const bool reduction = index >= op->axis.size();
+        const tir::Var expected = reduction
+                                      ? op->reduce_axis[index - op->axis.size()]->var
+                                      : op->axis[index];
+        if (!root.defined() || root->var.get() != expected.get() ||
+            root->is_reduction != reduction ||
+            !all_axes.insert(root.get()).second) {
+            throw std::invalid_argument(
+                "TE schedule root-axis contract was mutated");
+        }
+        plan.root_values.emplace(root->var.get(), root->var);
+    }
+
+    Array<te::IterVar> relation_leaves;
+    std::vector<te::IterVar> expected_all_axes;
+    for (const te::IterVar& root : stage->root_iter_vars) {
+        relation_leaves.push_back(root);
+        expected_all_axes.push_back(root);
+    }
+    for (const te::SplitRelation& relation : stage->split_relations) {
+        const auto parent = std::find(relation_leaves.begin(),
+                                      relation_leaves.end(), relation.parent);
+        int64_t factor = 0;
+        int64_t parent_extent = 0;
+        int64_t outer_min = 0;
+        int64_t outer_extent = 0;
+        int64_t inner_min = 0;
+        int64_t inner_extent = 0;
+        const bool valid_domains =
+            relation.parent.defined() && relation.outer.defined() &&
+            relation.inner.defined() &&
+            EvaluateStaticInt64(relation.factor, &factor) && factor > 0 &&
+            EvaluateStaticInt64(relation.parent->dom_extent,
+                                &parent_extent) &&
+            parent_extent >= 0 &&
+            EvaluateStaticInt64(relation.outer->dom_min, &outer_min) &&
+            EvaluateStaticInt64(relation.outer->dom_extent,
+                                &outer_extent) &&
+            EvaluateStaticInt64(relation.inner->dom_min, &inner_min) &&
+            EvaluateStaticInt64(relation.inner->dom_extent,
+                                &inner_extent) &&
+            outer_min == 0 && inner_min == 0 && inner_extent == factor &&
+            outer_extent ==
+                (parent_extent == 0 ? 0 : 1 + (parent_extent - 1) / factor);
+        if (parent == relation_leaves.end() || !relation.parent.defined() ||
+            !relation.outer.defined() || !relation.inner.defined() ||
+            !valid_domains ||
+            relation.outer->var->dtype != relation.parent->var->dtype ||
+            relation.inner->var->dtype != relation.parent->var->dtype ||
+            relation.outer->is_reduction != relation.parent->is_reduction ||
+            relation.inner->is_reduction != relation.parent->is_reduction ||
+            !all_axes.insert(relation.outer.get()).second ||
+            !all_axes.insert(relation.inner.get()).second) {
+            throw std::invalid_argument(
+                "TE schedule contains an invalid split relation");
+        }
+        const size_t position = static_cast<size_t>(
+            std::distance(relation_leaves.begin(), parent));
+        relation_leaves[position] = relation.outer;
+        relation_leaves.insert(relation_leaves.begin() + position + 1,
+                               relation.inner);
+        expected_all_axes.push_back(relation.outer);
+        expected_all_axes.push_back(relation.inner);
+
+        const tir::DataType dtype = relation.parent->var->dtype;
+        const tir::PrimExpr replacement =
+            CastIndex(relation.parent->dom_min, dtype) +
+            relation.outer->var * CastIndex(relation.factor, dtype) +
+            relation.inner->var;
+        for (auto& [root, value] : plan.root_values) {
+            (void)root;
+            value = VarSubstituter(relation.parent->var, replacement)
+                        .Mutate(value);
+        }
+    }
+
+    if (stage->all_iter_vars.size() != expected_all_axes.size()) {
+        throw std::invalid_argument(
+            "TE schedule all-axis list does not match split relations");
+    }
+    for (size_t index = 0; index < expected_all_axes.size(); ++index) {
+        if (!stage->all_iter_vars[index].defined() ||
+            stage->all_iter_vars[index].get() != expected_all_axes[index].get()) {
+            throw std::invalid_argument(
+                "TE schedule all-axis list was mutated");
+        }
+    }
+    if (relation_leaves.size() != stage->leaf_iter_vars.size()) {
+        throw std::invalid_argument(
+            "TE schedule leaf count does not match split relations");
+    }
+    std::unordered_set<const Object*> expected_leaves;
+    for (const te::IterVar& axis : relation_leaves) {
+        expected_leaves.insert(axis.get());
+    }
+    std::unordered_set<const Object*> seen_leaves;
+    bool saw_reduction = false;
+    for (const te::IterVar& axis : stage->leaf_iter_vars) {
+        if (!axis.defined() || expected_leaves.count(axis.get()) == 0 ||
+            !seen_leaves.insert(axis.get()).second) {
+            throw std::invalid_argument(
+                "TE schedule leaf order is not a split-leaf permutation");
+        }
+        if (axis->is_reduction) {
+            saw_reduction = true;
+            plan.reduction_leaves.push_back(axis);
+        } else {
+            if (saw_reduction) {
+                throw std::invalid_argument(
+                    "TE schedule requires data leaves before reduction leaves");
+            }
+            plan.data_leaves.push_back(axis);
+        }
+    }
+
+    for (const te::IterVar& root : stage->root_iter_vars) {
+        const tir::PrimExpr value = plan.root_values.at(root->var.get());
+        if (value.get() == root->var.get()) continue;
+        const tir::DataType dtype = root->var->dtype;
+        const tir::PrimExpr predicate =
+            value < (CastIndex(root->dom_min, dtype) +
+                     CastIndex(root->dom_extent, dtype));
+        plan.full_predicate = plan.full_predicate.defined()
+                                  ? plan.full_predicate && predicate
+                                  : predicate;
+        if (!root->is_reduction) {
+            plan.data_predicate = plan.data_predicate.defined()
+                                      ? plan.data_predicate && predicate
+                                      : predicate;
+        }
+    }
+    return plan;
+}
+
+tir::ForType LowerForType(const te::IterVar& axis) {
+    switch (axis->iter_type) {
+        case te::IterVarType::kDataPar:
+            if (axis->is_reduction) break;
+            return tir::ForType::Serial;
+        case te::IterVarType::kCommReduce:
+            if (!axis->is_reduction) break;
+            return tir::ForType::Serial;
+        case te::IterVarType::kVectorized:
+            if (!axis->is_reduction) return tir::ForType::Vectorized;
+            break;
+        case te::IterVarType::kParallel:
+            if (!axis->is_reduction) return tir::ForType::Parallel;
+            break;
+        case te::IterVarType::kUnrolled:
+            return tir::ForType::Unrolled;
+    }
+    throw std::invalid_argument(
+        "TE schedule axis has an incompatible execution annotation");
+}
+
+tir::Stmt Guarded(const tir::PrimExpr& predicate, tir::Stmt body) {
+    return predicate.defined()
+               ? tir::Stmt(tir::IfThenElse(predicate, std::move(body)))
+               : body;
+}
+
+tir::Stmt WrapLoops(const Array<te::IterVar>& axes, tir::Stmt body) {
+    for (size_t index = axes.size(); index > 0; --index) {
+        const te::IterVar& axis = axes[index - 1];
+        body = tir::For(axis->var, axis->dom_min, axis->dom_extent,
+                        LowerForType(axis), body);
+    }
+    return body;
+}
+
+// 把 TE 表达式中的轴和张量访问改写为 scheduled TIR 表达式。
 class ExprLowerer {
 public:
-    // 绑定张量到 TIR buffer 变量的映射。
-    explicit ExprLowerer(const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor)
-        : buffer_var_by_tensor_(buffer_var_by_tensor) {}
+    ExprLowerer(
+        const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor,
+        const std::unordered_map<const Object*, tir::PrimExpr>& axis_values)
+        : buffer_var_by_tensor_(buffer_var_by_tensor),
+          axis_values_(axis_values) {}
 
-    // 递归降低纯表达式节点；Reduce 留给语句级 lowering。
     tir::PrimExpr Lower(const tir::PrimExpr& expr) const {
         if (!expr.defined()) return expr;
 
+        if (expr.As<tir::VarNode>()) {
+            const auto axis = axis_values_.find(expr.get());
+            return axis == axis_values_.end() ? expr : axis->second;
+        }
         if (auto* n = expr.As<te::ProducerLoadNode>()) {
             auto it = buffer_var_by_tensor_.find(n->tensor.get());
             if (it == buffer_var_by_tensor_.end()) {
@@ -193,27 +417,19 @@ public:
         if (expr.As<te::ReduceNode>()) {
             throw std::runtime_error("Reduce must be lowered at statement level");
         }
-
         return expr;
     }
 
 private:
     const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor_;
+    const std::unordered_map<const Object*, tir::PrimExpr>& axis_values_;
 };
 
-// 用 ComputeOp 数据轴从内到外包裹串行循环。
-tir::Stmt WrapDataLoops(const te::ComputeOpNode* op, tir::Stmt body) {
-    for (int i = static_cast<int>(op->axis.size()) - 1; i >= 0; --i) {
-        body = tir::For(op->axis[i], tir::IntImm(0), op->shape[i], tir::ForType::Serial, body);
-    }
-    return body;
-}
-
-// 将 TE ComputeOp 的指定 value_index 降为 TIR Store、数据循环和可选归约循环。
-tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
-                           const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor,
-                           const ExprLowerer& expr_lowerer) {
-    auto* op = out_tensor->op.As<te::ComputeOpNode>();
+// 将 TE ComputeOp 的指定 value_index 按 Stage leaf 轴降为 TIR。
+tir::Stmt LowerComputeStmt(
+    const te::Tensor& out_tensor, const te::Stage& stage,
+    const std::unordered_map<const Object*, tir::Var>& buffer_var_by_tensor) {
+    const auto* op = out_tensor->op.As<te::ComputeOpNode>();
     if (!op) {
         throw std::runtime_error("LowerComputeStmt expects ComputeOpNode");
     }
@@ -226,50 +442,56 @@ tir::Stmt LowerComputeStmt(const te::Tensor& out_tensor,
             "LowerComputeStmt tensor value_index is outside ComputeOp body");
     }
 
-    auto out_it = buffer_var_by_tensor.find(out_tensor.get());
+    const auto out_it = buffer_var_by_tensor.find(out_tensor.get());
     if (out_it == buffer_var_by_tensor.end()) {
         throw std::runtime_error("Missing output buffer var for compute tensor");
     }
-    tir::Var out_var = out_it->second;
+    const tir::Var out_var = out_it->second;
+    const StageAxisPlan axes = BuildStageAxisPlan(stage, op);
+    const ExprLowerer expr_lowerer(buffer_var_by_tensor, axes.root_values);
 
     Array<tir::PrimExpr> data_indices;
-    for (const auto& ax : op->axis) data_indices.push_back(ax);
-    tir::PrimExpr out_index = FlattenIndex(data_indices, op->shape);
+    for (const auto& axis : op->axis) {
+        data_indices.push_back(expr_lowerer.Lower(axis));
+    }
+    const tir::PrimExpr out_index = FlattenIndex(data_indices, op->shape);
 
-    tir::PrimExpr body_expr = op->body[static_cast<size_t>(out_tensor->value_index)];
-    if (auto* red = body_expr.As<te::ReduceNode>()) {
-        if (red->source.size() != 1) {
+    const tir::PrimExpr body_expr =
+        op->body[static_cast<size_t>(out_tensor->value_index)];
+    if (const auto* reduction = body_expr.As<te::ReduceNode>()) {
+        if (reduction->source.size() != 1) {
             throw std::runtime_error("Only single-source reduce is supported");
         }
-        tir::PrimExpr init_value = MakeIdentityForReduce(red->reduce_type, out_tensor->dtype);
-        tir::Stmt init_store = tir::Store(out_var, init_value, out_index);
+        const tir::PrimExpr init_value =
+            MakeIdentityForReduce(reduction->reduce_type, out_tensor->dtype);
+        tir::Stmt init_store = Guarded(
+            axes.data_predicate, tir::Store(out_var, init_value, out_index));
 
-        tir::PrimExpr src = expr_lowerer.Lower(red->source[0]);
-        tir::PrimExpr old = tir::Load(out_var, out_index);
+        const tir::PrimExpr source = expr_lowerer.Lower(reduction->source[0]);
+        const tir::PrimExpr old = tir::Load(out_var, out_index);
         tir::PrimExpr update_value;
-        if (red->reduce_type == te::ReduceType::kSum) {
-            update_value = old + src;
-        } else if (red->reduce_type == te::ReduceType::kMax) {
-            update_value = tir::Max(old, src);
-        } else if (red->reduce_type == te::ReduceType::kMin) {
-            update_value = tir::Min(old, src);
+        if (reduction->reduce_type == te::ReduceType::kSum) {
+            update_value = old + source;
+        } else if (reduction->reduce_type == te::ReduceType::kMax) {
+            update_value = tir::Max(old, source);
+        } else if (reduction->reduce_type == te::ReduceType::kMin) {
+            update_value = tir::Min(old, source);
         } else {
             throw std::runtime_error("Unsupported reduce type in update");
         }
-        tir::Stmt update_store = tir::Store(out_var, update_value, out_index);
-
-        for (int i = static_cast<int>(red->axis.size()) - 1; i >= 0; --i) {
-            const auto& rax = red->axis[i];
-            update_store = tir::For(rax->var, rax->dom_min, rax->dom_extent, tir::ForType::Serial, update_store);
-        }
-
-        tir::Stmt seq = tir::SeqStmt({init_store, update_store});
-        return WrapDataLoops(op, seq);
+        tir::Stmt update_store = Guarded(
+            axes.full_predicate,
+            tir::Store(out_var, update_value, out_index));
+        update_store = WrapLoops(axes.reduction_leaves, update_store);
+        return WrapLoops(
+            axes.data_leaves,
+            tir::SeqStmt({std::move(init_store), std::move(update_store)}));
     }
 
-    tir::PrimExpr lowered = expr_lowerer.Lower(body_expr);
-    tir::Stmt store = tir::Store(out_var, lowered, out_index);
-    return WrapDataLoops(op, store);
+    tir::Stmt store = Guarded(
+        axes.data_predicate,
+        tir::Store(out_var, expr_lowerer.Lower(body_expr), out_index));
+    return WrapLoops(axes.data_leaves, store);
 }
 
 bool CheckedAddInt64(int64_t lhs, int64_t rhs, int64_t* result) {
@@ -354,6 +576,21 @@ bool EvaluateStaticInt64(const tir::PrimExpr& expression, int64_t* result) {
         return true;
     }
     return false;
+}
+
+Array<tir::PrimExpr> CanonicalStaticBufferShape(
+    const Array<tir::PrimExpr>& shape) {
+    Array<tir::PrimExpr> canonical;
+    for (const tir::PrimExpr& expression : shape) {
+        int64_t extent = 0;
+        if (!EvaluateStaticInt64(expression, &extent) || extent < 0) {
+            throw std::invalid_argument(
+                "TE-to-TIR Buffer shape requires static non-negative extents");
+        }
+        canonical.push_back(
+            tir::IntImm(extent, tir::DataType::Int(64)));
+    }
+    return canonical;
 }
 
 // 为公开输出生成唯一且可读的 TIR 参数名。
@@ -442,11 +679,259 @@ void ValidateStaticLoweringTensor(const Array<tir::PrimExpr>& shape,
     }
 }
 
+namespace {
+
+void ValidateScheduleTarget(const Target& target) {
+    const auto* node = target.As<TargetNode>();
+    if (!node || node->device_id < 0 ||
+        !((node->kind == "llvm" && node->device_type == kCPU) ||
+          (node->kind == "cuda" && node->device_type == kCUDA))) {
+        throw std::invalid_argument(
+            "TE scheduling requires a complete supported Target");
+    }
+}
+
+int64_t StaticAxisExtent(const te::IterVar& axis,
+                         const std::string& context) {
+    int64_t extent = 0;
+    if (!axis.defined() ||
+        !EvaluateStaticInt64(axis->dom_extent, &extent) || extent < 0) {
+        throw std::invalid_argument(context +
+                                    " requires a static non-negative extent");
+    }
+    return extent;
+}
+
+const char* OperationKind(const te::Operation& operation) {
+    if (operation.As<te::PlaceholderOpNode>()) return "placeholder";
+    if (operation.As<te::ComputeOpNode>()) return "compute";
+    throw std::invalid_argument(
+        "TE schedule contains an unsupported operation kind");
+}
+
+void ValidateCudaTESchedule(const te::Schedule& schedule) {
+    for (const te::Stage& stage : schedule->stages) {
+        if (!stage->split_relations.empty() ||
+            stage->leaf_iter_vars.size() != stage->root_iter_vars.size()) {
+            throw std::invalid_argument(
+                "CUDA TE schedule must stay unsplit; BindCudaThreads owns launch mapping");
+        }
+        for (size_t index = 0; index < stage->leaf_iter_vars.size(); ++index) {
+            const te::IterVar& leaf = stage->leaf_iter_vars[index];
+            const te::IterVar& root = stage->root_iter_vars[index];
+            const te::IterVarType expected =
+                leaf->is_reduction ? te::IterVarType::kCommReduce
+                                   : te::IterVarType::kDataPar;
+            if (leaf.get() != root.get() || leaf->iter_type != expected) {
+                throw std::invalid_argument(
+                    "CUDA TE schedule must stay serial; BindCudaThreads is the sole thread authority");
+            }
+        }
+    }
+}
+
+}  // namespace
+
+te::Schedule BuildDefaultTESchedule(const Array<te::Tensor>& outputs,
+                                    const Target& target) {
+    ValidateScheduleTarget(target);
+    if (outputs.empty()) {
+        throw std::invalid_argument(
+            "BuildDefaultTESchedule requires output tensors");
+    }
+    Array<te::Operation> output_operations;
+    std::unordered_set<const Object*> seen;
+    for (const te::Tensor& output : outputs) {
+        if (!output.defined() || !output->op.defined()) {
+            throw std::invalid_argument(
+                "BuildDefaultTESchedule outputs must be defined");
+        }
+        if (seen.insert(output->op.get()).second) {
+            output_operations.push_back(output->op);
+        }
+    }
+    te::Schedule schedule = te::create_schedule(output_operations);
+    schedule.operator->()->policy = kDefaultTESchedulePolicy;
+
+    if (target->kind == "cuda") {
+        return schedule;
+    }
+
+    for (const te::Stage& stage_ref : schedule->stages) {
+        te::Stage stage(stage_ref);
+        const auto* compute = stage->op.As<te::ComputeOpNode>();
+        if (!compute || stage->root_iter_vars.empty()) continue;
+
+        Array<te::IterVar> data_roots;
+        Array<te::IterVar> reduction_roots;
+        for (const te::IterVar& root : stage->root_iter_vars) {
+            (root->is_reduction ? reduction_roots : data_roots).push_back(root);
+        }
+        if (data_roots.empty()) continue;
+
+        if (!reduction_roots.empty()) {
+            const int64_t data_extent =
+                StaticAxisExtent(data_roots[0], "CPU default schedule");
+            if (data_extent > 1) stage.parallel(data_roots[0]);
+            const te::IterVar reduction =
+                reduction_roots[reduction_roots.size() - 1];
+            const int64_t reduction_extent =
+                StaticAxisExtent(reduction, "CPU default reduction schedule");
+            if (reduction_extent > 0 && reduction_extent <= 8) {
+                stage.unroll(reduction);
+            }
+            continue;
+        }
+
+        const te::IterVar innermost = data_roots[data_roots.size() - 1];
+        const int64_t inner_extent =
+            StaticAxisExtent(innermost, "CPU default elementwise schedule");
+        if (inner_extent >= 4 && inner_extent % 4 == 0) {
+            te::IterVar outer;
+            te::IterVar inner;
+            stage.split(innermost, tir::IntImm(4), &outer, &inner);
+            stage.vectorize(inner);
+            const int64_t outer_extent =
+                StaticAxisExtent(outer, "CPU default split schedule");
+            const te::IterVar first = stage->leaf_iter_vars[0];
+            if (outer_extent > 1 || first.get() != outer.get()) {
+                stage.parallel(first);
+            }
+        } else if (inner_extent > 0 && inner_extent <= 8) {
+            stage.unroll(innermost);
+        } else if (inner_extent > 1) {
+            stage.parallel(stage->leaf_iter_vars[0]);
+        }
+    }
+    return schedule;
+}
+
+std::string CanonicalTEScheduleContract(const te::Schedule& schedule,
+                                        const Target& target) {
+    ValidateScheduleTarget(target);
+    if (!schedule.defined() || schedule->policy.empty() ||
+        schedule->outputs.empty() || schedule->stages.empty() ||
+        schedule->op_map.size() != schedule->stages.size()) {
+        throw std::invalid_argument(
+            "CanonicalTEScheduleContract requires a complete Schedule");
+    }
+    if (target->kind == "cuda") ValidateCudaTESchedule(schedule);
+
+    support::CanonicalBytesEncoder encoder("kxc.te.schedule.v1");
+    encoder.Field("policy", schedule->policy);
+    encoder.Field("target_kind", target->kind);
+    encoder.IntegerField("target_device_type",
+                         static_cast<int>(target->device_type));
+    for (const te::Operation& output : schedule->outputs) {
+        if (!output.defined()) {
+            throw std::invalid_argument(
+                "TE schedule contains an undefined output operation");
+        }
+        encoder.Field("output_operation", output->name);
+    }
+
+    for (size_t stage_index = 0; stage_index < schedule->stages.size();
+         ++stage_index) {
+        const te::Stage& stage = schedule->stages[stage_index];
+        if (!stage.defined() || !stage->op.defined() ||
+            !schedule->op_map.count(stage->op) ||
+            schedule->op_map.at(stage->op).get() != stage.get()) {
+            throw std::invalid_argument(
+                "TE schedule contains an undefined or unindexed stage");
+        }
+        encoder.IntegerField("stage", stage_index);
+        encoder.Field("operation_kind", OperationKind(stage->op));
+        encoder.Field("operation_name", stage->op->name);
+
+        std::unordered_map<const Object*, size_t> axis_ids;
+        for (size_t axis_index = 0;
+             axis_index < stage->all_iter_vars.size(); ++axis_index) {
+            const te::IterVar& axis = stage->all_iter_vars[axis_index];
+            if (!axis.defined() ||
+                !axis_ids.emplace(axis.get(), axis_index).second) {
+                throw std::invalid_argument(
+                    "TE schedule all_iter_vars must be defined and unique");
+            }
+            int64_t minimum = 0;
+            int64_t extent = 0;
+            if (!EvaluateStaticInt64(axis->dom_min, &minimum) ||
+                !EvaluateStaticInt64(axis->dom_extent, &extent)) {
+                throw std::invalid_argument(
+                    "TE schedule canonical identity requires static axis domains");
+            }
+            encoder.IntegerField("axis", axis_index);
+            encoder.Field("axis_name", axis->var->name_hint);
+            encoder.IntegerField("axis_min", minimum);
+            encoder.IntegerField("axis_extent", extent);
+            encoder.BoolField("axis_reduction", axis->is_reduction);
+        }
+        for (const te::IterVar& root : stage->root_iter_vars) {
+            if (axis_ids.count(root.get()) == 0) {
+                throw std::invalid_argument(
+                    "TE schedule root is absent from all_iter_vars");
+            }
+            encoder.IntegerField("root_axis", axis_ids.at(root.get()));
+        }
+        for (const te::SplitRelation& split : stage->split_relations) {
+            int64_t factor = 0;
+            if (axis_ids.count(split.parent.get()) == 0 ||
+                axis_ids.count(split.outer.get()) == 0 ||
+                axis_ids.count(split.inner.get()) == 0 ||
+                !EvaluateStaticInt64(split.factor, &factor) || factor <= 0) {
+                throw std::invalid_argument(
+                    "TE schedule split cannot be canonicalized");
+            }
+            encoder.IntegerField("split_parent",
+                                 axis_ids.at(split.parent.get()));
+            encoder.IntegerField("split_outer",
+                                 axis_ids.at(split.outer.get()));
+            encoder.IntegerField("split_inner",
+                                 axis_ids.at(split.inner.get()));
+            encoder.IntegerField("split_factor", factor);
+        }
+        for (const te::IterVar& leaf : stage->leaf_iter_vars) {
+            if (axis_ids.count(leaf.get()) == 0) {
+                throw std::invalid_argument(
+                    "TE schedule leaf is absent from all_iter_vars");
+            }
+            encoder.IntegerField("leaf_axis", axis_ids.at(leaf.get()));
+            encoder.IntegerField("leaf_type",
+                                 static_cast<int>(leaf->iter_type));
+        }
+        if (const auto* compute = stage->op.As<te::ComputeOpNode>()) {
+            (void)BuildStageAxisPlan(stage, compute);
+        }
+    }
+    return std::move(encoder).Take();
+}
+
+std::string GetTEScheduleContract(const tir::PrimFunc& function) {
+    if (!function.defined() ||
+        !function->attrs.count(String(kTEScheduleContractAttr))) {
+        throw std::invalid_argument(
+            "PrimFunc is missing its TE schedule contract");
+    }
+    const auto* contract =
+        function->attrs.at(String(kTEScheduleContractAttr)).As<StringObj>();
+    if (!contract || contract->data.empty()) {
+        throw std::invalid_argument(
+            "PrimFunc TE schedule contract is malformed");
+    }
+    return contract->data;
+}
+
 LoweredFunction LowerTensorGraphToTIR(
     const Array<te::Tensor>& inputs,
     const std::vector<ConstantTensor>& constants,
     const Array<te::Tensor>& outputs,
+    const te::Schedule& schedule,
+    const Target& target,
     const PrimFuncIdentity& identity) {
+    ValidateScheduleTarget(target);
+    if (!schedule.defined()) {
+        throw std::invalid_argument(
+            "TE-to-TIR lowering requires an explicit Schedule");
+    }
     if (std::string(identity.symbol).empty()) {
         throw std::invalid_argument("PrimFunc identity requires a non-empty symbol");
     }
@@ -509,6 +994,37 @@ LoweredFunction LowerTensorGraphToTIR(
             "TE-to-TIR reduction iteration domain for '" + operation->name + "'");
     }
 
+    Array<te::Operation> unique_output_operations;
+    std::unordered_set<const Object*> seen_output_operations;
+    for (const te::Tensor& output : outputs) {
+        if (seen_output_operations.insert(output->op.get()).second) {
+            unique_output_operations.push_back(output->op);
+        }
+    }
+    if (schedule->outputs.size() != unique_output_operations.size() ||
+        schedule->stages.size() != topo_ops.size()) {
+        throw std::invalid_argument(
+            "TE schedule does not cover the lowering graph");
+    }
+    for (size_t index = 0; index < unique_output_operations.size(); ++index) {
+        if (schedule->outputs[index].get() !=
+            unique_output_operations[index].get()) {
+            throw std::invalid_argument(
+                "TE schedule outputs do not match lowering outputs");
+        }
+    }
+    for (size_t index = 0; index < topo_ops.size(); ++index) {
+        const te::Stage& stage = schedule->stages[index];
+        if (!stage.defined() || stage->op.get() != topo_ops[index].get() ||
+            !schedule->op_map.count(topo_ops[index]) ||
+            schedule->op_map.at(topo_ops[index]).get() != stage.get()) {
+            throw std::invalid_argument(
+                "TE schedule stages do not match producer-first graph order");
+        }
+    }
+    const std::string schedule_contract =
+        CanonicalTEScheduleContract(schedule, target);
+
     Array<tir::Var> params;
     Map<tir::Var, tir::Buffer> buffer_map;
     std::unordered_map<const Object*, tir::Var> buffer_var_by_tensor;
@@ -520,7 +1036,8 @@ LoweredFunction LowerTensorGraphToTIR(
             tensor->shape, tensor->dtype,
             "TE-to-TIR input tensor '" + tensor->name + "'");
         tir::Var data_var(tensor->name, tensor->dtype);
-        tir::Buffer buffer(data_var, tensor->dtype, tensor->shape, {},
+        tir::Buffer buffer(data_var, tensor->dtype,
+                           CanonicalStaticBufferShape(tensor->shape), {},
                            tir::IntImm(0), tensor->name, 0, 0);
         params.push_back(data_var);
         buffer_map.Set(data_var, buffer);
@@ -541,7 +1058,8 @@ LoweredFunction LowerTensorGraphToTIR(
             tensor->shape, tensor->dtype,
             "TE-to-TIR constant tensor '" + tensor->name + "'");
         tir::Var data_var(tensor->name, tensor->dtype);
-        tir::Buffer buffer(data_var, tensor->dtype, tensor->shape, {},
+        tir::Buffer buffer(data_var, tensor->dtype,
+                           CanonicalStaticBufferShape(tensor->shape), {},
                            tir::IntImm(0), tensor->name, 0, 0);
         params.push_back(data_var);
         buffer_map.Set(data_var, buffer);
@@ -562,7 +1080,8 @@ LoweredFunction LowerTensorGraphToTIR(
         const std::string name =
             MakeOutputVarName(tensor, index, &used_output_names);
         tir::Var data_var(name, tensor->dtype);
-        tir::Buffer buffer(data_var, tensor->dtype, tensor->shape, {},
+        tir::Buffer buffer(data_var, tensor->dtype,
+                           CanonicalStaticBufferShape(tensor->shape), {},
                            tir::IntImm(0), name, 0, 0);
         params.push_back(data_var);
         buffer_map.Set(data_var, buffer);
@@ -582,7 +1101,6 @@ LoweredFunction LowerTensorGraphToTIR(
         }
     }
 
-    ExprLowerer expr_lowerer(buffer_var_by_tensor);
     Array<tir::Stmt> compute_sequence;
     for (const auto& operation : topo_ops) {
         if (operation.As<te::PlaceholderOpNode>()) continue;
@@ -597,8 +1115,9 @@ LoweredFunction LowerTensorGraphToTIR(
                     "Unsupported non-compute operation in TIR lowering");
             }
             try {
-                compute_sequence.push_back(
-                    LowerComputeStmt(tensor, buffer_var_by_tensor, expr_lowerer));
+                compute_sequence.push_back(LowerComputeStmt(
+                    tensor, schedule->op_map.at(operation),
+                    buffer_var_by_tensor));
             } catch (const std::exception& error) {
                 throw std::runtime_error(
                     "LowerComputeStmt failed for tensor '" + tensor->name +
@@ -633,6 +1152,7 @@ LoweredFunction LowerTensorGraphToTIR(
     attrs.Set("kxc.output_param_start",
               tir::IntImm(output_param_start, tir::DataType::Int(64)));
     attrs.Set("kxc.constant_keys", codegen::KernelConstantKeys(constant_keys));
+    attrs.Set(kTEScheduleContractAttr, String(schedule_contract));
     if (identity.unit_id >= 0) {
         const String operator_identity(
             std::string(identity.operator_name) + "@v" +
@@ -646,7 +1166,9 @@ LoweredFunction LowerTensorGraphToTIR(
         attrs.Set("kxc.operator_identity", operator_identity);
         attrs.Set("kxc.structural_hash", identity.structural_hash);
     }
-    attrs = tir::AttachPassContextAttrs(attrs, PassContext::Current());
+    const PassContext lowering_context = PassContext::MergeTarget(
+        PassContext::Current(), target);
+    attrs = tir::AttachPassContextAttrs(attrs, lowering_context);
     return LoweredFunction(tir::PrimFunc(params, body, buffer_map, attrs),
                            constant_bindings);
 }

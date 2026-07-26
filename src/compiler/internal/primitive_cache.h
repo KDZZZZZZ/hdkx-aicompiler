@@ -139,7 +139,7 @@ std::string BuildTargetCapabilityFingerprint(const Target& target);
 PrimitiveArtifactKey BuildPrimitiveArtifactKey(
     const UnitSemanticKey& semantic_key, const Target& target,
     const std::string& pipeline_fingerprint,
-    const char* schedule_version, const char* backend_version);
+    const char* schedule_contract, const char* backend_version);
 
 /*! \brief Finds a ready artifact without changing cache state or creating a flight. */
 PrimitiveArtifactPin LookupPrimitiveCache(const PrimitiveArtifactKey& key);

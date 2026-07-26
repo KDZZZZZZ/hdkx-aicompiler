@@ -36,7 +36,7 @@ struct CompilerExecutionContract final {
     NormalizedPipeline tir_pipeline;
     std::string canonical_bytes;
     std::string fingerprint;
-    std::string schedule_version;
+    std::string schedule_policy;
     std::string backend_version;
 };
 

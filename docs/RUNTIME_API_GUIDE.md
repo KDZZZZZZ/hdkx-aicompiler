@@ -221,38 +221,30 @@ protected:
 
 这种做法的作用类似 TVM 的“pass context/target”，但目前是用 `attrs` 临时承载。后续如果你引入显式的 `Target`/`PassContext`，可以把这条链路替换掉。
 
-### 6.2 TE Schedule：注册与实现
+### 6.2 TE Schedule：显式消费与目标策略
 
 **入口/对象模型**
 
-- TE 算子与 Tensor 表达：`include/te/te.h`。
-- Schedule 关键类型：`te::Schedule` / `te::Stage` / `te::IterVar`（见 `include/te/te.h:20`、`include/te/te.h:98`）。
+- TE 算子、Tensor 与 Schedule：`include/kxc/te/te.h`。
+- `te::create_schedule(outputs)` 按 producer-first 顺序收集完整 TE DAG。
+- 当前有真实 lowering consumer 的原语只有
+  `split/reorder/vectorize/unroll/parallel`；参数或依赖关系不安全时立即失败。
 
-**“注册”是什么意思**
+生产 lowering 不注册全局 schedule。`LowerPrimitiveUnit` 从显式 `Target`
+构造确定性的默认 `Schedule`，再把 **Schedule 与 Target 两者显式传给**
+`LowerTensorGraphToTIR`。lowering 将 split/leaf order/执行类型物化为 TIR
+loop 和必要的 tail predicate，并把实际 canonical schedule 写入
+`kxc.te.schedule_contract`；primitive artifact key 使用同一份 contract。
 
-在 TE 层，通常不做“全局注册某个 schedule”。惯用方式是：
+CPU 默认策略对可证明安全的静态轴做小粒度 split、最内层 vectorize、
+独立数据轴 parallel 或小循环 unroll。完整行为和数值测试见
+`test/te_schedule_test.cpp`。
 
-1. 在 build/lowering pipeline 里，根据 `target` 选择一个 schedule 函数。
-2. schedule 函数对 `Schedule s` 做原语调用（split/tile/bind/...）。
-
-当前仓库已经提供了若干 schedule 原语：
-
-- `Stage::split/fuse/reorder/tile`：`include/te/te.h:394` 起。
-- `Stage::vectorize/unroll/parallel/bind`：`include/te/te.h:503` 起。
-
-**设备通用 schedule（示例：CPU 友好的 tile + vectorize）**
-
-- 典型策略：外层 `tile` 改善 cache locality，内层 `vectorize` 触发 SIMD。
-- 示例见 `test/test_schedule_api.cpp:43`。
-
-**设备特定 schedule（示例：GPU thread 绑定）**
-
-- GPU 常见策略：把 innermost 轴 `bind(threadIdx.x)`，并配合 `blockIdx.x`/`vthread` 等。
-- 当前最小示例：`test/test_schedule_api.cpp:105`，其中：
-  - `thread_axis(IntImm(64), "threadIdx.x")` 创建 thread 轴。
-  - `stage.bind(inner, tx)` 将 `inner` 设为 `IterVarType::kThreadIndex` 并写入 `thread_tag`。
-
-注意：这一步只是“标注”与“意图表达”。要真正生成 CUDA kernel，还需要后续 lowering/codegen 支持把 `IterVarType::kThreadIndex` 翻译为 `tir::AttrStmt(thread_extent=...)` 或等价结构。
+TE 不提供 `bind`/`thread_axis`，也不产生 CUDA launch metadata。CUDA 默认
+TE schedule 保持 serial；后续 `tir::BindCudaThreads(PrimFunc, Target)` 是
+唯一的线程独立性证明、`ThreadBinding` 和 grid/block metadata 权威。不支持的
+CUDA 图在该 pass 明确失败，不回退 CPU。设计和 QA 记录见
+`docs/plans/skeleton/te-schedule.md`。
 
 ### 6.3 TIR Pass：注册与实现
 

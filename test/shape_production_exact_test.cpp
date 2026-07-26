@@ -255,7 +255,7 @@ bool TestPreparedConstantSnapshot() {
     for (const kxc::api::internal::PrimitiveUnit& unit :
          prepared.partitioned.units) {
         (void)kxc::api::internal::LowerPrimitiveUnit(
-            prepared.partitioned.value_graph.values, unit);
+            prepared.partitioned.value_graph.values, unit, prepared.target);
     }
     const kxc::api::internal::ValueInfo& constant =
         prepared.partitioned.value_graph.values[

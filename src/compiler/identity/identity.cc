@@ -241,19 +241,19 @@ PrimitiveArtifactKey::PrimitiveArtifactKey(
     UnitSemanticKey unit_semantic_key,
     std::string target_capability_fingerprint,
     std::string pipeline_fingerprint, int abi_version,
-    std::string schedule_version,
+    std::string schedule_contract,
     std::string backend_version)
     : PrimitiveArtifactKey(
           std::move(unit_semantic_key),
           std::move(target_capability_fingerprint),
           std::move(pipeline_fingerprint), abi_version,
-          std::move(schedule_version), std::move(backend_version), {}) {}
+          std::move(schedule_contract), std::move(backend_version), {}) {}
 
 PrimitiveArtifactKey::PrimitiveArtifactKey(
     UnitSemanticKey unit_semantic_key,
     std::string target_capability_fingerprint,
     std::string pipeline_fingerprint, int abi_version,
-    std::string schedule_version,
+    std::string schedule_contract,
     std::string backend_version,
     std::string index_digest)
     : unit_semantic_key_(std::move(unit_semantic_key)),
@@ -264,20 +264,20 @@ PrimitiveArtifactKey::PrimitiveArtifactKey(
     }
     RequireNonEmpty(target_capability_fingerprint_, "target fingerprint");
     RequireNonEmpty(pipeline_fingerprint, "pipeline fingerprint");
-    RequireNonEmpty(schedule_version, "schedule version");
+    RequireNonEmpty(schedule_contract, "schedule contract");
     RequireNonEmpty(backend_version, "backend version");
     if (abi_version <= 0) {
         throw std::invalid_argument(
             "artifact identity requires a positive ABI version");
     }
-    AppendField(&canonical_bytes_, "kind", "primitive-artifact-key-v2");
+    AppendField(&canonical_bytes_, "kind", "primitive-artifact-key-v3");
     AppendField(&canonical_bytes_, "unit_semantic",
                 unit_semantic_key_.canonical_bytes());
     AppendField(&canonical_bytes_, "target",
                 target_capability_fingerprint_);
     AppendField(&canonical_bytes_, "pipeline", pipeline_fingerprint);
     AppendField(&canonical_bytes_, "abi", std::to_string(abi_version));
-    AppendField(&canonical_bytes_, "schedule", schedule_version);
+    AppendField(&canonical_bytes_, "schedule", schedule_contract);
     AppendField(&canonical_bytes_, "backend", backend_version);
     digest_ = Digest(canonical_bytes_, std::move(index_digest));
 }

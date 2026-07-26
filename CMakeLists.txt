@@ -1006,6 +1006,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
   kxc_add_runtime_exe(runtime_session_test test/runtime_session_test.cpp)
   kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
+  kxc_add_runtime_exe(te_schedule_test test/te_schedule_test.cpp)
 
   set(KXC_CONTROL_FLOW_TESTS
     relay_anf_test
@@ -1295,7 +1296,7 @@ foreach(_kxc_cpu_core_test IN ITEMS
     compiler_contract_test compiler_identity_test
     operator_compilation_test primitive_cache_test
     compiler_extension_contract_test kernel_signature_test compiled_module_test
-    cuda_schedule_test)
+    cuda_schedule_test te_schedule_test)
   # cuda_schedule_test exercises CPU-only scheduling contracts with synthetic
   # Target snapshots; it neither requires nor launches CUDA hardware.
   kxc_add_ctest_if_target(${_kxc_cpu_core_test} "cpu;core")

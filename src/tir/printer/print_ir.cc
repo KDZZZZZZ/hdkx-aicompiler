@@ -38,6 +38,16 @@ const char* ThreadIndexName(ThreadIndexKind kind) {
     return "unknown_thread_index";
 }
 
+const char* ForTypeName(ForType type) {
+    switch (type) {
+        case ForType::Serial: return "serial";
+        case ForType::Parallel: return "parallel";
+        case ForType::Vectorized: return "vectorized";
+        case ForType::Unrolled: return "unrolled";
+    }
+    return "unknown";
+}
+
 class IRPrinterImpl : private TIRExprFunctor<std::string>, private TIRStmtFunctor<void> {
 public:
     IRPrinterImpl(std::ostream& os, int indent_spaces) : os_(os), indent_spaces_(indent_spaces) {}
@@ -181,7 +191,8 @@ private:
 
     void VisitFor(const ForNode* op, const Stmt& ref) override {
         (void)ref;
-        os_ << Indent(indent_) << "for (" << op->loop_var->name_hint << " = " << PrintExpr(op->min)
+        os_ << Indent(indent_) << "for[" << ForTypeName(op->for_type) << "] ("
+            << op->loop_var->name_hint << " = " << PrintExpr(op->min)
             << "; " << op->loop_var->name_hint << " < (" << PrintExpr(op->min) << " + "
             << PrintExpr(op->extent) << "); " << op->loop_var->name_hint << "++) {\n";
         PrintStmt(op->body, indent_ + indent_spaces_);

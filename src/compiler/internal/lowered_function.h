@@ -11,6 +11,11 @@
 
 namespace kxc::relay {
 
+namespace internal {
+inline constexpr const char* kTEScheduleContractAttr =
+    "kxc.te.schedule_contract";
+}  // namespace internal
+
 class ConstantBindingNode final : public Object {
 public:
     String key;

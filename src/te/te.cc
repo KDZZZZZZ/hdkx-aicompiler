@@ -6,7 +6,11 @@
 #include "kxc/support/object_registration.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
+#include <limits>
+#include <stdexcept>
+#include <unordered_set>
 
 namespace kxc {
 namespace te {
@@ -56,19 +60,144 @@ ProducerLoad::ProducerLoad(Tensor tensor, Array<tir::PrimExpr> indices) {
     SetData(node);
 }
 
-IterVar::IterVar(tir::PrimExpr min, tir::PrimExpr extent, IterVarType type,
-                 std::string thread_tag, std::string name) {
+namespace {
+
+IterVar MakeIterVar(tir::Var var, tir::PrimExpr min, tir::PrimExpr extent,
+                    IterVarType type, bool is_reduction) {
     auto* node = new IterVarNode();
-    node->var = tir::Var(std::move(name));
+    node->var = std::move(var);
     node->dom_min = std::move(min);
     node->dom_extent = std::move(extent);
     node->iter_type = type;
-    node->thread_tag = std::move(thread_tag);
-    SetData(node);
+    node->is_reduction = is_reduction;
+    return IterVar(node);
+}
+
+int64_t RequirePositiveSplitFactor(const tir::PrimExpr& factor) {
+    const auto* value = factor.As<tir::IntImmNode>();
+    if (!value || (value->dtype.code != 0 && value->dtype.code != 1) ||
+        value->dtype.lanes != 1 || value->value <= 0 ||
+        value->value > std::numeric_limits<int32_t>::max()) {
+        throw std::invalid_argument(
+            "Stage::split requires a positive static int32 factor");
+    }
+    return value->value;
+}
+
+bool IsBaseIterType(const IterVar& var) {
+    return var->iter_type == IterVarType::kDataPar ||
+           var->iter_type == IterVarType::kCommReduce;
+}
+
+void RequireCurrentLeaf(const StageNode* stage, const IterVar& var,
+                        const char* primitive) {
+    if (!var.defined() ||
+        std::find(stage->leaf_iter_vars.begin(), stage->leaf_iter_vars.end(),
+                  var) == stage->leaf_iter_vars.end()) {
+        throw std::invalid_argument(std::string("Stage::") + primitive +
+                                    " requires a current leaf axis");
+    }
+}
+
+void MarkLeaf(StageNode* stage, const IterVar& var, IterVarType type,
+              bool allow_reduction, const char* primitive) {
+    RequireCurrentLeaf(stage, var, primitive);
+    if (!IsBaseIterType(var)) {
+        throw std::invalid_argument(std::string("Stage::") + primitive +
+                                    " axis already has an execution annotation");
+    }
+    if (var->is_reduction && !allow_reduction) {
+        throw std::invalid_argument(std::string("Stage::") + primitive +
+                                    " requires a data-parallel axis");
+    }
+    const_cast<IterVarNode*>(var.operator->())->iter_type = type;
+}
+
+void FindProducerLoads(const tir::PrimExpr& expr,
+                       std::vector<Tensor>* dependencies) {
+    if (!expr.defined()) return;
+    if (const auto* load = expr.As<ProducerLoadNode>()) {
+        dependencies->push_back(load->tensor);
+        for (const auto& index : load->indices) {
+            FindProducerLoads(index, dependencies);
+        }
+        return;
+    }
+    if (const auto* reduce = expr.As<ReduceNode>()) {
+        for (const auto& source : reduce->source) {
+            FindProducerLoads(source, dependencies);
+        }
+        return;
+    }
+    if (const auto* binary = expr.As<tir::BinaryOpNode>()) {
+        FindProducerLoads(binary->a, dependencies);
+        FindProducerLoads(binary->b, dependencies);
+        return;
+    }
+    if (const auto* call = expr.As<tir::CallNode>()) {
+        for (const auto& argument : call->args) {
+            FindProducerLoads(argument, dependencies);
+        }
+        return;
+    }
+    if (const auto* select = expr.As<tir::SelectNode>()) {
+        FindProducerLoads(select->condition, dependencies);
+        FindProducerLoads(select->true_value, dependencies);
+        FindProducerLoads(select->false_value, dependencies);
+        return;
+    }
+    if (const auto* logical_not = expr.As<tir::NotNode>()) {
+        FindProducerLoads(logical_not->value, dependencies);
+        return;
+    }
+    if (const auto* load = expr.As<tir::LoadNode>()) {
+        FindProducerLoads(load->index, dependencies);
+        FindProducerLoads(load->predicate, dependencies);
+    }
+}
+
+void CollectOperation(const Operation& operation,
+                      std::unordered_set<const Object*>* visiting,
+                      std::unordered_set<const Object*>* visited,
+                      std::vector<Operation>* producer_first) {
+    if (!operation.defined()) {
+        throw std::invalid_argument("create_schedule received an undefined operation");
+    }
+    if (visited->count(operation.get()) != 0) return;
+    if (!visiting->insert(operation.get()).second) {
+        throw std::invalid_argument("create_schedule requires an acyclic TE graph");
+    }
+    if (const auto* compute = operation.As<ComputeOpNode>()) {
+        for (const auto& expression : compute->body) {
+            std::vector<Tensor> dependencies;
+            FindProducerLoads(expression, &dependencies);
+            for (const Tensor& dependency : dependencies) {
+                if (!dependency.defined() || !dependency->op.defined()) {
+                    throw std::invalid_argument(
+                        "create_schedule found an undefined producer dependency");
+                }
+                CollectOperation(dependency->op, visiting, visited,
+                                 producer_first);
+            }
+        }
+    }
+    visiting->erase(operation.get());
+    visited->insert(operation.get());
+    producer_first->push_back(operation);
+}
+
+}  // namespace
+
+IterVar::IterVar(tir::PrimExpr min, tir::PrimExpr extent, IterVarType type,
+                 std::string name) {
+    const bool is_reduction = type == IterVarType::kCommReduce;
+    *this = MakeIterVar(tir::Var(std::move(name)), std::move(min),
+                        std::move(extent), type, is_reduction);
 }
 
 IterVar reduce_axis(tir::PrimExpr min, tir::PrimExpr extent, std::string name) {
-    return IterVar(std::move(min), std::move(extent), IterVarType::kCommReduce, "", std::move(name));
+    return IterVar(std::move(min), std::move(extent),
+                   IterVarType::kCommReduce, std::move(name));
 }
 
 Reduce::Reduce(Array<IterVar> axis, Array<tir::PrimExpr> source, ReduceType type) {
@@ -166,123 +295,148 @@ Tensor compute(Array<tir::PrimExpr> shape, FCompute fcompute, std::string name, 
 }
 
 Stage::Stage(Operation op) {
+    if (!op.defined()) {
+        throw std::invalid_argument("Stage requires a defined operation");
+    }
     auto* node = new StageNode();
     node->op = std::move(op);
 
-    if (auto* compute_op = node->op.As<ComputeOpNode>()) {
-        for (const auto& var : compute_op->axis) {
-            IterVar iv(0, 0, IterVarType::kDataPar, "", var->name_hint);
-            node->leaf_iter_vars.push_back(iv);
-            node->all_iter_vars.push_back(iv);
+    if (const auto* compute_op = node->op.As<ComputeOpNode>()) {
+        for (size_t index = 0; index < compute_op->axis.size(); ++index) {
+            const tir::Var& var = compute_op->axis[index];
+            IterVar axis = MakeIterVar(
+                var, tir::IntImm(0, var->dtype), compute_op->shape[index],
+                IterVarType::kDataPar, false);
+            node->root_iter_vars.push_back(axis);
+            node->leaf_iter_vars.push_back(axis);
+            node->all_iter_vars.push_back(axis);
         }
-        for (const auto& iv : compute_op->reduce_axis) {
-            node->leaf_iter_vars.push_back(iv);
-            node->all_iter_vars.push_back(iv);
+        for (const IterVar& reduction : compute_op->reduce_axis) {
+            IterVar axis = MakeIterVar(
+                reduction->var, reduction->dom_min, reduction->dom_extent,
+                IterVarType::kCommReduce, true);
+            node->root_iter_vars.push_back(axis);
+            node->leaf_iter_vars.push_back(axis);
+            node->all_iter_vars.push_back(axis);
         }
     }
 
     SetData(node);
 }
 
-IterVar Stage::split(IterVar parent, tir::PrimExpr factor, IterVar* p_outer, IterVar* p_inner) {
-    IterVar outer(0, 0, IterVarType::kDataPar, "", parent->var->name_hint + ".outer");
-    IterVar inner(0, factor, IterVarType::kDataPar, "", parent->var->name_hint + ".inner");
-
-    auto* node = this->operator->();
-    auto it = std::find(node->leaf_iter_vars.begin(), node->leaf_iter_vars.end(), parent);
-    if (it != node->leaf_iter_vars.end()) {
-        size_t idx = std::distance(node->leaf_iter_vars.begin(), it);
-        node->leaf_iter_vars[idx] = outer;
-        node->leaf_iter_vars.insert(node->leaf_iter_vars.begin() + idx + 1, inner);
+IterVar Stage::split(IterVar parent, tir::PrimExpr factor,
+                     IterVar* p_outer, IterVar* p_inner) {
+    auto* node = operator->();
+    RequireCurrentLeaf(node, parent, "split");
+    if (!IsBaseIterType(parent)) {
+        throw std::invalid_argument(
+            "Stage::split cannot split an annotated leaf axis");
     }
+    const int64_t factor_value = RequirePositiveSplitFactor(factor);
+    const tir::DataType dtype = parent->var->dtype;
+    const tir::PrimExpr normalized_factor = tir::IntImm(factor_value, dtype);
+    const tir::PrimExpr outer_extent =
+        (parent->dom_extent + tir::IntImm(factor_value - 1, dtype)) /
+        normalized_factor;
+    const IterVarType base_type = parent->is_reduction
+                                      ? IterVarType::kCommReduce
+                                      : IterVarType::kDataPar;
+    IterVar outer = MakeIterVar(
+        tir::Var(parent->var->name_hint + ".outer", dtype),
+        tir::IntImm(0, dtype), outer_extent, base_type,
+        parent->is_reduction);
+    IterVar inner = MakeIterVar(
+        tir::Var(parent->var->name_hint + ".inner", dtype),
+        tir::IntImm(0, dtype), normalized_factor, base_type,
+        parent->is_reduction);
 
+    const auto found = std::find(node->leaf_iter_vars.begin(),
+                                 node->leaf_iter_vars.end(), parent);
+    const size_t index = static_cast<size_t>(
+        std::distance(node->leaf_iter_vars.begin(), found));
+    node->leaf_iter_vars[index] = outer;
+    node->leaf_iter_vars.insert(node->leaf_iter_vars.begin() + index + 1,
+                                inner);
     node->all_iter_vars.push_back(outer);
     node->all_iter_vars.push_back(inner);
+    node->split_relations.push_back(
+        SplitRelation{parent, outer, inner, normalized_factor});
 
-    if (p_outer) *p_outer = outer;
-    if (p_inner) *p_inner = inner;
-
+    if (p_outer != nullptr) *p_outer = outer;
+    if (p_inner != nullptr) *p_inner = inner;
     return outer;
 }
 
-IterVar Stage::fuse(IterVar outer, IterVar inner) {
-    IterVar fused(0, 0, IterVarType::kDataPar, "",
-                  outer->var->name_hint + "." + inner->var->name_hint + ".fused");
-
-    auto* node = this->operator->();
-    auto it_outer = std::find(node->leaf_iter_vars.begin(), node->leaf_iter_vars.end(), outer);
-    auto it_inner = std::find(node->leaf_iter_vars.begin(), node->leaf_iter_vars.end(), inner);
-
-    if (it_outer != node->leaf_iter_vars.end() && it_inner != node->leaf_iter_vars.end()) {
-        node->leaf_iter_vars.erase(it_inner);
-        it_outer = std::find(node->leaf_iter_vars.begin(), node->leaf_iter_vars.end(), outer);
-        if (it_outer != node->leaf_iter_vars.end()) {
-            *it_outer = fused;
-        }
-    }
-
-    node->all_iter_vars.push_back(fused);
-    return fused;
-}
-
 void Stage::reorder(const Array<IterVar>& order) {
-    auto* node = this->operator->();
-    node->leaf_iter_vars = order;
-}
-
-void Stage::tile(IterVar x_parent, IterVar y_parent, tir::PrimExpr x_factor,
-                 tir::PrimExpr y_factor, IterVar* x_outer, IterVar* y_outer,
-                 IterVar* x_inner, IterVar* y_inner) {
-    split(x_parent, std::move(x_factor), x_outer, x_inner);
-    split(y_parent, std::move(y_factor), y_outer, y_inner);
-
-    auto* node = this->operator->();
-    Array<IterVar> current_leaves = node->leaf_iter_vars;
-    reorder({*x_outer, *y_outer, *x_inner, *y_inner});
-
-    Array<IterVar> new_leaves = node->leaf_iter_vars;
-    for (auto& iv : current_leaves) {
-        if (iv == x_parent || iv == y_parent) continue;
-        bool found = false;
-        for (auto& new_iv : new_leaves) {
-            if (iv == new_iv) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) new_leaves.push_back(iv);
+    auto* node = operator->();
+    if (order.size() != node->leaf_iter_vars.size()) {
+        throw std::invalid_argument(
+            "Stage::reorder requires every current leaf exactly once");
     }
-    node->leaf_iter_vars = new_leaves;
+    std::unordered_set<const Object*> seen;
+    bool saw_reduction = false;
+    for (const IterVar& axis : order) {
+        RequireCurrentLeaf(node, axis, "reorder");
+        if (!seen.insert(axis.get()).second) {
+            throw std::invalid_argument(
+                "Stage::reorder does not accept duplicate axes");
+        }
+        if (axis->is_reduction) {
+            saw_reduction = true;
+        } else if (saw_reduction) {
+            throw std::invalid_argument(
+                "Stage::reorder requires data axes before reduction axes");
+        }
+    }
+    Array<IterVar> reordered;
+    for (const IterVar& axis : order) reordered.push_back(axis);
+    node->leaf_iter_vars = std::move(reordered);
 }
 
 void Stage::vectorize(IterVar var) {
-    const_cast<IterVarNode*>(var.operator->())->iter_type = IterVarType::kVectorized;
+    auto* node = operator->();
+    RequireCurrentLeaf(node, var, "vectorize");
+    if (node->leaf_iter_vars.empty() ||
+        node->leaf_iter_vars[node->leaf_iter_vars.size() - 1] != var) {
+        throw std::invalid_argument(
+            "Stage::vectorize requires the innermost leaf axis");
+    }
+    MarkLeaf(node, var, IterVarType::kVectorized, false, "vectorize");
 }
 
 void Stage::unroll(IterVar var) {
-    const_cast<IterVarNode*>(var.operator->())->iter_type = IterVarType::kUnrolled;
+    MarkLeaf(operator->(), var, IterVarType::kUnrolled, true, "unroll");
 }
 
 void Stage::parallel(IterVar var) {
-    const_cast<IterVarNode*>(var.operator->())->iter_type = IterVarType::kParallel;
-}
-
-void Stage::bind(IterVar var, IterVar thread_axis) {
-    const_cast<IterVarNode*>(var.operator->())->iter_type = IterVarType::kThreadIndex;
-    const_cast<IterVarNode*>(var.operator->())->thread_tag = thread_axis->thread_tag;
-}
-
-IterVar thread_axis(tir::PrimExpr dom, std::string tag) {
-    return IterVar(0, std::move(dom), IterVarType::kThreadIndex, tag, tag);
+    MarkLeaf(operator->(), var, IterVarType::kParallel, false, "parallel");
 }
 
 Schedule create_schedule(const Array<Operation>& ops) {
+    if (ops.empty()) {
+        throw std::invalid_argument(
+            "create_schedule requires at least one output operation");
+    }
+    std::unordered_set<const Object*> outputs;
+    std::unordered_set<const Object*> visiting;
+    std::unordered_set<const Object*> visited;
+    std::vector<Operation> producer_first;
+    for (const Operation& operation : ops) {
+        if (!operation.defined() || !outputs.insert(operation.get()).second) {
+            throw std::invalid_argument(
+                "create_schedule outputs must be defined and unique");
+        }
+        CollectOperation(operation, &visiting, &visited, &producer_first);
+    }
+
     auto* node = new ScheduleNode();
-    node->outputs = ops;
-    for (auto& op : ops) {
-        Stage stage(op);
+    for (const Operation& operation : ops) {
+        node->outputs.push_back(operation);
+    }
+    for (const Operation& operation : producer_first) {
+        Stage stage(operation);
         node->stages.push_back(stage);
-        node->op_map.Set(op, stage);
+        node->op_map.Set(operation, stage);
     }
     return Schedule(node);
 }

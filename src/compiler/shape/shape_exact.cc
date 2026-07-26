@@ -15,6 +15,7 @@
 #include "../internal/primitive_cache.h"
 #include "../internal/primitive_compiler.h"
 #include "../internal/relay_snapshot.h"
+#include "../internal/te_to_tir.h"
 #include "runtime/internal/memory_plan.h"
 #include "support/hash.h"
 #include "kxc/pass/context.h"
@@ -395,10 +396,16 @@ void VerifyVariant(
             (config->target->kind == "cuda" && metadata->backend != codegen::CodeGenBackend::kCUDA)) {
             Reject("compiled launch metadata does not match target/backend");
         }
+        const relay::LoweredFunction expected_lowered =
+            internal::LowerPrimitiveUnit(
+                partitioned.value_graph.values, unit, config->target);
+        const std::string expected_schedule =
+            relay::internal::GetTEScheduleContract(
+                expected_lowered->prim_func);
         const PrimitiveArtifactKey expected =
             internal::BuildPrimitiveArtifactKey(
-            unit.semantic_key, config->target, contract.canonical_bytes,
-            contract.schedule_version.c_str(), contract.backend_version.c_str());
+                unit.semantic_key, config->target, contract.canonical_bytes,
+                expected_schedule.c_str(), contract.backend_version.c_str());
         const ArtifactPin& public_pin = compiled.artifact_pins()[i];
         if (!public_pin.defined()) {
             Reject("production artifact pin is undefined");
