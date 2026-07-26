@@ -198,11 +198,6 @@ void ValueSpec::Validate() const {
         throw std::invalid_argument(
             "ValueSpec alias source requires a produced in-place alias");
     }
-    if (node->alias_source_value_id != -1 &&
-        (node->is_input || node->is_constant || node->is_state)) {
-        throw std::invalid_argument(
-            "ValueSpec in-place alias must be a produced value");
-    }
     if (!node->shape_defined_) {
         throw std::invalid_argument("ValueSpec shape metadata must be defined");
     }
