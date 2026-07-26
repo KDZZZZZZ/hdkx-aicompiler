@@ -1,0 +1,296 @@
+/* 列视图样式（§3.3、§6） */
+.column {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-column);
+  border-right: 1px solid var(--border);
+  border-left: 1px solid transparent;
+}
+
+.column.focused {
+  border-left: 3px solid var(--focus-ring);
+}
+
+.column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-column);
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.column-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.column-title.editable {
+  cursor: text;
+}
+
+.column-title-input {
+  flex: 1;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  background: var(--bg-tile);
+  color: var(--text-primary);
+  border: 1px solid var(--focus-ring);
+  padding: 2px 4px;
+  border-radius: var(--radius);
+}
+
+.column-controls {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.column-btn {
+  padding: 2px 4px;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.column-btn:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.column-compare-badge {
+  font-size: var(--fs-xs);
+  padding: 2px 4px;
+  border-radius: var(--radius);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.column-compare-badge.baseline {
+  background: rgba(123, 135, 148, 0.2);
+  color: var(--cmp-baseline);
+}
+
+.column-compare-badge.candidate {
+  background: rgba(91, 157, 217, 0.2);
+  color: var(--cmp-candidate);
+}
+
+.column-arrange-selector {
+  padding: 2px 4px;
+  font-size: var(--fs-xs);
+  background: var(--bg-tile);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.column-arrange-selector:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+/* 列内容：Tile 平铺或 Tab 形式 */
+.column-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.column-body.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-column);
+  padding: var(--gap-column);
+  overflow-y: auto;
+}
+
+.column-body.tabs {
+  display: flex;
+  flex-direction: column;
+}
+
+.column-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-column);
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+
+.column-tab {
+  padding: 4px 8px;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  border-radius: 0;
+}
+
+.column-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-raised);
+}
+
+.column-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--focus-ring);
+}
+
+.column-tab-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Tile 外框（§6） */
+.tile-frame {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-tile);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.tile-frame.stack-item {
+  flex-shrink: 0;
+}
+
+.tile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  height: var(--h-tile-header);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-column);
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.tile-header-start {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.tile-title {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tile-type-badge {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.tile-readiness-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--fs-xs);
+  color: var(--sem-warn);
+  padding: 1px 4px;
+  background: rgba(211, 160, 75, 0.15);
+  border-radius: 2px;
+}
+
+.tile-readiness-icon {
+  width: 12px;
+  height: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+}
+
+.tile-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.tile-btn {
+  padding: 2px 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tile-btn:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.tile-btn.hidden {
+  display: none;
+}
+
+/* 紧凑模式下的按钮折叠 */
+.tile-frame.compact .tile-header-controls .tile-btn:not(.tile-btn-more):not(.tile-btn-close) {
+  display: none;
+}
+
+.tile-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tile-body-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+/* Tile 高度调整分隔条 */
+.tile-splitter {
+  height: 4px;
+  background: transparent;
+  cursor: row-resize;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.tile-splitter:hover {
+  background: var(--focus-ring);
+}
+
+.tile-splitter.dragging {
+  background: var(--focus-ring);
+}

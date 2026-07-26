@@ -1,0 +1,9 @@
+// remove_no_op after (305257 bytes)
+primfn(x_handle: handle, out_handle: handle) -> ()
+  attr = {"global_symbol": "main", "tir.noalias": True}
+  buffers = {x: Buffer(x_data, float32, [1, 3, 224, 224], [])}
+  for (i.outer: int32, 0, 9408) {
+    for (i.inner: int32, 0, 16) "vectorized" {
+      out[((i.outer*16) + i.inner)] = (x[((i.outer*16) + i.inner)] * 2f32)
+    }
+  }
