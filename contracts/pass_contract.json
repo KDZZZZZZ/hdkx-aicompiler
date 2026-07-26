@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "rules": {
     "single_registration": true,
     "deterministic_order": true,
@@ -23,7 +23,7 @@
       "deterministic",
       "idempotent",
       "thread_safe",
-      "target_dependent",
+      "target_requirements",
       "implementation_key"
     ]
   },
@@ -37,7 +37,7 @@
     "may_change_ir": true,
     "deterministic": true,
     "thread_safe": false,
-    "target_dependent": false
+    "target_requirements": []
   },
   "pipelines": {
     "relay.optimize_default": [
@@ -140,8 +140,7 @@
         "bounded_pre_test_loop"
       ],
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "relay.fold_constant": {
       "name": "fold_constant",
@@ -156,8 +155,7 @@
         "bounded_pre_test_loop"
       ],
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "relay.simplify_expr": {
       "name": "simplify_expr",
@@ -172,8 +170,7 @@
         "bounded_pre_test_loop"
       ],
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "relay.canonicalize_cast": {
       "name": "canonicalize_cast",
@@ -188,8 +185,7 @@
         "bounded_pre_test_loop"
       ],
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "relay.remove_standalone_reshapes": {
       "name": "remove_standalone_reshapes",
@@ -204,8 +200,7 @@
         "bounded_pre_test_loop"
       ],
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "relay.eliminate_common_subexpr": {
       "name": "eliminate_common_subexpr",
@@ -217,8 +212,7 @@
       "implementation_key": "kxc.relay.transform.eliminate_common_subexpr",
       "supported_control_capabilities": [],
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "relay.eliminate_dead_let": {
       "name": "eliminate_dead_let",
@@ -233,8 +227,7 @@
         "bounded_pre_test_loop"
       ],
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "relay.annotate_memory_scope": {
       "name": "annotate_memory_scope",
@@ -249,8 +242,7 @@
         "bounded_pre_test_loop"
       ],
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "relay.capture_post_dfs_index_in_spans": {
       "name": "capture_post_dfs_index_in_spans",
@@ -265,8 +257,7 @@
         "bounded_pre_test_loop"
       ],
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "relay.infer_type": {
       "name": "infer_type",
@@ -282,7 +273,6 @@
       ],
       "deterministic": true,
       "idempotent": true,
-      "target_dependent": false,
       "produced_invariants": [
         "checked_type"
       ]
@@ -301,7 +291,6 @@
       ],
       "deterministic": true,
       "idempotent": true,
-      "target_dependent": false,
       "required_invariants": [
         "checked_type"
       ],
@@ -318,8 +307,7 @@
       "opt_level": 1,
       "implementation_key": "kxc.tir.transform.fold_constant",
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "tir.simplify_expr": {
       "name": "simplify_expr",
@@ -330,8 +318,7 @@
       "opt_level": 1,
       "implementation_key": "kxc.tir.transform.simplify_expr",
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "tir.force_narrow_index_to_i32": {
       "name": "force_narrow_index_to_i32",
@@ -342,8 +329,7 @@
       "opt_level": 1,
       "implementation_key": "kxc.tir.transform.force_narrow_index_to_i32",
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "tir.convert_for_loops_serial": {
       "name": "convert_for_loops_serial",
@@ -354,8 +340,7 @@
       "opt_level": 1,
       "implementation_key": "kxc.tir.transform.convert_for_loops_serial",
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "tir.loop_partition": {
       "name": "loop_partition",
@@ -366,8 +351,7 @@
       "opt_level": 1,
       "implementation_key": "kxc.tir.transform.loop_partition",
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "tir.unroll_loop": {
       "name": "unroll_loop",
@@ -378,8 +362,7 @@
       "opt_level": 1,
       "implementation_key": "kxc.tir.transform.unroll_loop",
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "tir.vectorize_loop": {
       "name": "vectorize_loop",
@@ -390,8 +373,7 @@
       "opt_level": 1,
       "implementation_key": "kxc.tir.transform.vectorize_loop",
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "tir.remove_no_op": {
       "name": "remove_no_op",
@@ -402,8 +384,7 @@
       "opt_level": 1,
       "implementation_key": "kxc.tir.transform.remove_no_op",
       "deterministic": true,
-      "idempotent": true,
-      "target_dependent": false
+      "idempotent": true
     },
     "tir.bind_cuda_threads": {
       "name": "bind_cuda_threads",
@@ -415,7 +396,15 @@
       "implementation_key": "kxc.tir.transform.bind_cuda_threads",
       "deterministic": true,
       "idempotent": false,
-      "target_dependent": true
+      "target_requirements": [
+        "kind=cuda",
+        "attr.exists>0",
+        "attr.max_threads_per_block>0",
+        "attr.max_shared_memory_per_block>=0"
+      ],
+      "produced_invariants": [
+        "prim_func_defined"
+      ]
     }
   },
   "documentation": "docs/PASS_CONTRACT.md"

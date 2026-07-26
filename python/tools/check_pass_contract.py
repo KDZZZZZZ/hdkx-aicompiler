@@ -20,6 +20,17 @@ BINDING_BLOCK_RE = re.compile(
 )
 IMPLEMENTATION_KEY_RE = re.compile(r'"(kxc\.(?:relay|tir)\.transform\.[^"]+)"')
 FFI_RE = re.compile(r'KXC_REGISTER_GLOBAL\s*\(\s*"([^"]+)"\s*\)')
+TARGET_ATTRIBUTE_REQUIREMENTS = {
+    "attr.exists>0",
+    "attr.max_threads_per_block>0",
+    "attr.max_shared_memory_per_block>=0",
+}
+
+
+def is_target_requirement(value: str) -> bool:
+    return (
+        value.startswith("kind=") and len(value) > len("kind=")
+    ) or value in TARGET_ATTRIBUTE_REQUIREMENTS
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,6 +106,22 @@ def analyze(root: Path, contract: dict[str, Any]) -> dict[str, Any]:
         seen_identity.add(identity)
         if key != f"{dialect}.{name}":
             row_issues.append("JSON object key differs from dialect/name")
+        target_requirements = effective.get("target_requirements")
+        if not isinstance(target_requirements, list) or not all(
+            isinstance(value, str) and value for value in target_requirements
+        ):
+            row_issues.append("target_requirements must be a string list")
+        elif len(target_requirements) != len(set(target_requirements)):
+            row_issues.append("target_requirements contains duplicates")
+        else:
+            unsupported = [
+                value for value in target_requirements
+                if not is_target_requirement(value)
+            ]
+            if unsupported:
+                row_issues.append(
+                    f"unsupported target_requirements: {unsupported}"
+                )
         implementation_key = effective.get("implementation_key")
         if not isinstance(implementation_key, str) or not implementation_key:
             row_issues.append("implementation_key is empty")

@@ -37,7 +37,12 @@ namespace relay {
 
 namespace {
 
-using RelayPassFunc = std::function<Function(const Function&)>;
+using RelayPassFunc = std::function<Function(const Function&, const PassContext&)>;
+using LegacyRelayPassFunc = Function (*)(const Function&);
+
+RelayPassFunc WithContext(LegacyRelayPassFunc pass) {
+    return [pass](const Function& function, const PassContext&) { return pass(function); };
+}
 
 struct RelayPassBinding {
     const char* implementation_key;
@@ -58,25 +63,26 @@ std::string SanitizeArtifactName(const std::string& pass_name) {
     return out;
 }
 
-Function RunSinglePass(const Function& func, const std::string& pass_name);
+Function RunSinglePass(const Function& func, const std::string& pass_name,
+                       const PassContext& pass_ctx);
 
 const std::vector<RelayPassBinding>& GetRelayPassBindings() {
     static const std::vector<RelayPassBinding> bindings = {
-        {"kxc.relay.transform.fold_tuple_get_item", FoldTupleGetItemPass},
-        {"kxc.relay.transform.fold_constant", FoldConstantPass},
-        {"kxc.relay.transform.simplify_expr", SimplifyExprPass},
-        {"kxc.relay.transform.canonicalize_cast", CanonicalizeCastPass},
+        {"kxc.relay.transform.fold_tuple_get_item", WithContext(FoldTupleGetItemPass)},
+        {"kxc.relay.transform.fold_constant", WithContext(FoldConstantPass)},
+        {"kxc.relay.transform.simplify_expr", WithContext(SimplifyExprPass)},
+        {"kxc.relay.transform.canonicalize_cast", WithContext(CanonicalizeCastPass)},
         {"kxc.relay.transform.remove_standalone_reshapes",
-         RemoveStandaloneReshapesPass},
+         WithContext(RemoveStandaloneReshapesPass)},
         {"kxc.relay.transform.eliminate_common_subexpr",
-         EliminateCommonSubexprPass},
-        {"kxc.relay.transform.eliminate_dead_let", EliminateDeadLetPass},
+         WithContext(EliminateCommonSubexprPass)},
+        {"kxc.relay.transform.eliminate_dead_let", WithContext(EliminateDeadLetPass)},
         {"kxc.relay.transform.annotate_memory_scope",
-         AnnotateMemoryScopePass},
+         WithContext(AnnotateMemoryScopePass)},
         {"kxc.relay.transform.capture_post_dfs_index_in_spans",
-         CapturePostDfsIndexInSpansPass},
-        {"kxc.relay.transform.infer_type", InferTypePass},
-        {"kxc.relay.transform.normalize_to_anf", NormalizeToANF},
+         WithContext(CapturePostDfsIndexInSpansPass)},
+        {"kxc.relay.transform.infer_type", WithContext(InferTypePass)},
+        {"kxc.relay.transform.normalize_to_anf", WithContext(NormalizeToANF)},
     };
     return bindings;
 }
@@ -108,7 +114,8 @@ Array<String> GetDefaultPassOrder() {
     return pass_contract_generated::Pipeline("relay.optimize_default");
 }
 
-Function RunInstrumentedPass(const Function& func, const std::string& pass_name) {
+Function RunInstrumentedPass(const Function& func, const std::string& pass_name,
+                             const PassContext& pass_ctx) {
     auto profile_context = profiling::CurrentContext();
     profiling::EventSpec spec;
     spec.component = "relay_pass";
@@ -122,7 +129,7 @@ Function RunInstrumentedPass(const Function& func, const std::string& pass_name)
     span.AddMetric("ir_before_bytes", static_cast<double>(before_text.size()));
 
     try {
-        Function updated = RunSinglePass(func, pass_name);
+        Function updated = RunSinglePass(func, pass_name, pass_ctx);
         const std::string after_text = relay::printer::ToText(updated);
         const std::string after_hash = support::HashText(after_text);
         const bool changed = before_hash != after_hash;
@@ -156,10 +163,15 @@ Function RunInstrumentedPass(const Function& func, const std::string& pass_name)
     }
 }
 
-Function RunSinglePass(const Function& func, const std::string& pass_name) {
+Function RunSinglePass(const Function& func, const std::string& pass_name,
+                       const PassContext& pass_ctx) {
     EnsureRelayPassSpecsRegistered();
     const PassSpec& spec = PassRegistry::Global().Get(IRDialect::kRelay, String(pass_name));
     ValidatePassSpecForPipeline(spec, IRDialect::kRelay, PassScope::kGraph, "relay_optimize");
+    if (!PassSpecSupportsTarget(spec, pass_ctx.default_target())) {
+        throw std::invalid_argument("Relay pass target requirements are not satisfied: " +
+                                    PassSpecKey(spec.dialect, spec.name));
+    }
 
     const std::string implementation_key = static_cast<std::string>(spec.implementation_key);
     const auto& pass_table = GetRelayImplementationTable();
@@ -168,12 +180,17 @@ Function RunSinglePass(const Function& func, const std::string& pass_name) {
         throw std::runtime_error("Relay pass " + pass_name +
                                  " has no implementation binding: " + implementation_key);
     }
-    return it->second(func);
+    return it->second(func, pass_ctx);
 }
 
 }  // namespace
 
 Function RunRelayPassPipeline(const Function& func, const Array<String>& pass_names) {
+    return RunRelayPassPipeline(func, pass_names, PassContext::Current());
+}
+
+Function RunRelayPassPipeline(const Function& func, const Array<String>& pass_names,
+                              const PassContext& pass_ctx) {
     EnsureRelayPassSpecsRegistered();
     if (!func.defined()) {
         throw std::runtime_error("RunRelayPassPipeline expects a defined Function");
@@ -184,16 +201,18 @@ Function RunRelayPassPipeline(const Function& func, const Array<String>& pass_na
     pipeline_spec.event_type = "run_pipeline";
     profiling::ScopedSpan pipeline_span(profiling::CurrentContext(), std::move(pipeline_spec));
 
+    PassContext::Scope scope(pass_ctx);
     Function current = func;
     for (const auto& pass_name_obj : pass_names) {
         const std::string pass_name = pass_name_obj;
         if (pass_name == "optimize_default") {
             for (const auto& default_name : GetDefaultPassOrder()) {
-                current = RunInstrumentedPass(current, static_cast<std::string>(default_name));
+                current = RunInstrumentedPass(current, static_cast<std::string>(default_name),
+                                               pass_ctx);
             }
             continue;
         }
-        current = RunInstrumentedPass(current, pass_name);
+        current = RunInstrumentedPass(current, pass_name, pass_ctx);
     }
     return current;
 }

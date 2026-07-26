@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "kxc/pass/context.h"
 #include "kxc/pass/pass.h"
 #include "kxc/support/container.h"
 #include "kxc/relay/relay.h"
@@ -12,6 +13,8 @@ namespace kxc {
 namespace relay {
 
 Function RunRelayPassPipeline(const Function& func, const Array<String>& pass_names);
+Function RunRelayPassPipeline(const Function& func, const Array<String>& pass_names,
+                              const PassContext& pass_ctx);
 Array<String> RelayDefaultPassOrder();
 Array<PassSpec> RelayRegisteredPassSpecs();
 

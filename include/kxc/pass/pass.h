@@ -10,6 +10,8 @@
 
 namespace kxc {
 
+class Target;
+
 enum class IRDialect {
     kUnknown,
     kRelay,
@@ -38,11 +40,12 @@ struct PassSpec {
     Array<String> invalidated_analyses;
     /*! \brief Relay control capabilities this graph pass is audited to preserve. */
     Array<String> supported_control_capabilities;
+    /*! \brief Ordered target capability predicates required by this pass. */
+    Array<String> target_requirements;
     bool may_change_ir{true};
     bool deterministic{true};
     bool idempotent{false};
     bool thread_safe{false};
-    bool target_dependent{false};
     String implementation_key;
 };
 
@@ -56,6 +59,9 @@ void ValidatePassSpec(const PassSpec& spec);
 void ValidatePassSpecForPipeline(const PassSpec& spec, IRDialect dialect,
                                  PassScope scope, const std::string& phase);
 void ValidatePassSpecs(const Array<PassSpec>& specs);
+
+/*! \brief True when target satisfies every validated PassSpec predicate. */
+bool PassSpecSupportsTarget(const PassSpec& spec, const Target& target);
 
 class PassRegistry {
 public:

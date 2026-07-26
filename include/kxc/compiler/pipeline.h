@@ -60,6 +60,7 @@ struct NormalizedPipeline final {
     Array<String> required_control_capabilities;
     std::vector<PipelineExecutionStep> execution_steps;
     std::vector<PipelineInvariantTransition> invariant_transitions;
+    String target_snapshot;
     Array<String> target_requirements;
     String canonical_bytes;
     String fingerprint;

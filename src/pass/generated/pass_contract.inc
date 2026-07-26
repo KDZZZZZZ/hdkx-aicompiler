@@ -10,7 +10,7 @@
 
 namespace kxc::pass_contract_generated {
 
-inline constexpr int kContractVersion = 3;
+inline constexpr int kContractVersion = 4;
 
 inline const std::vector<PassSpec>& Specs() {
     static const std::vector<PassSpec> specs = [] {
@@ -29,11 +29,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.fold_tuple_get_item");
             result.push_back(std::move(spec));
         }
@@ -51,11 +51,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.fold_constant");
             result.push_back(std::move(spec));
         }
@@ -73,11 +73,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.simplify_expr");
             result.push_back(std::move(spec));
         }
@@ -95,11 +95,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.canonicalize_cast");
             result.push_back(std::move(spec));
         }
@@ -117,11 +117,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.remove_standalone_reshapes");
             result.push_back(std::move(spec));
         }
@@ -139,11 +139,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.eliminate_common_subexpr");
             result.push_back(std::move(spec));
         }
@@ -161,11 +161,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.eliminate_dead_let");
             result.push_back(std::move(spec));
         }
@@ -183,11 +183,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.annotate_memory_scope");
             result.push_back(std::move(spec));
         }
@@ -205,11 +205,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.capture_post_dfs_index_in_spans");
             result.push_back(std::move(spec));
         }
@@ -227,11 +227,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.infer_type");
             result.push_back(std::move(spec));
         }
@@ -249,11 +249,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {String("conditional_branch"), String("bounded_pre_test_loop")};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.relay.transform.normalize_to_anf");
             result.push_back(std::move(spec));
         }
@@ -271,11 +271,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.tir.transform.fold_constant");
             result.push_back(std::move(spec));
         }
@@ -293,11 +293,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.tir.transform.simplify_expr");
             result.push_back(std::move(spec));
         }
@@ -315,11 +315,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.tir.transform.force_narrow_index_to_i32");
             result.push_back(std::move(spec));
         }
@@ -337,11 +337,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.tir.transform.convert_for_loops_serial");
             result.push_back(std::move(spec));
         }
@@ -359,11 +359,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.tir.transform.loop_partition");
             result.push_back(std::move(spec));
         }
@@ -381,11 +381,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.tir.transform.unroll_loop");
             result.push_back(std::move(spec));
         }
@@ -403,11 +403,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.tir.transform.vectorize_loop");
             result.push_back(std::move(spec));
         }
@@ -425,11 +425,11 @@ inline const std::vector<PassSpec>& Specs() {
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = true;
             spec.thread_safe = false;
-            spec.target_dependent = false;
             spec.implementation_key = String("kxc.tir.transform.remove_no_op");
             result.push_back(std::move(spec));
         }
@@ -442,16 +442,16 @@ inline const std::vector<PassSpec>& Specs() {
             spec.phase = String("tir_schedule");
             spec.opt_level = 3;
             spec.required_invariants = {};
-            spec.produced_invariants = {};
+            spec.produced_invariants = {String("prim_func_defined")};
             spec.declarative_only_invariants = {};
             spec.preserved_analyses = {};
             spec.invalidated_analyses = {};
             spec.supported_control_capabilities = {};
+            spec.target_requirements = {String("kind=cuda"), String("attr.exists>0"), String("attr.max_threads_per_block>0"), String("attr.max_shared_memory_per_block>=0")};
             spec.may_change_ir = true;
             spec.deterministic = true;
             spec.idempotent = false;
             spec.thread_safe = false;
-            spec.target_dependent = true;
             spec.implementation_key = String("kxc.tir.transform.bind_cuda_threads");
             result.push_back(std::move(spec));
         }

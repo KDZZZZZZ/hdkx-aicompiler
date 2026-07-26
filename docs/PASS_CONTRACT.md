@@ -17,7 +17,10 @@ scheduled. It does not define or store rewrite algorithms.
 - `required_invariants`, `produced_invariants`: production invariant ledger.
 - `declarative_only_invariants`: declared metadata with no executable proof;
   these names cannot satisfy a production precondition.
-- `deterministic`, `idempotent`, `thread_safe`, `target_dependent`: behavioral
+- `target_requirements`: ordered target predicates. The current grammar is
+  `kind=<kind>`, `attr.exists>0`, `attr.max_threads_per_block>0`, and
+  `attr.max_shared_memory_per_block>=0`.
+- `may_change_ir`, `deterministic`, `idempotent`, `thread_safe`: behavioral
   claims that tests and contract checks can validate.
 
 The implementation key must point to an existing transform entry such as
@@ -37,11 +40,17 @@ The implementation key must point to an existing transform entry such as
 - Every production precondition and every invariant recorded as proven must
   have an executable dialect-specific validator. Unsupported produced metadata
   must be marked declarative-only and is never added to the proven set.
+- The same target-predicate matcher gates direct bindings, resolver output,
+  and executor replay. Unknown predicates fail contract validation.
+- For an IR-changing pass, only explicitly preserved analyses survive. For a
+  non-changing pass, explicitly invalidated analyses are removed. One analysis
+  cannot be both preserved and invalidated.
 - The executor validates the initial proven set and the complete proven set
-  after every `NormalizedPipeline` step. Currently the executable registry
-  proves Relay `checked_type`; no TIR invariant name is accepted as proven.
+  after every `NormalizedPipeline` step. The executable registry proves Relay
+  `checked_type`/`anf` and TIR `prim_func_defined`.
 - `PassSpec` never owns function objects. Pipeline files keep local function
-  bindings and map them through `implementation_key`.
+  bindings, map them through `implementation_key`, and receive the invocation's
+  explicit `PassContext`.
 
 ## Default Pipelines
 
@@ -71,10 +80,11 @@ TIR `optimize_default`:
 7. `vectorize_loop`
 8. `remove_no_op`
 
-`bind_cuda_threads` is registered as a target-dependent `tir_schedule` pass.
-The normalized TIR compiler pipeline selects and executes it explicitly; its
-step and `cuda_thread_binding` target requirement participate in canonical
-pipeline identity.
+`bind_cuda_threads` is registered as a `tir_schedule` pass requiring a live
+CUDA target with valid thread/shared-memory capabilities. The normalized TIR
+compiler pipeline selects and executes it explicitly. Its exact step,
+requirements, and canonical target capability snapshot participate in pipeline
+identity; changing a capability used by execution changes the fingerprint.
 
 ## Machine Contract
 
@@ -84,7 +94,8 @@ metadata and default order. `python/tools/check_pass_contract.py` cross-checks:
 - contract pass entries against C++ pipeline bindings;
 - implementation keys against FFI registrations;
 - default pipeline order against `GetDefaultPassOrder()`;
-- default membership flags against the JSON pipeline lists.
+- default membership flags against the JSON pipeline lists;
+- target predicate syntax and uniqueness.
 
 Common conservative declarations live in `pass_defaults`; each pass entry is
 merged over those defaults before required-field validation. A missing field in

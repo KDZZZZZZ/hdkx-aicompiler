@@ -2,18 +2,23 @@
  * \brief Verifies normalized production execution plans and their executor.
  */
 
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "../src/compiler/internal/execution_contract.h"
 #include "kxc/compiler/pipeline.h"
+#include "kxc/pass/context.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
+#include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
+#include "kxc/tir/transforms/pipeline.h"
 
 namespace {
 
@@ -41,16 +46,41 @@ bool Contains(const kxc::Array<kxc::String>& values, const char* expected) {
     return false;
 }
 
-kxc::Target FakeCudaTarget() {
+bool EqualStrings(const kxc::Array<kxc::String>& values,
+                  const std::vector<std::string>& expected) {
+    if (values.size() != expected.size()) return false;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (std::string(values[i]) != expected[i]) return false;
+    }
+    return true;
+}
+
+std::string TIRText(const kxc::tir::PrimFunc& function) {
+    std::ostringstream stream;
+    kxc::tir::printer::DumpPrimFunc(function, stream);
+    return stream.str();
+}
+
+kxc::Array<kxc::String> StepNames(
+    const kxc::api::NormalizedPipeline& pipeline) {
+    kxc::Array<kxc::String> names;
+    for (const auto& step : pipeline.execution_steps) {
+        names.push_back(step.pass_name);
+    }
+    return names;
+}
+
+kxc::Target FakeCudaTarget(int64_t max_threads = 128, int exists = 1,
+                           int64_t max_shared_memory = 48 * 1024) {
     auto* node = new kxc::TargetNode();
     node->kind = "cuda";
     node->device_type = kxc::kCUDA;
     node->device_id = 0;
-    node->attrs.exists = 1;
+    node->attrs.exists = exists;
     node->attrs.device_name = "contract-cuda";
     node->attrs.arch = "sm_80";
-    node->attrs.max_threads_per_block = 128;
-    node->attrs.max_shared_memory_per_block = 48 * 1024;
+    node->attrs.max_threads_per_block = max_threads;
+    node->attrs.max_shared_memory_per_block = max_shared_memory;
     node->attrs.warp_size = 32;
     node->attrs.multi_processor_count = 1;
     return kxc::Target(kxc::ObjectRef(node));
@@ -164,7 +194,10 @@ bool TestCudaScheduleIsCanonicalAndVerified() {
         Request(IRDialect::kTIR, 3, BuildTarget(Device::CPU())));
     TEST_CHECK(cuda_plan.execution_steps.size() == 5 &&
                    cuda_plan.execution_steps.back().pass_name == String("bind_cuda_threads") &&
-                   Contains(cuda_plan.target_requirements, "cuda_thread_binding") &&
+                   Contains(cuda_plan.target_requirements, "kind=cuda") &&
+                   Contains(cuda_plan.target_requirements, "attr.exists>0") &&
+                   Contains(cuda_plan.invariant_transitions.back().invariants_after,
+                            "prim_func_defined") &&
                    std::string(cuda_plan.execution_steps.back().phase) ==
                        "tir_schedule" &&
                    cuda_plan.fingerprint != cpu_plan.fingerprint,
@@ -181,6 +214,127 @@ bool TestCudaScheduleIsCanonicalAndVerified() {
         target_tamper.target_requirements.size() - 1);
     TEST_CHECK(Throws([&] { PipelineExecutor::Validate(target_tamper, cuda); }),
                "missing CUDA target capability requirement must be rejected");
+    return true;
+}
+
+bool TestDirectAndExecutorContextConsistency() {
+    using namespace kxc;
+    using namespace kxc::api;
+    const Target cuda = FakeCudaTarget(64);
+    const NormalizedPipeline plan =
+        PipelineResolver::Resolve(Request(IRDialect::kTIR, 3, cuda));
+    const tir::PrimFunc input = MakeElementwiseTIR();
+
+    tir::PrimFunc direct;
+    {
+        PassContext::Scope unrelated(PassContext::FromTarget(
+            BuildTarget(Device::CPU())));
+        direct = tir::RunTIRPassPipeline(
+            input, StepNames(plan), PassContext::FromTarget(cuda));
+    }
+    const tir::PrimFunc executed =
+        PipelineExecutor::ExecuteTIR(plan, input, cuda);
+    const tir::CudaLaunchConfig direct_launch =
+        tir::GetCudaLaunchConfig(direct);
+    const tir::CudaLaunchConfig executed_launch =
+        tir::GetCudaLaunchConfig(executed);
+    TEST_CHECK(TIRText(direct) == TIRText(executed) &&
+                   direct_launch.grid_x == executed_launch.grid_x &&
+                   direct_launch.block_x == 64 && executed_launch.block_x == 64,
+               "direct and executor paths must consume the same explicit PassContext");
+    return true;
+}
+
+bool TestTargetPolicyAndSnapshotMismatchFailClosed() {
+    using namespace kxc;
+    using namespace kxc::api;
+    const Target cpu = BuildTarget(Device::CPU());
+    PipelineRequest forced_cuda = Request(IRDialect::kTIR, 3, cpu);
+    forced_cuda.named_pipeline = String("tir.compiler.cuda.o3");
+    TEST_CHECK(Throws([&] { (void)PipelineResolver::Resolve(forced_cuda); }),
+               "a CUDA pass policy must reject a CPU target");
+
+    TEST_CHECK(Throws([&] {
+                   (void)PipelineResolver::Resolve(
+                       Request(IRDialect::kTIR, 3, FakeCudaTarget(0)));
+               }) &&
+                   Throws([&] {
+                       (void)PipelineResolver::Resolve(
+                           Request(IRDialect::kTIR, 3,
+                                   FakeCudaTarget(64, 0)));
+                   }),
+               "missing target capabilities must fail during policy resolution");
+
+    const Target cuda64 = FakeCudaTarget(64);
+    const Target cuda128 = FakeCudaTarget(128);
+    const NormalizedPipeline plan64 =
+        PipelineResolver::Resolve(Request(IRDialect::kTIR, 3, cuda64));
+    const NormalizedPipeline plan128 =
+        PipelineResolver::Resolve(Request(IRDialect::kTIR, 3, cuda128));
+    TEST_CHECK(plan64.target_snapshot != plan128.target_snapshot &&
+                   plan64.fingerprint != plan128.fingerprint &&
+                   Throws([&] { PipelineExecutor::Validate(plan64, cuda128); }),
+               "canonical identity must bind the capability snapshot used by execution");
+
+    {
+        PassContext::Scope scope(PassContext::FromTarget(cpu));
+        TEST_CHECK(Throws([&] {
+                       (void)tir::RunTIRPassPipeline(
+                           MakeElementwiseTIR(), {String("bind_cuda_threads")});
+                   }),
+                   "legacy direct execution must enforce the same target policy");
+    }
+    return true;
+}
+
+bool TestAnalysisPreserveAndInvalidateState() {
+    using namespace kxc;
+    using namespace kxc::api;
+    (void)tir::TIRRegisteredPassSpecs();
+
+    PassSpec preserve;
+    preserve.name = String("unit_preserve_analyses");
+    preserve.dialect = IRDialect::kTIR;
+    preserve.scope = PassScope::kPrimFunc;
+    preserve.phase = String("tir_optimize");
+    preserve.implementation_key = String("kxc.tir.transform.fold_constant");
+    preserve.preserved_analyses = {String("kept"), String("stale")};
+    PassRegistry::Global().Register(preserve);
+
+    PassSpec invalidate;
+    invalidate.name = String("unit_invalidate_analysis");
+    invalidate.dialect = IRDialect::kTIR;
+    invalidate.scope = PassScope::kPrimFunc;
+    invalidate.phase = String("tir_optimize");
+    invalidate.implementation_key = String("kxc.tir.transform.simplify_expr");
+    invalidate.may_change_ir = false;
+    invalidate.invalidated_analyses = {String("stale")};
+    PassRegistry::Global().Register(invalidate);
+
+    PipelineRequest request = Request(
+        IRDialect::kTIR, 0, BuildTarget(Device::CPU()));
+    request.enabled = {preserve.name, invalidate.name};
+    request.initial_analyses = {
+        String("stale"), String("dropped"), String("kept")};
+    const NormalizedPipeline plan = PipelineResolver::Resolve(request);
+    TEST_CHECK(plan.invariant_transitions.size() == 2 &&
+                   EqualStrings(plan.invariant_transitions[0].analyses_before,
+                                {"dropped", "kept", "stale"}) &&
+                   EqualStrings(plan.invariant_transitions[0].analyses_after,
+                                {"kept", "stale"}) &&
+                   EqualStrings(plan.invariant_transitions[1].analyses_after,
+                                {"kept"}),
+               "analysis state must preserve only claims and then apply invalidation");
+    PipelineExecutor::Validate(plan, request.target);
+    TEST_CHECK(PipelineExecutor::ExecuteTIR(
+                   plan, MakeElementwiseTIR(), request.target).defined(),
+               "analysis-bearing normalized steps must remain executable");
+
+    NormalizedPipeline tampered = plan;
+    tampered.invariant_transitions[1].analyses_after = {
+        String("kept"), String("stale")};
+    TEST_CHECK(Throws([&] { PipelineExecutor::Validate(tampered, request.target); }),
+               "executor must replay and reject a stale analysis transition");
     return true;
 }
 
@@ -222,6 +376,24 @@ bool TestExecutableInvariantValidationFailsClosed() {
     TEST_CHECK(
         Throws([&] { (void)PipelineResolver::Resolve(unsupported); }),
         "an invariant without an executable validator cannot be a production precondition");
+
+    PassSpec tir_proof;
+    tir_proof.name = String("fake_prim_func_proof");
+    tir_proof.dialect = IRDialect::kTIR;
+    tir_proof.scope = PassScope::kPrimFunc;
+    tir_proof.phase = String("tir_optimize");
+    tir_proof.implementation_key = String("kxc.test.fake_prim_func_proof");
+    tir_proof.produced_invariants = {String("prim_func_defined")};
+    PipelineInvariantValidator::ValidateProductionContract(tir_proof);
+    PipelineInvariantValidator::ValidateTIR(
+        tir_proof.produced_invariants, MakeElementwiseTIR());
+    const tir::PrimFunc missing_body({}, tir::Stmt());
+    TEST_CHECK(
+        Throws([&] {
+            PipelineInvariantValidator::ValidateTIR(
+                tir_proof.produced_invariants, missing_body);
+        }),
+        "prim_func_defined must reject a PrimFunc without a statement body");
     return true;
 }
 
@@ -307,6 +479,12 @@ int main() {
         {"explicit_infer_boundaries", TestProductionPlanHasExplicitInferBoundaries},
         {"tamper_and_undeclared_rejection", TestTamperedAndUndeclaredStepsFailClosed},
         {"cuda_schedule_execution_identity", TestCudaScheduleIsCanonicalAndVerified},
+        {"direct_executor_context_consistency",
+         TestDirectAndExecutorContextConsistency},
+        {"target_policy_snapshot_mismatch",
+         TestTargetPolicyAndSnapshotMismatchFailClosed},
+        {"analysis_preserve_invalidate",
+         TestAnalysisPreserveAndInvalidateState},
         {"executable_invariant_fail_closed",
          TestExecutableInvariantValidationFailsClosed},
         {"compiler_execution_artifact_identity",

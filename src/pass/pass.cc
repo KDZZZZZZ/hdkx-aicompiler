@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "kxc/target/target.h"
+
 namespace kxc {
 namespace {
 
@@ -51,6 +53,28 @@ std::set<std::string> ValidateNames(const Array<String>& values,
         }
     }
     return names;
+}
+
+bool IsTargetPredicate(const std::string& predicate) {
+    return (predicate.rfind("kind=", 0) == 0 && predicate.size() > 5) ||
+           predicate == "attr.exists>0" ||
+           predicate == "attr.max_threads_per_block>0" ||
+           predicate == "attr.max_shared_memory_per_block>=0";
+}
+
+bool TargetMatches(const Target& target, const std::string& predicate) {
+    if (!target.defined() || !target.As<TargetNode>()) return false;
+    if (predicate.rfind("kind=", 0) == 0) {
+        return target->kind == predicate.substr(5);
+    }
+    if (predicate == "attr.exists>0") return target->attrs.exists > 0;
+    if (predicate == "attr.max_threads_per_block>0") {
+        return target->attrs.max_threads_per_block > 0;
+    }
+    if (predicate == "attr.max_shared_memory_per_block>=0") {
+        return target->attrs.max_shared_memory_per_block >= 0;
+    }
+    return false;
 }
 
 }  // namespace
@@ -133,10 +157,28 @@ void ValidatePassSpec(const PassSpec& spec) {
                 invariant + "' as declarative-only");
         }
     }
-    (void)ValidateNames(spec.preserved_analyses, "preserved_analyses", pass_key);
-    (void)ValidateNames(spec.invalidated_analyses, "invalidated_analyses", pass_key);
     (void)ValidateNames(spec.supported_control_capabilities,
                         "supported_control_capabilities", pass_key);
+    const std::set<std::string> target_requirements =
+        ValidateNames(spec.target_requirements, "target_requirements", pass_key);
+    for (const std::string& predicate : target_requirements) {
+        if (!IsTargetPredicate(predicate)) {
+            throw std::invalid_argument("PassSpec " + pass_key +
+                                        " has unsupported target requirement '" +
+                                        predicate + "'");
+        }
+    }
+    const std::set<std::string> preserved =
+        ValidateNames(spec.preserved_analyses, "preserved_analyses", pass_key);
+    const std::set<std::string> invalidated =
+        ValidateNames(spec.invalidated_analyses, "invalidated_analyses", pass_key);
+    for (const std::string& analysis : preserved) {
+        if (invalidated.count(analysis)) {
+            throw std::invalid_argument("PassSpec " + pass_key +
+                                        " both preserves and invalidates analysis '" +
+                                        analysis + "'");
+        }
+    }
     if (spec.dialect != IRDialect::kRelay &&
         !spec.supported_control_capabilities.empty()) {
         throw std::invalid_argument(
@@ -183,6 +225,13 @@ void ValidatePassSpecs(const Array<PassSpec>& specs) {
         }
         seen.emplace(key, spec);
     }
+}
+
+bool PassSpecSupportsTarget(const PassSpec& spec, const Target& target) {
+    for (const String& predicate : spec.target_requirements) {
+        if (!TargetMatches(target, AsStdString(predicate))) return false;
+    }
+    return true;
 }
 
 PassRegistry& PassRegistry::Global() {

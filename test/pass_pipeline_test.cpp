@@ -493,6 +493,43 @@ bool TestPassSpecValidation() {
         dialect_thrown = true;
     }
     TEST_CHECK(dialect_thrown, "pipeline dialect mismatch should fail validation");
+
+    kxc::PassSpec targeted = valid;
+    targeted.name = kxc::String("unit_test_targeted");
+    targeted.target_requirements = {
+        kxc::String("kind=llvm"), kxc::String("attr.exists>0"),
+        kxc::String("attr.max_threads_per_block>0"),
+        kxc::String("attr.max_shared_memory_per_block>=0")};
+    kxc::ValidatePassSpec(targeted);
+    TEST_CHECK(kxc::PassSpecSupportsTarget(
+                   targeted, kxc::BuildTarget(kxc::Device::CPU())),
+               "validated target predicates should match a CPU capability snapshot");
+
+    kxc::PassSpec unsupported_requirement = targeted;
+    unsupported_requirement.name = kxc::String("unit_test_bad_target_requirement");
+    unsupported_requirement.target_requirements = {
+        kxc::String("attr.unknown>0")};
+    bool unsupported_requirement_thrown = false;
+    try {
+        kxc::ValidatePassSpec(unsupported_requirement);
+    } catch (const std::exception&) {
+        unsupported_requirement_thrown = true;
+    }
+    TEST_CHECK(unsupported_requirement_thrown,
+               "unknown target predicates should fail validation");
+
+    kxc::PassSpec contradictory_analysis = valid;
+    contradictory_analysis.name = kxc::String("unit_test_analysis_conflict");
+    contradictory_analysis.preserved_analyses = {kxc::String("shape")};
+    contradictory_analysis.invalidated_analyses = {kxc::String("shape")};
+    bool contradictory_analysis_thrown = false;
+    try {
+        kxc::ValidatePassSpec(contradictory_analysis);
+    } catch (const std::exception&) {
+        contradictory_analysis_thrown = true;
+    }
+    TEST_CHECK(contradictory_analysis_thrown,
+               "one analysis cannot be both preserved and invalidated");
     return true;
 }
 
@@ -534,7 +571,11 @@ bool TestPassSpecPipelineMetadata() {
                    "TIR implementation key should match FFI transform name");
         if (name == "bind_cuda_threads") {
             saw_bind_cuda = true;
-            TEST_CHECK(spec.target_dependent, "bind_cuda_threads should be target dependent");
+            TEST_CHECK(!spec.target_requirements.empty() &&
+                           spec.produced_invariants.size() == 1 &&
+                           spec.produced_invariants[0] ==
+                               kxc::String("prim_func_defined"),
+                       "bind_cuda_threads should declare target policy and proof");
         }
     }
     TEST_CHECK(saw_bind_cuda, "CUDA binding pass should still have a PassSpec");
