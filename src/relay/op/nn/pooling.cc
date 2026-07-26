@@ -14,16 +14,12 @@ namespace kxc {
 namespace relay {
 
 namespace {
-// 将零、一或二维池化属性规范化为高宽二元组。
-Array<int> Read2DPair(const Array<int64_t>& values, int default_value) {
+// 与 Relay 类型推导共用同一展开语义，避免单元素属性在两侧得出不同高宽。
+Array<int> ReadPair(const Array<int64_t>& values, int64_t default_value) {
+    const te::topi::AxisPair2D pair = te::topi::ExpandPair2D(values, default_value);
     Array<int> out;
-    if (values.size() >= 2) {
-        out.push_back(static_cast<int>(values[0]));
-        out.push_back(static_cast<int>(values[1]));
-    } else {
-        out.push_back(default_value);
-        out.push_back(default_value);
-    }
+    out.push_back(static_cast<int>(pair.h));
+    out.push_back(static_cast<int>(pair.w));
     return out;
 }
 
@@ -43,9 +39,9 @@ te::Tensor MaxPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         throw std::runtime_error("nn_max_pool2d expects NCHW rank-4 input");
     }
 
-    Array<int> pool_size = Read2DPair(p->pool_size, 1);
-    Array<int> strides = Read2DPair(p->strides, 1);
-    Array<int> dilation = Read2DPair(p->dilation, 1);
+    Array<int> pool_size = ReadPair(p->pool_size, 1);
+    Array<int> strides = ReadPair(p->strides, 1);
+    Array<int> dilation = ReadPair(p->dilation, 1);
     te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
     return te::topi::pool2d(inputs[0], pool_size, strides, padding, dilation, "max",
                             p->ceil_mode, "T_max_pool2d");
@@ -65,9 +61,9 @@ te::Tensor AvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         throw std::runtime_error("nn_avg_pool2d expects NCHW rank-4 input");
     }
 
-    Array<int> pool_size = Read2DPair(p->pool_size, 1);
-    Array<int> strides = Read2DPair(p->strides, 1);
-    Array<int> dilation = Read2DPair(p->dilation, 1);
+    Array<int> pool_size = ReadPair(p->pool_size, 1);
+    Array<int> strides = ReadPair(p->strides, 1);
+    Array<int> dilation = ReadPair(p->dilation, 1);
     te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
     return te::topi::pool2d(inputs[0], pool_size, strides, padding, dilation, "avg",
                             p->ceil_mode, "T_avg_pool2d");

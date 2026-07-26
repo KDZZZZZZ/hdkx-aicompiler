@@ -170,17 +170,6 @@ int64_t ReadVectorValue(const Array<int64_t>& values, size_t index, int64_t defa
     return index < values.size() ? values[index] : default_value;
 }
 
-// 将零、一或二维属性展开为高宽二元组。
-std::vector<int64_t> ReadPair(const Array<int64_t>& values, int64_t default_value) {
-    if (values.empty()) {
-        return {default_value, default_value};
-    }
-    if (values.size() == 1) {
-        return {values[0], values[0]};
-    }
-    return {values[0], values[1]};
-}
-
 // 推导卷积或池化窗口对应的单个输出维度。
 int64_t WindowOutputDim(const std::string& op_name, int64_t input, int64_t kernel,
                         int64_t pad_before, int64_t pad_after, int64_t stride,
@@ -417,8 +406,10 @@ Type Conv2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
         throw std::runtime_error("nn_conv2d input channel mismatch");
     }
 
-    const std::vector<int64_t> strides = conv_attrs ? ReadPair(conv_attrs->strides, 1) : std::vector<int64_t>{1, 1};
-    const std::vector<int64_t> dilation = conv_attrs ? ReadPair(conv_attrs->dilation, 1) : std::vector<int64_t>{1, 1};
+    const te::topi::AxisPair2D strides =
+        conv_attrs ? te::topi::ExpandPair2D(conv_attrs->strides, 1) : te::topi::AxisPair2D{};
+    const te::topi::AxisPair2D dilation =
+        conv_attrs ? te::topi::ExpandPair2D(conv_attrs->dilation, 1) : te::topi::AxisPair2D{};
     const te::topi::Padding2D padding =
         conv_attrs ? te::topi::ExpandPadding2D(conv_attrs->padding) : te::topi::Padding2D{};
     const int64_t kh = conv_attrs && !conv_attrs->kernel_size.empty()
@@ -442,9 +433,9 @@ Type Conv2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
     }
 
     const int64_t oh = WindowOutputDim("nn_conv2d", data->shape[2], kh, padding.top, padding.bottom,
-                                      strides[0], dilation[0], false);
+                                      strides.h, dilation.h, false);
     const int64_t ow = WindowOutputDim("nn_conv2d", data->shape[3], kw, padding.left, padding.right,
-                                      strides[1], dilation[1], false);
+                                      strides.w, dilation.w, false);
     const std::string dtype =
         conv_attrs ? AttrOutDTypeOrDefault(conv_attrs->out_dtype, data->dtype) : data->dtype;
     return MakeTensorType({data->shape[0], channels, oh, ow}, dtype);
@@ -461,20 +452,20 @@ Type Pool2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
     if (pool_attrs && !pool_attrs->layout.empty() && pool_attrs->layout != "NCHW") {
         throw std::runtime_error("pool2d only supports NCHW layout in type inference");
     }
-    const std::vector<int64_t> pool_size =
-        pool_attrs ? ReadPair(pool_attrs->pool_size, 1) : std::vector<int64_t>{1, 1};
-    const std::vector<int64_t> strides =
-        pool_attrs ? ReadPair(pool_attrs->strides, 1) : std::vector<int64_t>{1, 1};
-    const std::vector<int64_t> dilation =
-        pool_attrs ? ReadPair(pool_attrs->dilation, 1) : std::vector<int64_t>{1, 1};
+    const te::topi::AxisPair2D pool_size =
+        pool_attrs ? te::topi::ExpandPair2D(pool_attrs->pool_size, 1) : te::topi::AxisPair2D{};
+    const te::topi::AxisPair2D strides =
+        pool_attrs ? te::topi::ExpandPair2D(pool_attrs->strides, 1) : te::topi::AxisPair2D{};
+    const te::topi::AxisPair2D dilation =
+        pool_attrs ? te::topi::ExpandPair2D(pool_attrs->dilation, 1) : te::topi::AxisPair2D{};
     const te::topi::Padding2D padding =
         pool_attrs ? te::topi::ExpandPadding2D(pool_attrs->padding) : te::topi::Padding2D{};
     const bool ceil_mode = pool_attrs && pool_attrs->ceil_mode;
 
-    const int64_t oh = WindowOutputDim("pool2d", data->shape[2], pool_size[0], padding.top,
-                                      padding.bottom, strides[0], dilation[0], ceil_mode);
-    const int64_t ow = WindowOutputDim("pool2d", data->shape[3], pool_size[1], padding.left,
-                                      padding.right, strides[1], dilation[1], ceil_mode);
+    const int64_t oh = WindowOutputDim("pool2d", data->shape[2], pool_size.h, padding.top,
+                                      padding.bottom, strides.h, dilation.h, ceil_mode);
+    const int64_t ow = WindowOutputDim("pool2d", data->shape[3], pool_size.w, padding.left,
+                                      padding.right, strides.w, dilation.w, ceil_mode);
     return MakeTensorType({data->shape[0], data->shape[1], oh, ow}, data->dtype);
 }
 

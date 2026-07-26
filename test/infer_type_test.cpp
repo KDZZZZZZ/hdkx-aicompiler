@@ -233,6 +233,34 @@ bool TestAsymmetricPaddingShapeAgreement() {
     TEST_CHECK(kxc::test_support::LowerFirstPrimitive(dilated_func)->prim_func.defined(),
                "dilated pool2d should lower to TIR");
 
+    // 单元素的 strides / dilation / pool_size 必须在两侧展开成同一组高宽。
+    // 类型推导一直是"复制到两轴"，而 lowering 侧曾分别是"整体取默认值"（池化）
+    // 和"第二轴取默认值"（卷积），所以 {2} 这类合法写法两侧结果不同。
+    auto single_pool_attrs =
+        kxc::relay::MaxPool2DAttrs::Create({1}, {0, 0, 0, 0}, {2}, {3},
+                                           "NCHW", false);
+    kxc::Call single_pool(kxc::relay::Op::Get("nn_max_pool2d"), {data}, single_pool_attrs);
+    kxc::Function single_pool_func({data}, single_pool);
+    kxc::relay::InferTypePass(single_pool_func);
+    // pool_size={3}->3x3, strides={1}->1x1, dilation={2}->2x2，与上面的显式二元组同解。
+    TEST_CHECK(CheckTensor(single_pool.checked_type(), {1, 3, 4, 4}, "float32"),
+               "single-element pool attrs infer shape mismatch");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(single_pool_func)->prim_func.defined(),
+               "single-element pool attrs should lower to TIR");
+
+    kxc::Var conv_weight("conv_weight", kxc::TensorType({4, 3, 3, 3}, "float32"));
+    auto single_conv_attrs = kxc::relay::Conv2DAttrs::Create(
+        {2}, {0, 0, 0, 0}, {1}, 1, 4, {3, 3}, "NCHW", "OIHW", "", "");
+    kxc::Call single_conv(kxc::relay::Op::Get("nn_conv2d"), {data, conv_weight},
+                          single_conv_attrs);
+    kxc::Function single_conv_func({data, conv_weight}, single_conv);
+    kxc::relay::InferTypePass(single_conv_func);
+    // strides={2} 必须两轴都是 2：(8 - 3) / 2 + 1 = 3。W 轴若退回 1 则会得到 6。
+    TEST_CHECK(CheckTensor(single_conv.checked_type(), {1, 4, 3, 3}, "float32"),
+               "single-element conv strides infer shape mismatch");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(single_conv_func)->prim_func.defined(),
+               "single-element conv strides should lower to TIR");
+
     // 只有 0/1/2/4 个元素有约定含义。长度 3 或 5 必须报错，静默截断会把配置
     // 错误变成一个看似成功但形状错误的编译产物。
     for (const kxc::Array<int64_t>& bad : {kxc::Array<int64_t>{1, 1, 1},

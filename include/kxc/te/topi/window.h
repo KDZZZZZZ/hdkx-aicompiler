@@ -59,6 +59,41 @@ Padding2D ExpandPadding2D(const Container& values) {
     throw std::runtime_error("padding expects 0, 1, 2 or 4 elements");
 }
 
+/*! \brief 展开后的高宽二元组。 */
+struct AxisPair2D {
+    int64_t h = 1;
+    int64_t w = 1;
+};
+
+/*!
+ * \brief 将 strides / dilation / pool_size 这类紧凑二维属性展开为高宽二元组。
+ *
+ * 这是该展开语义的唯一权威实现，理由与 ExpandPadding2D 相同：类型推导与 TOPI
+ * compute 必须对同一属性得出同一组高宽，否则推导出的输出 shape 与 compute 出的
+ * 不一致。单元素尤其容易分歧——它既可以理解为"复制到两个轴"，也可以理解为
+ * "第二个轴取默认值"，两种理解各自自洽但互不兼容。
+ *
+ * 语义以 Relay 类型推导为准：空取默认值，单元素复制到两轴，两个及以上取前两个。
+ *
+ * \tparam Container 提供 size() 与 operator[] 的整数序列，例如 Array<int64_t>。
+ */
+template <typename Container>
+AxisPair2D ExpandPair2D(const Container& values, int64_t default_value) {
+    AxisPair2D out;
+    const std::size_t count = values.size();
+    if (count == 0) {
+        out.h = out.w = default_value;
+        return out;
+    }
+    if (count == 1) {
+        out.h = out.w = static_cast<int64_t>(values[0]);
+        return out;
+    }
+    out.h = static_cast<int64_t>(values[0]);
+    out.w = static_cast<int64_t>(values[1]);
+    return out;
+}
+
 /*!
  * \brief 计算滑窗算子（卷积、池化）在一个空间维度上的输出尺寸。
  *
