@@ -215,6 +215,18 @@ bool TestMaterializedVariantClosure() {
               prep, d6, g4); }),
           "verification must reject a variant compiled for other bindings");
 
+    // 语义绑定回归：同边界（shape/dtype/call 数）但算子不同的产物必须被
+    // 拒绝——sqrt(N=6) 与授权的 relu(N=6) 边界完全一致，只有语义身份不同。
+    const kxc::Function fn6_sqrt =
+        RestrictedSymbolicShapeAdapter::MaterializeExactFunction(other, other6);
+    const kxc::api::CompiledGraph g6_sqrt =
+        kxc::api::Compiler::Compile(fn6_sqrt, Config());
+    RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
+        other, other6, g6_sqrt);
+    CHECK(Throws([&] { RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
+              prep, d6, g6_sqrt); }),
+          "same-boundary wrong-operator artifact must fail semantic binding");
+
     // 数值：relu(N=6) 输入含负值。
     kxc::runtime::NDArray input = kxc::runtime::NDArray::Zeros(
         {6}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
