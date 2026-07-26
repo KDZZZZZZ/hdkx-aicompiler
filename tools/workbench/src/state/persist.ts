@@ -32,45 +32,48 @@ interface SavedLayout {
  * 在 App 级别调一次。
  */
 export function usePersistence(): void {
-  const store = useWorkbench()
+  // 只订阅 doc。绝不能写 `const store = useWorkbench()` 去订阅整个 store：
+  // 那样任何一次 set() 都会换掉 store 引用，而下面的 effect 又会写 store，
+  // 于是 effect → set → effect 无限循环（React 报 Maximum update depth exceeded）。
+  // 需要调用 action 时一律走 getState()，它不参与订阅。
+  const doc = useWorkbench((s) => s.doc)
   const debounceTimer = useRef<number | null>(null)
+  const restored = useRef(false)
 
-  // 启动时恢复上一次的状态
+  // 启动恢复只做一次。空依赖 + ref 双保险：StrictMode 下 effect 会跑两遍，
+  // 没有 ref 的话会把刚恢复的状态再导入一次，凭空多出一条 Undo 记录。
   useEffect(() => {
+    if (restored.current) return
+    restored.current = true
     try {
       const saved = localStorage.getItem(AUTOSAVE_STORAGE_KEY)
-      if (saved) {
-        const snapshot = JSON.parse(saved) as WorkbenchSnapshot
-        store.importSnapshot(snapshot)
-      }
+      if (!saved) return
+      const snapshot = JSON.parse(saved) as WorkbenchSnapshot
+      useWorkbench.getState().importSnapshot(snapshot)
     } catch (err) {
-      console.error('Failed to restore persisted state:', err)
+      console.error('恢复已保存布局失败:', err)
     }
-  }, [store])
+  }, [])
 
   // 自动保存：doc 变化后 debounce 500ms
   useEffect(() => {
-    if (debounceTimer.current !== null) {
-      clearTimeout(debounceTimer.current)
-    }
+    if (debounceTimer.current !== null) clearTimeout(debounceTimer.current)
 
     debounceTimer.current = window.setTimeout(() => {
       try {
-        const snapshot = store.exportSnapshot()
-        localStorage.setItem(AUTOSAVE_STORAGE_KEY, JSON.stringify(snapshot))
-        // 自动保存后清除 dirty 标记
-        store.markSaved()
+        const s = useWorkbench.getState()
+        localStorage.setItem(AUTOSAVE_STORAGE_KEY, JSON.stringify(s.exportSnapshot()))
+        // markSaved 只改 dirty，不动 doc，所以不会把本 effect 再次触发。
+        s.markSaved()
       } catch (err) {
-        console.error('Failed to autosave:', err)
+        console.error('自动保存失败:', err)
       }
     }, DEBOUNCE_MS)
 
     return () => {
-      if (debounceTimer.current !== null) {
-        clearTimeout(debounceTimer.current)
-      }
+      if (debounceTimer.current !== null) clearTimeout(debounceTimer.current)
     }
-  }, [store.doc, store.exportSnapshot, store.markSaved])
+  }, [doc])
 }
 
 /**

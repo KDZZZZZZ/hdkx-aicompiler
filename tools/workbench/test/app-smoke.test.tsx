@@ -214,6 +214,47 @@ describe('Gather 语义（§4.2）', () => {
   })
 })
 
+describe('渲染不得失控', () => {
+  /**
+   * 这一组专门盯"无限重渲染"。
+   *
+   * 它出现过两次，都是同一个模式：组件订阅整个 store（useWorkbench() 不带 selector），
+   * 或 selector 每次返回新对象，再配合 effect 里 setState —— set() 换掉引用，
+   * effect 依赖变化，再 setState，循环不止。前面的用例抓不到它，
+   * 因为 React 只在超过嵌套更新上限时才抛错，而那需要真的把 App 完整挂起来跑。
+   */
+  it('localStorage 里有已保存布局时，启动恢复不会把自己反复触发', async () => {
+    // 先造一份自动保存数据，逼 usePersistence 走恢复分支——这正是线上炸掉的路径。
+    const seed = useWorkbench.getState().exportSnapshot()
+    localStorage.setItem('kxc-workbench-doc-v1', JSON.stringify(seed))
+    try {
+      await mountApp()
+      expect(container.querySelector('.app')).not.toBeNull()
+    } finally {
+      localStorage.removeItem('kxc-workbench-doc-v1')
+    }
+  })
+
+  it('命令面板开着时连续改状态，不触发 Maximum update depth', async () => {
+    await mountApp()
+    await act(async () => {
+      useWorkbench.getState().setCommandPaletteOpen(true)
+    })
+    // 连续写入：每次 commit 都会 structuredClone 整个 doc，把所有引用换新，
+    // 足以让"订阅整个 store + effect setState"的写法立刻爆炸。
+    await act(async () => {
+      const s = useWorkbench.getState()
+      for (let i = 0; i < 12; i += 1) {
+        const c = s.addColumn({ title: `列 ${i}` })
+        s.addTile(c, 'kpi')
+        s.setHover({ kind: 'pass', value: `p${i}` })
+      }
+    })
+    expect(useWorkbench.getState().commandPaletteOpen).toBe(true)
+    expect(container.querySelector('.command-palette')).not.toBeNull()
+  })
+})
+
 describe('模式切换都能渲染（§4.2/§4.3/§4.4、§15）', () => {
   it('Gather / Overview / Focus 三种模式挂载均不抛异常', async () => {
     await mountApp()

@@ -20,7 +20,12 @@ import {
 } from './keymap-config'
 
 export function useKeymap(): void {
-  const store = useWorkbench()
+  // 刻意不订阅 store。这个 hook 挂在 App 顶层，一旦订阅整个 store，
+  // 任何一次写入（连 hover 都算）都会重渲染整棵组件树，直接违背
+  // §18.4「布局操作不得触发所有图表重新渲染」。
+  // 改成每次按键时取一次最新快照：下面的 handler 闭包捕获的是这个变量绑定，
+  // 在 handleKeyDown 里重新赋值即可拿到最新状态，不需要重挂监听。
+  let store = useWorkbench.getState()
 
   // 派生状态便于检查输入框 focus
   function isEditingInput(target: EventTarget | null): boolean {
@@ -265,6 +270,9 @@ export function useKeymap(): void {
 
   useEffect(() => {
     const handleKeyDown = (ev: KeyboardEvent): void => {
+      // 每次按键刷新快照，保证读到最新的模式与文档，而不是挂载那一刻的。
+      store = useWorkbench.getState()
+
       // 系统级快捷键始终处理
       handleCommandPalette(ev)
       handleEscape(ev)
@@ -279,12 +287,7 @@ export function useKeymap(): void {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [
-    store.mode,
-    store.commandPaletteOpen,
-    store.doc,
-    store.activeWorkspace,
-    store.columnsOf,
-    store.tilesOf,
-  ])
+    // 监听器只挂一次；状态在 handler 内部按需读取，因此这里不需要任何依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 }
