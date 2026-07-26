@@ -54,7 +54,24 @@
       "tests": true,
       "onnx_ops": [
         "Add"
-      ]
+      ],
+      "registration": {
+        "description": "Element-wise addition.",
+        "arguments": [
+          {
+            "name": "lhs",
+            "type": "Tensor",
+            "description": "The left hand side input tensor."
+          },
+          {
+            "name": "rhs",
+            "type": "Tensor",
+            "description": "The right hand side input tensor."
+          }
+        ],
+        "type_infer_symbol": "AddInferType",
+        "relay_to_te_symbol": "AddCompute"
+      }
     },
     "cast": {
       "schema_version": 1,

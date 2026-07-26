@@ -413,6 +413,7 @@ set(KXC_RELAY_IR_SOURCES
   src/relay/op_attrs.cc
   src/relay/op_macros.cc
   src/relay/op_registry.cc
+  src/relay/generated/relay_op_registration.cc
   src/relay/op/tensor/math.cc
   src/relay/op/tensor/reduce.cc
   src/relay/op/tensor/transform.cc

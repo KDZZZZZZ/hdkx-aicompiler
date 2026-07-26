@@ -106,12 +106,27 @@ bool HasInt64FlattenedIndices(const kxc::relay::LoweredFunction& lowered) {
 bool TestElementwiseBroadcast() {
     kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
     kxc::Var y("y", kxc::TensorType({3}, "float32"));
-    kxc::Call add(kxc::relay::Op::Get("add"), {x, y});
+    const kxc::relay::Op& add_op = kxc::relay::Op::Get("add");
+    kxc::Call add(add_op, {x, y});
     kxc::Function func({x, y}, add);
 
     kxc::relay::InferTypePass(func);
+    TEST_CHECK(add_op->description == "Element-wise addition." &&
+                   add_op->arguments.size() == 2 &&
+                   add_op->arguments[0].name == "lhs" &&
+                   add_op->arguments[1].name == "rhs",
+               "generated add schema must be retained by builtin anchoring");
+    const kxc::PackedFunc make_add =
+        kxc::Registry::Global().Get("kxc.relay.op._make.add");
+    TEST_CHECK(make_add.defined(), "add must retain its canonical FFI binding");
+    const kxc::Call ffi_add = kxc::CastTo<kxc::Call>(make_add(x, y));
+    TEST_CHECK(ffi_add->args.size() == 2 && ffi_add->args[0].get() == x.get() &&
+                   ffi_add->args[1].get() == y.get() && !ffi_add->attrs.defined(),
+               "add FFI behavior must preserve argument order and fieldless attrs");
     TEST_CHECK(CheckTensor(add.checked_type(), {2, 3}, "float32"),
                "add should infer broadcast output");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
+               "generated add registration must lower through FRelayToTE");
 
     kxc::Var bad("bad", kxc::TensorType({4}, "float32"));
     kxc::Call invalid(kxc::relay::Op::Get("add"), {x, bad});

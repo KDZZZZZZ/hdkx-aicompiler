@@ -10,7 +10,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from generate_relay_op_contract import render as render_generated_contract
+from generate_relay_op_contract import (
+    render as render_generated_contract,
+    render_registration as render_generated_registration,
+)
 
 
 REGISTER_RE = re.compile(
@@ -54,6 +57,7 @@ OPERATOR_FIELD_ORDER = [
     "ffi",
     "tests",
     "onnx_ops",
+    "registration",
 ]
 REQUIRED_OPERATOR_FIELDS = {
     "schema_version",
@@ -73,6 +77,7 @@ REQUIRED_OPERATOR_FIELDS = {
 }
 ALLOWED_EFFECTS = {"pure", "stateful", "device_communication"}
 ALLOWED_LOWERINGS = {"single", "multi", "exec_plan", "none"}
+CPP_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
@@ -227,6 +232,66 @@ def operator_contract_issues(op: str, spec: dict[str, Any]) -> list[str]:
     onnx_ops = spec.get("onnx_ops")
     if not isinstance(onnx_ops, list) or not all(isinstance(item, str) for item in onnx_ops):
         issues.append(f"{op}: onnx_ops must be a string array")
+
+    binding = spec.get("registration")
+    if binding is not None:
+        if not isinstance(binding, dict):
+            issues.append(f"{op}: registration must be an object")
+        else:
+            binding_fields = {
+                "description", "arguments", "type_infer_symbol", "relay_to_te_symbol"
+            }
+            missing_binding_fields = sorted(binding_fields - set(binding))
+            unknown_binding_fields = sorted(set(binding) - binding_fields)
+            if missing_binding_fields:
+                issues.append(
+                    f"{op}: registration missing field(s): " +
+                    ", ".join(missing_binding_fields)
+                )
+            if unknown_binding_fields:
+                issues.append(
+                    f"{op}: registration has unsupported field(s): " +
+                    ", ".join(unknown_binding_fields)
+                )
+            description = binding.get("description")
+            if not isinstance(description, str) or not description.strip():
+                issues.append(f"{op}: registration description must be non-empty")
+
+            arguments = binding.get("arguments")
+            if (not isinstance(arguments, list) or
+                    len(arguments) != spec.get("num_inputs")):
+                issues.append(f"{op}: registration arguments must match fixed input arity")
+            elif not all(
+                isinstance(arg, dict) and set(arg) == {"name", "type", "description"} and
+                all(
+                    isinstance(arg.get(field), str) and bool(arg[field].strip())
+                    for field in ("name", "type", "description")
+                )
+                for arg in arguments
+            ):
+                issues.append(
+                    f"{op}: registration arguments need only non-empty name, type, and description"
+                )
+            elif len({arg["name"] for arg in arguments}) != len(arguments):
+                issues.append(f"{op}: registration argument names must be unique")
+
+            if not CPP_IDENTIFIER_RE.fullmatch(op):
+                issues.append(f"{op}: generated registration requires a C++ identifier op name")
+            for field in ("type_infer_symbol", "relay_to_te_symbol"):
+                symbol = binding.get(field)
+                if not isinstance(symbol, str) or not CPP_IDENTIFIER_RE.fullmatch(symbol):
+                    issues.append(f"{op}: registration {field} must be a C++ identifier")
+            binding_num_inputs = spec.get("num_inputs")
+            if not isinstance(binding_num_inputs, int) or binding_num_inputs < 0:
+                issues.append(f"{op}: generated registration currently requires fixed arity")
+            if spec.get("attrs") is not None:
+                issues.append(f"{op}: generated registration currently requires fieldless attrs")
+            if spec.get("output_arity") != 1:
+                issues.append(f"{op}: generated registration currently requires one output")
+            if spec.get("type_relation_key") != "FInferType":
+                issues.append(f"{op}: generated registration requires FInferType")
+            if spec.get("lowering") != "single":
+                issues.append(f"{op}: generated registration currently supports single lowering only")
     return issues
 
 
@@ -349,6 +414,39 @@ def parse_registrations(root: Path, terms: list[str]) -> dict[str, list[Registra
             )
             registrations.setdefault(op, []).append(registration)
     return registrations
+
+
+def has_callback_definition(root: Path, symbol: str, return_type: str,
+                            arguments: str) -> bool:
+    pattern = re.compile(
+        r"(?m)^\s*(?!static\b)" + return_type + re.escape(symbol) +
+        r"\s*\(" + arguments + r"\)\s*\{"
+    )
+    for path in find_cpp_files(root):
+        if (path.suffix not in {".cc", ".cpp"} or
+                path.as_posix().endswith("/generated/relay_op_registration.cc")):
+            continue
+        if pattern.search(mask_comments(read_text(path))):
+            return True
+    return False
+
+
+def generated_binding_issues(root: Path, regs: list[Registration],
+                             binding: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    if len(regs) != 1 or not regs[0].file.endswith("generated/relay_op_registration.cc"):
+        issues.append("generated registration must be the sole registration authority")
+    if not has_callback_definition(
+        root, binding["type_infer_symbol"], r"Type\s+",
+        r"\s*const\s+Attrs\s*&\s*\w+\s*,\s*const\s+Array\s*<\s*Type\s*>\s*&\s*\w+\s*",
+    ):
+        issues.append("generated type_infer_symbol lacks the non-static FInferType signature")
+    if not has_callback_definition(
+        root, binding["relay_to_te_symbol"], r"te::Tensor\s+",
+        r"\s*const\s+Attrs\s*&\s*\w+\s*,\s*const\s+Array\s*<\s*te::Tensor\s*>\s*&\s*\w+\s*,\s*const\s+kxc::Type\s*&\s*\w+\s*",
+    ):
+        issues.append("generated relay_to_te_symbol lacks the non-static FRelayToTE signature")
+    return issues
 
 
 def count_top_level_items(text: str) -> int:
@@ -626,6 +724,36 @@ def has_complete_schema(reg: Registration, expected: dict[str, Any] | None) -> b
     return not registration_schema_issues(reg, expected)
 
 
+def cmake_set_contains(text: str, variable: str, value: str) -> bool:
+    match = re.search(
+        r"\bset\s*\(\s*" + re.escape(variable) + r"\b(?P<body>.*?)\)",
+        text,
+        re.DOTALL,
+    )
+    if not match:
+        return False
+    body = re.sub(r"#[^\n]*", "", match.group("body"))
+    return bool(re.search(r"(?m)^\s*" + re.escape(value) + r"\s*$", body))
+
+
+def generated_anchor_is_reachable(text: str) -> bool:
+    masked = mask_comments(text)
+    declaration = re.search(
+        r"\bvoid\s+RelayGeneratedOpBindings\s*\(\s*\)\s*;", masked
+    )
+    register_builtins = re.search(
+        r"\bvoid\s+RegisterBuiltins\s*\(\s*\)\s*\{(?P<body>[^}]*)\}",
+        masked,
+        re.DOTALL,
+    )
+    return bool(
+        declaration and register_builtins and re.search(
+            r"\bbuiltin_anchor::RelayGeneratedOpBindings\s*\(\s*\)\s*;",
+            register_builtins.group("body"),
+        )
+    )
+
+
 def analyze(
     root: Path,
     contract: dict[str, Any],
@@ -657,6 +785,28 @@ def analyze(
             "generated OperatorSpec source is stale; run "
             "python/tools/generate_relay_op_contract.py"
         )
+    generated_registration_path = (
+        root / "src" / "relay" / "generated" / "relay_op_registration.cc"
+    )
+    expected_generated_registration = render_generated_registration(contract)
+    if (not generated_registration_path.exists() or
+            generated_registration_path.read_text(encoding="utf-8") !=
+            expected_generated_registration):
+        global_issues.append("generated Relay registration source is stale")
+    cmake_text = read_text(root / "CMakeLists.txt")
+    builtin_text = read_text(root / "src" / "ffi" / "builtin_registry.cc")
+    if not cmake_set_contains(
+        cmake_text,
+        "KXC_RELAY_IR_SOURCES",
+        "src/relay/generated/relay_op_registration.cc",
+    ):
+        global_issues.append(
+            "generated Relay registration source is not in KXC_RELAY_IR_SOURCES"
+        )
+    if not generated_anchor_is_reachable(builtin_text):
+        global_issues.append(
+            "generated Relay registration anchor is not retained by RegisterBuiltins"
+        )
     registry_text = read_text(root / "src" / "relay" / "op_registry.cc")
     if "op_contract_generated::Spec" not in registry_text:
         global_issues.append("operator registry bypasses generated OperatorSpec metadata")
@@ -675,6 +825,8 @@ def analyze(
 
         if expected is None:
             issues.append("op is not declared in contracts/relay_op_contract.json")
+        elif "registration" in expected:
+            issues.extend(generated_binding_issues(root, regs, expected["registration"]))
         if op in forbidden_ops:
             issues.append("op name is forbidden alias")
         if expected and not regs:

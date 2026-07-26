@@ -115,14 +115,6 @@ te::Tensor MatMulCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     return RequireDefined("matmul", te::topi::matmul(inputs[0], inputs[1], "T_matmul"));
 }
 
-KXC_REGISTER_OP(add)
-    .describe(R"doc(Element-wise addition.)doc")
-    .set_num_inputs(2)
-    .add_argument("lhs", "Tensor", "The left hand side input tensor.")
-    .add_argument("rhs", "Tensor", "The right hand side input tensor.")
-    .set_attr<FInferType>("FInferType", AddInferType)
-    .set_attr<FRelayToTE>("FRelayToTE", AddCompute);
-
 KXC_REGISTER_OP(subtract)
     .describe(R"doc(Element-wise subtraction.)doc")
     .set_num_inputs(2)

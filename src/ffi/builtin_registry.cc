@@ -10,6 +10,7 @@ void DistributedCclCpu();
 void DistributedSession();
 void DistributedWorker();
 void RelayOpFfi();
+void RelayGeneratedOpBindings();
 void RelayActivationOps();
 void RelayConvolutionOps();
 void RelayDenseOps();
@@ -33,6 +34,7 @@ void RegisterBuiltins() {
   builtin_anchor::DistributedSession();
   builtin_anchor::DistributedWorker();
   builtin_anchor::RelayOpFfi();
+  builtin_anchor::RelayGeneratedOpBindings();
   builtin_anchor::RelayActivationOps();
   builtin_anchor::RelayConvolutionOps();
   builtin_anchor::RelayDenseOps();
