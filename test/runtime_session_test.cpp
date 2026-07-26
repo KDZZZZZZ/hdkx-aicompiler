@@ -255,7 +255,7 @@ bool TestConstructionAndTypeChecks() {
                }),
                "undefined CompiledModule should fail");
     TEST_CHECK(Throws([] {
-                   runtime::RuntimeSession invalid(ObjectRef(Device::CPU()));
+                   runtime::RuntimeSession invalid{ObjectRef(Device::CPU())};
                }),
                "Device ObjectRef should not become RuntimeSession");
     SessionFixture fixture = MakeStaticFixture();

@@ -246,7 +246,7 @@ bool TestRoleListsAndObjectTypeChecks() {
                    ExecutablePlan plan(values, calls, {0}, {}, {3});
                }),
                "ordered constant list must cover all constant values");
-    TEST_CHECK(Throws([&] { ValueSpec wrong(ObjectRef(Device::CPU())); }),
+    TEST_CHECK(Throws([&] { ValueSpec wrong{ObjectRef(Device::CPU())}; }),
                "wrong ObjectRef type must fail safely");
     TEST_CHECK(Throws([&] {
                    ExecutablePlan undefined{ObjectRef()};
