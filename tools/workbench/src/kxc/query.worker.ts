@@ -1,9 +1,17 @@
 /// <reference lib="webworker" />
 /**
- * Bundle 解析与聚合 Worker（需求 §18.3）。
+ * Bundle 解析与聚合（需求 §18.3）。
  *
- * 职责边界：只做纯计算，不做任何 IO。文件内容由主线程读好后通过 postMessage 传进来，
+ * 职责边界：只做纯计算，不做任何 IO。文件内容由调用方读好后传进来，
  * 这样同一份代码既能服务本地目录句柄，也能服务 fetch 来的 fixture。
+ *
+ * 这个文件有两个消费者：
+ * 1. 浏览器 —— Vite 把它打成 Worker，走 onmessage 那套壳；
+ * 2. CLI（kxc-wb query）—— 直接 import parseBundle / runQuery，在 Node 里跑。
+ *    Node 24 原生剥离类型，所以不需要为 CLI 单独构建一份。
+ *
+ * 因此 self 必须做存在性判断：Node 里没有 self，模块顶层直接取会抛错。
+ * 聚合口径只有这一份实现，CLI 和界面不会算出不同的数。
  */
 
 import {
@@ -20,7 +28,9 @@ import {
   type KxcEvent,
   type KxcManifest,
   type KxcSummary,
-} from './contract'
+  // 带 .ts 扩展名是为了让 CLI 能用 Node 原生 ESM 直接 import 这个模块：
+  // Node 不做扩展名推断，而 Vite 两种写法都吃。
+} from './contract.ts'
 import type {
   ArtifactResult,
   DiagnosticsResult,
@@ -44,7 +54,7 @@ import type {
   WorkerResponse,
 } from './query-protocol'
 
-interface ParsedBundle {
+export interface ParsedBundle {
   meta: MetaResult
   events: KxcEvent[]
   bySpanId: Map<string, KxcEvent>
@@ -57,10 +67,12 @@ interface ParsedBundle {
 const bundles = new Map<string, ParsedBundle>()
 const cancelled = new Set<number>()
 
-const ctx = self as unknown as DedicatedWorkerGlobalScope
+// Node 里没有 self；CLI 直接 import 本模块时不能在顶层解引用它。
+const ctx =
+  typeof self !== 'undefined' ? (self as unknown as DedicatedWorkerGlobalScope) : null
 
 function post(msg: WorkerResponse) {
-  ctx.postMessage(msg)
+  ctx?.postMessage(msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +88,7 @@ function safeJson<T>(text: string | null): T | null {
   }
 }
 
-function parseBundle(bundleId: string, files: LoadPayload, reqId: number): ParsedBundle {
+export function parseBundle(bundleId: string, files: LoadPayload, reqId = 0): ParsedBundle {
   const events: KxcEvent[] = []
   let malformed = 0
 
@@ -604,7 +616,7 @@ function queryEventBySpan(spanId: string, b: ParsedBundle): EventBySpanResult {
 // 分发
 // ---------------------------------------------------------------------------
 
-function runQuery(b: ParsedBundle, spec: QuerySpec, filter: QueryFilter): unknown {
+export function runQuery(b: ParsedBundle, spec: QuerySpec, filter: QueryFilter): unknown {
   if (spec.kind === 'meta') return b.meta
   if (spec.kind === 'diagnostics') return queryDiagnostics(b)
   if (spec.kind === 'artifact') {
@@ -653,7 +665,8 @@ function runQuery(b: ParsedBundle, spec: QuerySpec, filter: QueryFilter): unknow
   }
 }
 
-ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
+// 只有真在 Worker 里才挂消息处理；CLI 直接调 parseBundle / runQuery。
+if (ctx) ctx.onmessage = (ev: MessageEvent<WorkerRequest>) => {
   const msg = ev.data
   if (msg.type === 'cancel') {
     cancelled.add(msg.id)

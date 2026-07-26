@@ -191,6 +191,52 @@ describe('布局操作与撤销（§12、§17）', () => {
   })
 })
 
+describe('恢复布局后的 id 分配', () => {
+  /**
+   * id 计数器是模块级变量，页面一刷新就归零，而从 localStorage 恢复出来的
+   * 文档里已经带着 tile-3 这种 id。不推进计数器就会分配出重复 id——
+   * 两个对象共用一个 key，删一个连带删另一个，而且要等操作到那一步才暴露。
+   */
+  it('导入快照后新建的对象不会与已有 id 冲突', async () => {
+    await mountApp()
+
+    // 先造出若干对象，拿到一份带较大 id 的快照
+    await act(async () => {
+      const s = useWorkbench.getState()
+      const col = s.addColumn({ title: 'A' })
+      for (let i = 0; i < 6; i += 1) s.addTile(col, 'kpi')
+    })
+    const snap = useWorkbench.getState().exportSnapshot()
+    const existing = new Set([
+      ...Object.keys(snap.doc.tiles),
+      ...Object.keys(snap.doc.columns),
+    ])
+    expect(existing.size).toBeGreaterThan(6)
+
+    // 模拟"刷新后恢复"：直接导入这份快照
+    await act(async () => {
+      useWorkbench.getState().importSnapshot(snap)
+    })
+
+    // 再新建一批，全部 id 必须是新的
+    const created: string[] = []
+    await act(async () => {
+      const s = useWorkbench.getState()
+      const col = s.addColumn({ title: 'B' })
+      created.push(col)
+      for (let i = 0; i < 6; i += 1) created.push(s.addTile(col, 'logs'))
+    })
+
+    for (const id of created) {
+      expect(existing.has(id)).toBe(false)
+      // id 必须仍是 prefix-<base36> 的正常形状。非生成 id（如默认联动组 'global'）
+      // 一旦被误当成计数器来源，就会把序号顶飞，产出 tile-globam 这种乱码。
+      expect(id).toMatch(/^(?:ws|col|tile|lg|gather)-[0-9a-z]{1,6}$/)
+    }
+    expect(new Set(created).size).toBe(created.length)
+  })
+})
+
 describe('Gather 语义（§4.2）', () => {
   it('从 Gather 移除引用不会删掉原始 Tile', async () => {
     await mountApp()

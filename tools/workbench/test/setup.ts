@@ -38,24 +38,28 @@ globalThis.Worker ??= NoopWorker as unknown as typeof Worker
 // React 18 要求显式声明处于 act 环境，否则 act() 会打警告并可能吞掉更新。
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-if (!window.matchMedia) {
-  window.matchMedia = ((query: string) => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addListener: () => {},
-    removeListener: () => {},
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    dispatchEvent: () => false,
-  })) as unknown as typeof window.matchMedia
-}
+// 下面全是 DOM 补丁。控制链路那组用例跑在 node 环境（没有 window/Element），
+// 而 setup 对所有环境生效，所以整体先判存在性，否则 node 用例会在这里直接崩。
+if (typeof window !== 'undefined') {
+  if (!window.matchMedia) {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia
+  }
 
-// jsdom 的 Element 缺少这两个滚动方法：StripView 定位聚焦列、
-// 命令面板把选中项滚进视野时都会调用。
-if (!Element.prototype.scrollTo) {
-  Element.prototype.scrollTo = function scrollTo() {}
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = function scrollIntoView() {}
+  // jsdom 的 Element 缺少这两个滚动方法：StripView 定位聚焦列、
+  // 命令面板把选中项滚进视野时都会调用。
+  if (!Element.prototype.scrollTo) {
+    Element.prototype.scrollTo = function scrollTo() {}
+  }
+  if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = function scrollIntoView() {}
+  }
 }

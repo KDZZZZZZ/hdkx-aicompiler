@@ -44,6 +44,37 @@ function nextId(prefix: string): string {
   idSeq += 1
   return `${prefix}-${idSeq.toString(36)}`
 }
+
+/**
+ * 把计数器推到已有 id 之后。
+ *
+ * 必须在恢复布局（importSnapshot / localStorage 自动恢复）之后调用：
+ * idSeq 是模块级变量，页面一刷新就归零，而恢复回来的文档里已经存在
+ * tile-3、col-2 这样的 id。不推进计数器的话，接着新建几个就会分配出
+ * 与现存对象相同的 id——两个 Tile 共用一个 key，删一个会连带删掉另一个，
+ * 而且要等用户操作到那一步才暴露，极难排查。
+ */
+function bumpIdSeq(doc: WorkbenchDoc): void {
+  let max = idSeq
+  // 只认本模块 nextId() 生成的形状。不加这道校验的话，像默认联动组 'global'
+  // 这种非生成 id 会被整体按 base36 解析成一个天文数字，把计数器顶飞，
+  // 之后所有新 id 都变成 tile-globam 这类乱码。
+  const GENERATED = /^(?:ws|col|tile|lg|gather)-([0-9a-z]+)$/
+  const scan = (id: string) => {
+    const m = GENERATED.exec(id)
+    if (!m) return
+    const n = parseInt(m[1]!, 36)
+    if (Number.isSafeInteger(n) && n > max) max = n
+  }
+  Object.keys(doc.workspaces).forEach(scan)
+  Object.keys(doc.columns).forEach(scan)
+  Object.keys(doc.tiles).forEach(scan)
+  Object.keys(doc.linkGroups).forEach(scan)
+  for (const w of Object.values(doc.workspaces)) {
+    for (const g of w.gatherLayouts) scan(g.id)
+  }
+  idSeq = max
+}
 /** 逻辑时钟，替代 Date.now() 作为 createdAt/updatedAt。 */
 let logicalClock = 0
 function tick(): number {
@@ -1106,6 +1137,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => {
         set({ toast: { kind: 'error', text: '不是有效的桌布布局文件' } })
         return
       }
+      // 恢复的文档带着旧 id，计数器必须跳过它们，否则后续新建会撞号。
+      bumpIdSeq(snap.doc)
       set((s) => ({
         doc: snap.doc,
         undoStack: [...s.undoStack, s.doc].slice(-HISTORY_LIMIT),
