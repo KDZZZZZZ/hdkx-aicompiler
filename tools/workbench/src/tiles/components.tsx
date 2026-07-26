@@ -11,7 +11,7 @@
  *   - 提供 .sr-only 文本摘要
  */
 
-import { useMemo } from 'react'
+import { Component, useMemo, type ErrorInfo, type ReactNode } from 'react'
 import type { TileDensity, AnalysisContext } from '../state/types'
 import { useWorkbench } from '../state/store'
 import { resolveContext, EMPTY_CONTEXT } from '../state/types'
@@ -36,6 +36,43 @@ import { IrDiffTile } from './IrDiffTile'
 export interface TileBodyProps {
   tileId: string
   density: TileDensity
+}
+
+/**
+ * 单个 Tile 的错误边界。
+ *
+ * 没有它的时候，任意一张图抛异常都会把整个工作台白屏——分析到一半、
+ * 布局全在的时候整页消失，是最糟糕的失败方式。
+ * 现在坏掉的图退化成一张错误卡片，其余图照常用。
+ */
+class TileErrorBoundary extends Component<
+  { tileId: string; title: string; children: ReactNode },
+  { error: Error | null }
+> {
+  override state: { error: Error | null } = { error: null }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  override componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error(`[Tile ${this.props.tileId}] ${this.props.title} 渲染失败`, error, info)
+  }
+
+  override render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <div className="tile-content tile-error" role="alert">
+        <div style={{ color: 'var(--sem-error)', fontWeight: 500 }}>⚠ 此图渲染失败</div>
+        <div style={{ color: 'var(--text-secondary)', fontSize: 'var(--fs-sm)', marginTop: 4 }}>
+          {this.state.error.message}
+        </div>
+        <button style={{ marginTop: 8 }} onClick={() => this.setState({ error: null })}>
+          重试
+        </button>
+      </div>
+    )
+  }
 }
 
 /**
@@ -90,6 +127,7 @@ export function TileBody(props: TileBodyProps): JSX.Element {
         </div>
       )}
 
+      <TileErrorBoundary tileId={tileId} title={spec.title}>
       {/* 分发到具体实现 */}
       {tile.type === 'kpi' && (
         <KpiTile tile={tile} context={resolvedContext} density={density} />
@@ -152,9 +190,10 @@ export function TileBody(props: TileBodyProps): JSX.Element {
         'ir_diff',
       ].includes(tile.type) && (
         <div className="tile-placeholder">
-          <p>Tile type "{tile.type}" not yet implemented</p>
+          <p>图表类型「{tile.type}」尚未实现</p>
         </div>
       )}
+      </TileErrorBoundary>
     </div>
   )
 }

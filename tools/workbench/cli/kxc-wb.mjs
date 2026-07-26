@@ -372,6 +372,7 @@ async function cmdUi() {
   }
   if (positional.length > 2 && sub === 'gather') args.tileIds = positional.slice(2)
   if (positional.length > 2 && sub === 'add-tile') args.type = positional[2]
+  if (positional.length > 2 && sub === 'load-bundle') args.id = positional[2]
 
   const { status, body } = await control('/command', {
     method: 'POST',
@@ -402,6 +403,7 @@ function printState(s) {
 }
 
 const UI_COMMANDS = [
+  'load-bundle',
   'new-column',
   'remove-column',
   'add-tile',
@@ -443,6 +445,7 @@ const HELP = `kxc-wb —— 性能分析桌布命令行
 
 驱动界面（需要控制服务与已打开的页面）
   kxc-wb ui state                                  查看页面当前有哪些列和图
+  kxc-wb ui load-bundle <样例 id>                  把样例 bundle 装进页面
   kxc-wb ui add-tile <类型> [--column-id <id>]
   kxc-wb ui new-column [--title <标题>] [--width 1/3|1/2|2/3|full|fit]
   kxc-wb ui drill --kind pass --value <pass 名> [--as-tab]

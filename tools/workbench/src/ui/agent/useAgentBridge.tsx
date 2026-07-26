@@ -14,6 +14,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useWorkbench } from '../../state/store'
+import { useBundleActions } from '../bundle/useBundleActions'
 import { getTileSpec, ALL_TILE_SPECS } from '../../tiles/registry'
 import type { TileType, WidthTier, WorkbenchMode } from '../../state/types'
 
@@ -28,6 +29,17 @@ interface CommandMessage {
 }
 
 type CommandResult = { ok: true; result?: unknown } | { ok: false; error: string }
+type CommandHandler = (
+  args: Record<string, unknown>,
+  deps: CommandDeps,
+) => CommandResult | Promise<CommandResult>
+
+/** 需要 hook 能力的命令（如加载 bundle）通过这里拿到入口。 */
+interface CommandDeps {
+  loadFixtureById: (id: string) => Promise<void>
+  openDirectory: () => Promise<void>
+  fixtures: Array<{ id: string; path: string; variant: string; event_count: number }>
+}
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
 
@@ -39,7 +51,32 @@ function isTileType(v: unknown): v is TileType {
  * 命令白名单。每条都要么成功、要么给出**能指导下一步的**错误信息——
  * agent 拿到 "未知列 col-3" 比拿到 "失败" 有用得多。
  */
-const COMMANDS: Record<string, (args: Record<string, unknown>) => CommandResult> = {
+const COMMANDS: Record<string, CommandHandler> = {
+  /**
+   * 加载 bundle。没有它 agent 就无法自己把数据装进来，
+   * 用户还得先手动点一次下拉——那"指挥 Claude 分析"就断在第一步。
+   */
+  'load-bundle': async (a, deps) => {
+    const id = str(a.id) ?? str(a.fixtureId)
+    if (!id) {
+      return {
+        ok: false,
+        error: `需要 id；当前可用样例：${deps.fixtures.map((f) => f.id).join(', ') || '（无，请先跑 npm run fixture）'}`,
+      }
+    }
+    const known = deps.fixtures.find((f) => f.id === id)
+    if (!known) {
+      return {
+        ok: false,
+        error: `未知样例 ${id}；可用：${deps.fixtures.map((f) => f.id).join(', ')}`,
+      }
+    }
+    await deps.loadFixtureById(id)
+    const s = useWorkbench.getState()
+    const loaded = Object.keys(s.bundles)
+    return { ok: true, result: { loadedBundleIds: loaded } }
+  },
+
   'new-column': (a) => {
     const id = useWorkbench.getState().addColumn({
       title: str(a.title) ?? '新建列',
@@ -299,6 +336,20 @@ export function useAgentBridge(): AgentConnection {
   const bundles = useWorkbench((s) => s.bundles)
   const connected = useRef(false)
 
+  // bundle 加载能力来自 hook，命令处理器却在 effect 闭包里，
+  // 用 ref 中转：始终指向最新一次渲染的入口，避免闭包里拿到过期的 fixtures 列表。
+  const bundleActions = useBundleActions()
+  const depsRef = useRef<CommandDeps>({
+    loadFixtureById: bundleActions.loadFixtureById,
+    openDirectory: bundleActions.openDirectory,
+    fixtures: bundleActions.fixtures,
+  })
+  depsRef.current = {
+    loadFixtureById: bundleActions.loadFixtureById,
+    openDirectory: bundleActions.openDirectory,
+    fixtures: bundleActions.fixtures,
+  }
+
   // 命令订阅
   useEffect(() => {
     let es: EventSource | null = null
@@ -322,32 +373,35 @@ export function useAgentBridge(): AgentConnection {
       })
 
       es.addEventListener('command', (ev) => {
-        const msg = JSON.parse((ev as MessageEvent).data) as CommandMessage
-        let result: CommandResult
-        try {
-          const handler = COMMANDS[msg.cmd]
-          result = handler
-            ? handler(msg.args ?? {})
-            : { ok: false, error: `未知命令 ${msg.cmd}；可用：${AGENT_COMMANDS.join(', ')}` }
-        } catch (err) {
-          result = { ok: false, error: err instanceof Error ? err.message : String(err) }
-        }
-        // 回执里直接带上执行后的状态快照。
-        // 否则 agent 执行完命令马上读状态会拿到 debounce 之前的旧数据，
-        // 从而基于过期信息做下一步决策——这是最容易踩且最难查的坑。
-        // zustand 的 set 是同步的，所以这里 snapshot() 拿到的一定是新状态。
-        const after = snapshot()
-        void fetch(`${controlBase()}/ack`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: msg.id, ...result, state: after }),
-        }).catch(() => {})
-        // 同时立刻推一份，让后续独立的 ui state 也读得到最新值。
-        void fetch(`${controlBase()}/state`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(after),
-        }).catch(() => {})
+        void (async () => {
+          const msg = JSON.parse((ev as MessageEvent).data) as CommandMessage
+          let result: CommandResult
+          try {
+            const handler = COMMANDS[msg.cmd]
+            // 有的命令是异步的（加载 bundle 要读文件、解析事件），必须 await，
+            // 否则回执会在数据装好之前就发出去，agent 随后读到的是半成品状态。
+            result = handler
+              ? await handler(msg.args ?? {}, depsRef.current)
+              : { ok: false, error: `未知命令 ${msg.cmd}；可用：${AGENT_COMMANDS.join(', ')}` }
+          } catch (err) {
+            result = { ok: false, error: err instanceof Error ? err.message : String(err) }
+          }
+          // 回执里直接带上执行后的状态快照。
+          // 否则 agent 执行完命令马上读状态会拿到 debounce 之前的旧数据，
+          // 从而基于过期信息做下一步决策——这是最容易踩且最难查的坑。
+          const after = snapshot()
+          void fetch(`${controlBase()}/ack`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: msg.id, ...result, state: after }),
+          }).catch(() => {})
+          // 同时立刻推一份，让后续独立的 ui state 也读得到最新值。
+          void fetch(`${controlBase()}/state`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(after),
+          }).catch(() => {})
+        })()
       })
 
       es.onerror = () => {

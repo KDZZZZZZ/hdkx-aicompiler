@@ -191,6 +191,37 @@ describe('布局操作与撤销（§12、§17）', () => {
   })
 })
 
+describe('单个图表崩溃不能拖垮整个工作台', () => {
+  /**
+   * 实机演示时踩到的：PassWaterfallTile 用错了 ECharts 系列类型抛异常，
+   * 整个页面直接白屏——分析到一半、布局全在的时候整页消失，是最糟的失败方式。
+   * 现在坏掉的图退化成一张错误卡片，其余照常。
+   */
+  it('图表抛异常时降级为错误卡片，其他图仍在', async () => {
+    // 让 ECharts 的 init 抛错，模拟图表渲染失败
+    const echarts = await import('echarts')
+    const spy = vi.spyOn(echarts, 'init').mockImplementation(() => {
+      throw new Error('模拟渲染失败')
+    })
+    try {
+      await mountApp()
+      await act(async () => {
+        const s = useWorkbench.getState()
+        const col = s.addColumn({ title: '崩溃测试' })
+        s.addTile(col, 'kpi') // 不依赖 echarts，应当仍然渲染
+        s.addTile(col, 'pass_ranking') // 依赖 echarts，会抛
+      })
+
+      // 整个 app 还在，没有白屏
+      expect(container.querySelector('.app')).not.toBeNull()
+      // KPI 仍然挂着
+      expect(container.querySelector('[data-tile-type="kpi"]')).not.toBeNull()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
 describe('恢复布局后的 id 分配', () => {
   /**
    * id 计数器是模块级变量，页面一刷新就归零，而从 localStorage 恢复出来的
