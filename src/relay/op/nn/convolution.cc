@@ -51,8 +51,7 @@ te::Tensor Conv2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, co
 
     int stride_h = Read2DValue(p->strides, 0, 1);
     int stride_w = Read2DValue(p->strides, 1, 1);
-    int pad_h = Read2DValue(p->padding, 0, 0);
-    int pad_w = Read2DValue(p->padding, 1, 0);
+    te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
     int dilation_h = Read2DValue(p->dilation, 0, 1);
     int dilation_w = Read2DValue(p->dilation, 1, 1);
 
@@ -65,7 +64,7 @@ te::Tensor Conv2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs, co
         throw std::runtime_error("nn_conv2d bias must be rank-1");
     }
     te::Tensor conv_out = te::topi::conv2d_nchw(
-        inputs[0], inputs[1], stride_h, stride_w, pad_h, pad_w, dilation_h, dilation_w, "T_conv2d");
+        inputs[0], inputs[1], stride_h, stride_w, padding, dilation_h, dilation_w, "T_conv2d");
 
     if (!has_bias) {
         return conv_out;

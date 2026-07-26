@@ -4,6 +4,8 @@
 
 #include "kxc/relay/type_infer.h"
 
+#include "kxc/te/topi/window.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -179,20 +181,6 @@ std::vector<int64_t> ReadPair(const Array<int64_t>& values, int64_t default_valu
     return {values[0], values[1]};
 }
 
-// 将紧凑 padding 展开为四边顺序。
-std::vector<int64_t> ReadPadding(const Array<int64_t>& values) {
-    if (values.empty()) {
-        return {0, 0, 0, 0};
-    }
-    if (values.size() == 1) {
-        return {values[0], values[0], values[0], values[0]};
-    }
-    if (values.size() == 2) {
-        return {values[0], values[1], values[0], values[1]};
-    }
-    return {values[0], values[1], values[2], values[3]};
-}
-
 // 推导卷积或池化窗口对应的单个输出维度。
 int64_t WindowOutputDim(const std::string& op_name, int64_t input, int64_t kernel,
                         int64_t pad_before, int64_t pad_after, int64_t stride,
@@ -204,14 +192,11 @@ int64_t WindowOutputDim(const std::string& op_name, int64_t input, int64_t kerne
         return -1;
     }
     const int64_t effective_kernel = dilation * (kernel - 1) + 1;
-    const int64_t numerator = input + pad_before + pad_after - effective_kernel;
-    if (numerator < 0) {
+    if (input + pad_before + pad_after - effective_kernel < 0) {
         throw std::runtime_error(op_name + " window is larger than input");
     }
-    if (ceil_mode) {
-        return (numerator + stride - 1) / stride + 1;
-    }
-    return numerator / stride + 1;
+    return te::topi::WindowOutputExtent<int64_t>(input, kernel, pad_before, pad_after, stride,
+                                                 dilation, ceil_mode);
 }
 
 // 推导二元逐元素算子的广播 shape 和结果 dtype。
@@ -434,7 +419,8 @@ Type Conv2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
 
     const std::vector<int64_t> strides = conv_attrs ? ReadPair(conv_attrs->strides, 1) : std::vector<int64_t>{1, 1};
     const std::vector<int64_t> dilation = conv_attrs ? ReadPair(conv_attrs->dilation, 1) : std::vector<int64_t>{1, 1};
-    const std::vector<int64_t> padding = conv_attrs ? ReadPadding(conv_attrs->padding) : std::vector<int64_t>{0, 0, 0, 0};
+    const te::topi::Padding2D padding =
+        conv_attrs ? te::topi::ExpandPadding2D(conv_attrs->padding) : te::topi::Padding2D{};
     const int64_t kh = conv_attrs && !conv_attrs->kernel_size.empty()
                            ? ReadVectorValue(conv_attrs->kernel_size, 0, weight->shape[2])
                            : weight->shape[2];
@@ -455,9 +441,9 @@ Type Conv2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
         }
     }
 
-    const int64_t oh = WindowOutputDim("nn_conv2d", data->shape[2], kh, padding[0], padding[2],
+    const int64_t oh = WindowOutputDim("nn_conv2d", data->shape[2], kh, padding.top, padding.bottom,
                                       strides[0], dilation[0], false);
-    const int64_t ow = WindowOutputDim("nn_conv2d", data->shape[3], kw, padding[1], padding[3],
+    const int64_t ow = WindowOutputDim("nn_conv2d", data->shape[3], kw, padding.left, padding.right,
                                       strides[1], dilation[1], false);
     const std::string dtype =
         conv_attrs ? AttrOutDTypeOrDefault(conv_attrs->out_dtype, data->dtype) : data->dtype;
@@ -481,14 +467,14 @@ Type Pool2DInferType(const Attrs& attrs, const Array<Type>& input_types) {
         pool_attrs ? ReadPair(pool_attrs->strides, 1) : std::vector<int64_t>{1, 1};
     const std::vector<int64_t> dilation =
         pool_attrs ? ReadPair(pool_attrs->dilation, 1) : std::vector<int64_t>{1, 1};
-    const std::vector<int64_t> padding =
-        pool_attrs ? ReadPadding(pool_attrs->padding) : std::vector<int64_t>{0, 0, 0, 0};
+    const te::topi::Padding2D padding =
+        pool_attrs ? te::topi::ExpandPadding2D(pool_attrs->padding) : te::topi::Padding2D{};
     const bool ceil_mode = pool_attrs && pool_attrs->ceil_mode;
 
-    const int64_t oh = WindowOutputDim("pool2d", data->shape[2], pool_size[0], padding[0],
-                                      padding[2], strides[0], dilation[0], ceil_mode);
-    const int64_t ow = WindowOutputDim("pool2d", data->shape[3], pool_size[1], padding[1],
-                                      padding[3], strides[1], dilation[1], ceil_mode);
+    const int64_t oh = WindowOutputDim("pool2d", data->shape[2], pool_size[0], padding.top,
+                                      padding.bottom, strides[0], dilation[0], ceil_mode);
+    const int64_t ow = WindowOutputDim("pool2d", data->shape[3], pool_size[1], padding.left,
+                                      padding.right, strides[1], dilation[1], ceil_mode);
     return MakeTensorType({data->shape[0], data->shape[1], oh, ow}, data->dtype);
 }
 

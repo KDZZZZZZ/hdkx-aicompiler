@@ -27,25 +27,6 @@ Array<int> Read2DPair(const Array<int64_t>& values, int default_value) {
     return out;
 }
 
-// 将紧凑 padding 属性展开为 TOPI 接受的二维或四维形式。
-Array<int> ReadPadding(const Array<int64_t>& values) {
-    Array<int> out;
-    if (values.size() >= 4) {
-        out.push_back(static_cast<int>(values[0]));
-        out.push_back(static_cast<int>(values[1]));
-        out.push_back(static_cast<int>(values[2]));
-        out.push_back(static_cast<int>(values[3]));
-    } else if (values.size() >= 2) {
-        out.push_back(static_cast<int>(values[0]));
-        out.push_back(static_cast<int>(values[1]));
-        out.push_back(static_cast<int>(values[0]));
-        out.push_back(static_cast<int>(values[1]));
-    } else {
-        out.push_back(0);
-        out.push_back(0);
-    }
-    return out;
-}
 }
 
 // 校验并生成最大池化的 TE 计算。
@@ -64,7 +45,7 @@ te::Tensor MaxPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
 
     Array<int> pool_size = Read2DPair(p->pool_size, 1);
     Array<int> strides = Read2DPair(p->strides, 1);
-    Array<int> padding = ReadPadding(p->padding);
+    te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
     return te::topi::pool2d(inputs[0], pool_size, strides, padding, "max", p->ceil_mode, "T_max_pool2d");
 }
 
@@ -84,7 +65,7 @@ te::Tensor AvgPool2DCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
 
     Array<int> pool_size = Read2DPair(p->pool_size, 1);
     Array<int> strides = Read2DPair(p->strides, 1);
-    Array<int> padding = ReadPadding(p->padding);
+    te::topi::Padding2D padding = te::topi::ExpandPadding2D(p->padding);
     return te::topi::pool2d(inputs[0], pool_size, strides, padding, "avg", p->ceil_mode, "T_avg_pool2d");
 }
 

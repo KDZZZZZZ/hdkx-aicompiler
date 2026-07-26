@@ -184,6 +184,42 @@ bool TestConvAndPoolOps() {
     return true;
 }
 
+// 非对称 padding 下，类型推导与 TE compute 必须给出同一个输出 shape。
+// 回归此前的缺陷：conv2d 的 TE compute 只读取 padding 的前两个分量并按对称
+// 处理，而类型推导按四边处理，导致合法模型在 unit lowering 的边界校验处
+// 抛出 "Unit TE output shape mismatch"。
+bool TestAsymmetricPaddingShapeAgreement() {
+    kxc::Var data("data", kxc::TensorType({1, 3, 8, 8}, "float32"));
+    kxc::Var weight("weight", kxc::TensorType({4, 3, 3, 3}, "float32"));
+    // padding = [top=1, left=1, bottom=2, right=2]
+    auto conv_attrs = kxc::relay::Conv2DAttrs::Create(
+        {1, 1}, {1, 1, 2, 2}, {1, 1}, 1, 4, {3, 3}, "NCHW", "OIHW", "", "");
+    kxc::Call conv(kxc::relay::Op::Get("nn_conv2d"), {data, weight}, conv_attrs);
+    kxc::Function conv_func({data, weight}, conv);
+    kxc::relay::InferTypePass(conv_func);
+    // H: (8 + 1 + 2 - 3) / 1 + 1 = 9，W 同理。对称处理会算成 8。
+    TEST_CHECK(CheckTensor(conv.checked_type(), {1, 4, 9, 9}, "float32"),
+               "asymmetric padding conv2d infer shape mismatch");
+    // lowering 会把 TE compute 的 shape 与推导出的 TensorType 逐轴比对，
+    // 两者不一致时抛出，因此这一步才是真正的回归点。
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(conv_func)->prim_func.defined(),
+               "asymmetric padding conv2d should lower to TIR");
+
+    // 非对称 padding 的池化走同一条公式。
+    auto pool_attrs =
+        kxc::relay::MaxPool2DAttrs::Create({2, 2}, {1, 0, 0, 1}, {1, 1}, {2, 2},
+                                           "NCHW", false);
+    kxc::Call pool(kxc::relay::Op::Get("nn_max_pool2d"), {data}, pool_attrs);
+    kxc::Function pool_func({data}, pool);
+    kxc::relay::InferTypePass(pool_func);
+    // H: (8 + 1 + 0 - 2) / 2 + 1 = 4，W: (8 + 0 + 1 - 2) / 2 + 1 = 4。
+    TEST_CHECK(CheckTensor(pool.checked_type(), {1, 3, 4, 4}, "float32"),
+               "asymmetric padding pool2d infer shape mismatch");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(pool_func)->prim_func.defined(),
+               "asymmetric padding pool2d should lower to TIR");
+    return true;
+}
+
 bool TestTransformAndReduceOps() {
     kxc::Var x("x", kxc::TensorType({2, 3, 4}, "float32"));
     kxc::Call reshape(kxc::relay::Op::Get("reshape"), {x},
@@ -968,6 +1004,7 @@ int main() {
         {"elementwise_broadcast", TestElementwiseBroadcast},
         {"matrix_and_dense_ops", TestMatrixAndDenseOps},
         {"conv_and_pool_ops", TestConvAndPoolOps},
+        {"asymmetric_padding_shape_agreement", TestAsymmetricPaddingShapeAgreement},
         {"transform_and_reduce_ops", TestTransformAndReduceOps},
         {"flatten_and_reshape_product_arithmetic", TestFlattenAndReshapeProductArithmetic},
         {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},

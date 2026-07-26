@@ -7,6 +7,7 @@
 #include "kxc/te/topi/broadcast.h"
 #include "kxc/te/topi/tags.h"
 #include "kxc/te/topi/utils.h"
+#include "kxc/te/topi/window.h"
 #include "kxc/support/container.h"
 #include <vector>
 #include <stdexcept>
@@ -33,11 +34,12 @@ Tensor matmul(const Tensor& A, const Tensor& B, std::string name = "matmul", std
 // Conv2D NCHW
 // Data: [N, C, H, W]
 // Weight: [O, C, KH, KW]
-// Stride: [sh, sw], Padding: [ph, pw], Dilation: [dh, dw]
-Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w, int pad_h, int pad_w, int dilation_h, int dilation_w, std::string name = "conv2d_nchw", std::string tag = kConv2d);
+// Stride: [sh, sw], Dilation: [dh, dw]
+// padding 已由调用方通过 ExpandPadding2D 展开为四边，允许非对称。
+Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w, Padding2D padding, int dilation_h, int dilation_w, std::string name = "conv2d_nchw", std::string tag = kConv2d);
 
 // Pool2D
-Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Array<int> padding,
+Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride, Padding2D padding,
                      std::string pool_type, bool ceil_mode = false, std::string name = "pool2d",
                      std::string tag = kPool);
 
