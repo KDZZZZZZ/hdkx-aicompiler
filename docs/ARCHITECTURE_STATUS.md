@@ -62,16 +62,25 @@ explicit `Compiler::Compile`, and a route miss never compiles implicitly.
 ### Data contracts
 
 The one-way rule constrains *control and execution* dependencies, not the
-naming of shared data types. `NDArray`, `DeviceStream`, and the types in
+naming of shared data types. `NDArray`, `DeviceStream`, `DeviceInfo` /
+`DeviceAttributes` in `include/kxc/runtime/device_info.h`, and the types in
 `include/kxc/runtime/kernel_abi.h` are neutral data contracts: compiler-tier
 code may name them, because the artifacts it produces must conform to them.
 `relay::Constant` holding a `runtime::NDArray` is therefore correct and not a
-layering violation.
+layering violation, and `target/target.h` including `runtime/device_info.h` is
+a legal downward edge under the declared module order (runtime sits below
+target).
 
 What the rule forbids is the reverse edge. Runtime must not include
 `kxc/compiler/`, `kxc/relay/`, `kxc/te/`, or `kxc/tir/` headers, and must not
 inspect Relay, lower primitives, or select variants. That direction is what
 keeps `RuntimeSession` a static plan executor.
+
+One deliberate carve-out exists: the compiled-module implementation under
+`src/runtime/internal/` names `Target` because published modules record the
+target they were built for. `tools/architecture/check_include_layers.py`
+models this as the `runtime_executable` seam; it is intentional, enforced, and
+not a module cycle.
 
 ## Deliberate limits
 
@@ -80,8 +89,36 @@ keeps `RuntimeSession` a static plan executor.
 - Compiler publication is single-target. Distributed runtime, CPU CCL,
   workers, sessions, and execution-plan data structures remain independent
   until they can launch real compiled modules with numerical coverage.
+  Disposition (2026-07-26): the module stays in the tree and in the default
+  build as roadmap work; issue #12 (real `CompiledKernel` invocation) is the
+  tracked next step, and reaching it is the revisit condition for this bullet.
 - CUDA and LLVM numerical claims require their enabled local toolchain and
   hardware; a CPU-only LLVM-disabled build does not establish those claims.
+
+## Source layout
+
+`src/compiler/` keeps only the orchestration surface at top level —
+`compiler.cc`, `compile_config.cc`, `pipeline_resolver.cc`, matching the
+public entry headers. Every other implementation lives in a domain
+subdirectory (`abi/`, `adaptive/`, `analysis/`, `cache/`, `control_flow/`,
+`graph/`, `identity/`, `lowering/`, `primitive/`); private headers stay in
+`internal/`. The three `shape_*.cc` files move to `shape/` once the in-flight
+shape PRs land.
+
+Cross-module includes between `src/` modules are src-rooted (the `src/`
+directory is a declared include root for module objects and test
+executables), e.g. `#include "runtime/internal/compiled_module_node.h"` —
+never `../` filesystem traversal. Same-module includes of `internal/` headers
+remain includer-relative. The remaining `../` cross-module includes in
+`adaptive/` and `shape_exact.cc` convert when the PRs touching those files
+merge.
+
+## Repository policy
+
+Large binary fixtures are generated or fetched, never committed.
+`resnet18.onnx` (45 MB) predates this rule and is permanently in history; it
+stays tracked, but it is the last of its kind. New fixtures follow the
+workbench precedent: commit the generator or fetch script, not the artifact.
 
 ## Verification
 
