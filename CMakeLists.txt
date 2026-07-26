@@ -168,6 +168,7 @@ set(KXC_EXPERIMENTAL_HEADERS
   include/kxc/compiler/experimental_identity.h
   include/kxc/compiler/adaptive_hot_swap_preparation.h
   include/kxc/compiler/restricted_symbolic_shape.h
+  include/kxc/compiler/shape_control.h
   include/kxc/compiler/shape_exact.h
   include/kxc/compiler/shape_specialization.h
   include/kxc/shape/shape.h
@@ -527,6 +528,7 @@ if(KXC_ENABLE_ADAPTIVE_HOT_SWAP)
 endif()
 if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
   list(APPEND KXC_COMPILER_SOURCES
+    src/compiler/shape/shape_control.cc
     src/compiler/shape/shape_exact.cc
     src/compiler/shape/shape_specialization.cc
     src/compiler/shape/restricted_symbolic_shape.cc)
@@ -591,6 +593,7 @@ else()
     kxc_configure_module_obj(kxc_experimental_identity_test_obj)
   endif()
   add_library(kxc_shape_experimental_test_obj OBJECT
+    src/compiler/shape/shape_control.cc
     src/compiler/shape/shape_exact.cc
     src/compiler/shape/shape_specialization.cc
     src/compiler/shape/restricted_symbolic_shape.cc)
@@ -795,24 +798,33 @@ add_custom_target(run_shape_system_test
 
 kxc_add_runtime_exe(shape_specialization_test
   test/shape_specialization_test.cpp)
+kxc_add_runtime_exe(shape_control_test test/shape_control_test.cpp)
 if(TARGET kxc_shape_experimental_test_obj)
-  target_sources(shape_specialization_test PRIVATE
-    $<TARGET_OBJECTS:kxc_shape_test_obj>
-    $<TARGET_OBJECTS:kxc_shape_experimental_test_obj>)
-  add_dependencies(shape_specialization_test kxc_shape_test_obj
-    kxc_shape_experimental_test_obj)
-  if(TARGET kxc_experimental_identity_test_obj)
-    target_sources(shape_specialization_test PRIVATE
-      $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>)
-    add_dependencies(shape_specialization_test
-      kxc_experimental_identity_test_obj)
-  endif()
+  foreach(_kxc_shape_core_test IN ITEMS shape_specialization_test
+      shape_control_test)
+    target_sources(${_kxc_shape_core_test} PRIVATE
+      $<TARGET_OBJECTS:kxc_shape_test_obj>
+      $<TARGET_OBJECTS:kxc_shape_experimental_test_obj>)
+    add_dependencies(${_kxc_shape_core_test} kxc_shape_test_obj
+      kxc_shape_experimental_test_obj)
+    if(TARGET kxc_experimental_identity_test_obj)
+      target_sources(${_kxc_shape_core_test} PRIVATE
+        $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>)
+      add_dependencies(${_kxc_shape_core_test}
+        kxc_experimental_identity_test_obj)
+    endif()
+  endforeach()
 endif()
 add_custom_target(run_shape_specialization_test
   COMMAND "$<TARGET_FILE:shape_specialization_test>"
   DEPENDS shape_specialization_test
   USES_TERMINAL
   COMMENT "Run shape_specialization_test")
+add_custom_target(run_shape_control_test
+  COMMAND "$<TARGET_FILE:shape_control_test>"
+  DEPENDS shape_control_test
+  USES_TERMINAL
+  COMMENT "Run shape_control_test")
 
 if(KXC_BUILD_RESNET18_IR_DUMP)
   kxc_add_runtime_exe(resnet18_ir_dump test/resnet18_ir_dump.cpp)
@@ -1270,6 +1282,7 @@ endfunction()
 
 kxc_add_ctest_if_target(shape_system_test "shape;cpu")
 kxc_add_ctest_if_target(shape_specialization_test "shape;cpu")
+kxc_add_ctest_if_target(shape_control_test "shape;shape-control;cpu")
 kxc_add_ctest_if_target(shape_production_exact_test "shape;shape-production;cpu")
 kxc_add_ctest_if_target(restricted_symbolic_shape_test "shape;shape-restricted-symbolic;cpu")
 kxc_add_ctest_if_target(shape_exact_dispatch_test "shape;shape-dispatch;cpu")

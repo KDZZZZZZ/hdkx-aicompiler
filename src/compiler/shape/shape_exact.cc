@@ -16,7 +16,6 @@
 #include "../internal/primitive_compiler.h"
 #include "../internal/relay_snapshot.h"
 #include "runtime/internal/memory_plan.h"
-#include "support/canonical.h"
 #include "support/hash.h"
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
@@ -162,85 +161,6 @@ shape::TensorShapeContract ValueContract(const internal::ValueInfo& value) {
 }
 
 std::string ValueName(int64_t id) { return "value." + std::to_string(id); }
-
-void AppendField(std::string* bytes, const std::string& name,
-                 const std::string& value) {
-    support::CanonicalBytesEncoder field;
-    field.Field(name, value);
-    *bytes += std::move(field).Take();
-}
-
-std::string IdsCanonical(const Array<int64_t>& ids) {
-    std::string result;
-    AppendField(&result, "count", std::to_string(ids.size()));
-    for (int64_t id : ids) AppendField(&result, "id", std::to_string(id));
-    return result;
-}
-
-std::string PartitionCanonical(const internal::PartitionedGraph& partitioned) {
-    std::string result;
-    AppendField(&result, "kind", "partition.static-per-call.v2");
-    AppendField(&result, "graph_inputs", IdsCanonical(partitioned.input_value_ids));
-    AppendField(&result, "graph_constants", IdsCanonical(partitioned.constant_value_ids));
-    AppendField(&result, "graph_outputs", IdsCanonical(partitioned.output_value_ids));
-    AppendField(&result, "unit_count", std::to_string(partitioned.units.size()));
-    for (const auto& unit : partitioned.units) {
-        std::string encoded;
-        AppendField(&encoded, "ordinal", std::to_string(unit.id));
-        AppendField(&encoded, "semantic", unit.semantic_key.canonical_bytes());
-        AppendField(&encoded, "inputs",
-                    IdsCanonical(unit.boundary_input_value_ids));
-        AppendField(&encoded, "outputs", IdsCanonical(unit.output_value_ids));
-        AppendField(&result, "unit", encoded);
-    }
-    return result;
-}
-
-std::string ConstantCanonical(const internal::ValueInfo& value) {
-    const auto* constant = value.source.As<ConstantNode>();
-    if (!constant || !constant->data.defined()) {
-        Reject("prepared constant value has no payload");
-    }
-    const runtime::NDArray data = constant->data;
-    std::string result;
-    AppendField(&result, "shape", IdsCanonical(data.shape()));
-    const DLDataType dtype = data.dtype();
-    AppendField(&result, "dtype_code", std::to_string(dtype.code));
-    AppendField(&result, "dtype_bits", std::to_string(dtype.bits));
-    AppendField(&result, "dtype_lanes", std::to_string(dtype.lanes));
-    std::string payload(data.NBytes(), '\0');
-    data.CopyToBytes(payload.empty() ? nullptr : payload.data(), payload.size());
-    AppendField(&result, "payload", payload);
-    return result;
-}
-
-std::string GraphCanonical(const internal::PartitionedGraph& partitioned) {
-    std::string result;
-    AppendField(&result, "kind", "prepared-static-graph-v1");
-    AppendField(&result, "partition", PartitionCanonical(partitioned));
-    AppendField(&result, "value_count",
-                std::to_string(partitioned.value_graph.values.size()));
-    for (const auto& value : partitioned.value_graph.values) {
-        std::string encoded;
-        AppendField(&encoded, "value_id", std::to_string(value.id));
-        AppendField(&encoded, "origin",
-                    std::to_string(static_cast<int>(value.origin)));
-        AppendField(&encoded, "checked_type", TypeToString(value.checked_type));
-        AppendField(&encoded, "device", value.device.ToString());
-        AppendField(&encoded, "source_locator", value.source_locator);
-        const bool is_graph_output =
-            std::find(partitioned.output_value_ids.begin(),
-                      partitioned.output_value_ids.end(),
-                      value.id) != partitioned.output_value_ids.end();
-        AppendField(&encoded, "is_graph_output",
-                    is_graph_output ? "1" : "0");
-        if (value.origin == internal::ValueOrigin::kConstant) {
-            AppendField(&encoded, "constant", ConstantCanonical(value));
-        }
-        AppendField(&result, "value", encoded);
-    }
-    return result;
-}
 
 shape::GraphTemplate BuildTemplate(
     const internal::PreparedCompilerGraph& prepared) {
@@ -538,7 +458,6 @@ const ShapeExactPreparationCounters& PreparedGraphTemplate::counters() const {
     return impl_->counters;
 }
 size_t PreparedGraphTemplate::unit_count() const { return graph_template().ordered_units().size(); }
-bool PreparedGraphTemplate::multi_profile_supported() const noexcept { return false; }
 
 ExactPlanVariant::ExactPlanVariant() = default;
 ExactPlanVariant::ExactPlanVariant(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}

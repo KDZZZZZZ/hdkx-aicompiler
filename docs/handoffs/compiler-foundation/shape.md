@@ -51,13 +51,18 @@ the route identity for a decision (one route family per prepared template),
 `VerifyCompiledExactVariant` binds a compiled graph to its authorizing
 decision by boundary shape/dtype and unit count, and `BindingsFromInputShapes`
 converts request-boundary input shapes into canonical bindings, failing closed
-on conflicting shared symbols, rank mismatch, or static-axis mismatch. The
-control plane is caller-owned (a plain map in
-`test/shape_exact_dispatch_test.cpp`); there is no production variant table,
-router, or dispatcher class, request-boundary lookups never compile, and a
-route miss is an explicit failure with primitive cache statistics unchanged.
-Publishing exact variants into the adaptive controller remains a non-goal
-until a real hot-swap need for a single shape variant appears.
+on conflicting shared symbols, rank mismatch, or static-axis mismatch.
+
+`shape_control.h` adds a source-tree-only, caller-owned finite publication
+surface. `BindExactInputShapes` converts named concrete logical shapes into a
+canonical binding through the existing `ShapeProgram`. `ExactProfileRouteTable`
+freezes one template and one primitive target fingerprint, requires callers
+to producer-validate explicitly compiled graphs, reconstructs the supplied
+`PlanAbiFingerprint`, and routes with `BuildStaticExactDispatchKey`. It owns
+artifact pins, rejects duplicate/overlapping exact inputs, and fails a miss
+without compiler/cache activity. It is not a production adaptive router:
+publishing into `AdaptiveHotSwapController` remains a non-goal until its
+separate revisit condition fires.
 
 Source-private module invocation contracts validate compiler/runtime-authored
 invocations. They do not consume restricted symbolic decisions or establish a

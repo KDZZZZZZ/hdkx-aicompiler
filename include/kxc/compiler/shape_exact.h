@@ -46,8 +46,9 @@ struct ShapeExactPreparationCounters final {
 
 // ---------------------------------------------------------------------------
 // PreparedGraphTemplate — 已冻结的图模板 + 计数
-// 用法：仅由 PrepareGraphTemplate 得到；再交给 Instantiate / Assemble
-// multi_profile_supported() 当前恒为 false（concrete-only）
+// 用法：仅由 PrepareGraphTemplate 得到；再交给 Instantiate / Assemble。
+// 每次 preparation 只接受其 concrete Relay 的 empty-binding profile；有限
+// 已编译 profile 的 caller-owned 路由属于独立 shape_control API。
 // ---------------------------------------------------------------------------
 class PreparedGraphTemplate final {
 public:
@@ -61,8 +62,6 @@ public:
     const specialization::GraphTemplate& graph_template() const;
     const ShapeExactPreparationCounters& counters() const;
     size_t unit_count() const;
-    // 非空绑定会被 Instantiate 拒绝，不静默当另一 profile
-    bool multi_profile_supported() const noexcept;
 
 private:
     struct Impl;
