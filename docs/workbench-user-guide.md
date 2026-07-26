@@ -37,6 +37,7 @@ npm run dev --prefix tools/workbench
 | `candidate` | 223 个事件，`fold_tuple_get_item` 被人为放慢 3.4× | 试对比功能 |
 | `raw-unanalyzed` | 同 baseline，但没跑过诊断分析 | 看"未分析"状态长什么样 |
 | `real-compile` | **22 个事件，编译器真实产物** | 看真实数据有多稀疏 |
+| `real-analyzed` | 同上，但跑过 Python 诊断分析 | 看真实诊断长什么样 |
 
 分析自己的数据点 **打开目录…**，选中任意 KXC profiling bundle 目录（就是含 `events.jsonl` 的那个）。文件通过浏览器的 File System Access API 读取，**不上传、不出本机**，顶栏会显示 🔒 本地。
 
@@ -130,6 +131,11 @@ Gather 里的图是**引用**，不是副本：
 试一下：Bundle 选 `candidate`，Baseline 选 `baseline`，加一个 **回归对比** Tile。`fold_tuple_get_item` 会明显标红。
 
 **对齐能力有边界**：Pass 维度按名字自动对齐，可靠；算子和 Kernel 维度**对不齐**，因为当前编译器没有填充 `op_name` / `kernel_symbol` 顶层字段（详见 §8）。
+
+**更重要的边界：单次运行不足以判定回归。** 实测同一份代码连跑两次，
+毫秒级 pass 的耗时能差出 1.4~1.9 倍。所以每侧只有一次观测时，
+差异一律标为「疑似」而非「回归」，绝对差小于 1ms 的直接判为噪声。
+要下结论，需要同一配置重复跑多次再比分位数。
 
 ---
 
@@ -302,7 +308,7 @@ PYTHONPATH=python python -m kxc_agent.cli analyze_bundle --bundle <bundle 路径
 | --- | --- |
 | 命令面板里的"搜索 Pass / Op / Kernel" | 占位项，标着「待实现」。请改用顶栏搜索框 |
 | 改键界面 | 无，只能改 `localStorage` |
-| IR Diff 配合样例 bundle | 从样例（HTTP）加载时不会预读 artifact，IR 内容为空；用 **打开目录…** 加载则正常 |
+| 真实推理数据 | 本机没有 LLVM 开发库，`op_numeric_llvm_test` 这类会真正执行的目标构建不了，因此 runtime / 缓存 / kernel 相关的图**尚未用真实执行数据验证过**，只验证过编译期真实数据 |
 | P1 / P2 图表 | 未实现（Execution DAG、内存曲线、Roofline、Occupancy 等），多数也缺数据支撑 |
 | 图表渲染的实机验证 | 尚未在真实浏览器中逐张确认过；测试里 ECharts 是被 mock 的。遇到空白图请反馈控制台输出 |
 

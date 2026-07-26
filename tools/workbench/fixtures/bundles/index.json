@@ -19,6 +19,12 @@
       "event_count": 222
     },
     {
+      "id": "real-analyzed",
+      "path": "bundles/real-analyzed",
+      "variant": "real",
+      "event_count": 22
+    },
+    {
       "id": "real-compile",
       "path": "bundles/real-compile",
       "variant": "real",

@@ -1,0 +1,1 @@
+{"trace_id":"trace-18c5c4f1b9b413a8-1","session_id":"session-18c5c4f1b9b4654c-2","event_count":22,"component_counts":{"lowering":"1","relay_pass":"10","relay_pipeline":"1","test":"1","tir_pass":"8","tir_pipeline":"1"}}

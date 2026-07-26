@@ -97,7 +97,26 @@ kxc-wb compare --baseline <目录> --candidate <目录> [--threshold 1.2] [--jso
 ```
 
 返回 KPI 对比 + 逐 Pass delta，每条带 `status`：
-`regression` / `improvement` / `stable` / `only_in_baseline` / `only_in_candidate`。
+`suspected_regression` / `suspected_improvement` / `stable` / `noise` /
+`only_in_baseline` / `only_in_candidate`。
+
+**为什么是 `suspected_`。** 用两份真实 bundle 实测过：同一份代码连跑两次，
+毫秒级 pass 的耗时能差出 1.4~1.9 倍、绝对差 2ms 以上，全是运行间抖动。
+每侧只有一次观测时无法区分噪声与真实回归，所以一律标 `suspected_`；
+只有当同名 pass 在两侧都有多次观测（`repeats > 1`）时才去掉前缀。
+`--min-delta-ms`（默认 1）以下的差异直接判 `noise`。
+
+**结果里的 `confidence` 字段 agent 必须转述**：
+
+```json
+"confidence": {
+  "level": "single_run",
+  "caveat": "每个 pass 在两侧各只观测到一次，因此所有差异只标为 suspected_*，不能当作结论……"
+}
+```
+
+要真正判定回归，需要同一配置重复运行多次后比较分位数——项目设计文档
+也明确要求「不用单次运行宣称性能回归或收益」。
 
 **结果里有个 `alignment` 字段，agent 必须读。** 它说明哪些维度可比：
 
@@ -117,6 +136,7 @@ kxc-wb compare --baseline <目录> --candidate <目录> [--threshold 1.2] [--jso
 
 ```bash
 kxc-wb ui state                                  # 先看这个
+kxc-wb ui load-bundle <样例 id>                  # 把数据装进页面
 kxc-wb ui new-column --title "回归定位" --width 1/2
 kxc-wb ui add-tile pass_ranking [--column-id col-3]
 kxc-wb ui drill --kind pass --value fold_tuple_get_item [--as-tab]
@@ -160,9 +180,10 @@ kxc-wb compare --baseline fixtures/bundles/baseline \
 # 2. 摆证据。先看现状，别猜 id
 kxc-wb ui state --json
 
-# 3. 绑定两个 bundle 进入对比
-kxc-wb ui set-bundle   --bundle-id url:/bundles/candidate
-kxc-wb ui set-baseline --bundle-id url:/bundles/baseline
+# 3. 把两份数据装进页面并进入对比
+kxc-wb ui load-bundle candidate
+kxc-wb ui load-bundle baseline
+kxc-wb ui set-baseline --bundle-id url:bundles/baseline
 
 # 4. 建一列放主证据
 kxc-wb ui new-column --title "回归：fold_tuple_get_item" --width 1/2 --json
@@ -176,9 +197,10 @@ kxc-wb ui add-tile shape_cache_heatmap --json
 kxc-wb ui gather <tileId1> <tileId2>
 ```
 
-然后向用户报告时，**同时说清两件事**：Pass 回归多花约 3.75 ms；
-缓存多出的 7 次未命中每次触发一轮同步编译（约 12 ms），量级更大。
-并注明算子维度无法对齐，所以没有给出算子级结论。
+然后向用户报告时，**同时说清三件事**：
+1. Pass 侧多花约 3.75 ms，但这是单次运行的观测，只能算线索；
+2. 缓存多出的 7 次未命中每次触发一轮同步编译（约 12 ms），量级更大；
+3. 算子维度无法对齐，所以没有给出算子级结论。
 
 ---
 

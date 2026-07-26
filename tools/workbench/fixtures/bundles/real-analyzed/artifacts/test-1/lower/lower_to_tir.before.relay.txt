@@ -1,0 +1,9 @@
+Function(params=2) : Tensor[4; float32]
+  param[0]=x
+  param[1]=y
+  body:
+    Call(op=add, args=2) : Tensor[4; float32]
+      arg[0]:
+        Var(x) : Tensor[4; float32]
+      arg[1]:
+        Var(y) : Tensor[4; float32]
