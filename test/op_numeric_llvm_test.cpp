@@ -907,7 +907,7 @@ void TestModelDecodeExternalKV() {
     kxc::Function func({query, external_key_transposed, external_value}, context);
 
     const std::vector<float> query_data = {1, 0};
-    const std::vector<float> external_key_data = {1, 0, 0, 1, -1, 0};
+    const std::vector<float> external_key_data = {1, 0, -1, 0, 1, 0};
     const std::vector<float> external_value_data = {1, 2, 3, 4, 5, 6};
     std::vector<float> out(2, 0.0f);
     CompileAndRun("model_decode_external_kv", func,

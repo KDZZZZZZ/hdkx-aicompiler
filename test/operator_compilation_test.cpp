@@ -417,17 +417,17 @@ bool TestOperatorGraphsExecuteNumerically() {
         const auto artifacts = api::Compiler::Compile(
             fixtures[fixture_index].function,
             api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
-        TEST_CHECK(artifacts.module.entry_count() ==
+        TEST_CHECK(artifacts.module().entry_count() ==
                            fixtures[fixture_index].expected_compute_calls &&
-                       artifacts.plan.calls().size() ==
+                       artifacts.plan().calls().size() ==
                            fixtures[fixture_index].expected_compute_calls,
                    std::string(fixtures[fixture_index].name) +
                        " compiled entry/call cardinality mismatch");
-        runtime::RuntimeSession session(artifacts.module, artifacts.plan);
+        runtime::RuntimeSession session(artifacts.module(), artifacts.plan());
         Array<runtime::NDArray> inputs;
         inputs.push_back(FilledTensor(1.0f));
         inputs.push_back(FilledTensor(2.0f));
-        if (artifacts.plan.input_value_ids().size() == 3) {
+        if (artifacts.plan().input_value_ids().size() == 3) {
             inputs.push_back(FilledTensor(3.0f));
         }
         const Array<runtime::NDArray> outputs = session.Run(inputs);
@@ -455,10 +455,10 @@ bool TestSharedConstantExecutesNumerically() {
     Function function({input}, Multiply(first, constant));
     const auto artifacts = api::Compiler::Compile(
         function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
-    runtime::RuntimeSession session(artifacts.module, artifacts.plan);
+    runtime::RuntimeSession session(artifacts.module(), artifacts.plan());
     const Array<runtime::NDArray> outputs = session.Run({FilledTensor(2.0f)});
-    TEST_CHECK(artifacts.module.constants().size() == 1 &&
-                   artifacts.plan.constant_value_ids().size() == 1 &&
+    TEST_CHECK(artifacts.module().constants().size() == 1 &&
+                   artifacts.plan().constant_value_ids().size() == 1 &&
                    outputs.size() == 1 && TensorEquals(outputs[0], 15.0f),
                "shared constant must remain one value and feed both kernels");
     return true;
@@ -471,9 +471,9 @@ bool TestMultiOutputExecutesNumerically() {
     Function function({input}, Call(MultiOutputTestOp(), {input}));
     const auto artifacts = api::Compiler::Compile(
         function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
-    runtime::RuntimeSession session(artifacts.module, artifacts.plan);
+    runtime::RuntimeSession session(artifacts.module(), artifacts.plan());
     const Array<runtime::NDArray> outputs = session.Run({FilledTensor(5.0f)});
-    TEST_CHECK(artifacts.module.entry_count() == 1 && outputs.size() == 2 &&
+    TEST_CHECK(artifacts.module().entry_count() == 1 && outputs.size() == 2 &&
                    TensorEquals(outputs[0], 5.0f) &&
                    TensorEquals(outputs[1], 6.0f),
                "one primitive with two outputs must preserve numeric output order");

@@ -3,6 +3,7 @@
  */
 
 #include "../internal/kernel_abi_builder.h"
+#include "../internal/te_to_tir.h"
 
 #include <limits>
 #include <stdexcept>
@@ -67,11 +68,13 @@ uint64_t NaturalAlignment(DLDataType dtype) {
 Array<int64_t> ShapeFromBuffer(const tir::Buffer& buffer, KernelArgRole role) {
   Array<int64_t> shape;
   for (const auto& extent : buffer->shape) {
-    if (const auto* integer = extent.As<tir::IntImmNode>()) {
-      if (integer->value < 0) {
+    int64_t static_extent = 0;
+    if (relay::internal::EvaluateStaticLoweringInt64(extent,
+                                                     &static_extent)) {
+      if (static_extent < 0) {
         throw std::invalid_argument("PrimFunc Buffer shape contains a negative extent");
       }
-      shape.push_back(integer->value);
+      shape.push_back(static_extent);
       continue;
     }
     const auto* variable = extent.As<tir::VarNode>();
