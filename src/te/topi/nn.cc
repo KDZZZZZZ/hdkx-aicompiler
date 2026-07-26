@@ -156,8 +156,10 @@ Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, AxisPair2D strides,
             tir::Var w = indices[3];
 
             // Input indices
-            PrimExpr h_in = h * strides.h + rh * dilation.h - padding.top;
-            PrimExpr w_in = w * strides.w + rw * dilation.w - padding.left;
+            PrimExpr h_in = PrimExpr(strides.h) * h + PrimExpr(dilation.h) * rh -
+                            padding.top;
+            PrimExpr w_in = PrimExpr(strides.w) * w + PrimExpr(dilation.w) * rw -
+                            padding.left;
 
             // Pad handling (PaddedInput)
             // Simplified: Assume Select/If logic or data is already padded.
@@ -175,6 +177,14 @@ Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, AxisPair2D strides,
         name,
         tag
     );
+}
+
+Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w,
+                   Padding2D padding, int dilation_h, int dilation_w,
+                   std::string name, std::string tag) {
+    return conv2d_nchw(data, kernel, AxisPair2D{stride_h, stride_w}, padding,
+                       AxisPair2D{dilation_h, dilation_w}, std::move(name),
+                       std::move(tag));
 }
 
 Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w,
@@ -224,8 +234,10 @@ Tensor pool2d(const Tensor& data, AxisPair2D kernel_size, AxisPair2D stride,
                 tir::Var h = indices[2];
                 tir::Var w = indices[3];
 
-                PrimExpr h_in = h * SH + rh * DH - padding.top;
-                PrimExpr w_in = w * SW + rw * DW - padding.left;
+                PrimExpr h_in =
+                    PrimExpr(SH) * h + PrimExpr(DH) * rh - padding.top;
+                PrimExpr w_in =
+                    PrimExpr(SW) * w + PrimExpr(DW) * rw - padding.left;
 
                 PrimExpr in_val = Select(
                     (h_in >= 0) && (h_in < H) && (w_in >= 0) && (w_in < W),
@@ -245,8 +257,8 @@ Tensor pool2d(const Tensor& data, AxisPair2D kernel_size, AxisPair2D stride,
             tir::Var h = indices[2];
             tir::Var w = indices[3];
 
-            PrimExpr h_in = h * SH + rh * DH - padding.top;
-            PrimExpr w_in = w * SW + rw * DW - padding.left;
+            PrimExpr h_in = PrimExpr(SH) * h + PrimExpr(DH) * rh - padding.top;
+            PrimExpr w_in = PrimExpr(SW) * w + PrimExpr(DW) * rw - padding.left;
 
             PrimExpr in_val = Select(
                 (h_in >= 0) && (h_in < H) && (w_in >= 0) && (w_in < W),
@@ -264,6 +276,24 @@ Tensor pool2d(const Tensor& data, AxisPair2D kernel_size, AxisPair2D stride,
         },
         name,
         tag);
+}
+
+Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride,
+              Padding2D padding, Array<int> dilation, std::string pool_type,
+              bool ceil_mode, std::string name, std::string tag) {
+    if (kernel_size.size() < 2) {
+        throw std::runtime_error("topi::pool2d expects kernel_size with at least 2 elements");
+    }
+    if (stride.size() < 2) {
+        throw std::runtime_error("topi::pool2d expects stride with at least 2 elements");
+    }
+    if (dilation.size() < 2) {
+        throw std::runtime_error("topi::pool2d expects dilation with at least 2 elements");
+    }
+    return pool2d(data, AxisPair2D{kernel_size[0], kernel_size[1]},
+                  AxisPair2D{stride[0], stride[1]}, padding,
+                  AxisPair2D{dilation[0], dilation[1]}, std::move(pool_type),
+                  ceil_mode, std::move(name), std::move(tag));
 }
 
 Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride,

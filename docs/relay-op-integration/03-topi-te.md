@@ -99,6 +99,8 @@ TOPI 是构造 TE compute 的 helper 集合。它是“可用于搭算子”的�
 
 旧的 TOPI 调用签名仍作为兼容重载保留：`conv2d_nchw` 的两个 padding 整数继续按
 高、宽方向对称展开；`pool2d` 的 `Array<int>` 形式继续默认 `dilation={1,1}`。
+此前使用 `Padding2D` 但仍分别传递 int/`Array<int>` stride、dilation 的过渡签名也
+保留为转发重载。
 新代码应先用上述共享 helper 规范化属性，再调用 `AxisPair2D` / `Padding2D` 主接口，
 从而保留 Relay 的 `int64_t` 属性精度并支持非对称 padding 与显式 dilation。
 

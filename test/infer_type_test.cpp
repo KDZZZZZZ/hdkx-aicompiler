@@ -158,16 +158,27 @@ bool TestMatrixAndDenseOps() {
 }
 
 bool TestTopiWindowApiCompatibility() {
-    using LegacyConv2D = kxc::te::Tensor (*)(
+    using HistoricConv2D = kxc::te::Tensor (*)(
         const kxc::te::Tensor&, const kxc::te::Tensor&, int, int, int, int, int, int,
         std::string, std::string);
-    using LegacyPool2D = kxc::te::Tensor (*)(
+    using TransitionalConv2D = kxc::te::Tensor (*)(
+        const kxc::te::Tensor&, const kxc::te::Tensor&, int, int,
+        kxc::te::topi::Padding2D, int, int, std::string, std::string);
+    using HistoricPool2D = kxc::te::Tensor (*)(
         const kxc::te::Tensor&, kxc::Array<int>, kxc::Array<int>, kxc::Array<int>,
         std::string, bool, std::string, std::string);
-    const auto legacy_conv =
-        static_cast<LegacyConv2D>(&kxc::te::topi::conv2d_nchw);
-    const auto legacy_pool =
-        static_cast<LegacyPool2D>(&kxc::te::topi::pool2d);
+    using TransitionalPool2D = kxc::te::Tensor (*)(
+        const kxc::te::Tensor&, kxc::Array<int>, kxc::Array<int>,
+        kxc::te::topi::Padding2D, kxc::Array<int>, std::string, bool, std::string,
+        std::string);
+    const auto historic_conv =
+        static_cast<HistoricConv2D>(&kxc::te::topi::conv2d_nchw);
+    const auto transitional_conv =
+        static_cast<TransitionalConv2D>(&kxc::te::topi::conv2d_nchw);
+    const auto historic_pool =
+        static_cast<HistoricPool2D>(&kxc::te::topi::pool2d);
+    const auto transitional_pool =
+        static_cast<TransitionalPool2D>(&kxc::te::topi::pool2d);
 
     const kxc::te::Tensor data = kxc::te::placeholder(
         {kxc::tir::IntImm(1), kxc::tir::IntImm(1), kxc::tir::IntImm(4),
@@ -177,16 +188,31 @@ bool TestTopiWindowApiCompatibility() {
         {kxc::tir::IntImm(1), kxc::tir::IntImm(1), kxc::tir::IntImm(2),
          kxc::tir::IntImm(2)},
         kxc::tir::DataType::Float(32), "legacy_window_weight");
-    const kxc::te::Tensor conv =
-        legacy_conv(data, weight, 1, 1, 1, 0, 1, 1, "legacy_conv", kxc::te::topi::kConv2d);
-    const kxc::te::Tensor pool =
-        legacy_pool(data, {2, 2}, {2, 2}, {1, 0}, "max", false, "legacy_pool",
-                    kxc::te::topi::kPool);
+    const kxc::te::Tensor historic_conv_result = historic_conv(
+        data, weight, 1, 1, 1, 0, 1, 1, "historic_conv", kxc::te::topi::kConv2d);
+    const kxc::te::Tensor transitional_conv_result = transitional_conv(
+        data, weight, 1, 1, kxc::te::topi::Padding2D{1, 0, 1, 0}, 1, 1,
+        "transitional_conv", kxc::te::topi::kConv2d);
+    const kxc::te::Tensor historic_pool_result = historic_pool(
+        data, {2, 2}, {2, 2}, {1, 0}, "max", false, "historic_pool",
+        kxc::te::topi::kPool);
+    const kxc::te::Tensor transitional_pool_result = transitional_pool(
+        data, {2, 2}, {2, 2}, kxc::te::topi::Padding2D{1, 0, 1, 0}, {2, 2},
+        "max", false, "transitional_pool", kxc::te::topi::kPool);
 
-    TEST_CHECK(conv.defined() && conv->shape.size() == 4,
-               "legacy conv2d signature must remain callable and produce a tensor");
-    TEST_CHECK(pool.defined() && pool->shape.size() == 4,
-               "legacy pool2d signature must remain callable and produce a tensor");
+    for (const kxc::te::Tensor& result :
+         {historic_conv_result, transitional_conv_result, historic_pool_result,
+          transitional_pool_result}) {
+        TEST_CHECK(result.defined() && result->shape.size() == 4,
+                   "each retained TOPI window signature must produce a rank-4 tensor");
+    }
+    TEST_CHECK(
+        ExpectThrow([&] {
+            transitional_pool(data, {2}, {2}, kxc::te::topi::Padding2D{}, {1},
+                              "max", false, "invalid_transitional_pool",
+                              kxc::te::topi::kPool);
+        }),
+        "transitional pool overload must preserve its two-element input requirement");
     return true;
 }
 

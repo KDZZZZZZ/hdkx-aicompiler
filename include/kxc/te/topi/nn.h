@@ -40,7 +40,12 @@ Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, AxisPair2D strides,
                    Padding2D padding, AxisPair2D dilation,
                    std::string name = "conv2d_nchw", std::string tag = kConv2d);
 
-// Legacy symmetric-padding overload retained for source and binary compatibility.
+// Transitional expanded-padding overload retained for compatibility.
+Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w,
+                   Padding2D padding, int dilation_h, int dilation_w,
+                   std::string name = "conv2d_nchw", std::string tag = kConv2d);
+
+// Historic symmetric-padding overload retained for source and binary compatibility.
 Tensor conv2d_nchw(const Tensor& data, const Tensor& kernel, int stride_h, int stride_w,
                    int pad_h, int pad_w, int dilation_h, int dilation_w,
                    std::string name = "conv2d_nchw", std::string tag = kConv2d);
@@ -53,7 +58,13 @@ Tensor pool2d(const Tensor& data, AxisPair2D kernel_size, AxisPair2D stride,
               bool ceil_mode = false, std::string name = "pool2d",
               std::string tag = kPool);
 
-// Legacy raw-padding/default-dilation overload retained for compatibility.
+// Transitional expanded-padding/dilation overload retained for compatibility.
+Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride,
+              Padding2D padding, Array<int> dilation, std::string pool_type,
+              bool ceil_mode = false, std::string name = "pool2d",
+              std::string tag = kPool);
+
+// Historic raw-padding/default-dilation overload retained for compatibility.
 Tensor pool2d(const Tensor& data, Array<int> kernel_size, Array<int> stride,
               Array<int> padding, std::string pool_type, bool ceil_mode = false,
               std::string name = "pool2d", std::string tag = kPool);
