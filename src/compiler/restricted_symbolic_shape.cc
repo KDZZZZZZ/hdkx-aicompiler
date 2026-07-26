@@ -408,6 +408,22 @@ void RequireDecisionOwnership(
     }
 }
 
+// ShapeProgram::outputs() 按 BuildTemplate 语义收录全部计算值（含被后续
+// unit 消费的中间值）；图输出是其中未被任何 unit 消费的那些。
+std::vector<shape::NamedTensorContract> GraphOutputs(
+    const shape::GraphTemplate& graph) {
+    std::set<std::string> consumed;
+    for (const auto& unit : graph.ordered_units()) {
+        consumed.insert(unit.input_value_names.begin(),
+                        unit.input_value_names.end());
+    }
+    std::vector<shape::NamedTensorContract> outputs;
+    for (const auto& value : graph.shape_program().outputs()) {
+        if (!consumed.count(value.name)) outputs.push_back(value);
+    }
+    return outputs;
+}
+
 }  // namespace
 
 Function RestrictedSymbolicShapeAdapter::MaterializeExactFunction(
@@ -422,7 +438,8 @@ Function RestrictedSymbolicShapeAdapter::MaterializeExactFunction(
     const shape::ExactShapeProfile& profile =
         decision.impl_->exact_oracle.profile();
     const auto& program = prepared.impl_->graph.shape_program();
-    if (program.outputs().size() != 1) {
+    const auto graph_outputs = GraphOutputs(prepared.impl_->graph);
+    if (graph_outputs.size() != 1) {
         Reject("restricted template must have exactly one graph output");
     }
     // 参数：决策求值后的 concrete shape + representative dtype 快照。
@@ -457,7 +474,7 @@ Function RestrictedSymbolicShapeAdapter::MaterializeExactFunction(
             Reject("frozen unit output wiring is not a single-assignment tree");
         }
     }
-    const auto output = values.find(program.outputs()[0].name);
+    const auto output = values.find(graph_outputs[0].name);
     if (output == values.end()) Reject("graph output was never produced");
     return Function(params, output->second);
 }
@@ -532,7 +549,8 @@ void RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
             }
         };
     check_boundary(plan.input_value_ids(), program.inputs(), "input");
-    check_boundary(plan.output_value_ids(), program.outputs(), "output");
+    check_boundary(plan.output_value_ids(), GraphOutputs(prepared.impl_->graph),
+                   "output");
     for (size_t i = 0; i < plan.input_value_ids().size(); ++i) {
         const DLDataType expected =
             runtime::DataTypeFromString(prepared.impl_->input_dtypes[i]);
@@ -543,6 +561,17 @@ void RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
                 "restricted exact variant: input dtype differs from the "
                 "representative");
         }
+    }
+    // 语义绑定：边界一致不构成授权——同 shape/dtype/call 数但算子不同的
+    // 图（如 sqrt 换 relu）必须被拒绝。产物身份必须等于按本决策物化出的
+    // concrete Function 的语义身份；类型（含输出 dtype）是身份的一部分。
+    const Function expected_function =
+        MaterializeExactFunction(prepared, decision);
+    if (!(compiled.graph_semantic_key() ==
+          Compiler::BuildGraphSemanticKey(expected_function))) {
+        throw std::runtime_error(
+            "restricted exact variant: compiled graph semantic identity does "
+            "not match the decision's materialized function");
     }
 }
 
