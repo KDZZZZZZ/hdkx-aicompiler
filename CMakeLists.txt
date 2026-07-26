@@ -490,6 +490,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/analysis/logical_value.cc
   src/compiler/analysis/primitive_unit.cc
   src/compiler/analysis/relay_program.cc
+  src/compiler/analysis/relay_snapshot.cc
   src/compiler/analysis/resolved_relay_call.cc
   src/compiler/cache/primitive_cache.cc
   src/compiler/compile_config.cc
@@ -525,9 +526,9 @@ if(KXC_ENABLE_ADAPTIVE_HOT_SWAP)
 endif()
 if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
   list(APPEND KXC_COMPILER_SOURCES
-    src/compiler/shape_exact.cc
-    src/compiler/shape_specialization.cc
-    src/compiler/restricted_symbolic_shape.cc)
+    src/compiler/shape/shape_exact.cc
+    src/compiler/shape/shape_specialization.cc
+    src/compiler/shape/restricted_symbolic_shape.cc)
 endif()
 
 set(KXC_CODEGEN_LLVM_SOURCES "")
@@ -589,9 +590,9 @@ else()
     kxc_configure_module_obj(kxc_experimental_identity_test_obj)
   endif()
   add_library(kxc_shape_experimental_test_obj OBJECT
-    src/compiler/shape_exact.cc
-    src/compiler/shape_specialization.cc
-    src/compiler/restricted_symbolic_shape.cc)
+    src/compiler/shape/shape_exact.cc
+    src/compiler/shape/shape_specialization.cc
+    src/compiler/shape/restricted_symbolic_shape.cc)
   kxc_configure_module_obj(kxc_shape_experimental_test_obj)
 endif()
 

@@ -101,17 +101,20 @@ not a module cycle.
 `compiler.cc`, `compile_config.cc`, `pipeline_resolver.cc`, matching the
 public entry headers. Every other implementation lives in a domain
 subdirectory (`abi/`, `adaptive/`, `analysis/`, `cache/`, `control_flow/`,
-`graph/`, `identity/`, `lowering/`, `primitive/`); private headers stay in
-`internal/`. The three `shape_*.cc` files move to `shape/` once the in-flight
-shape PRs land.
+`graph/`, `identity/`, `lowering/`, `primitive/`, `shape/`); private headers
+stay in `internal/`.
 
 Cross-module includes between `src/` modules are src-rooted (the `src/`
 directory is a declared include root for module objects and test
 executables), e.g. `#include "runtime/internal/compiled_module_node.h"` —
 never `../` filesystem traversal. Same-module includes of `internal/` headers
-remain includer-relative. The remaining `../` cross-module includes in
-`adaptive/` and `shape_exact.cc` convert when the PRs touching those files
-merge.
+remain includer-relative.
+
+Contract wellformedness has one implementation: `shape::ContractDefect` /
+`shape::IsExactContract` in `include/kxc/shape/shape.h`. The specialization
+verifier and both shape adapters delegate to it; do not write another copy.
+Relay AST snapshot cloning lives in `src/compiler/analysis/relay_snapshot.cc`
+behind `src/compiler/internal/relay_snapshot.h`, not in the shape layer.
 
 ## Repository policy
 

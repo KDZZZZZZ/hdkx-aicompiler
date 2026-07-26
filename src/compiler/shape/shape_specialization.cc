@@ -40,25 +40,9 @@ std::string Hex(const std::string& bytes) {
   return result;
 }
 
-bool IsExactContract(const ConcreteTensorShapeContract& contract) {
-  return contract.logical == contract.physical && contract.logical == contract.valid;
-}
-
 void VerifyConcreteContract(const ConcreteTensorShapeContract& contract, bool require_exact) {
-  if (contract.logical.size() != contract.physical.size() ||
-      contract.logical.size() != contract.valid.size() ||
-      (!contract.axis_names.empty() && contract.axis_names.size() != contract.logical.size())) {
-    Invalid("concrete tensor contract rank mismatch");
-  }
-  for (size_t i = 0; i < contract.logical.size(); ++i) {
-    if (contract.logical[i] < 0 || contract.physical[i] < 0 ||
-        contract.valid[i] < 0) {
-      Invalid("concrete tensor contract contains a negative dimension");
-    }
-    if (contract.valid[i] > contract.logical[i] || contract.logical[i] > contract.physical[i]) {
-      Invalid("concrete tensor contract violates valid <= logical <= physical");
-    }
-  }
+  // 良构性与 exact 判定委托 shape 层的唯一实现（ADL 经由契约类型）。
+  if (const char* defect = ContractDefect(contract)) Invalid(defect);
   if (require_exact && !IsExactContract(contract)) {
     Invalid("exact specialization requires logical == physical == valid");
   }

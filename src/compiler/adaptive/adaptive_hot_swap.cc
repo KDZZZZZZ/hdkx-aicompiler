@@ -17,7 +17,7 @@
 #include "../internal/execution_contract.h"
 #include "../internal/primitive_cache.h"
 #include "../internal/primitive_compiler.h"
-#include "../../runtime/internal/compiled_module_node.h"
+#include "runtime/internal/compiled_module_node.h"
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
 #include "kxc/relay/visitor.h"
