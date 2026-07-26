@@ -2,7 +2,7 @@
 
 > State: default-off experimental; not production-ready.
 
-## v2 lifecycle
+## Hot-swap lifecycle
 
 `KXC_ENABLE_ADAPTIVE_HOT_SWAP` is the only adaptive gate and the sole
 lifecycle authority. Its internal preparation stage snapshots the compiler

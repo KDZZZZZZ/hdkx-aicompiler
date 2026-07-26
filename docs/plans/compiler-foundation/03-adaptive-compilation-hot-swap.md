@@ -2,11 +2,11 @@
 
 ## Status
 
-`KXC_ENABLE_ADAPTIVE_HOT_SWAP_V2` is default OFF and is the only adaptive
-lifecycle gate. Preparation is an internal v2 stage, not a separately enabled
-feature.
+`KXC_ENABLE_ADAPTIVE_HOT_SWAP` is default OFF and is the only adaptive
+lifecycle gate. Preparation is an internal hot-swap stage, not a separately
+enabled feature.
 
-## v2 authority
+## Hot-swap authority
 
 `AdaptiveHotSwapController` owns queueing, singleflight, cancellation and
 deadline isolation, retry/negative-cache policy, generation issuance,
@@ -26,13 +26,13 @@ pins/session alive.
 ## Build/test gate
 
 ```bash
-cmake -S . -B out/adaptive-v2-on -G Ninja \
+cmake -S . -B out/adaptive-on -G Ninja \
   -DKXC_ENABLE_CUDA=OFF -DKXC_ENABLE_LLVM=OFF \
-  -DKXC_ENABLE_ADAPTIVE_HOT_SWAP_V2=ON
-cmake --build out/adaptive-v2-on --target run_adaptive_hot_swap_v2_tests
+  -DKXC_ENABLE_ADAPTIVE_HOT_SWAP=ON
+cmake --build out/adaptive-on --target run_adaptive_hot_swap_tests
 ```
 
-The v2 suite verifies external lease retention after route eviction and
+The hot-swap suite verifies external lease retention after route eviction and
 controller destruction. TSan, CUDA pending completion, native/device-resident
 bytes, authentication/attestation, and numeric-health claims require separate
 passing environments and are not implied here.

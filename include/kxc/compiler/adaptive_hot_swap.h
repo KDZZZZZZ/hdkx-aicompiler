@@ -25,7 +25,7 @@
 #include "kxc/compiler/adaptive_hot_swap_preparation.h"
 
 // =============================================================================
-// 轨 03 W3 — AdaptiveHotSwapController v2（default-OFF，依赖 preparation contracts）
+// 轨 03 W3 — AdaptiveHotSwapController（default-OFF，依赖 preparation contracts）
 // -----------------------------------------------------------------------------
 // 进程内 experimental 控制面；内建 Generation/Health authority 是测试权威，
 // 不是认证/attestation。CMake：KXC_ENABLE_ADAPTIVE_HOT_SWAP=ON
