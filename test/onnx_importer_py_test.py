@@ -167,7 +167,9 @@ def test_output_unresolved_dimension_error_includes_value_name_and_dim_param():
 
 @pytest.mark.parametrize("default_batch", [0, -1])
 def test_explicit_default_batch_must_be_positive(default_batch):
-    with pytest.raises(ValueError, match="default_batch must be positive"):
+    with pytest.raises(
+        ValueError, match=r"default_batch must be a positive integer"
+    ):
         import_onnx_model(_model_with_io_shapes(["batch", 3]), default_batch=default_batch)
 
 
@@ -922,9 +924,9 @@ def test_slice_steps_can_use_an_empty_optional_axes_slot():
         ({"starts": (0,), "ends": (1, 2), "axes": (0,), "steps": (1,)}, "lengths must match"),
         ({"starts": (0, 0), "ends": (1, 1), "axes": (0, 0), "steps": (1, 1)}, "unique and in range"),
         ({"axes": (2,)}, "unique and in range"),
-        ({"steps": (0,)}, "equal exactly +1"),
-        ({"steps": (-1,)}, "equal exactly +1"),
-        ({"steps": (2,)}, "equal exactly +1"),
+        ({"steps": (0,)}, r"equal exactly \+1"),
+        ({"steps": (-1,)}, r"equal exactly \+1"),
+        ({"steps": (2,)}, r"equal exactly \+1"),
     ],
 )
 def test_slice_rejects_exact_static_contract_violations(kwargs, message):
