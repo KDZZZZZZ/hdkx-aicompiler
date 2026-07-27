@@ -22,6 +22,7 @@ namespace kxc::api::internal {
 struct CompiledPrimitive final {
     PrimitiveUnitId unit_id{-1};
     tir::PrimFunc diagnostic_tir;
+    codegen::KernelSignature current_signature;
     PrimitiveArtifactPin pin;
     bool cache_hit{false};
 };

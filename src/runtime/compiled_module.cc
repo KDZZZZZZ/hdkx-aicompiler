@@ -8,11 +8,13 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "internal/compiled_module_node.h"
 #include "internal/kernel_argument_validation.h"
@@ -127,9 +129,20 @@ std::unordered_map<std::string, size_t> ValidateConstants(
         }
         ValidateConstantValue(key, item.second, constants.at(key));
     }
-    if (constants.size() != required_specs.size()) {
-        throw std::invalid_argument(
-            "CompiledModule constant table contains unexpected keys");
+    std::vector<std::string> unexpected_keys;
+    for (const auto& item : constants) {
+        const std::string key = std::string(item.first);
+        if (!required_specs.count(key)) unexpected_keys.push_back(key);
+    }
+    if (!unexpected_keys.empty()) {
+        std::sort(unexpected_keys.begin(), unexpected_keys.end());
+        std::ostringstream message;
+        message << "CompiledModule constant table contains unexpected keys: ";
+        for (std::size_t index = 0; index < unexpected_keys.size(); ++index) {
+            if (index != 0) message << ", ";
+            message << "'" << unexpected_keys[index] << "'";
+        }
+        throw std::invalid_argument(message.str());
     }
     return required_alignments;
 }

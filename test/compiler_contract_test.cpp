@@ -609,17 +609,12 @@ bool TestAssembleCompiledGraphFromOrderedPins() {
     const CompiledPrimitiveBatch batch = CompilePrimitiveUnits(
         prepared.graph.partitioned.units,
         prepared.graph.partitioned.value_graph.values, config, contract);
-    std::vector<PrimitiveArtifactPin> pins;
-    pins.reserve(batch.primitives.size());
-    for (const CompiledPrimitive& primitive : batch.primitives) {
-        pins.push_back(primitive.pin);
-    }
     const api::CompiledGraph compiled = AssembleCompiledGraph(
-        prepared, pins, batch.constants);
-    std::vector<PrimitiveArtifactPin> missing = pins;
-    missing.pop_back();
-    std::vector<PrimitiveArtifactPin> swapped = pins;
-    std::swap(swapped[0], swapped[1]);
+        prepared, batch);
+    CompiledPrimitiveBatch missing = batch;
+    missing.primitives.pop_back();
+    CompiledPrimitiveBatch swapped = batch;
+    std::swap(swapped.primitives[0], swapped.primitives[1]);
 
     auto filled = [](float value) {
         runtime::NDArray array = runtime::NDArray::Empty(
@@ -639,12 +634,10 @@ bool TestAssembleCompiledGraphFromOrderedPins() {
                    compiled.artifact_pins().size() == batch.primitives.size() &&
                    outputs.size() == 1 && values == std::vector<float>(4, 9.0f) &&
                    Throws([&] {
-                       (void)AssembleCompiledGraph(
-                           prepared, missing, batch.constants);
+                       (void)AssembleCompiledGraph(prepared, missing);
                    }) &&
                    Throws([&] {
-                       (void)AssembleCompiledGraph(
-                           prepared, swapped, batch.constants);
+                       (void)AssembleCompiledGraph(prepared, swapped);
                    }),
                "ordered pins must assemble one executable graph and reject drift");
     return true;

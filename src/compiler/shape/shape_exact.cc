@@ -590,15 +590,10 @@ ExactPlanVariant ProductionExactShapeAdapter::AssembleExactPlan(
                 error.what());
         }
     }
-    std::vector<internal::PrimitiveArtifactPin> pins;
-    pins.reserve(batch.primitives.size());
-    for (const internal::CompiledPrimitive& primitive : batch.primitives) {
-        pins.push_back(primitive.pin);
-    }
     profiling::ScopedSpan assemble_span(
         profile_context, stage_event("assemble"), run_id);
     CompiledGraph compiled = internal::AssembleCompiledGraph(
-        compiler_prepared, pins, batch.constants);
+        compiler_prepared, batch);
     AddPrimitiveBatchFields(&assemble_span, compiler_prepared, batch);
     if (profile_context) profile_context->Flush();
     VerifyVariant(prepared.impl_->graph, requests, compiler_prepared, config,

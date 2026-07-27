@@ -399,7 +399,8 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
                 RequirePrimitivePin(item.lease, Context(*item.unit));
         }
         result.primitives.push_back(CompiledPrimitive{
-            item.unit->id, std::move(item.tir), std::move(item.pin),
+            item.unit->id, std::move(item.tir), std::move(item.signature),
+            std::move(item.pin),
             item.lease.access() != PrimitiveCacheAccess::kOwner});
     }
     owner_guard.Dismiss();
@@ -439,12 +440,16 @@ CompiledModule AssemblePrimitiveModule(
             throw std::invalid_argument(
                 "AssemblePrimitiveModule primitive artifact is invalid");
         }
+        if (!primitive.current_signature.defined() ||
+            primitive.current_signature->symbol != unit.symbol) {
+            throw std::invalid_argument(
+                "AssemblePrimitiveModule primitive signature is invalid");
+        }
         const CachedPrimitive& artifact = primitive.pin.artifact();
-        const codegen::KernelSignature signature(
-            unit.symbol, artifact.signature.arguments());
         entries.push_back(CompiledModuleEntry{
-            signature, artifact.launch_metadata,
-            RelocateCachedKernel(primitive.pin, signature, Context(unit))});
+            primitive.current_signature, artifact.launch_metadata,
+            RelocateCachedKernel(
+                primitive.pin, primitive.current_signature, Context(unit))});
     }
     return BuildCompiledModule(
         target, std::move(entries), batch.constants,

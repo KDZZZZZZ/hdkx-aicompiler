@@ -464,6 +464,54 @@ bool TestSharedConstantExecutesNumerically() {
     return true;
 }
 
+bool TestPrimitiveCacheRelocatesDistinctConstantKeys() {
+    using namespace kxc;
+    api::internal::ClearPrimitiveCacheForTesting();
+    TensorType type({4}, "float32");
+    Var input("input", type);
+    Constant first_constant(FilledTensor(3.0f));
+    Constant second_constant(FilledTensor(7.0f));
+    Function function(
+        {input},
+        Tuple({Add(input, first_constant), Add(input, second_constant)}));
+    const api::CompileConfig config =
+        api::CompileConfig::Create(BuildTarget(Device::CPU()), 2);
+
+    const auto artifacts = api::Compiler::Compile(function, config);
+    const api::internal::PrimitiveCacheStats stats =
+        api::internal::GetPrimitiveCacheStats();
+    const Array<runtime::KernelCall> calls = artifacts.plan().calls();
+    const Map<String, runtime::NDArray> constants = artifacts.module().constants();
+    std::vector<std::string> signature_constant_keys;
+    for (const runtime::KernelCall& call : calls) {
+        const Array<codegen::KernelArgSpec> arguments =
+            artifacts.module().signature(call->symbol).arguments();
+        for (const codegen::KernelArgSpec& argument : arguments) {
+            if (argument->role == codegen::KernelArgRole::kConstant) {
+                signature_constant_keys.push_back(
+                    std::string(argument->constant_key));
+            }
+        }
+    }
+    runtime::RuntimeSession session(artifacts.module(), artifacts.plan());
+    const Array<runtime::NDArray> outputs =
+        session.Run({FilledTensor(2.0f)});
+    api::internal::ClearPrimitiveCacheForTesting();
+
+    TEST_CHECK(artifacts.module().entry_count() == 2 && calls.size() == 2 &&
+                   constants.size() == 2 &&
+                   signature_constant_keys.size() == 2 &&
+                   signature_constant_keys[0] != signature_constant_keys[1] &&
+                   constants.count(String(signature_constant_keys[0])) &&
+                   constants.count(String(signature_constant_keys[1])) &&
+                   stats.misses == 1 && stats.hits == 0 &&
+                   stats.merged_waiters == 1 && outputs.size() == 2 &&
+                   TensorEquals(outputs[0], 5.0f) &&
+                   TensorEquals(outputs[1], 9.0f),
+               "cache-equivalent units must relocate distinct constant keys");
+    return true;
+}
+
 bool TestMultiOutputExecutesNumerically() {
     using namespace kxc;
     TensorType type({4}, "float32");
@@ -616,6 +664,8 @@ int main() {
          TestOperatorGraphsExecuteNumerically},
         {"shared_constant_executes_numerically",
          TestSharedConstantExecutesNumerically},
+        {"primitive_cache_relocates_distinct_constant_keys",
+         TestPrimitiveCacheRelocatesDistinctConstantKeys},
         {"multi_output_executes_numerically",
          TestMultiOutputExecutesNumerically},
         {"primitive_cache_uses_full_stable_identity",

@@ -176,22 +176,58 @@ CompiledGraph CompileReplacement(const ProductionCompileRequest& request) {
                 error.what());
         }
     }
-    std::vector<internal::PrimitiveArtifactPin> pins;
-    pins.reserve(baseline.artifact_pins().size());
-    for (const ArtifactPin& pin : baseline.artifact_pins()) {
-        pins.push_back(internal::ArtifactPinAccess::Unwrap(pin));
+    const Array<runtime::KernelCall> baseline_calls = baseline.plan().calls();
+    if (baseline_calls.size() != prepared.graph.partitioned.units.size()) {
+        throw std::invalid_argument(
+            "adaptive baseline plan primitive count differs from prepared graph");
+    }
+    internal::CompiledPrimitiveBatch assembly_batch;
+    assembly_batch.primitives.reserve(prepared.graph.partitioned.units.size());
+    for (std::size_t index = 0;
+         index < prepared.graph.partitioned.units.size(); ++index) {
+        const internal::PrimitiveUnit& unit =
+            prepared.graph.partitioned.units[index];
+        const codegen::KernelSignature baseline_signature =
+            baseline.module().signature(baseline_calls[index]->symbol);
+        assembly_batch.primitives.push_back(internal::CompiledPrimitive{
+            unit.id, tir::PrimFunc(),
+            codegen::KernelSignature(
+                unit.symbol, baseline_signature.arguments()),
+            internal::ArtifactPinAccess::Unwrap(
+                baseline.artifact_pins()[index]),
+            true});
     }
     for (const internal::CompiledPrimitive& replacement : batch.primitives) {
-        pins.at(static_cast<size_t>(replacement.unit_id)) = replacement.pin;
+        assembly_batch.primitives.at(
+            static_cast<size_t>(replacement.unit_id)) = replacement;
+    }
+    const Map<String, runtime::NDArray>& baseline_constants =
+        internal::BorrowCompiledModuleConstants(baseline.module());
+    for (const internal::CompiledPrimitive& primitive :
+         assembly_batch.primitives) {
+        for (const codegen::KernelArgSpec& argument :
+             primitive.current_signature.arguments()) {
+            if (argument->role != codegen::KernelArgRole::kConstant) continue;
+            if (batch.constants.count(argument->constant_key)) {
+                assembly_batch.constants.Set(
+                    argument->constant_key,
+                    batch.constants.at(argument->constant_key));
+            } else if (baseline_constants.count(argument->constant_key)) {
+                assembly_batch.constants.Set(
+                    argument->constant_key,
+                    baseline_constants.at(argument->constant_key));
+            } else {
+                throw std::invalid_argument(
+                    "adaptive assembled signature references an unknown constant");
+            }
+        }
     }
     CompiledGraph graph;
     {
         profiling::ScopedSpan assemble_span(
             prepared.profile_context, MakeStageEvent("assemble", config),
             prepared.profile_run_id);
-        graph = internal::AssembleCompiledGraph(
-            prepared, pins,
-            internal::BorrowCompiledModuleConstants(baseline.module()));
+        graph = internal::AssembleCompiledGraph(prepared, assembly_batch);
         AddPrimitiveBatchFields(&assemble_span, prepared, batch);
     }
     if (prepared.profile_context) prepared.profile_context->Flush();

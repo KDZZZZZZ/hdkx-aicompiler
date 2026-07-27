@@ -356,15 +356,10 @@ CompiledGraph CompilePipeline(
                 error.what());
         }
     }
-    std::vector<internal::PrimitiveArtifactPin> pins;
-    pins.reserve(batch.primitives.size());
-    for (const internal::CompiledPrimitive& primitive : batch.primitives) {
-        pins.push_back(primitive.pin);
-    }
     profiling::ScopedSpan assemble_span(
         profile_context, MakeStageEvent("assemble", config), run_id);
     CompiledGraph result = internal::AssembleCompiledGraph(
-        prepared, pins, batch.constants);
+        prepared, batch);
     AddPrimitiveBatchFields(&assemble_span, prepared, batch);
     if (profile_context) profile_context->Flush();
     return result;
@@ -522,12 +517,11 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
 
 CompiledGraph internal::AssembleCompiledGraph(
     const PreparedCompilerGraph& prepared,
-    const std::vector<PrimitiveArtifactPin>& ordered_pins,
-    const Map<String, runtime::NDArray>& constants) {
+    const CompiledPrimitiveBatch& batch) {
     const std::vector<PrimitiveUnit>& units = prepared.graph.partitioned.units;
-    if (ordered_pins.size() != units.size()) {
+    if (batch.primitives.size() != units.size()) {
         throw std::invalid_argument(
-            "AssembleCompiledGraph requires one pin per PrimitiveUnit");
+            "AssembleCompiledGraph requires one compiled artifact per PrimitiveUnit");
     }
     if (!prepared.target.defined() || !prepared.graph.target.defined() ||
         CanonicalTargetSnapshot(prepared.target) !=
@@ -539,34 +533,41 @@ CompiledGraph internal::AssembleCompiledGraph(
         BuildTargetCapabilityFingerprint(prepared.target);
     std::vector<CompiledModuleEntry> entries;
     std::vector<ArtifactPin> public_pins;
-    entries.reserve(ordered_pins.size());
-    public_pins.reserve(ordered_pins.size());
-    for (std::size_t index = 0; index < ordered_pins.size(); ++index) {
+    entries.reserve(batch.primitives.size());
+    public_pins.reserve(batch.primitives.size());
+    for (std::size_t index = 0; index < batch.primitives.size(); ++index) {
         const PrimitiveUnit& unit = units[index];
-        const PrimitiveArtifactPin& pin = ordered_pins[index];
+        const CompiledPrimitive& primitive = batch.primitives[index];
+        const PrimitiveArtifactPin& pin = primitive.pin;
         if (unit.id != static_cast<PrimitiveUnitId>(index) ||
+            primitive.unit_id != unit.id ||
             !pin.defined() ||
             pin.key().unit_semantic_key() != unit.semantic_key ||
             pin.key().target_capability_fingerprint() != target_fingerprint) {
             throw std::invalid_argument(
-                "AssembleCompiledGraph ordered pin does not match its PrimitiveUnit");
+                "AssembleCompiledGraph compiled artifact does not match its PrimitiveUnit");
+        }
+        if (!primitive.current_signature.defined() ||
+            primitive.current_signature->symbol != unit.symbol) {
+            throw std::invalid_argument(
+                "AssembleCompiledGraph compiled signature does not match its PrimitiveUnit");
         }
         const CachedPrimitive& artifact = pin.artifact();
-        const codegen::KernelSignature signature(
-            unit.symbol, artifact.signature.arguments());
-        if (!SamePhysicalKernelAbi(artifact.signature, signature) ||
+        if (!SamePhysicalKernelAbi(
+                artifact.signature, primitive.current_signature) ||
             !artifact.kernel.IsReady() || !artifact.kernel->launcher) {
             throw std::invalid_argument(
                 "AssembleCompiledGraph pin artifact cannot be relocated");
         }
         entries.push_back(CompiledModuleEntry{
-            signature, artifact.launch_metadata,
+            primitive.current_signature, artifact.launch_metadata,
             codegen::CompiledKernel(
-                signature, artifact.launch_metadata, artifact.kernel->launcher)});
+                primitive.current_signature, artifact.launch_metadata,
+                artifact.kernel->launcher)});
         public_pins.push_back(ArtifactPinAccess::Wrap(pin));
     }
     return CompiledGraphAccess::Create(
-        BuildCompiledModule(prepared.target, std::move(entries), constants,
+        BuildCompiledModule(prepared.target, std::move(entries), batch.constants,
                             prepared.profile_context),
         BuildStaticExecutablePlan(prepared.graph), std::move(public_pins),
         prepared.graph_semantic_key);

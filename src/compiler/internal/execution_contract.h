@@ -17,6 +17,8 @@ class ProfileContext;
 
 namespace kxc::api::internal {
 
+struct CompiledPrimitiveBatch;
+
 /*! \brief One immutable description of the production plan actually executed. */
 struct PreparedCompilerGraph final {
     GraphSemanticKey graph_semantic_key;
@@ -52,7 +54,6 @@ PreparedCompilerGraph PrepareCompilerGraph(
     const CompilerExecutionContract& contract);
 CompiledGraph AssembleCompiledGraph(
     const PreparedCompilerGraph& prepared,
-    const std::vector<PrimitiveArtifactPin>& ordered_pins,
-    const Map<String, runtime::NDArray>& constants);
+    const CompiledPrimitiveBatch& batch);
 
 }  // namespace kxc::api::internal
