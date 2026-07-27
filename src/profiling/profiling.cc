@@ -19,6 +19,7 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -240,6 +241,50 @@ NvtxAdapter* ResolveNvtxAdapter(bool requested) {
 }
 
 #if KXC_HAS_CUPTI
+#if defined(_WIN32)
+std::optional<std::filesystem::path> WindowsCudaRoot() {
+    const DWORD required =
+        GetEnvironmentVariableW(L"CUDA_PATH", nullptr, 0);
+    if (required == 0) return std::nullopt;
+    std::wstring value(required, L'\0');
+    const DWORD written =
+        GetEnvironmentVariableW(L"CUDA_PATH", value.data(), required);
+    if (written == 0 || written >= required) return std::nullopt;
+    value.resize(written);
+    return std::filesystem::path(std::move(value));
+}
+
+HMODULE LoadWindowsCuptiLibrary() {
+    for (const wchar_t* name : {L"cupti64.dll", L"cupti.dll"}) {
+        if (HMODULE handle = LoadLibraryW(name)) return handle;
+    }
+    const std::optional<std::filesystem::path> cuda_root =
+        WindowsCudaRoot();
+    if (!cuda_root) return nullptr;
+    const std::filesystem::path library_dir =
+        *cuda_root / "extras" / "CUPTI" / "lib64";
+    std::error_code error;
+    std::vector<std::filesystem::path> candidates;
+    for (std::filesystem::directory_iterator iterator(library_dir, error), end;
+         iterator != end && !error; iterator.increment(error)) {
+        std::error_code type_error;
+        if (!iterator->is_regular_file(type_error)) continue;
+        const std::wstring filename =
+            iterator->path().filename().wstring();
+        if (filename.rfind(L"cupti64_", 0) == 0 &&
+            iterator->path().extension() == L".dll") {
+            candidates.push_back(iterator->path());
+        }
+    }
+    std::sort(candidates.begin(), candidates.end());
+    for (auto iterator = candidates.rbegin();
+         iterator != candidates.rend(); ++iterator) {
+        if (HMODULE handle = LoadLibraryW(iterator->c_str())) return handle;
+    }
+    return nullptr;
+}
+#endif
+
 class CuptiAdapter;
 CuptiAdapter* ResolveCuptiAdapter(bool requested);
 
@@ -351,10 +396,7 @@ private:
             return;
         }
 #if defined(_WIN32)
-        handle_ = LoadLibraryA("cupti64.dll");
-        if (handle_ == nullptr) {
-            handle_ = LoadLibraryA("cupti.dll");
-        }
+        handle_ = LoadWindowsCuptiLibrary();
         if (handle_ == nullptr) {
             return;
         }

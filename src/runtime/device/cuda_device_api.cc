@@ -214,6 +214,12 @@ public:
         cudaDeviceProp prop{};
         CheckCUDA(cudaGetDeviceProperties(&prop, device.device_id()),
                   "cudaGetDeviceProperties");
+        int max_clock_rate_khz = 0;
+        CheckCUDA(
+            cudaDeviceGetAttribute(
+                &max_clock_rate_khz, cudaDevAttrClockRate,
+                device.device_id()),
+            "cudaDeviceGetAttribute(cudaDevAttrClockRate)");
         attrs.exists = 1;
         attrs.max_threads_per_block = prop.maxThreadsPerBlock;
         attrs.warp_size = prop.warpSize;
@@ -223,7 +229,7 @@ public:
         attrs.compute_version = std::to_string(prop.major) + "." + std::to_string(prop.minor);
         attrs.arch = "sm_" + std::to_string(prop.major) + std::to_string(prop.minor);
         attrs.device_name = prop.name;
-        attrs.max_clock_rate_khz = prop.clockRate;
+        attrs.max_clock_rate_khz = max_clock_rate_khz;
         attrs.multi_processor_count = prop.multiProcessorCount;
         attrs.max_registers_per_block = prop.regsPerBlock;
         attrs.l2_cache_size_bytes = prop.l2CacheSize;

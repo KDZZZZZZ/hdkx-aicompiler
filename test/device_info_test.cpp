@@ -122,6 +122,8 @@ bool TestCUDAAttributesDoNotRequireCUDARuntimeAvailability() {
                    "Available CUDA device should have compute major");
         TEST_CHECK(attrs.compute_version_minor >= 0,
                    "Available CUDA device should have compute minor");
+        TEST_CHECK(attrs.max_clock_rate_khz > 0,
+                   "Available CUDA device should have a positive max clock rate");
     } else {
         TEST_CHECK(!attrs.device_name.empty(), "Unavailable CUDA should carry status text");
     }
