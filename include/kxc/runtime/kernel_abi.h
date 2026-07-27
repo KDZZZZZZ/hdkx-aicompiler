@@ -49,7 +49,10 @@ public:
     const KernelConstantKeysNode* operator->() const;
 };
 
-/*! \brief 动态输入维度的唯一哨兵；当前编译器仍只生成静态 shape。 */
+/*! \brief 当前可调用 kernel ABI 版本。 */
+inline constexpr int64_t kKernelAbiVersion = 3;
+
+/*! \brief 受控动态输入/输出维度的唯一物理 ABI 哨兵。 */
 constexpr int64_t kDynamicDimension = -1;
 
 /*! \brief 参数在内核调用契约中的数据流角色。 */
@@ -141,9 +144,9 @@ public:
     void Validate() const;
     /*! \brief 返回参数序列的独立 Array，保持节点内 ABI 顺序不可变。 */
     Array<KernelArgSpec> arguments() const;
-    /*! \brief 判断签名是否含动态输入；动态输出会在 Validate 中被拒绝。 */
+    /*! \brief 判断签名是否含动态输入。 */
     bool has_dynamic_input_shape() const;
-    /*! \brief 返回版本化、长度分隔的有序 ABI 签名字节（v2 起含 runtime extent role）。 */
+    /*! \brief 返回版本化、长度分隔的有序 ABI 签名字节。 */
     std::string CanonicalBytes() const;
     /*! \brief 生成参数顺序稳定的诊断文本。 */
     std::string ToString() const;

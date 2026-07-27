@@ -441,8 +441,9 @@ internal::ResolveCompilerExecutionContract(
     AppendPipelineIdentityField(
         &contract.canonical_bytes, "tir",
         std::string(contract.tir_pipeline.canonical_bytes));
-    AppendPipelineIdentityField(&contract.canonical_bytes, "kernel_abi",
-                                "kernel-abi-v1");
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "kernel_abi",
+        "kernel-abi-v" + std::to_string(codegen::kKernelAbiVersion));
     AppendPipelineIdentityField(&contract.canonical_bytes, "schedule_policy",
                                 contract.schedule_policy);
     AppendPipelineIdentityField(&contract.canonical_bytes, "backend",
@@ -563,7 +564,8 @@ CompiledGraph internal::AssembleCompiledGraph(
             primitive.current_signature, artifact.launch_metadata,
             codegen::CompiledKernel(
                 primitive.current_signature, artifact.launch_metadata,
-                artifact.kernel->launcher)});
+                artifact.kernel->launcher),
+            primitive.invocation_contract});
         public_pins.push_back(ArtifactPinAccess::Wrap(pin));
     }
     return CompiledGraphAccess::Create(

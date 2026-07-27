@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -16,6 +17,8 @@ namespace kxc::relay::internal {
 
 inline constexpr const char* kDefaultTESchedulePolicy =
     "target-default-v1";
+inline constexpr const char* kBoundedDynamicTESchedulePolicy =
+    "bounded-dynamic-serial-v1";
 
 struct ConstantTensor {
     te::Tensor tensor;
@@ -42,16 +45,29 @@ void ValidateStaticLoweringTensor(const Array<tir::PrimExpr>& shape,
 // Compiler-owned target policy: CUDA stays serial for BindCudaThreads.
 te::Schedule BuildDefaultTESchedule(const Array<te::Tensor>& outputs,
                                     const Target& target);
-std::string CanonicalTEScheduleContract(const te::Schedule& schedule,
-                                        const Target& target);
+// Bounded dynamic kernels are deliberately serial and LLVM/CPU-only.
+te::Schedule BuildBoundedDynamicTESchedule(
+    const Array<te::Tensor>& outputs, const Target& target);
+// Creates and recognizes the only accepted TE shape expression for a
+// generated uint64[1] runtime-extent buffer.
+tir::PrimExpr LoadRuntimeExtent(const tir::Var& buffer);
+bool MatchRuntimeExtentLoad(const tir::PrimExpr& expression,
+                            const Array<tir::Var>& buffers,
+                            size_t* buffer_index);
+std::string CanonicalTEScheduleContract(
+    const te::Schedule& schedule, const Target& target,
+    const Array<tir::Var>& runtime_extent_buffers = {});
 std::string GetTEScheduleContract(const tir::PrimFunc& function);
 
+// runtime_extent_buffers is the canonical physical scalar order; the bounded
+// producer must reuse that same order when authoring ModuleInvocationContract.
 LoweredFunction LowerTensorGraphToTIR(
     const Array<te::Tensor>& inputs,
     const std::vector<ConstantTensor>& constants,
     const Array<te::Tensor>& outputs,
     const te::Schedule& schedule,
     const Target& target,
-    const PrimFuncIdentity& identity);
+    const PrimFuncIdentity& identity,
+    const Array<tir::Var>& runtime_extent_buffers = {});
 
 }  // namespace kxc::relay::internal

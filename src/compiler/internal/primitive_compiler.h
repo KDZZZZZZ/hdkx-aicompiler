@@ -17,6 +17,10 @@ namespace kxc::profiling {
 class ProfileContext;
 }
 
+namespace kxc::api {
+class ModuleInvocationContract;
+}
+
 namespace kxc::api::internal {
 
 struct CompiledPrimitive final {
@@ -25,6 +29,9 @@ struct CompiledPrimitive final {
     codegen::KernelSignature current_signature;
     PrimitiveArtifactPin pin;
     bool cache_hit{false};
+    // Graph/profile applicability belongs to this compilation and module
+    // entry; reusable CachedPrimitive owns only code and its physical ABI.
+    std::shared_ptr<const ModuleInvocationContract> invocation_contract;
 };
 
 struct CompiledPrimitiveBatch final {

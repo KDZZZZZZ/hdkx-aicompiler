@@ -3,10 +3,12 @@
  */
 
 #include "../internal/lowered_function.h"
+#include "../internal/te_to_tir.h"
 
 #include "kxc/runtime/kernel_abi.h"
 #include "kxc/support/object_registration.h"
 
+#include <limits>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -108,7 +110,10 @@ void LoweredFunction::Validate() const {
         "LoweredFunction TE schedule contract is malformed");
   }
 
+  int64_t kernel_abi_version = -1;
   int64_t input_count = -1;
+  int64_t runtime_extent_count = -1;
+  int64_t runtime_extent_param_start = -1;
   int64_t constant_count = -1;
   int64_t output_count = -1;
   int64_t output_param_start = -1;
@@ -120,21 +125,91 @@ void LoweredFunction::Validate() const {
     *value = integer->value;
     return true;
   };
-  if (!read_count("kxc.input_count", &input_count) ||
+  if (!read_count("kxc.kernel_abi_version", &kernel_abi_version) ||
+      !read_count("kxc.input_count", &input_count) ||
+      !read_count("kxc.runtime_extent_count", &runtime_extent_count) ||
+      !read_count("kxc.runtime_extent_param_start",
+                  &runtime_extent_param_start) ||
       !read_count("kxc.constant_count", &constant_count) ||
       !read_count("kxc.output_count", &output_count) ||
       !read_count("kxc.output_param_start", &output_param_start)) {
     throw std::invalid_argument(
-        "LoweredFunction requires integer parameter count attrs");
+        "LoweredFunction requires versioned integer parameter attrs");
   }
-  if (input_count < 0 || constant_count < 0 || output_count <= 0 ||
+  if (kernel_abi_version != codegen::kKernelAbiVersion ||
+      input_count < 0 || runtime_extent_count < 0 || constant_count < 0 ||
+      output_count <= 0 ||
       static_cast<size_t>(constant_count) != constants.size()) {
     throw std::invalid_argument("LoweredFunction parameter count mismatch");
   }
-  if (output_param_start != input_count + constant_count ||
+  if (runtime_extent_param_start != input_count ||
+      input_count > std::numeric_limits<int64_t>::max() -
+                        runtime_extent_count ||
+      input_count + runtime_extent_count >
+          std::numeric_limits<int64_t>::max() - constant_count ||
+      output_param_start !=
+          input_count + runtime_extent_count + constant_count ||
+      output_param_start > std::numeric_limits<int64_t>::max() -
+                               output_count ||
       output_param_start + output_count !=
           static_cast<int64_t>(prim_func->params.size())) {
     throw std::invalid_argument("LoweredFunction output parameter range mismatch");
+  }
+
+  Array<tir::Var> runtime_extent_buffers;
+  for (int64_t offset = 0; offset < runtime_extent_count; ++offset) {
+    const tir::Var& parameter = prim_func->params[static_cast<size_t>(
+        runtime_extent_param_start + offset)];
+    if (!prim_func->buffer_map.count(parameter)) {
+      throw std::invalid_argument(
+          "LoweredFunction runtime extent parameter has no Buffer");
+    }
+    const tir::Buffer& buffer = prim_func->buffer_map.at(parameter);
+    if (!buffer.defined()) {
+      throw std::invalid_argument(
+          "LoweredFunction runtime extent parameter has an undefined Buffer");
+    }
+    const auto* extent = buffer->shape.size() == 1
+                             ? buffer->shape[0].As<tir::IntImmNode>()
+                             : nullptr;
+    if (buffer->data.get() != parameter.get() ||
+        buffer->dtype != tir::DataType::UInt(64) || !extent ||
+        extent->value != 1 || !buffer->strides.empty() ||
+        buffer->offset_factor != 0) {
+      throw std::invalid_argument(
+          "LoweredFunction runtime extent ABI must be uint64[1]");
+    }
+    runtime_extent_buffers.push_back(parameter);
+  }
+  for (int64_t index = 0;
+       index < static_cast<int64_t>(prim_func->params.size()); ++index) {
+    const bool tensor_parameter =
+        index < input_count || index >= output_param_start;
+    if (!tensor_parameter) continue;
+    const tir::Var& parameter =
+        prim_func->params[static_cast<size_t>(index)];
+    if (!prim_func->buffer_map.count(parameter)) {
+      throw std::invalid_argument(
+          "LoweredFunction tensor parameter has no Buffer");
+    }
+    const tir::Buffer& buffer = prim_func->buffer_map.at(parameter);
+    if (!buffer.defined()) {
+      throw std::invalid_argument(
+          "LoweredFunction tensor parameter has an undefined Buffer");
+    }
+    for (const tir::PrimExpr& extent : buffer->shape) {
+      int64_t static_extent = 0;
+      if (internal::EvaluateStaticLoweringInt64(extent, &static_extent)) {
+        if (static_extent < 0) {
+          throw std::invalid_argument(
+              "LoweredFunction tensor Buffer has a negative extent");
+        }
+      } else if (!internal::MatchRuntimeExtentLoad(
+                     extent, runtime_extent_buffers, nullptr)) {
+        throw std::invalid_argument(
+            "LoweredFunction tensor Buffer has an uncontrolled dynamic extent");
+      }
+    }
   }
 
   const String constant_keys_attr("kxc.constant_keys");
@@ -151,7 +226,8 @@ void LoweredFunction::Validate() const {
   std::unordered_set<std::string> keys;
   for (size_t i = 0; i < constants.size(); ++i) {
     const ConstantBinding& binding = constants[i];
-    const int64_t expected_index = input_count + static_cast<int64_t>(i);
+    const int64_t expected_index =
+        input_count + runtime_extent_count + static_cast<int64_t>(i);
     if (binding->param_index != expected_index ||
         static_cast<size_t>(binding->param_index) >= prim_func->params.size()) {
       throw std::invalid_argument(
@@ -170,7 +246,8 @@ void LoweredFunction::Validate() const {
       throw std::invalid_argument("LoweredFunction constant parameter has no Buffer");
     }
     const tir::Buffer& buffer = prim_func->buffer_map.at(parameter);
-    if (DTypeFromDL(binding->value.dtype()) != buffer->dtype ||
+    if (!buffer.defined() ||
+        DTypeFromDL(binding->value.dtype()) != buffer->dtype ||
         buffer->shape.size() != binding->value->shape_storage.size()) {
       throw std::invalid_argument("LoweredFunction constant dtype or rank mismatch");
     }

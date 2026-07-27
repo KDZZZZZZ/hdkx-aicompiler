@@ -11,6 +11,7 @@
 
 #include "kxc/runtime/kernel_abi.h"
 #include "../src/compiler/internal/kernel_abi_builder.h"
+#include "../src/compiler/internal/te_to_tir.h"
 
 namespace {
 
@@ -82,8 +83,9 @@ bool TestRuntimeExtentRole() {
     const KernelArgSpec output("output", KernelArgRole::kOutput, Float32(), {2}, Device::CPU(), 1, true);
     const KernelSignature signature("extent", {input, extent, output});
     TEST_CHECK(signature.arguments()[1]->role == KernelArgRole::kRuntimeExtent &&
-                   signature.CanonicalBytes().find("kxc.kernel-signature.v2") != std::string::npos &&
-                   extent.CanonicalBytes().find("kxc.kernel-arg-spec.v2") != std::string::npos,
+                   kKernelAbiVersion == 3 &&
+                   signature.CanonicalBytes().find("kxc.kernel-signature.v3") != std::string::npos &&
+                   extent.CanonicalBytes().find("kxc.kernel-arg-spec.v3") != std::string::npos,
                "runtime extent must be a versioned explicit signature role");
     TEST_CHECK(Throws([] { KernelArgSpec("bad", KernelArgRole::kRuntimeExtent,
                                         Float32(), {1}, Device::CPU()); }) &&
@@ -105,7 +107,7 @@ bool TestCanonicalBytesCoverEveryAbiField() {
     const KernelSignature signature("entry", {input, constant, output});
     const std::string canonical = signature.CanonicalBytes();
     TEST_CHECK(canonical == signature.CanonicalBytes() &&
-                   canonical.find("kxc.kernel-signature.v2") != std::string::npos &&
+                   canonical.find("kxc.kernel-signature.v3") != std::string::npos &&
                    canonical.find("KernelSignature(") == std::string::npos,
                "canonical signature must be deterministic and independent of diagnostics");
 
@@ -171,7 +173,7 @@ bool TestCanonicalBytesCoverEveryAbiField() {
     return true;
 }
 
-// 动态维只允许出现在输入；标量和零尺寸静态 shape 都是合法张量契约。
+// 动态 input/output、标量和零尺寸静态 shape 都是合法张量契约。
 bool TestShapeVariants() {
     using namespace kxc;
     using namespace kxc::codegen;
@@ -433,7 +435,7 @@ bool TestLaunchMetadata() {
     return true;
 }
 
-// 直接构造 PrimFunc，验证 bool ABI、零尺寸和动态输出拒绝等 builder 边界。
+// 直接构造 PrimFunc，验证 bool ABI、零尺寸和无契约动态输出拒绝。
 bool TestBuildKernelSignature() {
     using namespace kxc;
     using namespace kxc::codegen;
@@ -449,7 +451,13 @@ bool TestBuildKernelSignature() {
                                     tir::IntImm(0), "output", 0, 0));
     Map<String, ObjectRef> attrs;
     attrs.Set("global_symbol", String("bool_kernel"));
+    attrs.Set("kxc.kernel_abi_version",
+              tir::IntImm(kKernelAbiVersion, tir::DataType::Int(64)));
     attrs.Set("kxc.input_count", tir::IntImm(1, tir::DataType::Int(64)));
+    attrs.Set("kxc.runtime_extent_count",
+              tir::IntImm(0, tir::DataType::Int(64)));
+    attrs.Set("kxc.runtime_extent_param_start",
+              tir::IntImm(1, tir::DataType::Int(64)));
     attrs.Set("kxc.constant_count", tir::IntImm(0, tir::DataType::Int(64)));
     attrs.Set("kxc.output_count", tir::IntImm(1, tir::DataType::Int(64)));
     attrs.Set("kxc.output_param_start", tir::IntImm(1, tir::DataType::Int(64)));
@@ -477,7 +485,14 @@ bool TestBuildKernelSignature() {
         tir::Buffer(constant_output, tir::DataType::UInt(8), {tir::IntImm(1)}, {},
                     tir::IntImm(0), "constant_output", 0, 0));
     Map<String, ObjectRef> constant_attrs;
+    constant_attrs.Set("kxc.kernel_abi_version",
+                       tir::IntImm(kKernelAbiVersion,
+                                   tir::DataType::Int(64)));
     constant_attrs.Set("kxc.input_count", tir::IntImm(0, tir::DataType::Int(64)));
+    constant_attrs.Set("kxc.runtime_extent_count",
+                       tir::IntImm(0, tir::DataType::Int(64)));
+    constant_attrs.Set("kxc.runtime_extent_param_start",
+                       tir::IntImm(0, tir::DataType::Int(64)));
     constant_attrs.Set("kxc.constant_count", tir::IntImm(1, tir::DataType::Int(64)));
     constant_attrs.Set("kxc.output_count", tir::IntImm(1, tir::DataType::Int(64)));
     constant_attrs.Set("kxc.output_param_start",
@@ -528,7 +543,14 @@ bool TestBuildKernelSignature() {
                         tir::Buffer(output, tir::DataType::Float(32), {dynamic_extent},
                                     {}, tir::IntImm(0), "output", 0, 0));
     Map<String, ObjectRef> dynamic_attrs;
+    dynamic_attrs.Set("kxc.kernel_abi_version",
+                      tir::IntImm(kKernelAbiVersion,
+                                  tir::DataType::Int(64)));
     dynamic_attrs.Set("kxc.input_count", tir::IntImm(0, tir::DataType::Int(64)));
+    dynamic_attrs.Set("kxc.runtime_extent_count",
+                      tir::IntImm(0, tir::DataType::Int(64)));
+    dynamic_attrs.Set("kxc.runtime_extent_param_start",
+                      tir::IntImm(0, tir::DataType::Int(64)));
     dynamic_attrs.Set("kxc.constant_count", tir::IntImm(0, tir::DataType::Int(64)));
     dynamic_attrs.Set("kxc.output_count", tir::IntImm(1, tir::DataType::Int(64)));
     dynamic_attrs.Set("kxc.output_param_start", tir::IntImm(0, tir::DataType::Int(64)));
@@ -554,6 +576,86 @@ bool TestBuildKernelSignature() {
     return true;
 }
 
+bool TestBuildDynamicKernelSignature() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const tir::DataType f32 = tir::DataType::Float(32);
+    const tir::DataType u64 = tir::DataType::UInt(64);
+    tir::Var input("dynamic_input", f32);
+    tir::Var extent("runtime_extent_0", u64);
+    tir::Var output("dynamic_output", f32);
+    const tir::PrimExpr dynamic_extent =
+        relay::internal::LoadRuntimeExtent(extent);
+
+    Array<tir::Var> params{input, extent, output};
+    Map<tir::Var, tir::Buffer> buffers;
+    buffers.Set(input, tir::Buffer(input, f32, {dynamic_extent}, {},
+                                   tir::IntImm(0), "dynamic_input", 4, 0));
+    buffers.Set(extent, tir::Buffer(
+                            extent, u64,
+                            {tir::IntImm(1, tir::DataType::Int(64))}, {},
+                            tir::IntImm(0), "runtime_extent_0", 8, 0));
+    buffers.Set(output, tir::Buffer(output, f32, {dynamic_extent}, {},
+                                    tir::IntImm(0), "dynamic_output", 4, 0));
+    Map<String, ObjectRef> attrs;
+    attrs.Set("kxc.kernel_abi_version",
+              tir::IntImm(kKernelAbiVersion, tir::DataType::Int(64)));
+    attrs.Set("kxc.input_count", tir::IntImm(1, tir::DataType::Int(64)));
+    attrs.Set("kxc.runtime_extent_count",
+              tir::IntImm(1, tir::DataType::Int(64)));
+    attrs.Set("kxc.runtime_extent_param_start",
+              tir::IntImm(1, tir::DataType::Int(64)));
+    attrs.Set("kxc.constant_count", tir::IntImm(0, tir::DataType::Int(64)));
+    attrs.Set("kxc.output_count", tir::IntImm(1, tir::DataType::Int(64)));
+    attrs.Set("kxc.output_param_start",
+              tir::IntImm(2, tir::DataType::Int(64)));
+    attrs.Set("kxc.constant_keys", KernelConstantKeys(Array<String>()));
+    const tir::PrimFunc function(
+        params, tir::Evaluate(tir::IntImm(0)), buffers, attrs);
+
+    const KernelSignature signature = BuildKernelSignature(
+        function, {}, BuildTarget(Device::CPU()), "dynamic_kernel");
+    const Array<KernelArgSpec> arguments = signature.arguments();
+    TEST_CHECK(arguments.size() == 3 &&
+                   arguments[0]->role == KernelArgRole::kInput &&
+                   arguments[0].shape()[0] == kDynamicDimension &&
+                   arguments[1]->role == KernelArgRole::kRuntimeExtent &&
+                   arguments[1]->dtype.code == kDLUInt &&
+                   arguments[1]->dtype.bits == 64 &&
+                   arguments[1].shape()[0] == 1 &&
+                   arguments[2]->role == KernelArgRole::kOutput &&
+                   arguments[2].shape()[0] == kDynamicDimension,
+               "generated runtime extent did not produce canonical dynamic input/output ABI");
+
+    tir::Var uncontrolled("uncontrolled", tir::DataType::Int(64));
+    Map<tir::Var, tir::Buffer> uncontrolled_buffers;
+    uncontrolled_buffers.Set(
+        input, tir::Buffer(input, f32, {uncontrolled}, {}, tir::IntImm(0),
+                           "dynamic_input", 4, 0));
+    uncontrolled_buffers.Set(extent, buffers.at(extent));
+    uncontrolled_buffers.Set(output, buffers.at(output));
+    const tir::PrimFunc uncontrolled_function(
+        params, tir::Evaluate(tir::IntImm(0)), uncontrolled_buffers, attrs);
+    TEST_CHECK(Throws([&] {
+                   (void)BuildKernelSignature(
+                       uncontrolled_function, {}, BuildTarget(Device::CPU()),
+                       "uncontrolled_dynamic");
+               }),
+               "uncontrolled symbolic input extent should fail closed");
+
+    auto* cuda_node = new TargetNode();
+    cuda_node->kind = "cuda";
+    cuda_node->device_type = kCUDA;
+    cuda_node->device_id = 0;
+    const Target cuda{ObjectRef(cuda_node)};
+    TEST_CHECK(Throws([&] {
+                   (void)BuildKernelSignature(function, {}, cuda,
+                                              "dynamic_cuda");
+               }),
+               "synthetic CUDA target accepted the runtime extent ABI");
+    return true;
+}
+
 }  // namespace
 
 // 顺序运行全部签名测试并汇总失败，使单次 CI 输出保留所有契约问题。
@@ -570,6 +672,7 @@ int main() {
         {"object_ref_type_checks", TestObjectRefTypeChecks},
         {"launch_metadata", TestLaunchMetadata},
         {"build_kernel_signature", TestBuildKernelSignature},
+        {"build_dynamic_kernel_signature", TestBuildDynamicKernelSignature},
     };
 
     int failures = 0;

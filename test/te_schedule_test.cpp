@@ -2,23 +2,29 @@
  * \brief Verifies that TE schedules are validated, consumed, identified, and target-aware.
  */
 
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "../src/compiler/internal/execution_contract.h"
 #include "../src/compiler/internal/kernel_abi_builder.h"
 #include "../src/compiler/internal/primitive_cache.h"
 #include "../src/compiler/internal/te_to_tir.h"
+#include "../src/runtime/internal/compiled_module_node.h"
 #include "kxc/compiler/compiler.h"
+#include "kxc/compiler/pipeline.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/ndarray.h"
 #include "kxc/te/te.h"
+#include "../src/runtime/internal/module_invocation_contract.h"
 #include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
 
@@ -48,6 +54,13 @@ bool Throws(const std::function<void()>& function) {
     return false;
 }
 
+int64_t ReadIntAttr(const kxc::tir::PrimFunc& function, const char* key) {
+    const auto* value = function->attrs.at(kxc::String(key))
+                            .As<kxc::tir::IntImmNode>();
+    if (!value) throw std::runtime_error(std::string("bad integer attr: ") + key);
+    return value->value;
+}
+
 kxc::Target SyntheticCudaTarget() {
     auto* node = new kxc::TargetNode();
     node->kind = "cuda";
@@ -66,10 +79,12 @@ kxc::Target SyntheticCudaTarget() {
 kxc::relay::LoweredFunction Lower(
     const kxc::te::Tensor& input, const kxc::te::Tensor& output,
     const kxc::te::Schedule& schedule, const kxc::Target& target,
-    const char* symbol) {
+    const char* symbol,
+    const kxc::Array<kxc::tir::Var>& runtime_extent_buffers = {}) {
     return kxc::relay::internal::LowerTensorGraphToTIR(
         {input}, {}, {output}, schedule, target,
-        kxc::relay::internal::PrimFuncIdentity{kxc::String(symbol)});
+        kxc::relay::internal::PrimFuncIdentity{kxc::String(symbol)},
+        runtime_extent_buffers);
 }
 
 void CollectForTypes(const kxc::tir::Stmt& statement,
@@ -99,6 +114,27 @@ void CollectForTypes(const kxc::tir::Stmt& statement,
     }
     if (const auto* let = statement.As<kxc::tir::LetStmtNode>()) {
         CollectForTypes(let->body, types, names);
+    }
+}
+
+void CollectLoopExtents(const kxc::tir::Stmt& statement,
+                        std::vector<kxc::tir::PrimExpr>* extents) {
+    if (!statement.defined()) return;
+    if (const auto* loop = statement.As<kxc::tir::ForNode>()) {
+        extents->push_back(loop->extent);
+        CollectLoopExtents(loop->body, extents);
+    } else if (const auto* sequence = statement.As<kxc::tir::SeqStmtNode>()) {
+        for (const kxc::tir::Stmt& child : sequence->seq) {
+            CollectLoopExtents(child, extents);
+        }
+    } else if (const auto* branch = statement.As<kxc::tir::IfThenElseNode>()) {
+        CollectLoopExtents(branch->then_case, extents);
+        CollectLoopExtents(branch->else_case, extents);
+    } else if (const auto* allocation =
+                   statement.As<kxc::tir::AllocateNode>()) {
+        CollectLoopExtents(allocation->body, extents);
+    } else if (const auto* let = statement.As<kxc::tir::LetStmtNode>()) {
+        CollectLoopExtents(let->body, extents);
     }
 }
 
@@ -376,6 +412,251 @@ bool ExecuteScheduledLLVM(const kxc::te::Tensor& input,
 }
 #endif
 
+bool TestBoundedDynamicScheduleTIRABIAndLLVM() {
+    using namespace kxc;
+    using namespace kxc::api;
+    const Target cpu = BuildTarget(Device::CPU());
+    const tir::DataType f32 = tir::DataType::Float(32);
+    const tir::DataType u64 = tir::DataType::UInt(64);
+    const tir::Var rows("runtime_extent_rows", u64);
+    const tir::Var columns("runtime_extent_columns", u64);
+    const Array<tir::Var> runtime_extents{rows, columns};
+    const Array<tir::PrimExpr> shape{
+        relay::internal::LoadRuntimeExtent(rows),
+        relay::internal::LoadRuntimeExtent(columns)};
+    const te::Tensor input = te::placeholder(shape, f32, "dynamic_input");
+    const te::Tensor bias = te::placeholder({1}, f32, "dynamic_bias");
+    const te::Tensor output = te::compute(
+        shape,
+        [input, bias](const Array<tir::Var>& axis) {
+            return input(axis) + bias(tir::IntImm(0));
+        },
+        "dynamic_output");
+    const te::Schedule schedule =
+        relay::internal::BuildBoundedDynamicTESchedule({output}, cpu);
+    CHECK(schedule->policy ==
+              relay::internal::kBoundedDynamicTESchedulePolicy,
+          "bounded dynamic schedule did not retain its explicit policy");
+
+    runtime::NDArray bias_value = runtime::NDArray::Empty(
+        {1}, runtime::DataTypeFromString("float32"), Device::CPU());
+    const float bias_scalar = 0.5f;
+    bias_value.CopyFromBytes(&bias_scalar, sizeof(bias_scalar));
+    const relay::LoweredFunction lowered =
+        relay::internal::LowerTensorGraphToTIR(
+            {input},
+            {relay::internal::ConstantTensor{
+                bias, String("dynamic.bias"), bias_value}},
+            {output}, schedule, cpu,
+            relay::internal::PrimFuncIdentity{String("bounded_dynamic_add")},
+            runtime_extents);
+    const tir::PrimFunc& function = lowered->prim_func;
+    CHECK(function->params.size() == 5 &&
+              function->params[0]->name_hint == "dynamic_input" &&
+              function->params[1].get() == rows.get() &&
+              function->params[2].get() == columns.get() &&
+              function->params[3]->name_hint == "dynamic_bias" &&
+              ReadIntAttr(function, "kxc.kernel_abi_version") ==
+                  codegen::kKernelAbiVersion &&
+              ReadIntAttr(function, "kxc.input_count") == 1 &&
+              ReadIntAttr(function, "kxc.runtime_extent_count") == 2 &&
+              ReadIntAttr(function, "kxc.runtime_extent_param_start") == 1 &&
+              ReadIntAttr(function, "kxc.constant_count") == 1 &&
+              ReadIntAttr(function, "kxc.output_param_start") == 4 &&
+              lowered.constants().size() == 1 &&
+              lowered.constants()[0]->param_index == 3,
+          "PrimFunc parameters are not input -> extents -> constants -> output");
+
+    std::vector<tir::PrimExpr> loop_extents;
+    CollectLoopExtents(function->body, &loop_extents);
+    size_t first_extent = 99;
+    size_t second_extent = 99;
+    CHECK(loop_extents.size() == 2 &&
+              relay::internal::MatchRuntimeExtentLoad(
+                  loop_extents[0], runtime_extents, &first_extent) &&
+              relay::internal::MatchRuntimeExtentLoad(
+                  loop_extents[1], runtime_extents, &second_extent) &&
+              first_extent == 0 && second_extent == 1,
+          "TIR loop bounds are not ordered runtime extent loads");
+
+    const CompileConfig config = CompileConfig::Create(cpu, 3);
+    const api::internal::CompilerExecutionContract execution_contract =
+        api::internal::ResolveCompilerExecutionContract(config);
+    const tir::PrimFunc executable_function = PipelineExecutor::ExecuteTIR(
+        execution_contract.tir_pipeline, function, cpu);
+    std::vector<tir::PrimExpr> optimized_loop_extents;
+    CollectLoopExtents(executable_function->body, &optimized_loop_extents);
+    CHECK(optimized_loop_extents.size() == 2 &&
+              relay::internal::MatchRuntimeExtentLoad(
+                  optimized_loop_extents[0], runtime_extents, nullptr) &&
+              relay::internal::MatchRuntimeExtentLoad(
+                  optimized_loop_extents[1], runtime_extents, nullptr),
+          "production TIR pipeline replaced dynamic bounds with constants");
+
+    Map<String, runtime::NDArray> constants;
+    constants.Set("dynamic.bias", bias_value);
+    const codegen::KernelSignature signature =
+        codegen::BuildKernelSignature(executable_function, constants, cpu,
+                                      "bounded_dynamic_add");
+    const Array<codegen::KernelArgSpec> arguments = signature.arguments();
+    CHECK(arguments.size() == 5 &&
+              arguments[0]->role == codegen::KernelArgRole::kInput &&
+              arguments[0].shape()[0] == codegen::kDynamicDimension &&
+              arguments[0].shape()[1] == codegen::kDynamicDimension &&
+              arguments[1]->role ==
+                  codegen::KernelArgRole::kRuntimeExtent &&
+              arguments[2]->role ==
+                  codegen::KernelArgRole::kRuntimeExtent &&
+              arguments[3]->role == codegen::KernelArgRole::kConstant &&
+              arguments[3]->constant_key == "dynamic.bias" &&
+              arguments[4]->role == codegen::KernelArgRole::kOutput &&
+              arguments[4].shape()[0] == codegen::kDynamicDimension &&
+              arguments[4].shape()[1] == codegen::kDynamicDimension,
+          "KernelSignature lost dynamic input/output or runtime extent roles");
+
+    const std::string canonical =
+        relay::internal::GetTEScheduleContract(executable_function);
+    const std::string reversed =
+        relay::internal::CanonicalTEScheduleContract(
+            schedule, cpu, {columns, rows});
+    const api::PrimitiveArtifactKey artifact =
+        api::internal::BuildPrimitiveArtifactKey(
+            api::UnitSemanticKey("bounded-dynamic-unit"), cpu, "pipeline",
+            canonical.c_str(), "llvm-test");
+    const api::PrimitiveArtifactKey reversed_artifact =
+        api::internal::BuildPrimitiveArtifactKey(
+            api::UnitSemanticKey("bounded-dynamic-unit"), cpu, "pipeline",
+            reversed.c_str(), "llvm-test");
+    CHECK(canonical.find("kxc.te.schedule.v2") != std::string::npos &&
+              canonical == relay::internal::CanonicalTEScheduleContract(
+                               schedule, cpu, runtime_extents) &&
+              canonical != reversed && artifact != reversed_artifact,
+          "dynamic schedule/artifact identity omits runtime extent order");
+
+    te::Schedule wrong_policy = te::create_schedule({output->op});
+    CHECK(Throws([&] {
+              (void)relay::internal::LowerTensorGraphToTIR(
+                  {input}, {}, {output}, wrong_policy, cpu,
+                  relay::internal::PrimFuncIdentity{String("wrong_policy")},
+                  runtime_extents);
+          }) &&
+              Throws([&] {
+                  (void)relay::internal::BuildBoundedDynamicTESchedule(
+                      {output}, SyntheticCudaTarget());
+              }),
+          "dynamic schedule policy or synthetic CUDA did not fail closed");
+
+    const tir::Var rogue("rogue_extent", u64);
+    const Array<tir::PrimExpr> rogue_shape{
+        relay::internal::LoadRuntimeExtent(rogue)};
+    const te::Tensor rogue_input =
+        te::placeholder(rogue_shape, f32, "rogue_input");
+    const te::Tensor rogue_output = te::compute(
+        rogue_shape,
+        [rogue_input](const Array<tir::Var>& axis) {
+            return rogue_input(axis);
+        },
+        "rogue_output");
+    const te::Schedule rogue_schedule =
+        relay::internal::BuildBoundedDynamicTESchedule({rogue_output}, cpu);
+    CHECK(Throws([&] {
+              (void)relay::internal::LowerTensorGraphToTIR(
+                  {rogue_input}, {}, {rogue_output}, rogue_schedule, cpu,
+                  relay::internal::PrimFuncIdentity{String("rogue_dynamic")},
+                  {rows});
+          }),
+          "unregistered runtime extent load was accepted");
+
+#if KXC_USE_LLVM
+    auto llvm_context = std::make_unique<llvm::LLVMContext>();
+    codegen::CodeGenLLVM llvm_codegen(*llvm_context);
+    llvm_codegen.AddFunction(executable_function, "bounded_dynamic_add");
+    const codegen::KernelLaunchMetadata metadata(
+        Device::CPU(), codegen::CodeGenBackend::kLLVM);
+    const codegen::CompiledKernel kernel = codegen::LLVMJITEngine().Compile(
+        llvm_codegen.TakeModule(), std::move(llvm_context), signature,
+        metadata, 2);
+
+    const auto make_float_array = [](int64_t rows_value,
+                                     const std::vector<float>& values) {
+        runtime::NDArray array = runtime::NDArray::Empty(
+            {rows_value, 4}, runtime::DataTypeFromString("float32"),
+            Device::CPU());
+        if (!values.empty()) {
+            array.CopyFromBytes(values.data(), values.size() * sizeof(float));
+        }
+        return array;
+    };
+    const auto make_extent = [](uint64_t value) {
+        runtime::NDArray array = runtime::NDArray::Empty(
+            {1}, DLDataType{kDLUInt, 64, 1}, Device::CPU(), 8);
+        array.CopyFromBytes(&value, sizeof(value));
+        return array;
+    };
+    for (const int64_t rows_value : {2, 7}) {
+        std::vector<float> values(static_cast<size_t>(rows_value * 4));
+        for (size_t index = 0; index < values.size(); ++index) {
+            values[index] = static_cast<float>(index);
+        }
+        runtime::NDArray destination = make_float_array(rows_value, {});
+        kernel.Launch(
+                  {make_float_array(rows_value, values),
+                   make_extent(static_cast<uint64_t>(rows_value)),
+                   make_extent(4), bias_value, destination},
+                  DeviceStream::Default(Device::CPU()))
+            .Wait();
+        std::vector<float> actual(values.size());
+        destination.CopyToBytes(actual.data(), actual.size() * sizeof(float));
+        for (size_t index = 0; index < values.size(); ++index) {
+            CHECK(actual[index] == values[index] + bias_scalar,
+                  "one LLVM kernel did not execute both bounded shapes");
+        }
+    }
+
+#if KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
+    ModuleInputContract module_input;
+    module_input.axis_guards = {
+        ModuleAxisGuard{0, 0, 7, 1, std::nullopt, std::nullopt},
+        ModuleAxisGuard{1, 4, 4, 1, ModuleExtent{4}, std::nullopt}};
+    const ModuleShapeExpr rows_expr = ModuleShapeExpr::InputAxis(0, 0);
+    const ModuleShapeExpr columns_expr = ModuleShapeExpr::InputAxis(0, 1);
+    ModuleTensorContract module_output;
+    module_output.logical = {rows_expr, columns_expr};
+    module_output.physical = module_output.logical;
+    module_output.valid = module_output.logical;
+    module_output.max_bytes = 7 * 4 * sizeof(float);
+    const auto invocation_contract =
+        std::make_shared<ModuleInvocationContract>(
+            std::vector<ModuleInputContract>{module_input},
+            std::vector<ModuleTensorContract>{module_output},
+            std::vector<ModuleRuntimeExtentScalar>{{rows_expr},
+                                                   {columns_expr}},
+            module_output.max_bytes);
+    const CompiledModule module = internal::BuildCompiledModule(
+        cpu,
+        {internal::CompiledModuleEntry{signature, metadata, kernel,
+                                       invocation_contract}},
+        constants);
+    for (const int64_t rows_value : {2, 7}) {
+        std::vector<float> values(static_cast<size_t>(rows_value * 4), 2.0f);
+        ModuleInvocationResult result = module.Invoke(
+            "bounded_dynamic_add",
+            {make_float_array(rows_value, values)},
+            DeviceStream::Default(Device::CPU()));
+        result.operation.Wait();
+        const std::vector<ModuleExtent> expected_shape{
+            static_cast<ModuleExtent>(rows_value), 4};
+        CHECK(result.outputs.size() == 1 &&
+                  result.outputs[0].logical == expected_shape,
+              "TE-produced module entry lost its invocation contract");
+    }
+#endif
+#else
+    std::cout << "[SKIP] bounded dynamic LLVM numeric: KXC_USE_LLVM=0\n";
+#endif
+    return true;
+}
+
 bool TestCpuDefaultScheduleAndLLVMNumerics() {
     using namespace kxc;
     const Target cpu = BuildTarget(Device::CPU());
@@ -459,6 +740,8 @@ int main() {
         {"manual_schedule_tir_identity", TestManualScheduleChangesTIRAndIdentity},
         {"schedule_validation", TestScheduleValidation},
         {"cuda_single_binding_authority", TestCudaKeepsSingleBindingAuthority},
+        {"bounded_dynamic_schedule_tir_abi_llvm",
+         TestBoundedDynamicScheduleTIRABIAndLLVM},
         {"cpu_default_schedule_llvm_numeric", TestCpuDefaultScheduleAndLLVMNumerics},
     };
     for (const auto& [name, test] : tests) {

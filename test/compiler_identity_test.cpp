@@ -305,7 +305,7 @@ bool TestPlanAbiUsesKernelCanonicalBytes() {
     const kxc::api::PlanAbiFingerprint first = PlanAbiForAlignment(4);
     const kxc::api::PlanAbiFingerprint changed = PlanAbiForAlignment(8);
     TEST_CHECK(first.defined() && first != changed &&
-                   first.canonical_bytes().find("kxc.kernel-signature.v2") !=
+                   first.canonical_bytes().find("kxc.kernel-signature.v3") !=
                        std::string::npos &&
                    first.canonical_bytes().find("kxc.kernel-launch-metadata.v1") !=
                        std::string::npos &&

@@ -401,7 +401,8 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
         result.primitives.push_back(CompiledPrimitive{
             item.unit->id, std::move(item.tir), std::move(item.signature),
             std::move(item.pin),
-            item.lease.access() != PrimitiveCacheAccess::kOwner});
+            item.lease.access() != PrimitiveCacheAccess::kOwner,
+            nullptr});
     }
     owner_guard.Dismiss();
     return result;
@@ -449,7 +450,8 @@ CompiledModule AssemblePrimitiveModule(
         entries.push_back(CompiledModuleEntry{
             primitive.current_signature, artifact.launch_metadata,
             RelocateCachedKernel(
-                primitive.pin, primitive.current_signature, Context(unit))});
+                primitive.pin, primitive.current_signature, Context(unit)),
+            primitive.invocation_contract});
     }
     return BuildCompiledModule(
         target, std::move(entries), batch.constants,

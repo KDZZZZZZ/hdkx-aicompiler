@@ -578,17 +578,111 @@ bool EvaluateStaticInt64(const tir::PrimExpr& expression, int64_t* result) {
     return false;
 }
 
-Array<tir::PrimExpr> CanonicalStaticBufferShape(
-    const Array<tir::PrimExpr>& shape) {
+bool IsRuntimeExtentBufferVar(const tir::Var& buffer) {
+    return buffer.defined() && buffer.As<tir::VarNode>() &&
+           buffer->dtype == tir::DataType::UInt(64);
+}
+
+void ValidateRuntimeExtentBuffers(const Array<tir::Var>& buffers) {
+    std::unordered_set<const Object*> seen;
+    for (const tir::Var& buffer : buffers) {
+        if (!IsRuntimeExtentBufferVar(buffer) || buffer->name_hint.empty() ||
+            !seen.insert(buffer.get()).second) {
+            throw std::invalid_argument(
+                "Runtime extent buffers must be unique named uint64 Vars");
+        }
+    }
+}
+
+bool MatchRuntimeExtentLoadImpl(const tir::PrimExpr& expression,
+                                const Array<tir::Var>& buffers,
+                                size_t* buffer_index) {
+    const auto* cast = expression.As<tir::CallNode>();
+    if (!cast || cast->name != "cast" || cast->args.size() != 1 ||
+        cast->dtype != tir::DataType::Int(64)) {
+        return false;
+    }
+    const auto* load = cast->args[0].As<tir::LoadNode>();
+    int64_t index = -1;
+    if (!load || load->predicate.defined() ||
+        load->dtype != tir::DataType::UInt(64) ||
+        !EvaluateStaticInt64(load->index, &index) || index != 0) {
+        return false;
+    }
+    for (size_t slot = 0; slot < buffers.size(); ++slot) {
+        if (load->buffer_var.get() == buffers[slot].get()) {
+            if (buffer_index) *buffer_index = slot;
+            return true;
+        }
+    }
+    return false;
+}
+
+void ValidateLoweringTensor(
+    const Array<tir::PrimExpr>& shape, tir::DataType dtype,
+    const std::string& context, const Array<tir::Var>& runtime_buffers) {
+    bool all_static = true;
+    for (const tir::PrimExpr& expression : shape) {
+        int64_t ignored = 0;
+        all_static = all_static && EvaluateStaticInt64(expression, &ignored);
+    }
+    if (all_static) {
+        internal::ValidateStaticLoweringTensor(shape, dtype, context);
+        return;
+    }
+    if (runtime_buffers.empty()) {
+        throw std::invalid_argument(
+            context + " requires static extents outside bounded dynamic lowering");
+    }
+    if (dtype.bits == 0 || dtype.lanes == 0) {
+        throw std::invalid_argument(context +
+                                    " has an invalid zero-width tensor dtype");
+    }
+    const size_t scalar_bytes =
+        (static_cast<size_t>(dtype.bits) + 7U) / 8U;
+    if (scalar_bytes > std::numeric_limits<size_t>::max() / dtype.lanes) {
+        throw std::overflow_error(context +
+                                  " dtype byte width overflows size_t");
+    }
+    for (size_t axis = 0; axis < shape.size(); ++axis) {
+        int64_t extent = 0;
+        if (EvaluateStaticInt64(shape[axis], &extent)) {
+            if (extent < 0 || extent > std::numeric_limits<int32_t>::max()) {
+                throw std::invalid_argument(
+                    context + " has an invalid static extent at axis " +
+                    std::to_string(axis));
+            }
+            continue;
+        }
+        if (!MatchRuntimeExtentLoadImpl(shape[axis], runtime_buffers,
+                                        nullptr)) {
+            throw std::invalid_argument(
+                context + " axis " + std::to_string(axis) +
+                " must be a direct generated runtime extent load");
+        }
+    }
+}
+
+Array<tir::PrimExpr> CanonicalBufferShape(
+    const Array<tir::PrimExpr>& shape,
+    const Array<tir::Var>& runtime_buffers) {
     Array<tir::PrimExpr> canonical;
     for (const tir::PrimExpr& expression : shape) {
         int64_t extent = 0;
-        if (!EvaluateStaticInt64(expression, &extent) || extent < 0) {
+        if (EvaluateStaticInt64(expression, &extent)) {
+            if (extent < 0) {
+                throw std::invalid_argument(
+                    "TE-to-TIR Buffer shape contains a negative extent");
+            }
+            canonical.push_back(
+                tir::IntImm(extent, tir::DataType::Int(64)));
+        } else if (MatchRuntimeExtentLoadImpl(expression, runtime_buffers,
+                                              nullptr)) {
+            canonical.push_back(expression);
+        } else {
             throw std::invalid_argument(
-                "TE-to-TIR Buffer shape requires static non-negative extents");
+                "TE-to-TIR Buffer shape is neither static nor a runtime extent load");
         }
-        canonical.push_back(
-            tir::IntImm(extent, tir::DataType::Int(64)));
     }
     return canonical;
 }
@@ -709,12 +803,23 @@ const char* OperationKind(const te::Operation& operation) {
         "TE schedule contains an unsupported operation kind");
 }
 
-void ValidateCudaTESchedule(const te::Schedule& schedule) {
+void ValidateSerialTESchedule(const te::Schedule& schedule,
+                              const char* context,
+                              bool allow_reduction) {
     for (const te::Stage& stage : schedule->stages) {
+        if (!stage.defined() || !stage->op.defined()) {
+            throw std::invalid_argument(
+                std::string(context) + " contains an undefined stage");
+        }
+        const auto* compute = stage->op.As<te::ComputeOpNode>();
+        if (!allow_reduction && compute && !compute->reduce_axis.empty()) {
+            throw std::invalid_argument(
+                std::string(context) + " does not support reductions");
+        }
         if (!stage->split_relations.empty() ||
             stage->leaf_iter_vars.size() != stage->root_iter_vars.size()) {
             throw std::invalid_argument(
-                "CUDA TE schedule must stay unsplit; BindCudaThreads owns launch mapping");
+                std::string(context) + " must stay unsplit");
         }
         for (size_t index = 0; index < stage->leaf_iter_vars.size(); ++index) {
             const te::IterVar& leaf = stage->leaf_iter_vars[index];
@@ -724,9 +829,19 @@ void ValidateCudaTESchedule(const te::Schedule& schedule) {
                                    : te::IterVarType::kDataPar;
             if (leaf.get() != root.get() || leaf->iter_type != expected) {
                 throw std::invalid_argument(
-                    "CUDA TE schedule must stay serial; BindCudaThreads is the sole thread authority");
+                    std::string(context) + " must stay serial");
             }
         }
+    }
+}
+
+void ValidateCudaTESchedule(const te::Schedule& schedule) {
+    try {
+        ValidateSerialTESchedule(schedule, "CUDA TE schedule", true);
+    } catch (const std::invalid_argument& error) {
+        throw std::invalid_argument(
+            std::string(error.what()) +
+            "; BindCudaThreads is the sole launch mapping authority");
     }
 }
 
@@ -806,22 +921,100 @@ te::Schedule BuildDefaultTESchedule(const Array<te::Tensor>& outputs,
     return schedule;
 }
 
-std::string CanonicalTEScheduleContract(const te::Schedule& schedule,
-                                        const Target& target) {
+te::Schedule BuildBoundedDynamicTESchedule(
+    const Array<te::Tensor>& outputs, const Target& target) {
     ValidateScheduleTarget(target);
+    if (target->kind != "llvm" || target->device_type != kCPU) {
+        throw std::invalid_argument(
+            "Bounded dynamic TE scheduling is LLVM/CPU-only");
+    }
+    if (outputs.empty()) {
+        throw std::invalid_argument(
+            "BuildBoundedDynamicTESchedule requires output tensors");
+    }
+    bool has_symbolic_extent = false;
+    Array<te::Operation> output_operations;
+    std::unordered_set<const Object*> seen;
+    for (const te::Tensor& output : outputs) {
+        if (!output.defined() || !output->op.defined()) {
+            throw std::invalid_argument(
+                "BuildBoundedDynamicTESchedule outputs must be defined");
+        }
+        for (const tir::PrimExpr& extent : output->shape) {
+            int64_t ignored = 0;
+            has_symbolic_extent =
+                has_symbolic_extent || !EvaluateStaticInt64(extent, &ignored);
+        }
+        if (seen.insert(output->op.get()).second) {
+            output_operations.push_back(output->op);
+        }
+    }
+    if (!has_symbolic_extent) {
+        throw std::invalid_argument(
+            "Bounded dynamic TE scheduling requires a symbolic output extent");
+    }
+    te::Schedule schedule = te::create_schedule(output_operations);
+    schedule.operator->()->policy = kBoundedDynamicTESchedulePolicy;
+    ValidateSerialTESchedule(schedule, "Bounded dynamic TE schedule", false);
+    return schedule;
+}
+
+tir::PrimExpr LoadRuntimeExtent(const tir::Var& buffer) {
+    if (!IsRuntimeExtentBufferVar(buffer) || buffer->name_hint.empty()) {
+        throw std::invalid_argument(
+            "LoadRuntimeExtent requires a named uint64 buffer Var");
+    }
+    return tir::Call(
+        tir::DataType::Int(64), "cast",
+        {tir::Load(buffer, tir::IntImm(0, tir::DataType::Int(64)))});
+}
+
+bool MatchRuntimeExtentLoad(const tir::PrimExpr& expression,
+                            const Array<tir::Var>& buffers,
+                            size_t* buffer_index) {
+    ValidateRuntimeExtentBuffers(buffers);
+    return MatchRuntimeExtentLoadImpl(expression, buffers, buffer_index);
+}
+
+std::string CanonicalTEScheduleContract(
+    const te::Schedule& schedule, const Target& target,
+    const Array<tir::Var>& runtime_extent_buffers) {
+    ValidateScheduleTarget(target);
+    ValidateRuntimeExtentBuffers(runtime_extent_buffers);
     if (!schedule.defined() || schedule->policy.empty() ||
         schedule->outputs.empty() || schedule->stages.empty() ||
         schedule->op_map.size() != schedule->stages.size()) {
         throw std::invalid_argument(
             "CanonicalTEScheduleContract requires a complete Schedule");
     }
-    if (target->kind == "cuda") ValidateCudaTESchedule(schedule);
+    const bool bounded_dynamic = !runtime_extent_buffers.empty();
+    if (bounded_dynamic) {
+        if (target->kind != "llvm" || target->device_type != kCPU ||
+            schedule->policy != kBoundedDynamicTESchedulePolicy) {
+            throw std::invalid_argument(
+                "Runtime extent schedules require the bounded LLVM/CPU policy");
+        }
+        ValidateSerialTESchedule(schedule, "Bounded dynamic TE schedule", false);
+    } else {
+        if (schedule->policy == kBoundedDynamicTESchedulePolicy) {
+            throw std::invalid_argument(
+                "Bounded dynamic TE schedule requires runtime extent buffers");
+        }
+        if (target->kind == "cuda") ValidateCudaTESchedule(schedule);
+    }
 
-    support::CanonicalBytesEncoder encoder("kxc.te.schedule.v1");
+    support::CanonicalBytesEncoder encoder(
+        bounded_dynamic ? "kxc.te.schedule.v2" : "kxc.te.schedule.v1");
     encoder.Field("policy", schedule->policy);
     encoder.Field("target_kind", target->kind);
     encoder.IntegerField("target_device_type",
                          static_cast<int>(target->device_type));
+    std::vector<bool> used_runtime_extents(runtime_extent_buffers.size(),
+                                           false);
+    if (bounded_dynamic) {
+        encoder.IntegerField("runtime_extent_count",
+                             runtime_extent_buffers.size());
+    }
     std::unordered_map<const Object*, size_t> stage_indices;
     for (size_t index = 0; index < schedule->stages.size(); ++index) {
         const te::Stage& stage = schedule->stages[index];
@@ -864,15 +1057,27 @@ std::string CanonicalTEScheduleContract(const te::Schedule& schedule,
                     "TE schedule all_iter_vars must be defined and unique");
             }
             int64_t minimum = 0;
-            int64_t extent = 0;
-            if (!EvaluateStaticInt64(axis->dom_min, &minimum) ||
-                !EvaluateStaticInt64(axis->dom_extent, &extent)) {
+            if (!EvaluateStaticInt64(axis->dom_min, &minimum)) {
                 throw std::invalid_argument(
-                    "TE schedule canonical identity requires static axis domains");
+                    "TE schedule canonical identity requires a static axis minimum");
             }
             encoder.IntegerField("axis", axis_index);
             encoder.IntegerField("axis_min", minimum);
-            encoder.IntegerField("axis_extent", extent);
+            int64_t extent = 0;
+            if (EvaluateStaticInt64(axis->dom_extent, &extent)) {
+                encoder.IntegerField("axis_extent", extent);
+            } else {
+                size_t runtime_extent = 0;
+                if (!bounded_dynamic ||
+                    !MatchRuntimeExtentLoadImpl(
+                        axis->dom_extent, runtime_extent_buffers,
+                        &runtime_extent)) {
+                    throw std::invalid_argument(
+                        "TE schedule axis extent is not canonicalizable");
+                }
+                used_runtime_extents[runtime_extent] = true;
+                encoder.IntegerField("axis_runtime_extent", runtime_extent);
+            }
             encoder.BoolField("axis_reduction", axis->is_reduction);
         }
         for (const te::IterVar& root : stage->root_iter_vars) {
@@ -912,6 +1117,12 @@ std::string CanonicalTEScheduleContract(const te::Schedule& schedule,
             (void)BuildStageAxisPlan(stage, compute);
         }
     }
+    if (bounded_dynamic &&
+        std::find(used_runtime_extents.begin(), used_runtime_extents.end(),
+                  false) != used_runtime_extents.end()) {
+        throw std::invalid_argument(
+            "Every runtime extent buffer must drive a scheduled loop axis");
+    }
     return std::move(encoder).Take();
 }
 
@@ -936,8 +1147,15 @@ LoweredFunction LowerTensorGraphToTIR(
     const Array<te::Tensor>& outputs,
     const te::Schedule& schedule,
     const Target& target,
-    const PrimFuncIdentity& identity) {
+    const PrimFuncIdentity& identity,
+    const Array<tir::Var>& runtime_extent_buffers) {
     ValidateScheduleTarget(target);
+    ValidateRuntimeExtentBuffers(runtime_extent_buffers);
+    if (!runtime_extent_buffers.empty() &&
+        (target->kind != "llvm" || target->device_type != kCPU)) {
+        throw std::invalid_argument(
+            "Runtime extent TE-to-TIR lowering is LLVM/CPU-only");
+    }
     if (!schedule.defined()) {
         throw std::invalid_argument(
             "TE-to-TIR lowering requires an explicit Schedule");
@@ -966,9 +1184,10 @@ LoweredFunction LowerTensorGraphToTIR(
             throw std::invalid_argument(
                 "TE-to-TIR output tensors must be distinct logical values");
         }
-        ValidateStaticLoweringTensor(
+        ValidateLoweringTensor(
             output->shape, output->dtype,
-            "TE-to-TIR output tensor '" + output->name + "'");
+            "TE-to-TIR output tensor '" + output->name + "'",
+            runtime_extent_buffers);
         if (!output->op.As<te::ComputeOpNode>()) {
             throw std::invalid_argument(
                 "TE-to-TIR public outputs must be produced by ComputeOp");
@@ -987,9 +1206,10 @@ LoweredFunction LowerTensorGraphToTIR(
                       return lhs->value_index < rhs->value_index;
                   });
         for (const auto& tensor : entry.second) {
-            ValidateStaticLoweringTensor(
+            ValidateLoweringTensor(
                 tensor->shape, tensor->dtype,
-                "TE-to-TIR tensor '" + tensor->name + "'");
+                "TE-to-TIR tensor '" + tensor->name + "'",
+                runtime_extent_buffers);
         }
     }
     for (const auto& operation : topo_ops) {
@@ -1033,7 +1253,8 @@ LoweredFunction LowerTensorGraphToTIR(
         }
     }
     const std::string schedule_contract =
-        CanonicalTEScheduleContract(schedule, target);
+        CanonicalTEScheduleContract(schedule, target,
+                                    runtime_extent_buffers);
 
     Array<tir::Var> params;
     Map<tir::Var, tir::Buffer> buffer_map;
@@ -1042,18 +1263,32 @@ LoweredFunction LowerTensorGraphToTIR(
         if (!tensor.defined()) {
             throw std::invalid_argument("TE-to-TIR input tensor is undefined");
         }
-        ValidateStaticLoweringTensor(
+        ValidateLoweringTensor(
             tensor->shape, tensor->dtype,
-            "TE-to-TIR input tensor '" + tensor->name + "'");
+            "TE-to-TIR input tensor '" + tensor->name + "'",
+            runtime_extent_buffers);
         tir::Var data_var(tensor->name, tensor->dtype);
         tir::Buffer buffer(data_var, tensor->dtype,
-                           CanonicalStaticBufferShape(tensor->shape), {},
+                           CanonicalBufferShape(tensor->shape,
+                                                runtime_extent_buffers), {},
                            tir::IntImm(0), tensor->name, 0, 0);
         params.push_back(data_var);
         buffer_map.Set(data_var, buffer);
         buffer_var_by_tensor[tensor.get()] = data_var;
     }
     const int64_t input_count = static_cast<int64_t>(inputs.size());
+    const int64_t runtime_extent_param_start = input_count;
+    for (const tir::Var& data_var : runtime_extent_buffers) {
+        const std::string name = data_var->name_hint;
+        params.push_back(data_var);
+        buffer_map.Set(
+            data_var,
+            tir::Buffer(data_var, tir::DataType::UInt(64),
+                        {tir::IntImm(1, tir::DataType::Int(64))}, {},
+                        tir::IntImm(0), name, 8, 0));
+    }
+    const int64_t runtime_extent_count =
+        static_cast<int64_t>(runtime_extent_buffers.size());
 
     Array<ConstantBinding> constant_bindings;
     Array<String> constant_keys;
@@ -1069,7 +1304,7 @@ LoweredFunction LowerTensorGraphToTIR(
             "TE-to-TIR constant tensor '" + tensor->name + "'");
         tir::Var data_var(tensor->name, tensor->dtype);
         tir::Buffer buffer(data_var, tensor->dtype,
-                           CanonicalStaticBufferShape(tensor->shape), {},
+                           CanonicalBufferShape(tensor->shape, {}), {},
                            tir::IntImm(0), tensor->name, 0, 0);
         params.push_back(data_var);
         buffer_map.Set(data_var, buffer);
@@ -1080,7 +1315,8 @@ LoweredFunction LowerTensorGraphToTIR(
         constant_keys.push_back(record.key);
     }
     const int64_t constant_count = static_cast<int64_t>(constants.size());
-    const int64_t output_param_start = input_count + constant_count;
+    const int64_t output_param_start =
+        input_count + runtime_extent_count + constant_count;
 
     std::unordered_set<const Object*> public_outputs;
     std::unordered_set<std::string> used_output_names;
@@ -1091,7 +1327,8 @@ LoweredFunction LowerTensorGraphToTIR(
             MakeOutputVarName(tensor, index, &used_output_names);
         tir::Var data_var(name, tensor->dtype);
         tir::Buffer buffer(data_var, tensor->dtype,
-                           CanonicalStaticBufferShape(tensor->shape), {},
+                           CanonicalBufferShape(tensor->shape,
+                                                runtime_extent_buffers), {},
                            tir::IntImm(0), name, 0, 0);
         params.push_back(data_var);
         buffer_map.Set(data_var, buffer);
@@ -1105,6 +1342,10 @@ LoweredFunction LowerTensorGraphToTIR(
         if (tensors_it == op_output_tensors.end()) continue;
         for (const auto& tensor : tensors_it->second) {
             if (public_outputs.count(tensor.get()) != 0) continue;
+            if (!runtime_extent_buffers.empty()) {
+                throw std::invalid_argument(
+                    "Bounded dynamic TE lowering does not support intermediate allocation");
+            }
             tir::Var local_var(tensor->name, tensor->dtype);
             buffer_var_by_tensor[tensor.get()] = local_var;
             intermediates.push_back(tensor);
@@ -1152,8 +1393,17 @@ LoweredFunction LowerTensorGraphToTIR(
     Map<String, ObjectRef> attrs;
     attrs.Set("global_symbol", identity.symbol);
     attrs.Set("tir.noalias", tir::IntImm(1, tir::DataType::Bool()));
+    attrs.Set("kxc.kernel_abi_version",
+              tir::IntImm(codegen::kKernelAbiVersion,
+                          tir::DataType::Int(64)));
     attrs.Set("kxc.input_count",
               tir::IntImm(input_count, tir::DataType::Int(64)));
+    attrs.Set("kxc.runtime_extent_count",
+              tir::IntImm(runtime_extent_count,
+                          tir::DataType::Int(64)));
+    attrs.Set("kxc.runtime_extent_param_start",
+              tir::IntImm(runtime_extent_param_start,
+                          tir::DataType::Int(64)));
     attrs.Set("kxc.constant_count",
               tir::IntImm(constant_count, tir::DataType::Int(64)));
     attrs.Set("kxc.output_count",
