@@ -5,6 +5,7 @@
 ## 从这里开始
 
 - [架构总览](ARCHITECTURE.md) — 系统边界、编译与运行流程、身份、功能开关和已知限制。
+- [TE Program IR 设计提案](TE_PROGRAM_IR.md) — 尚未实现的 `te::Program` 边界、确定性 Lowering、融合接入与验收条件。
 - [构建说明](BUILDING.md) — 支持的本地配置和测试命令。
 - [开发流程](DEVELOPMENT_WORKFLOW.md) — 分支、评审和验证规则。
 

@@ -40,6 +40,7 @@ Relay Function + CompileConfig
 
 - [文档索引](docs/README.md)
 - [架构总览](docs/ARCHITECTURE.md)
+- [TE Program IR 设计提案（尚未实现）](docs/TE_PROGRAM_IR.md)
 - [构建说明](docs/BUILDING.md)
 - [编译器扩展契约](docs/COMPILER_EXTENSION_CONTRACT.md)
 - [Relay 算子支持矩阵](docs/OP_SUPPORT_MATRIX.md)
