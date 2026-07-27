@@ -1,8 +1,9 @@
 /*! \file include/kxc/compiler/restricted_symbolic_shape.h
- * \brief Default-off restricted symbolic Shape exact-decision control plane.
+ * \brief Default-off restricted symbolic Shape compile-admission control plane.
  *
- * Mints validated exact decisions only. Does not allocate, compile/cache,
- * execute, or lower control flow. Requires the exact representative gate.
+ * Mints validated exact decisions and bounded compile admission only. Does not
+ * allocate, compile/cache, execute, or lower control flow. Requires the exact
+ * representative gate.
  */
 #pragma once
 
@@ -18,9 +19,9 @@
 #include "kxc/compiler/shape_specialization.h"
 
 // =============================================================================
-// 轨 02 W3 — 受限符号 Shape 控制面（default-OFF）
+// 轨 02 — 受限符号 Shape 控制面（default-OFF）
 // -----------------------------------------------------------------------------
-// 只铸造 exact dispatch 决策，不执行。
+// 只铸造 exact dispatch 决策或 bounded compile admission，不执行。
 // 典型用法：
 //   auto prep = RestrictedSymbolicShapeAdapter::Prepare(fn, cfg, {
 //       InputAxisSymbol{0, 0, "N", 1, 1024, 1}});
@@ -35,6 +36,7 @@ namespace specialization =
     kxc::api::experimental::shape_specialization::v1;
 
 inline constexpr uint32_t kRestrictedSymbolicShapeVersion = 1;
+inline constexpr uint32_t kBoundedCompileApplicabilityVersion = 1;
 
 struct InputAxisSymbol final {
     size_t parameter_index{0};
@@ -81,6 +83,35 @@ private:
     friend class RestrictedSymbolicShapeAdapter;
 };
 
+// Adapter-minted immutable bounded compilation authority.  The representative
+// is a detached Relay snapshot; logical_boundary_function() is the same
+// fixed-rank graph with direct symbolic axes represented as -1.  A caller
+// cannot construct this type from a bare Function or BindingSet.
+class BoundedCompileRequest final {
+public:
+    ~BoundedCompileRequest();
+    BoundedCompileRequest(const BoundedCompileRequest&);
+    BoundedCompileRequest& operator=(const BoundedCompileRequest&);
+    BoundedCompileRequest(BoundedCompileRequest&&) noexcept;
+    BoundedCompileRequest& operator=(BoundedCompileRequest&&) noexcept;
+
+    [[nodiscard]] Function representative() const;
+    [[nodiscard]] Function logical_boundary_function() const;
+    [[nodiscard]] const specialization::GraphTemplate& graph_template() const;
+    [[nodiscard]] const specialization::ExactOracle& representative_oracle() const;
+    [[nodiscard]] const CompileConfig& compile_config() const;
+    [[nodiscard]] const Target& target() const;
+    [[nodiscard]] uint32_t applicability_version() const noexcept;
+
+    struct Impl;
+
+private:
+    explicit BoundedCompileRequest(std::shared_ptr<const Impl> impl);
+
+    std::shared_ptr<const Impl> impl_;
+    friend class RestrictedSymbolicShapeAdapter;
+};
+
 class RestrictedSymbolicShapeAdapter final {
 public:
     static bool IsEnabled() noexcept;
@@ -92,6 +123,12 @@ public:
     static RestrictedDispatchDecision MintExact(
         const PreparedRestrictedSymbolicTemplate& prepared,
         const specialization::BindingSet& bindings);
+
+    // 铸造 bounded compilation admission。请求绑定 detached representative、
+    // GraphTemplate、representative exact proof、CompileConfig/Target snapshot
+    // 与 applicability version；不 lower、不编译 backend、不创建 route。
+    static BoundedCompileRequest MintBoundedCompileRequest(
+        const PreparedRestrictedSymbolicTemplate& prepared);
 
     // 语义 artifact/boundary 变化的 unit 下标；不是 cache 比较。
     static std::vector<size_t> ChangedUnitIndices(

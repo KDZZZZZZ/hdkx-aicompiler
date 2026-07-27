@@ -1,11 +1,14 @@
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "../src/compiler/internal/dynamic_shape_contract.h"
 #include "../src/compiler/internal/primitive_cache.h"
 #include "kxc/compiler/compiler.h"
 #include "kxc/compiler/restricted_symbolic_shape.h"
@@ -16,6 +19,16 @@ namespace {
 namespace restricted = kxc::api::experimental::restricted_symbolic_shape::v1;
 namespace shape =
     kxc::api::experimental::shape_specialization::v1;
+namespace compiler_internal = kxc::api::internal;
+
+static_assert(!std::is_default_constructible_v<restricted::BoundedCompileRequest>);
+static_assert(std::is_copy_constructible_v<restricted::BoundedCompileRequest>);
+static_assert(!std::is_constructible_v<restricted::BoundedCompileRequest,
+                                       kxc::Function, shape::BindingSet>);
+static_assert(!std::is_default_constructible_v<
+              compiler_internal::BoundedCompilePreparation>);
+static_assert(std::is_copy_constructible_v<
+              compiler_internal::BoundedCompilePreparation>);
 
 #define CHECK(x, m) do { if (!(x)) { std::cerr << "[FAIL] " << __FUNCTION__ << ": " << m << "\n"; return false; } } while (0)
 
@@ -26,6 +39,24 @@ bool Throws(const std::function<void()>& fn) {
 
 kxc::api::CompileConfig Config() {
     return kxc::api::CompileConfig::Create(kxc::BuildTarget(kxc::Device::CPU()));
+}
+
+kxc::api::CompileConfig SyntheticCudaConfig() {
+    auto* node = new kxc::TargetNode();
+    node->kind = "cuda";
+    node->device_type = kxc::kCUDA;
+    node->device_id = 0;
+    node->attrs.exists = 1;
+    node->attrs.device_name = "synthetic-cuda";
+    node->attrs.arch = "sm_80";
+    node->attrs.compute_version = "8.0";
+    node->attrs.compute_version_major = 8;
+    node->attrs.compute_version_minor = 0;
+    node->attrs.max_threads_per_block = 1024;
+    node->attrs.warp_size = 32;
+    node->attrs.multi_processor_count = 1;
+    return kxc::api::CompileConfig::Create(
+        kxc::Target(kxc::ObjectRef(node)));
 }
 
 kxc::Function UnaryGraph(const std::string& operation, int64_t extent = 4) {
@@ -40,6 +71,16 @@ kxc::Function MixedGraph() {
     const kxc::Expr add = kxc::Call(kxc::relay::Op::Get("add"), {x, y});
     return kxc::Function({x, y}, kxc::Call(kxc::relay::Op::Get("nn_relu"), {
         kxc::Call(kxc::relay::Op::Get("sqrt"), {add})}));
+}
+
+kxc::Function BoundedChain() {
+    const kxc::TensorType type({4, 4}, "float32");
+    const kxc::Var x("x", type), y("y", type);
+    const kxc::Expr add = kxc::Call(kxc::relay::Op::Get("add"), {x, y});
+    const kxc::Expr relu =
+        kxc::Call(kxc::relay::Op::Get("nn_relu"), {add});
+    return kxc::Function(
+        {x, y}, kxc::Call(kxc::relay::Op::Get("sqrt"), {relu}));
 }
 
 kxc::Function UnusedBindingGraph() {
@@ -243,12 +284,248 @@ bool TestMaterializedVariantClosure() {
 #endif
 }
 
+shape::TensorShapeContract SymbolicContract(
+    const std::vector<shape::DimExpr>& dimensions) {
+    return shape::TensorShapeContract(
+        shape::LogicalShape(dimensions), shape::PhysicalCapacity(dimensions),
+        shape::ValidExtent(dimensions));
+}
+
+bool TestBoundedCompileAdmissionAndUnitContracts() {
+#if !KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE || !KXC_ENABLE_SHAPE_PRODUCTION_EXACT
+    return true;
+#else
+    using restricted::RestrictedSymbolicShapeAdapter;
+    kxc::Function caller = BoundedChain();
+    const auto prepared = RestrictedSymbolicShapeAdapter::Prepare(
+        caller, Config(),
+        {{0, 0, "n", 2, 8, 2}, {1, 0, "n", 2, 8, 2}});
+    // Caller mutation after preparation cannot alter the request snapshot.
+    auto* root = const_cast<kxc::CallNode*>(caller->body.As<kxc::CallNode>());
+    root->op = kxc::relay::Op::Get("mul");
+
+    const auto cache_before =
+        compiler_internal::GetPrimitiveCacheStats();
+    const restricted::BoundedCompileRequest request =
+        RestrictedSymbolicShapeAdapter::MintBoundedCompileRequest(prepared);
+    CHECK(request.applicability_version() ==
+              restricted::kBoundedCompileApplicabilityVersion &&
+              request.graph_template().CanonicalBytes() ==
+                  prepared.graph_template().CanonicalBytes() &&
+              request.target()->kind == "llvm" &&
+              request.target()->device_type == kxc::kCPU,
+          "bounded request must bind template, applicability, config, and target");
+    CHECK(request.representative_oracle().profile().Value("value.0")
+                  .contract.logical == std::vector<int64_t>({4, 4}),
+          "bounded request must carry the representative proof");
+    kxc::Function detached_representative = request.representative();
+    const_cast<kxc::CallNode*>(
+        detached_representative->body.As<kxc::CallNode>())
+        ->op = kxc::relay::Op::Get("nn_relu");
+    CHECK(kxc::api::Compiler::BuildGraphSemanticKey(request.representative()) ==
+              request.graph_template().key(),
+          "mutating a returned Relay copy cannot mutate request authority");
+
+    const kxc::Function logical_boundary =
+        request.logical_boundary_function();
+    const auto* logical_x = logical_boundary->params[0]
+                                ->type_annotation.As<kxc::TensorTypeNode>();
+    const auto* logical_y = logical_boundary->params[1]
+                                ->type_annotation.As<kxc::TensorTypeNode>();
+    CHECK(logical_x && logical_y && logical_x->dtype == "float32" &&
+              logical_y->dtype == "float32" &&
+              logical_x->shape.size() == 2 && logical_x->shape[0] == -1 &&
+              logical_x->shape[1] == 4 && logical_y->shape[0] == -1 &&
+              logical_y->shape[1] == 4,
+          "only direct symbolic axes may become fixed-rank -1 boundaries");
+    CHECK(Throws([&] {
+              (void)compiler_internal::BuildValueGraph(
+                  logical_boundary, kxc::Device::CPU());
+          }) &&
+              Throws([&] {
+                  (void)kxc::api::Compiler::Compile(
+                      logical_boundary, Config());
+              }),
+          "bare dynamic Functions must still fail static ValueGraph and Compiler admission");
+
+    const compiler_internal::BoundedCompilePreparation result =
+        compiler_internal::PrepareBoundedCompile(request);
+    CHECK(result.version() ==
+              compiler_internal::kBoundedCompilePreparationVersion &&
+              result.partitioned_graph().units.size() == 3 &&
+              result.unit_shape_contracts().size() == 3,
+          "add/relu/sqrt must produce three ordered bounded units");
+    for (const auto& value : result.partitioned_graph().value_graph.values) {
+        const auto* type = value.checked_type.As<kxc::TensorTypeNode>();
+        CHECK(type && type->dtype == "float32" && type->shape.size() == 2 &&
+                  type->shape[0] == -1 && type->shape[1] == 4,
+              "bounded logical values must preserve dtype/rank and direct axes");
+    }
+
+    const auto& add = result.unit_shape_contracts()[0];
+    CHECK(add.version() ==
+              compiler_internal::kDynamicUnitShapeContractVersion &&
+              add.local_input_guards().size() == 2 &&
+              add.local_input_guards()[0].size() == 2 &&
+              add.local_input_guards()[1].size() == 2,
+          "add must expose one local guard for every input axis");
+    const auto& anchor = add.local_input_guards()[0][0];
+    const auto& shared = add.local_input_guards()[1][0];
+    CHECK(anchor.lower == 2 && anchor.upper == 8 &&
+              anchor.divisible_by == 2 && !anchor.exact && !anchor.equal_to &&
+              shared.equal_to && shared.equal_to->input_index == 0 &&
+              shared.equal_to->axis == 0 &&
+              add.local_input_guards()[0][1].exact ==
+                  std::optional<std::uint64_t>(4),
+          "bounds, divisibility, constants, and shared-axis equality must be canonical");
+    const auto& output = add.output_shape_expressions()[0];
+    CHECK(output.size() == 2 &&
+              output[0].kind() ==
+                  compiler_internal::DynamicShapeExpr::Kind::kInputAxis &&
+              output[0].input_index() == 0 && output[0].axis() == 0 &&
+              output[1].kind() ==
+                  compiler_internal::DynamicShapeExpr::Kind::kConst &&
+              output[1].constant() == 4 &&
+              add.runtime_extent_expressions() == output,
+          "output and runtime extents must share one local direct-expression order");
+
+    const auto rebuilt = compiler_internal::BuildDynamicUnitShapeContracts(
+        request.graph_template());
+    CHECK(rebuilt.size() == result.unit_shape_contracts().size(),
+          "contract producer cardinality must be deterministic");
+    for (size_t i = 0; i < rebuilt.size(); ++i) {
+        CHECK(!rebuilt[i].canonical_bytes().empty() &&
+                  rebuilt[i].canonical_bytes() ==
+                      result.unit_shape_contracts()[i].canonical_bytes(),
+              "GraphTemplate + ordered UnitSkeleton must be the sole canonical producer");
+    }
+    const auto cache_after = compiler_internal::GetPrimitiveCacheStats();
+    CHECK(cache_before.entries == cache_after.entries &&
+              cache_before.hits == cache_after.hits &&
+              cache_before.misses == cache_after.misses &&
+              cache_before.in_flight == cache_after.in_flight,
+          "bounded structural preparation must not compile or touch primitive cache");
+    return true;
+#endif
+}
+
+bool TestBoundedCompileFailsClosedStructurally() {
+#if !KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE || !KXC_ENABLE_SHAPE_PRODUCTION_EXACT
+    return true;
+#else
+    using restricted::RestrictedSymbolicShapeAdapter;
+    const kxc::TensorType vector4({4}, "float32");
+    const kxc::Var x("x", vector4), y("y", vector4);
+    CHECK(Throws([&] {
+              (void)RestrictedSymbolicShapeAdapter::Prepare(
+                  kxc::Function({x}, kxc::Call(kxc::relay::Op::Get("softmax"), {x})),
+                  Config(), {{0, 0, "n", 1, 8, 1}});
+          }),
+          "unknown bounded operators must fail before request minting");
+    const kxc::Var wrong_dtype("wrong_dtype",
+                               kxc::TensorType({4}, "int32"));
+    CHECK(Throws([&] {
+              (void)RestrictedSymbolicShapeAdapter::Prepare(
+                  kxc::Function(
+                      {x, wrong_dtype},
+                      kxc::Call(kxc::relay::Op::Get("add"),
+                                {x, wrong_dtype})),
+                  Config(), {{0, 0, "n", 1, 8, 1},
+                             {1, 0, "n", 1, 8, 1}});
+          }),
+          "equal-rank values with different dtypes must fail admission");
+
+    const kxc::runtime::NDArray data = kxc::runtime::NDArray::Zeros(
+        {4}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    CHECK(Throws([&] {
+              (void)RestrictedSymbolicShapeAdapter::Prepare(
+                  kxc::Function({x}, kxc::Call(kxc::relay::Op::Get("add"),
+                                               {x, kxc::Constant(data)})),
+                  Config(), {{0, 0, "n", 1, 8, 1}});
+          }),
+          "constants must fail before bounded request minting");
+    CHECK(Throws([&] {
+              (void)RestrictedSymbolicShapeAdapter::Prepare(
+                  kxc::Function({x}, kxc::If(x, x, x)), Config(),
+                  {{0, 0, "n", 1, 8, 1}});
+          }),
+          "control flow must fail before bounded request minting");
+
+    const kxc::Var bx("bx", kxc::TensorType({4, 1}, "float32"));
+    const kxc::Var by("by", kxc::TensorType({4, 3}, "float32"));
+    CHECK(Throws([&] {
+              (void)RestrictedSymbolicShapeAdapter::Prepare(
+                  kxc::Function({bx, by},
+                      kxc::Call(kxc::relay::Op::Get("add"), {bx, by})),
+                  Config(), {{0, 0, "n", 1, 8, 1},
+                             {1, 0, "n", 1, 8, 1}});
+          }),
+          "broadcast must fail before bounded request minting");
+
+    const kxc::Var missing_rank("missing_rank", kxc::Type());
+    CHECK(Throws([&] {
+              (void)RestrictedSymbolicShapeAdapter::Prepare(
+                  kxc::Function({missing_rank}, missing_rank), Config(),
+                  {{0, 0, "n", 1, 8, 1}});
+          }),
+          "missing or dynamic rank must fail before bounded request minting");
+
+    const shape::DimExpr n = shape::DimExpr::Symbol("n");
+    const shape::DimExpr arithmetic =
+        shape::DimExpr::Add({n, shape::DimExpr::Const(1)});
+    const shape::GraphTemplate arithmetic_graph(
+        kxc::api::Compiler::BuildGraphSemanticKey(UnaryGraph("nn_relu")),
+        shape::ShapeProgram(
+            {"n"}, {{"x", SymbolicContract({n})}},
+            {{"y", SymbolicContract({arithmetic})}},
+            {shape::Constraint::Range(n, 1, 8)}),
+        {{shape::GraphLocalCallLocator("value.1"),
+          kxc::api::UnitSemanticKey("bounded.test.relu"), {"x"}, {"y"}}});
+    CHECK(Throws([&] {
+              (void)compiler_internal::BuildDynamicUnitShapeContracts(
+                  arithmetic_graph);
+          }),
+          "complex output shape arithmetic must fail closed");
+
+    CHECK(Throws([&] {
+              const auto cuda_prepared =
+                  RestrictedSymbolicShapeAdapter::Prepare(
+                      UnaryGraph("nn_relu"), SyntheticCudaConfig(),
+                      {{0, 0, "n", 1, 8, 1}});
+              (void)RestrictedSymbolicShapeAdapter::MintBoundedCompileRequest(
+                  cuda_prepared);
+          }),
+          "bounded admission must reject synthetic CUDA without CPU fallback");
+
+    const shape::GraphTemplate broadcast_constraint_graph(
+        kxc::api::Compiler::BuildGraphSemanticKey(UnaryGraph("nn_relu")),
+        shape::ShapeProgram(
+            {"n"}, {{"x", SymbolicContract({n})}},
+            {{"y", SymbolicContract({n})}},
+            {shape::Constraint::Range(n, 1, 8),
+             shape::Constraint::BroadcastCompatible(
+                 n, shape::DimExpr::Const(1))}),
+        {{shape::GraphLocalCallLocator("value.1"),
+          kxc::api::UnitSemanticKey("bounded.test.relu"), {"x"}, {"y"}}});
+    CHECK(Throws([&] {
+              (void)compiler_internal::BuildDynamicUnitShapeContracts(
+                  broadcast_constraint_graph);
+          }),
+          "broadcast constraints cannot masquerade as direct-axis proof");
+    return true;
+#endif
+}
+
 }  // namespace
 
 int main() {
     std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"gate_and_restricted_exact_slice", TestGateAndRestrictedExactSlice},
         {"materialized_variant_closure", TestMaterializedVariantClosure},
+        {"bounded_compile_admission_and_unit_contracts",
+         TestBoundedCompileAdmissionAndUnitContracts},
+        {"bounded_compile_fails_closed_structurally",
+         TestBoundedCompileFailsClosedStructurally},
     };
     int failed = 0;
     for (const auto& test : tests) {

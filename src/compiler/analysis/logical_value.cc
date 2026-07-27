@@ -16,15 +16,18 @@ namespace {
 }
 
 void Flatten(const Type& type, const std::string& path,
-             std::vector<Type>* leaves) {
+             bool allow_bounded_wildcard, std::vector<Type>* leaves) {
     if (const auto* tensor = type.As<TensorTypeNode>()) {
         if (tensor->dtype.empty()) {
             Fail(path, "capability=tensor_dtype; tensor dtype must be explicit");
         }
         for (std::size_t index = 0; index < tensor->shape.size(); ++index) {
-            if (tensor->shape[index] < 0) {
+            const int64_t extent = tensor->shape[index];
+            if (extent < 0 && !(allow_bounded_wildcard && extent == -1)) {
                 Fail(path + ".shape[" + std::to_string(index) + "]",
-                     "capability=static_exact_shape; dimension is dynamic");
+                     allow_bounded_wildcard
+                         ? "capability=bounded_fixed_rank_shape; only -1 is an admitted wildcard"
+                         : "capability=static_exact_shape; dimension is dynamic");
             }
         }
         leaves->push_back(type);
@@ -33,11 +36,39 @@ void Flatten(const Type& type, const std::string& path,
     if (const auto* tuple = type.As<TupleTypeNode>()) {
         for (std::size_t index = 0; index < tuple->fields.size(); ++index) {
             Flatten(tuple->fields[index],
-                    path + ".fields[" + std::to_string(index) + "]", leaves);
+                    path + ".fields[" + std::to_string(index) + "]",
+                    allow_bounded_wildcard, leaves);
         }
         return;
     }
     Fail(path, "requires TensorType or nested TupleType tensor leaves");
+}
+
+std::vector<LogicalValueContract> MakeLeaves(
+    const Expr& source, const Type& checked_type, LogicalValueOrigin origin,
+    ValueId first_id, Device default_device, const std::string& source_locator,
+    bool allow_bounded_wildcard) {
+    if (first_id < 0) Fail(source_locator, "first value id must be non-negative");
+    if (!checked_type.defined()) {
+        Fail(source_locator + ".checked_type", "requires a defined checked Type");
+    }
+    std::vector<Type> leaf_types;
+    Flatten(checked_type, source_locator + ".checked_type",
+            allow_bounded_wildcard, &leaf_types);
+    if (leaf_types.empty()) {
+        Fail(source_locator + ".checked_type", "requires at least one tensor leaf");
+    }
+    const Device device =
+        ResolveLogicalValueDevice(source, std::move(default_device), source_locator);
+    std::vector<LogicalValueContract> values;
+    values.reserve(leaf_types.size());
+    for (std::size_t index = 0; index < leaf_types.size(); ++index) {
+        values.push_back(LogicalValueContract{
+            first_id + static_cast<ValueId>(index), leaf_types[index], device,
+            origin, source,
+            source_locator + ".leaf[" + std::to_string(index) + "]"});
+    }
+    return values;
 }
 
 }  // namespace
@@ -46,7 +77,17 @@ std::vector<Type> FlattenLogicalTensorTypes(const Type& type,
                                             const std::string& path) {
     if (!type.defined()) Fail(path, "requires a defined checked Type");
     std::vector<Type> leaves;
-    Flatten(type, path, &leaves);
+    Flatten(type, path, false, &leaves);
+    if (leaves.empty()) Fail(path, "requires at least one tensor leaf");
+    return leaves;
+}
+
+std::vector<Type> FlattenLogicalTensorTypes(
+    const Type& type, const std::string& path,
+    const BoundedLogicalShapeAdmission&) {
+    if (!type.defined()) Fail(path, "requires a defined checked Type");
+    std::vector<Type> leaves;
+    Flatten(type, path, true, &leaves);
     if (leaves.empty()) Fail(path, "requires at least one tensor leaf");
     return leaves;
 }
@@ -71,20 +112,16 @@ Device ResolveLogicalValueDevice(const Expr& source, Device default_device,
 std::vector<LogicalValueContract> MakeLogicalValueLeaves(
     const Expr& source, const Type& checked_type, LogicalValueOrigin origin,
     ValueId first_id, Device default_device, const std::string& source_locator) {
-    if (first_id < 0) Fail(source_locator, "first value id must be non-negative");
-    const std::vector<Type> leaf_types =
-        FlattenLogicalTensorTypes(checked_type, source_locator + ".checked_type");
-    const Device device =
-        ResolveLogicalValueDevice(source, std::move(default_device), source_locator);
-    std::vector<LogicalValueContract> values;
-    values.reserve(leaf_types.size());
-    for (std::size_t index = 0; index < leaf_types.size(); ++index) {
-        values.push_back(LogicalValueContract{
-            first_id + static_cast<ValueId>(index), leaf_types[index], device,
-            origin, source,
-            source_locator + ".leaf[" + std::to_string(index) + "]"});
-    }
-    return values;
+    return MakeLeaves(source, checked_type, origin, first_id,
+                      std::move(default_device), source_locator, false);
+}
+
+std::vector<LogicalValueContract> MakeLogicalValueLeaves(
+    const Expr& source, const Type& checked_type, LogicalValueOrigin origin,
+    ValueId first_id, Device default_device, const std::string& source_locator,
+    const BoundedLogicalShapeAdmission&) {
+    return MakeLeaves(source, checked_type, origin, first_id,
+                      std::move(default_device), source_locator, true);
 }
 
 const TensorTypeNode& RequireLogicalTensorType(

@@ -14,14 +14,18 @@
 namespace kxc::api::internal {
 namespace {
 
-size_t TensorLeafCount(const Type& type) {
-    return FlattenLogicalTensorTypes(type, "value_graph.checked_type").size();
+size_t TensorLeafCount(
+    const Type& type, const BoundedLogicalShapeAdmission* bounded) {
+    return bounded
+        ? FlattenLogicalTensorTypes(type, "value_graph.checked_type", *bounded).size()
+        : FlattenLogicalTensorTypes(type, "value_graph.checked_type").size();
 }
 
 class ValueGraphBuilder {
 public:
-    ValueGraphBuilder(Function function, Device execution_device)
-        : execution_device_(std::move(execution_device)) {
+    ValueGraphBuilder(Function function, Device execution_device,
+                      const BoundedLogicalShapeAdmission* bounded = nullptr)
+        : execution_device_(std::move(execution_device)), bounded_(bounded) {
         if (!function.defined()) {
             throw std::invalid_argument(
                 "BuildValueGraph: capability=defined_typed_relay; requires a defined Function");
@@ -78,6 +82,7 @@ public:
 private:
     ValueGraph graph_;
     Device execution_device_;
+    const BoundedLogicalShapeAdmission* bounded_{nullptr};
     std::unordered_map<const Object*, std::vector<int64_t>> bound_value_ids_;
 
     int64_t AddValue(const Expr& source, ValueOrigin origin, const Type& type,
@@ -91,8 +96,11 @@ private:
                 "Stable graph value leaves must have TensorType");
         }
         const int64_t id = static_cast<int64_t>(graph_.values.size());
-        std::vector<LogicalValueContract> leaves = MakeLogicalValueLeaves(
-            source, type, origin, id, execution_device_, source_locator);
+        std::vector<LogicalValueContract> leaves = bounded_
+            ? MakeLogicalValueLeaves(source, type, origin, id, execution_device_,
+                                     source_locator, *bounded_)
+            : MakeLogicalValueLeaves(source, type, origin, id, execution_device_,
+                                     source_locator);
         if (leaves.size() != 1) {
             throw std::invalid_argument(
                 "Stable graph AddValue requires exactly one TensorType leaf");
@@ -224,10 +232,10 @@ private:
             size_t begin = 0;
             for (int index = 0; index < get_item->index; ++index) {
                 begin += TensorLeafCount(
-                    tuple_type->fields[static_cast<size_t>(index)]);
+                    tuple_type->fields[static_cast<size_t>(index)], bounded_);
             }
             const size_t count = TensorLeafCount(
-                tuple_type->fields[static_cast<size_t>(get_item->index)]);
+                tuple_type->fields[static_cast<size_t>(get_item->index)], bounded_);
             if (begin + count > tuple_values.size()) {
                 throw std::invalid_argument(
                     "BuildValueGraph: capability=well_typed_tuple_get_item; "
@@ -316,6 +324,13 @@ bool IsOrdinaryCompute(relay::OperatorLoweringKind kind) {
 ValueGraph BuildValueGraph(const Function& function,
                            Device execution_device) {
     return ValueGraphBuilder(function, std::move(execution_device)).Build();
+}
+
+ValueGraph BuildBoundedValueGraph(
+    const Function& function, Device execution_device,
+    const BoundedLogicalShapeAdmission& admission) {
+    return ValueGraphBuilder(function, std::move(execution_device),
+                             &admission).Build();
 }
 
 }  // namespace kxc::api::internal
