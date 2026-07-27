@@ -1,71 +1,87 @@
-# KXC 性能分析图表桌布
+# KXC 性能工作台
 
-面向 KXC 编译器与推理性能分析的可组合 GUI 工作台。
+性能工作台提供本地 React/TypeScript 界面和 CLI，用于查看 KXC Profile Bundle。它只展示 Bundle 中实际存在的数据，不会根据缺失事件推断编译器或后端能力。
 
-- **要用它** → 看[使用手册](../../docs/workbench-user-guide.md)
-- **要改它** → 继续往下读
-- 需求基线：[2026-07-26-performance-workbench-requirements.md](../../docs/plans/2026-07-26-performance-workbench-requirements.md)
+性能分析边界见 [架构总览](../../docs/ARCHITECTURE.md)。
 
-## 快速开始
+## 要求
+
+- Node.js 22.6 或更新版本；
+- npm；
+- 一个 KXC Profile Bundle，或仓库中已经提交的合成 Fixture。
+
+## 浏览器界面
 
 ```bash
 npm install --prefix tools/workbench
-node tools/workbench/scripts/make-fixture.mjs   # 生成样例 bundle
-npm run dev --prefix tools/workbench            # http://localhost:5273
+npm run fixture --prefix tools/workbench
+npm run dev --prefix tools/workbench
 ```
 
-顶栏可直接加载 `fixtures/bundles/` 下的样例，或用「打开目录」选择本机任意 KXC bundle
-（走 File System Access API，文件不离开浏览器进程）。
+打开 `http://localhost:5273`。顶部栏可以加载 `tools/workbench/fixtures/bundles/` 下的样例，也可以通过浏览器 File System Access API 加载本地 Bundle。
+
+构建和测试：
 
 ```bash
-npm run build --prefix tools/workbench
+npm run typecheck --prefix tools/workbench
 npm test --prefix tools/workbench
+npm run build --prefix tools/workbench
 ```
 
-## 数据契约的几个坑
+## CLI
 
-前端解析 bundle 时踩到的实际差异，全部对照 `src/base/profiling.cc` 核验过，
-细节写在 [src/kxc/contract.ts](src/kxc/contract.ts) 的注释里。最容易出错的几条：
+CLI 可以在无浏览器环境下读取 Bundle：
 
-| 现象 | 实际情况 | 出处 |
-| --- | --- | --- |
-| 时间戳字段 | JSON key 是 `ts_ns`，**不是** `timestamp_ns` | profiling.cc:759 |
-| 算子名 | 顶层 `op_name` 从未被赋值，恒为空串；真实算子名在 `fields.op_name` | executor.cc:128 |
-| Pipeline 事件 | component 是 `relay_pipeline` / `tir_pipeline`，event_type 是 `run_pipeline`；按 `relay_pass` 过滤取不到 | 真实 bundle 实测 |
-| `worker_id` | 未赋值时是 `-1`，不是 null | profiling.cc:764 |
-| `summary.json` | `component_counts` 的值是**字符串**，直接相加会字符串拼接 | profiling.cc:1104-1125 |
-| 缓存事件的 shape | `cache_*` span 只带 `fields.shape_hash`，没有 `shape_signature`，需靠 hash 表或父 span 补全 | runtime_session.cc:57/65/72 |
-| `trace.json` args | 只有 status/severity/message，**没有** run_id/span_id | profiling.cc:789-793 |
-| 诊断 evidence | 只有标量与文本，无 span/时间引用；C++ 自动写出的版本只有 4 个字段 | profiling.cc:1142-1146 |
+```bash
+node tools/workbench/cli/kxc-wb.mjs query phases \
+  --bundle <bundle-directory>
 
-## 当前数据能支撑到什么程度
+node tools/workbench/cli/kxc-wb.mjs query pass-ranking \
+  --bundle <bundle-directory> --json
 
-Tile 的 `readiness` 标注在 [src/tiles/registry.ts](src/tiles/registry.ts)，UI 上会如实显示，
-不会因为数据缺失就画一张看起来正常的空图。
-
-**ready** — KPI、阶段耗时分解、Pass Waterfall、Pass 排行、Shape × Cache 热力图、日志、事件表
-
-**partial（有已知缺口，UI 会说明原因）**
-- Hotspot / Kernel 类：算子耗时来自 `execution_plan.kernel_exec` span，而该 span 当前包裹的是
-  值拷贝而非真实 kernel 执行（executor.cc:153），只能用于结构分析，不能当性能结论
-- Timeline：内置轻量时间线可用；嵌入 Perfetto 后无法从选中事件回跳（trace.json 缺 span_id）
-- 诊断：evidence 无精确引用，只能按 pass/component 名字近似回跳
-- 回归对比：Pass 维度可按名字自动对齐，算子/Kernel 维度因字段未填充无法对齐
-
-想解除这些限制需要改 C++ 侧埋点（补 trace.json args、顶层 op_name、evidence 引用），
-本轮刻意没有改动编译器代码。
-
-## 目录
-
-```
-src/kxc/        bundle 解析与统一查询层（Worker 内聚合，主线程只拿结果）
-src/state/      空间模型、zustand store、Undo/Redo、Gather 自动布局
-src/tiles/      图表 Tile 与目录注册表
-src/ui/         外壳、列、模式、命令面板、键盘
-scripts/        fixture 生成器
-test/           数据管线测试与应用冒烟测试
+node tools/workbench/cli/kxc-wb.mjs compare \
+  --baseline <baseline-directory> \
+  --candidate <candidate-directory> \
+  --threshold 1.2 --json
 ```
 
-`fixtures/bundles/real-compile` 是 `profile_bundle_test` 跑出来的**真实产物**（22 个事件，
-只有编译期事件、没有任何 runtime/cache 数据），用来验证 fixture 没有失真，
-也用来检验各 Tile 在稀疏数据下的退化表现。
+运行 `node tools/workbench/cli/kxc-wb.mjs --help` 查看筛选参数和界面控制命令。`--json` 只输出一个 JSON 对象，不混入日志文本，便于自动化处理。
+
+## Bundle 契约
+
+解析器和查询层位于 [src/kxc](src/kxc)。主要规则如下：
+
+- 事件时间戳使用 `ts_ns`；
+- 流水线事件使用 `relay_pipeline`、`tir_pipeline` 等组件名；
+- 可选字段可以缺失或为空；
+- 只有当 Bundle 包含对应事件和关联字段时，缓存、内核、算子与形状视图才可用；
+- 数据不完整时必须显示明确的“不可用”或“部分可用”状态，不能显示成看似可信的空图表。
+
+`events.jsonl` 是更完整的事件来源。`trace.json` 是兼容 Chrome/Perfetto 的投影视图，可能缺少部分关联字段。`summary.json` 是聚合结果，不能替代事件级证据。
+
+## Fixture 状态
+
+`fixtures/bundles/` 下的 Bundle 是确定性的界面与查询回归数据。部分 Fixture 会刻意模拟旧版缓存、运行时和内核事件，用于测试对比与稀疏数据行为。它们不能证明当前编译器、CUDA、分布式或数值执行能力。
+
+生成 Fixture：
+
+```bash
+node tools/workbench/scripts/make-fixture.mjs
+```
+
+Fixture 的来源与场景见 [fixtures/README.md](fixtures/README.md)。
+
+## 源码布局
+
+```text
+cli/         无界面查询、对比与界面控制命令
+scripts/     确定性 Fixture 生成器与开发辅助脚本
+server/      可选的本地界面控制服务
+src/kxc/     Bundle 解析与查询契约
+src/state/   工作区状态、布局、撤销与重做
+src/tiles/   可视化卡片与就绪状态注册表
+src/ui/      外壳、列布局、命令与键盘交互
+test/        查询、状态与应用测试
+```
+
+性能工作台只负责观察。它不能重写 Bundle、静默修复无效 Schema，也不能把不完整 Fixture 当成后端能力证据。

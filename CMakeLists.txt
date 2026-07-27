@@ -865,6 +865,14 @@ if(Python3_Interpreter_FOUND)
     USES_TERMINAL
     COMMENT "Check Relay and TIR pass contracts"
   )
+  add_custom_target(check_docs
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_docs.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    USES_TERMINAL
+    COMMENT "Check documentation links and index coverage"
+  )
   add_custom_target(check_include_layers
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_include_layers.py"
@@ -885,7 +893,7 @@ if(Python3_Interpreter_FOUND)
     COMMENT "Check and compile public headers"
   )
 else()
-  message(WARNING "Python3 was not found; skipping check_relay_op_contract target.")
+  message(WARNING "Python3 was not found; skipping Python contract and documentation checks.")
 endif()
 
 include(GNUInstallDirs)
@@ -1324,6 +1332,10 @@ if(Python3_Interpreter_FOUND)
             "${CMAKE_CURRENT_SOURCE_DIR}/python/tools/check_pass_contract.py"
             --root "${CMAKE_CURRENT_SOURCE_DIR}"
             --matrix "${CMAKE_CURRENT_SOURCE_DIR}/contracts/pass_contract.json")
+  add_test(NAME docs
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_docs.py"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME include_layers
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/architecture/check_include_layers.py"
@@ -1335,6 +1347,6 @@ if(Python3_Interpreter_FOUND)
             --compile
             --compiler "${CMAKE_CXX_COMPILER}"
             --define "KXC_ENABLE_ADAPTIVE_HOT_SWAP=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP}>")
-  set_tests_properties(relay_op_contract pass_contract include_layers public_headers
+  set_tests_properties(relay_op_contract pass_contract docs include_layers public_headers
     PROPERTIES LABELS "cpu;contract")
 endif()

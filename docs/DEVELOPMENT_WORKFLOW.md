@@ -1,132 +1,93 @@
-# Development Workflow
+# 开发流程
 
-This repository uses an issue-driven, PR-first workflow. Direct pushes to
-`main` are reserved for repository administration only. Feature work, fixes,
-documentation updates, and compiler design changes should all go through a
-branch and pull request.
+仓库采用短生命周期任务分支和评审 Pull Request。
+`dev` 是共享集成分支；`main` 是稳定分支，只通过评审发布流程推进。
 
-## Goals
+## 开始任务
 
-- Keep every change traceable to a GitHub issue.
-- Review compiler behavior, tests, and docs before merging.
-- Avoid mixing unrelated requirements in one branch.
-- Preserve `main` as a working baseline for local users and CI.
+1. 选择或创建一个范围、验收标准和验证方式都明确的 Issue。
+2. 从 `origin/dev` 更新本地 `dev`。
+3. 从该提交创建命名清晰的任务分支。
+4. 将改动限制在对应 Issue 的范围内。
 
-## Required Flow
-
-1. Create or select a GitHub issue.
-2. Confirm the issue has a clear scope, acceptance criteria, and test plan.
-3. Create a branch from the latest `main`.
-4. Make the smallest coherent change that satisfies the issue.
-5. Run the required local checks.
-6. Open a pull request and link the issue.
-7. Merge only after review approval and passing checks.
-
-## Issue Requirements
-
-Every implementation issue should include:
-
-- **Problem:** what is currently broken, missing, or unclear.
-- **Scope:** which subsystem is expected to change.
-- **Out of scope:** related work that should not be included.
-- **Acceptance criteria:** observable behavior required before closing.
-- **Validation:** commands, tests, examples, or docs used to prove completion.
-
-If the issue changes a compiler contract, IR format, runtime API, operator
-extension path, pass pipeline, target/device semantics, or profiling output, it
-must also include a design note before implementation starts.
-
-## Branch Naming
-
-Use short, issue-linked branch names:
-
-```text
-issue-<number>-<short-topic>
-```
-
-Examples:
-
-```text
-issue-1-cpu-build-smoke
-issue-2-op-extension-contract
-issue-14-hot-cold-adaptive-compile
-```
-
-## Commit Scope
-
-Commits should be reviewable and focused:
-
-- Keep unrelated issues on separate branches.
-- Do not reformat files unrelated to the issue.
-- Do not rewrite generated artifacts unless the issue requires it.
-- Do not revert another user's local or remote changes without explicit
-  agreement.
-- Prefer one meaningful commit per completed issue unless incremental commits
-  make review clearer.
-
-## Pull Request Requirements
-
-Every PR must include:
-
-- Linked issue, using `Closes #<number>` when the PR completes the issue.
-- Summary of behavior changed.
-- Test commands and results.
-- Risk notes for compiler/runtime behavior.
-- Documentation updates, or a statement that no docs are needed.
-
-For compiler-facing changes, the PR should state which layer is affected:
-
-- Frontend or model import
-- Relay IR
-- Type or shape inference
-- Relay passes
-- TIR IR
-- TIR passes
-- Scheduling
-- Code generation
-- Runtime
-- Device or target handling
-- Profiling or diagnostics
-- Build, CI, or developer tooling
-
-## Validation Baseline
-
-Use the narrowest checks that cover the issue. When the existing CMake CPU-only
-toolchain is enough, prefer:
+示例：
 
 ```powershell
-cmake --preset dev-ninja-cpu
-cmake --build --preset dev-ninja-cpu
-cmake --build out/build/dev-ninja-cpu --target run_pass_pipeline_test
-cmake --build out/build/dev-ninja-cpu --target run_profile_bundle_test
+git fetch origin
+git switch dev
+git pull --ff-only origin dev
+git switch -c pass-analysis-contract
 ```
 
-If a change touches CUDA, LLVM, code generation, device placement, or distributed
-runtime behavior, add the relevant target-specific build and smoke test commands
-to the PR.
+除非用户明确要求，不要给分支名添加 Agent 或厂商前缀。
 
-## Review Rules
+## 实施规则
 
-A PR is ready to merge when:
+- 保留与任务无关的工作区改动。
+- 保持公共契约、实现、生成文件、测试与文档同步。
+- 优先复用现有工具；没有必要时，优先删除而不是新增抽象。
+- 未经明确要求，不要引入新依赖。
+- 不支持的语义必须明确报错，不得引入静默回退，包括目标、算子、形状和运行时回退路径。
+- 不要把图内 ID、对象地址或链接符号作为语义产物身份。
 
-- The linked issue's acceptance criteria are satisfied.
-- Required tests pass or any skipped checks are explicitly justified.
-- The diff only contains changes needed for the issue.
-- New public behavior is documented.
-- Follow-up work is captured in separate issues instead of hidden in comments.
+架构变更必须同步更新 [架构总览](ARCHITECTURE.md)。
+算子与 Pass 变更必须遵循 [编译器扩展契约](COMPILER_EXTENSION_CONTRACT.md)。
 
-Do not merge PRs that combine infrastructure changes with operator semantics,
-pass behavior, runtime behavior, or large documentation rewrites unless the issue
-explicitly requires that combination.
+## 验证
 
-## Agent Rules
+先运行能证明行为变化的最小测试，再执行对应的仓库契约检查：
 
-When an AI coding agent works in this repository:
+```powershell
+python tools/architecture/check_docs.py --root .
+python tools/architecture/check_include_layers.py --root .
+python python/tools/check_relay_op_contract.py --root . `
+  --matrix contracts/relay_op_contract.json
+python python/tools/check_pass_contract.py --root . `
+  --matrix contracts/pass_contract.json
+git diff --check
+```
 
-- Start from the issue and restate the implementation target.
-- Work on a branch, not directly on `main`, unless the user explicitly asks for
-  a local-only experiment.
-- Before editing files, identify the files and behavior expected to change.
-- After editing, run the relevant validation commands.
-- Open or prepare a PR instead of pushing directly to `main`.
-- Report exact commands run and whether they passed.
+代码改动还需执行：
+
+```powershell
+cmake --build out/build/dev-mingw-cpu --parallel
+ctest --test-dir out/build/dev-mingw-cpu `
+  --output-on-failure --no-tests=error
+```
+
+LLVM、CUDA、CUPTI、控制流、形状或自适应功能变更必须执行对应测试矩阵。
+被跳过的后端必须记录为验证缺口。
+
+## 发起 Pull Request
+
+发起 PR 前：
+
+1. 执行 `git fetch origin`，校验当前分支与 `origin/dev` 的关系；
+2. 运行 `git diff --check`；
+3. 检查 `git status --short`；
+4. 只清理本任务产生的生成文件；
+5. 不要强推。
+
+PR 说明应包含：
+
+- 关联 Issue；
+- 行为与边界变化；
+- 完整测试命令与结果；
+- 跳过的检查及原因；
+- 风险或兼容性说明；
+- 文档变更说明。
+
+只有在 Issue 的验收标准全部达成后，才能使用 `Closes #<number>`。
+只完成父级清单或部分架构片段不能直接关闭 Issue。
+
+## 合并与清理
+
+只有评审通过且必需检查全部完成后，才能合并到 `dev`。不要对共享分支强推。
+任务分支合并后：
+
+- 确认分支顶端提交已包含在 `dev` 中；
+- 确认使用该分支的工作区干净；
+- 删除本地与远端任务分支；
+- 保留 `main`、`dev`、正在使用的活动分支和尚未合并的工作分支。
+
+稳定发布通过仓库发布流程，将经过评审的 `dev` 内容迁移到 `main`。
