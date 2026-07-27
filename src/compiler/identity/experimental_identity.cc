@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "runtime/internal/compiled_module_node.h"
+#include "kxc/compiler/compiler.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
 
@@ -451,6 +452,30 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     AppendField(&canonical, "constants_end", "v1");
     return PlanAbiFingerprint(std::move(canonical));
+}
+
+PlanAbiFingerprint BuildPlanAbiFingerprint(const CompiledGraph& graph) {
+    if (!graph.defined()) {
+        throw std::invalid_argument(
+            "plan ABI requires a defined CompiledGraph");
+    }
+    const Array<runtime::KernelCall> calls = graph.plan().calls();
+    const auto& pins = graph.artifact_pins();
+    if (pins.size() != calls.size()) {
+        throw std::invalid_argument(
+            "plan ABI requires one ordered artifact pin per call");
+    }
+    std::vector<OrderedArtifactIdentity> artifacts;
+    artifacts.reserve(calls.size());
+    for (size_t index = 0; index < calls.size(); ++index) {
+        if (!pins[index].defined()) {
+            throw std::invalid_argument(
+                "plan ABI requires defined ordered artifact pins");
+        }
+        artifacts.push_back({index, std::string(calls[index]->symbol),
+                             pins[index].record().artifact_key});
+    }
+    return BuildPlanAbiFingerprint(graph.module(), graph.plan(), artifacts);
 }
 
 DispatchKey BuildStaticExactDispatchKey(

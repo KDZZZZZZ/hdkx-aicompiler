@@ -171,6 +171,7 @@ set(KXC_EXPERIMENTAL_HEADERS
   include/kxc/compiler/shape_control.h
   include/kxc/compiler/shape_exact.h
   include/kxc/compiler/shape_specialization.h
+  include/kxc/compiler/shape_specialization_controller.h
   include/kxc/shape/shape.h
 )
 
@@ -531,6 +532,7 @@ if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
     src/compiler/shape/shape_control.cc
     src/compiler/shape/shape_exact.cc
     src/compiler/shape/shape_specialization.cc
+    src/compiler/shape/shape_specialization_controller.cc
     src/compiler/shape/restricted_symbolic_shape.cc)
 endif()
 
@@ -596,6 +598,7 @@ else()
     src/compiler/shape/shape_control.cc
     src/compiler/shape/shape_exact.cc
     src/compiler/shape/shape_specialization.cc
+    src/compiler/shape/shape_specialization_controller.cc
     src/compiler/shape/restricted_symbolic_shape.cc)
   kxc_configure_module_obj(kxc_shape_experimental_test_obj)
 endif()

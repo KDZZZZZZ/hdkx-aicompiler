@@ -9,6 +9,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -62,7 +64,8 @@ private:
 // A finite, single-template, single-target set of exact profiles. The caller
 // must validate compiled against the oracle with its producer-specific exact
 // adapter before Publish. expected_plan_abi is checked against the canonical
-// BuildPlanAbiFingerprint result. Lookup has no compile/cache side effect.
+// BuildPlanAbiFingerprint result. Publish, TryLookup, Lookup, and size are
+// thread-safe; lookups return retained copies and have no compile/cache effect.
 class ExactProfileRouteTable final {
 public:
     ExactProfileRouteTable(
@@ -72,13 +75,17 @@ public:
     void Publish(const specialization::ExactOracle& oracle,
                  CompiledGraph compiled,
                  PlanAbiFingerprint expected_plan_abi);
+    // A valid unpublished profile returns nullopt; foreign/invalid oracles fail.
+    [[nodiscard]] std::optional<PublishedExactVariant> TryLookup(
+        const specialization::ExactOracle& oracle) const;
     [[nodiscard]] PublishedExactVariant Lookup(
         const specialization::ExactOracle& oracle) const;
-    [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] std::size_t size() const;
 
 private:
     specialization::GraphTemplate graph_template_;
     std::string target_capability_fingerprint_;
+    mutable std::mutex mutex_;
     std::vector<PublishedExactVariant> variants_;
 };
 

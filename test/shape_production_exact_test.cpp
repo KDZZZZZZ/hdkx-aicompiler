@@ -551,9 +551,9 @@ bool TestLLVMNormalAndExactShareStaticAssembly() {
             normal.artifact_pins()[index].record().artifact_key ==
                 exact.artifact_pins()[index].record().artifact_key;
     }
-    const bool same_plan_abi = PlanAbi(
-        normal.module(), normal.plan(), normal.artifact_pins()) == PlanAbi(
-            exact.module(), exact.plan(), exact.artifact_pins());
+    const bool same_plan_abi =
+        kxc::api::BuildPlanAbiFingerprint(normal) ==
+        PlanAbi(exact.module(), exact.plan(), exact.artifact_pins());
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     CHECK(normal.graph_semantic_key() ==
               exact.plan_variant_key().graph_semantic_key() &&

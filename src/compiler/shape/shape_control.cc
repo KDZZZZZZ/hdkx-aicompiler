@@ -194,20 +194,11 @@ ExactProfileRouteTable::ExactProfileRouteTable(
 void ExactProfileRouteTable::Publish(
     const specialization::ExactOracle& oracle, CompiledGraph compiled,
     PlanAbiFingerprint expected_plan_abi) {
-    const std::vector<ConcreteInputShape> inputs =
+    std::vector<ConcreteInputShape> inputs =
         ExactInputs(graph_template_, oracle);
     const ShapeProfileKey& profile = oracle.profile().key();
     const DispatchKey dispatch =
         BuildStaticExactDispatchKey(graph_template_.key(), profile);
-    for (const auto& existing : variants_) {
-        if (existing.dispatch_key() == dispatch) {
-            Reject("duplicate exact profile route");
-        }
-        if (SameInputs(existing.inputs_, inputs)) {
-            Reject("exact profiles overlap on concrete inputs");
-        }
-    }
-
     if (!compiled.defined()) {
         Reject("compiled variant is undefined");
     }
@@ -227,31 +218,41 @@ void ExactProfileRouteTable::Publish(
                               artifact.artifact_key, 0});
     }
 
-    const PlanAbiFingerprint actual_plan_abi = BuildPlanAbiFingerprint(
-        compiled.module(), compiled.plan(), artifacts);
+    PlanAbiFingerprint actual_plan_abi = BuildPlanAbiFingerprint(compiled);
     if (actual_plan_abi != expected_plan_abi) {
         Reject("compiled variant plan ABI differs from publication metadata");
     }
-    const PlanVariantKey variant = BuildPlanVariantKey(
+    PlanVariantKey variant = BuildPlanVariantKey(
         graph_template_.key(), profile, selections,
         runtime::internal::kStaticMemoryPlanVersion);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& existing : variants_) {
+        if (existing.dispatch_key() == dispatch) {
+            Reject("duplicate exact profile route");
+        }
+        if (SameInputs(existing.inputs_, inputs)) {
+            Reject("exact profiles overlap on concrete inputs");
+        }
+    }
     variants_.push_back(PublishedExactVariant(
         std::move(compiled), dispatch, profile, std::move(variant),
-        std::move(actual_plan_abi), inputs));
+        std::move(actual_plan_abi), std::move(inputs)));
 }
 
-PublishedExactVariant ExactProfileRouteTable::Lookup(
+std::optional<PublishedExactVariant> ExactProfileRouteTable::TryLookup(
     const specialization::ExactOracle& oracle) const {
     const std::vector<ConcreteInputShape> inputs =
         ExactInputs(graph_template_, oracle);
     const DispatchKey dispatch = BuildStaticExactDispatchKey(
         graph_template_.key(), oracle.profile().key());
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = std::find_if(
         variants_.begin(), variants_.end(), [&dispatch](const auto& variant) {
             return variant.dispatch_key() == dispatch;
         });
     if (found == variants_.end()) {
-        Reject("no published variant for this exact profile");
+        return std::nullopt;
     }
     if (found->shape_profile_key() != oracle.profile().key() ||
         found->plan_variant_key().graph_semantic_key() !=
@@ -265,7 +266,17 @@ PublishedExactVariant ExactProfileRouteTable::Lookup(
     return *found;
 }
 
-std::size_t ExactProfileRouteTable::size() const noexcept {
+PublishedExactVariant ExactProfileRouteTable::Lookup(
+    const specialization::ExactOracle& oracle) const {
+    std::optional<PublishedExactVariant> found = TryLookup(oracle);
+    if (!found) {
+        Reject("no published variant for this exact profile");
+    }
+    return std::move(*found);
+}
+
+std::size_t ExactProfileRouteTable::size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return variants_.size();
 }
 

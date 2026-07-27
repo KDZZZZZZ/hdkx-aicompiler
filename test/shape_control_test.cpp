@@ -245,8 +245,10 @@ bool TestPureRouteFailures() {
         spec::InstantiateExactProfile(graph, BindFour(graph));
     control::ExactProfileRouteTable routes(graph, "synthetic-cpu-target");
     CHECK(routes.size() == 0, "a route table must begin empty");
+    CHECK(!routes.TryLookup(oracle).has_value(),
+          "TryLookup must report an unpublished exact profile");
     CHECK(Throws([&] { (void)routes.Lookup(oracle); }),
-          "an unpublished exact profile must miss without fallback");
+          "Lookup must preserve the fail-closed miss API");
 
     const spec::GraphTemplate changed = BindingTemplate("changed.call");
     const spec::ExactOracle foreign =
@@ -254,7 +256,7 @@ bool TestPureRouteFailures() {
     CHECK(graph.key() == changed.key() &&
               graph.CanonicalBytes() != changed.CanonicalBytes(),
           "the foreign-oracle fixture must preserve graph semantics only");
-    CHECK(Throws([&] { (void)routes.Lookup(foreign); }),
+    CHECK(Throws([&] { (void)routes.TryLookup(foreign); }),
           "an oracle from different template content must be rejected");
     CHECK(Throws([&] {
               routes.Publish(foreign, kxc::api::CompiledGraph(),
@@ -274,6 +276,11 @@ bool TestPureRouteFailures() {
               (void)invalid;
           }),
           "an empty target fingerprint must be rejected");
+    CHECK(Throws([&] {
+              (void)kxc::api::BuildPlanAbiFingerprint(
+                  kxc::api::CompiledGraph());
+          }),
+          "the CompiledGraph Plan ABI helper must reject an undefined graph");
     return true;
 }
 
@@ -352,12 +359,6 @@ std::vector<kxc::api::OrderedArtifactIdentity> OrderedArtifacts(
              pins[index].record().artifact_key});
     }
     return artifacts;
-}
-
-kxc::api::PlanAbiFingerprint PlanAbi(
-    const kxc::api::CompiledGraph& compiled) {
-    return kxc::api::BuildPlanAbiFingerprint(
-        compiled.module(), compiled.plan(), OrderedArtifacts(compiled));
 }
 
 kxc::api::PlanVariantKey ExpectedPlanVariant(
@@ -495,8 +496,10 @@ bool TestCompiledFiniteConsumer() {
     const std::string fingerprint = TargetFingerprint(small.compiled);
     CHECK(fingerprint == TargetFingerprint(large.compiled),
           "finite variants must share one primitive target fingerprint");
-    const kxc::api::PlanAbiFingerprint small_abi = PlanAbi(small.compiled);
-    const kxc::api::PlanAbiFingerprint large_abi = PlanAbi(large.compiled);
+    const kxc::api::PlanAbiFingerprint small_abi =
+        kxc::api::BuildPlanAbiFingerprint(small.compiled);
+    const kxc::api::PlanAbiFingerprint large_abi =
+        kxc::api::BuildPlanAbiFingerprint(large.compiled);
     CHECK(small_abi != large_abi,
           "different exact shapes must have distinct plan ABIs");
 
@@ -514,8 +517,11 @@ bool TestCompiledFiniteConsumer() {
     CHECK(routes.size() == 2,
           "two exact profiles must produce a finite two-route table");
 
-    const control::PublishedExactVariant selected =
-        routes.Lookup(small.decision.exact_oracle());
+    const auto selected_result =
+        routes.TryLookup(small.decision.exact_oracle());
+    CHECK(selected_result.has_value(),
+          "TryLookup must return a published exact profile copy");
+    const control::PublishedExactVariant selected = *selected_result;
     CHECK(selected.compiled_graph().defined() &&
               selected.shape_profile_key() ==
                   small.decision.exact_oracle().profile().key() &&
@@ -585,7 +591,7 @@ bool TestCompiledFiniteConsumer() {
         control::ExactProfileRouteTable one(prepared.graph_template(),
                                              fingerprint);
         one.Publish(small.decision.exact_oracle(), small.compiled, small_abi);
-        return one.Lookup(small.decision.exact_oracle());
+        return *one.TryLookup(small.decision.exact_oracle());
     }();
     small.compiled = kxc::api::CompiledGraph();
     large.compiled = kxc::api::CompiledGraph();
