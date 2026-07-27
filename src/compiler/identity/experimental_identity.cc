@@ -370,11 +370,20 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     plan.Validate();
     std::string canonical;
-    // v7 adds the execution/allocation mode, wildcard graph guards, and each
-    // entry's versioned invocation contract. Selected artifact generations
-    // remain PlanVariant selection identity, not callable compatibility.
-    AppendField(&canonical, "kind", "executable-plan-abi-v7-dynamic-fresh-output");
+    const bool bounded_dynamic =
+        plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1;
+    // Preserve static v7 bytes. Dynamic v8 additionally names the production
+    // gate contract; selected generations remain PlanVariant identity.
+    AppendField(
+        &canonical, "kind",
+        bounded_dynamic
+            ? "executable-plan-abi-v8-bounded-dynamic-graph"
+            : "executable-plan-abi-v7-dynamic-fresh-output");
     AppendInteger(&canonical, "plan_mode", static_cast<uint8_t>(plan.mode()));
+    if (bounded_dynamic) {
+        AppendField(&canonical, "bounded_dynamic_graph_gate",
+                    "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH.v1");
+    }
     AppendField(
         &canonical, "memory_plan",
         plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1
@@ -394,8 +403,7 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
                 "plan ABI ordered artifact mapping differs from its call");
         }
     }
-    const bool allow_wildcards =
-        plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1;
+    const bool allow_wildcards = bounded_dynamic;
     const std::vector<runtime::GraphInputAxisGuard> graph_guards =
         plan.graph_input_guards();
     for (const auto& guard : graph_guards) {

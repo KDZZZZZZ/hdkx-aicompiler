@@ -23,6 +23,8 @@ class ModuleInvocationContract;
 
 namespace kxc::api::internal {
 
+class BoundedCompilePreparation;
+
 struct CompiledPrimitive final {
     PrimitiveUnitId unit_id{-1};
     tir::PrimFunc diagnostic_tir;
@@ -51,6 +53,12 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
     const CompileConfig& config,
     const CompilerExecutionContract& contract,
     const std::vector<PrimitiveUnitId>& requested_unit_ids);
+
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const BoundedCompilePreparation& preparation,
+    const PartitionedGraph& partitioned_graph,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract);
 
 CompiledModule AssemblePrimitiveModule(
     const CompiledPrimitiveBatch& batch,

@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "../internal/execution_contract.h"
+#include "runtime/internal/module_invocation_contract.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "support/canonical.h"
 
@@ -202,7 +203,7 @@ std::string ContractCanonicalBytes(
     const std::vector<std::vector<DynamicInputAxisGuard>>& input_guards,
     const std::vector<std::vector<DynamicShapeExpr>>& output_expressions,
     const std::vector<DynamicShapeExpr>& runtime_extent_expressions) {
-    support::CanonicalBytesEncoder encoder("dynamic-unit-shape-contract-v1");
+    support::CanonicalBytesEncoder encoder("dynamic-unit-shape-contract-v2");
     encoder.IntegerField("version", kDynamicUnitShapeContractVersion);
     encoder.Field("representative_unit_semantics",
                   representative_unit_semantic_key.canonical_bytes());
@@ -403,6 +404,112 @@ void ValidateUnits(
     }
 }
 
+std::vector<runtime::GraphInputAxisGuard> BuildGraphInputGuards(
+    const specialization::GraphTemplate& graph,
+    const PartitionedGraph& bounded) {
+    const BoundsBySymbol bounds = AnalyzeTemplate(graph);
+    std::map<std::string, runtime::GraphInputAxisReference> anchors;
+    std::vector<runtime::GraphInputAxisGuard> guards;
+    for (std::size_t input = 0; input < bounded.input_value_ids.size(); ++input) {
+        const ValueId value_id = bounded.input_value_ids[input];
+        if (value_id < 0 ||
+            static_cast<std::size_t>(value_id) >=
+                bounded.value_graph.values.size()) {
+            Reject("a graph input value id is out of range");
+        }
+        const auto* type = bounded.value_graph.values[
+            static_cast<std::size_t>(value_id)].checked_type.As<TensorTypeNode>();
+        const auto& dimensions =
+            FindNamed(graph, ValueName(value_id)).contract.logical().dimensions();
+        if (!type || type->shape.size() != dimensions.size()) {
+            Reject("a graph input rank differs from its ShapeProgram contract");
+        }
+        for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+            const DirectDimension direct = ReadDirectDimension(dimensions[axis]);
+            if (type->shape[axis] != -1) {
+                if (!direct.is_constant ||
+                    direct.constant !=
+                        static_cast<std::uint64_t>(type->shape[axis])) {
+                    Reject("a static graph input axis differs from its ShapeProgram contract");
+                }
+                continue;
+            }
+            if (direct.is_constant) {
+                Reject("a wildcard graph input axis lacks a direct Symbol");
+            }
+            const SymbolBounds& symbol_bounds = bounds.at(direct.symbol);
+            runtime::GraphInputAxisGuard guard;
+            guard.input_index = input;
+            guard.axis = axis;
+            guard.lower = static_cast<std::int64_t>(symbol_bounds.lower);
+            guard.upper = static_cast<std::int64_t>(symbol_bounds.upper);
+            guard.divisible_by =
+                static_cast<std::int64_t>(symbol_bounds.divisible_by);
+            const runtime::GraphInputAxisReference current{input, axis};
+            const auto inserted = anchors.emplace(direct.symbol, current);
+            if (!inserted.second) guard.equal_to = inserted.first->second;
+            guards.push_back(std::move(guard));
+        }
+    }
+    return guards;
+}
+
+ModuleShapeExpr ToModuleShapeExpr(const DynamicShapeExpr& expression) {
+    return expression.kind() == DynamicShapeExpr::Kind::kConst
+               ? ModuleShapeExpr::Const(expression.constant())
+               : ModuleShapeExpr::InputAxis(expression.input_index(),
+                                            expression.axis());
+}
+
+const LogicalValueContract& ContractValue(
+    const std::vector<LogicalValueContract>& values, ValueId value_id,
+    const char* context) {
+    if (value_id < 0 ||
+        static_cast<std::size_t>(value_id) >= values.size() ||
+        values[static_cast<std::size_t>(value_id)].id != value_id) {
+        Reject(std::string(context) + " references an invalid value id");
+    }
+    return values[static_cast<std::size_t>(value_id)];
+}
+
+std::size_t MaximumOutputBytes(
+    const std::vector<DynamicShapeExpr>& expressions,
+    const std::vector<std::vector<DynamicInputAxisGuard>>& input_guards,
+    DLDataType dtype) {
+    if (dtype.bits == 0 || dtype.bits % 8 != 0 || dtype.lanes == 0) {
+        Reject("a dynamic output dtype is not byte addressable");
+    }
+    std::size_t elements = 1;
+    for (const DynamicShapeExpr& expression : expressions) {
+        std::uint64_t extent = 0;
+        if (expression.kind() == DynamicShapeExpr::Kind::kConst) {
+            extent = expression.constant();
+        } else {
+            if (expression.input_index() >= input_guards.size() ||
+                expression.axis() >=
+                    input_guards[expression.input_index()].size()) {
+                Reject("a dynamic output expression references an unknown input axis");
+            }
+            extent = input_guards[expression.input_index()]
+                                 [expression.axis()].upper;
+        }
+        if (extent > std::numeric_limits<std::size_t>::max() ||
+            (extent != 0 &&
+             elements > std::numeric_limits<std::size_t>::max() /
+                            static_cast<std::size_t>(extent))) {
+            Reject("a dynamic output maximum element count overflows size_t");
+        }
+        elements *= static_cast<std::size_t>(extent);
+    }
+    const std::size_t item_bytes =
+        static_cast<std::size_t>(dtype.bits / 8) * dtype.lanes;
+    if (item_bytes == 0 ||
+        elements > std::numeric_limits<std::size_t>::max() / item_bytes) {
+        Reject("a dynamic output maximum byte count overflows size_t");
+    }
+    return elements * item_bytes;
+}
+
 }  // namespace
 
 DynamicShapeExpr::DynamicShapeExpr(Kind kind, std::uint64_t constant,
@@ -457,9 +564,19 @@ DynamicUnitShapeContract::DynamicUnitShapeContract(
       local_input_guards_(std::move(local_input_guards)),
       output_shape_expressions_(std::move(output_shape_expressions)),
       runtime_extent_expressions_(std::move(runtime_extent_expressions)) {
+    std::vector<DynamicShapeExpr> expected_runtime_extents;
+    if (output_shape_expressions_.size() == 1) {
+        for (const DynamicShapeExpr& expression :
+             output_shape_expressions_.front()) {
+            if (expression.kind() == DynamicShapeExpr::Kind::kInputAxis) {
+                expected_runtime_extents.push_back(expression);
+            }
+        }
+    }
     if (!representative_unit_semantic_key_.defined() ||
         local_input_guards_.empty() || output_shape_expressions_.size() != 1 ||
-        runtime_extent_expressions_ != output_shape_expressions_.front()) {
+        runtime_extent_expressions_.empty() ||
+        runtime_extent_expressions_ != expected_runtime_extents) {
         Reject("a DynamicUnitShapeContract is incomplete");
     }
     canonical_bytes_ = ContractCanonicalBytes(
@@ -565,8 +682,12 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
         }
         output_expressions.push_back(std::move(expressions));
     }
-    std::vector<DynamicShapeExpr> runtime_extent_expressions =
-        output_expressions.front();
+    std::vector<DynamicShapeExpr> runtime_extent_expressions;
+    for (const DynamicShapeExpr& expression : output_expressions.front()) {
+        if (expression.kind() == DynamicShapeExpr::Kind::kInputAxis) {
+            runtime_extent_expressions.push_back(expression);
+        }
+    }
     return DynamicUnitShapeContract(
         unit.semantic_key, std::move(input_guards),
         std::move(output_expressions),
@@ -590,10 +711,12 @@ std::vector<DynamicUnitShapeContract> BuildDynamicUnitShapeContracts(
 BoundedCompilePreparation::BoundedCompilePreparation(
     restricted::BoundedCompileRequest request,
     PartitionedGraph partitioned_graph,
-    std::vector<DynamicUnitShapeContract> unit_shape_contracts)
+    std::vector<DynamicUnitShapeContract> unit_shape_contracts,
+    std::vector<runtime::GraphInputAxisGuard> graph_input_guards)
     : request_(std::move(request)),
       partitioned_graph_(std::move(partitioned_graph)),
-      unit_shape_contracts_(std::move(unit_shape_contracts)) {}
+      unit_shape_contracts_(std::move(unit_shape_contracts)),
+      graph_input_guards_(std::move(graph_input_guards)) {}
 
 std::uint32_t BoundedCompilePreparation::version() const noexcept {
     return version_;
@@ -612,6 +735,11 @@ BoundedCompilePreparation::partitioned_graph() const noexcept {
 const std::vector<DynamicUnitShapeContract>&
 BoundedCompilePreparation::unit_shape_contracts() const noexcept {
     return unit_shape_contracts_;
+}
+
+const std::vector<runtime::GraphInputAxisGuard>&
+BoundedCompilePreparation::graph_input_guards() const noexcept {
+    return graph_input_guards_;
 }
 
 BoundedCompilePreparation PrepareBoundedCompile(
@@ -656,8 +784,126 @@ BoundedCompilePreparation PrepareBoundedCompile(
                            representative_partition, bounded_partition);
     ValidateUnits(graph, request.representative_oracle(),
                   representative_partition, bounded_partition, contracts);
+    std::vector<runtime::GraphInputAxisGuard> graph_input_guards =
+        BuildGraphInputGuards(graph, bounded_partition);
     return BoundedCompilePreparation(
-        request, std::move(bounded_partition), std::move(contracts));
+        request, std::move(bounded_partition), std::move(contracts),
+        std::move(graph_input_guards));
+}
+
+std::shared_ptr<const ModuleInvocationContract>
+BuildDynamicModuleInvocationContract(
+    const DynamicUnitShapeContract& shape_contract,
+    const PrimitiveUnit& unit,
+    const std::vector<LogicalValueContract>& values) {
+    if (shape_contract.local_input_guards().size() !=
+            unit.boundary_input_value_ids.size() ||
+        shape_contract.output_shape_expressions().size() !=
+            unit.output_value_ids.size()) {
+        Reject("a unit and its dynamic invocation contract have different arity");
+    }
+
+    std::vector<ModuleInputContract> inputs;
+    inputs.reserve(unit.boundary_input_value_ids.size());
+    for (std::size_t input = 0;
+         input < unit.boundary_input_value_ids.size(); ++input) {
+        const LogicalValueContract& value = ContractValue(
+            values, unit.boundary_input_value_ids[input],
+            "a dynamic module input");
+        if (value.origin == LogicalValueOrigin::kConstant) {
+            Reject("bounded dynamic v1 does not support constants");
+        }
+        ModuleInputContract module_input;
+        for (const DynamicInputAxisGuard& source :
+             shape_contract.local_input_guards()[input]) {
+            ModuleAxisGuard guard;
+            guard.axis = source.axis;
+            guard.lower = source.lower;
+            guard.upper = source.upper;
+            guard.divisible_by = source.divisible_by;
+            guard.exact = source.exact;
+            if (source.equal_to) {
+                guard.equal_to = ModuleAxisReference{
+                    source.equal_to->input_index, source.equal_to->axis};
+            }
+            module_input.axis_guards.push_back(std::move(guard));
+        }
+        inputs.push_back(std::move(module_input));
+    }
+
+    std::vector<ModuleTensorContract> outputs;
+    std::size_t run_byte_budget = 0;
+    for (std::size_t output = 0;
+         output < unit.output_value_ids.size(); ++output) {
+        const LogicalValueContract& value = ContractValue(
+            values, unit.output_value_ids[output],
+            "a dynamic module output");
+        const auto* type = value.checked_type.As<TensorTypeNode>();
+        if (!type || type->shape.size() !=
+                         shape_contract.output_shape_expressions()[output].size()) {
+            Reject("a dynamic module output rank differs from its shape contract");
+        }
+        ModuleTensorContract module_output;
+        for (const DynamicShapeExpr& expression :
+             shape_contract.output_shape_expressions()[output]) {
+            module_output.logical.push_back(ToModuleShapeExpr(expression));
+        }
+        module_output.physical = module_output.logical;
+        module_output.valid = module_output.logical;
+        module_output.max_bytes = MaximumOutputBytes(
+            shape_contract.output_shape_expressions()[output],
+            shape_contract.local_input_guards(),
+            runtime::DataTypeFromString(type->dtype));
+        if (run_byte_budget >
+            std::numeric_limits<std::size_t>::max() -
+                module_output.max_bytes) {
+            Reject("a dynamic module run budget overflows size_t");
+        }
+        run_byte_budget += module_output.max_bytes;
+        outputs.push_back(std::move(module_output));
+    }
+
+    std::vector<ModuleRuntimeExtentScalar> scalars;
+    scalars.reserve(shape_contract.runtime_extent_expressions().size());
+    for (const DynamicShapeExpr& expression :
+         shape_contract.runtime_extent_expressions()) {
+        scalars.push_back(ModuleRuntimeExtentScalar{
+            ToModuleShapeExpr(expression)});
+    }
+    // ModuleInvocationContract uses zero as "unspecified"; one byte is the
+    // smallest finite cap for a graph whose bounded outputs are all empty.
+    run_byte_budget = std::max<std::size_t>(run_byte_budget, 1);
+    return std::make_shared<const ModuleInvocationContract>(
+        std::move(inputs), std::move(outputs), std::move(scalars),
+        run_byte_budget);
+}
+
+runtime::ExecutablePlan BuildDynamicExecutablePlan(
+    const BoundedCompilePreparation& preparation) {
+    const PartitionedGraph& graph = preparation.partitioned_graph();
+    ValidatePartition(graph);
+    Array<runtime::ValueSpec> value_specs;
+    for (const LogicalValueContract& value : graph.value_graph.values) {
+        const auto* type = value.checked_type.As<TensorTypeNode>();
+        if (!type) Reject("a dynamic plan value has no TensorType");
+        const bool is_graph_output =
+            std::find(graph.output_value_ids.begin(),
+                      graph.output_value_ids.end(), value.id) !=
+            graph.output_value_ids.end();
+        value_specs.push_back(runtime::ValueSpec(
+            value.id, value.id, type->shape,
+            runtime::DataTypeFromString(type->dtype), value.device,
+            value.origin == LogicalValueOrigin::kParameter,
+            value.origin == LogicalValueOrigin::kConstant,
+            is_graph_output));
+    }
+    runtime::ExecutablePlan plan(
+        value_specs, graph.calls, graph.input_value_ids,
+        graph.constant_value_ids, graph.output_value_ids, {},
+        runtime::ExecutablePlanMode::kDynamicFreshOutputV1,
+        preparation.graph_input_guards());
+    plan.Validate();
+    return plan;
 }
 
 }  // namespace kxc::api::internal

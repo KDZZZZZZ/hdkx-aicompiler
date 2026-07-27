@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "internal/compiled_graph_access.h"
+#include "internal/dynamic_shape_contract.h"
 #include "internal/execution_contract.h"
 #include "internal/identity_private.h"
 #include "internal/kernel_abi_equivalence.h"
@@ -23,8 +24,11 @@
 #include "internal/primitive_cache.h"
 #include "internal/primitive_compiler.h"
 #include "internal/relay_program.h"
+#include "internal/relay_snapshot.h"
 #include "internal/te_to_tir.h"
 #include "runtime/internal/compiled_module_node.h"
+#include "runtime/internal/module_invocation_contract.h"
+#include "kxc/compiler/experimental_identity.h"
 #include "kxc/compiler/pipeline.h"
 #include "kxc/pass/context.h"
 #include "kxc/profiling/profiling.h"
@@ -33,6 +37,13 @@
 #include "support/hash.h"
 #include "kxc/relay/visitor.h"
 #include "kxc/tir/printer/print_ir.h"
+
+#ifndef KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+#define KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH 0
+#endif
+#ifndef KXC_USE_LLVM
+#define KXC_USE_LLVM 0
+#endif
 
 namespace kxc::api {
 
@@ -315,6 +326,42 @@ const char* BackendVersion(const Target& target) {
     throw std::invalid_argument("Primitive cache target has no backend version");
 }
 
+internal::CompilerExecutionContract ResolveBoundedExecutionContract(
+    const CompileConfig& config) {
+    internal::CompilerExecutionContract contract =
+        internal::ResolveCompilerExecutionContract(config);
+    contract.schedule_policy =
+        relay::internal::kBoundedDynamicTESchedulePolicy;
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "bounded_dynamic_graph_gate",
+        "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH");
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "bounded_schedule_policy",
+        contract.schedule_policy);
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "bounded_dynamic_graph_version",
+        std::to_string(internal::kBoundedDynamicGraphVersion));
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "bounded_applicability_version",
+        std::to_string(experimental::restricted_symbolic_shape::v1::
+                           kBoundedCompileApplicabilityVersion));
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "bounded_preparation_version",
+        std::to_string(internal::kBoundedCompilePreparationVersion));
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "dynamic_unit_shape_contract_version",
+        std::to_string(internal::kDynamicUnitShapeContractVersion));
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "dynamic_plan_mode",
+        std::to_string(static_cast<std::uint8_t>(
+            runtime::ExecutablePlanMode::kDynamicFreshOutputV1)));
+    AppendPipelineIdentityField(
+        &contract.canonical_bytes, "module_invocation_abi_version",
+        std::to_string(ModuleInvocationContract::kAbiVersion));
+    contract.fingerprint = support::HashText(contract.canonical_bytes);
+    return contract;
+}
+
 CompiledGraph CompilePipeline(
     Function function, CompileConfig config,
     const internal::CompilerExecutionContract* expected_contract = nullptr) {
@@ -519,6 +566,14 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
 CompiledGraph internal::AssembleCompiledGraph(
     const PreparedCompilerGraph& prepared,
     const CompiledPrimitiveBatch& batch) {
+    return AssembleCompiledGraph(
+        prepared, batch, BuildStaticExecutablePlan(prepared.graph));
+}
+
+CompiledGraph internal::AssembleCompiledGraph(
+    const PreparedCompilerGraph& prepared,
+    const CompiledPrimitiveBatch& batch,
+    runtime::ExecutablePlan plan) {
     const std::vector<PrimitiveUnit>& units = prepared.graph.partitioned.units;
     if (batch.primitives.size() != units.size()) {
         throw std::invalid_argument(
@@ -571,7 +626,7 @@ CompiledGraph internal::AssembleCompiledGraph(
     return CompiledGraphAccess::Create(
         BuildCompiledModule(prepared.target, std::move(entries), batch.constants,
                             prepared.profile_context),
-        BuildStaticExecutablePlan(prepared.graph), std::move(public_pins),
+        std::move(plan), std::move(public_pins),
         prepared.graph_semantic_key);
 }
 
@@ -586,5 +641,79 @@ GraphSemanticKey Compiler::BuildGraphSemanticKey(
 
 CompiledGraph Compiler::Compile(Function function, CompileConfig config) {
     return CompilePipeline(std::move(function), std::move(config));
+}
+
+CompiledGraph Compiler::CompileBounded(
+    const experimental::restricted_symbolic_shape::v1::BoundedCompileRequest&
+        request) {
+#if !KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+    (void)request;
+    throw std::runtime_error(
+        "Compiler::CompileBounded is disabled; configure with "
+        "-DKXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=ON");
+#elif !KXC_USE_LLVM
+    (void)request;
+    throw std::runtime_error(
+        "Compiler::CompileBounded requires an available LLVM backend");
+#else
+    const internal::BoundedCompilePreparation preparation =
+        internal::PrepareBoundedCompile(request);
+    if (preparation.version() !=
+            internal::kBoundedCompilePreparationVersion ||
+        request.applicability_version() !=
+            experimental::restricted_symbolic_shape::v1::
+                kBoundedCompileApplicabilityVersion) {
+        throw std::invalid_argument(
+            "Compiler::CompileBounded received an unsupported bounded contract version");
+    }
+
+    runtime::ExecutablePlan plan =
+        internal::BuildDynamicExecutablePlan(preparation);
+    CompileConfig config = request.compile_config();
+    config.Validate();
+    const internal::CompilerExecutionContract contract =
+        ResolveBoundedExecutionContract(config);
+    auto profile_context = MaybeCreateProfileContext(config);
+    const std::string run_id =
+        profile_context ? profile_context->NextRunId("compile_bounded") : "";
+    profiling::ActivationScope activation(profile_context, run_id);
+    profiling::ScopedSpan compile_span(
+        profile_context, MakeStageEvent("compile_bounded", config), run_id);
+
+    internal::PreparedStaticGraph graph;
+    graph.partitioned = preparation.partitioned_graph();
+    graph.device = Device(config->target->device_type,
+                          config->target->device_id);
+    graph.target = config->target;
+    graph.pipeline_fingerprint = String(contract.fingerprint);
+    internal::PreparedCompilerGraph prepared{
+        request.graph_template().key(), std::move(graph), config->target,
+        contract.canonical_bytes, profile_context, run_id};
+    internal::FreezePreparedOperators(&prepared);
+
+    internal::CompiledPrimitiveBatch batch;
+    {
+        const PassContext pass_context = PassContext::MergeTarget(
+            relay::PassContextFromRelay(
+                prepared.graph.partitioned.value_graph.function),
+            config->target);
+        PassContext::Scope pass_scope(pass_context);
+        profiling::ScopedSpan primitive_span(
+            profile_context,
+            MakeStageEvent("compile_bounded_primitives", config), run_id);
+        batch = internal::CompilePrimitiveUnits(
+            preparation, prepared.graph.partitioned, config, contract);
+        primitive_span.AddMetric(
+            "primitive_count", static_cast<double>(batch.primitives.size()));
+    }
+
+    CompiledGraph result = internal::AssembleCompiledGraph(
+        prepared, batch, std::move(plan));
+    (void)BuildPlanAbiFingerprint(result);
+    compile_span.AddMetric(
+        "primitive_count", static_cast<double>(batch.primitives.size()));
+    if (profile_context) profile_context->Flush();
+    return result;
+#endif
 }
 }  // namespace kxc::api

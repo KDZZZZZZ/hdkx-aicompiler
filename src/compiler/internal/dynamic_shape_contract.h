@@ -5,12 +5,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "compilation_unit.h"
 #include "kxc/compiler/restricted_symbolic_shape.h"
+
+namespace kxc::api {
+class ModuleInvocationContract;
+}
 
 namespace kxc::api::internal {
 
@@ -19,8 +24,9 @@ namespace restricted =
 namespace specialization =
     kxc::api::experimental::shape_specialization::v1;
 
-inline constexpr std::uint32_t kDynamicUnitShapeContractVersion = 1;
-inline constexpr std::uint32_t kBoundedCompilePreparationVersion = 1;
+inline constexpr std::uint32_t kBoundedDynamicGraphVersion = 1;
+inline constexpr std::uint32_t kDynamicUnitShapeContractVersion = 2;
+inline constexpr std::uint32_t kBoundedCompilePreparationVersion = 2;
 
 struct DynamicInputAxisReference final {
     std::size_t input_index{0};
@@ -65,9 +71,10 @@ private:
 
 /*! \brief One unit's sole bounded shape authority.
  *
- * Input guards are grouped in physical boundary-input order. Output and
- * runtime-extent expressions reference only those local inputs. Construction
- * is private so every instance comes from GraphTemplate + ordered UnitSkeleton.
+ * Input guards are grouped in physical boundary-input order. Output
+ * expressions reference only those local inputs; runtime extents are exactly
+ * the non-Const output expressions in output-axis order. Construction is
+ * private so every instance comes from GraphTemplate + ordered UnitSkeleton.
  */
 class DynamicUnitShapeContract final {
 public:
@@ -107,11 +114,11 @@ private:
 BuildDynamicUnitShapeContracts(
     const specialization::GraphTemplate& graph_template);
 
-/*! \brief Immutable pre-lowering result consumed by future CompileBounded.
+/*! \brief Immutable pre-lowering result consumed by Compiler::CompileBounded.
  *
- * No TE/TIR, backend compilation, module assembly, Runtime plan, or route is
- * produced here. The partition carries fixed-rank -1 logical boundaries only
- * because preparation requires an adapter-minted BoundedCompileRequest.
+ * Preparation itself performs no TE/TIR, backend compilation, module
+ * assembly, Runtime plan construction, or routing. Its partition carries
+ * fixed-rank -1 boundaries only under adapter-minted authority.
  */
 class BoundedCompilePreparation final {
 public:
@@ -121,17 +128,21 @@ public:
     [[nodiscard]] const PartitionedGraph& partitioned_graph() const noexcept;
     [[nodiscard]] const std::vector<DynamicUnitShapeContract>&
     unit_shape_contracts() const noexcept;
+    [[nodiscard]] const std::vector<runtime::GraphInputAxisGuard>&
+    graph_input_guards() const noexcept;
 
 private:
     BoundedCompilePreparation(
         restricted::BoundedCompileRequest request,
         PartitionedGraph partitioned_graph,
-        std::vector<DynamicUnitShapeContract> unit_shape_contracts);
+        std::vector<DynamicUnitShapeContract> unit_shape_contracts,
+        std::vector<runtime::GraphInputAxisGuard> graph_input_guards);
 
     std::uint32_t version_{kBoundedCompilePreparationVersion};
     restricted::BoundedCompileRequest request_;
     PartitionedGraph partitioned_graph_;
     std::vector<DynamicUnitShapeContract> unit_shape_contracts_;
+    std::vector<runtime::GraphInputAxisGuard> graph_input_guards_;
 
     friend BoundedCompilePreparation PrepareBoundedCompile(
         const restricted::BoundedCompileRequest&);
@@ -139,5 +150,14 @@ private:
 
 [[nodiscard]] BoundedCompilePreparation PrepareBoundedCompile(
     const restricted::BoundedCompileRequest& request);
+
+[[nodiscard]] std::shared_ptr<const ModuleInvocationContract>
+BuildDynamicModuleInvocationContract(
+    const DynamicUnitShapeContract& shape_contract,
+    const PrimitiveUnit& unit,
+    const std::vector<LogicalValueContract>& values);
+
+[[nodiscard]] runtime::ExecutablePlan BuildDynamicExecutablePlan(
+    const BoundedCompilePreparation& preparation);
 
 }  // namespace kxc::api::internal

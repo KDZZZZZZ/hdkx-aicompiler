@@ -36,7 +36,7 @@ namespace specialization =
     kxc::api::experimental::shape_specialization::v1;
 
 inline constexpr uint32_t kRestrictedSymbolicShapeVersion = 1;
-inline constexpr uint32_t kBoundedCompileApplicabilityVersion = 1;
+inline constexpr uint32_t kBoundedCompileApplicabilityVersion = 2;
 
 struct InputAxisSymbol final {
     size_t parameter_index{0};

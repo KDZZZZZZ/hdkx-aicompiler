@@ -309,6 +309,12 @@ bool TestPlanAbiUsesKernelCanonicalBytes() {
                        std::string::npos &&
                    first.canonical_bytes().find("kxc.kernel-launch-metadata.v1") !=
                        std::string::npos &&
+                   first.canonical_bytes().find(
+                       "executable-plan-abi-v7-dynamic-fresh-output") !=
+                       std::string::npos &&
+                   first.canonical_bytes().find(
+                       "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH") ==
+                       std::string::npos &&
                    first.canonical_bytes().find("KernelSignature(") ==
                        std::string::npos,
                "Plan ABI must embed canonical kernel contracts rather than diagnostics");
@@ -339,9 +345,12 @@ bool TestPlanAbiIncludesDynamicModeGuardsAndInvocationContract() {
     TEST_CHECK(
         baseline != graph_guard_changed && baseline != invocation_changed &&
             baseline.canonical_bytes().find(
-                "executable-plan-abi-v7-dynamic-fresh-output") !=
+                "executable-plan-abi-v8-bounded-dynamic-graph") !=
                 std::string::npos &&
             baseline.canonical_bytes().find("plan_mode") !=
+                std::string::npos &&
+            baseline.canonical_bytes().find(
+                "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH.v1") !=
                 std::string::npos &&
             baseline.canonical_bytes().find("graph_guard_upper") !=
                 std::string::npos &&

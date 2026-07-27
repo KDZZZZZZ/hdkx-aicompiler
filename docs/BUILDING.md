@@ -77,6 +77,37 @@ ctest --test-dir out/build/dev-llvm \
 启用 LLVM 的验证必须包含 `codegen_llvm_test`、`op_numeric_llvm_test`，
 以及 `onnx_importer_test` 的 LLVM 子集。
 
+## Bounded 动态图 all-gates 构建
+
+`KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH` 默认关闭，且配置时强制要求：
+
+- `KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON`
+- `KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON`
+- `KXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON`
+- `KXC_ENABLE_LLVM=ON`，并实际发现 LLVM >= 20
+
+独立 CPU/LLVM all-gates 配置示例：
+
+```bash
+cmake -S . -B out/build/dynamic-production-e2e-all-gates -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DKXC_ENABLE_CUDA=OFF \
+  -DKXC_ENABLE_LLVM=ON \
+  -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm \
+  -DKXC_ENABLE_CONTROL_RUNTIME=ON \
+  -DKXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON \
+  -DKXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON \
+  -DKXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON \
+  -DKXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=ON \
+  -DKXC_ENABLE_ADAPTIVE_HOT_SWAP=ON
+cmake --build out/build/dynamic-production-e2e-all-gates --parallel
+ctest --test-dir out/build/dynamic-production-e2e-all-gates \
+  --output-on-failure --no-tests=error
+```
+
+`bounded_dynamic_graph_llvm_test` 证明一次 `CompileBounded` 后，同一
+`CompiledGraph` 在 `N=2` 与 `N=6` 上执行 `add -> relu -> sqrt`，运行期间不访问原语缓存。该 gate 不启用 route、adaptive 对齐、state/alias/reuse、控制流合并或 CUDA fallback。
+
 ## CUDA 构建
 
 CUDA 支持需要兼容的 NVIDIA 驱动与工具包。工具包发现与设备可用性是独立条件：
@@ -111,6 +142,7 @@ ctest --test-dir out/build/dev-cuda \
 - `KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI`
 - `KXC_ENABLE_SHAPE_PRODUCTION_EXACT`
 - `KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE`
+- `KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH`
 - `KXC_ENABLE_ADAPTIVE_HOT_SWAP`
 
 仅在验证矩阵包含其测试时再开启该开关。

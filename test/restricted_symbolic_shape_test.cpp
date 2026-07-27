@@ -386,8 +386,19 @@ bool TestBoundedCompileAdmissionAndUnitContracts() {
               output[1].kind() ==
                   compiler_internal::DynamicShapeExpr::Kind::kConst &&
               output[1].constant() == 4 &&
-              add.runtime_extent_expressions() == output,
-          "output and runtime extents must share one local direct-expression order");
+              add.runtime_extent_expressions().size() == 1 &&
+              add.runtime_extent_expressions()[0] == output[0],
+          "only dynamic InputAxis expressions may enter runtime extent order");
+    CHECK(result.graph_input_guards().size() == 2 &&
+              result.graph_input_guards()[0].input_index == 0 &&
+              result.graph_input_guards()[0].axis == 0 &&
+              !result.graph_input_guards()[0].equal_to &&
+              result.graph_input_guards()[1].input_index == 1 &&
+              result.graph_input_guards()[1].axis == 0 &&
+              result.graph_input_guards()[1].equal_to &&
+              result.graph_input_guards()[1].equal_to->input_index == 0 &&
+              result.graph_input_guards()[1].equal_to->axis == 0,
+          "graph preflight guards must follow wildcard input-axis order");
 
     const auto rebuilt = compiler_internal::BuildDynamicUnitShapeContracts(
         request.graph_template());
