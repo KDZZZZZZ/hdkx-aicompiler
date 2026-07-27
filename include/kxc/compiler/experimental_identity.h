@@ -93,7 +93,7 @@ private:
     std::string digest_;
 };
 
-/*! \brief Opaque, versioned static-exact ABI identity derived from a real plan. */
+/*! \brief Opaque, versioned callable ABI identity derived from a real plan. */
 class PlanAbiFingerprint final {
 public:
     PlanAbiFingerprint() = default;

@@ -213,10 +213,6 @@ void ValueSpec::Validate() const {
         if (dimension < kDynamicDimension) {
             throw std::invalid_argument("ValueSpec shape contains an invalid dimension");
         }
-        if (dimension == kDynamicDimension && !node->is_input) {
-            throw std::invalid_argument(
-                "Only input ValueSpecs may contain dynamic dimensions");
-        }
     }
     if (node->valid_bytes < -1) {
         throw std::invalid_argument("ValueSpec valid bytes is invalid");
@@ -287,11 +283,12 @@ const KernelCallNode* KernelCall::operator->() const {
     return node;
 }
 
-ExecutablePlan::ExecutablePlan(Array<ValueSpec> values, Array<KernelCall> calls,
-                               Array<int64_t> input_value_ids,
-                               Array<int64_t> constant_value_ids,
-                               Array<int64_t> output_value_ids,
-                               Array<int64_t> state_value_ids) {
+ExecutablePlan::ExecutablePlan(
+    Array<ValueSpec> values, Array<KernelCall> calls,
+    Array<int64_t> input_value_ids, Array<int64_t> constant_value_ids,
+    Array<int64_t> output_value_ids, Array<int64_t> state_value_ids,
+    ExecutablePlanMode mode,
+    std::vector<GraphInputAxisGuard> graph_input_guards) {
     auto* node = new ExecutablePlanNode();
     node->values_ = CopyArray(values);
     node->calls_ = CopyArray(calls);
@@ -299,6 +296,8 @@ ExecutablePlan::ExecutablePlan(Array<ValueSpec> values, Array<KernelCall> calls,
     node->constant_value_ids_ = CopyArray(constant_value_ids);
     node->output_value_ids_ = CopyArray(output_value_ids);
     node->state_value_ids_ = CopyArray(state_value_ids);
+    node->mode_ = mode;
+    node->graph_input_guards_ = std::move(graph_input_guards);
     SetData(node);
     Validate();
 }
@@ -333,6 +332,14 @@ Array<int64_t> ExecutablePlan::output_value_ids() const {
 
 Array<int64_t> ExecutablePlan::state_value_ids() const {
     return CopyArray(operator->()->state_value_ids_);
+}
+
+ExecutablePlanMode ExecutablePlan::mode() const {
+    return operator->()->mode_;
+}
+
+std::vector<GraphInputAxisGuard> ExecutablePlan::graph_input_guards() const {
+    return operator->()->graph_input_guards_;
 }
 
 void ExecutablePlan::Validate() const {
@@ -378,6 +385,106 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
                             values_by_id);
     ValidateOrderedRoleList(state_ids, &ValueSpecNode::is_state,
                             "state_value_ids", values_by_id);
+
+    const ExecutablePlanMode mode = plan.mode();
+    const std::vector<GraphInputAxisGuard> graph_guards =
+        plan.graph_input_guards();
+    if (mode == ExecutablePlanMode::kStatic) {
+        if (!graph_guards.empty()) {
+            throw std::invalid_argument(
+                "Static ExecutablePlan cannot declare graph input guards");
+        }
+        for (const auto& value : values) {
+            for (int64_t dimension : value.shape()) {
+                if (dimension == -1 && !value->is_input) {
+                    throw std::invalid_argument(
+                        "Static ExecutablePlan only allows wildcard input values");
+                }
+            }
+        }
+    } else if (mode == ExecutablePlanMode::kDynamicFreshOutputV1) {
+        std::unordered_set<int64_t> storage_ids;
+        for (const auto& value : values) {
+            if (value->is_state || value->is_alias ||
+                value->alias_source_value_id != -1 ||
+                value->write_mode != ValueWriteMode::kAllocate) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output ExecutablePlan rejects state, alias, and donation");
+            }
+            if (value->valid_bytes != -1) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output ExecutablePlan requires logical valid extents");
+            }
+            if (!storage_ids.insert(value->storage_id).second) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output ExecutablePlan forbids graph storage reuse");
+            }
+            if (value->is_constant) {
+                for (int64_t dimension : value.shape()) {
+                    if (dimension == -1) {
+                        throw std::invalid_argument(
+                            "Dynamic fresh-output constants require static shapes");
+                    }
+                }
+            }
+        }
+        if (!state_ids.empty()) {
+            throw std::invalid_argument(
+                "Dynamic fresh-output ExecutablePlan rejects persistent state");
+        }
+
+        std::vector<std::pair<size_t, size_t>> wildcard_axes;
+        for (size_t input_index = 0; input_index < input_ids.size();
+             ++input_index) {
+            const Array<int64_t> shape =
+                values_by_id.at(input_ids[input_index]).shape();
+            for (size_t axis = 0; axis < shape.size(); ++axis) {
+                if (shape[axis] == -1) {
+                    wildcard_axes.emplace_back(input_index, axis);
+                }
+            }
+        }
+        if (graph_guards.size() != wildcard_axes.size()) {
+            throw std::invalid_argument(
+                "Dynamic fresh-output graph guards must cover every wildcard input axis");
+        }
+        for (size_t index = 0; index < graph_guards.size(); ++index) {
+            const GraphInputAxisGuard& guard = graph_guards[index];
+            if (guard.input_index != wildcard_axes[index].first ||
+                guard.axis != wildcard_axes[index].second) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output graph guards must follow input-axis order");
+            }
+            if (guard.lower < 0 || guard.upper < guard.lower ||
+                guard.divisible_by <= 0) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output graph guard bounds are invalid");
+            }
+            const int64_t remainder = guard.lower % guard.divisible_by;
+            if (remainder != 0 &&
+                guard.divisible_by - remainder > guard.upper - guard.lower) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output graph guard admits no divisible extent");
+            }
+            if (!guard.equal_to) continue;
+            const GraphInputAxisReference& reference = *guard.equal_to;
+            if (reference.input_index >= input_ids.size()) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output equality guard references an unknown input");
+            }
+            const Array<int64_t> reference_shape =
+                values_by_id.at(input_ids[reference.input_index]).shape();
+            if (reference.axis >= reference_shape.size() ||
+                reference.input_index > guard.input_index ||
+                (reference.input_index == guard.input_index &&
+                 reference.axis >= guard.axis)) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output equality guards require a prior input axis");
+            }
+        }
+    } else {
+        throw std::invalid_argument("ExecutablePlan mode is unsupported");
+    }
 
     std::unordered_set<int64_t> available;
     for (int64_t id : input_ids) available.insert(id);

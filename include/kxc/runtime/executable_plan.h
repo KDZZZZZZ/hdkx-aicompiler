@@ -4,7 +4,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <vector>
 
 #include <dlpack/dlpack.h>
 
@@ -17,6 +20,28 @@ namespace kxc::runtime {
 enum class ValueWriteMode : uint8_t {
     kAllocate = 0,
     kInPlace = 1,
+};
+
+/*! \brief Selects the immutable graph execution and allocation contract. */
+enum class ExecutablePlanMode : uint8_t {
+    kStatic = 0,
+    kDynamicFreshOutputV1 = 1,
+};
+
+/*! \brief One graph-input axis referenced by a shared-shape guard. */
+struct GraphInputAxisReference final {
+    size_t input_index{0};
+    size_t axis{0};
+};
+
+/*! \brief Finite preflight contract for one wildcard graph-input axis. */
+struct GraphInputAxisGuard final {
+    size_t input_index{0};
+    size_t axis{0};
+    int64_t lower{0};
+    int64_t upper{0};
+    int64_t divisible_by{1};
+    std::optional<GraphInputAxisReference> equal_to;
 };
 
 /*! \brief Complete runtime metadata for one stable graph value. */
@@ -100,6 +125,8 @@ private:
     Array<int64_t> constant_value_ids_;
     Array<int64_t> output_value_ids_;
     Array<int64_t> state_value_ids_;
+    ExecutablePlanMode mode_{ExecutablePlanMode::kStatic};
+    std::vector<GraphInputAxisGuard> graph_input_guards_;
 };
 
 /*! \brief Validated immutable graph ABI and kernel call order. */
@@ -110,7 +137,9 @@ public:
                    Array<int64_t> input_value_ids,
                    Array<int64_t> constant_value_ids,
                    Array<int64_t> output_value_ids,
-                   Array<int64_t> state_value_ids = {});
+                   Array<int64_t> state_value_ids = {},
+                   ExecutablePlanMode mode = ExecutablePlanMode::kStatic,
+                   std::vector<GraphInputAxisGuard> graph_input_guards = {});
     explicit ExecutablePlan(const ObjectRef& ref);
 
     Array<ValueSpec> values() const;
@@ -119,6 +148,8 @@ public:
     Array<int64_t> constant_value_ids() const;
     Array<int64_t> output_value_ids() const;
     Array<int64_t> state_value_ids() const;
+    ExecutablePlanMode mode() const;
+    std::vector<GraphInputAxisGuard> graph_input_guards() const;
     void Validate() const;
     const ExecutablePlanNode* operator->() const;
 };
