@@ -40,6 +40,11 @@ Call MakeDivide(Expr lhs, Expr rhs) {
     return Call(GetOp("divide"), {lhs, rhs});
 }
 
+// 构造二元逐元素相等比较调用。
+Call MakeEqual(Expr lhs, Expr rhs) {
+    return Call(GetOp("equal"), {lhs, rhs});
+}
+
 // 构造三元 Where 调用。
 Call MakeWhere(Expr condition, Expr x, Expr y) {
     return Call(GetOp("where"), {condition, x, y});
@@ -169,6 +174,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.add").set_body(ToPackedFunc(MakeAdd));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.subtract").set_body(ToPackedFunc(MakeSubtract));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.mul").set_body(ToPackedFunc(MakeMul));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.divide").set_body(ToPackedFunc(MakeDivide));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.equal").set_body(ToPackedFunc(MakeEqual));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.where").set_body(ToPackedFunc(MakeWhere));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sqrt").set_body(ToPackedFunc(MakeSqrt));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.matmul").set_body(ToPackedFunc(MakeMatmul));

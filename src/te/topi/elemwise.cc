@@ -4,6 +4,10 @@
 
 #include "kxc/te/topi/elemwise.h"
 
+#include "kxc/te/topi/broadcast.h"
+
+#include <stdexcept>
+
 namespace kxc {
 namespace te {
 namespace topi {
@@ -132,6 +136,23 @@ Tensor cast(const Tensor& x, DataType dtype, std::string name , std::string tag 
         name,
         tag
     );
+}
+
+Tensor equal(const Tensor& A, const Tensor& B, std::string name, std::string tag) {
+    if (!A.defined() || !B.defined()) {
+        throw std::runtime_error("equal requires defined tensors");
+    }
+    if (A->dtype != B->dtype) {
+        throw std::runtime_error("equal input dtypes must match");
+    }
+    const auto output_shape = detail::InferBroadcastShape(A->shape, B->shape);
+    return compute(
+        output_shape,
+        [A, B, output_shape](const Array<tir::Var>& indices) {
+            return A(detail::GetBroadcastIndices(indices, A->shape, output_shape)) ==
+                   B(detail::GetBroadcastIndices(indices, B->shape, output_shape));
+        },
+        std::move(name), std::move(tag));
 }
 
 }  // namespace topi

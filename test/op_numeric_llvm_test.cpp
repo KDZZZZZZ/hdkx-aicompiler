@@ -595,6 +595,94 @@ void TestWhere() {
           "Where bool Constant/branch result mismatch");
 }
 
+// 验证 Equal 的 bool 输出、int32/int64/float32 数值语义与合法广播。
+// 首版子集：同 dtype int32/int64/float32；NaN 按数值相等语义（NaN != NaN），不能用位相等。
+void TestEqual() {
+    // M5 文档示例：A=[1,2,3]、B=[1,0,3] → [true,false,true]。
+    kxc::Var a("a", kxc::TensorType({3}, "int32"));
+    kxc::Var b("b", kxc::TensorType({3}, "int32"));
+    kxc::Call call(kxc::relay::Op::Get("equal"), {a, b});
+    kxc::Function func({a, b}, call);
+
+    const std::vector<int32_t> a_data = {1, 2, 3};
+    const std::vector<int32_t> b_data = {1, 0, 3};
+    std::vector<uint8_t> out(3, 0);
+    CompileAndRun("equal", func, {Input(a_data), Input(b_data), Output(out)});
+    Check(out == std::vector<uint8_t>({1, 0, 1}), "equal int32 doc example mismatch");
+
+    // int64 的 trailing-axis 广播。
+    kxc::Var lhs("lhs", kxc::TensorType({2, 3}, "int64"));
+    kxc::Var rhs("rhs", kxc::TensorType({3}, "int64"));
+    kxc::Call broadcast_call(kxc::relay::Op::Get("equal"), {lhs, rhs});
+    kxc::Function broadcast_func({lhs, rhs}, broadcast_call);
+    const std::vector<int64_t> lhs_data = {1, 2, 3, 4, 5, 6};
+    const std::vector<int64_t> rhs_data = {4, 5, 6};
+    std::vector<uint8_t> broadcast_out(6, 1);
+    CompileAndRun("equal_int64_broadcast", broadcast_func,
+                  {Input(lhs_data), Input(rhs_data), Output(broadcast_out)});
+    Check(broadcast_out == std::vector<uint8_t>({0, 0, 0, 1, 1, 1}),
+          "equal int64 broadcast mismatch");
+
+    // float32 数值相等：+0 与 -0 相等；NaN 与任何值（含自身）都不相等。
+    kxc::Var f_lhs("f_lhs", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var f_rhs("f_rhs", kxc::TensorType({3}, "float32"));
+    kxc::Call float_call(kxc::relay::Op::Get("equal"), {f_lhs, f_rhs});
+    kxc::Function float_func({f_lhs, f_rhs}, float_call);
+    const float nan_value = std::numeric_limits<float>::quiet_NaN();
+    const std::vector<float> float_lhs_data = {0.0f, -0.0f, nan_value, 1.0f, 0.0f, 5.0f};
+    const std::vector<float> float_rhs_data = {-0.0f, 0.0f, nan_value};
+    std::vector<uint8_t> float_out(6, 0);
+    CompileAndRun("equal_float32_special_values", float_func,
+                  {Input(float_lhs_data), Input(float_rhs_data), Output(float_out)});
+    // 实际行为：+0 == -0 → true；NaN == NaN → false；数值 == NaN → false。
+    Check(float_out == std::vector<uint8_t>({1, 1, 0, 0, 1, 0}),
+          "equal float32 NaN and signed-zero semantics mismatch");
+
+    // 标量（rank-0）与空张量的真实 buffer 读写。
+    kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
+    kxc::Var row("row", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call scalar_call(kxc::relay::Op::Get("equal"), {scalar, row});
+    kxc::Function scalar_func({scalar, row}, scalar_call);
+    const std::vector<float> scalar_data = {7.0f};
+    const std::vector<float> row_data = {7.0f, 8.0f, 7.0f};
+    std::vector<uint8_t> scalar_out(3, 0);
+    CompileAndRun("equal_scalar_broadcast", scalar_func,
+                  {Input(scalar_data), Input(row_data), Output(scalar_out)});
+    Check(scalar_out == std::vector<uint8_t>({1, 0, 1}),
+          "equal rank-0 broadcast mismatch");
+
+    kxc::Var empty_a("empty_a", kxc::TensorType({0}, "int32"));
+    kxc::Var empty_b("empty_b", kxc::TensorType({0}, "int32"));
+    kxc::Call empty_call(kxc::relay::Op::Get("equal"), {empty_a, empty_b});
+    kxc::Function empty_func({empty_a, empty_b}, empty_call);
+    std::vector<uint8_t> empty_out;
+    CompileAndRun("equal_empty", empty_func,
+                  {Input(std::vector<int32_t>{}), Input(std::vector<int32_t>{}),
+                   Output(empty_out)});
+    Check(empty_out.empty(), "equal on empty tensors must produce an empty bool buffer");
+}
+
+// 验证 Equal 的 bool 结果直接作为 Where 条件的真实 buffer 消费链。
+void TestEqualWhereComposition() {
+    kxc::Var a("a", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var b("b", kxc::TensorType({3}, "float32"));
+    kxc::Call equal_call(kxc::relay::Op::Get("equal"), {a, b});
+    kxc::Var x("x", kxc::TensorType({1, 3}, "float32"));
+    kxc::Var y("y", kxc::TensorType({}, "float32"));
+    kxc::Call where_call(kxc::relay::Op::Get("where"), {equal_call, x, y});
+    kxc::Function func({a, b, x, y}, where_call);
+
+    const std::vector<float> a_data = {1, 2, 3, 4, 5, 6};
+    const std::vector<float> b_data = {1, 0, 3};
+    const std::vector<float> x_data = {10, 20, 30};
+    const std::vector<float> y_data = {0};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("equal_where_composition", func,
+                  {Input(a_data), Input(b_data), Input(x_data), Input(y_data),
+                   Output(out)});
+    ExpectNear(out, {10, 0, 30, 0, 0, 0});
+}
+
 // 验证 LayerNorm 的常量行、微小方差行和仿射参数语义。
 void TestLayerNorm() {
     kxc::Var data("data", kxc::TensorType({2, 4}, "float32"));
@@ -949,6 +1037,8 @@ int main() {
         {"softmax", TestSoftmax},
         {"gather", TestGather},
         {"where", TestWhere},
+        {"equal", TestEqual},
+        {"equal_where_composition", TestEqualWhereComposition},
         {"nn_layer_norm", TestLayerNorm},
         {"cast", TestCast},
         {"model_add_chain", TestModelAddChain},

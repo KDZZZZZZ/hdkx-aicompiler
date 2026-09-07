@@ -13,6 +13,8 @@ Type AddInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SubtractInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type MultiplyInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type DivideInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type EqualInferType(const Attrs& attrs, const Array<Type>& input_types);
+bool IsEqualInputDType(const std::string& dtype);
 Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type UnarySameInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type CastInferType(const Attrs& attrs, const Array<Type>& input_types);

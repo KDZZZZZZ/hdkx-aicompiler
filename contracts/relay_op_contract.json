@@ -127,6 +127,39 @@
         "Div"
       ]
     },
+    "equal": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [],
+      "registration": {
+        "description": "Element-wise equality comparison with broadcast.",
+        "arguments": [
+          {
+            "name": "lhs",
+            "type": "Tensor",
+            "description": "The left hand side input tensor."
+          },
+          {
+            "name": "rhs",
+            "type": "Tensor",
+            "description": "The right hand side input tensor."
+          }
+        ],
+        "type_infer_symbol": "EqualInferType",
+        "relay_to_te_symbol": "EqualCompute"
+      }
+    },
     "gather": {
       "schema_version": 1,
       "category": "tensor.transform",
