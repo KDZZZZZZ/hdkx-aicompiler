@@ -1,8 +1,8 @@
 # 代码库清单：基座层与外挂层
 
 > **状态：** 现状快照
-> **更新时间：** 2026-09-06
-> **审计基点：** `dev` @ `f379ebf`
+> **更新时间：** 2026-09-07
+> **审计基点：** 第一波 G1 集成后的 `dev`（见 [G1 记录](implementation/G1_RECORD.md)）
 > **标尺：** [项目目标](PROJECT_GOAL.md)。本文按目标重新划分代码，不重复架构描述；架构权威仍是 [架构总览](ARCHITECTURE.md)。
 
 ## 规模概览
@@ -75,7 +75,7 @@
 | 自适应热替换 | 868 | `KXC_ENABLE_ADAPTIVE_HOT_SWAP`（OFF） | 有界全图替换控制面，旧代际租约保活 | **1（核心机制）** |
 | 形状决策层 | 约 3,400 | `SHAPE_PRODUCTION_EXACT` / `RESTRICTED_SYMBOLIC_SHAPE`（OFF） | 形状代数、符号模板到精确值的决策、精确 profile 路由 | 2 |
 | Bounded 动态图 | 约 4,800 | `KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH`（OFF，**未合入 dev**） | 一份产物服务多个合法 shape：固定秩、有界、整除约束 | **2（变长）** |
-| 控制流运行时 | 约 1,400 | `KXC_ENABLE_CONTROL_RUNTIME`（OFF） | 静态 If 与条件前置有界 While 的编译期控制拓扑 | 2 |
+| 控制流运行时 | 约 1,400 | `KXC_ENABLE_CONTROL_RUNTIME`（OFF） | 静态 If 与条件前置有界 While 的编译期控制拓扑；后续按 [M10](implementation/M10_STRUCTURED_CONTROL.md) 补 gate-on 生产证据 | 2 |
 
 ### 分布式地基
 
@@ -91,6 +91,7 @@
 |---|---|---|
 | **shape-as-value** | `Shape` / `Expand` / `ConstantOfShape` 三个算子；动态形状下的 `Squeeze` / `Unsqueeze`；ONNX Transformer 图的整个动态形状链 | 全仓无任何相关实现 |
 | **运行时状态（KV cache）** | 支柱 2 的 decode 阶段与端到端链路 | `kv_cache` 能力全线仅有契约；`kDynamicFreshOutputV1` 明确拒绝 state / alias / donation / storage reuse |
+| **结构化控制流生产证据与状态交接** | 静态 `If`/有界 `While` 的可声明能力，以及未来把控制图用于 decode 的判断 | 控制流实现和 gate-off 拒绝测试已存在，但 `KXC_ENABLE_CONTROL_RUNTIME` 默认 OFF；当前 runtime 明确拒绝 runtime extent/KV state，尚无 MiniMind gate-on LLVM receipt；执行计划见 [M10](implementation/M10_STRUCTURED_CONTROL.md) |
 | **执行侧观测 Span** | 支柱 5 的可信度；支柱 1 的决策输入 | 能力矩阵 `profile` 列 **12/12 unsupported**；架构文档声明不覆盖 RuntimeSession 内核、分配与拷贝路径 |
 | ~~IR parser / round-trip~~ | — | **已延后**，见 [项目目标](PROJECT_GOAL.md) §2.4。现状仍是有 printer 无 parser，但不作为当前缺口计入 |
 | **导入层多输出支持** | `Split` 及一切多输出算子 | 导入器自述"only single-output nodes are supported in the static-shape MVP" |
@@ -114,7 +115,7 @@
 
 ## 2.1 外挂层有三个必须同步的表面
 
-> **更新（2026-09-07，第一波集成后）**：契约 24→**25**（新增 `equal`）、Relay 算子实现 24→**25**、importer 映射 15→**16**（新增 `Equal`；另有 `Constant` 节点经常量物化路径接受，不入映射表）。下文保留更新前的统计口径供追溯。
+> **更新（2026-09-07，第一波集成后）**：契约 24→**25**（新增 `equal`）、Relay 算子实现 24→**25**、importer 的可达映射已随第一波补齐静态子集并接入 `Equal`；另有 `Constant` 节点经常量物化路径接受，不等同于通用 op 映射。具体数量以代码和 `onnx_op_inventory.py` 当前输出为准，下文保留语义限制而不把映射数量当作模型能力。
 
 | 表面 | 当前数量 | 位置 |
 |---|---|---|
@@ -130,31 +131,31 @@ nn_avg_pool2d   nn_dense
 
 （`nn_dense` 可能经 `Gemm` 间接到达，需核实；`nn_avg_pool2d` 仅 `AvgPool` 名称未映射。第一波前不可达的 `cast` `divide` `mul` `reduce_mean` `reshape` `sqrt` `subtract` 已由静态导入接通。）扩算子时三个表面必须一起推进。
 
-**按模型交集统计（与上表的"Relay 算子不可达"是两个不同口径）**：[OP_TODO](OP_TODO.md) 快照的 25 个模型 ONNX 名称中，importer 现在接受 **17** 个（既有交集 8：`Add` `Concat` `Gather` `MatMul` `Slice` `Softmax` `Transpose` `Where`；第一波新增 9：`Cast` `Constant` `Div` `Equal` `Mul` `ReduceMean` `Reshape` `Sqrt` `Sub`），仍缺 **8** 个名称（`ConstantOfShape` `Erf` `Expand` `Pow` `Shape` `Split` `Squeeze` `Unsqueeze`）。且名称交集不等于语义覆盖：交集中 `Concat` 只接受两个输入（模型出现三/四输入）、`Gather` 要求常量索引、`ReduceMean` 的 keepdims 中间轴存在已知数值缺陷（见 [G1 记录](implementation/G1_RECORD.md)）。
+**按模型交集统计（与上表的"Relay 算子不可达"是两个不同口径）**：目标已改为 MiniMind，`OP_TODO.md` 同时记录 dynamic/static 原始图和静态非原地 mask 的常量折叠口径。当前 raw prefill/decode 导出各有 24 种左右算子，非原地 mask 的 inventory 与折叠后实算清单还需分开读取；导入器名称交集不等于 dtype、属性、输入数量或真实 LLVM 执行已通过。`Concat` 的输入数、`Gather` 的索引和 `ReduceMean` 的中间轴缺陷见 [G1 记录](implementation/G1_RECORD.md)，动态 Shape/Range/ConstantOfShape 由 M3/M9 决定是否开放。
 
-## 2.2 现有 24 个算子的用途归属
+## 2.2 现有 Relay 算子的用途归属
 
 - **服务 Transformer（18 个）**：`add` `cast` `concatenate` `divide` `gather` `matmul` `mul` `reduce_mean` `reshape` `slice` `softmax` `sqrt` `subtract` `transpose` `where` `nn_dense` `nn_gemm` `nn_layer_norm`
 - **基础能力验证（6 个）**：`nn_conv2d` `nn_max_pool2d` `nn_avg_pool2d` `nn_global_avg_pool2d` `nn_flatten` `nn_relu` —— 见 2.4
 
 ## 2.3 缺失算子：按"实际属于哪一层"分类
 
-目标 Transformer 模型用到 25 个 ONNX 算子，第一波后已覆盖 17 个（更新前 15 个）。仍缺的 8 个中，**只有 2 个是纯外挂**：
+目标 MiniMind 图的 raw/folded 算子集合不同：dynamic_axes 原始图包含 Shape/Range/ScatterND 等导出器节点，静态非原地 mask 的折叠图才是 L1a 的首个候选。仍缺的能力按“纯外挂”和“基座形态”分类，不能用 raw 节点数量替代支持矩阵：
 
 | ONNX 算子 | 模型中出现 | 所需基座形态 | 基座就绪 | 实际归属 |
 |---|---:|---|---|---|
-| `Erf` | 6 | 一元 elementwise | ✅ | **纯外挂** |
-| `Pow` | 13 | 二元 elementwise | ✅ | **纯外挂** |
+| `Erf` | 以实际 inventory 为准 | 一元 elementwise | ✅ | **纯外挂，命中模型后再做** |
+| `Pow` | 以实际 inventory 为准 | 二元 elementwise | ✅ | **纯外挂，L1a 需要时优先** |
 | ~~`Equal`~~ | 1 | 布尔输出 elementwise | ✅ | **已完成**（第一波 C 线 + B 线 ONNX 接线，LLVM 数值与 Equal→Where 组合证据见 [G1 记录](implementation/G1_RECORD.md)） |
 | ~~`Constant`~~ | 180 | 常量物化（导入层） | ✅ | **已完成**（第一波 B 线静态导入） |
-| `Squeeze` | 2 | 静态：reshape；动态：shape-as-value | 静态 ✅ / 动态 ❌ | **取决于形状模式** |
-| `Unsqueeze` | 30 | 同上 | 静态 ✅ / 动态 ❌ | **取决于形状模式** |
-| `Split` | 1 | 多输出导入 | Relay ✅ / 导入 ❌ | **基座**（导入层） |
-| `Shape` | 17 | shape-as-value | ❌ | **基座** |
-| `Expand` | 1 | shape-as-value + 广播 | ❌ | **基座** |
-| `ConstantOfShape` | 1 | shape-as-value | ❌ | **基座** |
+| `Squeeze` | 以实际 inventory 为准 | 静态：reshape；动态：shape-as-value | 静态 ✅ / 动态 ❌ | **取决于形状模式** |
+| `Unsqueeze` | 以实际 inventory 为准 | 同上 | 静态 ✅ / 动态 ❌ | **取决于形状模式** |
+| `Split` | 以实际 inventory 为准 | 多输出导入 | Relay ✅ / 导入 ❌ | **基座**（导入层） |
+| `Shape` | 以实际 inventory 为准 | shape-as-value | ❌ | **基座** |
+| `Expand` | 以实际 inventory 为准 | shape-as-value + 广播 | ❌ | **基座** |
+| `ConstantOfShape` | 以实际 inventory 为准 | shape-as-value | ❌ | **基座** |
 
-**结论**：`Erf` / `Pow` 可以立刻做，成本低（`Equal` / `Constant` 已在第一波完成）。其余六个中有四个必须先补 shape-as-value 基座 —— 它们是"伪装成算子缺口的基座缺口"，而且正是让 ONNX Transformer 图具备变长能力的那部分。
+**结论**：`Equal` / `Constant` 已在第一波完成；`Pow` / `Erf` 可作为独立外挂，但是否进入 L1 由 M9 的实际 inventory 决定。Shape/Expand/ConstantOfShape/Squeeze/Unsqueeze 的动态用法必须先经过 M3 的 shape-as-value 和有界合同；原地 mask 导出的 ScatterND 先通过 M9 的非原地导出审计，不得直接把它当作 runtime state。
 
 ## 2.4 视觉算子：第一步基础能力验证，不是多余
 
@@ -222,6 +223,6 @@ nn_avg_pool2d   nn_dense
 
 1. **基座缺口是唯一的排期约束。** 外挂层（算子）单位成本低且可并行，但九项基座缺口中每一项都阻塞一整类能力。
 2. **算子缺口有 40% 是伪装的基座缺口。** 10 个缺失算子中 4 个需要 shape-as-value，1 个需要导入层多输出支持。先补基座，再补算子，顺序反了会返工。
-3. **外挂层的三个表面必须同步推进。** 契约 24 / Relay 24 / 导入 15 的不同步，使已实现算子有相当部分对真实模型不可用。
+3. **外挂层的三个表面必须同步推进。** 第一波已缩小契约与静态导入的差距，但 MiniMind raw/folded 图仍有不同缺口；每次补算子都必须把契约、Relay、导入、LLVM 和真实模型证据放在同一条链上。
 4. **视觉路径是资产不是负债。** 它验证了归约、布局、端到端链路等 Transformer 同样依赖的基座形态，并提供第二条参照链。
 5. **主轴是加宽已有的端到端链路**，而不是另起炉灶。每项工作都应体现为能力矩阵多覆盖一格，且由可复现测试背书。

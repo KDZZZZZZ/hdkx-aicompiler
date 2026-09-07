@@ -1,10 +1,10 @@
 # M6：证明热替换真的发生且安全
 
-现在自适应模块已经能准备候选、编译、发布代际并按精确 DispatchKey 获取候选，也有 generation lease、健康检查和回滚事件。但已有测试主要验证 preparation；它们没有证明一次真实 RuntimeSession 运行在发布前后分别使用了正确的模块，也没有证明旧请求完成前旧代际不会被回收。
+第一波已经完成执行侧 profiling，但还没有把一次真实 MiniMind 运行与 candidate generation 关联起来。当前 adaptive 控制面能显式准备、发布、获取候选并维持 generation lease；它不等于 RuntimeSession 已在发布前后安全换代。MiniMind-L1 的 KV cache 又属于 session state，不能在请求中间凭 route head 直接迁移；MiniMind-O 的 Thinker/Talker 多流和实时服务更不能由无状态 fixture 代替。
 
-本模块要把“准备好一个候选”推进到“运行中的请求安全换代”。第一版只对无状态的静态 exact 图做两个已离线编译的候选；候选的数学语义和 ABI 必须相同，差异应来自明确的 pipeline/backend 配置。KV cache 迁移和带 state 的 generation 协议等 M2 完成后再做。
+本模块先用无状态的 MiniMind L1a 静态 prefill 或同等 Where 图证明两个离线编译候选的真实切换，再把 M1 bundle 的导出 receipt、stage、generation 和 plan ABI 关联起来。等 M2 明确 KV 所有权后，再决定带 state 的替换边界；没有迁移合同就明确拒绝中途替换。
 
-> 状态：待实施，依赖 [M1](M1_RUNTIME_PROFILING.md) 的执行证据。现有控制面见 [adaptive_hot_swap.h](../../include/kxc/compiler/adaptive_hot_swap.h)和[架构总览](../ARCHITECTURE.md)。
+> 状态：待实施，依赖 M1 已完成的执行证据、M9 的 L1a receipt；带 KV 的部分依赖 M2。当前安排见 [WAVE_2](WAVE_2.md)，控制面见 adaptive_hot_swap.h。
 
 ## 当前已有和缺少什么
 
@@ -12,7 +12,7 @@
 - `RunAsync` 已经通过 lease 保持 candidate/session，并把 lease 放进 completion 的 retention。
 - generation、route、health、quarantine、rollback 事件已有控制面表示。
 - 缺少真实执行顺序、输出等价、旧 generation 的生命周期和错误/回滚行为的端到端测试。
-- profiling 尚未能把某次运行和 generation/plan ABI 关联；没有执行证据就不能让 health 决策自我调整。
+- 第一波 profiling 已能记录某次运行和 kernel/plan 事件，但还没有把 MiniMind 的 export receipt、stage、generation/plan ABI 稳定关联；在此之前 health 决策只能保持显式、一次性的外部输入。
 
 ## S1：两个静态候选的真实切换
 

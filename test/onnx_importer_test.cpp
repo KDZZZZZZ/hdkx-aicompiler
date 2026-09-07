@@ -52,6 +52,14 @@
 #define KXC_ONNX_EQUAL_WHERE_PARAMS_PATH "equal_where.params.bin"
 #endif
 
+#ifndef KXC_ONNX_M4M5_OPS_JSON_PATH
+#define KXC_ONNX_M4M5_OPS_JSON_PATH "m4m5_ops.import.json"
+#endif
+
+#ifndef KXC_ONNX_M4M5_OPS_PARAMS_PATH
+#define KXC_ONNX_M4M5_OPS_PARAMS_PATH "m4m5_ops.params.bin"
+#endif
+
 #ifndef KXC_USE_LLVM
 #define KXC_USE_LLVM 0
 #endif
@@ -395,6 +403,70 @@ bool TestRunEqualWhereProtobufLLVM() {
     return true;
 }
 
+// M4/M5 五算子接线验证：真实 protobuf 经 Python importer 序列化后，C++
+// reifier 重建 Neg → Pow(x²) → Sigmoid → Unsqueeze(axes=[0]→reshape) →
+// Expand([1,2,4]→[3,2,4]) 图，通过 LLVM Compiler 与 RuntimeSession 执行，
+// 并与独立手写参考逐元素比较（绝对误差 2e-5，覆盖 float32 sigmoid/pow）。
+bool TestRunM4M5OpsProtobufLLVM() {
+    kxc::frontend::ImportedONNXModel imported =
+        kxc::frontend::LoadONNXImportSpec(
+            KXC_ONNX_M4M5_OPS_JSON_PATH,
+            KXC_ONNX_M4M5_OPS_PARAMS_PATH);
+    TEST_CHECK(imported.function.defined() && imported.function->params.size() == 1 &&
+                   imported.params.size() == 3 &&
+                   imported.input_names.size() == 1 &&
+                   imported.input_names[0] == "x" &&
+                   imported.output_names.size() == 1 &&
+                   imported.output_names[0] == "out",
+               "M4/M5 ops fixture must preserve importer/reifier bindings");
+    TEST_CHECK(CheckTensor(imported.function->body.checked_type(), {3, 2, 4}, "float32"),
+               "M4/M5 ops fixture output contract mismatch");
+#if KXC_USE_LLVM
+    const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
+    const auto compiled = kxc::api::Compiler::Compile(
+        prepared, kxc::api::CompileConfig::Create(
+                      kxc::BuildTarget(kxc::Device::CPU()), 1));
+    TEST_CHECK(compiled.module().IsReady() && compiled.plan().calls().size() == 5,
+               "M4/M5 ops fixture must compile to five LLVM units");
+
+    // 独立参考：不经过 importer/Relay，直接按 ONNX 语义手写计算。
+    const float x_values[8] = {1.0f, -2.0f, 0.5f, 3.0f, -0.25f, 2.0f, -4.0f, 0.75f};
+    std::vector<float> expected(24, 0.0f);
+    for (int copy = 0; copy < 3; ++copy) {
+        for (int row = 0; row < 2; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                const double value = static_cast<double>(x_values[row * 4 + column]);
+                const double squared = std::pow(-value, 2.0);
+                expected[static_cast<size_t>((copy * 2 + row) * 4 + column)] =
+                    static_cast<float>(1.0 / (1.0 + std::exp(-squared)));
+            }
+        }
+    }
+
+    kxc::runtime::NDArray x = kxc::runtime::NDArray::Empty(
+        {2, 4}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    x.CopyFromBytes(x_values, x.NBytes());
+    kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
+    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({x});
+    TEST_CHECK(outputs.size() == 1 && ShapeEquals(outputs[0], {3, 2, 4}),
+               "M4/M5 ops RuntimeSession output shape mismatch");
+
+    std::vector<float> actual(24, 0.0f);
+    outputs[0].CopyToBytes(actual.data(), outputs[0].NBytes());
+    float max_abs_error = 0.0f;
+    for (size_t index = 0; index < actual.size(); ++index) {
+        TEST_CHECK(std::isfinite(actual[index]),
+                   "M4/M5 ops output must be finite at " + std::to_string(index));
+        max_abs_error = std::max(max_abs_error, std::fabs(actual[index] - expected[index]));
+    }
+    std::cout << "[INFO] m4m5_ops max_abs_error=" << max_abs_error << "\n";
+    TEST_CHECK(max_abs_error <= 2e-5f,
+               "M4/M5 ops RuntimeSession numeric mismatch beyond 2e-5 absolute "
+               "tolerance");
+#endif
+    return true;
+}
+
 // 验证导入的 ResNet18 可完成 Relay 到 LLVM 编译。
 bool TestCompileResNet18ToLLVM() {
 #if KXC_USE_LLVM
@@ -498,6 +570,9 @@ int main() {
         if (!TestRunEqualWhereProtobufLLVM()) {
             return 1;
         }
+        if (!TestRunM4M5OpsProtobufLLVM()) {
+            return 1;
+        }
         if (!TestCompileResNet18ToLLVM()) {
             return 1;
         }
@@ -514,6 +589,7 @@ int main() {
     std::cout << "[PASS] onnx_transformer_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_static_s1_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_equal_where_protobuf_reifier_llvm_runtime\n";
+    std::cout << "[PASS] onnx_m4m5_ops_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_importer_compile_resnet18_llvm\n";
     if (ShouldRunResNet18Kernel()) {
         std::cout << "[PASS] onnx_importer_run_resnet18_llvm\n";
@@ -522,6 +598,7 @@ int main() {
     std::cout << "[SKIP] onnx_transformer_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
     std::cout << "[SKIP] onnx_static_s1_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
     std::cout << "[SKIP] onnx_equal_where_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
+    std::cout << "[SKIP] onnx_m4m5_ops_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
 #endif
     std::cout << "All available ONNX importer tests passed.\n";
     return 0;

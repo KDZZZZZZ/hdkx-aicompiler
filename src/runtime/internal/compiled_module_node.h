@@ -76,12 +76,15 @@ const ModuleInvocationContract& BorrowCompiledModuleInvocationContract(
 std::shared_ptr<runtime::ExecutionObserver> BorrowCompiledModuleExecutionObserver(
     const CompiledModule& module);
 
-/*! Internal preallocated-output hook used by RuntimeSession/control paths. */
+/*! Internal preallocated-output hook used by RuntimeSession/control paths.
+ *  state_extent_values, when provided, supplies the state-sourced runtime
+ *  extent scalars of the invocation contract in ABI order. */
 AsyncOperation InvokeCompiledModuleWithOutputs(
     const CompiledModule& module, const String& symbol,
     const Array<runtime::NDArray>& data_inputs,
     const Array<runtime::NDArray>& outputs, const DeviceStream& stream,
-    std::size_t run_byte_budget = 0);
+    std::size_t run_byte_budget = 0,
+    const std::vector<ModuleExtent>* state_extent_values = nullptr);
 
 }  // namespace internal
 }  // namespace kxc::api

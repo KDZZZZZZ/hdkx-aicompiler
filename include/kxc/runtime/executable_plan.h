@@ -26,6 +26,14 @@ enum class ValueWriteMode : uint8_t {
 enum class ExecutablePlanMode : uint8_t {
     kStatic = 0,
     kDynamicFreshOutputV1 = 1,
+    /*! \brief Session-owned persistent state with a dynamic valid extent.
+     *
+     *  Independently versioned dynamic stateful contract (M2 v1): the session
+     *  owns the cache storage and the committed valid length, appends are
+     *  declared in-place through alias outputs, and kernels read the
+     *  state-sourced runtime extents injected by the session. This mode never
+     *  relaxes the fresh-output rejection contract. */
+    kDynamicStatefulV1 = 2,
 };
 
 /*! \brief One graph-input axis referenced by a shared-shape guard. */
@@ -60,6 +68,15 @@ public:
     int64_t alias_source_value_id{-1};
     ValueWriteMode write_mode{ValueWriteMode::kAllocate};
     int64_t valid_bytes{-1};
+    /*! \brief Declared physical capacity along the extent axis; -1 when the
+     *  value carries no dynamic state-extent contract. Must equal
+     *  shape[state_extent_axis] when declared. */
+    int64_t state_capacity{-1};
+    /*! \brief Axis whose runtime extent is the valid length; -1 when unset. */
+    int64_t state_extent_axis{-1};
+    /*! \brief Fill value applied to the invalid capacity region at session
+     *  state construction; must be finite. Non-state values keep 0.0. */
+    double state_fill{0.0};
 
     KXC_OBJECT_DECLARE
 
@@ -78,7 +95,8 @@ public:
               bool is_alias = false, bool is_async_live = false,
               bool is_state = false, int64_t alias_source_value_id = -1,
               ValueWriteMode write_mode = ValueWriteMode::kAllocate,
-              int64_t valid_bytes = -1);
+              int64_t valid_bytes = -1, int64_t state_capacity = -1,
+              int64_t state_extent_axis = -1, double state_fill = 0.0);
     explicit ValueSpec(const ObjectRef& ref);
 
     Array<int64_t> shape() const;
@@ -127,6 +145,12 @@ private:
     Array<int64_t> state_value_ids_;
     ExecutablePlanMode mode_{ExecutablePlanMode::kStatic};
     std::vector<GraphInputAxisGuard> graph_input_guards_;
+    /*! \brief Per call (in call order), the state value ids whose committed
+     *  lengths feed that call's runtime-extent arguments in ABI order. */
+    std::vector<std::vector<int64_t>> state_extent_bindings_;
+    /*! \brief Graph input value id carrying the uint64[1] append count;
+     *  required (>= 0) in the dynamic stateful mode. */
+    int64_t state_count_input_value_id_{-1};
 };
 
 /*! \brief Validated immutable graph ABI and kernel call order. */
@@ -139,7 +163,9 @@ public:
                    Array<int64_t> output_value_ids,
                    Array<int64_t> state_value_ids = {},
                    ExecutablePlanMode mode = ExecutablePlanMode::kStatic,
-                   std::vector<GraphInputAxisGuard> graph_input_guards = {});
+                   std::vector<GraphInputAxisGuard> graph_input_guards = {},
+                   std::vector<std::vector<int64_t>> state_extent_bindings = {},
+                   int64_t state_count_input_value_id = -1);
     explicit ExecutablePlan(const ObjectRef& ref);
 
     Array<ValueSpec> values() const;
@@ -150,6 +176,8 @@ public:
     Array<int64_t> state_value_ids() const;
     ExecutablePlanMode mode() const;
     std::vector<GraphInputAxisGuard> graph_input_guards() const;
+    std::vector<std::vector<int64_t>> state_extent_bindings() const;
+    int64_t state_count_input_value_id() const;
     void Validate() const;
     const ExecutablePlanNode* operator->() const;
 };

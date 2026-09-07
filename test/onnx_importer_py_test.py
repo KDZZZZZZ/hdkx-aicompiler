@@ -1589,3 +1589,293 @@ def test_reshape_int64_overflow_is_rejected():
             [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1])],
             initializers=[helper.make_tensor("shape", TensorProto.INT64, [1], [-1])],
         ))
+
+
+# ---------------------------------------------------------------------------
+# M4/M5 wave: Neg / Sigmoid (fieldless float32 unary ops, opset >= 13 form).
+# ---------------------------------------------------------------------------
+
+
+def _unary_math_model(op, shape, *, dtype=TensorProto.FLOAT,
+                      output_dtype=TensorProto.FLOAT, output_shape=None, opset=17):
+    return _s1_model(
+        [helper.make_node(op, ["a"], ["out"], name=f"s1_{op.lower()}")],
+        [helper.make_tensor_value_info("a", dtype, shape)],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape or shape)],
+        opset=opset,
+    )
+
+
+@pytest.mark.parametrize("op,relay_op", [("Neg", "neg"), ("Sigmoid", "sigmoid")])
+def test_unary_math_maps_and_preserves_shape(op, relay_op):
+    imported = import_onnx_model(_unary_math_model(op, [2, 3]))
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        (relay_op, {}, ["a"]),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+def test_unary_math_rejects_pre_opset13(op):
+    with pytest.raises(UnsupportedONNXOpError, match="opset >= 13 form is required"):
+        import_onnx_model(_unary_math_model(op, [2], opset=12))
+
+
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+def test_unary_math_rejects_non_float32(op):
+    with pytest.raises(ValueError, match="requires float32 input in the M4/M5 static subset"):
+        import_onnx_model(_unary_math_model(op, [2], dtype=TensorProto.INT64))
+
+
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+def test_unary_math_rejects_attributes(op):
+    model = _unary_math_model(op, [2])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+def test_unary_math_rejects_declared_output_mismatch(op):
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_unary_math_model(op, [2, 3], output_shape=[2, 4]))
+
+
+# ---------------------------------------------------------------------------
+# M5 S2: Pow (fieldless float32 binary broadcast, opset >= 13 form).
+# ---------------------------------------------------------------------------
+
+
+def _pow_model(a_shape, b_shape, *, a_dtype=TensorProto.FLOAT, b_dtype=TensorProto.FLOAT,
+               output_shape=(2, 3), output_dtype=TensorProto.FLOAT, opset=17):
+    return _s1_model(
+        [helper.make_node("Pow", ["a", "b"], ["out"], name="s2_pow")],
+        [helper.make_tensor_value_info("a", a_dtype, a_shape),
+         helper.make_tensor_value_info("b", b_dtype, b_shape)],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+        opset=opset,
+    )
+
+
+def test_pow_maps_with_trailing_broadcast():
+    imported = import_onnx_model(_pow_model([2, 1], [1, 3]))
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        ("pow", {}, ["a", "b"]),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_pow_rejects_pre_opset13():
+    with pytest.raises(UnsupportedONNXOpError, match="opset >= 13 form is required"):
+        import_onnx_model(_pow_model([2], [2], opset=12))
+
+
+def test_pow_rejects_attributes():
+    model = _pow_model([2, 3], [2, 3])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize(
+    ("a_shape", "b_shape", "a_dtype", "b_dtype", "message"),
+    [
+        ([2, 3], [2, 3], TensorProto.INT32, TensorProto.INT32,
+         "requires same-dtype float32 inputs in the M4/M5 static subset"),
+        ([2, 3], [2, 3], TensorProto.DOUBLE, TensorProto.DOUBLE,
+         "requires same-dtype float32 inputs in the M4/M5 static subset"),
+        ([2, 3], [2, 3], TensorProto.FLOAT, TensorProto.INT64,
+         "requires same-dtype float32 inputs in the M4/M5 static subset"),
+        ([2, 3], [2, 4], TensorProto.FLOAT, TensorProto.FLOAT,
+         "incompatible broadcast dimensions"),
+    ],
+)
+def test_pow_rejects_invalid_static_contract(a_shape, b_shape, a_dtype, b_dtype, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_pow_model(a_shape, b_shape, a_dtype=a_dtype, b_dtype=b_dtype))
+
+
+def test_pow_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_pow_model([2, 3], [3], output_shape=[2, 4]))
+
+
+# ---------------------------------------------------------------------------
+# M4/M5: Expand (constant target shape control input, broadcast_to rules).
+# ---------------------------------------------------------------------------
+
+
+def _expand_model(data_shape, target, *, dtype=TensorProto.FLOAT,
+                  output_shape=None, output_dtype=None, opset=17):
+    return _s1_model(
+        [helper.make_node("Expand", ["a", "shape"], ["out"], name="s1_expand")],
+        [helper.make_tensor_value_info("a", dtype, data_shape)],
+        [helper.make_tensor_value_info("out", output_dtype or dtype,
+                                       output_shape or target)],
+        initializers=[helper.make_tensor("shape", TensorProto.INT64, [len(target)],
+                                         list(target))],
+        opset=opset,
+    )
+
+
+def test_expand_maps_constant_target_and_preserves_dtype():
+    imported = import_onnx_model(_expand_model([2, 1], [2, 3]))
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        ("expand", {"target_shape": [2, 3]}, ["a"]),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_expand_accepts_rank_raise_from_vector():
+    imported = import_onnx_model(_expand_model([3], [2, 3]))
+
+    assert imported.function.nodes[0].attrs == {"target_shape": [2, 3]}
+    assert imported.function.outputs[0].shape == [2, 3]
+
+
+def test_expand_rejects_dynamic_shape_input():
+    # 目标 shape 来自前一个节点的输出（非 initializer/Constant）必须拒绝：
+    # 动态 shape 输入由 M3 的形状值切片承接。
+    graph = _s1_model(
+        [helper.make_node("Expand", ["a", "dyn_shape"], ["out"], name="s1_expand")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 1]),
+         helper.make_tensor_value_info("dyn_shape", TensorProto.INT64, [2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+    )
+    with pytest.raises(ValueError, match="must be a static initializer or Constant node output"):
+        import_onnx_model(graph)
+
+
+def test_expand_rejects_pre_opset13():
+    with pytest.raises(UnsupportedONNXOpError, match="opset >= 13 form is required"):
+        import_onnx_model(_expand_model([2, 1], [2, 3], opset=12))
+
+
+def test_expand_rejects_attributes():
+    model = _expand_model([2, 1], [2, 3])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+def test_expand_rejects_non_int64_shape_input():
+    graph = _s1_model(
+        [helper.make_node("Expand", ["a", "shape"], ["out"], name="s1_expand")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 1])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+        initializers=[helper.make_tensor("shape", TensorProto.INT32, [2], [2, 3])],
+    )
+    with pytest.raises(ValueError, match="must be int64"):
+        import_onnx_model(graph)
+
+
+def test_expand_rejects_negative_target_dimensions():
+    with pytest.raises(ValueError, match="must be non-negative"):
+        import_onnx_model(_expand_model([2, 1], [-2, 3], output_shape=[2, 3]))
+
+
+@pytest.mark.parametrize(
+    ("data_shape", "target", "message"),
+    [
+        ([2, 3, 4], [3, 4], "must not exceed"),
+        ([3], [2, 4], "must be 1 or equal to the target dimension"),
+        ([2, 3], [2, 4], "must be 1 or equal to the target dimension"),
+    ],
+)
+def test_expand_rejects_incompatible_contract(data_shape, target, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_expand_model(data_shape, target))
+
+
+def test_expand_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_expand_model([2, 1], [2, 3], output_shape=[2, 4]))
+
+
+# ---------------------------------------------------------------------------
+# M4 S2: Unsqueeze normalized to the existing reshape (no new canonical op).
+# ---------------------------------------------------------------------------
+
+
+def _unsqueeze_model(data_shape, axes, *, dtype=TensorProto.FLOAT,
+                     output_shape=None, opset=17):
+    return _s1_model(
+        [helper.make_node("Unsqueeze", ["a", "axes"], ["out"], name="s2_unsqueeze")],
+        [helper.make_tensor_value_info("a", dtype, data_shape)],
+        [helper.make_tensor_value_info("out", dtype, output_shape or [])],
+        initializers=[helper.make_tensor("axes", TensorProto.INT64, [len(axes)],
+                                         list(axes))],
+        opset=opset,
+    )
+
+
+@pytest.mark.parametrize(
+    ("data_shape", "axes", "expected"),
+    [
+        ([2, 3], [0], [1, 2, 3]),
+        ([2, 3], [-1], [2, 3, 1]),
+        ([3], [0, 2], [1, 3, 1]),
+        ([2, 3, 4], [-5, 2], [1, 2, 1, 3, 4]),
+    ],
+)
+def test_unsqueeze_normalizes_to_reshape(data_shape, axes, expected):
+    imported = import_onnx_model(_unsqueeze_model(data_shape, axes, output_shape=expected))
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        ("reshape", {"newshape": expected, "allowzero": 0}, ["a"]),
+    ]
+    assert imported.function.outputs[0].shape == expected
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_unsqueeze_rejects_pre_opset13():
+    with pytest.raises(UnsupportedONNXOpError,
+                       match="axes-input opset >= 13 form is required"):
+        import_onnx_model(_unsqueeze_model([2, 3], [0], output_shape=[1, 2, 3], opset=12))
+
+
+def test_unsqueeze_rejects_dynamic_axes_input():
+    graph = _s1_model(
+        [helper.make_node("Unsqueeze", ["a", "dyn_axes"], ["out"], name="s2_unsqueeze")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3]),
+         helper.make_tensor_value_info("dyn_axes", TensorProto.INT64, [1])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 3])],
+    )
+    with pytest.raises(ValueError, match="must be a static initializer or Constant node output"):
+        import_onnx_model(graph)
+
+
+def test_unsqueeze_rejects_duplicate_axes():
+    with pytest.raises(ValueError, match="axes must be unique after normalization"):
+        import_onnx_model(_unsqueeze_model([3], [0, -3], output_shape=[1, 1, 3]))
+
+
+def test_unsqueeze_rejects_out_of_range_axis():
+    with pytest.raises(ValueError, match="axis 3 is out of range for output rank 2"):
+        import_onnx_model(_unsqueeze_model([2], [3], output_shape=[1, 2]))
+
+
+def test_unsqueeze_rejects_non_int64_and_attributes():
+    graph = _s1_model(
+        [helper.make_node("Unsqueeze", ["a", "axes"], ["out"], name="s2_unsqueeze")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 3])],
+        initializers=[helper.make_tensor("axes", TensorProto.INT32, [1], [0])],
+    )
+    with pytest.raises(ValueError, match="must be int64"):
+        import_onnx_model(graph)
+    model = _unsqueeze_model([2, 3], [0], output_shape=[1, 2, 3])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+def test_unsqueeze_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_unsqueeze_model([2, 3], [0], output_shape=[2, 3, 1]))

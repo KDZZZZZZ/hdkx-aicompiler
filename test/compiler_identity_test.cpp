@@ -354,7 +354,7 @@ bool TestPlanAbiIncludesDynamicModeGuardsAndInvocationContract() {
                 std::string::npos &&
             baseline.canonical_bytes().find("graph_guard_upper") !=
                 std::string::npos &&
-            baseline.canonical_bytes().find("KXC_MODULE_INVOKE_V2") !=
+            baseline.canonical_bytes().find("KXC_MODULE_INVOKE_V3") !=
                 std::string::npos,
         "Plan ABI must version dynamic mode, wildcard guards, and invocation bytes");
     return true;

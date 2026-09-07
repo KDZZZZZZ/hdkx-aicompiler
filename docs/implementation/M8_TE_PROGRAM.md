@@ -1,10 +1,10 @@
-# M8：`te::Program` 与第一个跨算子融合
+# M8：te::Program 与第一个跨算子融合
 
-现在一个普通 Relay Call 通常对应一个 PrimitiveUnit 和一个 kernel 边界。TE 有计算 DAG 和几个 schedule 原语，TIR 也能表达这些计算，但还没有一个完整、不可变、可规范化的“算法候选”。因此不能只在 metadata 里写“两个算子已融合”，也不能把现有 schedule 标记误报成 CPU SIMD、并行或 CUDA 线程能力。
+第一波已经接通 MiniMind 所需的一部分静态导入和执行观测，但没有产生跨算子融合候选。MiniMind 的 attention、RMSNorm 和 SwiGLU 仍应先以独立算子获得真实 L1a 数值和 profile；没有 profile 证据时，直接宣称融合只会掩盖哪个边界是瓶颈。
 
-本模块要做一个最小的候选表示，并让它真的被 lowering、缓存和运行时消费。第一切片固定为静态精确、同设备、纯逐元素 `sqrt(add(x,y))`：外部输入仍是 x、y，外部输出仍是 sqrt 结果，内部 add 不再单独形成一个可见 kernel。它是性能切片，不是新的 agent IR，也不支持动态形状、归约或自动候选搜索。
+本模块保留一个最小、可验证的性能切片：静态精确、同设备、纯逐元素 sqrt(add(x,y))。L1a 稳定后，再用 M1 bundle 判断是否值得扩展到 MiniMind attention/FFN。te::Program 不是新的 agent IR，也不支持动态形状、KV state 或自动候选搜索。
 
-> 状态：待实施，在功能链和 M1 稳定后推进。完整边界见[TE Program 设计提案](../TE_PROGRAM_IR.md)，返回[模块总览](README.md)。
+> 状态：待实施，依赖 M1 已完成的观测基础和 M9 L1a 的真实模型 profile。当前安排见 [WAVE_2](WAVE_2.md)，完整边界见 [TE_PROGRAM_IR.md](../TE_PROGRAM_IR.md)。
 
 ## 必须保持的 owner
 

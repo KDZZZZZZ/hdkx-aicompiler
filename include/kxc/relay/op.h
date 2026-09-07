@@ -332,6 +332,24 @@ public:
     static ReshapeAttrs Create(Array<int64_t> newshape, int allowzero = 0);
 };
 
+/*! \brief expand 的已解析静态目标形状属性（numpy broadcast_to 规则）。
+ *
+ *  ONNX Expand 的目标 shape 是常量控制输入：导入期解析进 attrs，使类型推导
+ *  可以证明唯一输出 shape；动态 shape 输入由导入边界拒绝（M3 形状值切片）。
+ */
+class ExpandAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> target_shape;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ExpandAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ExpandAttrs, ExpandAttrsNode)
+
+public:
+    static ExpandAttrs Create(Array<int64_t> target_shape);
+};
+
 /*! \brief transpose 的维度置换属性。 */
 class TransposeAttrsNode : public BaseAttrsNode {
 public:

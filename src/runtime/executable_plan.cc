@@ -4,6 +4,7 @@
 
 #include "kxc/runtime/executable_plan.h"
 
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -133,7 +134,8 @@ ValueSpec::ValueSpec(int64_t value_id, int64_t storage_id, Array<int64_t> shape,
                      bool is_constant, bool is_output, bool is_alias,
                      bool is_async_live, bool is_state,
                      int64_t alias_source_value_id, ValueWriteMode write_mode,
-                     int64_t valid_bytes) {
+                     int64_t valid_bytes, int64_t state_capacity,
+                     int64_t state_extent_axis, double state_fill) {
     auto* node = new ValueSpecNode();
     node->value_id = value_id;
     node->storage_id = storage_id;
@@ -150,6 +152,9 @@ ValueSpec::ValueSpec(int64_t value_id, int64_t storage_id, Array<int64_t> shape,
     node->alias_source_value_id = alias_source_value_id;
     node->write_mode = write_mode;
     node->valid_bytes = valid_bytes;
+    node->state_capacity = state_capacity;
+    node->state_extent_axis = state_extent_axis;
+    node->state_fill = state_fill;
     SetData(node);
     Validate();
 }
@@ -221,6 +226,34 @@ void ValueSpec::Validate() const {
         static_cast<uint64_t>(node->valid_bytes) > StaticNBytes(*this)) {
         throw std::invalid_argument("ValueSpec valid bytes exceeds tensor capacity");
     }
+    if ((node->state_capacity == -1) != (node->state_extent_axis == -1)) {
+        throw std::invalid_argument(
+            "ValueSpec state capacity and extent axis must be declared together");
+    }
+    if (node->state_extent_axis != -1) {
+        if (!node->is_state) {
+            throw std::invalid_argument(
+                "ValueSpec state extent metadata requires a state value");
+        }
+        if (node->state_capacity < 0 ||
+            node->state_extent_axis < 0 ||
+            node->state_extent_axis >= static_cast<int64_t>(node->shape_.size())) {
+            throw std::invalid_argument(
+                "ValueSpec state extent metadata is out of range");
+        }
+        if (node->shape_[node->state_extent_axis] != node->state_capacity) {
+            throw std::invalid_argument(
+                "ValueSpec state capacity must equal the declared extent axis size");
+        }
+    }
+    if (!node->is_state && node->state_fill != 0.0) {
+        throw std::invalid_argument(
+            "ValueSpec fill metadata requires a state value");
+    }
+    if (node->is_state && !std::isfinite(node->state_fill)) {
+        throw std::invalid_argument(
+            "ValueSpec state fill must be a finite value");
+    }
 }
 
 const ValueSpecNode* ValueSpec::operator->() const {
@@ -288,7 +321,9 @@ ExecutablePlan::ExecutablePlan(
     Array<int64_t> input_value_ids, Array<int64_t> constant_value_ids,
     Array<int64_t> output_value_ids, Array<int64_t> state_value_ids,
     ExecutablePlanMode mode,
-    std::vector<GraphInputAxisGuard> graph_input_guards) {
+    std::vector<GraphInputAxisGuard> graph_input_guards,
+    std::vector<std::vector<int64_t>> state_extent_bindings,
+    int64_t state_count_input_value_id) {
     auto* node = new ExecutablePlanNode();
     node->values_ = CopyArray(values);
     node->calls_ = CopyArray(calls);
@@ -298,6 +333,8 @@ ExecutablePlan::ExecutablePlan(
     node->state_value_ids_ = CopyArray(state_value_ids);
     node->mode_ = mode;
     node->graph_input_guards_ = std::move(graph_input_guards);
+    node->state_extent_bindings_ = std::move(state_extent_bindings);
+    node->state_count_input_value_id_ = state_count_input_value_id;
     SetData(node);
     Validate();
 }
@@ -340,6 +377,14 @@ ExecutablePlanMode ExecutablePlan::mode() const {
 
 std::vector<GraphInputAxisGuard> ExecutablePlan::graph_input_guards() const {
     return operator->()->graph_input_guards_;
+}
+
+std::vector<std::vector<int64_t>> ExecutablePlan::state_extent_bindings() const {
+    return operator->()->state_extent_bindings_;
+}
+
+int64_t ExecutablePlan::state_count_input_value_id() const {
+    return operator->()->state_count_input_value_id_;
 }
 
 void ExecutablePlan::Validate() const {
@@ -480,6 +525,84 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
                  reference.axis >= guard.axis)) {
                 throw std::invalid_argument(
                     "Dynamic fresh-output equality guards require a prior input axis");
+            }
+        }
+    } else if (mode == ExecutablePlanMode::kDynamicStatefulV1) {
+        if (!graph_guards.empty()) {
+            throw std::invalid_argument(
+                "Dynamic stateful ExecutablePlan cannot declare graph input guards");
+        }
+        if (state_ids.empty()) {
+            throw std::invalid_argument(
+                "Dynamic stateful ExecutablePlan requires persistent state");
+        }
+        std::unordered_set<int64_t> state_id_set;
+        for (int64_t state_id : state_ids) state_id_set.insert(state_id);
+        for (const auto& value : values) {
+            for (int64_t dimension : value.shape()) {
+                if (dimension < 0) {
+                    throw std::invalid_argument(
+                        "Dynamic stateful ExecutablePlan requires fully static shapes");
+                }
+            }
+            if (value->valid_bytes != -1) {
+                throw std::invalid_argument(
+                    "Dynamic stateful ExecutablePlan derives valid extents from "
+                    "session state metadata, not static valid bytes");
+            }
+        }
+        // Append-count input: an explicit uint64[1] graph input describes how
+        // many tokens this run appends to every declared state.
+        if (plan.state_count_input_value_id() < 0) {
+            throw std::invalid_argument(
+                "Dynamic stateful ExecutablePlan requires an append-count input");
+        }
+        {
+            const auto count_it =
+                values_by_id.find(plan.state_count_input_value_id());
+            if (count_it == values_by_id.end() || !count_it->second->is_input ||
+                count_it->second->dtype.code != kDLUInt ||
+                count_it->second->dtype.bits != 64 ||
+                count_it->second->dtype.lanes != 1 ||
+                count_it->second.shape().size() != 1 ||
+                count_it->second.shape()[0] != 1) {
+                throw std::invalid_argument(
+                    "Dynamic stateful append-count input must be a uint64[1] graph input");
+            }
+        }
+        // Every declared state carries capacity/extent metadata, is appended
+        // exactly once through an in-place alias producer, and each call's
+        // state extent bindings reference declared states in ABI order.
+        std::unordered_map<int64_t, int> append_producers;
+        for (const auto& value : values) {
+            if (value->state_extent_axis == -1 && value->is_state) {
+                throw std::invalid_argument(
+                    "Dynamic stateful ExecutablePlan state requires capacity metadata");
+            }
+            if (value->alias_source_value_id != -1 &&
+                state_id_set.count(value->alias_source_value_id) != 0) {
+                ++append_producers[value->alias_source_value_id];
+            }
+        }
+        for (int64_t state_id : state_ids) {
+            if (append_producers[state_id] != 1) {
+                throw std::invalid_argument(
+                    "Dynamic stateful ExecutablePlan state must be appended by "
+                    "exactly one in-place alias producer");
+            }
+        }
+        const std::vector<std::vector<int64_t>> bindings =
+            plan.state_extent_bindings();
+        if (bindings.size() != calls.size()) {
+            throw std::invalid_argument(
+                "Dynamic stateful ExecutablePlan requires one extent binding list per call");
+        }
+        for (const auto& bound : bindings) {
+            for (int64_t state_id : bound) {
+                if (state_id_set.count(state_id) == 0) {
+                    throw std::invalid_argument(
+                        "Dynamic stateful extent binding references a non-state value");
+                }
             }
         }
     } else {

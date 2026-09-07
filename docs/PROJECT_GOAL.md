@@ -1,13 +1,14 @@
 # 项目目标
 
 > **状态：** 唯一目标权威文档
-> **更新时间：** 2026-09-06
+> **更新时间：** 2026-09-07
 > **规则：** 本文定义仓库"要成为什么"。[架构总览](ARCHITECTURE.md) 定义"当前是什么"。
 > 某项能力被本文列为目标，**不等于它已经实现**；当前事实一律以架构总览、机器可读契约和可复现测试为准。
 
 > **范围决策记录**
 > - 2026-09-06：排除 eager / define-by-run 路线（§4）。
 > - 2026-09-06：延后新 agent / 调度友好 IR 的设计，含 parser 与 Python 编译入口暴露（§2.4）。
+> - 2026-09-07：确定目标模型阶梯 —— MiniMind-O 为北极星，MiniMind（纯文本）为当前验收目标（§2.2）。
 
 ## 1. 一句话目标
 
@@ -46,7 +47,40 @@
 - KV cache —— 需要运行时状态，是当前端到端链路的硬阻塞；
 - 批处理 —— 含动态批处理方向。
 
+#### 目标模型阶梯（2026-09-07 决定）
+
+首要目标负载不再是匿名的"某个 Transformer"，而是 [MiniMind 系列](https://github.com/jingyaogong/minimind)三个具体模型。选择它的唯一理由是**规模与本仓库的覆盖能力相称**：MiniMind-O 是目前少见的、小到能被一个自研编译器完整覆盖的 omni 模型，因此"端到端跑通"是一个可达成而非象征性的目标。
+
+三级构成一条**真子集阶梯**，后一级复用前一级的全部成果：
+
+| 级别 | 模型 | 新增基座需求 | 状态 |
+|---|---|---|---|
+| **L1** | [MiniMind](https://github.com/jingyaogong/minimind)（纯文本 decoder，约 64M） | KV cache（§6.2）、shape-as-value（§6.3）、采样与生成循环驱动 | **当前验收目标** |
+| **L2** | [MiniMind-V](https://github.com/jingyaogong/minimind-v)（+ SigLIP2 视觉编码） | 接近于零：SigLIP2 为 256×256 固定输入 → 64 patch token 的静态图，复用现有 `nn_conv2d` / `nn_layer_norm` / `softmax` / `matmul` 路径 | 后续 |
+| **L3** | [MiniMind-O](https://github.com/jingyaogong/minimind-o)（+ 语音输入输出，Thinker–Talker） | Conv1d / ConvTranspose1d、流式卷积状态、双自回归调度、实时帧预算、多流会话 | **北极星** |
+
+**为什么 L1 就是通往 L3 的第一段**：MiniMind-O 的 Thinker 即 MiniMind backbone，同作者、同 block 定义。选 L1 作为当前验收目标不是放弃 L3，而是走它的第一段；这条路径上没有一段工作会被废弃。
+
+**L3 的已知代价必须写明，不得用"0.1B 小模型"掩盖**：
+
+- 标题的 0.1B 仅指可训练主干（Thinker 63.9M + Talker 47.1M）。端到端部署面还包含冻结的 SenseVoice-Small（234M）、SigLIP2（94.6M）、Mimi 编解码器（96.2M）与 CAM++，合计约 540M 参数、5 种异构架构。**编译器覆盖面按后者计。**
+- Mimi 的增量解码需要每个卷积层维护流式 ring buffer。这是**比 KV cache 更强的一类运行时状态**，不在当前动态执行合同内。
+- Talker 以 12.5 Hz 帧率输出，即每 80 ms 必须完成一次 Talker 前向加 Mimi 增量解码。这是**实时预算**，其验证依赖执行侧观测（§2.5）。
+- barge-in 与近双工要求会话级中断与输入输出并发。当前 `RuntimeSession` 是单会话顺序执行。**这部分属于服务系统工程，尚未纳入五根支柱**；进入 L3 前必须先决定它是新增支柱还是移出范围（§7）。
+
+**目标模型算子清单的证据规则**：[模型算子清单](OP_TODO.md)必须来自**对目标模型的实际 ONNX 导出**，标注模型版本、导出参数与 opset，不得使用来源不明的快照。导出本身的可行性（decoder 带 `past_key_values` 的 dynamic axes 导出）是 L1 的第一个待验证项，未验证前 M2 / M3 的方案均建立在假设上。
+
 **验收**：以 `test/nlp_validation/transformer_capability_matrix.json` 为唯一权威，12 项能力 × 8 个层级（frontend / relay / lowering / llvm / cuda / runtime / numeric / profile）逐格标注，不得以整体"支持"替代逐格证据。
+
+#### 结构化控制流能力边界（横向能力）
+
+Transformer 图中可能出现条件分支和生成循环，仓库已有一条独立的结构化控制流实现，但它不是普通 `Compiler::Compile` 的默认能力。`KXC_ENABLE_CONTROL_RUNTIME` 默认关闭；开启后，`Compiler::CompileControlFlowExact` 可把静态精确的 Relay `If` 和有界、条件先于循环体执行的 `While` 编译成真实 LLVM 原语，再由 `ControlRuntimeSession` 在 CPU:0、默认流上执行。控制计划已经有 branch/loop region、Phi 绑定、循环携带值、`max_trip_count` 和严格校验，相关 schema、lowering、运行时与 CTest 也已经存在。
+
+这条路径当前的边界必须进入目标定义：固定 rank/shape 和静态 kernel 签名；CPU/LLVM 与默认流；CPU 标量布尔谓词；非负的循环上限；fresh-output kernel effect。它明确拒绝 CUDA、非默认设备或异步流、运行时 extent、KV/持久状态、alias/donation/storage reuse，以及任意数据相关形状。关闭门禁时的“明确拒绝”测试不等于生产能力，reference executor 也不等于 LLVM 证据。
+
+对 MiniMind 的关系分两步处理：L1a 静态 prefill 不依赖控制流路径，L1b 的首个生成循环先由 host driver 明确编排；随后用 M10 评估固定步数或导出图中的 `While` 是否值得接入。若要让控制流承载真实 decode，必须先由 M2/M3 为同一运行时 owner 定义 KV 状态和 extent ABI，不能在 `ControlRuntimeSession` 旁边再造一套模型专用状态引擎。MiniMind-O 的双自回归、80 ms 帧预算和多流近双工也不由现有控制流合同自动获得。
+
+**控制流验收**：在 gate-on LLVM 构建中分别证明 `If` 两个分支、`While` 的 0/1/多次迭代和上限拒绝，并与 reference 结果对齐；在 gate-off 构建中证明入口在执行前拒绝。每个结果单独记录到能力矩阵和 profile receipt，不能把“源码已存在”写成“MiniMind 已支持”。
 
 ### 2.3 分布式执行
 
@@ -90,9 +124,9 @@
 
 **已具备的形态**：Profile Bundle（`manifest.json` + `events.jsonl` + `summary.json` + `trace.json`），schema 版本化，`span_id` / `parent_span_id` 构成调用树，`event_type` 分类；配套离线诊断引擎与性能工作台。
 
-**当前缺口**：观测覆盖编译过程，**不覆盖执行过程** —— 通用 RuntimeSession 的内核、分配与拷贝路径均无 Span，能力矩阵中 12 项能力的 `profile` 列全部为 `unsupported`。
+**当前缺口**：第一波已把 RuntimeSession 的运行、内核提交/完成、分配和拷贝接入 Span，并用 LLVM 组合图验证；但这些事件还没有与 MiniMind 的导出 receipt、prefill/decode、KV extent 和 generation 稳定关联，能力矩阵中 12 项能力的 `profile` 列也不能因此整体改为已验证。
 
-**为什么它是支柱而不是配套设施**：热替换必须依据观测结果决策，而它需要的正是执行侧数据。观测层不打通，动静兼备就没有决策依据。
+**为什么它是支柱而不是配套设施**：热替换和 MiniMind-O 的实时预算都必须依据执行结果决策。第一波已经打通基础事件，后续要把事件与模型阶段、状态和代际关联，才能形成可消费的决策依据。
 
 ---
 
@@ -100,8 +134,9 @@
 
 以下依赖关系决定了工作顺序，不是可选的组织方式：
 
-- **观测层（2.5）→ 热替换（2.1）**：替换决策的输入来自执行侧观测。执行侧 Span 缺失，热替换只能靠外部输入触发，无法自我调整。
+- **观测层（2.5）→ 热替换（2.1）**：替换决策的输入来自执行侧观测。第一波基础 Span 已存在，仍需把它和 generation/ABI/模型阶段关联后，才能让热替换消费真实证据。
 - **KV cache 状态支持 → Transformer（2.2）**：prefill 与 decode 的完整链路依赖运行时状态。当前动态执行模式明确拒绝 state / alias / donation / storage reuse，与本支柱直接冲突，必须解决。
+- **结构化控制流 → Transformer（2.2）**：现有控制流路径只消费静态精确值和 CPU 标量谓词，明确拒绝 runtime extent、持久状态和 CUDA。它可独立做 gate-on 证据，但只有在 M2 的 KV owner 与 M3 的 extent/shape 合同落定后，才能评估是否用于真实 decode；不能绕过普通 `ExecutablePlan`/`RuntimeSession` 的状态权威。
 - **契约闭环（2.4）→ agent 参与的一切**：agent 的写入路径是机器可读契约（生成与校验双向闭环），不是 IR parser。parser 已按 §2.4 延后，不再列作阻塞；闭环依赖的是契约可生成、可校验、可落码。
 - **分布式（2.3）→ 证据标准**：在补齐测试之前，它不能作为任何能力声明的依据。
 
@@ -122,26 +157,27 @@
 
 ---
 
-## 5. 当前状态快照（2026-09-06）
+## 5. 当前状态快照（2026-09-07）
 
 | 支柱 | 当前状态 | 最大缺口 |
 |---|---|---|
 | 2.1 动静兼备（热替换） | 约 868 行，门禁默认 OFF，仅 preparation 有测试 | 替换动作本身缺运行时证据 |
-| 2.2 Transformer 推理 | 12 项能力中 LLVM 层 8 项 `implemented`、4 项 `unsupported`；`implemented` 是矩阵状态，运行证据以 NLP 检查与测试为准 | 通用 state/alias/重复执行机制已存在；fresh-output 动态路径拒绝 state，KV 更新语义与动态有效长度是协议缺口，不是"运行时完全没有状态" |
+| 2.2 Transformer 推理 | 目标已明确为 MiniMind 阶梯；第一波有静态 Transformer/ONNX 组合证据，LLVM 层 8 项 `implemented`、4 项 `unsupported` 仍只是矩阵状态；控制流源码与测试已具备但 gate 默认 OFF | MiniMind L1a 真实 prefill 尚未端到端通过；L1b 仍缺 KV 更新、动态有效长度和 host 生成循环；控制流尚缺当前 gate-on LLVM receipt，且不能直接承载 state/extent |
 | 2.3 分布式 | 约 2,487 行 | 零测试、零证据 |
 | 2.4 agent / 调度友好 IR | 契约与 canonical bytes 已具备并在用；agent 经**契约**写入 | 新 IR 设计与 parser **已延后**（§2.4）；当前无阻塞项 |
-| 2.5 agent 友好观测层 | Bundle 格式与诊断引擎已具备 | 执行侧无 Span，能力矩阵 profile 列 12/12 未覆盖 |
+| 2.5 agent 友好观测层 | Bundle 格式与诊断引擎已具备；第一波已接通 RuntimeSession 的 run/kernel/alloc/copy 事件并有 LLVM 组合证据 | MiniMind 的导出 receipt、prefill/decode、KV extent 和 generation 关联尚未完成；能力矩阵 profile 列仍不能整体升级 |
 
 ---
 
 ## 6. 优先级顺序
 
-1. **打通执行侧 profiling** —— 一处缺口同时解锁支柱 2.5 与 2.1，杠杆最高。
-2. **KV cache 的运行时状态支持** —— 支柱 2.2 端到端链路的唯一硬阻塞。
-3. **shape-as-value 基座** —— 解锁 `Shape` / `Expand` / `ConstantOfShape` 与动态形状下的 `Squeeze` / `Unsqueeze`，是变长能力的前提。
-4. **热替换的运行时证据** —— 使支柱 2.1 从"准备就绪"变为"可验证可用"。
-5. **分布式补齐证据或明确降级** —— 消除支柱 2.3 的零证据状态。
-6. **跨算子融合（`te::Program`）** —— 性能手段，服务支柱 2.1 与 2.2，排在能力打通之后。
+1. **锁定 MiniMind 导出并完成 L1a prefill** —— 先把模型版本、opset、past/present 轴和实际算子清单变成唯一可复现输入，再补真实导入与 LLVM 运行缺口。
+2. **验证并挂载结构化控制流路径** —— 用独立的 gate-on LLVM 证据确认 `If`/bounded `While` 的真实编译与执行，并给出它对 L1 生成循环的适用性结论；这一步不阻塞静态 L1a。
+3. **KV cache 的运行时状态支持** —— 支柱 2.2 L1b 端到端链路的硬阻塞；要证明同一 session 的追加、有效长度和多步 decode，并决定控制流是否能复用同一状态 owner。
+4. **shape-as-value 基座** —— 解锁 MiniMind 变长所需的 Shape/Reshape/Expand/Unsqueeze 等受限控制值，并扩展有界 attention；若控制流使用 shape 值，必须共用这份 extent 合同。
+5. **用第一波 profiling 支撑模型验收和热替换** —— 补导出 receipt、stage、extent、generation 关联，使支柱 2.5/2.1 从基础设施变成可消费证据。
+6. **分布式补齐证据或明确降级** —— 消除支柱 2.3 的零 compiled-kernel 证据状态。
+7. **跨算子融合（`te::Program`）** —— 用真实 MiniMind profile 选择首个性能切片，排在 L1 能力打通之后。
 
 **已移出本序列**：IR parser / round-trip、Python 编译入口暴露、新 agent 友好 IR 的设计。理由见 §2.4。
 
@@ -173,6 +209,7 @@
 | 新 agent / 调度友好 IR 的设计 | **已延后**，见 §2.4 |
 | IR parser / round-trip、Python 编译入口暴露 | **已延后**，与上一项绑定 |
 | 受限符号形状 / 精确 profile 路由 | 服务支柱 2.2；与 bounded 动态图存在职责重叠，需合并 |
+| `compiler/control_flow/` + `runtime/control_*` | 横向控制流能力：默认关闭的静态精确 `If` / 有界 `While` 路径；先做 gate-on 证据与 MiniMind 生成循环适用性评估，再决定是否接入 M2/M3 的状态/extent 合同 |
 | eager 底座 + tracing 子图（A + B 路线） | **移出范围**，理由见 §4 |
 | `distributed/` | 服务支柱 2.3，见 §2.3 的证据要求 |
 | [代码库审计与模块清单](CODEBASE_INVENTORY.md) | 现状快照，本文的事实依据之一 |

@@ -181,6 +181,7 @@ set(KXC_PUBLIC_HEADERS
 set(KXC_EXPERIMENTAL_HEADERS
   include/kxc/compiler/adaptive_hot_swap.h
   include/kxc/compiler/experimental_identity.h
+  include/kxc/compiler/kv_state_plan.h
   include/kxc/compiler/adaptive_hot_swap_preparation.h
   include/kxc/compiler/restricted_symbolic_shape.h
   include/kxc/compiler/shape_control.h
@@ -534,6 +535,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/lowering/lowered_function.cc
   src/compiler/lowering/lowered_graph.cc
   src/compiler/lowering/te_to_tir.cc
+  src/compiler/kv_state/kv_state_plan.cc
 )
 
 set(KXC_RUNTIME_SESSION_SOURCES
@@ -1024,6 +1026,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(control_plan_test test/control_plan_test.cpp)
   kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
   kxc_add_runtime_exe(control_runtime_integration_test test/control_runtime_integration_test.cpp)
+  kxc_add_runtime_exe(control_llvm_receipt_test test/control_llvm_receipt_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
@@ -1052,6 +1055,8 @@ if(KXC_BUILD_PASS_TESTS)
       test/bounded_dynamic_graph_llvm_test.cpp)
     kxc_add_runtime_exe(shape_value_llvm_test
       test/shape_value_llvm_test.cpp)
+    kxc_add_runtime_exe(kv_state_llvm_test
+      test/kv_state_llvm_test.cpp)
   endif()
 
   set(KXC_CONTROL_FLOW_TESTS
@@ -1072,11 +1077,17 @@ if(KXC_BUILD_PASS_TESTS)
   set_tests_properties(control_runtime_integration_test PROPERTIES
     LABELS "control-flow;control-runtime;runtime-plan;cpu"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+  add_test(NAME control_llvm_receipt_test
+    COMMAND "$<TARGET_FILE:control_llvm_receipt_test>")
+  set_tests_properties(control_llvm_receipt_test PROPERTIES
+    LABELS "control-flow;control-runtime;cpu"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   add_custom_target(run_control_flow_tests
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
             -L control-flow
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     DEPENDS ${KXC_CONTROL_FLOW_TESTS} control_runtime_integration_test
+            control_llvm_receipt_test
     USES_TERMINAL
     COMMENT "Run control-flow CTest suite")
   add_custom_target(run_control_runtime_tests
@@ -1181,6 +1192,28 @@ if(KXC_BUILD_PASS_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/spec.py"
       VERBATIM
       COMMENT "Generate Equal-Where protobuf/import fixtures")
+    set(KXC_ONNX_M4M5_OPS_PROTO "${CMAKE_CURRENT_BINARY_DIR}/onnx/m4m5_ops.onnx")
+    set(KXC_ONNX_M4M5_OPS_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/m4m5_ops.import.json")
+    set(KXC_ONNX_M4M5_OPS_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/m4m5_ops.params.bin")
+    add_custom_command(
+      OUTPUT
+        "${KXC_ONNX_M4M5_OPS_PROTO}"
+        "${KXC_ONNX_M4M5_OPS_JSON}"
+        "${KXC_ONNX_M4M5_OPS_PARAMS}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/onnx"
+      COMMAND "${CMAKE_COMMAND}" -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
+              "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_m4m5_ops_fixture.py"
+              --onnx "${KXC_ONNX_M4M5_OPS_PROTO}"
+              --json "${KXC_ONNX_M4M5_OPS_JSON}"
+              --params "${KXC_ONNX_M4M5_OPS_PARAMS}"
+      DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_m4m5_ops_fixture.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/__init__.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/importer.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/spec.py"
+      VERBATIM
+      COMMENT "Generate M4/M5 five-operator protobuf/import fixtures")
     add_custom_target(onnx_importer_fixture DEPENDS
       "${KXC_ONNX_IMPORT_JSON}" "${KXC_ONNX_IMPORT_PARAMS}"
       "${KXC_ONNX_TRANSFORMER_PROTO}" "${KXC_ONNX_TRANSFORMER_JSON}"
@@ -1188,7 +1221,9 @@ if(KXC_BUILD_PASS_TESTS)
       "${KXC_ONNX_STATIC_S1_PROTO}" "${KXC_ONNX_STATIC_S1_JSON}"
       "${KXC_ONNX_STATIC_S1_PARAMS}"
       "${KXC_ONNX_EQUAL_WHERE_PROTO}" "${KXC_ONNX_EQUAL_WHERE_JSON}"
-      "${KXC_ONNX_EQUAL_WHERE_PARAMS}")
+      "${KXC_ONNX_EQUAL_WHERE_PARAMS}"
+      "${KXC_ONNX_M4M5_OPS_PROTO}" "${KXC_ONNX_M4M5_OPS_JSON}"
+      "${KXC_ONNX_M4M5_OPS_PARAMS}")
     kxc_add_runtime_exe(onnx_importer_test test/onnx_importer_test.cpp)
     add_dependencies(onnx_importer_test onnx_importer_fixture)
     target_compile_definitions(onnx_importer_test PRIVATE
@@ -1199,7 +1234,9 @@ if(KXC_BUILD_PASS_TESTS)
       KXC_ONNX_STATIC_S1_JSON_PATH="${KXC_ONNX_STATIC_S1_JSON}"
       KXC_ONNX_STATIC_S1_PARAMS_PATH="${KXC_ONNX_STATIC_S1_PARAMS}"
       KXC_ONNX_EQUAL_WHERE_JSON_PATH="${KXC_ONNX_EQUAL_WHERE_JSON}"
-      KXC_ONNX_EQUAL_WHERE_PARAMS_PATH="${KXC_ONNX_EQUAL_WHERE_PARAMS}")
+      KXC_ONNX_EQUAL_WHERE_PARAMS_PATH="${KXC_ONNX_EQUAL_WHERE_PARAMS}"
+      KXC_ONNX_M4M5_OPS_JSON_PATH="${KXC_ONNX_M4M5_OPS_JSON}"
+      KXC_ONNX_M4M5_OPS_PARAMS_PATH="${KXC_ONNX_M4M5_OPS_PARAMS}")
     kxc_add_runtime_exe(g1_combined_profiling_test test/g1_combined_profiling_test.cpp)
     add_dependencies(g1_combined_profiling_test onnx_importer_fixture)
     target_compile_definitions(g1_combined_profiling_test PRIVATE
@@ -1395,6 +1432,8 @@ kxc_add_ctest_if_target(bounded_dynamic_graph_llvm_test
   "shape;bounded-dynamic;cpu;llvm;e2e;numeric")
 kxc_add_ctest_if_target(shape_value_llvm_test
   "shape;shape-value;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(kv_state_llvm_test
+  "kv-state;llvm;dynamic-module;e2e;numeric")
 
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test

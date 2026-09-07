@@ -33,20 +33,16 @@ PrimExpr ceil(PrimExpr x){
 }
 
 PrimExpr sigmoid_expr(PrimExpr x){
-    // 1.0f / (1.0f + exp(-x))
-    // We need correct type for 1.0
-    // Assuming float32 for simplicity or matching x
-    DataType dtype = x.dtype();
-    PrimExpr one;
-    if (dtype.code == 2) { // Float
-        if (dtype.bits == 64) one = FloatImm(1.0, dtype);
-        else one = FloatImm(1.0f, dtype);
-    } else {
-        // Fallback for non-float? Usually cast to float.
-        // Assuming input is float.
-         one = FloatImm(1.0f, DataType::Float(32));
+    // 选定语义：1/(1+exp(-x))，直接调用既有 exp 调用分派（不用 tanh 近似）。
+    // 字面量必须携带 x 的 dtype：裸整数 0/1 会把中间表达式的 dtype 定成
+    // int32，在 LLVM codegen 的 math-call 分派处失败。仅接受浮点 dtype。
+    const DataType dtype = x.dtype();
+    if (dtype.code != 2) {
+        throw std::runtime_error("sigmoid_expr requires a floating-point dtype");
     }
-    return one / (one + exp(0 - x)); // 0 - x for negation if unary - not defined
+    const PrimExpr one = FloatImm(1.0, dtype);
+    const PrimExpr zero = FloatImm(0.0, dtype);
+    return one / (one + exp(zero - x));
 }
 
 namespace {
@@ -106,10 +102,16 @@ Tensor identity(const Tensor& x, std::string name , std::string tag ){
 }
 
 Tensor negative(const Tensor& x, std::string name , std::string tag ){
+    // 0 - x：零字面量必须携带 x 的 dtype；裸整数 0 会把 Sub 的 dtype 定成
+    // int32 并破坏 lowering 的输出 dtype 合同。IEEE 语义：-0.0 输入得 +0.0，
+    // +0.0 输入同样得 +0.0（0-x 的减法语义，非符号位取反）。
+    const PrimExpr zero = x->dtype.code == 2
+        ? PrimExpr(FloatImm(0.0, x->dtype))
+        : PrimExpr(IntImm(0, x->dtype));
     return compute(
         x->shape,
         [&](const Array<tir::Var>& indices) {
-            return 0 - x(indices); // Assuming 0-x works or use Sub(0, x)
+            return zero - x(indices);
         },
         name,
         tag

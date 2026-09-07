@@ -37,6 +37,11 @@ Tensor multiply(const Tensor& A, const Tensor& B,
 Tensor divide(const Tensor& A, const Tensor& B, std::string name = "divide",
               std::string tag = kBroadcast);
 
+/*! \brief Element-wise power with trailing-axis broadcast; emits the "pow" TIR
+ *         call that the LLVM math-call dispatch binds to llvm.pow. */
+Tensor power(const Tensor& A, const Tensor& B, std::string name = "power",
+             std::string tag = kBroadcast);
+
 Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y,
              std::string name = "where", std::string tag = kBroadcast);
 

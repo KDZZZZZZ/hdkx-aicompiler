@@ -1,22 +1,31 @@
-# M4：把模型入口接通，并支持一个节点的多个结果
+# M4：把 MiniMind 模型入口接通，并支持多输出
 
-现在 Relay 中已有 24 个算子契约，但 Python ONNX importer 只有 15 个映射，其中只有 8 个名字出现在目标 Encoder 快照里。模型即使只需要已经能算的乘法、除法或变形，也可能在导入时被拒绝。Python 导入器和 C++ 重建器还都限制一个节点只能产生一个结果，因此 Split 不能直接到达现有多输出 lowering。
+第一波 B 线已经完成 Constant、Cast、Div、Mul、Sub、Sqrt、ReduceMean、Reshape 的受限静态导入，并由 G1 证明 Equal→Where 的 ONNX 组合可以进入 LLVM RuntimeSession。目标已经从旧的匿名 Encoder 快照改为 MiniMindForCausalLM：实际导出包含 prefill 和 decode 两张图，decode 有 8 层 past/present，静态非原地 mask 的常量折叠统计与 dynamic_axes 原始统计不同。当前仍不能把 importer 的名称交集写成“MiniMind 可运行”，因为 Concat 输入数、Gather 索引、ReduceMean 中间轴和动态 shape 控制值都有语义边界；Split 多输出也尚未形成真实模型证据。
 
-本模块分两段工作。第一波先把已有静态计算接到 ONNX，让一段常量、算术、归约和变形小图能够真正编译执行；后续再把一个节点的多个输出按顺序交给 Relay 和运行时，并用 Split 证明。动态 shape 值属于 M3，不能在这里用 Python 临时求值普通模型数据来绕过。
+本模块的下一段工作是以 M9 锁定的导出为唯一输入，按实际节点和属性补齐 L1a prefill，再接通 decode 的 past/present 输出顺序。静态常量控制输入可以在 importer 中证明；Shape/Expand/ConstantOfShape 等运行时 shape 值交给 M3，KV 所有权和 extent 交给 M2。不能在 Python 中偷算普通模型数据来绕过 Relay/TE/Runtime。
 
-> 状态：待实施。第一波 B 线，依赖 [M0](M0_BASELINE.md)。当前入口限制见 [ONNX 导入器](../ONNX_IMPORTER.md)和[架构总览](../ARCHITECTURE.md)。
+> 状态：第一波静态 S1 已完成；MiniMind 节点补齐与多输出仍待实施。第一波证据见 G1，当前分派见 WAVE_2。入口限制以 ONNX_IMPORTER.md 和 PROJECT_GOAL.md §2.2 为准。
+
+## 本模块要做的模块
+
+| 模块 | 当前情况 | 计划结果 |
+|---|---|---|
+| M4-A 真实图审计 | M9 有 exporter/inventory；raw 图和折叠图统计口径不同 | 每个 MiniMind stage 有 opset、输入/输出顺序、attrs 和拒绝原因报告 |
+| M4-B L1a prefill | 第一波静态子集已接通，仍缺实际 MiniMind 算子 | 真实 prefill protobuf → Relay → LLVM → RuntimeSession 数值证据 |
+| M4-C decode 多输出 | 8 层 past/present 名称存在于导出包装器 | 输出顺序、Tuple/叶子绑定和 ABI 与 M2 state 合同一致 |
+| M4-D 后续 Split | 当前没有 Split 的完整 canonical 纵向证据 | 单独的双输出 fixture，不阻塞 L1a/L1b |
 
 ## 当前需要区分的三个表面
 
 | 表面 | 现状 | 这次如何处理 |
 |---|---|---|
-| Relay 声明和数学实现 | 已有 cast/divide/mul/reduce_mean/reshape/sqrt/subtract | 复用，不另写算术内核 |
-| Python ONNX 解析和序列化 | 缺少上述映射和 Constant 节点处理 | 增加明确的 opset、属性、常量控制输入校验 |
-| C++ spec 重建 | MakeAttrs 和节点结果绑定不自动跟随 Python 映射增加 | 同步重建同一 canonical op；对手写错误 spec 同样拒绝 |
+| Relay 声明和数学实现 | 第一波已补齐一批静态算术/归约/变形和 Equal；MiniMind 仍有实际缺口 | 复用现有 canonical op；新语义按 M5 独立完成 LLVM 数值 |
+| Python ONNX 解析和序列化 | 已能导入第一波静态子集，M9 inventory 中的动态控制节点和部分属性仍未开放 | 以真实 MiniMind opset 17 图逐节点校验；不把名称交集当成能力 |
+| C++ spec 重建 | 第一波已同步 Constant 与算术 attrs；多输出和 past/present 顺序仍需证明 | 同步重建同一 canonical op；手写错误 spec、输出数量和名字顺序都拒绝 |
 
 当前 `Gemm` 映射到 `nn_gemm`，不是 `nn_dense`。当前 Relay 契约也没有 `split` 条目；已有的是 Tuple/多输出基础能力，不等于 Split 已经实现。
 
-## S1：第一波静态范围
+## S1：第一波静态范围（已完成）
 
 首批 fixture 固定使用 ONNX opset 17，只声明实际实现并测试的 dtype/shape 子集。不能把某个版本的通过写成所有 opset 都支持。
 
@@ -41,7 +50,7 @@ Constant 的属性互斥规则、Reshape 的 0/-1 及 allowzero 行为、ReduceM
 6. 更新现有 op 条目的 onnx_ops 元数据，重新生成合同；从真实 protobuf 导入后走 Compiler/RuntimeSession，与独立参考逐元素比较。
 7. 接收 [M5](M5_ELEMENTWISE_OPS.md) 的 Equal 后，由本模块独占 importer 接线，增加 `Equal → Where` 组合 fixture。
 
-第一波只完成 S1。新增名称交集不是完整模型验收，特别是动态控制值和多输出仍未开放。
+第一波已经完成 S1 的受限小图和 Equal→Where 组合；这些证据证明导入链可用，不等于 MiniMind 全图、动态控制值或多输出已经开放。后续 S2/S3 以 M9 的真实节点清单为准。
 
 ## S2：已有名称的模型子集补齐
 
@@ -79,13 +88,28 @@ python3 python/tools/check_relay_op_contract.py --root .
 
 依赖缺失时不能把 pytest 未执行或 LLVM 条件测试跳过写成通过；记录缺口并完成现有可用层。随后执行第一波公共检查和 LLVM 全量回归。
 
-- [ ] S1 八个新名称均有 protobuf → Relay → LLVM → RuntimeSession 数值证据。
+- [x] S1 八个新名称均有 protobuf → Relay → LLVM → RuntimeSession 数值证据（第一波 G1）。
 - [ ] 控制输入缺失、属性类型错误、shape/dtype 声明不一致均得到包含节点名的诊断。
 - [ ] Constant 不被错误抹成 float32，不新增多余运行 kernel；常量字节参与既有 identity。
 - [ ] Python 和 C++ 手写 spec 的负例都覆盖，未依赖 Python 作为唯一校验边界。
-- [ ] 与 C 线联合完成 Equal ONNX 入口，合同映射和生成文件一致。
+- [x] 与 C 线联合完成 Equal ONNX 入口，合同映射和生成文件一致（第一波 G1）。
 - [ ] S3 单独证明两个输出的顺序、类型、后续消费和数值，旧单输出/optional output 不回归。
 
 ## 身份与交接
 
 原有 op 的正确接线一般不改变其 kernel ABI；其 attrs、常量和形状仍由现有 semantic key 覆盖。新增 Split 的输出结构、规范 attrs 和必要格式版本必须进入既有身份规则。向 M3 交接清楚哪些控制输入仍必须是常量，不能在 importer 中暗自接受任意动态 tensor 后再让 backend 猜测。
+
+## 第二波 D 线实施记录（2026-09-07）
+
+S2 的 Unsqueeze 部分已实现：axes 已知、结果 rank 可证明时 Unsqueeze 在
+Python importer 内规范化为既有 `reshape`（不新增 canonical op），axes 必须
+来自 initializer/Constant、按 ONNX-13 在 `rank(data)+len(axes)` 上规范化负轴，
+重复/越界拒绝；动态 axes 输入不开放。本波同时接线 `Neg`、`Sigmoid`、`Pow`、
+`Expand`（opset >= 13 边界、float32 子集、C++ reifier 双侧负例）。
+
+`Expand` 的目标 shape 是常量控制输入：导入期解析为 canonical `expand` 算子的
+`ExpandAttrs`（与 Reshape 常量 shape 输入规范化到 attrs 的既有方式一致），使
+类型推导能证明唯一输出 shape；动态 shape 输入被拒绝并交接 M3 形状值切片。
+真实 protobuf 的五算子组合 fixture（`test/generate_onnx_m4m5_ops_fixture.py`
+→ `onnx_importer_test` 的 `TestRunM4M5OpsProtobufLLVM`）以独立手写参考逐元素
+比较（max_abs_error=0）。

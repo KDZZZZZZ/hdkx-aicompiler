@@ -20,6 +20,10 @@ inline constexpr const char* kDefaultTESchedulePolicy =
     "target-default-v1";
 inline constexpr const char* kBoundedDynamicTESchedulePolicy =
     "bounded-dynamic-serial-v1";
+// Dynamic stateful KV kernels keep static shapes; their state extent buffers
+// may appear only inside stage bodies (masks and index arithmetic).
+inline constexpr const char* kStatefulKvTESchedulePolicy =
+    "stateful-kv-serial-v1";
 
 struct ConstantTensor {
     te::Tensor tensor;
@@ -57,12 +61,20 @@ te::Schedule BuildBoundedDynamicTESchedule(
 // Creates and recognizes the only accepted TE shape expression for a
 // generated uint64[1] runtime-extent buffer.
 tir::PrimExpr LoadRuntimeExtent(const tir::Var& buffer);
+// Serial unsplit schedule with reductions for static-shape dynamic stateful
+// kernels (LLVM/CPU only).
+te::Schedule BuildStatefulKvTESchedule(const Array<te::Tensor>& outputs,
+                                       const Target& target);
 bool MatchRuntimeExtentLoad(const tir::PrimExpr& expression,
                             const Array<tir::Var>& buffers,
                             size_t* buffer_index);
 std::string CanonicalTEScheduleContract(
     const te::Schedule& schedule, const Target& target,
     const Array<tir::Var>& runtime_extent_buffers = {},
+    // stateful 路径：由调用方声明、只在 body 中出现的 extent 下标。
+    const std::vector<size_t>& body_only_runtime_extents = {},
+    // bounded 路径：由 lowering 扫描 compute body 得出、作为存储值被消费
+    // 而非驱动循环轴的 extent buffer（形状值单元）。两条路径互斥。
     const std::unordered_set<const Object*>* body_consumed_extents = nullptr);
 std::string GetTEScheduleContract(const tir::PrimFunc& function);
 
@@ -75,6 +87,7 @@ LoweredFunction LowerTensorGraphToTIR(
     const te::Schedule& schedule,
     const Target& target,
     const PrimFuncIdentity& identity,
-    const Array<tir::Var>& runtime_extent_buffers = {});
+    const Array<tir::Var>& runtime_extent_buffers = {},
+    const std::vector<size_t>& body_only_runtime_extents = {});
 
 }  // namespace kxc::relay::internal

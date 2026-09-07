@@ -1,58 +1,63 @@
 # 模块实施计划
 
-现在的 KXC 已经能够把一小段静态 Transformer 计算从 ONNX 导入、编译为 LLVM 内核，再交给运行时执行。编译、缓存、内存和契约的主干已经存在。距离“能观察自己的执行，并安全调整的 Transformer 推理系统”，还缺执行数据、真正可用的 KV cache、形状计算、前端覆盖和替换行为的验证。
+现在的 KXC 已经能够把静态计算从 ONNX 导入、编译为 LLVM 内核，再交给 RuntimeSession 执行；第一波还已经接通了真实执行侧 bundle、Equal→Where 组合和一批静态 ONNX 算子。下一步的目标模型已经收敛为 MiniMind：纯文本 MiniMind 是当前 L1 验收目标，MiniMind-O 是北极星。仓库有实际生成的 MiniMind prefill/decode 图和元数据，但同一会话的 KV 更新、变长形状和完整生成循环仍未形成端到端证据。
 
-这组文档把接下来的工作分成 M0–M8 九个模块。第一波先固定可验证的共同基线，再并行完成执行观测、已有算子的 ONNX 接通和 `Equal` 算子。其余模块也给出具体方案，但不因为有了计划就同时启动实现。
+这组文档现在分成 M0–M10 十一个模块。M0/M1/M4/M5 的第一波切片已经完成；M9 负责先锁定 MiniMind 导出合同，随后 M2/M3/M4/M5 的后续切片并行推进 L1a 静态 prefill 和 L1b 多步 decode。M10 单独承接已经存在但默认关闭的结构化控制流：先补 gate-on LLVM 证据，再决定它是否适合真实生成循环。M6–M8 以真实模型运行证据为输入，M7 仍先补分布式证据。每篇文档开头都先说明现状和要做的模块，再给出步骤、代码落点和验收条件。
 
-> 状态：第一波（G0 基线 + A/B/C 三线 + G1 组合验收）**已实施完成**（2026-09-07），证据见 [G0 基线记录](G0_BASELINE.md)与 [G1 验收记录](G1_RECORD.md)。M2–M8 仍为待实施计划。核对日期：2026-09-07。第一波代码基点：`dev` @ `e426f7e`，集成点见 G1 记录。
+> 状态：第一波（G0 基线 + A/B/C 三线 + G1 组合验收）**已实施完成**（2026-09-07），证据见 [G0 基线记录](G0_BASELINE.md)与 [G1 验收记录](G1_RECORD.md)。当前可分派计划是 [第二波 MiniMind-L1](WAVE_2.md)。M2/M3/M6/M7/M8 仍为待实施，M9 是下一波入口；M0/M1/M4/M5 保留后续收尾切片。核对日期：2026-09-07。G0 记录提交为 `e426f7e`，G1 集成点为 `dev` @ `796fb9f`。
 > 目标以[项目目标](../PROJECT_GOAL.md)为准，已实现行为以[架构总览](../ARCHITECTURE.md)、代码、机器契约和实际测试为准。本文不新增能力声明。
 
 ## 先读哪一篇
 
-要开始分派任务，先读[第一波并行计划](WAVE_1.md)。要实施某个模块，再读下面对应的文档。每篇都以当前情况和拟实现行为开头，随后给出步骤、代码落点和验收条件。
+要开始新的分派，先读[第二波 MiniMind-L1 计划](WAVE_2.md)；[第一波计划](WAVE_1.md)只作为已完成工作的历史分派记录。要实施某个模块，再读下面对应的文档。
 
 | 模块 | 要解决的问题 | 第一波安排 | 主要前置条件 |
 |---|---|---|---|
-| [M0 基线与证据口径](M0_BASELINE.md) | 分支中的能力还没有成为大家共同验证过的基线，文档统计也存在偏差 | 先完成基线检查点 G0，随后承担集成 | 无 |
-| [M1 执行侧观测](M1_RUNTIME_PROFILING.md) | 知道编译花多久，但不知道真实执行、分配和拷贝花多久 | A 线实施 CPU/LLVM 首切片 | G0 |
-| [M2 KV cache 与动态状态](M2_KV_STATE.md) | 下一次 decode 不能沿用一个有明确容量和有效长度的缓存 | 第一波不改运行时；下一波先做追加/读取切片 | G0；完整注意力链还需 M3 |
-| [M3 形状值与有界计算](M3_SHAPE_VALUES.md) | 模型计算出来的形状，不能可靠交给后续算子使用 | 第一波记录需求，下一波实施 | G0；ONNX 接入与 M4 协同 |
-| [M4 ONNX 导入与多输出](M4_ONNX_IMPORT.md) | 已有计算能力不能从真实模型到达，一个节点也不能返回多个结果 | B 线先接静态已有算子和 Constant | G0；多输出后续单独切片 |
-| [M5 新逐元素算子](M5_ELEMENTWISE_OPS.md) | Equal、Pow、Erf 缺少从声明到执行的完整链路 | C 线只做 Equal；Pow/Erf 后续推进 | G0；Equal 导入与 B 线顺序交接 |
-| [M6 热替换执行与决策](M6_HOT_SWAP.md) | 准备候选不等于正在执行的程序已经安全换代 | 后续实施 | M1；带状态替换另需 M2 |
-| [M7 分布式证据与执行桥接](M7_DISTRIBUTED.md) | 现有计划和通信代码还不能证明多 worker 执行编译内核 | 后续先补证并准确降级 | 单机数值基线；桥接复用既有运行时 ABI |
-| [M8 TE Program 与首个融合](M8_TE_PROGRAM.md) | 每个 Relay Call 都形成内核边界，跨算子优化尚无完整候选表示 | 功能链打通后实施 | M1；稳定的 compiler/identity 边界 |
+| [M0 基线与证据口径](M0_BASELINE.md) | 已完成的 G0 基点和能力边界需要持续作为共同事实 | 已完成；只维护基线证据 | 无 |
+| [M1 执行侧观测](M1_RUNTIME_PROFILING.md) | 已有运行 bundle，仍需把 MiniMind 的模型/代际信息接入诊断 | 第一波已完成；下一波做真实模型 profile | G1；M9 receipt |
+| [M2 KV cache 与动态状态](M2_KV_STATE.md) | decode 需要同一会话内有容量和有效长度的缓存 | 第二波 S1/S2：追加、读取、prefill→decode | M9 E2；M3 extent 合同 |
+| [M3 形状值与有界计算](M3_SHAPE_VALUES.md) | MiniMind 的变长和形状控制值还不能可靠执行 | 第二波 S1/S2：受限 shape 链和有界 attention | M9 E0；M4 导入 |
+| [M4 ONNX 导入与多输出](M4_ONNX_IMPORT.md) | 真实 MiniMind 节点仍有导入缺口和多输出顺序问题 | 第一波静态子集已完成；按 M9 inventory 补齐 | M9 E0；M5 算子语义 |
+| [M5 新逐元素算子](M5_ELEMENTWISE_OPS.md) | Equal 已闭环，MiniMind 仍需 Pow 等算子和严格属性边界 | Equal 已完成；Pow/Erf/实际缺口后续切片 | M9 E1；LLVM 数值 |
+| [M6 热替换执行与决策](M6_HOT_SWAP.md) | 需要把执行 profile 变成真实的候选切换证据 | 后续实施，先无状态再带 KV | M1；M2 |
+| [M7 分布式证据与执行桥接](M7_DISTRIBUTED.md) | 计划/通信代码仍不能证明 compiled module 多 worker 执行 | 后续先补证并准确降级 | 单机 MiniMind 基线 |
+| [M8 TE Program 与首个融合](M8_TE_PROGRAM.md) | MiniMind attention/FFN 还没有 profile 驱动的融合候选 | 后续实施，先保留最小静态切片 | M1；M9 L1a |
+| [M9 MiniMind 模型与导出验收](M9_MINIMIND_TARGET.md) | 模型目标、导出参数、past/present 轴和生成入口需要一个唯一门禁 | 第二波入口：E0→E1→E2 | G1；Python/ONNX 依赖 |
+| [M10 结构化控制流](M10_STRUCTURED_CONTROL.md) | 已有 `If`/有界 `While` 编译和运行代码默认未启用，生产证据与 MiniMind 生成循环的适用性尚未定论 | 第二波 E 线：C0 审计→C1 gate-on LLVM→C2 生成循环决策；C3 再与 M2/M3 交接 | C1 独立于 L1a；真实 decode 依赖 M2/M3 |
 
 ## 当前事实与原快照的差异
 
-以下结论来自本次代码核对，M0 负责回写到相应权威文档，避免计划和快照长期各说一套。
+以下结论来自第一波后的代码和实际 MiniMind 导出；后续变更必须回写到权威文档，避免计划和快照再次分叉。
 
-- [模型清单](../OP_TODO.md)是一个 Encoder 的 25 种 ONNX 算子快照，并非完整自回归模型验收集。[Python importer](../../python/kxc_onnx/importer.py)有 15 种映射，但与该快照只有 8 种名称交集；缺少 17 种名称。名称交集也不等于属性、输入数量和动态形状均已支持。
+- [模型清单](../OP_TODO.md)来自 MiniMindForCausalLM 的实际导出，分别记录 dynamic/static 原始图和常量折叠后的实算图；它不是支持矩阵。静态非原地 mask 的 L1a 口径仍有 11 种实算缺口，dynamic_axes 还会引入 Shape/Range/ConstantOfShape 等形状链。名称交集、常量折叠和真实运行证据必须分开记录。
 - 已有交集中的 `Concat` 只接受两个输入，快照却出现三个或四个输入；`Gather` 导入要求常量索引。这些已有名称的语义限制也要进入后续验收。
 - [能力矩阵](../../test/nlp_validation/transformer_capability_matrix.json)的 LLVM 列为 8 个 `implemented`、4 个 `unsupported`。`implemented` 不能写成“本次已经跑过”；部分 numeric 的 `validated` 仅是参考实现证据。
-- 通用 state、alias 和重复执行机制已经存在，缺少的是 Transformer 的更新语义和动态有效长度。bounded 分支的 fresh-output 模式仍拒绝 state，合入该分支不会自动得到 KV cache。
+- 通用 state、alias 和重复执行机制已经存在，缺少的是 MiniMind Transformer 的 KV 更新语义和动态有效长度。bounded 分支的 fresh-output 模式仍拒绝 state，合入该分支不会自动得到 KV cache。
 - `experimental_identity` 在形状路由、自适应准备等开关启用的路径中被调用，不能直接删除。分布式内核执行则确实仍有未实现的启动分支。
 - `runtime` 的普通代码目前不能直接 include `profiling`；观测接入需要维持依赖方向。M1 已把这个约束纳入实现方案。
 
-## 九个模块之间如何衔接
+## 十一个模块之间如何衔接
 
 ```mermaid
 flowchart LR
-    G0["M0：固定已验证基线"] --> M1["M1：执行观测"]
-    G0 --> M4["M4：静态 ONNX 接通"]
-    G0 --> M5["M5：Equal"]
-    M5 --> E["Equal ONNX 接入"]
-    M4 --> E
-    G0 --> M2["M2：缓存追加与状态"]
-    G0 --> M3["M3：形状值与有界算子"]
-    M2 --> D["prefill + 多步 decode"]
-    M3 --> D
-    M4 --> D
-    M1 --> M6["M6：替换执行与决策"]
+    G1["G1：第一波已验收"] --> M9["M9：MiniMind 导出门禁"]
+    M9 --> M4["M4：真实节点导入"]
+    M9 --> M5["M5：实际算子缺口"]
+    M9 --> M2["M2：KV cache 状态"]
+    M9 --> M3["M3：shape-as-value/有界 attention"]
+    M4 --> L1a["L1a：静态 prefill"]
+    M5 --> L1a
+    M2 --> L1b["L1b：多步 decode"]
+    M3 --> L1b
+    L1a --> L1b
+    M10["M10：控制流 gate-on 证据"] -. "不阻塞 L1a" .-> L1b
+    M2 -. "state/extent 交接" .-> M10
+    M3 -. "shape/extent 交接" .-> M10
+    M1["M1：执行观测已完成"] --> M6["M6：替换执行与决策"]
     M1 --> M8["M8：首个融合与测量"]
 ```
 
-图中的箭头表示某项验收需要前项的结果，不表示所有后项都在第一波启动。M7 先完成独立的计划/通信证据，再决定进入实际内核桥接；它不阻塞第一波。
+图中的箭头表示某项验收需要前项的结果。M9 E0 通过后 M2/M3/M4/M5 可以并行；M7 先完成独立的计划/通信证据，不阻塞 L1。
 
 ## 几个术语的普通含义
 
@@ -79,4 +84,4 @@ flowchart LR
 
 新 agent IR、IR parser、Python 编译入口、训练、自动调优继续按项目目标延后或排除。视觉验证链和仍有消费者的 identity 代码保留。
 
-CUDA 的归约/间接访存、完整自回归模型覆盖、全 mask 数值行为以及请求级动态批处理仍是后续工作。九篇模块计划不能被当作这些能力已经完成的声明；特别是“一份产物接受多种 batch shape”不等于已经实现请求排队、合批、退出和 KV 槽位管理。
+CUDA 的归约/间接访存、完整自回归模型覆盖、全 mask 数值行为以及请求级动态批处理仍是后续工作。十一篇模块计划不能被当作这些能力已经完成的声明；特别是“一份产物接受多种 batch shape”不等于已经实现请求排队、合批、退出和 KV 槽位管理。M10 的控制流路径也不能因为源码、参考执行器或 gate-off 拒绝测试存在，就被写成 MiniMind 生成循环已经通过。

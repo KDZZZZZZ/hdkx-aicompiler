@@ -45,6 +45,21 @@ Call MakeEqual(Expr lhs, Expr rhs) {
     return Call(GetOp("equal"), {lhs, rhs});
 }
 
+// 构造一元逐元素取负调用。
+Call MakeNeg(Expr data) {
+    return Call(GetOp("neg"), {data});
+}
+
+// 构造一元 logistic sigmoid 调用。
+Call MakeSigmoid(Expr data) {
+    return Call(GetOp("sigmoid"), {data});
+}
+
+// 构造二元逐元素幂调用。
+Call MakePow(Expr lhs, Expr rhs) {
+    return Call(GetOp("pow"), {lhs, rhs});
+}
+
 // 构造三元 Where 调用。
 Call MakeWhere(Expr condition, Expr x, Expr y) {
     return Call(GetOp("where"), {condition, x, y});
@@ -120,6 +135,11 @@ Call MakeSqueeze(Expr data, Array<int64_t> axes) {
 // 构造 unsqueeze 调用，axes 静态已知。
 Call MakeUnsqueeze(Expr data, Array<int64_t> axes) {
     return Call(GetOp("unsqueeze"), {data}, UnsqueezeAttrs::Create(std::move(axes)));
+}
+
+// 构造 expand 调用，并保留已解析的静态目标形状。
+Call MakeExpand(Expr data, Array<int64_t> target_shape) {
+    return Call(GetOp("expand"), {data}, ExpandAttrs::Create(std::move(target_shape)));
 }
 
 // 构造 softmax 调用。
@@ -222,6 +242,10 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.subtract").set_body(ToPackedFunc(MakeSub
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.mul").set_body(ToPackedFunc(MakeMul));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.divide").set_body(ToPackedFunc(MakeDivide));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.equal").set_body(ToPackedFunc(MakeEqual));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.neg").set_body(ToPackedFunc(MakeNeg));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.sigmoid").set_body(ToPackedFunc(MakeSigmoid));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.pow").set_body(ToPackedFunc(MakePow));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.expand").set_body(ToPackedFunc(MakeExpand));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.where").set_body(ToPackedFunc(MakeWhere));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sqrt").set_body(ToPackedFunc(MakeSqrt));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.matmul").set_body(ToPackedFunc(MakeMatmul));

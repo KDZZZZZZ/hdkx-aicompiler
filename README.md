@@ -40,7 +40,7 @@ Relay Function + CompileConfig
 
 - [文档索引](docs/README.md)
 - [项目目标（唯一目标权威）](docs/PROJECT_GOAL.md)
-- [模块实施总览与第一波并行计划](docs/implementation/README.md)
+- [模块实施总览与 MiniMind-L1 并行计划](docs/implementation/README.md)
 - [架构总览](docs/ARCHITECTURE.md)
 - [TE Program IR 设计提案（尚未实现）](docs/TE_PROGRAM_IR.md)
 - [构建说明](docs/BUILDING.md)

@@ -258,18 +258,28 @@ bool TestBoundedShapeValueMaterialization() {
     CHECK(runtime_extents == 2 &&
               invocation.runtime_extent_scalars().size() == 2,
           "the ordered extent ABI carries the consumed input axes in order");
+    // 形状值单元的 extent 全部来自输入轴，没有 M2 的 state 来源标量。
+    using ExtentSource =
+        kxc::api::ModuleRuntimeExtentScalar::Source;
+    CHECK(invocation.runtime_extent_scalars()[0].source == ExtentSource::kInputAxis &&
+              invocation.runtime_extent_scalars()[1].source == ExtentSource::kInputAxis &&
+              invocation.runtime_extent_scalars()[0].expression.has_value() &&
+              invocation.runtime_extent_scalars()[1].expression.has_value(),
+          "shape-value extents are input-axis sourced and carry an expression");
     // extent 表达式按单元自身输入轴求值：{x} 的 shape[0]/shape[1]。
-    CHECK(invocation.runtime_extent_scalars()[0].expression.Evaluate({{4, 5, 3}}) == 4 &&
-              invocation.runtime_extent_scalars()[1].expression.Evaluate({{4, 5, 3}}) == 5,
+    CHECK(invocation.runtime_extent_scalars()[0].expression->Evaluate({{4, 5, 3}}) == 4 &&
+              invocation.runtime_extent_scalars()[1].expression->Evaluate({{4, 5, 3}}) == 5,
           "extent scalars evaluate to the consumed input axes");
-    CHECK(invocation.runtime_extent_scalars()[0].expression.Evaluate({{6, 7, 3}}) == 6 &&
-              invocation.runtime_extent_scalars()[1].expression.Evaluate({{6, 7, 3}}) == 7,
+    CHECK(invocation.runtime_extent_scalars()[0].expression->Evaluate({{6, 7, 3}}) == 6 &&
+              invocation.runtime_extent_scalars()[1].expression->Evaluate({{6, 7, 3}}) == 7,
           "extent scalars follow the second legal shape");
     CHECK(invocation.outputs().size() == 1 &&
               invocation.outputs()[0].max_bytes == 3 * sizeof(int64_t),
           "the shape-value output stays byte-capped by its fixed length");
+    // M2 的 state-sourced extent 把调用合同编码升到 V3；形状值单元沿用
+    // 同一个版本化编码，不另立一套。
     CHECK(invocation.CanonicalBytes().find(
-              "KXC_MODULE_INVOKE_V2") != std::string::npos,
+              "KXC_MODULE_INVOKE_V3") != std::string::npos,
           "the invocation contract keeps its versioned canonical encoding");
 
     const kxc::runtime::RuntimeSession session(compiled.module(),

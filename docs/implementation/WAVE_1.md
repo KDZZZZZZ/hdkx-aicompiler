@@ -1,16 +1,16 @@
-# 第一波并行计划
+# 第一波并行计划（历史记录）
 
-现在已经有一条很窄的静态 LLVM 执行链，也有五个尚未合入 `dev` 的有界动态提交。直接让多人同时改运行时、形状和导入器，会混用不同基线，并在同一批核心文件上反复解决冲突。第一波要先让所有人站在同一个、跑过测试的版本上。
+第一波开始时，KXC 只有一条窄的静态 LLVM 执行链，有界动态提交尚未合入，模型清单还是匿名 Encoder 快照。那一波的目标是先固定可验证基线，再并行接通执行观测、静态 ONNX 子集和 Equal。现在这些工作已经完成并由 G1 验收；本文保留原始分派、所有权和检查项，供追溯，不再作为新的待办列表。
 
-这一波要交付三项能实际使用的增量：看到 CPU 内核、分配和拷贝的执行记录；让一批已有算子从 ONNX 模型进入编译器；让 Equal 从 Relay 计算一路执行到 LLVM，并在集成时接入 ONNX。KV cache、shape-as-value、热替换和融合的完整方案已经另文准备，但这一波不同时修改它们的基座。
+当前目标模型已改为 MiniMind：MiniMind-O 是北极星，纯文本 MiniMind 是 L1 验收目标。下一组任务见 [第二波 MiniMind-L1](WAVE_2.md)，其入口是 [M9 模型与导出验收](M9_MINIMIND_TARGET.md)。
 
-> 状态：**已执行完成（2026-09-07）**。基点与证据见 [G0 基线记录](G0_BASELINE.md)，组合验收见 [G1 验收记录](G1_RECORD.md)；已知缺陷与后续切片也在 G1 记录中。原始分派内容保留如下。模块全表见[实施总览](README.md)，当前架构见[架构总览](../ARCHITECTURE.md)。时间按检查点推进，不预设未经估算的完成日期。
+> 状态：**已执行完成（2026-09-07）**。G0 基点和测试见 [G0](G0_BASELINE.md)，组合验收见 [G1](G1_RECORD.md)。以下内容是第一波原始计划的完成记录，不要重新分派 A/B/C。控制流代码审计不属于已完成的 A/B/C 交付，已转入第二波 [M10](M10_STRUCTURED_CONTROL.md) 做 gate-on 生产证明；因此不能把第一波“开关关闭时的拒绝路径”误读为控制流已启用。
 
 ## 0. 并行开始前：G0 共同基线
 
 由集成负责人完成 [M0](M0_BASELINE.md)：核对五个既有提交，运行默认 CPU/LLVM 回归和 bounded gates 下的专项测试，修正文档事实，产出唯一的基线 commit。这里的“产出”是经过评审流程可供其他任务引用的 commit，不是自动授权合并到共享分支。
 
-G0 未完成时，A/B/C 可以读代码、准备测试输入和审查方案；不向一个尚未核实的动态 ABI 增加运行时代码。若 bounded 提交未通过，先在 M0 修复，不能声称第一波已基于动态执行能力开工。
+当时 G0 未完成时，A/B/C 只能读代码、准备测试输入和审查方案；G0 通过后才按共同基点开工。该门禁已经完成，后续新任务直接引用 G1 和当前主线。
 
 G0 输出必须写清：commit、LLVM 发现结果、feature flags、实际测试清单、失败或跳过项，以及仍然只支持 CPU elementwise/fresh-output 的范围。保留默认关闭的开关。
 
@@ -19,7 +19,7 @@ G0 输出必须写清：commit、LLVM 发现结果、feature flags、实际测�
 | 线 | 第一波任务 | 交付物 | 本波截止线 |
 |---|---|---|---|
 | A：执行观测 | [M1](M1_RUNTIME_PROFILING.md) 的 CPU/LLVM 首切片 | 一个真实 RuntimeSession bundle；分配、内核、拷贝可关联；异步只记录准确的提交/观测完成含义 | 不扩展 GPU 计时，不改 KV、shape 路由或调度策略 |
-| B：模型入口 | [M4](M4_ONNX_IMPORT.md) 的静态阶段 | Constant + Cast/Div/Mul/Sub/Sqrt/ReduceMean/Reshape 的受限静态导入、C++ 重建和数值 fixture | 不做 Split，不接动态 shape tensor，不宣布 25 个模型算子全支持 |
+| B：模型入口 | [M4](M4_ONNX_IMPORT.md) 的静态阶段 | Constant + Cast/Div/Mul/Sub/Sqrt/ReduceMean/Reshape 的受限静态导入、C++ 重建和数值 fixture | 不做 Split，不接动态 shape tensor，不宣布旧快照或 MiniMind 全图支持 |
 | C：新计算能力 | [M5](M5_ELEMENTWISE_OPS.md) 的 Equal 阶段 | 生成式契约、InferType、TE、生产 lowering、LLVM 数值和 bool 输出 | 不顺带实现 Pow/Erf，不独立改 ONNX importer |
 
 集成负责人不另开第四条核心重构线，负责共享文件、代码评审、C → B 交接，以及最后的组合验证。
@@ -77,14 +77,14 @@ flowchart TD
 
 ## 5. G1 第一波整体验收
 
-- [ ] G0 基线已记录，默认 CPU/LLVM 与 bounded 配置的回归均有结果。
-- [ ] B 列出的 8 种 ONNX 名称有静态受限入口和真实 LLVM 数值证据；其中 Constant 使用已有常量表示。
-- [ ] Equal 的 Relay、lowering、LLVM、runtime 和 ONNX 接线形成闭环，bool 结果真正用于 Where。
-- [ ] 至少一个组合图由 ONNX 导入后编译执行，并导出真实 runtime bundle；另一个已有能力 fixture 提供拟更新的 profile 格子证据。
-- [ ] 原有静态 Transformer fixture、视觉参照链、bounded 两种合法形状执行均不退化。
-- [ ] 错误 shape/dtype/属性在执行前明确失败；开关关闭时原拒绝路径仍有效。
-- [ ] profiling 关闭与开启的输出一致，观测不会触发编译、改路由或强制设备同步。
-- [ ] shared contracts 重新生成后通过检查；矩阵、检查器和文档状态相符。
+- [x] G0 基线已记录，默认 CPU/LLVM 与 bounded 配置的回归均有结果。
+- [x] B 列出的 8 种 ONNX 名称有静态受限入口和真实 LLVM 数值证据；其中 Constant 使用已有常量表示。
+- [x] Equal 的 Relay、lowering、LLVM、runtime 和 ONNX 接线形成闭环，bool 结果真正用于 Where。
+- [x] 至少一个组合图由 ONNX 导入后编译执行，并导出真实 runtime bundle；另一个已有能力 fixture 提供 profile 格子证据。
+- [x] 原有静态 Transformer fixture、视觉参照链、bounded 两种合法形状执行均不退化。
+- [x] 错误 shape/dtype/属性在执行前明确失败；开关关闭时原拒绝路径仍有效。
+- [x] profiling 关闭与开启的输出一致，观测不会触发编译、改路由或强制设备同步。
+- [x] shared contracts 重新生成后通过检查；矩阵、检查器和文档状态相符。
 
 8 个既有名称交集，加 B 的 8 个新名称，再加 Equal，理论名称交集上限为 17/25。这只是用于检查漏项的计数，不能作为“模型已能执行”的验收；多输入 Concat、动态 Gather、shape 链和 Split 仍有限制。
 
