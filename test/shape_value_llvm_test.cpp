@@ -459,8 +459,8 @@ bool TestS2StaticInferType() {
     const kxc::Type control = kxc::TensorType({3}, "int64");
 
     // expand：axis0 广播 1→4，其余等值。
-    const kxc::Type expanded = kxc::relay::ExpandInferType(
-        kxc::relay::ExpandAttrs::Create(
+    const kxc::Type expanded = kxc::relay::ExpandDynamicInferType(
+        kxc::relay::ExpandDynamicAttrs::Create(
             kxc::Array<int64_t>({kxc::relay::kShapeExprKindConst,
                                  kxc::relay::kShapeExprKindInputAxis,
                                  kxc::relay::kShapeExprKindInputAxis}),
@@ -473,8 +473,8 @@ bool TestS2StaticInferType() {
               expand_tensor->shape[2] == 3,
           "expand infers the restricted broadcast target");
     CHECK(Throws([&] {
-              (void)kxc::relay::ExpandInferType(
-                  kxc::relay::ExpandAttrs::Create(
+              (void)kxc::relay::ExpandDynamicInferType(
+                  kxc::relay::ExpandDynamicAttrs::Create(
                       kxc::Array<int64_t>(
                           {kxc::relay::kShapeExprKindConst,
                            kxc::relay::kShapeExprKindInputAxis,
@@ -629,8 +629,8 @@ bool TestS2StaticProduction() {
                 kxc::Array<int64_t>({4, 0, 0}),
                 kxc::Array<int64_t>({0, 1, 2})));
         const kxc::Expr expanded = kxc::Call(
-            kxc::relay::Op::Get("expand"), {x, control},
-            kxc::relay::ExpandAttrs::Create(
+            kxc::relay::Op::Get("expand_dynamic"), {x, control},
+            kxc::relay::ExpandDynamicAttrs::Create(
                 kxc::Array<int64_t>({kxc::relay::kShapeExprKindConst,
                                      kxc::relay::kShapeExprKindInputAxis,
                                      kxc::relay::kShapeExprKindInputAxis}),
@@ -775,12 +775,12 @@ bool TestS2PrimitiveTIR() {
                 kinds, kxc::Array<int64_t>({4, 0, 0}),
                 kxc::Array<int64_t>({0, 1, 2})));
         const kxc::Expr expanded = kxc::Call(
-            kxc::relay::Op::Get("expand"), {x, control},
-            kxc::relay::ExpandAttrs::Create(
+            kxc::relay::Op::Get("expand_dynamic"), {x, control},
+            kxc::relay::ExpandDynamicAttrs::Create(
                 kinds, kxc::Array<int64_t>({4, 0, 0}),
                 kxc::Array<int64_t>({0, 1, 2})));
         CHECK(lowers_to(kxc::relay::InferTypePass(kxc::Function({x}, expanded)),
-                        "expand"),
+                        "expand_dynamic"),
               "expand lowers to its own primitive unit");
     }
 
@@ -984,7 +984,7 @@ bool TestBoundedS2Failures() {
               (void)restricted::RestrictedSymbolicShapeAdapter::Prepare(
                   kxc::Function(
                       {x},
-                      kxc::Call(kxc::relay::Op::Get("expand"),
+                      kxc::Call(kxc::relay::Op::Get("expand_dynamic"),
                                 {x, widened_target})),
                   CpuConfig(), {{0, 0, "B", 2, 8, 1}, {0, 1, "S", 1, 8, 1}});
           }),

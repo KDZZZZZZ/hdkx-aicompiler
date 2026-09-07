@@ -670,29 +670,29 @@ Type ReshapeDynamicInferType(const Attrs& attrs, const Array<Type>& input_types)
 }
 
 // 推导 expand 的受限目标形状与广播合法性。
-Type ExpandInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    RequireArity("expand", input_types, 2);
-    const auto* data = RequireTensor("expand", input_types[0], "data");
-    const auto* control = RequireTensor("expand", input_types[1], "shape");
+Type ExpandDynamicInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("expand_dynamic", input_types, 2);
+    const auto* data = RequireTensor("expand_dynamic", input_types[0], "data");
+    const auto* control = RequireTensor("expand_dynamic", input_types[1], "shape");
     if (control->dtype != "int64" || control->shape.size() != 1 ||
         !IsKnown(control->shape[0])) {
         throw std::runtime_error(
             "expand control must be a known-length int64 rank-1 tensor");
     }
-    const auto* expand_attrs = attrs.As<ExpandAttrsNode>();
+    const auto* expand_attrs = attrs.As<ExpandDynamicAttrsNode>();
     if (!expand_attrs) {
         throw std::runtime_error(
-            "expand requires ExpandAttrs; unrestricted use is rejected");
+            "expand requires ExpandDynamicAttrs; unrestricted use is rejected");
     }
     const std::vector<ShapeExprElement> elements = ReadShapeExpr(
-        "expand", expand_attrs->expr_kinds, expand_attrs->expr_values,
+        "expand_dynamic", expand_attrs->expr_kinds, expand_attrs->expr_values,
         expand_attrs->expr_axes);
     if (elements.size() != static_cast<size_t>(control->shape[0]) ||
         elements.size() != data->shape.size()) {
         throw std::runtime_error(
             "expand target length must equal both its control tensor and data rank");
     }
-    const std::vector<int64_t> target = EvaluateShapeExpr("expand", elements, data);
+    const std::vector<int64_t> target = EvaluateShapeExpr("expand_dynamic", elements, data);
     for (size_t axis = 0; axis < target.size(); ++axis) {
         const int64_t data_dim = data->shape[axis];
         const int64_t target_dim = target[axis];

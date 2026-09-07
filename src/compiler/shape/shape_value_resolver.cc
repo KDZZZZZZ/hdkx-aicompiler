@@ -187,7 +187,7 @@ private:
 
     static size_t ExpectedArity(const std::string& name) {
         if (name == "add" || name == "mul" || name == "gather" ||
-            name == "concatenate" || name == "reshape_dynamic" || name == "expand") {
+            name == "concatenate" || name == "reshape_dynamic" || name == "expand_dynamic") {
             return 2;
         }
         return 1;
@@ -289,7 +289,7 @@ private:
             info = ResolveConcatenate(call, node);
         } else if (name == "reshape_dynamic") {
             info = ResolveReshapeDynamic(call, node);
-        } else if (name == "expand") {
+        } else if (name == "expand_dynamic") {
             info = ResolveExpand(call, node);
         } else if (name == "squeeze") {
             info = ResolveSqueeze(call, node);
@@ -458,7 +458,7 @@ private:
         const NodeInfo& control = Resolve(call->args[1]);
         RequireData(data, "expand data");
         RequireShapeValue(control, "expand control");
-        RequireNoCallerAttrs(call, "expand");
+        RequireNoCallerAttrs(call, "expand_dynamic");
         if (control.elements.size() != data.dims.size()) {
             Reject("expand target length must equal the data rank");
         }
@@ -474,10 +474,10 @@ private:
         const EncodedExpr encoded =
             EncodeElements(control.elements, data.dims, "expand target");
         rewritten_[node] = kxc::Call(
-            kxc::relay::Op::Get("expand"),
+            kxc::relay::Op::Get("expand_dynamic"),
             {rewritten_.at(call->args[0].get()),
              rewritten_.at(call->args[1].get())},
-            kxc::relay::ExpandAttrs::Create(encoded.kinds, encoded.values,
+            kxc::relay::ExpandDynamicAttrs::Create(encoded.kinds, encoded.values,
                                             encoded.axes));
         NodeInfo info;
         info.kind = ValueKind::kData;

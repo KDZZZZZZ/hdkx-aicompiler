@@ -306,25 +306,25 @@ te::Tensor ReshapeDynamicCompute(const Attrs& attrs, const Array<te::Tensor>& in
 }
 
 // 受限目标 expand：逐轴广播拷贝，目标各维来自受限表达式。
-te::Tensor ExpandCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+te::Tensor ExpandDynamicCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                          const kxc::Type& out_type) {
     (void)out_type;
-    RequireInputCount("expand", inputs, 2);
-    const auto* expand_attrs = attrs.As<ExpandAttrsNode>();
+    RequireInputCount("expand_dynamic", inputs, 2);
+    const auto* expand_attrs = attrs.As<ExpandDynamicAttrsNode>();
     if (!expand_attrs) {
-        throw std::runtime_error("expand expects ExpandAttrs");
+        throw std::runtime_error("expand expects ExpandDynamicAttrs");
     }
     const std::vector<ShapeExprElement> elements = ReadShapeExpr(
-        "expand", expand_attrs->expr_kinds, expand_attrs->expr_values,
+        "expand_dynamic", expand_attrs->expr_kinds, expand_attrs->expr_values,
         expand_attrs->expr_axes);
     const Array<kxc::tir::PrimExpr> out_shape =
-        ShapeExprToTEShape("expand", elements, inputs[0]);
+        ShapeExprToTEShape("expand_dynamic", elements, inputs[0]);
     const te::Tensor data = inputs[0];
     const size_t rank = out_shape.size();
     if (rank != data->shape.size()) {
         throw std::runtime_error("expand lowering requires equal data and target rank");
     }
-    return RequireDefined("expand", te::compute(
+    return RequireDefined("expand_dynamic", te::compute(
         out_shape,
         [data, rank](const Array<kxc::tir::Var>& indices) {
             Array<kxc::tir::PrimExpr> in_indices;
@@ -415,14 +415,14 @@ KXC_REGISTER_OP(reshape_dynamic)
     .set_attr<FInferType>("FInferType", ReshapeDynamicInferType)
     .set_attr<FRelayToTE>("FRelayToTE", ReshapeDynamicCompute);
 
-KXC_REGISTER_OP(expand)
+KXC_REGISTER_OP(expand_dynamic)
     .describe(R"doc(Broadcast data to a verified restricted shape expression target.)doc")
     .set_num_inputs(2)
     .add_argument("data", "Tensor", "The input tensor.")
     .add_argument("shape", "Tensor", "int64 shape value from a restricted chain.")
-    .set_attr<std::string>("TAttrs", "ExpandAttrs")
-    .set_attr<FInferType>("FInferType", ExpandInferType)
-    .set_attr<FRelayToTE>("FRelayToTE", ExpandCompute);
+    .set_attr<std::string>("TAttrs", "ExpandDynamicAttrs")
+    .set_attr<FInferType>("FInferType", ExpandDynamicInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", ExpandDynamicCompute);
 
 KXC_REGISTER_OP(constant_of_shape)
     .describe(R"doc(Fill a constant target shape with an explicit scalar value.)doc")

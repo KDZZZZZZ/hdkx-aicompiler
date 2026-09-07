@@ -29,7 +29,7 @@ Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReshapeDynamicInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ShapeOfInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ShapeExprInferType(const Attrs& attrs, const Array<Type>& input_types);
-Type ExpandInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type ExpandDynamicInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ConstantOfShapeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SqueezeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type UnsqueezeInferType(const Attrs& attrs, const Array<Type>& input_types);

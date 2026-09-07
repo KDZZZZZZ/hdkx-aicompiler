@@ -172,8 +172,8 @@ private:
             result = relay::ReshapeDynamicAttrs::Create(
                 CloneIntArray(node->expr_kinds), CloneIntArray(node->expr_values),
                 CloneIntArray(node->expr_axes));
-        } else if (const auto* node = source.As<relay::ExpandAttrsNode>()) {
-            result = relay::ExpandAttrs::Create(
+        } else if (const auto* node = source.As<relay::ExpandDynamicAttrsNode>()) {
+            result = relay::ExpandDynamicAttrs::Create(
                 CloneIntArray(node->expr_kinds), CloneIntArray(node->expr_values),
                 CloneIntArray(node->expr_axes));
         } else if (const auto* node =

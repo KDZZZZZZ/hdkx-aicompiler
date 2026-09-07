@@ -26,10 +26,10 @@ ReshapeDynamicAttrs ReshapeDynamicAttrs::Create(Array<int64_t> expr_kinds,
 }
 
 // 创建 expand 的受限目标形状表达式属性。
-ExpandAttrs ExpandAttrs::Create(Array<int64_t> expr_kinds,
+ExpandDynamicAttrs ExpandDynamicAttrs::Create(Array<int64_t> expr_kinds,
                                 Array<int64_t> expr_values,
                                 Array<int64_t> expr_axes) {
-    auto* node = new ExpandAttrsNode();
+    auto* node = new ExpandDynamicAttrsNode();
     node->expr_kinds = std::move(expr_kinds);
     node->expr_values = std::move(expr_values);
     node->expr_axes = std::move(expr_axes);
@@ -93,7 +93,7 @@ KXC_OBJECT_DEFINE(GemmAttrsNode)
 KXC_OBJECT_DEFINE(DeviceCopyAttrsNode)
 KXC_OBJECT_DEFINE(CollectiveAttrsNode)
 KXC_OBJECT_DEFINE(ReshapeDynamicAttrsNode)
-KXC_OBJECT_DEFINE(ExpandAttrsNode)
+KXC_OBJECT_DEFINE(ExpandDynamicAttrsNode)
 KXC_OBJECT_DEFINE(ShapeExprAttrsNode)
 KXC_OBJECT_DEFINE(ConstantOfShapeAttrsNode)
 KXC_OBJECT_DEFINE(SqueezeAttrsNode)
@@ -328,7 +328,7 @@ void ReshapeDynamicAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) co
     writer.Add("expr_axes", expr_axes);
 }
 
-void ExpandAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+void ExpandDynamicAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("expr_kinds", expr_kinds);
     writer.Add("expr_values", expr_values);
     writer.Add("expr_axes", expr_axes);

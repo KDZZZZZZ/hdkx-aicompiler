@@ -97,11 +97,11 @@ Call MakeReshapeDynamic(Expr data, Expr shape, Array<int64_t> expr_kinds,
                                             std::move(expr_axes)));
 }
 
-// 构造受限目标 expand 调用。
-Call MakeExpand(Expr data, Expr shape, Array<int64_t> expr_kinds,
+// 构造受限目标 expand_dynamic 调用。
+Call MakeExpandDynamic(Expr data, Expr shape, Array<int64_t> expr_kinds,
                 Array<int64_t> expr_values, Array<int64_t> expr_axes) {
-    return Call(GetOp("expand"), {data, shape},
-                ExpandAttrs::Create(std::move(expr_kinds), std::move(expr_values),
+    return Call(GetOp("expand_dynamic"), {data, shape},
+                ExpandDynamicAttrs::Create(std::move(expr_kinds), std::move(expr_values),
                                     std::move(expr_axes)));
 }
 
@@ -233,7 +233,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.shape_expr")
     .set_body(ToPackedFunc(MakeShapeExpr));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape_dynamic")
     .set_body(ToPackedFunc(MakeReshapeDynamic));
-KXC_REGISTER_GLOBAL("kxc.relay.op._make.expand").set_body(ToPackedFunc(MakeExpand));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.expand_dynamic").set_body(ToPackedFunc(MakeExpandDynamic));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.constant_of_shape")
     .set_body(ToPackedFunc(MakeConstantOfShape));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.squeeze").set_body(ToPackedFunc(MakeSqueeze));

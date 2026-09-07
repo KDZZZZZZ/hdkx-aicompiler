@@ -163,7 +163,7 @@ void ValidateFrozenUnits(const shape::GraphTemplate& graph,
                 output.logical.size() != static_cast<size_t>(control.logical[0])) {
                 Reject("reshape_dynamic output rank must equal its control length");
             }
-        } else if (operations[i] == "expand") {
+        } else if (operations[i] == "expand_dynamic") {
             if (unit.input_value_names.size() != 2) {
                 Reject("expand expects data and a control shape value");
             }
@@ -195,13 +195,13 @@ bool IsRestrictedSyntaxOp(const std::string& name) {
            // shape_expr 是解析器折叠 gather/concat 链后的单元形态，只出现在
            // 重写后的快照里；constant_of_shape 由受限目标形状驱动。
            name == "shape_expr" || name == "constant_of_shape" ||
-           name == "reshape_dynamic" || name == "expand" ||
+           name == "reshape_dynamic" || name == "expand_dynamic" ||
            name == "squeeze" || name == "unsqueeze";
 }
 
 size_t RestrictedSyntaxArity(const std::string& name) {
     if (name == "add" || name == "mul" || name == "gather" ||
-        name == "concatenate" || name == "reshape_dynamic" || name == "expand") {
+        name == "concatenate" || name == "reshape_dynamic" || name == "expand_dynamic") {
         return 2;
     }
     return 1;

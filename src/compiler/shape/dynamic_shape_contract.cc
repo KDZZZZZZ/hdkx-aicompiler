@@ -277,7 +277,7 @@ bool IsSupportedOperation(const std::string& name) {
     return name == "relu" || name == "nn_relu" || name == "sqrt" ||
            name == "add" || name == "mul" || name == "shape_of" ||
            name == "shape_expr" || name == "reshape_dynamic" ||
-           name == "expand" || name == "squeeze" || name == "unsqueeze";
+           name == "expand_dynamic" || name == "squeeze" || name == "unsqueeze";
 }
 
 // M3 形状值算子：输出是物化受限表达式的 int64 行向量，其元素来源与输出

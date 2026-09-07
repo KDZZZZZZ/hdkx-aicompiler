@@ -493,7 +493,7 @@ public:
 };
 
 /*! \brief expand 的受限目标形状表达式属性。 */
-class ExpandAttrsNode : public BaseAttrsNode {
+class ExpandDynamicAttrsNode : public BaseAttrsNode {
 public:
     Array<int64_t> expr_kinds;
     Array<int64_t> expr_values;
@@ -501,11 +501,11 @@ public:
     void SerializeCanonical(CanonicalAttrWriter& writer) const override;
     KXC_DECLARE_ATTRS_NODE
 };
-class ExpandAttrs : public Attrs {
-    KXC_DECLARE_ATTRS_REF(ExpandAttrs, ExpandAttrsNode)
+class ExpandDynamicAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ExpandDynamicAttrs, ExpandDynamicAttrsNode)
 
 public:
-    static ExpandAttrs Create(Array<int64_t> expr_kinds,
+    static ExpandDynamicAttrs Create(Array<int64_t> expr_kinds,
                               Array<int64_t> expr_values,
                               Array<int64_t> expr_axes);
 };

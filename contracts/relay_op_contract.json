@@ -178,11 +178,11 @@
         "relay_to_te_symbol": "EqualCompute"
       }
     },
-    "expand": {
+    "expand_dynamic": {
       "schema_version": 1,
       "category": "tensor.transform",
       "num_inputs": 2,
-      "attrs": "ExpandAttrs",
+      "attrs": "ExpandDynamicAttrs",
       "output_arity": 1,
       "type_relation_key": "FInferType",
       "effect": "pure",

@@ -119,15 +119,15 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.lowering_key = "FRelayToTE";
         return spec;
     }
-    if (name == "expand") {
+    if (name == "expand_dynamic") {
         OperatorSpec spec;
-        spec.name = "expand";
+        spec.name = "expand_dynamic";
         spec.schema_version = 1;
         spec.category = "tensor.transform";
         spec.input_arity.num_inputs = 2;
         spec.input_arity.min_inputs = -1;
         spec.input_arity.max_inputs = -1;
-        spec.attrs_type_key = "ExpandAttrs";
+        spec.attrs_type_key = "ExpandDynamicAttrs";
         spec.output_arity = 1;
         spec.type_relation_key = "FInferType";
         spec.effect = OperatorEffectKind::kPure;
