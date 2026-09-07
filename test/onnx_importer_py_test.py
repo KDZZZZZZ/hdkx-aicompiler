@@ -1589,3 +1589,55 @@ def test_reshape_int64_overflow_is_rejected():
             [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1])],
             initializers=[helper.make_tensor("shape", TensorProto.INT64, [1], [-1])],
         ))
+
+
+# ---------------------------------------------------------------------------
+# M4/M5 wave: Neg / Sigmoid (fieldless float32 unary ops, opset >= 13 form).
+# ---------------------------------------------------------------------------
+
+
+def _unary_math_model(op, shape, *, dtype=TensorProto.FLOAT,
+                      output_dtype=TensorProto.FLOAT, output_shape=None, opset=17):
+    return _s1_model(
+        [helper.make_node(op, ["a"], ["out"], name=f"s1_{op.lower()}")],
+        [helper.make_tensor_value_info("a", dtype, shape)],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape or shape)],
+        opset=opset,
+    )
+
+
+@pytest.mark.parametrize("op,relay_op", [("Neg", "neg"), ("Sigmoid", "sigmoid")])
+def test_unary_math_maps_and_preserves_shape(op, relay_op):
+    imported = import_onnx_model(_unary_math_model(op, [2, 3]))
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        (relay_op, {}, ["a"]),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+def test_unary_math_rejects_pre_opset13(op):
+    with pytest.raises(UnsupportedONNXOpError, match="opset >= 13 form is required"):
+        import_onnx_model(_unary_math_model(op, [2], opset=12))
+
+
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+def test_unary_math_rejects_non_float32(op):
+    with pytest.raises(ValueError, match="requires float32 input in the M4/M5 static subset"):
+        import_onnx_model(_unary_math_model(op, [2], dtype=TensorProto.INT64))
+
+
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+def test_unary_math_rejects_attributes(op):
+    model = _unary_math_model(op, [2])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+def test_unary_math_rejects_declared_output_mismatch(op):
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_unary_math_model(op, [2, 3], output_shape=[2, 4]))

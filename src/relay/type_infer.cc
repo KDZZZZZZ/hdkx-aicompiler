@@ -272,6 +272,46 @@ Type EqualInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(BroadcastShape("equal", ShapeVector(lhs), ShapeVector(rhs)), "bool");
 }
 
+// M4/M5 静态子集共享：Neg/Sigmoid 是 float32-only 的 fieldless 一元算子，
+// shape 与 dtype 原样保持；其余 dtype 必须在类型推导处立即失败。
+Type UnaryFloat32InferType(const std::string& op_name, const Array<Type>& input_types) {
+    RequireArity(op_name, input_types, 1);
+    const auto* data = RequireTensor(op_name, input_types[0], "data");
+    if (data->dtype != "float32") {
+        throw std::runtime_error(op_name +
+                                 " requires float32 input in the M4/M5 static subset, got " +
+                                 data->dtype);
+    }
+    return input_types[0];
+}
+
+// 推导 neg 的 shape 保持类型；仅开放 M4/M5 静态子集声明的 float32。
+Type NegInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    return UnaryFloat32InferType("neg", input_types);
+}
+
+// 推导 sigmoid 的 shape 保持类型；仅开放 M4/M5 静态子集声明的 float32。
+Type SigmoidInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    return UnaryFloat32InferType("sigmoid", input_types);
+}
+
+// 推导 pow 的二元广播类型；M5 S2 子集只声明同 dtype float32 输入。
+Type PowInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    RequireArity("pow", input_types, 2);
+    const auto* lhs = RequireTensor("pow", input_types[0], "lhs");
+    const auto* rhs = RequireTensor("pow", input_types[1], "rhs");
+    RequireSameDType("pow", lhs, rhs);
+    if (lhs->dtype != "float32") {
+        throw std::runtime_error("pow requires same-dtype float32 inputs in the M4/M5 "
+                                 "static subset, got " +
+                                 lhs->dtype);
+    }
+    return MakeTensorType(BroadcastShape("pow", ShapeVector(lhs), ShapeVector(rhs)), "float32");
+}
+
 bool IsWhereBranchDType(const std::string& dtype) {
     return dtype == "float32" || dtype == "float64" || dtype == "int32" ||
            dtype == "int64" || dtype == "int8" || dtype == "uint8" || dtype == "bool";

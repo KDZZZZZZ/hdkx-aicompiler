@@ -306,6 +306,106 @@ void WriteSqrtFixture(const TemporaryDirectory& directory,
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+// M4/M5 fieldless float32 一元算子的 reifier 合同：合法 spec 重建为 shape 保持
+// 的 Relay 调用；attrs 非空、dtype 越界、输出声明失配都以节点名失败。
+void WriteUnaryMathFixture(const TemporaryDirectory& directory, const std::string& op_name,
+                           const std::string& dtype, const std::string& output_shape,
+                           const std::string& output_dtype = "float32",
+                           const std::string& attrs = R"json({})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": [2, 3], "dtype": ")json" + dtype + R"json("}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": ")json" +
+      output_dtype + R"json("}
+    ],
+    "nodes": [
+      {"name": "s1_neg", "op_name": ")json" + op_name + R"json(", "inputs": ["a"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+bool TestValidStaticUnaryMath() {
+    for (const std::string& op_name : {"neg", "sigmoid"}) {
+        TemporaryDirectory directory;
+        WriteUnaryMathFixture(directory, op_name, "float32", "[2, 3]");
+        const auto imported = kxc::frontend::LoadONNXImportSpec(
+            (directory.path() / "model.json").string(),
+            (directory.path() / "params.bin").string());
+        TEST_CHECK(imported.function.defined(),
+                   "valid static " + op_name + " import spec should reify");
+        TEST_CHECK(ShapeEquals(
+                       imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                       {2, 3}, "float32"),
+                   "reified " + op_name + " output should preserve shape and dtype");
+    }
+    return true;
+}
+
+bool TestUnaryMathAttrsAreStrict() {
+    for (const std::string& op_name : {"neg", "sigmoid"}) {
+        TemporaryDirectory directory;
+        WriteUnaryMathFixture(directory, op_name, "float32", "[2, 3]", "float32",
+                              R"json({"axis": 0})json");
+        std::string message;
+        TEST_CHECK(ThrowsWithMessage(
+                       [&] {
+                           kxc::frontend::LoadONNXImportSpec(
+                               (directory.path() / "model.json").string(),
+                               (directory.path() / "params.bin").string());
+                       },
+                       "s1_neg", &message),
+                   op_name + " reifier must reject noncanonical attrs with the node name");
+        TEST_CHECK(message.find("(" + op_name + ")") != std::string::npos,
+                   op_name + " attr diagnostics should name the canonical op");
+    }
+    return true;
+}
+
+bool TestUnaryMathNonFloat32InputsAreRejected() {
+    for (const std::string& dtype : {"int64", "float64"}) {
+        for (const std::string& op_name : {"neg", "sigmoid"}) {
+            TemporaryDirectory directory;
+            WriteUnaryMathFixture(directory, op_name, dtype, "[2, 3]", dtype);
+            std::string message;
+            TEST_CHECK(ThrowsWithMessage(
+                           [&] {
+                               kxc::frontend::LoadONNXImportSpec(
+                                   (directory.path() / "model.json").string(),
+                                   (directory.path() / "params.bin").string());
+                           },
+                           "s1_neg", &message),
+                       op_name + " reifier must reject dtypes outside the M4/M5 float32 subset");
+            TEST_CHECK(message.find("M4/M5 static subset") != std::string::npos,
+                       op_name + " dtype diagnostic should name the subset");
+        }
+    }
+    return true;
+}
+
+bool TestUnaryMathDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteUnaryMathFixture(directory, "neg", "float32", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s1_neg", &message),
+               "declared neg output shape must match the inferred output");
+    return true;
+}
+
 bool TestValidStaticArithmetic() {
     for (const std::string& op_name : {"mul", "subtract", "divide"}) {
         TemporaryDirectory directory;
@@ -1194,6 +1294,10 @@ int main() {
         {"valid_static_layer_norm", TestValidStaticLayerNorm},
         {"layer_norm_declared_output_mismatch", TestLayerNormDeclaredOutputMismatchIsRejected},
         {"layer_norm_unsupported_attrs", TestLayerNormUnsupportedAttrsAreRejected},
+        {"valid_static_unary_math", TestValidStaticUnaryMath},
+        {"unary_math_attrs_are_strict", TestUnaryMathAttrsAreStrict},
+        {"unary_math_non_float32_inputs_rejected", TestUnaryMathNonFloat32InputsAreRejected},
+        {"unary_math_declared_output_mismatch", TestUnaryMathDeclaredOutputMismatchIsRejected},
         {"valid_static_arithmetic", TestValidStaticArithmetic},
         {"arithmetic_attrs_are_strict", TestArithmeticAttrsAreStrict},
         {"arithmetic_non_float32_inputs_rejected", TestArithmeticNonFloat32InputsAreRejected},

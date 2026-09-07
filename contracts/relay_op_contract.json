@@ -214,6 +214,36 @@
         "Mul"
       ]
     },
+    "neg": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Neg"
+      ],
+      "registration": {
+        "description": "Element-wise negation on float32.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor."
+          }
+        ],
+        "type_infer_symbol": "NegInferType",
+        "relay_to_te_symbol": "NegCompute"
+      }
+    },
     "nn_avg_pool2d": {
       "schema_version": 1,
       "category": "nn",
@@ -409,6 +439,36 @@
       "onnx_ops": [
         "Reshape"
       ]
+    },
+    "sigmoid": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Sigmoid"
+      ],
+      "registration": {
+        "description": "Element-wise logistic sigmoid 1/(1+exp(-x)) on float32.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor."
+          }
+        ],
+        "type_infer_symbol": "SigmoidInferType",
+        "relay_to_te_symbol": "SigmoidCompute"
+      }
     },
     "slice": {
       "schema_version": 1,

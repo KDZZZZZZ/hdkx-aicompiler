@@ -933,6 +933,61 @@ bool TestEqualInferAndLoweringContract() {
     return true;
 }
 
+// M4/M5 fieldless float32 一元算子（Neg/Sigmoid）的类型、FFI 与 lowering 合同：
+// shape/dtype 保持、float32-only、错误 arity 与 lowering 前拒绝。
+bool TestUnaryFloat32InferAndLoweringContract() {
+    for (const std::string& op_name : {"neg", "sigmoid"}) {
+        const kxc::relay::Op& op = kxc::relay::Op::Get(op_name);
+        kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
+        kxc::Call call(op, {data});
+        kxc::Function func({data}, call);
+        kxc::relay::InferTypePass(func);
+        TEST_CHECK(call.checked_type().As<kxc::TensorTypeNode>() &&
+                       CheckTensor(call.checked_type(), {2, 3}, "float32"),
+                   op_name + " must preserve the input shape and float32 dtype");
+        TEST_CHECK(op.spec().lowering_key == "FRelayToTE" &&
+                       op->arguments.size() == 1 && op->arguments[0].name == "data",
+                   op_name + " generated schema must expose the data argument");
+
+        const kxc::PackedFunc make_op =
+            kxc::Registry::Global().Get("kxc.relay.op._make." + op_name);
+        TEST_CHECK(make_op.defined(), op_name + " must retain its canonical FFI binding");
+        const kxc::Call ffi_call = kxc::CastTo<kxc::Call>(make_op(data));
+        TEST_CHECK(ffi_call->args.size() == 1 && ffi_call->args[0].get() == data.get() &&
+                       !ffi_call->attrs.defined(),
+                   op_name + " FFI must preserve the argument and fieldless attrs");
+        TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
+                   op_name + " must lower through FRelayToTE");
+        TEST_CHECK(LowerUnits(func).size() == 1,
+                   "one " + op_name + " Relay Call must produce one lowering unit");
+
+        kxc::Var int64_data("int64_data", kxc::TensorType({2, 3}, "int64"));
+        kxc::Var float64_data("float64_data", kxc::TensorType({2, 3}, "float64"));
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(
+                           kxc::Function({int64_data},
+                                         kxc::Call(op, {int64_data})));
+                   }),
+                   op_name + " must reject int64 outside the M4/M5 float32 subset");
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(
+                           kxc::Function({float64_data},
+                                         kxc::Call(op, {float64_data})));
+                   }),
+                   op_name + " must reject float64 outside the M4/M5 float32 subset");
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(kxc::Function({}, kxc::Call(op, {})));
+                   }),
+                   op_name + " must reject a missing input before lowering");
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(kxc::Function(
+                           {data, int64_data}, kxc::Call(op, {data, int64_data})));
+                   }),
+                   op_name + " must reject two inputs before lowering");
+    }
+    return true;
+}
+
 bool TestLayerNormInferAndLoweringContract() {
     kxc::Var data("data", kxc::TensorType({2, 3, 4}, "float32"));
     kxc::Var scale("scale", kxc::TensorType({3, 4}, "float32"));
@@ -1312,6 +1367,8 @@ int main() {
         {"slice_infer_and_lowering_contract", TestSliceInferAndLoweringContract},
         {"where_infer_and_lowering_contract", TestWhereInferAndLoweringContract},
         {"equal_infer_and_lowering_contract", TestEqualInferAndLoweringContract},
+        {"unary_float32_infer_and_lowering_contract",
+         TestUnaryFloat32InferAndLoweringContract},
         {"layer_norm_infer_and_lowering_contract", TestLayerNormInferAndLoweringContract},
         {"exact_transformer_operator_slice", TestExactTransformerOperatorSliceComposition},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},

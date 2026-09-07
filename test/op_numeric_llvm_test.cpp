@@ -662,6 +662,41 @@ void TestEqual() {
     Check(empty_out.empty(), "equal on empty tensors must produce an empty bool buffer");
 }
 
+// 验证 Neg 在 float32 上的 LLVM 数值结果。实现采用既有 TE negative（0 - x）：
+// 非零值与 ±inf 精确取反；-0.0 输入得 +0.0（与严格符号位取反一致），仅 +0.0
+// 输入会得到 +0.0 而非 -0.0（0-x 的 IEEE 语义），边界在算子注释中声明。
+void TestNeg() {
+    kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("neg"), {x});
+    kxc::Function func({x}, call);
+
+    const std::vector<float> x_data = {1.5f, -2.25f, 0.25f, -7.0f, 100.0f, -0.75f};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("neg", func, {Input(x_data), Output(out)});
+    ExpectNear(out, {-1.5f, 2.25f, -0.25f, 7.0f, -100.0f, 0.75f}, 0.0f);
+}
+
+// 验证 Sigmoid 在 float32 上的 LLVM 数值结果。选定语义：1/(1+exp(-x))
+// （TE sigmoid_expr 直接调用 exp），与独立 double 参考在测试点对齐到 1e-5。
+void TestSigmoid() {
+    kxc::Var x("x", kxc::TensorType({6}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("sigmoid"), {x});
+    kxc::Function func({x}, call);
+
+    const std::vector<float> x_data = {-3.0f, -0.5f, 0.0f, 0.5f, 3.0f, 8.0f};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("sigmoid", func, {Input(x_data), Output(out)});
+    std::vector<float> expected(6, 0.0f);
+    for (size_t i = 0; i < x_data.size(); ++i) {
+        const double value = 1.0 / (1.0 + std::exp(-static_cast<double>(x_data[i])));
+        expected[i] = static_cast<float>(value);
+    }
+    ExpectNear(out, expected, 1e-5f);
+    // 饱和区行为：大正值单调趋于 1，大负值单调趋于 0，且保持有限。
+    Check(out[5] > 0.999f && out[4] > 0.95f && out[0] < 0.05f,
+          "sigmoid saturation behavior mismatch");
+}
+
 // 验证 Equal 的 bool 结果直接作为 Where 条件的真实 buffer 消费链。
 void TestEqualWhereComposition() {
     kxc::Var a("a", kxc::TensorType({2, 3}, "float32"));
@@ -1038,6 +1073,8 @@ int main() {
         {"gather", TestGather},
         {"where", TestWhere},
         {"equal", TestEqual},
+        {"neg", TestNeg},
+        {"sigmoid", TestSigmoid},
         {"equal_where_composition", TestEqualWhereComposition},
         {"nn_layer_norm", TestLayerNorm},
         {"cast", TestCast},

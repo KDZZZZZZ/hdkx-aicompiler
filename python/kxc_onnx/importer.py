@@ -41,6 +41,10 @@ RELAY_CAST_DTYPE_CODES = {
 }
 # S1 Cast subset: only the conversions the target models need are opened.
 CAST_SUPPORTED_CONVERSIONS = {("int32", "float32"), ("int64", "float32")}
+# M4/M5 subset: Neg/Sigmoid are fieldless float32 unary ops, Pow a fieldless
+# float32 binary broadcast op. The multidirectional-broadcast input form
+# (opset >= 13) is the declared ONNX boundary for all of them.
+M4M5_MATH_MIN_OPSET = 13
 # ONNX TensorProto dtype enum values accepted by the Cast boundary.
 ONNX_CAST_DTYPE_NAMES = {
     TensorProto.FLOAT: "float32",
@@ -88,6 +92,8 @@ ONNX_TO_RELAY = {
     "Cast": "cast",
     "ReduceMean": "reduce_mean",
     "Reshape": "reshape",
+    "Neg": "neg",
+    "Sigmoid": "sigmoid",
 }
 
 
@@ -305,6 +311,11 @@ def import_onnx_model(
             inferred_static_specs[node.output[0]] = _infer_equal_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
+            )
+        if node.op_type in {"Neg", "Sigmoid"}:
+            inferred_static_specs[node.output[0]] = _infer_unary_math_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
             )
 
         missing = [name for name in node.input if name and name not in available_values]
@@ -1243,6 +1254,43 @@ def _infer_equal_spec(
     return result
 
 
+def _infer_unary_math_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    """Infer the static output of the fieldless float32 unary M4/M5 ops (Neg, Sigmoid).
+
+    Both ops keep shape and dtype: one float32 input, one float32 output, no
+    attributes. The multidirectional-broadcast input form (opset >= 13) is the
+    declared boundary; earlier opsets are rejected with the node name.
+    """
+    op_type = node.op_type
+    node_name = node.name or "<unnamed>"
+    if opset_version < M4M5_MATH_MIN_OPSET:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX {op_type} opset {opset_version} in node "
+            f"'{node_name}': the opset >= {M4M5_MATH_MIN_OPSET} form is required"
+        )
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(f"{op_type} node '{node_name}' requires exactly one non-empty input")
+    data = _resolve_static_input(op_type, node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    if data.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"{op_type} node '{node_name}' requires float32 input in the M4/M5 static "
+            f"subset; got {data.dtype}"
+        )
+    result = TensorSpec(name=node.output[0], shape=list(data.shape), dtype="float32")
+    _validate_declared_output(op_type, node_name, result, output_declarations, default_batch)
+    return result
+
+
 def _tensor_spec_from_value_info(
     value_info: onnx.ValueInfoProto, default_batch: int | None
 ) -> TensorSpec:
@@ -1427,6 +1475,12 @@ def _convert_attrs(
             )
         return {}
     if node.op_type in {"Mul", "Sub", "Div", "Sqrt"}:
+        if attrs:
+            raise ValueError(
+                f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
+            )
+        return {}
+    if node.op_type in {"Neg", "Sigmoid"}:
         if attrs:
             raise ValueError(
                 f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"

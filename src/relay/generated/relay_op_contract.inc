@@ -155,6 +155,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.lowering_key = "FRelayToTE";
         return spec;
     }
+    if (name == "neg") {
+        OperatorSpec spec;
+        spec.name = "neg";
+        spec.schema_version = 1;
+        spec.category = "tensor.math";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
     if (name == "nn_avg_pool2d") {
         OperatorSpec spec;
         spec.name = "nn_avg_pool2d";
@@ -344,6 +362,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.input_arity.min_inputs = -1;
         spec.input_arity.max_inputs = -1;
         spec.attrs_type_key = "ReshapeAttrs";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
+    if (name == "sigmoid") {
+        OperatorSpec spec;
+        spec.name = "sigmoid";
+        spec.schema_version = 1;
+        spec.category = "tensor.math";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "";
         spec.output_arity = 1;
         spec.type_relation_key = "FInferType";
         spec.effect = OperatorEffectKind::kPure;

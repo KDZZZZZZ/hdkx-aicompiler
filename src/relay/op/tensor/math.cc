@@ -106,6 +106,31 @@ te::Tensor EqualCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     return RequireDefined("equal", te::topi::equal(inputs[0], inputs[1], "T_equal"));
 }
 
+te::Tensor NegCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                      const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("neg", inputs, 1);
+    const auto* output = RequireTensorOutput("neg", out_type);
+    if (inputs[0]->dtype != kxc::tir::DataType::Float(32) ||
+        output->dtype != "float32") {
+        throw std::runtime_error("neg supports only float32 input and output before lowering");
+    }
+    return RequireDefined("neg", te::topi::negative(inputs[0], "T_neg"));
+}
+
+te::Tensor SigmoidCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                          const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("sigmoid", inputs, 1);
+    const auto* output = RequireTensorOutput("sigmoid", out_type);
+    if (inputs[0]->dtype != kxc::tir::DataType::Float(32) ||
+        output->dtype != "float32") {
+        throw std::runtime_error(
+            "sigmoid supports only float32 input and output before lowering");
+    }
+    return RequireDefined("sigmoid", te::topi::sigmoid(inputs[0], "T_sigmoid"));
+}
+
 te::Tensor WhereCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                         const kxc::Type& out_type) {
     if (attrs.defined()) {

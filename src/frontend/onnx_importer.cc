@@ -463,6 +463,14 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
         }
         return ObjectRef();
     }
+    if (op_name == "neg" || op_name == "sigmoid") {
+        // ONNX Neg/Sigmoid 是 fieldless 一元算子：一输入一输出、无属性。
+        if (!attrs.o.empty()) {
+            throw std::runtime_error("Node '" + node_name + "' (" + op_name +
+                                     ") import attrs must be empty");
+        }
+        return ObjectRef();
+    }
     if (op_name == "cast") {
         const std::string ctx = "cast attrs";
         if (attrs.o.size() != 1 || !OptionalField(attrs, "to")) {
@@ -603,6 +611,22 @@ void ValidateFloat32Inputs(const std::string& op_name, const Array<Expr>& args,
         if (!type || type->dtype != "float32") {
             throw std::runtime_error(
                 op_name + " import requires float32 inputs in the static S1 subset: " +
+                node_name);
+        }
+    }
+}
+
+// M4/M5 Neg/Sigmoid/Pow 只开放 float32：手写 spec 不能依赖 Python 已校验的假设，
+// dtype 越界必须携带节点名失败。
+void ValidateFloat32MathInputs(const std::string& op_name, const Array<Expr>& args,
+                               const Array<Var>& function_params,
+                               const std::string& node_name) {
+    InferArgTypes(args, function_params);
+    for (size_t i = 0; i < args.size(); ++i) {
+        const auto* type = args[i].checked_type().As<TensorTypeNode>();
+        if (!type || type->dtype != "float32") {
+            throw std::runtime_error(
+                op_name + " import requires float32 input(s) in the M4/M5 static subset: " +
                 node_name);
         }
     }
@@ -876,6 +900,9 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         if (op_name == "mul" || op_name == "subtract" || op_name == "divide" ||
             op_name == "sqrt") {
             ValidateFloat32Inputs(op_name, args, function_params, node_name);
+        }
+        if (op_name == "neg" || op_name == "sigmoid") {
+            ValidateFloat32MathInputs(op_name, args, function_params, node_name);
         }
         if (op_name == "equal") {
             ValidateEqualSubset(args, function_params, node_name);
