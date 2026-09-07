@@ -1796,3 +1796,86 @@ def test_expand_rejects_incompatible_contract(data_shape, target, message):
 def test_expand_rejects_declared_output_mismatch():
     with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
         import_onnx_model(_expand_model([2, 1], [2, 3], output_shape=[2, 4]))
+
+
+# ---------------------------------------------------------------------------
+# M4 S2: Unsqueeze normalized to the existing reshape (no new canonical op).
+# ---------------------------------------------------------------------------
+
+
+def _unsqueeze_model(data_shape, axes, *, dtype=TensorProto.FLOAT,
+                     output_shape=None, opset=17):
+    return _s1_model(
+        [helper.make_node("Unsqueeze", ["a", "axes"], ["out"], name="s2_unsqueeze")],
+        [helper.make_tensor_value_info("a", dtype, data_shape)],
+        [helper.make_tensor_value_info("out", dtype, output_shape or [])],
+        initializers=[helper.make_tensor("axes", TensorProto.INT64, [len(axes)],
+                                         list(axes))],
+        opset=opset,
+    )
+
+
+@pytest.mark.parametrize(
+    ("data_shape", "axes", "expected"),
+    [
+        ([2, 3], [0], [1, 2, 3]),
+        ([2, 3], [-1], [2, 3, 1]),
+        ([3], [0, 2], [1, 3, 1]),
+        ([2, 3, 4], [-5, 2], [1, 2, 1, 3, 4]),
+    ],
+)
+def test_unsqueeze_normalizes_to_reshape(data_shape, axes, expected):
+    imported = import_onnx_model(_unsqueeze_model(data_shape, axes, output_shape=expected))
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        ("reshape", {"newshape": expected, "allowzero": 0}, ["a"]),
+    ]
+    assert imported.function.outputs[0].shape == expected
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_unsqueeze_rejects_pre_opset13():
+    with pytest.raises(UnsupportedONNXOpError,
+                       match="axes-input opset >= 13 form is required"):
+        import_onnx_model(_unsqueeze_model([2, 3], [0], output_shape=[1, 2, 3], opset=12))
+
+
+def test_unsqueeze_rejects_dynamic_axes_input():
+    graph = _s1_model(
+        [helper.make_node("Unsqueeze", ["a", "dyn_axes"], ["out"], name="s2_unsqueeze")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3]),
+         helper.make_tensor_value_info("dyn_axes", TensorProto.INT64, [1])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 3])],
+    )
+    with pytest.raises(ValueError, match="must be a static initializer or Constant node output"):
+        import_onnx_model(graph)
+
+
+def test_unsqueeze_rejects_duplicate_axes():
+    with pytest.raises(ValueError, match="axes must be unique after normalization"):
+        import_onnx_model(_unsqueeze_model([3], [0, -3], output_shape=[1, 1, 3]))
+
+
+def test_unsqueeze_rejects_out_of_range_axis():
+    with pytest.raises(ValueError, match="axis 3 is out of range for output rank 2"):
+        import_onnx_model(_unsqueeze_model([2], [3], output_shape=[1, 2]))
+
+
+def test_unsqueeze_rejects_non_int64_and_attributes():
+    graph = _s1_model(
+        [helper.make_node("Unsqueeze", ["a", "axes"], ["out"], name="s2_unsqueeze")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 3])],
+        initializers=[helper.make_tensor("axes", TensorProto.INT32, [1], [0])],
+    )
+    with pytest.raises(ValueError, match="must be int64"):
+        import_onnx_model(graph)
+    model = _unsqueeze_model([2, 3], [0], output_shape=[1, 2, 3])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+def test_unsqueeze_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_unsqueeze_model([2, 3], [0], output_shape=[2, 3, 1]))

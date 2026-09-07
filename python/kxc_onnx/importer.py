@@ -96,6 +96,7 @@ ONNX_TO_RELAY = {
     "Sigmoid": "sigmoid",
     "Pow": "pow",
     "Expand": "expand",
+    "Unsqueeze": "reshape",
 }
 
 
@@ -329,6 +330,11 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch, opset_version,
             )
+        if node.op_type == "Unsqueeze":
+            inferred_static_specs[node.output[0]] = _infer_unsqueeze_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
+            )
 
         missing = [name for name in node.input if name and name not in available_values]
         if missing:
@@ -336,7 +342,8 @@ def import_onnx_model(
                 f"ONNX node '{node.name or node.op_type}' has missing input(s): {missing}"
             )
 
-        relay_inputs = ([node.input[0]] if node.op_type in {"Slice", "Reshape", "Expand"}
+        relay_inputs = ([node.input[0]]
+                        if node.op_type in {"Slice", "Reshape", "Expand", "Unsqueeze"}
                         else [name for name in node.input if name])
         relay_outputs = ([node.output[0]] if node.op_type == "LayerNormalization"
                          else [name for name in node.output])
@@ -1456,6 +1463,82 @@ def _infer_expand_spec(
     return result
 
 
+def _unsqueeze_attrs(
+    node: onnx.NodeProto, params: dict[str, ParamTensor], data_shape: list[int]
+) -> dict[str, Any]:
+    """Normalize an Unsqueeze-13 constant axes input into reshape canonical attrs.
+
+    The M4 S2 decision: with known axes and a provable output rank, Unsqueeze is
+    exactly a reshape (element count is unchanged; only 1s are inserted), so no
+    new canonical op is introduced. Axes must come from an initializer/Constant,
+    be unique after negative-axis normalization, and stay inside the output rank
+    ``rank(data) + len(axes)``; duplicates and out-of-range axes are rejected.
+    """
+    node_name = node.name or "<unnamed>"
+    if _attrs_by_name(node):
+        raise ValueError(f"Unsqueeze node '{node_name}' does not support attributes")
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Unsqueeze node '{node_name}' requires exactly two non-empty inputs "
+            "(data and axes)"
+        )
+    if any(dim < 0 for dim in data_shape):
+        raise ValueError(
+            f"Unsqueeze node '{node_name}' requires non-negative static data dimensions"
+        )
+    axes = _int64_constant_vector("Unsqueeze", node_name, node.input[1], params)
+    rank_out = len(data_shape) + len(axes)
+    normalized: list[int] = []
+    for axis in axes:
+        resolved = axis + rank_out if axis < 0 else axis
+        if resolved < 0 or resolved >= rank_out:
+            raise ValueError(
+                f"Unsqueeze node '{node_name}' axis {axis} is out of range for "
+                f"output rank {rank_out}"
+            )
+        if resolved in normalized:
+            raise ValueError(
+                f"Unsqueeze node '{node_name}' axes must be unique after "
+                f"normalization; duplicate axis {resolved}"
+            )
+        normalized.append(resolved)
+    newshape = list(data_shape)
+    for axis in sorted(normalized):
+        newshape.insert(axis, 1)
+    return {"newshape": newshape, "allowzero": 0}
+
+
+def _infer_unsqueeze_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    """Infer the static output of an Unsqueeze-13 node normalized to reshape."""
+    node_name = node.name or "<unnamed>"
+    if opset_version < M4M5_MATH_MIN_OPSET:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX Unsqueeze opset {opset_version} in node "
+            f"'{node_name}': the axes-input opset >= {M4M5_MATH_MIN_OPSET} form "
+            "is required"
+        )
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Unsqueeze node '{node_name}' requires exactly two non-empty inputs"
+        )
+    data = _resolve_static_input("Unsqueeze", node_name, node.input[0], input_specs,
+                                 params, inferred_specs, value_info_by_name, default_batch)
+    attrs = _unsqueeze_attrs(node, params, data.shape)
+    result = TensorSpec(name=node.output[0], shape=attrs["newshape"], dtype=data.dtype)
+    _validate_declared_output("Unsqueeze", node_name, result, output_declarations,
+                              default_batch)
+    return result
+
+
 def _tensor_spec_from_value_info(
     value_info: onnx.ValueInfoProto, default_batch: int | None
 ) -> TensorSpec:
@@ -1663,6 +1746,11 @@ def _convert_attrs(
         return _reshape_attrs(node, params, data.shape)
     if node.op_type == "Expand":
         return _expand_attrs(node, params)
+    if node.op_type == "Unsqueeze":
+        data = _resolve_static_input("Unsqueeze", node.name or "<unnamed>", node.input[0],
+                                     input_specs, params, inferred_specs,
+                                     value_info_by_name, None)
+        return _unsqueeze_attrs(node, params, data.shape)
     if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
         return {}
     raise UnsupportedONNXOpError(

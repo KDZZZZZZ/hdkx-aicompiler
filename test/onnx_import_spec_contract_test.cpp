@@ -391,6 +391,64 @@ void WriteExpandFixture(const TemporaryDirectory& directory,
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+// M4 S2 Unsqueeze 规范化的 C++ 侧证据：规范化产物是 reshape 节点（无新算子
+// 表面），reifier 沿既有 reshape 合同校验；手写非法 spec 的失配诊断仍能通过
+// producer 节点名定位到规范化的 Unsqueeze 节点。
+void WriteUnsqueezeNormalizedFixture(const TemporaryDirectory& directory,
+                                     const std::string& newshape,
+                                     const std::string& output_shape) {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": [2, 4], "dtype": "float32"}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "s2_unsqueeze", "op_name": "reshape", "inputs": ["a"], "outputs": ["out"],
+       "attrs": {"newshape": )json" + newshape + R"json(, "allowzero": 0}}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+bool TestUnsqueezeNormalizationReifier() {
+    // 合法规范化：Unsqueeze([2,4], axes=[0]) → reshape [1,2,4]。
+    TemporaryDirectory directory;
+    WriteUnsqueezeNormalizedFixture(directory, "[1, 2, 4]", "[1, 2, 4]");
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(),
+               "a valid Unsqueeze-normalized reshape spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {1, 2, 4}, "float32"),
+               "the normalized reshape output should carry the proven target shape");
+
+    // 手写非法 spec：newshape 与声明的规范化输出不一致（元素数相同但 shape
+    // 不同）→ 输出契约失配，诊断含 producer 节点名。
+    TemporaryDirectory bad_directory;
+    WriteUnsqueezeNormalizedFixture(bad_directory, "[4, 2]", "[1, 2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (bad_directory.path() / "model.json").string(),
+                           (bad_directory.path() / "params.bin").string());
+                   },
+                   "s2_unsqueeze", &message),
+               "a hand-written normalized-reshape spec must fail with the node name");
+    TEST_CHECK(message.find("output contract mismatch for 'out'") != std::string::npos,
+               "the normalized-reshape diagnostic should name the output value");
+    return true;
+}
+
 bool TestValidStaticExpand() {
     TemporaryDirectory directory;
     WriteExpandFixture(directory, "[2, 1]", "[2, 3]", "[2, 3]");
@@ -1529,6 +1587,7 @@ int main() {
         {"valid_static_layer_norm", TestValidStaticLayerNorm},
         {"layer_norm_declared_output_mismatch", TestLayerNormDeclaredOutputMismatchIsRejected},
         {"layer_norm_unsupported_attrs", TestLayerNormUnsupportedAttrsAreRejected},
+        {"unsqueeze_normalization_reifier", TestUnsqueezeNormalizationReifier},
         {"valid_static_expand", TestValidStaticExpand},
         {"expand_attrs_are_strict", TestExpandAttrsAreStrict},
         {"expand_negative_target_dimension_rejected",
