@@ -187,7 +187,7 @@ bool ContractAssemblyAndExpressionLimits() {
     ModuleInputContract second{{{0,1,8,1,std::nullopt,ModuleAxisReference{0,0}}}};
     ModuleTensorContract out; out.max_bytes=64; out.logical={ModuleShapeExpr::Const(1)}; out.physical=out.logical; out.valid=out.logical;
     const auto canonical=ModuleInvocationContract({first,second},{out},{}).CanonicalBytes();
-    CHECK(ModuleInvocationContract({first,second},{out},{}).abi_version()==2 && canonical.rfind("KXC_MODULE_INVOKE_V2;",0)==0);
+    CHECK(ModuleInvocationContract({first,second},{out},{}).abi_version()==3 && canonical.rfind("KXC_MODULE_INVOKE_V3;",0)==0);
     CHECK(canonical==ModuleInvocationContract({first,second},{out},{}).CanonicalBytes());
     auto altered=out; altered.logical={ModuleShapeExpr::Const(2)}; altered.physical=altered.logical; altered.valid=altered.logical;
     CHECK(canonical!=ModuleInvocationContract({first,second},{altered},{}).CanonicalBytes());

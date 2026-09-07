@@ -125,6 +125,59 @@ void ValidateDynamicInvocationOutputs(
     }
 }
 
+/*! \brief One state's in-place append producer and its declared tokens input. */
+struct StatefulAppendBinding final {
+    size_t append_call_index{0};
+    int64_t tokens_value_id{-1};
+};
+
+StatefulAppendBinding ResolveStatefulAppend(
+    const ExecutablePlan& plan,
+    const std::unordered_map<int64_t, ValueSpec>& values, int64_t state_id) {
+    int64_t alias_value_id = -1;
+    for (const auto& value : plan.values()) {
+        if (value->alias_source_value_id == state_id) {
+            alias_value_id = value->value_id;
+            break;
+        }
+    }
+    if (alias_value_id == -1) {
+        throw std::logic_error("RuntimeSession stateful state has no append alias");
+    }
+    for (size_t call_index = 0; call_index < plan.calls().size(); ++call_index) {
+        const KernelCall& call = plan.calls()[call_index];
+        bool produces_alias = false;
+        for (int64_t output_id : call.output_value_ids()) {
+            produces_alias = produces_alias || output_id == alias_value_id;
+        }
+        if (!produces_alias) continue;
+        int64_t tokens_value_id = -1;
+        bool consumes_state = false;
+        bool consumes_count = false;
+        for (int64_t input_id : call.input_value_ids()) {
+            const ValueSpec& input =
+                FindValue(values, input_id, "RuntimeSession stateful append");
+            if (input->is_constant) continue;
+            if (input_id == state_id) {
+                consumes_state = true;
+            } else if (input_id == plan.state_count_input_value_id()) {
+                consumes_count = true;
+            } else if (tokens_value_id == -1) {
+                tokens_value_id = input_id;
+            } else {
+                throw std::logic_error(
+                    "RuntimeSession stateful append consumes multiple token tensors");
+            }
+        }
+        if (!consumes_state || !consumes_count || tokens_value_id == -1) {
+            throw std::logic_error(
+                "RuntimeSession stateful append does not consume state, tokens, and count");
+        }
+        return StatefulAppendBinding{call_index, tokens_value_id};
+    }
+    throw std::logic_error("RuntimeSession stateful append producer disappeared");
+}
+
 ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
                                             const ExecutablePlan& plan) {
     if (!module.defined() || !module.IsReady()) {
@@ -137,10 +190,11 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
     plan.Validate();
     const bool dynamic =
         plan.mode() == ExecutablePlanMode::kDynamicFreshOutputV1;
+    const bool stateful = plan.mode() == ExecutablePlanMode::kDynamicStatefulV1;
 #if !KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
-    if (dynamic) {
+    if (dynamic || stateful) {
         throw std::invalid_argument(
-            "RuntimeSession dynamic fresh-output mode requires "
+            "RuntimeSession dynamic modes require "
             "KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON");
     }
 #endif
@@ -201,6 +255,30 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
                     context + " has no dynamic invocation contract");
             }
             ValidateDynamicInvocationOutputs(contract, context);
+        } else if (stateful) {
+            if (metadata->backend != codegen::CodeGenBackend::kLLVM ||
+                metadata->device != Device::CPU()) {
+                throw std::invalid_argument(
+                    context + " dynamic stateful mode supports CPU/LLVM only");
+            }
+            if (contract.IsConstantShape(signature)) {
+                throw std::invalid_argument(
+                    context + " has no dynamic stateful invocation contract");
+            }
+            const auto& extent_scalars = contract.runtime_extent_scalars();
+            if (extent_scalars.empty()) {
+                throw std::invalid_argument(
+                    context + " must declare state-sourced runtime extents");
+            }
+            for (const auto& scalar : extent_scalars) {
+                if (scalar.source !=
+                    api::ModuleRuntimeExtentScalar::Source::kStateExtent) {
+                    throw std::invalid_argument(
+                        context +
+                        " dynamic stateful mode binds state-sourced runtime extents only");
+                }
+            }
+            ValidateDynamicInvocationOutputs(contract, context);
         } else if (!contract.IsConstantShape(signature) ||
                    !contract.runtime_extent_scalars().empty()) {
             throw std::invalid_argument(
@@ -231,7 +309,7 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
                     value_id = regular_inputs[regular_index++];
                     break;
                 case codegen::KernelArgRole::kRuntimeExtent:
-                    if (!dynamic) {
+                    if (!dynamic && !stateful) {
                         throw std::invalid_argument(
                             context + " cannot bind a generated runtime extent");
                     }
@@ -293,6 +371,73 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
     if (call_symbols != expected_symbols) {
         throw std::invalid_argument(
             "RuntimeSession plan and module symbols are not identical");
+    }
+
+    if (stateful) {
+        const Array<int64_t> input_ids = plan.input_value_ids();
+        const std::vector<std::vector<int64_t>> bindings =
+            plan.state_extent_bindings();
+        // v1 stateful contract fixes the state/tokens dtype to float32.
+        for (int64_t state_id : plan.state_value_ids()) {
+            const ValueSpec& spec =
+                FindValue(values, state_id, "RuntimeSession stateful state");
+            if (spec->dtype.code != kDLFloat || spec->dtype.bits != 32 ||
+                spec->dtype.lanes != 1) {
+                throw std::invalid_argument(
+                    "dynamic stateful v1 requires float32 states");
+            }
+        }
+        for (size_t call_index = 0; call_index < calls.size(); ++call_index) {
+            const codegen::KernelSignature& signature =
+                module.signature(calls[call_index]->symbol);
+            size_t extent_args = 0;
+            for (const auto& argument : signature.arguments()) {
+                if (argument->role == codegen::KernelArgRole::kRuntimeExtent) {
+                    ++extent_args;
+                }
+            }
+            if (extent_args != bindings[call_index].size()) {
+                throw std::invalid_argument(
+                    "RuntimeSession stateful extent bindings do not match call[" +
+                    std::to_string(call_index) + "] runtime extent ABI");
+            }
+        }
+        for (int64_t state_id : plan.state_value_ids()) {
+            const ValueSpec& state =
+                FindValue(values, state_id, "RuntimeSession stateful state");
+            const StatefulAppendBinding append =
+                ResolveStatefulAppend(plan, values, state_id);
+            const ValueSpec& tokens = FindValue(values, append.tokens_value_id,
+                                                "RuntimeSession stateful tokens");
+            const Array<int64_t> state_shape = state.shape();
+            const Array<int64_t> tokens_shape = tokens.shape();
+            if (tokens->dtype.code != kDLFloat || tokens->dtype.bits != 32 ||
+                tokens->dtype.lanes != 1 || tokens->device != state->device ||
+                tokens_shape.size() != state_shape.size()) {
+                throw std::invalid_argument(
+                    "RuntimeSession stateful tokens tensor must match the state layout");
+            }
+            const int64_t axis = state->state_extent_axis;
+            for (int64_t dim = 0; dim < axis; ++dim) {
+                if (tokens_shape[dim] != state_shape[dim]) {
+                    throw std::invalid_argument(
+                        "RuntimeSession stateful tokens tensor differs from the "
+                        "state layout before the extent axis");
+                }
+            }
+            if (tokens_shape[axis] < 1 ||
+                tokens_shape[axis] > state_shape[axis]) {
+                throw std::invalid_argument(
+                    "RuntimeSession stateful tokens extent must fit the state capacity");
+            }
+            for (size_t dim = axis + 1; dim < state_shape.size(); ++dim) {
+                if (tokens_shape[dim] != state_shape[dim]) {
+                    throw std::invalid_argument(
+                        "RuntimeSession stateful tokens tensor differs from the "
+                        "state layout after the extent axis");
+                }
+            }
+        }
     }
 
     const Array<int64_t> constant_ids = plan.constant_value_ids();
@@ -368,14 +513,29 @@ void ValidateStoredSession(const RuntimeSessionNode& node) {
 AsyncOperation InvokeOrderedModuleEntry(const api::CompiledModule& module,
                                         const String& symbol,
                                         const Array<NDArray>& ordered,
-                                        const DeviceStream& stream) {
+                                        const DeviceStream& stream,
+                                        const std::vector<uint64_t>* state_extents = nullptr) {
     const codegen::KernelSignature module_signature = module.signature(symbol);
     const api::ModuleInvocationContract& contract =
         api::internal::BorrowCompiledModuleInvocationContract(module, symbol);
-    if (!contract.IsConstantShape(module_signature) ||
-        !contract.runtime_extent_scalars().empty()) {
+    if (state_extents == nullptr &&
+        (!contract.IsConstantShape(module_signature) ||
+         !contract.runtime_extent_scalars().empty())) {
         throw std::logic_error(
             "RuntimeSession fails closed until dynamic graph memory planning exists");
+    }
+    if (state_extents != nullptr) {
+        if (contract.runtime_extent_scalars().empty()) {
+            throw std::logic_error(
+                "RuntimeSession stateful invocation requires state-sourced extents");
+        }
+        for (const auto& scalar : contract.runtime_extent_scalars()) {
+            if (scalar.source !=
+                api::ModuleRuntimeExtentScalar::Source::kStateExtent) {
+                throw std::logic_error(
+                    "RuntimeSession stateful invocation binds state extents only");
+            }
+        }
     }
     Array<NDArray> inputs;
     Array<NDArray> outputs;
@@ -389,14 +549,15 @@ AsyncOperation InvokeOrderedModuleEntry(const api::CompiledModule& module,
         if (signature[i]->role == codegen::KernelArgRole::kOutput) outputs.push_back(ordered[i]);
     }
     return api::internal::InvokeCompiledModuleWithOutputs(
-        module, symbol, inputs, outputs, stream);
+        module, symbol, inputs, outputs, stream, 0, state_extents);
 }
 
 Array<NDArray> PrepareCallArguments(
     const api::CompiledModule& module, const KernelCall& call,
     const std::unordered_map<int64_t, ValueSpec>& values,
     const std::unordered_map<int64_t, size_t>& required_alignment_by_storage,
-    const std::shared_ptr<internal::ValueTable>& table) {
+    const std::shared_ptr<internal::ValueTable>& table,
+    const std::vector<uint64_t>* state_extent_values = nullptr) {
     const codegen::KernelSignature signature = module.signature(call->symbol);
     Array<int64_t> regular_inputs;
     Array<int64_t> constant_inputs;
@@ -410,6 +571,7 @@ Array<NDArray> PrepareCallArguments(
     size_t regular_index = 0;
     size_t constant_index = 0;
     size_t output_index = 0;
+    size_t state_extent_index = 0;
     Array<NDArray> ordered;
     for (const auto& argument : signature.arguments()) {
         int64_t value_id = -1;
@@ -417,9 +579,23 @@ Array<NDArray> PrepareCallArguments(
             case codegen::KernelArgRole::kInput:
                 value_id = regular_inputs[regular_index++];
                 break;
-            case codegen::KernelArgRole::kRuntimeExtent:
-                throw std::logic_error(
-                    "RuntimeSession cannot bind generated runtime extents");
+            case codegen::KernelArgRole::kRuntimeExtent: {
+                if (state_extent_values == nullptr) {
+                    throw std::logic_error(
+                        "RuntimeSession cannot bind generated runtime extents");
+                }
+                if (state_extent_index >= state_extent_values->size()) {
+                    throw std::logic_error(
+                        "RuntimeSession state extent values do not cover the ABI");
+                }
+                NDArray extent = NDArray::Empty({1}, argument->dtype,
+                                                argument->device,
+                                                static_cast<size_t>(argument->alignment));
+                const uint64_t value = (*state_extent_values)[state_extent_index++];
+                extent.CopyFromBytes(&value, sizeof(uint64_t));
+                ordered.push_back(std::move(extent));
+                continue;
+            }
             case codegen::KernelArgRole::kConstant:
                 value_id = constant_inputs[constant_index++];
                 break;
@@ -473,6 +649,11 @@ void ValidateBoundSourceArguments(
         for (size_t argument_index = 0; argument_index < arguments.size();
              ++argument_index) {
             const auto& argument = arguments[argument_index];
+            if (argument->role == codegen::KernelArgRole::kRuntimeExtent) {
+                // Runtime extents are generated or injected per invocation;
+                // they never consume a plan input slot.
+                continue;
+            }
             if (argument->role == codegen::KernelArgRole::kOutput) {
                 const ValueSpec& output = FindValue(
                     values, output_ids[output_index++],
@@ -586,6 +767,28 @@ AsyncOperation InvokeDynamicCall(
 
 }  // namespace
 
+namespace {
+
+// 构造会话持有的 state 张量；声明了 state_fill 的动态有状态合同把
+// 无效容量区填充为哨兵值，其余路径保持零初始化不变。
+NDArray AllocateSessionState(const ValueSpec& spec, size_t alignment) {
+    if (spec->state_fill == 0.0) {
+        return NDArray::Zeros(spec.shape(), spec->dtype, spec->device, alignment);
+    }
+    NDArray value =
+        NDArray::Empty(spec.shape(), spec->dtype, spec->device, alignment);
+    // 动态有状态 v1 合同把 state dtype 固定为 float32（构造期校验）。
+    size_t elements = 1;
+    for (int64_t dimension : spec.shape()) elements *= static_cast<size_t>(dimension);
+    std::vector<float> fill(elements, static_cast<float>(spec->state_fill));
+    if (!fill.empty()) {
+        value.CopyFromBytes(fill.data(), fill.size() * sizeof(float));
+    }
+    return value;
+}
+
+}  // namespace
+
 RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan) {
     ValidatedPlanContract contract = ValidateModuleAndPlan(module, plan);
     const auto values = IndexValues(plan);
@@ -606,16 +809,19 @@ RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan) 
                 throw std::logic_error(
                     "RuntimeSession state has no alignment contract");
             }
-            states.emplace(value_id, NDArray::Zeros(
-                                         spec.shape(), spec->dtype, spec->device,
-                                         alignment->second));
+            states.emplace(value_id, AllocateSessionState(spec, alignment->second));
         }
     }
-    SetData(new RuntimeSessionNode(
+    auto* node = new RuntimeSessionNode(
         std::move(module), std::move(plan), std::move(contract.device),
         std::move(contract.constant_keys_by_value),
         std::move(contract.required_alignment_by_storage), std::move(states),
-        std::move(observer)));
+        std::move(observer));
+    // 动态有状态合同：初始有效长度为 0，由 completion 在成功后提交。
+    for (int64_t value_id : node->plan.state_value_ids()) {
+        node->length_book->lengths.emplace(value_id, 0);
+    }
+    SetData(node);
 }
 
 RuntimeSession::RuntimeSession(const ObjectRef& ref) : ObjectRef(ref) {
@@ -684,6 +890,10 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
             const Array<KernelCall> calls = node->plan.calls();
             Array<AsyncOperation> operations;
             std::unique_lock<std::mutex> state_lock;
+            const bool stateful =
+                node->plan.mode() == ExecutablePlanMode::kDynamicStatefulV1;
+            // 动态有状态运行待提交的有效长度；成功完成后经 completion 提交。
+            std::unordered_map<int64_t, int64_t> staged_state_lengths;
             if (dynamic) {
                 PreflightDynamicGraphInputs(node->plan, inputs);
                 std::size_t call_index = 0;
@@ -698,6 +908,152 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
                     }
                     operations.push_back(InvokeDynamicCall(
                         node->module, call, values, table, stream));
+                    ++submit_count;
+                    if (observer) {
+                        ExecutionCompletionCallback completion;
+                        DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                            completion = sink.OnKernelSubmitted(
+                                KernelSubmitInfo{node->device, call_index,
+                                                 std::string(call->symbol)},
+                                correlation);
+                        });
+                        if (completion && operations[operations.size() - 1].defined()) {
+                            operations[operations.size() - 1].ObserveCompletion(
+                                std::move(completion));
+                        }
+                    }
+                    ++call_index;
+                }
+            } else if (stateful) {
+                const Map<String, NDArray>& constants =
+                    api::internal::BorrowCompiledModuleConstants(node->module);
+                for (int64_t value_id : node->plan.constant_value_ids()) {
+                    const auto key = node->constant_keys_by_value.find(value_id);
+                    if (key == node->constant_keys_by_value.end() || !constants.count(key->second)) {
+                        throw std::logic_error(
+                            "RuntimeSession validated constant binding disappeared");
+                    }
+                    const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession constant");
+                    table->Bind(spec, constants.at(key->second));
+                }
+
+                // 同一会话的有状态运行严格串行；未完成写入拒绝再次提交，
+                // 已有 pending completion 在此结算并落地其长度提交。
+                state_lock = std::unique_lock<std::mutex>(node->state_mutex);
+                {
+                    std::lock_guard<std::mutex> book_lock(node->length_book->mutex);
+                    if (node->length_book->poisoned) {
+                        throw std::runtime_error(
+                            "RuntimeSession state write failed previously; "
+                            "the session must be reconstructed");
+                    }
+                }
+                if (node->state_completion.defined() &&
+                    !node->state_completion.IsReady()) {
+                    throw std::runtime_error(
+                        "RuntimeSession state execution is still pending");
+                }
+                for (int64_t value_id : node->plan.state_value_ids()) {
+                    const auto state = node->states_by_value.find(value_id);
+                    if (state == node->states_by_value.end()) {
+                        throw std::logic_error(
+                            "RuntimeSession validated state binding disappeared");
+                    }
+                    const ValueSpec& spec =
+                        FindValue(values, value_id, "RuntimeSession state");
+                    table->Bind(spec, state->second);
+                }
+                ValidateBoundSourceArguments(node->module, node->plan, values, table);
+
+                // Launch 前预检：读取声明的追加数量并对照每个 state 的已提交
+                // 有效长度校验；任何拒绝都不改变长度与缓存。
+                const Array<int64_t> input_ids = node->plan.input_value_ids();
+                size_t count_position = input_ids.size();
+                for (size_t index = 0; index < input_ids.size(); ++index) {
+                    if (input_ids[index] ==
+                        node->plan.state_count_input_value_id()) {
+                        count_position = index;
+                    }
+                }
+                if (count_position >= input_ids.size()) {
+                    throw std::logic_error(
+                        "RuntimeSession stateful append-count input binding disappeared");
+                }
+                uint64_t append_count = 0;
+                inputs[count_position].CopyToBytes(&append_count,
+                                                   sizeof(append_count));
+                for (int64_t state_id : node->plan.state_value_ids()) {
+                    const ValueSpec& spec =
+                        FindValue(values, state_id, "RuntimeSession stateful state");
+                    const StatefulAppendBinding append =
+                        ResolveStatefulAppend(node->plan, values, state_id);
+                    const ValueSpec& tokens =
+                        FindValue(values, append.tokens_value_id,
+                                  "RuntimeSession stateful tokens");
+                    const Array<int64_t> tokens_shape = tokens.shape();
+                    const int64_t tokens_extent =
+                        tokens_shape[spec->state_extent_axis];
+                    std::lock_guard<std::mutex> book_lock(node->length_book->mutex);
+                    const auto length_it = node->length_book->lengths.find(state_id);
+                    if (length_it == node->length_book->lengths.end()) {
+                        throw std::logic_error(
+                            "RuntimeSession stateful length book lost a state");
+                    }
+                    const int64_t length = length_it->second;
+                    if (length < 0 || length > spec->state_capacity) {
+                        throw std::runtime_error(
+                            "RuntimeSession stateful length book is inconsistent");
+                    }
+                    // n <= capacity - length 以 uint64 全量比较：同时覆盖
+                    // 负值回绕与 length+n 的整数溢出，全部发生在 launch 之前。
+                    if (append_count >
+                        static_cast<uint64_t>(spec->state_capacity - length)) {
+                        throw std::invalid_argument(
+                            "RuntimeSession stateful append exceeds the declared "
+                            "capacity before launch");
+                    }
+                    if (append_count > static_cast<uint64_t>(tokens_extent)) {
+                        throw std::invalid_argument(
+                            "RuntimeSession stateful append exceeds the declared "
+                            "tokens input extent before launch");
+                    }
+                    staged_state_lengths[state_id] =
+                        length + static_cast<int64_t>(append_count);
+                }
+
+                std::size_t call_index = 0;
+                for (const auto& call : calls) {
+                    if (observer) {
+                        DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                            sink.OnKernelBegin(
+                                KernelSubmitInfo{node->device, call_index,
+                                                 std::string(call->symbol)},
+                                correlation);
+                        });
+                    }
+                    // 注入经校验的已提交有效长度；读取 kernel 在计算内部推导
+                    // 提交后长度（committed + n），会话只绑定一种 extent 表达。
+                    std::vector<uint64_t> call_extents;
+                    {
+                        std::lock_guard<std::mutex> book_lock(node->length_book->mutex);
+                        for (int64_t bound :
+                             node->plan.state_extent_bindings()[call_index]) {
+                            const auto length_it =
+                                node->length_book->lengths.find(bound);
+                            if (length_it == node->length_book->lengths.end()) {
+                                throw std::logic_error(
+                                    "RuntimeSession stateful extent binding is unbound");
+                            }
+                            call_extents.push_back(
+                                static_cast<uint64_t>(length_it->second));
+                        }
+                    }
+                    Array<NDArray> arguments = PrepareCallArguments(
+                        node->module, call, values,
+                        node->required_alignment_by_storage, table, &call_extents);
+                    operations.push_back(InvokeOrderedModuleEntry(
+                        node->module, call->symbol, arguments, stream,
+                        &call_extents));
                     ++submit_count;
                     if (observer) {
                         ExecutionCompletionCallback completion;
@@ -797,6 +1153,20 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
             auto state = std::make_shared<RuntimeExecutionState>(RuntimeExecutionState{
                 node->module, node->plan, table, std::move(prior_operations)});
             completion.RetainDependencies(table->RetainedStorage(), std::move(state));
+            if (stateful) {
+                // 长度更新只在全部 kernel 提交成功后注册到最终 completion：
+                // CPU 同步后端注册即落地，异步后端在首次完成观测时落地。
+                // 会话销毁后 book 仍由 completion 保活，提交不会悬空。
+                auto book = node->length_book;
+                const std::unordered_map<int64_t, int64_t> pending =
+                    staged_state_lengths;
+                completion.ObserveCompletion([book, pending](bool) {
+                    std::lock_guard<std::mutex> book_lock(book->mutex);
+                    for (const auto& entry : pending) {
+                        book->lengths[entry.first] = entry.second;
+                    }
+                });
+            }
             if (state_lock.owns_lock()) node->state_completion = completion;
             return RunAsyncResult{std::move(outputs), std::move(completion)};
         }();
@@ -812,6 +1182,13 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
         return result;
     } catch (...) {
         observation.reset();
+        if (node->plan.mode() == ExecutablePlanMode::kDynamicStatefulV1 &&
+            submit_count > 0) {
+            // 写入开始后的失败：第一版不做事务回滚，会话标记为不能继续，
+            // 要求显式重建；拒绝阶段的失败（launch 前）不置位该标记。
+            std::lock_guard<std::mutex> book_lock(node->length_book->mutex);
+            node->length_book->poisoned = true;
+        }
         if (observer) {
             // 错误复用 run span 的 status="error"，message 为原始异常文本，
             // 不新增事件类型；校验失败发生在任何 kernel_submit 之前。
@@ -831,6 +1208,43 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
         }
         throw;
     }
+}
+
+int64_t RuntimeSession::StateExtent(int64_t state_value_id) const {
+    const auto* node = operator->();
+    bool declared = false;
+    for (int64_t value_id : node->plan.state_value_ids()) {
+        declared = declared || value_id == state_value_id;
+    }
+    if (!declared) {
+        throw std::invalid_argument("RuntimeSession has no such state value");
+    }
+    if (node->plan.mode() != ExecutablePlanMode::kDynamicStatefulV1) {
+        throw std::invalid_argument(
+            "RuntimeSession state extents require the dynamic stateful mode");
+    }
+    std::lock_guard<std::mutex> book_lock(node->length_book->mutex);
+    const auto it = node->length_book->lengths.find(state_value_id);
+    if (it == node->length_book->lengths.end()) {
+        throw std::logic_error("RuntimeSession stateful length book lost a state");
+    }
+    return it->second;
+}
+
+NDArray RuntimeSession::StateValue(int64_t state_value_id) const {
+    const auto* node = operator->();
+    bool declared = false;
+    for (int64_t value_id : node->plan.state_value_ids()) {
+        declared = declared || value_id == state_value_id;
+    }
+    if (!declared) {
+        throw std::invalid_argument("RuntimeSession has no such state value");
+    }
+    const auto state = node->states_by_value.find(state_value_id);
+    if (state == node->states_by_value.end()) {
+        throw std::logic_error("RuntimeSession state binding disappeared");
+    }
+    return state->second;
 }
 
 const RuntimeSessionNode* RuntimeSession::operator->() const {
