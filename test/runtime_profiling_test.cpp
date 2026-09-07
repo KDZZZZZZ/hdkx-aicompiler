@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -23,11 +24,17 @@
 #include <utility>
 #include <vector>
 
+#include "kxc/compiler/compiler.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/relay/op.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/session.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 #include "../src/runtime/internal/memory_plan.h"
+
+#ifndef KXC_USE_LLVM
+#define KXC_USE_LLVM 0
+#endif
 
 namespace {
 
@@ -1001,6 +1008,216 @@ bool TestRecordPathDoesNotRecurse() {
     return true;
 }
 
+#if KXC_USE_LLVM
+/*! \brief 值返回 helper 内不能使用 TEST_CHECK（它 return false）；
+ *  违约直接抛出，由测试入口统一转为失败。 */
+void Require(bool condition, const std::string& message) {
+    if (!condition) throw std::runtime_error(message);
+}
+
+/*! \brief 把主机字节负载按输入顺序填进计划输入数组。 */
+kxc::Array<kxc::runtime::NDArray> FillPlanInputs(
+    const kxc::runtime::ExecutablePlan& plan,
+    const std::vector<std::vector<uint8_t>>& payloads) {
+    using namespace kxc;
+    const auto values = plan.values();
+    const auto find_value = [&](int64_t value_id) {
+        for (const auto& value : values) {
+            if (value->value_id == value_id) return value;
+        }
+        throw std::runtime_error("plan references an unknown value");
+    };
+    Array<runtime::NDArray> inputs;
+    const auto input_ids = plan.input_value_ids();
+    Require(payloads.size() == input_ids.size(),
+            "host payload count must match the graph ABI");
+    for (size_t i = 0; i < input_ids.size(); ++i) {
+        const auto spec = find_value(input_ids[i]);
+        runtime::NDArray array =
+            runtime::NDArray::Empty(spec.shape(), spec->dtype, spec->device);
+        Require(array.NBytes() == payloads[i].size(),
+                "host payload byte count must match the input spec");
+        array.CopyFromBytes(payloads[i].data(), payloads[i].size());
+        inputs.push_back(std::move(array));
+    }
+    return inputs;
+}
+
+std::vector<uint8_t> ReadBytesOutput(const kxc::runtime::NDArray& array) {
+    std::vector<uint8_t> bytes(array.NBytes(), 0);
+    array.CopyToBytes(bytes.data(), bytes.size());
+    return bytes;
+}
+
+std::vector<uint8_t> FloatBytes(const std::vector<float>& values) {
+    std::vector<uint8_t> bytes(values.size() * sizeof(float), 0);
+    std::memcpy(bytes.data(), values.data(), bytes.size());
+    return bytes;
+}
+
+std::vector<float> BytesAsFloat(const std::vector<uint8_t>& bytes) {
+    std::vector<float> values(bytes.size() / sizeof(float), 0.0f);
+    std::memcpy(values.data(), bytes.data(), values.size() * sizeof(float));
+    return values;
+}
+
+/*! \brief 真实 Compiler::Compile 的 LLVM Where fixture 运行证据：
+ *  数值不变，且同一 run_id 下出现 runtime_session_run/kernel_submit/
+ *  kernel_exec/alloc，内核与分配事件的 parent_span_id 指向 run span。
+ *  构图方式与 op_numeric_llvm_test.cpp 的 TestWhere 一致（矩阵归属）。
+ *  payloads 按计划输入顺序给出主机字节；reference 为期望的输出字节。
+ *  返回观测运行的原始输出字节，供调用方做数值断言。 */
+std::vector<uint8_t> RunWhereViaCompiler(
+    const std::string& bundle_name, const kxc::Function& func,
+    const std::vector<std::vector<uint8_t>>& payloads,
+    const std::vector<uint8_t>& reference) {
+    using namespace kxc;
+    profiling::ProfileOptions options;
+    options.enabled = true;
+    options.ir_capture_mode = profiling::IRCaptureMode::kDisabled;
+    options.bundle_dir = (std::filesystem::current_path() /
+                          "runtime_profiling_output" / bundle_name)
+                             .string();
+    const std::string bundle_dir = options.bundle_dir;
+
+    // 关闭观测的同构运行用于逐位对照。
+    std::vector<uint8_t> unobserved;
+    {
+        auto plain_config = api::CompileConfig::Create(BuildTarget(Device::CPU()), 0);
+        auto plain_compiled = api::Compiler::Compile(func, plain_config);
+        Require(plain_compiled.module().IsReady(),
+                   "Where LLVM module should be ready");
+        runtime::RuntimeSession plain_session(plain_compiled.module(),
+                                              plain_compiled.plan());
+        const auto outputs = plain_session.Run(FillPlanInputs(plain_compiled.plan(),
+                                                              payloads));
+        Require(outputs.size() == 1, "Where produces one output");
+        unobserved = ReadBytesOutput(outputs[0]);
+        Require(unobserved == reference,
+                   "the unobserved run must match the reference");
+    }
+
+    std::vector<uint8_t> observed;
+    {
+        auto config =
+            api::CompileConfig::Create(BuildTarget(Device::CPU()), 0, options);
+        auto compiled = api::Compiler::Compile(func, config);
+        Require(compiled.module().IsReady() && compiled.plan().defined(),
+                   "Where LLVM module should be ready");
+        runtime::RuntimeSession session(compiled.module(), compiled.plan());
+        const auto outputs =
+            session.Run(FillPlanInputs(compiled.plan(), payloads));
+        observed = ReadBytesOutput(outputs[0]);
+        Require(observed == unobserved,
+                   "observed and unobserved runs must be bitwise identical");
+        // 模块与 session 析构会触发其 ProfileContext 的最后一次 Flush。
+    }
+
+    const std::vector<EventLine> events = LoadEvents(bundle_dir);
+    const std::vector<const EventLine*> runs = Filter(events, "runtime_session_run");
+    Require(runs.size() == 1 && runs[0]->StringValue("status") == "ok",
+               "the LLVM run records one successful run span");
+    const std::string run_id = runs[0]->StringValue("run_id");
+    const std::string span_id = runs[0]->StringValue("span_id");
+    Require(!run_id.empty() && !span_id.empty(),
+               "the LLVM run span carries correlation ids");
+    int submits = 0;
+    int execs = 0;
+    int allocs = 0;
+    for (const EventLine* submit : Filter(events, "kernel_submit")) {
+        if (submit->StringValue("run_id") != run_id) continue;
+        ++submits;
+        Require(submit->StringValue("parent_span_id") == span_id,
+                   "LLVM kernel_submit parents to the run span");
+        Require(submit->raw.find("\"timing\":\"host_submit\"") !=
+                       std::string::npos,
+                   "LLVM kernel_submit timing is host_submit");
+    }
+    for (const EventLine* exec : Filter(events, "kernel_exec")) {
+        if (exec->StringValue("run_id") != run_id) continue;
+        ++execs;
+        Require(exec->StringValue("parent_span_id") == span_id,
+                   "LLVM kernel_exec parents to the run span");
+        Require(exec->raw.find("\"timing\":\"host_execute\"") !=
+                       std::string::npos,
+                   "LLVM kernel_exec closes at host-observed completion");
+        Require(!exec->StringValue("kernel_symbol").empty(),
+                   "LLVM kernel_exec carries the real kernel symbol");
+    }
+    for (const EventLine* alloc : Filter(events, "alloc")) {
+        if (alloc->StringValue("run_id") != run_id) continue;
+        ++allocs;
+        Require(alloc->StringValue("parent_span_id") == span_id,
+                   "LLVM alloc parents to the run span");
+    }
+    Require(submits == 1 && execs == 1 && allocs >= 1,
+               "one LLVM run submits one kernel and allocates its outputs");
+    Require(!Filter(events, "run_pass").empty(),
+               "the same bundle also carries the compile-stage events");
+    return observed;
+}
+
+/*! \brief Where 数值证据 + 常量快照复制证据。 */
+bool TestWhereRuntimeBundleEvidence() {
+    using namespace kxc;
+    // 矩阵归属的 Where：condition {2,1} 广播选择 x 标量或 y {1,3}。
+    const std::vector<uint8_t> condition_data = {1, 0};
+    Var condition("condition", TensorType({2, 1}, "bool"));
+    Var x("x", TensorType({}, "float32"));
+    Var y("y", TensorType({1, 3}, "float32"));
+    Function func({condition, x, y},
+                  Call(relay::Op::Get("where"), {condition, x, y}));
+    const std::vector<uint8_t> observed = RunWhereViaCompiler(
+        "where_runtime", func,
+        {condition_data, FloatBytes({10}), FloatBytes({1, 2, 3})},
+        FloatBytes({10, 10, 10, 1, 2, 3}));
+    TEST_CHECK(BytesAsFloat(observed) == std::vector<float>({10, 10, 10, 1, 2, 3}),
+               "Where result must match the reference output");
+
+    // bool 常量变体：额外证明模块构建期的常量快照复制进入 bundle。
+    runtime::NDArray constant_condition = runtime::NDArray::Empty(
+        {2, 1}, runtime::DataTypeFromString("bool"), Device::CPU());
+    constant_condition.CopyFromBytes(condition_data.data(), condition_data.size());
+    Var bool_x("bool_x", TensorType({1, 3}, "bool"));
+    Var bool_y("bool_y", TensorType({2, 1}, "bool"));
+    Function bool_func({bool_x, bool_y},
+                       Call(relay::Op::Get("where"),
+                            {Constant(constant_condition), bool_x, bool_y}));
+    const std::vector<uint8_t> bool_out = RunWhereViaCompiler(
+        "where_bool_constant_runtime", bool_func, {{1, 0, 1}, {0, 1}},
+        {1, 0, 1, 1, 1, 1});
+    TEST_CHECK(bool_out == std::vector<uint8_t>({1, 0, 1, 1, 1, 1}),
+               "Where bool constant variant must match the reference output");
+
+    const std::vector<EventLine> events = LoadEvents(
+        (std::filesystem::current_path() / "runtime_profiling_output" /
+         "where_bool_constant_runtime")
+            .string());
+    bool saw_snapshot_copy = false;
+    for (const EventLine* copy : Filter(events, "copy")) {
+        if (copy->raw.find("\"copy_kind\":\"constant_snapshot\"") !=
+            std::string::npos) {
+            saw_snapshot_copy = true;
+            TEST_CHECK(copy->NumberValue("bytes") == 2,
+                       "the bool constant snapshot copies 2 bytes");
+        }
+    }
+    TEST_CHECK(saw_snapshot_copy,
+               "the module constant snapshot copy must appear in the bundle");
+    return true;
+}
+#endif  // KXC_USE_LLVM
+
+/*! \brief LLVM 构建下真实 Where fixture 的运行证据；无 LLVM 时显式跳过。 */
+bool TestWhereRuntimeBundleEvidenceEntry() {
+#if KXC_USE_LLVM
+    return TestWhereRuntimeBundleEvidence();
+#else
+    std::cout << "[SKIP] where_runtime_bundle_evidence: KXC_USE_LLVM=0\n";
+    return true;
+#endif
+}
+
 }  // namespace
 
 /*! \brief 顺序执行执行观测契约用例，并将任一失败转换为非零退出码。 */
@@ -1020,6 +1237,7 @@ int main() {
         {"planned_reuse_accounting", TestPlannedReuseAccounting},
         {"completion_settles_exactly_once", TestCompletionSettlesExactlyOnce},
         {"record_path_does_not_recurse", TestRecordPathDoesNotRecurse},
+        {"where_runtime_bundle_evidence", TestWhereRuntimeBundleEvidenceEntry},
     };
     int failures = 0;
     for (const auto& test : tests) {
