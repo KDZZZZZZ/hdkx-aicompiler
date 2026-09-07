@@ -4,6 +4,7 @@
 
 #include "kxc/compiler/compiler.h"
 #include "kxc/frontend/onnx_importer.h"
+#include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/runtime/session.h"
@@ -33,6 +34,14 @@
 
 #ifndef KXC_ONNX_TRANSFORMER_PARAMS_PATH
 #define KXC_ONNX_TRANSFORMER_PARAMS_PATH "exact_transformer.params.bin"
+#endif
+
+#ifndef KXC_ONNX_STATIC_S1_JSON_PATH
+#define KXC_ONNX_STATIC_S1_JSON_PATH "static_s1.import.json"
+#endif
+
+#ifndef KXC_ONNX_STATIC_S1_PARAMS_PATH
+#define KXC_ONNX_STATIC_S1_PARAMS_PATH "static_s1.params.bin"
 #endif
 
 #ifndef KXC_USE_LLVM
@@ -247,6 +256,79 @@ bool TestRunExactTransformerProtobufLLVM() {
     return true;
 }
 
+// 静态 S1 组合 fixture：真实 protobuf 导入后必须经过 LLVM Compiler 与
+// RuntimeSession，并与独立手写参考逐元素比较（绝对误差 1e-5）。
+// 图：Mul(x,const[4]) → Sub(-0.25) → Div(/2) → Sqrt → Cast(idx int64→f32)
+//     → Mul(*3) → ReduceMean(axes=[2],keepdims=1) → Reshape([6])。
+bool TestRunStaticS1ProtobufLLVM() {
+    kxc::frontend::ImportedONNXModel imported =
+        kxc::frontend::LoadONNXImportSpec(
+            KXC_ONNX_STATIC_S1_JSON_PATH,
+            KXC_ONNX_STATIC_S1_PARAMS_PATH);
+    TEST_CHECK(imported.function.defined() && imported.function->params.size() == 2 &&
+                   imported.params.size() == 4 &&
+                   imported.input_names.size() == 2 &&
+                   imported.input_names[0] == "x" &&
+                   imported.input_names[1] == "idx" &&
+                   imported.output_names.size() == 1 &&
+                   imported.output_names[0] == "out",
+               "static S1 fixture must preserve importer/reifier bindings");
+    TEST_CHECK(CheckTensor(imported.function->body.checked_type(), {6}, "float32"),
+               "static S1 fixture output contract mismatch");
+#if KXC_USE_LLVM
+    const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
+    const auto compiled = kxc::api::Compiler::Compile(
+        prepared, kxc::api::CompileConfig::Create(
+                      kxc::BuildTarget(kxc::Device::CPU()), 1));
+    TEST_CHECK(compiled.module().IsReady() && compiled.plan().calls().size() == 8,
+               "static S1 fixture must compile to eight LLVM units");
+
+    // 独立参考：不经过 importer/Relay，直接按 ONNX 语义手写计算。
+    const std::vector<float> scale = {1.0f, 2.0f, 0.5f, 4.0f};
+    std::vector<float> x_values(24);
+    for (size_t i = 0; i < x_values.size(); ++i) {
+        x_values[i] = 1.0f + static_cast<float>(i % 7) * 0.25f;
+    }
+    std::vector<float> expected(6, 0.0f);
+    for (int b = 0; b < 2; ++b) {
+        for (int r = 0; r < 3; ++r) {
+            float sum = 0.0f;
+            for (int c = 0; c < 4; ++c) {
+                const size_t index = static_cast<size_t>((b * 3 + r) * 4 + c);
+                sum += std::sqrt((x_values[index] * scale[c] - 0.25f) / 2.0f) * 3.0f;
+            }
+            expected[static_cast<size_t>(b * 3 + r)] = sum / 4.0f;
+        }
+    }
+
+    kxc::runtime::NDArray x = kxc::runtime::NDArray::Empty(
+        {2, 3, 4}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    x.CopyFromBytes(x_values.data(), x.NBytes());
+    const int64_t idx_value = 3;
+    kxc::runtime::NDArray idx = kxc::runtime::NDArray::Empty(
+        {1}, kxc::runtime::DataTypeFromString("int64"), kxc::Device::CPU());
+    idx.CopyFromBytes(&idx_value, idx.NBytes());
+    kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
+    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({x, idx});
+    TEST_CHECK(outputs.size() == 1 && ShapeEquals(outputs[0], {6}),
+               "static S1 RuntimeSession output shape mismatch");
+
+    std::vector<float> actual(6, 0.0f);
+    outputs[0].CopyToBytes(actual.data(), outputs[0].NBytes());
+    float max_abs_error = 0.0f;
+    for (size_t index = 0; index < actual.size(); ++index) {
+        TEST_CHECK(std::isfinite(actual[index]),
+                   "static S1 output must be finite at " + std::to_string(index));
+        max_abs_error = std::max(max_abs_error, std::fabs(actual[index] - expected[index]));
+    }
+    std::cout << "[INFO] static_s1 max_abs_error=" << max_abs_error << "\n";
+    TEST_CHECK(max_abs_error <= 1e-5f,
+               "static S1 RuntimeSession numeric mismatch beyond 1e-5 absolute "
+               "tolerance");
+#endif
+    return true;
+}
+
 // 验证导入的 ResNet18 可完成 Relay 到 LLVM 编译。
 bool TestCompileResNet18ToLLVM() {
 #if KXC_USE_LLVM
@@ -344,6 +426,9 @@ int main() {
         if (!TestRunExactTransformerProtobufLLVM()) {
             return 1;
         }
+        if (!TestRunStaticS1ProtobufLLVM()) {
+            return 1;
+        }
         if (!TestCompileResNet18ToLLVM()) {
             return 1;
         }
@@ -358,12 +443,14 @@ int main() {
     std::cout << "[PASS] onnx_importer_load_resnet18\n";
 #if KXC_USE_LLVM
     std::cout << "[PASS] onnx_transformer_protobuf_reifier_llvm_runtime\n";
+    std::cout << "[PASS] onnx_static_s1_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_importer_compile_resnet18_llvm\n";
     if (ShouldRunResNet18Kernel()) {
         std::cout << "[PASS] onnx_importer_run_resnet18_llvm\n";
     }
 #else
     std::cout << "[SKIP] onnx_transformer_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
+    std::cout << "[SKIP] onnx_static_s1_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
 #endif
     std::cout << "All available ONNX importer tests passed.\n";
     return 0;
