@@ -921,6 +921,34 @@ te::Schedule BuildDefaultTESchedule(const Array<te::Tensor>& outputs,
     return schedule;
 }
 
+te::Schedule BuildStatefulKvTESchedule(const Array<te::Tensor>& outputs,
+                                       const Target& target) {
+    ValidateScheduleTarget(target);
+    if (target->kind != "llvm" || target->device_type != kCPU) {
+        throw std::invalid_argument(
+            "Stateful KV TE scheduling is LLVM/CPU-only");
+    }
+    if (outputs.empty()) {
+        throw std::invalid_argument(
+            "BuildStatefulKvTESchedule requires output tensors");
+    }
+    Array<te::Operation> output_operations;
+    std::unordered_set<const Object*> seen;
+    for (const te::Tensor& output : outputs) {
+        if (!output.defined() || !output->op.defined()) {
+            throw std::invalid_argument(
+                "BuildStatefulKvTESchedule outputs must be defined");
+        }
+        if (seen.insert(output->op.get()).second) {
+            output_operations.push_back(output->op);
+        }
+    }
+    te::Schedule schedule = te::create_schedule(output_operations);
+    schedule.operator->()->policy = kStatefulKvTESchedulePolicy;
+    ValidateSerialTESchedule(schedule, "Stateful KV TE schedule", true);
+    return schedule;
+}
+
 te::Schedule BuildBoundedDynamicTESchedule(
     const Array<te::Tensor>& outputs, const Target& target) {
     ValidateScheduleTarget(target);
@@ -978,7 +1006,8 @@ bool MatchRuntimeExtentLoad(const tir::PrimExpr& expression,
 
 std::string CanonicalTEScheduleContract(
     const te::Schedule& schedule, const Target& target,
-    const Array<tir::Var>& runtime_extent_buffers) {
+    const Array<tir::Var>& runtime_extent_buffers,
+    const std::vector<size_t>& body_only_runtime_extents) {
     ValidateScheduleTarget(target);
     ValidateRuntimeExtentBuffers(runtime_extent_buffers);
     if (!schedule.defined() || schedule->policy.empty() ||
@@ -987,33 +1016,60 @@ std::string CanonicalTEScheduleContract(
         throw std::invalid_argument(
             "CanonicalTEScheduleContract requires a complete Schedule");
     }
-    const bool bounded_dynamic = !runtime_extent_buffers.empty();
-    if (bounded_dynamic) {
-        if (target->kind != "llvm" || target->device_type != kCPU ||
-            schedule->policy != kBoundedDynamicTESchedulePolicy) {
+    const bool stateful_policy = schedule->policy == kStatefulKvTESchedulePolicy;
+    const bool bounded_dynamic =
+        !runtime_extent_buffers.empty() && !stateful_policy;
+    if (!runtime_extent_buffers.empty()) {
+        if (target->kind != "llvm" || target->device_type != kCPU) {
             throw std::invalid_argument(
-                "Runtime extent schedules require the bounded LLVM/CPU policy");
+                "Runtime extent schedules require the LLVM/CPU policy");
         }
-        ValidateSerialTESchedule(schedule, "Bounded dynamic TE schedule", false);
+        if (stateful_policy) {
+            ValidateSerialTESchedule(schedule, "Stateful KV TE schedule", true);
+        } else {
+            if (!body_only_runtime_extents.empty()) {
+                throw std::invalid_argument(
+                    "Bounded dynamic TE schedule extents must drive loop axes");
+            }
+            if (schedule->policy != kBoundedDynamicTESchedulePolicy) {
+                throw std::invalid_argument(
+                    "Runtime extent schedules require the bounded LLVM/CPU policy");
+            }
+            ValidateSerialTESchedule(schedule, "Bounded dynamic TE schedule", false);
+        }
     } else {
-        if (schedule->policy == kBoundedDynamicTESchedulePolicy) {
+        if (schedule->policy == kBoundedDynamicTESchedulePolicy ||
+            stateful_policy) {
             throw std::invalid_argument(
-                "Bounded dynamic TE schedule requires runtime extent buffers");
+                "Stateful or bounded dynamic TE schedule requires runtime extent buffers");
         }
         if (target->kind == "cuda") ValidateCudaTESchedule(schedule);
     }
+    std::unordered_set<size_t> body_only_extents;
+    for (size_t index : body_only_runtime_extents) {
+        if (index >= runtime_extent_buffers.size() ||
+            !body_only_extents.insert(index).second) {
+            throw std::invalid_argument(
+                "Body-only runtime extent indices must be unique and in range");
+        }
+    }
 
     support::CanonicalBytesEncoder encoder(
-        bounded_dynamic ? "kxc.te.schedule.v2" : "kxc.te.schedule.v1");
+        runtime_extent_buffers.empty()
+            ? "kxc.te.schedule.v1"
+            : (stateful_policy ? "kxc.te.schedule.v3" : "kxc.te.schedule.v2"));
     encoder.Field("policy", schedule->policy);
     encoder.Field("target_kind", target->kind);
     encoder.IntegerField("target_device_type",
                          static_cast<int>(target->device_type));
     std::vector<bool> used_runtime_extents(runtime_extent_buffers.size(),
                                            false);
-    if (bounded_dynamic) {
+    if (!runtime_extent_buffers.empty()) {
         encoder.IntegerField("runtime_extent_count",
                              runtime_extent_buffers.size());
+        for (size_t index : body_only_runtime_extents) {
+            encoder.IntegerField("body_only_extent", index);
+        }
     }
     std::unordered_map<const Object*, size_t> stage_indices;
     for (size_t index = 0; index < schedule->stages.size(); ++index) {
@@ -1123,6 +1179,16 @@ std::string CanonicalTEScheduleContract(
         throw std::invalid_argument(
             "Every runtime extent buffer must drive a scheduled loop axis");
     }
+    if (!runtime_extent_buffers.empty() && !bounded_dynamic) {
+        for (size_t index = 0; index < used_runtime_extents.size(); ++index) {
+            if (!used_runtime_extents[index] &&
+                body_only_extents.count(index) == 0) {
+                throw std::invalid_argument(
+                    "Every stateful KV runtime extent buffer must drive a "
+                    "scheduled loop axis or be declared body-only");
+            }
+        }
+    }
     return std::move(encoder).Take();
 }
 
@@ -1148,7 +1214,8 @@ LoweredFunction LowerTensorGraphToTIR(
     const te::Schedule& schedule,
     const Target& target,
     const PrimFuncIdentity& identity,
-    const Array<tir::Var>& runtime_extent_buffers) {
+    const Array<tir::Var>& runtime_extent_buffers,
+    const std::vector<size_t>& body_only_runtime_extents) {
     ValidateScheduleTarget(target);
     ValidateRuntimeExtentBuffers(runtime_extent_buffers);
     if (!runtime_extent_buffers.empty() &&
@@ -1254,7 +1321,8 @@ LoweredFunction LowerTensorGraphToTIR(
     }
     const std::string schedule_contract =
         CanonicalTEScheduleContract(schedule, target,
-                                    runtime_extent_buffers);
+                                    runtime_extent_buffers,
+                                    body_only_runtime_extents);
 
     Array<tir::Var> params;
     Map<tir::Var, tir::Buffer> buffer_map;
@@ -1342,7 +1410,10 @@ LoweredFunction LowerTensorGraphToTIR(
         if (tensors_it == op_output_tensors.end()) continue;
         for (const auto& tensor : tensors_it->second) {
             if (public_outputs.count(tensor.get()) != 0) continue;
-            if (!runtime_extent_buffers.empty()) {
+            // Bounded dynamic lowering keeps every value at the ABI boundary;
+            // the static-shape stateful KV policy may allocate intermediates.
+            if (!runtime_extent_buffers.empty() &&
+                schedule->policy != kStatefulKvTESchedulePolicy) {
                 throw std::invalid_argument(
                     "Bounded dynamic TE lowering does not support intermediate allocation");
             }

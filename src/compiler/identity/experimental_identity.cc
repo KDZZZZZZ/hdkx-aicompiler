@@ -7,6 +7,7 @@
 #include "../internal/identity_canonical.h"
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -75,7 +76,8 @@ void AppendShape(std::string* out, const Array<int64_t>& shape,
 
 void AppendValueContract(std::string* out,
                          const runtime::ValueSpec& value,
-                         bool allow_wildcards = false) {
+                         bool allow_wildcards = false,
+                         bool state_contract = false) {
     // Graph-local value/storage ids are locators, not reusable ABI identity.
     AppendInteger(out, "dtype_code", value->dtype.code);
     AppendInteger(out, "dtype_bits", value->dtype.bits);
@@ -90,6 +92,17 @@ void AppendValueContract(std::string* out,
     AppendInteger(out, "is_state", value->is_state);
     AppendInteger(out, "write_mode", static_cast<uint8_t>(value->write_mode));
     AppendInteger(out, "valid_bytes", value->valid_bytes);
+    if (state_contract) {
+        // Dynamic stateful contract: capacity, extent axis, and the sentinel
+        // fill are part of the plan identity; cursor values are not.
+        AppendInteger(out, "state_capacity", value->state_capacity);
+        AppendInteger(out, "state_extent_axis", value->state_extent_axis);
+        uint64_t fill_bits = 0;
+        static_assert(sizeof(fill_bits) == sizeof(value->state_fill),
+                      "state fill must be 64-bit for identity");
+        std::memcpy(&fill_bits, &value->state_fill, sizeof(fill_bits));
+        AppendInteger(out, "state_fill_bits", static_cast<int64_t>(fill_bits));
+    }
     AppendShape(out, value.shape(), "plan ABI", allow_wildcards);
 }
 
@@ -372,23 +385,34 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     std::string canonical;
     const bool bounded_dynamic =
         plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1;
+    const bool stateful =
+        plan.mode() == runtime::ExecutablePlanMode::kDynamicStatefulV1;
     // Preserve static v7 bytes. Dynamic v8 additionally names the production
     // gate contract; selected generations remain PlanVariant identity.
+    // Dynamic stateful v9 carries the session-owned state contract instead.
     AppendField(
         &canonical, "kind",
-        bounded_dynamic
-            ? "executable-plan-abi-v8-bounded-dynamic-graph"
-            : "executable-plan-abi-v7-dynamic-fresh-output");
+        stateful
+            ? "executable-plan-abi-v9-dynamic-stateful-v1"
+            : bounded_dynamic
+                  ? "executable-plan-abi-v8-bounded-dynamic-graph"
+                  : "executable-plan-abi-v7-dynamic-fresh-output");
     AppendInteger(&canonical, "plan_mode", static_cast<uint8_t>(plan.mode()));
     if (bounded_dynamic) {
         AppendField(&canonical, "bounded_dynamic_graph_gate",
                     "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH.v1");
     }
+    if (stateful) {
+        AppendField(&canonical, "stateful_contract",
+                    "dynamic-stateful-v1.session-owned-extent");
+    }
     AppendField(
         &canonical, "memory_plan",
-        plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1
-            ? runtime::internal::kDynamicFreshOutputMemoryPlanVersion
-            : runtime::internal::kStaticMemoryPlanVersion);
+        stateful
+            ? runtime::internal::kDynamicStatefulMemoryPlanVersion
+            : plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1
+                  ? runtime::internal::kDynamicFreshOutputMemoryPlanVersion
+                  : runtime::internal::kStaticMemoryPlanVersion);
     AppendTargetContract(&canonical, ModuleTarget(module));
     const Array<runtime::KernelCall> calls = plan.calls();
     if (ordered_artifacts.size() != calls.size()) {
@@ -405,8 +429,7 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     const bool allow_wildcards = bounded_dynamic;
     const std::vector<runtime::GraphInputAxisGuard> graph_guards =
-        plan.graph_input_guards();
-    for (const auto& guard : graph_guards) {
+        plan.graph_input_guards();    for (const auto& guard : graph_guards) {
         AppendInteger(&canonical, "graph_guard_input", guard.input_index);
         AppendInteger(&canonical, "graph_guard_axis", guard.axis);
         AppendInteger(&canonical, "graph_guard_lower", guard.lower);
@@ -430,7 +453,7 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     for (const auto& value : values) {
         AppendField(&canonical, "value_begin", "v3-wildcard");
-        AppendValueContract(&canonical, value, allow_wildcards);
+        AppendValueContract(&canonical, value, allow_wildcards, stateful);
         const auto source = value_ordinals.find(value->alias_source_value_id);
         AppendInteger(&canonical, "alias_source_ordinal",
                       source == value_ordinals.end()
@@ -480,6 +503,22 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
         AppendInteger(&canonical, "state_ordinal", value_ordinals.at(id));
     }
     AppendField(&canonical, "states_end", "v1");
+    if (stateful) {
+        // The append-count input and every per-call state extent binding are
+        // identity; committed cursor values are runtime data, never here.
+        AppendInteger(&canonical, "state_count_input_ordinal",
+                      value_ordinals.at(plan.state_count_input_value_id()));
+        const std::vector<std::vector<int64_t>> bindings =
+            plan.state_extent_bindings();
+        for (size_t call_index = 0; call_index < calls.size(); ++call_index) {
+            AppendInteger(&canonical, "binding_call_index",
+                          static_cast<int64_t>(call_index));
+            for (int64_t bound : bindings[call_index]) {
+                AppendInteger(&canonical, "state_extent_binding_ordinal",
+                              value_ordinals.at(bound));
+            }
+        }
+    }
     std::vector<std::pair<std::string, runtime::NDArray>> constants;
     for (const auto& item : module.constants()) {
         constants.emplace_back(std::string(item.first), item.second);
