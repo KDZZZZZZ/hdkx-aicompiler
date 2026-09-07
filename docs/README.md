@@ -39,6 +39,8 @@
 - [M6：热替换执行与决策证据](implementation/M6_HOT_SWAP.md)
 - [M7：分布式证据与执行桥接](implementation/M7_DISTRIBUTED.md)
 - [M8：TE Program 与首个跨算子融合](implementation/M8_TE_PROGRAM.md)
+- [M10：结构化控制流（If / 有界 While）](implementation/M10_STRUCTURED_CONTROL.md)
+- [M10 控制流 receipt](implementation/M10_CONTROL_RECEIPT.md) — C0 审计、C1 gate-on 证据与 L1b 循环选择。
 
 ## 工具文档
 
