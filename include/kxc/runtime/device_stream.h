@@ -106,10 +106,10 @@ public:
     void Wait() const;
     /*! \brief 非阻塞查询；就绪后释放 event 并转入 completed 状态。 */
     bool IsReady() const;
-    /*! \brief 注册一次性完成观测。观测点为 Wait、IsReady 和析构，注册时
-     *  已完成则立即触发；每个回调在三者之间恰好结算一次，回调内部不得再
-     *  等待同一句柄（此时 completed 已为 true，嵌套等待会直接返回），
-     *  也不得抛出异常。已完成且已结算后再注册的回调不会触发。 */
+    /*! \brief 注册一次性完成观测。观测点为 Wait、IsReady 和析构：注册时
+     *  已完成则本次注册立即触发；未完成时存储，首次观测到完成时对每个
+     *  已注册回调恰好触发一次。回调内部不得再等待同一句柄（此时
+     *  completed 已为 true，嵌套等待会直接返回），也不得抛出异常。 */
     void ObserveCompletion(AsyncCompletionCallback callback) const;
     /*! \brief 返回执行该异步操作的物理设备。 */
     Device device() const;

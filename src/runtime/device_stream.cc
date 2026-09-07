@@ -284,20 +284,20 @@ bool AsyncOperation::IsReady() const {
     return true;
 }
 
-// 注册一次性完成观测；注册时已完成则立即触发，否则在 Wait/IsReady/析构
-// 首次观测到完成时结算。已完成且已结算后再注册不会触发。
+// 注册一次性完成观测；注册时已完成则立即触发（每次注册独立触发一次），
+// 否则存储后在 Wait/IsReady/析构首次观测到完成时对所有已注册回调恰好
+// 结算一次。同一句柄可以被多方观测：先注册者随结算触发，后注册者若
+// 遇到已完成句柄则注册即触发。
 void AsyncOperation::ObserveCompletion(AsyncCompletionCallback callback) const {
     if (!callback) return;
     const auto* node = operator->();
     bool fire_now = false;
     {
         std::lock_guard<std::mutex> lock(node->mutex);
-        if (node->completion_settled) return;
-        if (node->completed) {
-            node->completion_settled = true;
-            fire_now = true;
-        } else {
+        if (!node->completed) {
             node->completion_callbacks.push_back(std::move(callback));
+        } else {
+            fire_now = true;
         }
     }
     if (fire_now) {

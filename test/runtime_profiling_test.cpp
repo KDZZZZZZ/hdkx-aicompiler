@@ -27,6 +27,7 @@
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/session.h"
 #include "../src/runtime/internal/compiled_module_node.h"
+#include "../src/runtime/internal/memory_plan.h"
 
 namespace {
 
@@ -102,6 +103,54 @@ public:
     bool ready{true};
     mutable int calls{0};
     int fail_on_call{0};
+};
+
+/*! \brief 输出经 StorageCopyAsync 的 launcher，用于拷贝记账。 */
+class CopyLauncher final : public kxc::codegen::KernelLauncher {
+public:
+    bool IsReady() const noexcept override { return true; }
+
+    kxc::AsyncOperation Launch(
+        const kxc::Array<kxc::runtime::NDArray>& arguments,
+        const kxc::DeviceStream& stream,
+        const kxc::ObjectRef&) const override {
+        if (arguments.size() != 2) {
+            throw std::invalid_argument("copy launcher expects input and output");
+        }
+        calls.fetch_add(1);
+        return arguments[1].CopyFromAsync(arguments[0], stream);
+    }
+
+    mutable std::atomic<int> calls{0};
+};
+
+/*! \brief 状态累加 launcher：要求输出别名输入存储并就地累加。 */
+class StateAccumulatorLauncher final : public kxc::codegen::KernelLauncher {
+public:
+    bool IsReady() const noexcept override { return true; }
+
+    kxc::AsyncOperation Launch(
+        const kxc::Array<kxc::runtime::NDArray>& arguments,
+        const kxc::DeviceStream& stream,
+        const kxc::ObjectRef&) const override {
+        if (arguments.size() != 3 ||
+            arguments[0].storage().get() != arguments[2].storage().get()) {
+            throw std::invalid_argument(
+                "state accumulator requires aliased source/output storage");
+        }
+        std::vector<float> state(4);
+        std::vector<float> increment(4);
+        arguments[0].CopyToBytes(state.data(), state.size() * sizeof(float));
+        arguments[1].CopyToBytes(increment.data(), increment.size() * sizeof(float));
+        for (size_t i = 0; i < state.size(); ++i) state[i] += increment[i];
+        arguments[2].CopyFromBytes(state.data(), state.size() * sizeof(float));
+        calls.fetch_add(1);
+        kxc::Array<kxc::Storage> retained;
+        for (const auto& argument : arguments) retained.push_back(argument.storage());
+        return kxc::AsyncOperation::Completed(stream, std::move(retained));
+    }
+
+    mutable std::atomic<int> calls{0};
 };
 
 kxc::runtime::ExecutablePlan MakePlan(
@@ -483,6 +532,475 @@ bool TestThrowingObserverDoesNotChangeExecution() {
     return true;
 }
 
+/*! \brief 辅助：取 run span 的 run_id（单一 run 场景）。 */
+std::string runs_run_id(const std::vector<EventLine>& events) {
+    for (const auto& event : events) {
+        if (event.HasType("runtime_session_run")) return event.StringValue("run_id");
+    }
+    return "";
+}
+
+/*! \brief 校验失败必须抛原异常，且 run 只有 error 状态、零 kernel_submit。 */
+bool TestValidationErrorRecordsErrorRun() {
+    using namespace kxc;
+    BundleFixture fixture = MakeBundleFixture("validation_error");
+    runtime::RuntimeSession session(fixture.module, fixture.plan);
+    std::string message;
+    TEST_CHECK(Throws([&] {
+                   session.Run({FilledInput({4}, {1, 1, 1, 1}),
+                                FilledInput({4}, {1, 1, 1, 1})});
+               }, &message) &&
+                   message.find("input count expected 1, actual 2") !=
+                       std::string::npos,
+               "input validation must keep its original message");
+    TEST_CHECK(fixture.launcher->calls.load() == 0,
+               "validation failure must not reach the backend");
+
+    fixture.context->Flush();
+    const std::vector<EventLine> events = LoadEvents(fixture.context->bundle_dir());
+    const std::vector<const EventLine*> runs = Filter(events, "runtime_session_run");
+    TEST_CHECK(runs.size() == 1, "the rejected run records exactly one span");
+    TEST_CHECK(runs[0]->StringValue("status") == "error",
+               "the rejected run closes with status error");
+    TEST_CHECK(runs[0]->raw.find("input count expected 1, actual 2") !=
+                   std::string::npos,
+               "the run span carries the original exception text");
+    TEST_CHECK(runs[0]->NumberValue("submit_count") == 0,
+               "no kernel was submitted before validation failed");
+    TEST_CHECK(Filter(events, "kernel_submit").empty() &&
+                   Filter(events, "kernel_exec").empty(),
+               "validation failure must not produce submit or exec events");
+    return true;
+}
+
+/*! \brief launcher 注入失败必须抛原异常，并产生 error 事件。 */
+bool TestLauncherFailureRecordsErrorRun() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    KernelSignature signature(
+        "failing_kernel_session",
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {4}, cpu),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {4}, cpu,
+                       64, true)});
+    Map<String, runtime::NDArray> constants;
+    auto launcher = std::make_shared<RecordingLauncher>();
+    launcher->fail_on_call = 1;
+    profiling::ProfileOptions options;
+    options.enabled = true;
+    options.bundle_dir = (std::filesystem::current_path() /
+                          "runtime_profiling_output" / "launcher_error")
+                             .string();
+    auto context = profiling::ProfileContext::Create(options);
+    api::CompiledModule module =
+        MakeModule(signature, constants, launcher, context);
+    runtime::RuntimeSession session(module, MakePlan(signature));
+
+    std::string message;
+    TEST_CHECK(Throws([&] { session.Run({FilledInput({4}, {1, 1, 1, 1})}); },
+                      &message) &&
+                   message == "recording launcher injected failure",
+               "launcher failure must keep its type and text");
+
+    context->Flush();
+    const std::vector<EventLine> events = LoadEvents(context->bundle_dir());
+    const std::vector<const EventLine*> runs = Filter(events, "runtime_session_run");
+    TEST_CHECK(runs.size() == 1 && runs[0]->StringValue("status") == "error",
+               "the failed run closes with status error");
+    TEST_CHECK(runs[0]->raw.find("recording launcher injected failure") !=
+                   std::string::npos,
+               "the run span carries the launcher failure text");
+    TEST_CHECK(runs[0]->NumberValue("submit_count") == 0,
+               "a failed launch never completed its submit action");
+    TEST_CHECK(Filter(events, "kernel_submit").empty() &&
+                   Filter(events, "kernel_exec").empty(),
+               "no submit or exec events exist for a failed launch");
+    TEST_CHECK(launcher->calls == 1, "the backend did observe the launch attempt");
+    return true;
+}
+
+/*! \brief 拷贝记账：异步拷贝记提交与观测完成两点，同一 run 关联。 */
+bool TestCopyAccountingOnRunPath() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    KernelSignature signature(
+        "copy_kernel_session",
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {4}, cpu),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {4}, cpu,
+                       64, true)});
+    Map<String, runtime::NDArray> constants;
+    auto launcher = std::make_shared<CopyLauncher>();
+    profiling::ProfileOptions options;
+    options.enabled = true;
+    options.bundle_dir = (std::filesystem::current_path() /
+                          "runtime_profiling_output" / "copy_accounting")
+                             .string();
+    auto context = profiling::ProfileContext::Create(options);
+    api::CompiledModule module =
+        MakeModule(signature, constants, launcher, context);
+    runtime::RuntimeSession session(module, MakePlan(signature));
+    const Array<runtime::NDArray> outputs =
+        session.Run({FilledInput({4}, {5, 5, 5, 5})});
+    TEST_CHECK(ReadOutput(outputs[0]) == std::vector<float>({5, 5, 5, 5}),
+               "copy-backed kernel must forward its input");
+    TEST_CHECK(launcher->calls.load() == 1, "one copy-backed kernel ran");
+
+    context->Flush();
+    const std::vector<EventLine> events = LoadEvents(context->bundle_dir());
+    const std::vector<const EventLine*> runs = Filter(events, "runtime_session_run");
+    TEST_CHECK(runs.size() == 1 && runs[0]->StringValue("status") == "ok",
+               "the copy run closes with status ok");
+    const std::vector<const EventLine*> copies = Filter(events, "copy");
+    // 模块构建期的常量快照复制也是 copy 事件（无 run 关联）；
+    // 运行内应恰好有提交与观测完成两点。
+    TEST_CHECK(copies.size() == 3,
+               "module snapshot copy plus the run's async copy points");
+    int submits = 0;
+    int completes = 0;
+    for (const EventLine* copy : copies) {
+        if (copy->StringValue("run_id") != runs[0]->StringValue("run_id")) {
+            TEST_CHECK(copy->StringValue("run_id").empty() &&
+                           copy->raw.find("\"copy_kind\":\"constant_snapshot\"") !=
+                               std::string::npos,
+                       "the non-run copy is the module constant snapshot");
+            continue;
+        }
+        TEST_CHECK(copy->NumberValue("bytes") == 16, "copy bytes cover 4 floats");
+        TEST_CHECK(copy->StringValue("device") == "cpu:0" &&
+                       copy->raw.find("\"from_device\":\"cpu:0\"") !=
+                           std::string::npos &&
+                       copy->raw.find("\"to_device\":\"cpu:0\"") !=
+                           std::string::npos,
+                   "copy endpoints carry both devices");
+        if (copy->StringValue("phase") == "submit") {
+            ++submits;
+            TEST_CHECK(copy->raw.find("\"timing\":\"host_submit\"") !=
+                           std::string::npos,
+                       "copy submit timing is host_submit");
+            TEST_CHECK(copy->StringValue("parent_span_id") ==
+                           runs[0]->StringValue("span_id"),
+                       "copy submit parents to the run span");
+        } else {
+            ++completes;
+            TEST_CHECK(copy->raw.find("\"timing\":\"host_execute\"") !=
+                           std::string::npos,
+                       "a CPU copy observed complete at submit is host_execute");
+            TEST_CHECK(copy->StringValue("parent_span_id") ==
+                           runs[0]->StringValue("span_id"),
+                       "copy completion parents to the run span");
+        }
+    }
+    TEST_CHECK(submits == 1 && completes == 1,
+               "exactly one submit point and one completion point");
+    return true;
+}
+
+/*! \brief state 会话：构造期初始化分配、别名输出和状态复用的记账。 */
+bool TestStateAliasAndConstructionAccounting() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    KernelSignature signature(
+        "state_accumulate",
+        {KernelArgSpec("state", KernelArgRole::kInput, Float32(), {4}, cpu, 4),
+         KernelArgSpec("increment", KernelArgRole::kInput, Float32(), {4}, cpu, 4),
+         KernelArgSpec("next_state", KernelArgRole::kOutput, Float32(), {4}, cpu,
+                       64, true)});
+    auto launcher = std::make_shared<StateAccumulatorLauncher>();
+    profiling::ProfileOptions options;
+    options.enabled = true;
+    options.bundle_dir = (std::filesystem::current_path() /
+                          "runtime_profiling_output" / "state_accounting")
+                             .string();
+    auto context = profiling::ProfileContext::Create(options);
+    api::CompiledModule module =
+        MakeModule(signature, {}, launcher, context);
+    runtime::ExecutablePlan plan(
+        {runtime::ValueSpec(0, 0, {4}, Float32(), cpu, false, false, false,
+                             false, false, true),
+         runtime::ValueSpec(1, 1, {4}, Float32(), cpu, true),
+         runtime::ValueSpec(2, 0, {4}, Float32(), cpu, false, false, true,
+                             true, false, false, 0,
+                             runtime::ValueWriteMode::kInPlace)},
+        {runtime::KernelCall("state_accumulate", {0, 1}, {2})},
+        {1}, {}, {2}, {0});
+    runtime::RuntimeSession session(module, plan);
+    Array<runtime::NDArray> first = session.Run({FilledInput({4}, {1, 2, 3, 4})});
+    // 别名语义：输出与 state 共享存储，必须在第二次运行前取值。
+    const std::vector<float> first_actual = ReadOutput(first[0]);
+    TEST_CHECK(first_actual == std::vector<float>({1, 2, 3, 4}),
+               "first state run should zero-accumulate");
+    Array<runtime::NDArray> second =
+        session.Run({FilledInput({4}, {10, 20, 30, 40})});
+    const std::vector<float> second_actual = ReadOutput(second[0]);
+    TEST_CHECK(second_actual == std::vector<float>({11, 22, 33, 44}),
+               "second state run should accumulate across runs");
+
+    context->Flush();
+    const std::vector<EventLine> events = LoadEvents(context->bundle_dir());
+    const std::vector<const EventLine*> allocs = Filter(events, "alloc");
+    // 构造期 state 初始化分配 + 每次运行的别名输出 = 3 条 alloc。
+    TEST_CHECK(allocs.size() == 3, "construction and both runs allocate once each");
+    int empty_run_allocs = 0;
+    int alias_allocs = 0;
+    for (const EventLine* alloc : allocs) {
+        if (alloc->StringValue("run_id").empty()) {
+            ++empty_run_allocs;
+            TEST_CHECK(alloc->raw.find("\"alloc_kind\":\"fresh\"") !=
+                           std::string::npos,
+                       "the state initialization is a fresh allocation");
+        } else {
+            TEST_CHECK(alloc->raw.find("\"alloc_kind\":\"alias\"") !=
+                           std::string::npos,
+                       "in-place state output is recorded as alias");
+            TEST_CHECK(alloc->raw.find("\"reused\":\"true\"") !=
+                           std::string::npos,
+                       "alias bindings are not counted as new allocations");
+            ++alias_allocs;
+        }
+    }
+    TEST_CHECK(empty_run_allocs == 1 && alias_allocs == 2,
+               "construction allocation has no run id; each run aliases once");
+    TEST_CHECK(Filter(events, "kernel_exec").size() == 2,
+               "each state run executes one kernel");
+    return true;
+}
+
+/*! \brief 计划内的中间存储复用必须以 reused=true 记账。 */
+bool TestPlannedReuseAccounting() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    const Array<int64_t> shape{4};
+    std::vector<std::shared_ptr<RecordingLauncher>> launchers;
+    std::vector<api::internal::CompiledModuleEntry> entries;
+    Array<runtime::KernelCall> calls;
+    for (int i = 0; i < 4; ++i) {
+        const String symbol("reuse_" + std::to_string(i));
+        KernelSignature signature(
+            symbol,
+            {KernelArgSpec("input", KernelArgRole::kInput, Float32(), shape, cpu),
+             KernelArgSpec("output", KernelArgRole::kOutput, Float32(), shape,
+                           cpu, 16, true)});
+        KernelLaunchMetadata metadata(cpu, CodeGenBackend::kLLVM);
+        auto launcher = std::make_shared<RecordingLauncher>();
+        entries.push_back({signature, metadata,
+                           codegen::CompiledKernel(signature, metadata, launcher)});
+        launchers.push_back(std::move(launcher));
+        calls.push_back(runtime::KernelCall(symbol, {i}, {i + 1}));
+    }
+    profiling::ProfileOptions options;
+    options.enabled = true;
+    options.bundle_dir = (std::filesystem::current_path() /
+                          "runtime_profiling_output" / "reuse_accounting")
+                             .string();
+    auto context = profiling::ProfileContext::Create(options);
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu), std::move(entries), {}, context);
+    Array<runtime::ValueSpec> values{
+        runtime::ValueSpec(0, 0, shape, Float32(), cpu, true),
+        runtime::ValueSpec(1, 1, shape, Float32(), cpu),
+        runtime::ValueSpec(2, 2, shape, Float32(), cpu),
+        runtime::ValueSpec(3, 3, shape, Float32(), cpu),
+        runtime::ValueSpec(4, 4, shape, Float32(), cpu, false, false, true),
+    };
+    runtime::ExecutablePlan plan = runtime::internal::PlanMemory(
+        runtime::ExecutablePlan(values, calls, {0}, {}, {4}));
+    runtime::RuntimeSession session(module, plan);
+    session.Run({FilledInput(shape, {1, 1, 1, 1})});
+
+    context->Flush();
+    const std::vector<EventLine> events = LoadEvents(context->bundle_dir());
+    const std::vector<const EventLine*> allocs = Filter(events, "alloc");
+    TEST_CHECK(allocs.size() == 4, "four outputs allocate across the chain");
+    int fresh = 0;
+    int reused = 0;
+    for (const EventLine* alloc : allocs) {
+        TEST_CHECK(alloc->StringValue("run_id") == runs_run_id(events),
+                   "chain allocations correlate to the run");
+        if (alloc->raw.find("\"alloc_kind\":\"reuse\"") != std::string::npos) {
+            TEST_CHECK(alloc->raw.find("\"reused\":\"true\"") != std::string::npos,
+                       "reuse events are marked reused");
+            ++reused;
+        } else {
+            TEST_CHECK(alloc->raw.find("\"alloc_kind\":\"fresh\"") !=
+                           std::string::npos,
+                       "non-reuse allocations are fresh");
+            ++fresh;
+        }
+        TEST_CHECK(alloc->NumberValue("bytes") == 16, "chain allocations hold 4 floats");
+    }
+    TEST_CHECK(fresh == 3 && reused == 1,
+               "the planned shared intermediate is recorded as reuse");
+    return true;
+}
+
+/*! \brief 完成回调在注册即触发、Wait/IsReady/析构之间恰好结算一次。 */
+int g_completion_fires = 0;  // NOLINT — 简单计数器，测试单线程使用
+
+bool TestCompletionSettlesExactlyOnce() {
+    using namespace kxc;
+    const DeviceStream stream = DeviceStream::Default(Device::CPU());
+    std::vector<bool> registrations;
+
+    // 已完成句柄：注册即触发一次（at_registration=true）。
+    {
+        g_completion_fires = 0;
+        AsyncOperation completed = AsyncOperation::Completed(stream);
+        completed.ObserveCompletion([&registrations](bool at_registration) {
+            registrations.push_back(at_registration);
+            ++g_completion_fires;
+        });
+        TEST_CHECK(g_completion_fires == 1 && registrations.size() == 1 &&
+                       registrations.back(),
+                   "registering on a completed handle fires immediately");
+        completed.Wait();
+        TEST_CHECK(completed.IsReady() && g_completion_fires == 1,
+                   "Wait/IsReady after settlement must not fire again");
+    }
+    TEST_CHECK(g_completion_fires == 1,
+               "destruction after settlement must not fire again");
+
+    // 未完成句柄：IsReady 是第一个观测点；等待中不提前报完成。
+    {
+        g_completion_fires = 0;
+        registrations.clear();
+        AsyncOperation pending =
+            AsyncOperation::Pending(stream, nullptr, {});
+        pending.ObserveCompletion([&registrations](bool at_registration) {
+            registrations.push_back(at_registration);
+            ++g_completion_fires;
+        });
+        TEST_CHECK(g_completion_fires == 0,
+                   "a pending handle must not report completion early");
+        TEST_CHECK(pending.IsReady(),
+                   "a null-event pending handle completes on observation");
+        TEST_CHECK(g_completion_fires == 1 && registrations.size() == 1 &&
+                       !registrations.back(),
+                   "IsReady settles once with at_registration=false");
+        pending.Wait();
+        TEST_CHECK(pending.IsReady() && g_completion_fires == 1,
+                   "Wait/IsReady after settlement must not fire again");
+    }
+    TEST_CHECK(g_completion_fires == 1,
+               "destruction after settlement must not fire again");
+
+    // Wait 观测点结算一次。
+    {
+        g_completion_fires = 0;
+        AsyncOperation pending =
+            AsyncOperation::Pending(stream, nullptr, {});
+        pending.ObserveCompletion([](bool) { ++g_completion_fires; });
+        TEST_CHECK(g_completion_fires == 0, "not fired before observation");
+        pending.Wait();
+        TEST_CHECK(g_completion_fires == 1, "Wait settles exactly once");
+    }
+    TEST_CHECK(g_completion_fires == 1, "destruction after Wait must not fire again");
+
+    // 析构观测点结算一次（回调不得持有句柄，否则析构永不发生）。
+    {
+        g_completion_fires = 0;
+        AsyncOperation pending;
+        {
+            AsyncOperation scoped =
+                AsyncOperation::Pending(stream, nullptr, {});
+            scoped.ObserveCompletion([](bool) { ++g_completion_fires; });
+            TEST_CHECK(g_completion_fires == 0, "not fired before destruction");
+            pending = scoped;
+        }
+        // pending 仍持有引用：句柄未析构，尚未结算。
+        TEST_CHECK(g_completion_fires == 0,
+                   "holding a second reference delays settlement");
+        pending = AsyncOperation();
+        TEST_CHECK(g_completion_fires == 1,
+                   "destruction settles the observation exactly once");
+    }
+
+    // 回调内不得再等待同一句柄：completed 已为 true，嵌套 Wait 直接返回。
+    {
+        AsyncOperation pending =
+            AsyncOperation::Pending(stream, nullptr, {});
+        pending.ObserveCompletion([&pending](bool) { pending.Wait(); });
+        pending.Wait();
+        TEST_CHECK(true, "a callback re-entering Wait must not deadlock");
+    }
+
+    // 回调抛出不得传播；已完成句柄上的迟到注册独立触发一次（注册即触发），
+    // 已结算的存储回调不会被重复触发。
+    {
+        g_completion_fires = 0;
+        AsyncOperation pending =
+            AsyncOperation::Pending(stream, nullptr, {});
+        pending.ObserveCompletion([](bool) {
+            ++g_completion_fires;
+            throw std::runtime_error("observer failure");
+        });
+        pending.Wait();
+        TEST_CHECK(g_completion_fires == 1,
+                   "a throwing callback still settles and never propagates");
+        bool threw = false;
+        try {
+            pending.ObserveCompletion([](bool) { ++g_completion_fires; });
+        } catch (...) {
+            threw = true;
+        }
+        TEST_CHECK(!threw && g_completion_fires == 2,
+                   "a late registration on a completed handle fires once more "
+                   "without disturbing the settled callback");
+    }
+    return true;
+}
+
+/*! \brief 记账路径自身的分配不得递归触发钩子（窄的重入保护）。 */
+class ReentrantAllocObserver final : public kxc::runtime::ExecutionObserver {
+public:
+    kxc::runtime::ExecutionRunCorrelation OnRunStart(
+        const kxc::runtime::ExecutionRunStart&) override {
+        return {};
+    }
+    void OnRunEnd(const kxc::runtime::ExecutionRunEnd&,
+                  const kxc::runtime::ExecutionRunCorrelation&) override {}
+    void OnKernelBegin(const kxc::runtime::KernelSubmitInfo&,
+                       const kxc::runtime::ExecutionRunCorrelation&) override {}
+    kxc::runtime::ExecutionCompletionCallback OnKernelSubmitted(
+        const kxc::runtime::KernelSubmitInfo&,
+        const kxc::runtime::ExecutionRunCorrelation&) override {
+        return nullptr;
+    }
+    void OnAllocation(const kxc::runtime::AllocationInfo&,
+                      const kxc::runtime::ExecutionRunCorrelation&) override {
+        ++allocations;
+        // 观测记录路径自身分配内存：内层 Storage::Alloc 不得再次上报。
+        kxc::runtime::NDArray nested =
+            kxc::runtime::NDArray::Empty({4}, Float32(), kxc::Device::CPU());
+        (void)nested;
+    }
+    void OnCopy(const kxc::runtime::CopyInfo&,
+                const kxc::runtime::ExecutionRunCorrelation&) override {}
+    kxc::runtime::ExecutionCompletionCallback OnCopySubmitted(
+        const kxc::runtime::CopyInfo&,
+        const kxc::runtime::ExecutionRunCorrelation&) override {
+        return nullptr;
+    }
+
+    int allocations{0};
+};
+
+bool TestRecordPathDoesNotRecurse() {
+    ReentrantAllocObserver observer;
+    {
+        kxc::runtime::ExecutionObservationScope scope(&observer,
+                                                      kxc::runtime::ExecutionRunCorrelation{});
+        kxc::runtime::NDArray array = kxc::runtime::NDArray::Empty(
+            {4}, Float32(), kxc::Device::CPU());
+        (void)array;
+    }
+    TEST_CHECK(observer.allocations == 1,
+               "the nested allocation inside the record path must not re-dispatch");
+    return true;
+}
+
 }  // namespace
 
 /*! \brief 顺序执行执行观测契约用例，并将任一失败转换为非零退出码。 */
@@ -494,6 +1012,14 @@ int main() {
          TestDisabledProfilingKeepsOutputIdentical},
         {"throwing_observer_does_not_change_execution",
          TestThrowingObserverDoesNotChangeExecution},
+        {"validation_error_records_error_run", TestValidationErrorRecordsErrorRun},
+        {"launcher_failure_records_error_run", TestLauncherFailureRecordsErrorRun},
+        {"copy_accounting_on_run_path", TestCopyAccountingOnRunPath},
+        {"state_alias_and_construction_accounting",
+         TestStateAliasAndConstructionAccounting},
+        {"planned_reuse_accounting", TestPlannedReuseAccounting},
+        {"completion_settles_exactly_once", TestCompletionSettlesExactlyOnce},
+        {"record_path_does_not_recurse", TestRecordPathDoesNotRecurse},
     };
     int failures = 0;
     for (const auto& test : tests) {
