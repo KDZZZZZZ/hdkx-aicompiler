@@ -25,6 +25,10 @@ INT64_MAX = (1 << 63) - 1
 # S1 static subset: arithmetic (Mul/Sub/Div) and Sqrt only accept float32 so the
 # truncating-division and widening semantics of integer ONNX inputs are never claimed.
 ARITHMETIC_DTYPES = {"float32"}
+# M5 Equal subset (pinned by the C-line InferType contract): both inputs must carry
+# the same dtype from this set and the broadcast result is bool. bool/float64 and
+# mixed-dtype comparisons are rejected with the canonical diagnostics.
+EQUAL_DTYPES = {"int32", "int64", "float32"}
 # Relay cast dtype codes as understood by CastDTypeFromCode in the C++ reifier.
 RELAY_CAST_DTYPE_CODES = {
     "float32": 0,
@@ -74,6 +78,7 @@ ONNX_TO_RELAY = {
     "Transpose": "transpose",
     "Gather": "gather",
     "Where": "where",
+    "Equal": "equal",
     "LayerNormalization": "nn_layer_norm",
     "Slice": "slice",
     "Mul": "mul",
@@ -293,6 +298,11 @@ def import_onnx_model(
             )
         if node.op_type == "Where":
             inferred_static_specs[node.output[0]] = _infer_where_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
+        if node.op_type == "Equal":
+            inferred_static_specs[node.output[0]] = _infer_equal_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
@@ -1188,6 +1198,51 @@ def _infer_where_spec(
     return result
 
 
+def _infer_equal_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    """Infer the static bool output of an opset-17 Equal node.
+
+    ONNX Equal is fieldless: two inputs, one output, no attributes. Both inputs
+    must carry the same dtype from the C-line verified subset (int32, int64,
+    float32); the NumPy multidirectional broadcast shape is proven here so the
+    result can feed Where as a condition.
+    """
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Equal node '{node_name}' requires exactly two non-empty inputs"
+        )
+    lhs, rhs = (
+        _resolve_static_input("Equal", node_name, name, input_specs, params,
+                              inferred_specs, value_info_by_name, default_batch)
+        for name in node.input
+    )
+    if lhs.dtype not in EQUAL_DTYPES or rhs.dtype not in EQUAL_DTYPES:
+        raise ValueError(
+            f"Equal node '{node_name}' requires same-dtype int32, int64, or "
+            f"float32 inputs; got {lhs.dtype} and {rhs.dtype}"
+        )
+    if lhs.dtype != rhs.dtype:
+        raise ValueError(
+            f"Equal node '{node_name}' requires matching input dtypes; "
+            f"got {lhs.dtype} and {rhs.dtype}"
+        )
+    result = TensorSpec(
+        name=node.output[0],
+        shape=_broadcast_shapes("Equal", node_name, lhs.shape, rhs.shape),
+        dtype="bool",
+    )
+    _validate_declared_output("Equal", node_name, result, output_declarations, default_batch)
+    return result
+
+
 def _tensor_spec_from_value_info(
     value_info: onnx.ValueInfoProto, default_batch: int | None
 ) -> TensorSpec:
@@ -1363,6 +1418,12 @@ def _convert_attrs(
         if attrs:
             raise ValueError(
                 f"Where node '{node.name or '<unnamed>'}' does not support attributes"
+            )
+        return {}
+    if node.op_type == "Equal":
+        if attrs:
+            raise ValueError(
+                f"Equal node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
     if node.op_type in {"Mul", "Sub", "Div", "Sqrt"}:

@@ -444,6 +444,14 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
         }
         return ObjectRef();
     }
+    if (op_name == "equal") {
+        // ONNX Equal(opset 17) 是 fieldless 算子：两输入一输出、无属性。
+        if (!attrs.o.empty()) {
+            throw std::runtime_error("Node '" + node_name +
+                                     "' (equal) import attrs must be empty");
+        }
+        return ObjectRef();
+    }
     if (op_name == "add" || op_name == "matmul") {
         return ObjectRef();
     }
@@ -600,6 +608,54 @@ void ValidateFloat32Inputs(const std::string& op_name, const Array<Expr>& args,
     }
 }
 
+// S1 Equal 接线只开放同 dtype 的 int32/int64/float32（与 M5 EqualInferType 合同
+// 一致）：手写 spec 不能依赖 Python 已校验的假设。dtype 子集、dtype 一致性和
+// trailing 广播都在此用携带节点名的诊断复校验；输出 bool 由 InferType 与图
+// 输出声明合同共同钉住（Y 声明为非 bool 会在输出契约检查中失败）。
+void ValidateEqualSubset(const Array<Expr>& args, const Array<Var>& function_params,
+                         const std::string& node_name) {
+    if (args.size() != 2) {
+        throw std::runtime_error("equal import expects exactly two inputs: " +
+                                 node_name);
+    }
+    InferArgTypes(args, function_params);
+    const auto* lhs = args[0].checked_type().As<TensorTypeNode>();
+    const auto* rhs = args[1].checked_type().As<TensorTypeNode>();
+    const auto is_supported_dtype = [](const std::string& dtype) {
+        return dtype == "int32" || dtype == "int64" || dtype == "float32";
+    };
+    if (!lhs || !rhs || !is_supported_dtype(lhs->dtype) || !is_supported_dtype(rhs->dtype)) {
+        throw std::runtime_error(
+            "equal import supports same-dtype int32, int64, or float32 inputs: " +
+            node_name);
+    }
+    if (lhs->dtype != rhs->dtype) {
+        throw std::runtime_error(
+            "equal import requires matching input dtypes: " + node_name);
+    }
+    const auto format_shape = [](const Array<int64_t>& shape) {
+        std::string text = "[";
+        for (size_t axis = 0; axis < shape.size(); ++axis) {
+            if (axis != 0) text += ", ";
+            text += std::to_string(shape[axis]);
+        }
+        return text + "]";
+    };
+    size_t lhs_axis = lhs->shape.size();
+    size_t rhs_axis = rhs->shape.size();
+    while (lhs_axis > 0 && rhs_axis > 0) {
+        --lhs_axis;
+        --rhs_axis;
+        const int64_t left = lhs->shape[lhs_axis];
+        const int64_t right = rhs->shape[rhs_axis];
+        if (left != right && left != 1 && right != 1) {
+            throw std::runtime_error(
+                "equal import cannot broadcast shapes " + format_shape(lhs->shape) +
+                " and " + format_shape(rhs->shape) + ": " + node_name);
+        }
+    }
+}
+
 // S1 Cast 只开放 int32/int64 到 float32；不信任 Python 已校验的手写 spec。
 void ValidateCastSubset(const Array<Expr>& args, const ObjectRef& attrs,
                         const Array<Var>& function_params, const std::string& node_name) {
@@ -739,6 +795,8 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
 
     ImportedONNXModel result;
     std::unordered_map<std::string, Expr> values;
+    // 记录每个中间值由哪个节点产出，供图输出契约失配诊断定位到节点。
+    std::unordered_map<std::string, std::string> producer_node_by_value;
     Array<Var> function_params;
 
     for (size_t i = 0; i < inputs_json.a.size(); ++i) {
@@ -819,6 +877,9 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             op_name == "sqrt") {
             ValidateFloat32Inputs(op_name, args, function_params, node_name);
         }
+        if (op_name == "equal") {
+            ValidateEqualSubset(args, function_params, node_name);
+        }
         if (op_name == "cast") {
             ValidateCastSubset(args, attrs, function_params, node_name);
         }
@@ -831,11 +892,20 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
                 "ONNX import node output name conflicts with an existing value: " +
                 node_name);
         }
+        producer_node_by_value.emplace(output_names[0], node_name);
     }
 
     Array<Expr> output_exprs;
     std::vector<std::vector<int64_t>> declared_output_shapes;
     std::vector<std::string> declared_output_dtypes;
+    const auto output_contract_error = [&](const std::string& name) {
+        std::string message = "ONNX import output contract mismatch for '" + name + "'";
+        const auto producer = producer_node_by_value.find(name);
+        if (producer != producer_node_by_value.end()) {
+            message += " (produced by node '" + producer->second + "')";
+        }
+        return message;
+    };
     for (size_t i = 0; i < outputs_json.a.size(); ++i) {
         const Json& output = outputs_json.a[i];
         std::string ctx = "function.outputs[" + std::to_string(i) + "]";
@@ -860,13 +930,11 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         const auto* inferred = output_exprs[i].checked_type().As<TensorTypeNode>();
         if (!inferred || inferred->dtype != declared_output_dtypes[i] ||
             inferred->shape.size() != declared_output_shapes[i].size()) {
-            throw std::runtime_error("ONNX import output contract mismatch for '" +
-                                     result.output_names[i] + "'");
+            throw std::runtime_error(output_contract_error(result.output_names[i]));
         }
         for (size_t axis = 0; axis < declared_output_shapes[i].size(); ++axis) {
             if (inferred->shape[axis] != declared_output_shapes[i][axis]) {
-                throw std::runtime_error("ONNX import output contract mismatch for '" +
-                                         result.output_names[i] + "'");
+                throw std::runtime_error(output_contract_error(result.output_names[i]));
             }
         }
     }

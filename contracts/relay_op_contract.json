@@ -141,7 +141,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": [],
+      "onnx_ops": [
+        "Equal"
+      ],
       "registration": {
         "description": "Element-wise equality comparison with broadcast.",
         "arguments": [
