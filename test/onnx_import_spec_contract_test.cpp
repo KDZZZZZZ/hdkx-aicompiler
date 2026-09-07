@@ -333,6 +333,117 @@ void WriteUnaryMathFixture(const TemporaryDirectory& directory, const std::strin
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+// M5 S2 Pow 的 reifier 合同：合法广播 spec 重建；attrs 非空、dtype 越界/失配、
+// 不可广播与输出声明失配都以节点名失败。
+void WritePowFixture(const TemporaryDirectory& directory, const std::string& a_shape,
+                     const std::string& b_shape, const std::string& output_shape,
+                     const std::string& a_dtype = "float32",
+                     const std::string& b_dtype = "float32",
+                     const std::string& attrs = R"json({})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": )json" + a_shape + R"json(, "dtype": ")json" + a_dtype + R"json("},
+      {"name": "b", "shape": )json" + b_shape + R"json(, "dtype": ")json" + b_dtype + R"json("}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "s2_pow", "op_name": "pow", "inputs": ["a", "b"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+bool TestValidStaticPow() {
+    TemporaryDirectory directory;
+    WritePowFixture(directory, "[2, 1]", "[1, 3]", "[2, 3]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Pow import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 3}, "float32"),
+               "reified Pow output should use the broadcast shape");
+    return true;
+}
+
+bool TestPowAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WritePowFixture(directory, "[2, 3]", "[2, 3]", "[2, 3]", "float32", "float32",
+                    R"json({"axis": 0})json");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s2_pow", &message),
+               "Pow reifier must reject noncanonical attrs with the node name");
+    return true;
+}
+
+bool TestPowInvalidDTypesAreRejected() {
+    // 手写 spec 不能依赖 Python 已校验的假设：非 float32 与 dtype 失配都必须失败。
+    for (auto [a_dtype, b_dtype] :
+         {std::pair<std::string, std::string>{"int32", "int32"},
+          {"float64", "float64"},
+          {"float32", "int64"}}) {
+        TemporaryDirectory directory;
+        WritePowFixture(directory, "[2, 3]", "[2, 3]", "[2, 3]", a_dtype, b_dtype);
+        std::string message;
+        TEST_CHECK(ThrowsWithMessage(
+                       [&] {
+                           kxc::frontend::LoadONNXImportSpec(
+                               (directory.path() / "model.json").string(),
+                               (directory.path() / "params.bin").string());
+                       },
+                       "s2_pow", &message),
+                   "Pow reifier must reject dtypes outside the M4/M5 float32 subset");
+        TEST_CHECK(message.find("M4/M5 static subset") != std::string::npos,
+                   "Pow dtype diagnostic should name the subset");
+    }
+    return true;
+}
+
+bool TestPowIncompatibleBroadcastIsRejected() {
+    TemporaryDirectory directory;
+    WritePowFixture(directory, "[2, 3]", "[2, 4]", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s2_pow", &message),
+               "Pow reifier must reject incompatible broadcast shapes");
+    return true;
+}
+
+bool TestPowDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WritePowFixture(directory, "[2, 3]", "[3]", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s2_pow", &message),
+               "declared Pow output shape must match the inferred broadcast");
+    return true;
+}
+
 bool TestValidStaticUnaryMath() {
     for (const std::string& op_name : {"neg", "sigmoid"}) {
         TemporaryDirectory directory;
@@ -1294,6 +1405,11 @@ int main() {
         {"valid_static_layer_norm", TestValidStaticLayerNorm},
         {"layer_norm_declared_output_mismatch", TestLayerNormDeclaredOutputMismatchIsRejected},
         {"layer_norm_unsupported_attrs", TestLayerNormUnsupportedAttrsAreRejected},
+        {"valid_static_pow", TestValidStaticPow},
+        {"pow_attrs_are_strict", TestPowAttrsAreStrict},
+        {"pow_invalid_dtypes_rejected", TestPowInvalidDTypesAreRejected},
+        {"pow_incompatible_broadcast_rejected", TestPowIncompatibleBroadcastIsRejected},
+        {"pow_declared_output_mismatch", TestPowDeclaredOutputMismatchIsRejected},
         {"valid_static_unary_math", TestValidStaticUnaryMath},
         {"unary_math_attrs_are_strict", TestUnaryMathAttrsAreStrict},
         {"unary_math_non_float32_inputs_rejected", TestUnaryMathNonFloat32InputsAreRejected},

@@ -988,6 +988,60 @@ bool TestUnaryFloat32InferAndLoweringContract() {
     return true;
 }
 
+// M5 S2 Pow 的类型、FFI 与 lowering 合同：同 dtype float32 二元广播，
+// dtype 越界/失配、非广播 shape 与错误 arity 必须在类型推导处失败。
+bool TestPowInferAndLoweringContract() {
+    const kxc::relay::Op& pow_op = kxc::relay::Op::Get("pow");
+    kxc::Var a("a", kxc::TensorType({2, 1}, "float32"));
+    kxc::Var b("b", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call pow_call(pow_op, {a, b});
+    kxc::Function func({a, b}, pow_call);
+    kxc::relay::InferTypePass(func);
+    TEST_CHECK(pow_op->description.find("llvm.pow") != std::string::npos &&
+                   pow_op->arguments.size() == 2 &&
+                   pow_op->arguments[0].name == "lhs" &&
+                   pow_op->arguments[1].name == "rhs",
+               "generated pow schema must be retained by builtin anchoring");
+    TEST_CHECK(CheckTensor(pow_call.checked_type(), {2, 3}, "float32"),
+               "pow must infer the trailing-axis broadcast shape");
+    const kxc::PackedFunc make_pow =
+        kxc::Registry::Global().Get("kxc.relay.op._make.pow");
+    TEST_CHECK(make_pow.defined(), "pow must retain its canonical FFI binding");
+    const kxc::Call ffi_pow = kxc::CastTo<kxc::Call>(make_pow(a, b));
+    TEST_CHECK(ffi_pow->args.size() == 2 && ffi_pow->args[0].get() == a.get() &&
+                   ffi_pow->args[1].get() == b.get() && !ffi_pow->attrs.defined(),
+               "pow FFI behavior must preserve argument order and fieldless attrs");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
+               "pow must lower through FRelayToTE");
+    TEST_CHECK(LowerUnits(func).size() == 1,
+               "one pow Relay Call must produce one lowering unit");
+
+    kxc::Var int64_b("int64_b", kxc::TensorType({3}, "int64"));
+    kxc::Var float64_b("float64_b", kxc::TensorType({3}, "float64"));
+    kxc::Var row("row", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var four("four", kxc::TensorType({4}, "float32"));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({a, int64_b},
+                                                           kxc::Call(pow_op, {a, int64_b})));
+               }),
+               "pow with mismatched dtypes should fail type inference");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({a, float64_b}, kxc::Call(pow_op, {a, float64_b})));
+               }),
+               "pow outside the M4/M5 float32 subset should fail closed");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({row, four},
+                                                           kxc::Call(pow_op, {row, four})));
+               }),
+               "pow with non-broadcastable shapes should fail type inference");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({a}, kxc::Call(pow_op, {a})));
+               }),
+               "pow with one input should fail type inference before lowering");
+    return true;
+}
+
 bool TestLayerNormInferAndLoweringContract() {
     kxc::Var data("data", kxc::TensorType({2, 3, 4}, "float32"));
     kxc::Var scale("scale", kxc::TensorType({3, 4}, "float32"));
@@ -1369,6 +1423,7 @@ int main() {
         {"equal_infer_and_lowering_contract", TestEqualInferAndLoweringContract},
         {"unary_float32_infer_and_lowering_contract",
          TestUnaryFloat32InferAndLoweringContract},
+        {"pow_infer_and_lowering_contract", TestPowInferAndLoweringContract},
         {"layer_norm_infer_and_lowering_contract", TestLayerNormInferAndLoweringContract},
         {"exact_transformer_operator_slice", TestExactTransformerOperatorSliceComposition},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},

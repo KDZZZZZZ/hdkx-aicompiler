@@ -404,6 +404,41 @@
         "Relu"
       ]
     },
+    "pow": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Pow"
+      ],
+      "registration": {
+        "description": "Element-wise power with broadcast on float32 (llvm.pow dispatch).",
+        "arguments": [
+          {
+            "name": "lhs",
+            "type": "Tensor",
+            "description": "The base tensor."
+          },
+          {
+            "name": "rhs",
+            "type": "Tensor",
+            "description": "The exponent tensor."
+          }
+        ],
+        "type_infer_symbol": "PowInferType",
+        "relay_to_te_symbol": "PowCompute"
+      }
+    },
     "reduce_mean": {
       "schema_version": 1,
       "category": "tensor.reduce",

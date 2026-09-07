@@ -463,8 +463,8 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
         }
         return ObjectRef();
     }
-    if (op_name == "neg" || op_name == "sigmoid") {
-        // ONNX Neg/Sigmoid 是 fieldless 一元算子：一输入一输出、无属性。
+    if (op_name == "neg" || op_name == "sigmoid" || op_name == "pow") {
+        // ONNX Neg/Sigmoid/Pow(opset 13+) 是 fieldless 算子：无属性。
         if (!attrs.o.empty()) {
             throw std::runtime_error("Node '" + node_name + "' (" + op_name +
                                      ") import attrs must be empty");
@@ -628,6 +628,44 @@ void ValidateFloat32MathInputs(const std::string& op_name, const Array<Expr>& ar
             throw std::runtime_error(
                 op_name + " import requires float32 input(s) in the M4/M5 static subset: " +
                 node_name);
+        }
+    }
+}
+
+// M5 S2 Pow 只开放同 dtype float32，且广播必须在 reifier 处以节点名失败：
+// 函数级 InferType 的广播错误不携带节点名，手写 spec 的诊断要求能定位节点。
+void ValidatePowSubset(const Array<Expr>& args, const Array<Var>& function_params,
+                       const std::string& node_name) {
+    if (args.size() != 2) {
+        throw std::runtime_error("pow import expects exactly two inputs: " + node_name);
+    }
+    InferArgTypes(args, function_params);
+    const auto* lhs = args[0].checked_type().As<TensorTypeNode>();
+    const auto* rhs = args[1].checked_type().As<TensorTypeNode>();
+    if (!lhs || !rhs || lhs->dtype != "float32" || rhs->dtype != "float32") {
+        throw std::runtime_error(
+            "pow import requires same-dtype float32 input(s) in the M4/M5 static "
+            "subset: " + node_name);
+    }
+    const auto format_shape = [](const Array<int64_t>& shape) {
+        std::string text = "[";
+        for (size_t axis = 0; axis < shape.size(); ++axis) {
+            if (axis != 0) text += ", ";
+            text += std::to_string(shape[axis]);
+        }
+        return text + "]";
+    };
+    size_t lhs_axis = lhs->shape.size();
+    size_t rhs_axis = rhs->shape.size();
+    while (lhs_axis > 0 && rhs_axis > 0) {
+        --lhs_axis;
+        --rhs_axis;
+        const int64_t left = lhs->shape[lhs_axis];
+        const int64_t right = rhs->shape[rhs_axis];
+        if (left != right && left != 1 && right != 1) {
+            throw std::runtime_error(
+                "pow import cannot broadcast shapes " + format_shape(lhs->shape) +
+                " and " + format_shape(rhs->shape) + ": " + node_name);
         }
     }
 }
@@ -903,6 +941,9 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         }
         if (op_name == "neg" || op_name == "sigmoid") {
             ValidateFloat32MathInputs(op_name, args, function_params, node_name);
+        }
+        if (op_name == "pow") {
+            ValidatePowSubset(args, function_params, node_name);
         }
         if (op_name == "equal") {
             ValidateEqualSubset(args, function_params, node_name);

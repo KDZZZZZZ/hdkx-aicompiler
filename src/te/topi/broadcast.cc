@@ -134,6 +134,26 @@ Tensor divide(const Tensor& A, const Tensor& B, std::string name,
                            std::divides<PrimExpr>());
 }
 
+Tensor power(const Tensor& A, const Tensor& B, std::string name,
+             std::string tag) {
+    if (!A.defined() || !B.defined()) {
+        throw std::runtime_error("power requires defined tensors");
+    }
+    if (A->dtype != B->dtype) {
+        throw std::runtime_error("power input dtypes must match");
+    }
+    if (A->dtype.code != 2) {
+        throw std::runtime_error("power requires floating-point inputs");
+    }
+    // 直接发射 "pow" TIR 调用：LLVM 分派把它绑定到 llvm.pow 声明（libm powf），
+    // 禁止用 exp(b·log a) 覆盖一般 Pow（负底数/精确性会丢失）。
+    return BinaryBroadcast(
+        A, B, std::move(name), std::move(tag),
+        [](const PrimExpr& base, const PrimExpr& exponent) {
+            return tir::Call(base.dtype(), "pow", {base, exponent});
+        });
+}
+
 Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y,
              std::string name, std::string tag) {
     if (!condition.defined() || !x.defined() || !y.defined()) {

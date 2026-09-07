@@ -9,6 +9,8 @@ Type EqualInferType(const Attrs&, const Array<Type>&);
 te::Tensor EqualCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 Type NegInferType(const Attrs&, const Array<Type>&);
 te::Tensor NegCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type PowInferType(const Attrs&, const Array<Type>&);
+te::Tensor PowCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 Type SigmoidInferType(const Attrs&, const Array<Type>&);
 te::Tensor SigmoidCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 
@@ -34,6 +36,14 @@ KXC_REGISTER_OP(neg)
     .add_argument("data", "Tensor", "The input tensor.")
     .set_attr<FInferType>("FInferType", NegInferType)
     .set_attr<FRelayToTE>("FRelayToTE", NegCompute);
+
+KXC_REGISTER_OP(pow)
+    .describe("Element-wise power with broadcast on float32 (llvm.pow dispatch).")
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The base tensor.")
+    .add_argument("rhs", "Tensor", "The exponent tensor.")
+    .set_attr<FInferType>("FInferType", PowInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", PowCompute);
 
 KXC_REGISTER_OP(sigmoid)
     .describe("Element-wise logistic sigmoid 1/(1+exp(-x)) on float32.")

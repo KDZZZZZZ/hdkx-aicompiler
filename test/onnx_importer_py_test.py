@@ -1641,3 +1641,64 @@ def test_unary_math_rejects_attributes(op):
 def test_unary_math_rejects_declared_output_mismatch(op):
     with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
         import_onnx_model(_unary_math_model(op, [2, 3], output_shape=[2, 4]))
+
+
+# ---------------------------------------------------------------------------
+# M5 S2: Pow (fieldless float32 binary broadcast, opset >= 13 form).
+# ---------------------------------------------------------------------------
+
+
+def _pow_model(a_shape, b_shape, *, a_dtype=TensorProto.FLOAT, b_dtype=TensorProto.FLOAT,
+               output_shape=(2, 3), output_dtype=TensorProto.FLOAT, opset=17):
+    return _s1_model(
+        [helper.make_node("Pow", ["a", "b"], ["out"], name="s2_pow")],
+        [helper.make_tensor_value_info("a", a_dtype, a_shape),
+         helper.make_tensor_value_info("b", b_dtype, b_shape)],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+        opset=opset,
+    )
+
+
+def test_pow_maps_with_trailing_broadcast():
+    imported = import_onnx_model(_pow_model([2, 1], [1, 3]))
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        ("pow", {}, ["a", "b"]),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_pow_rejects_pre_opset13():
+    with pytest.raises(UnsupportedONNXOpError, match="opset >= 13 form is required"):
+        import_onnx_model(_pow_model([2], [2], opset=12))
+
+
+def test_pow_rejects_attributes():
+    model = _pow_model([2, 3], [2, 3])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize(
+    ("a_shape", "b_shape", "a_dtype", "b_dtype", "message"),
+    [
+        ([2, 3], [2, 3], TensorProto.INT32, TensorProto.INT32,
+         "requires same-dtype float32 inputs in the M4/M5 static subset"),
+        ([2, 3], [2, 3], TensorProto.DOUBLE, TensorProto.DOUBLE,
+         "requires same-dtype float32 inputs in the M4/M5 static subset"),
+        ([2, 3], [2, 3], TensorProto.FLOAT, TensorProto.INT64,
+         "requires same-dtype float32 inputs in the M4/M5 static subset"),
+        ([2, 3], [2, 4], TensorProto.FLOAT, TensorProto.FLOAT,
+         "incompatible broadcast dimensions"),
+    ],
+)
+def test_pow_rejects_invalid_static_contract(a_shape, b_shape, a_dtype, b_dtype, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_pow_model(a_shape, b_shape, a_dtype=a_dtype, b_dtype=b_dtype))
+
+
+def test_pow_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_pow_model([2, 3], [3], output_shape=[2, 4]))

@@ -413,6 +413,30 @@ llvm::Value* CodeGenLLVM::GenCall(const tir::CallNode* op) {
         return CastValue(value, ret_type, is_signed, "cast");
     }
 
+    if (op->name == "pow") {
+        // M5 S2 backend 分派合同：参数数量、操作数类型和声明函数在此显式固定；
+        // 不是只让某个名字出现在 IR 里。非有限结果按 llvm.pow/C99 pow 声明处理
+        // （如 pow(+0,-1)=+inf、pow(负底数, 非整数)=NaN）。
+        if (op->args.size() != 2) {
+            throw std::runtime_error("CodeGenLLVM: pow expects exactly two arguments, got " +
+                                     std::to_string(op->args.size()));
+        }
+        if (op->dtype.code != 2 || op->args[0]->dtype.code != 2 ||
+            op->args[1]->dtype.code != 2) {
+            throw std::runtime_error(
+                "CodeGenLLVM: pow requires floating-point base and exponent");
+        }
+        if (op->args[0]->dtype.bits != op->dtype.bits ||
+            op->args[1]->dtype.bits != op->dtype.bits) {
+            throw std::runtime_error(
+                "CodeGenLLVM: pow operand bits must match the declared result dtype");
+        }
+        llvm::Value* base = GenExprInContext(op->args[0], "pow base");
+        llvm::Value* exponent = GenExprInContext(op->args[1], "pow exponent");
+        llvm::Function* callee = GetOrDeclareIntrinsic("pow", ret_type);
+        return builder_.CreateCall(callee, {base, exponent}, "call_pow");
+    }
+
     std::vector<llvm::Value*> args;
     for (const auto& arg : op->args) {
         llvm::Value* arg_value = GenExprInContext(arg, "call argument");
@@ -502,6 +526,8 @@ llvm::Function* CodeGenLLVM::GetOrDeclareIntrinsic(const std::string& name,
         id = llvm::Intrinsic::ceil;
     } else if (name == "fabs" || name == "tir.fabs") {
         id = llvm::Intrinsic::fabs;
+    } else if (name == "pow" || name == "tir.pow") {
+        id = llvm::Intrinsic::pow;
     }
 
     if (id == llvm::Intrinsic::not_intrinsic) {

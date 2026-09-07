@@ -697,6 +697,65 @@ void TestSigmoid() {
           "sigmoid saturation behavior mismatch");
 }
 
+// 验证 Pow 在 float32 上的 LLVM 数值结果（M5 S2 的 backend 调用核实）：
+// TIR "pow" 调用在 codegen 分派处绑定 llvm.pow 声明，libm powf 在 JIT 链接期
+// 由 host 进程符号表解析——下面的真实执行本身就是核实方式：若声明 ABI、
+// 参数数量/类型或 JIT 符号不可解析，verifyFunction 或 LLJIT 链接会在本测试
+// 直接失败，而不是"IR 里出现过 pow 这个名字"。
+// 非零底数整数指数（如 pow(-2,3)=-8）同时证明实现不是 exp(b·log a)：
+// 负底数走 log 会得到 NaN，无法得到 -8。
+void TestPow() {
+    // 合法分数指数 + 尾轴广播：[2,1]^[1,2] → [2,2]。
+    kxc::Var a("a", kxc::TensorType({2, 1}, "float32"));
+    kxc::Var b("b", kxc::TensorType({1, 2}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("pow"), {a, b});
+    kxc::Function func({a, b}, call);
+    const std::vector<float> a_data = {2.0f, 4.0f};
+    const std::vector<float> b_data = {2.0f, 0.5f};
+    std::vector<float> out(4, 0.0f);
+    CompileAndRun("pow", func, {Input(a_data), Input(b_data), Output(out)});
+    ExpectNear(out, {4.0f, 1.4142135f, 16.0f, 2.0f}, 1e-5f);
+
+    // 零指数：任何有限底数（含 0^0）按 C99 pow 声明得 1。
+    kxc::Var base("base", kxc::TensorType({3}, "float32"));
+    kxc::Var zero_exp("zero_exp", kxc::TensorType({3}, "float32"));
+    kxc::Call zero_call(kxc::relay::Op::Get("pow"), {base, zero_exp});
+    kxc::Function zero_func({base, zero_exp}, zero_call);
+    const std::vector<float> base_data = {0.0f, 5.0f, -2.0f};
+    const std::vector<float> zeros(3, 0.0f);
+    std::vector<float> zero_out(3, 0.0f);
+    CompileAndRun("pow_zero_exponent", zero_func,
+                  {Input(base_data), Input(zeros), Output(zero_out)});
+    ExpectNear(zero_out, {1.0f, 1.0f, 1.0f}, 0.0f);
+
+    // 负底数的整数指数：pow(-2,3)=-8、pow(-2,2)=4（按声明精确）。
+    kxc::Var neg_base("neg_base", kxc::TensorType({2}, "float32"));
+    kxc::Var int_exp("int_exp", kxc::TensorType({2}, "float32"));
+    kxc::Call int_call(kxc::relay::Op::Get("pow"), {neg_base, int_exp});
+    kxc::Function int_func({neg_base, int_exp}, int_call);
+    const std::vector<float> neg_base_data = {-2.0f, -2.0f};
+    const std::vector<float> int_exp_data = {3.0f, 2.0f};
+    std::vector<float> int_out(2, 0.0f);
+    CompileAndRun("pow_negative_base_integer_exponent", int_func,
+                  {Input(neg_base_data), Input(int_exp_data), Output(int_out)});
+    ExpectNear(int_out, {-8.0f, 4.0f}, 0.0f);
+
+    // 按声明处理的非有限结果：pow(+0,-1)=+inf；pow(-2,0.5)=NaN（定义域错误）。
+    kxc::Var nf_base("nf_base", kxc::TensorType({2}, "float32"));
+    kxc::Var nf_exp("nf_exp", kxc::TensorType({2}, "float32"));
+    kxc::Call nf_call(kxc::relay::Op::Get("pow"), {nf_base, nf_exp});
+    kxc::Function nf_func({nf_base, nf_exp}, nf_call);
+    const std::vector<float> nf_base_data = {0.0f, -2.0f};
+    const std::vector<float> nf_exp_data = {-1.0f, 0.5f};
+    std::vector<float> nf_out(2, 0.0f);
+    CompileAndRun("pow_nonfinite_by_declaration", nf_func,
+                  {Input(nf_base_data), Input(nf_exp_data), Output(nf_out)});
+    Check(std::isinf(nf_out[0]) && nf_out[0] > 0.0f,
+          "pow(+0,-1) must be +inf per the pow declaration");
+    Check(std::isnan(nf_out[1]),
+          "pow(-2,0.5) must be NaN per the pow declaration domain rule");
+}
+
 // 验证 Equal 的 bool 结果直接作为 Where 条件的真实 buffer 消费链。
 void TestEqualWhereComposition() {
     kxc::Var a("a", kxc::TensorType({2, 3}, "float32"));
@@ -1075,6 +1134,7 @@ int main() {
         {"equal", TestEqual},
         {"neg", TestNeg},
         {"sigmoid", TestSigmoid},
+        {"pow", TestPow},
         {"equal_where_composition", TestEqualWhereComposition},
         {"nn_layer_norm", TestLayerNorm},
         {"cast", TestCast},

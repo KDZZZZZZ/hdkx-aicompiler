@@ -94,6 +94,7 @@ ONNX_TO_RELAY = {
     "Reshape": "reshape",
     "Neg": "neg",
     "Sigmoid": "sigmoid",
+    "Pow": "pow",
 }
 
 
@@ -314,6 +315,11 @@ def import_onnx_model(
             )
         if node.op_type in {"Neg", "Sigmoid"}:
             inferred_static_specs[node.output[0]] = _infer_unary_math_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
+            )
+        if node.op_type == "Pow":
+            inferred_static_specs[node.output[0]] = _infer_pow_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch, opset_version,
             )
@@ -1291,6 +1297,54 @@ def _infer_unary_math_spec(
     return result
 
 
+def _infer_pow_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    """Infer the static output of a Pow node under the M5 S2 float32 subset.
+
+    Pow is fieldless: two same-dtype float32 inputs (base and exponent) with
+    multidirectional trailing-axis broadcast. Integer and float64 inputs are
+    rejected; the ONNX boundary is the opset >= 13 broadcast form.
+    """
+    node_name = node.name or "<unnamed>"
+    if opset_version < M4M5_MATH_MIN_OPSET:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX Pow opset {opset_version} in node "
+            f"'{node_name}': the opset >= {M4M5_MATH_MIN_OPSET} form is required"
+        )
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(f"Pow node '{node_name}' requires exactly two non-empty inputs")
+    lhs, rhs = (
+        _resolve_static_input("Pow", node_name, name, input_specs, params,
+                              inferred_specs, value_info_by_name, default_batch)
+        for name in node.input
+    )
+    if lhs.dtype not in ARITHMETIC_DTYPES or rhs.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"Pow node '{node_name}' requires same-dtype float32 inputs in the "
+            f"M4/M5 static subset; got {lhs.dtype} and {rhs.dtype}"
+        )
+    if lhs.dtype != rhs.dtype:
+        raise ValueError(
+            f"Pow node '{node_name}' requires matching input dtypes; "
+            f"got {lhs.dtype} and {rhs.dtype}"
+        )
+    result = TensorSpec(
+        name=node.output[0],
+        shape=_broadcast_shapes("Pow", node_name, lhs.shape, rhs.shape),
+        dtype="float32",
+    )
+    _validate_declared_output("Pow", node_name, result, output_declarations, default_batch)
+    return result
+
+
 def _tensor_spec_from_value_info(
     value_info: onnx.ValueInfoProto, default_batch: int | None
 ) -> TensorSpec:
@@ -1480,7 +1534,7 @@ def _convert_attrs(
                 f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
-    if node.op_type in {"Neg", "Sigmoid"}:
+    if node.op_type in {"Neg", "Sigmoid", "Pow"}:
         if attrs:
             raise ValueError(
                 f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"

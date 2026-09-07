@@ -55,6 +55,11 @@ Call MakeSigmoid(Expr data) {
     return Call(GetOp("sigmoid"), {data});
 }
 
+// 构造二元逐元素幂调用。
+Call MakePow(Expr lhs, Expr rhs) {
+    return Call(GetOp("pow"), {lhs, rhs});
+}
+
 // 构造三元 Where 调用。
 Call MakeWhere(Expr condition, Expr x, Expr y) {
     return Call(GetOp("where"), {condition, x, y});
@@ -187,6 +192,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.divide").set_body(ToPackedFunc(MakeDivid
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.equal").set_body(ToPackedFunc(MakeEqual));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.neg").set_body(ToPackedFunc(MakeNeg));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sigmoid").set_body(ToPackedFunc(MakeSigmoid));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.pow").set_body(ToPackedFunc(MakePow));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.where").set_body(ToPackedFunc(MakeWhere));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sqrt").set_body(ToPackedFunc(MakeSqrt));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.matmul").set_body(ToPackedFunc(MakeMatmul));

@@ -156,6 +156,20 @@ te::Tensor SqrtCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     return RequireDefined("sqrt", te::topi::sqrt(inputs[0], "T_sqrt"));
 }
 
+te::Tensor PowCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                      const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("pow", inputs, 2);
+    const auto* output = RequireTensorOutput("pow", out_type);
+    if (inputs[0]->dtype != inputs[1]->dtype ||
+        inputs[0]->dtype != kxc::tir::DataType::Float(32) ||
+        output->dtype != "float32") {
+        throw std::runtime_error(
+            "pow supports only same-dtype float32 base/exponent before lowering");
+    }
+    return RequireDefined("pow", te::topi::power(inputs[0], inputs[1], "T_pow"));
+}
+
 te::Tensor MatMulCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                          const kxc::Type& out_type) {
     (void)attrs;
