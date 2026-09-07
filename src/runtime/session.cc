@@ -144,8 +144,9 @@ StatefulAppendBinding ResolveStatefulAppend(
     if (alias_value_id == -1) {
         throw std::logic_error("RuntimeSession stateful state has no append alias");
     }
-    for (size_t call_index = 0; call_index < plan.calls().size(); ++call_index) {
-        const KernelCall& call = plan.calls()[call_index];
+    const Array<KernelCall> calls = plan.calls();
+    for (size_t call_index = 0; call_index < calls.size(); ++call_index) {
+        const KernelCall& call = calls[call_index];
         bool produces_alias = false;
         for (int64_t output_id : call.output_value_ids()) {
             produces_alias = produces_alias || output_id == alias_value_id;
@@ -1035,9 +1036,10 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
                     // 提交后长度（committed + n），会话只绑定一种 extent 表达。
                     std::vector<uint64_t> call_extents;
                     {
+                        const std::vector<std::vector<int64_t>>& bindings =
+                            node->plan.state_extent_bindings();
                         std::lock_guard<std::mutex> book_lock(node->length_book->mutex);
-                        for (int64_t bound :
-                             node->plan.state_extent_bindings()[call_index]) {
+                        for (int64_t bound : bindings[call_index]) {
                             const auto length_it =
                                 node->length_book->lengths.find(bound);
                             if (length_it == node->length_book->lengths.end()) {
