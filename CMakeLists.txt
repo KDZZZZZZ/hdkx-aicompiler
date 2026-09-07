@@ -556,6 +556,7 @@ if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
     src/compiler/shape/shape_specialization.cc
     src/compiler/shape/shape_specialization_controller.cc
     src/compiler/shape/restricted_symbolic_shape.cc
+    src/compiler/shape/shape_value_resolver.cc
     src/compiler/shape/dynamic_shape_contract.cc)
 endif()
 
@@ -624,6 +625,7 @@ else()
     src/compiler/shape/shape_specialization.cc
     src/compiler/shape/shape_specialization_controller.cc
     src/compiler/shape/restricted_symbolic_shape.cc
+    src/compiler/shape/shape_value_resolver.cc
     src/compiler/shape/dynamic_shape_contract.cc)
   kxc_configure_module_obj(kxc_shape_experimental_test_obj)
 endif()

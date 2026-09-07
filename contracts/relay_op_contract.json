@@ -109,6 +109,22 @@
         "Concat"
       ]
     },
+    "constant_of_shape": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "ConstantOfShapeAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
     "divide": {
       "schema_version": 1,
       "category": "tensor.math",
@@ -162,6 +178,22 @@
         "relay_to_te_symbol": "EqualCompute"
       }
     },
+    "expand": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 2,
+      "attrs": "ExpandAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
     "gather": {
       "schema_version": 1,
       "category": "tensor.transform",
@@ -194,7 +226,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["MatMul"]
+      "onnx_ops": [
+        "MatMul"
+      ]
     },
     "mul": {
       "schema_version": 1,
@@ -410,6 +444,38 @@
         "Reshape"
       ]
     },
+    "reshape_dynamic": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 2,
+      "attrs": "ReshapeDynamicAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "shape_expr": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "ShapeExprAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
     "shape_of": {
       "schema_version": 1,
       "category": "tensor.transform",
@@ -470,7 +536,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Softmax"]
+      "onnx_ops": [
+        "Softmax"
+      ]
     },
     "sqrt": {
       "schema_version": 1,
@@ -489,6 +557,22 @@
       "onnx_ops": [
         "Sqrt"
       ]
+    },
+    "squeeze": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "SqueezeAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
     },
     "subtract": {
       "schema_version": 1,
@@ -522,7 +606,25 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Transpose"]
+      "onnx_ops": [
+        "Transpose"
+      ]
+    },
+    "unsqueeze": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "UnsqueezeAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
     },
     "where": {
       "schema_version": 1,
@@ -538,7 +640,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Where"]
+      "onnx_ops": [
+        "Where"
+      ]
     }
   },
   "documentation": "docs/OP_SUPPORT_MATRIX.md"

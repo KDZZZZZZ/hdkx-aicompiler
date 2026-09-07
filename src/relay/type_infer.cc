@@ -535,6 +535,319 @@ Type ShapeOfInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType({rank}, "int64");
 }
 
+namespace {
+
+// 受限形状表达式元素：kind 0 常量 / kind 1 数据输入轴引用。
+struct ShapeExprElement {
+    int64_t kind;
+    int64_t value;
+    int64_t axis;
+};
+
+// 读取并校验受限形状表达式三元组（expr_kinds/expr_values/expr_axes）。
+std::vector<ShapeExprElement> ReadShapeExpr(const std::string& op_name,
+                                            const Array<int64_t>& kinds,
+                                            const Array<int64_t>& values,
+                                            const Array<int64_t>& axes) {
+    if (kinds.empty() || values.size() != kinds.size() || axes.size() != kinds.size()) {
+        throw std::runtime_error(
+            op_name + " requires a resolved restricted shape expression "
+            "(expr_kinds/expr_values/expr_axes); static admission has no proof");
+    }
+    std::vector<ShapeExprElement> elements;
+    elements.reserve(kinds.size());
+    for (size_t i = 0; i < kinds.size(); ++i) {
+        if (kinds[i] != kShapeExprKindConst && kinds[i] != kShapeExprKindInputAxis) {
+            throw std::runtime_error(op_name + " shape expression kind must be 0 or 1");
+        }
+        elements.push_back(ShapeExprElement{kinds[i], values[i], axes[i]});
+    }
+    return elements;
+}
+
+// 求值受限形状表达式：kind 1 引用第 0 个输入（数据）轴；未知维透传 -1。
+std::vector<int64_t> EvaluateShapeExpr(const std::string& op_name,
+                                       const std::vector<ShapeExprElement>& elements,
+                                       const TensorTypeNode* data) {
+    const int64_t data_rank = static_cast<int64_t>(data->shape.size());
+    std::vector<int64_t> dims;
+    dims.reserve(elements.size());
+    for (const ShapeExprElement& element : elements) {
+        if (element.kind == kShapeExprKindConst) {
+            if (element.value < 0) {
+                throw std::runtime_error(
+                    op_name + " shape expression constant must be >= 0; unresolved "
+                    "-1 inference is not part of the restricted subset");
+            }
+            dims.push_back(element.value);
+            continue;
+        }
+        if (element.value != 0) {
+            throw std::runtime_error(
+                op_name + " shape expression axis references must target input 0 (data)");
+        }
+        if (element.axis < 0 || element.axis >= data_rank) {
+            throw std::runtime_error(op_name + " shape expression axis out of range");
+        }
+        dims.push_back(data->shape[static_cast<size_t>(element.axis)]);
+    }
+    return dims;
+}
+
+// 校验元素总数（已知时），未知维（-1）跳过。
+void RequireSameElementCount(const std::string& op_name,
+                             const std::vector<int64_t>& data_dims,
+                             const std::vector<int64_t>& target_dims) {
+    const int64_t data_product = KnownProduct(data_dims, 0, data_dims.size());
+    const int64_t target_product = KnownProduct(target_dims, 0, target_dims.size());
+    if (data_product < 0 || target_product < 0) {
+        return;  // 边界 -1 维：符号等值证明由受限准备路径负责。
+    }
+    if (data_product != target_product) {
+        throw std::runtime_error(op_name + " element count mismatch");
+    }
+}
+
+}  // namespace
+
+// 推导 shape_expr 的 int64[len(expr)] 输出；表达式经受限准备验证。
+Type ShapeExprInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("shape_expr", input_types, 1);
+    const auto* source = RequireTensor("shape_expr", input_types[0], "data");
+    const auto* shape_expr_attrs = attrs.As<ShapeExprAttrsNode>();
+    if (!shape_expr_attrs) {
+        throw std::runtime_error(
+            "shape_expr requires ShapeExprAttrs; unrestricted use is rejected");
+    }
+    const std::vector<ShapeExprElement> elements = ReadShapeExpr(
+        "shape_expr", shape_expr_attrs->expr_kinds, shape_expr_attrs->expr_values,
+        shape_expr_attrs->expr_axes);
+    const int64_t source_rank = static_cast<int64_t>(source->shape.size());
+    for (const ShapeExprElement& element : elements) {
+        if (element.kind == kShapeExprKindConst) {
+            if (element.value < 0) {
+                throw std::runtime_error(
+                    "shape_expr constant elements must be >= 0");
+            }
+            continue;
+        }
+        if (element.value != 0 || element.axis < 0 || element.axis >= source_rank) {
+            throw std::runtime_error(
+                "shape_expr axis references must target input 0 within range");
+        }
+    }
+    return MakeTensorType({static_cast<int64_t>(elements.size())}, "int64");
+}
+
+// 推导 reshape_dynamic 的目标形状：目标表达式必须已被受限准备解析。
+Type ReshapeDynamicInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("reshape_dynamic", input_types, 2);
+    const auto* data = RequireTensor("reshape_dynamic", input_types[0], "data");
+    const auto* control = RequireTensor("reshape_dynamic", input_types[1], "shape");
+    if (control->dtype != "int64" || control->shape.size() != 1 ||
+        !IsKnown(control->shape[0])) {
+        throw std::runtime_error(
+            "reshape_dynamic control must be a known-length int64 rank-1 tensor");
+    }
+    const auto* reshape_attrs = attrs.As<ReshapeDynamicAttrsNode>();
+    if (!reshape_attrs) {
+        throw std::runtime_error(
+            "reshape_dynamic requires ReshapeDynamicAttrs; unrestricted use is rejected");
+    }
+    const std::vector<ShapeExprElement> elements = ReadShapeExpr(
+        "reshape_dynamic", reshape_attrs->expr_kinds, reshape_attrs->expr_values,
+        reshape_attrs->expr_axes);
+    if (elements.size() != static_cast<size_t>(control->shape[0])) {
+        throw std::runtime_error(
+            "reshape_dynamic target expression length differs from its control tensor");
+    }
+    const std::vector<int64_t> target = EvaluateShapeExpr("reshape_dynamic", elements, data);
+    if (target.empty()) {
+        throw std::runtime_error("reshape_dynamic requires a rank >= 1 target");
+    }
+    RequireSameElementCount("reshape_dynamic", ShapeVector(data), target);
+    return MakeTensorType(target, data->dtype);
+}
+
+// 推导 expand 的受限目标形状与广播合法性。
+Type ExpandInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("expand", input_types, 2);
+    const auto* data = RequireTensor("expand", input_types[0], "data");
+    const auto* control = RequireTensor("expand", input_types[1], "shape");
+    if (control->dtype != "int64" || control->shape.size() != 1 ||
+        !IsKnown(control->shape[0])) {
+        throw std::runtime_error(
+            "expand control must be a known-length int64 rank-1 tensor");
+    }
+    const auto* expand_attrs = attrs.As<ExpandAttrsNode>();
+    if (!expand_attrs) {
+        throw std::runtime_error(
+            "expand requires ExpandAttrs; unrestricted use is rejected");
+    }
+    const std::vector<ShapeExprElement> elements = ReadShapeExpr(
+        "expand", expand_attrs->expr_kinds, expand_attrs->expr_values,
+        expand_attrs->expr_axes);
+    if (elements.size() != static_cast<size_t>(control->shape[0]) ||
+        elements.size() != data->shape.size()) {
+        throw std::runtime_error(
+            "expand target length must equal both its control tensor and data rank");
+    }
+    const std::vector<int64_t> target = EvaluateShapeExpr("expand", elements, data);
+    for (size_t axis = 0; axis < target.size(); ++axis) {
+        const int64_t data_dim = data->shape[axis];
+        const int64_t target_dim = target[axis];
+        if (!IsKnown(data_dim) || !IsKnown(target_dim)) {
+            continue;  // 未知维兼容性由运行期合同校验。
+        }
+        if (data_dim != target_dim && data_dim != 1) {
+            throw std::runtime_error(
+                "expand cannot broadcast data axis " + std::to_string(axis) +
+                " (extent " + std::to_string(data_dim) + ") to " +
+                std::to_string(target_dim));
+        }
+    }
+    return MakeTensorType(target, data->dtype);
+}
+
+// constant_of_shape 的单输出字节上限（声明子集，超出即拒绝）。
+constexpr int64_t kMaxConstantOfShapeBytes = int64_t{256} << 20;
+
+// 推导 constant_of_shape 的常量目标形状输出。
+Type ConstantOfShapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("constant_of_shape", input_types, 1);
+    const auto* control = RequireTensor("constant_of_shape", input_types[0], "shape");
+    if (control->dtype != "int64" || control->shape.size() != 1 ||
+        !IsKnown(control->shape[0])) {
+        throw std::runtime_error(
+            "constant_of_shape control must be a known-length int64 rank-1 tensor");
+    }
+    const auto* constant_attrs = attrs.As<ConstantOfShapeAttrsNode>();
+    if (!constant_attrs) {
+        throw std::runtime_error(
+            "constant_of_shape requires ConstantOfShapeAttrs with an explicit "
+            "constant target; data-dependent shapes are rejected");
+    }
+    const std::vector<int64_t> target(constant_attrs->target.begin(),
+                                      constant_attrs->target.end());
+    if (target.empty() || target.size() != static_cast<size_t>(control->shape[0])) {
+        throw std::runtime_error(
+            "constant_of_shape target must be nonempty and match its control length");
+    }
+    if (target.size() > static_cast<size_t>(kMaxShapeOfRank)) {
+        throw std::runtime_error(
+            "constant_of_shape supports rank up to " + std::to_string(kMaxShapeOfRank));
+    }
+    for (int64_t dim : target) {
+        if (dim < 0) {
+            throw std::runtime_error("constant_of_shape target dimensions must be >= 0");
+        }
+    }
+    const std::string dtype = CastDTypeFromCode(constant_attrs->dtype_code);
+    const double value = constant_attrs->value;
+    if (!std::isfinite(value)) {
+        throw std::runtime_error("constant_of_shape value must be finite");
+    }
+    if ((dtype == "int32" || dtype == "int64" || dtype == "int8" || dtype == "uint8") &&
+        std::trunc(value) != value) {
+        throw std::runtime_error(
+            "constant_of_shape integer fill value must be integral");
+    }
+    int64_t elements = 1;
+    for (int64_t dim : target) {
+        if (dim != 0 &&
+            elements > std::numeric_limits<int64_t>::max() / dim) {
+            throw std::overflow_error("constant_of_shape target element count overflows int64");
+        }
+        elements *= dim == 0 ? 0 : dim;
+    }
+    const int64_t item_bytes = dtype == "bool" || dtype == "int8" || dtype == "uint8"
+                                   ? 1
+                                   : (dtype == "float32" || dtype == "int32" ? 4 : 8);
+    if (elements > kMaxConstantOfShapeBytes / item_bytes) {
+        throw std::runtime_error(
+            "constant_of_shape output exceeds the declared byte cap");
+    }
+    return MakeTensorType(target, dtype);
+}
+
+// 推导 squeeze 的移除轴结果；被移除维必须静态已知为 1。
+Type SqueezeInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("squeeze", input_types, 1);
+    const auto* data = RequireTensor("squeeze", input_types[0], "data");
+    const auto* squeeze_attrs = attrs.As<SqueezeAttrsNode>();
+    if (!squeeze_attrs || squeeze_attrs->axes.empty()) {
+        throw std::runtime_error(
+            "squeeze requires explicit axes; omit-axes cannot prove fixed rank here");
+    }
+    const int rank = static_cast<int>(data->shape.size());
+    if (rank < 1) {
+        throw std::runtime_error("squeeze requires data rank >= 1");
+    }
+    std::vector<bool> removed(static_cast<size_t>(rank), false);
+    for (int64_t raw_axis : squeeze_attrs->axes) {
+        const int axis = NormalizeAxis("squeeze", raw_axis, rank);
+        if (removed[static_cast<size_t>(axis)]) {
+            throw std::runtime_error("squeeze duplicate axis");
+        }
+        removed[static_cast<size_t>(axis)] = true;
+        const int64_t dim = data->shape[static_cast<size_t>(axis)];
+        if (dim != 1) {
+            throw std::runtime_error(
+                "squeeze requires each removed axis to be provably 1, got " +
+                (dim < 0 ? std::string("unknown") : std::to_string(dim)));
+        }
+    }
+    std::vector<int64_t> out;
+    for (int axis = 0; axis < rank; ++axis) {
+        if (!removed[static_cast<size_t>(axis)]) {
+            out.push_back(data->shape[static_cast<size_t>(axis)]);
+        }
+    }
+    if (out.empty()) {
+        throw std::runtime_error("squeeze must keep at least one axis");
+    }
+    return MakeTensorType(out, data->dtype);
+}
+
+// 推导 unsqueeze 的插入轴结果；插入 1 维，结果 rank 在声明子集内。
+Type UnsqueezeInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("unsqueeze", input_types, 1);
+    const auto* data = RequireTensor("unsqueeze", input_types[0], "data");
+    const auto* unsqueeze_attrs = attrs.As<UnsqueezeAttrsNode>();
+    if (!unsqueeze_attrs || unsqueeze_attrs->axes.empty()) {
+        throw std::runtime_error("unsqueeze requires explicit axes");
+    }
+    const int64_t input_rank = static_cast<int64_t>(data->shape.size());
+    const int64_t new_rank = input_rank + static_cast<int64_t>(unsqueeze_attrs->axes.size());
+    if (new_rank > kMaxShapeOfRank) {
+        throw std::runtime_error(
+            "unsqueeze supports output rank up to " + std::to_string(kMaxShapeOfRank));
+    }
+    std::vector<int64_t> out(static_cast<size_t>(new_rank), -1);
+    std::vector<bool> placed(static_cast<size_t>(new_rank), false);
+    for (int64_t raw_axis : unsqueeze_attrs->axes) {
+        int64_t axis = raw_axis < 0 ? raw_axis + new_rank : raw_axis;
+        if (axis < 0 || axis >= new_rank) {
+            throw std::runtime_error(
+                "unsqueeze axis out of range for the provable output rank");
+        }
+        if (placed[static_cast<size_t>(axis)]) {
+            throw std::runtime_error("unsqueeze duplicate axis");
+        }
+        placed[static_cast<size_t>(axis)] = true;
+        out[static_cast<size_t>(axis)] = 1;
+    }
+    // 原始维按未放置位置依次填入，保持 ONNX unsqueeze 的顺序语义。
+    size_t next = 0;
+    for (size_t axis = 0; axis < out.size(); ++axis) {
+        if (placed[axis]) {
+            continue;
+        }
+        out[axis] = data->shape[next++];
+    }
+    return MakeTensorType(out, data->dtype);
+}
+
 // 解释 0、-1 与 allowzero 后推导 reshape 结果。
 Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("reshape", input_types, 1);

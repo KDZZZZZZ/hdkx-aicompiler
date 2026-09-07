@@ -67,6 +67,7 @@ public:
     void Add(std::string_view name, int value);
     void Add(std::string_view name, int64_t value);
     void Add(std::string_view name, float value);
+    void Add(std::string_view name, double value);
     void Add(std::string_view name, const std::string& value);
     void Add(std::string_view name, const Array<int64_t>& value);
     void Add(std::string_view name, const VirtualDevice& value);
@@ -462,6 +463,114 @@ class CollectiveAttrs : public Attrs {
 public:
     static CollectiveAttrs Create(std::string kind, std::string reduce_kind = "sum",
                                   bool in_group = true, int group_id = 0, int root_worker = 0);
+};
+
+// ---------------------------------------------------------------------------
+// M3 受限形状表达式编码（唯一约定，进入 canonical attrs 身份）：
+//   expr_kinds[i] == 0 → 常量维，值为 expr_values[i]（必须 >= 0）
+//   expr_kinds[i] == 1 → 输入轴引用，输入下标 expr_values[i]、轴 expr_axes[i]
+// 该编码由编译准备中的受限形状解析器写入，是链式证明的投影，不是独立来源。
+// ---------------------------------------------------------------------------
+constexpr int64_t kShapeExprKindConst = 0;
+constexpr int64_t kShapeExprKindInputAxis = 1;
+
+/*! \brief reshape_dynamic 的已解析目标形状表达式属性。 */
+class ReshapeDynamicAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> expr_kinds;
+    Array<int64_t> expr_values;
+    Array<int64_t> expr_axes;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ReshapeDynamicAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ReshapeDynamicAttrs, ReshapeDynamicAttrsNode)
+
+public:
+    static ReshapeDynamicAttrs Create(Array<int64_t> expr_kinds,
+                                      Array<int64_t> expr_values,
+                                      Array<int64_t> expr_axes);
+};
+
+/*! \brief expand 的受限目标形状表达式属性。 */
+class ExpandAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> expr_kinds;
+    Array<int64_t> expr_values;
+    Array<int64_t> expr_axes;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ExpandAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ExpandAttrs, ExpandAttrsNode)
+
+public:
+    static ExpandAttrs Create(Array<int64_t> expr_kinds,
+                              Array<int64_t> expr_values,
+                              Array<int64_t> expr_axes);
+};
+
+/*! \brief shape_expr 的受限形状表达式属性（链式折叠后的唯一单元形态）。 */
+class ShapeExprAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> expr_kinds;
+    Array<int64_t> expr_values;
+    Array<int64_t> expr_axes;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ShapeExprAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ShapeExprAttrs, ShapeExprAttrsNode)
+
+public:
+    static ShapeExprAttrs Create(Array<int64_t> expr_kinds,
+                                 Array<int64_t> expr_values,
+                                 Array<int64_t> expr_axes);
+};
+
+/*! \brief constant_of_shape 的常量目标形状、填充 dtype 和标量值属性。 */
+class ConstantOfShapeAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> target;
+    int dtype_code = 0;
+    double value = 0.0;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ConstantOfShapeAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ConstantOfShapeAttrs, ConstantOfShapeAttrsNode)
+
+public:
+    static ConstantOfShapeAttrs Create(Array<int64_t> target, int dtype_code,
+                                       double value);
+};
+
+/*! \brief squeeze 的移除轴属性。 */
+class SqueezeAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> axes;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class SqueezeAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(SqueezeAttrs, SqueezeAttrsNode)
+
+public:
+    static SqueezeAttrs Create(Array<int64_t> axes);
+};
+
+/*! \brief unsqueeze 的插入轴属性。 */
+class UnsqueezeAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> axes;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class UnsqueezeAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(UnsqueezeAttrs, UnsqueezeAttrsNode)
+
+public:
+    static UnsqueezeAttrs Create(Array<int64_t> axes);
 };
 
 }  // namespace relay

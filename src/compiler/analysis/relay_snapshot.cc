@@ -157,6 +157,33 @@ private:
             result = relay::CollectiveAttrs::Create(
                 node->kind, node->reduce_kind, node->in_group, node->group_id,
                 node->root_worker);
+        // M3 形状链：折叠前的 gather/concat 与折叠后的受限形状值算子都要
+        // 能进入准备快照，否则受限入口无法接收未折叠的形状表达式。
+        } else if (const auto* node = source.As<relay::GatherAttrsNode>()) {
+            result = relay::GatherAttrs::Create(node->axis);
+        } else if (const auto* node = source.As<relay::ConcatenateAttrsNode>()) {
+            result = relay::ConcatenateAttrs::Create(node->axis);
+        } else if (const auto* node = source.As<relay::ShapeExprAttrsNode>()) {
+            result = relay::ShapeExprAttrs::Create(
+                CloneIntArray(node->expr_kinds), CloneIntArray(node->expr_values),
+                CloneIntArray(node->expr_axes));
+        } else if (const auto* node =
+                       source.As<relay::ReshapeDynamicAttrsNode>()) {
+            result = relay::ReshapeDynamicAttrs::Create(
+                CloneIntArray(node->expr_kinds), CloneIntArray(node->expr_values),
+                CloneIntArray(node->expr_axes));
+        } else if (const auto* node = source.As<relay::ExpandAttrsNode>()) {
+            result = relay::ExpandAttrs::Create(
+                CloneIntArray(node->expr_kinds), CloneIntArray(node->expr_values),
+                CloneIntArray(node->expr_axes));
+        } else if (const auto* node =
+                       source.As<relay::ConstantOfShapeAttrsNode>()) {
+            result = relay::ConstantOfShapeAttrs::Create(
+                CloneIntArray(node->target), node->dtype_code, node->value);
+        } else if (const auto* node = source.As<relay::SqueezeAttrsNode>()) {
+            result = relay::SqueezeAttrs::Create(CloneIntArray(node->axes));
+        } else if (const auto* node = source.As<relay::UnsqueezeAttrsNode>()) {
+            result = relay::UnsqueezeAttrs::Create(CloneIntArray(node->axes));
         } else {
             Reject("unsupported Relay attrs in preparation snapshot: " +
                    std::string(source->GetTypeKey()));

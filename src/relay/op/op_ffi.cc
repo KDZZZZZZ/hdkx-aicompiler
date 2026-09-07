@@ -80,6 +80,48 @@ Call MakeShapeOf(Expr data) {
     return Call(GetOp("shape_of"), {data});
 }
 
+// 构造受限形状表达式调用（链式折叠后的单元形态）。
+Call MakeShapeExpr(Expr data, Array<int64_t> expr_kinds,
+                   Array<int64_t> expr_values, Array<int64_t> expr_axes) {
+    return Call(GetOp("shape_expr"), {data},
+                ShapeExprAttrs::Create(std::move(expr_kinds), std::move(expr_values),
+                                       std::move(expr_axes)));
+}
+
+// 构造控制输入 reshape 调用，携带已解析的受限形状表达式。
+Call MakeReshapeDynamic(Expr data, Expr shape, Array<int64_t> expr_kinds,
+                        Array<int64_t> expr_values, Array<int64_t> expr_axes) {
+    return Call(GetOp("reshape_dynamic"), {data, shape},
+                ReshapeDynamicAttrs::Create(std::move(expr_kinds),
+                                            std::move(expr_values),
+                                            std::move(expr_axes)));
+}
+
+// 构造受限目标 expand 调用。
+Call MakeExpand(Expr data, Expr shape, Array<int64_t> expr_kinds,
+                Array<int64_t> expr_values, Array<int64_t> expr_axes) {
+    return Call(GetOp("expand"), {data, shape},
+                ExpandAttrs::Create(std::move(expr_kinds), std::move(expr_values),
+                                    std::move(expr_axes)));
+}
+
+// 构造常量目标 constant_of_shape 调用，携带显式填充 dtype 与标量值。
+Call MakeConstantOfShape(Expr shape, Array<int64_t> target, int dtype_code,
+                         double value) {
+    return Call(GetOp("constant_of_shape"), {shape},
+                ConstantOfShapeAttrs::Create(std::move(target), dtype_code, value));
+}
+
+// 构造 squeeze 调用，axes 静态已知。
+Call MakeSqueeze(Expr data, Array<int64_t> axes) {
+    return Call(GetOp("squeeze"), {data}, SqueezeAttrs::Create(std::move(axes)));
+}
+
+// 构造 unsqueeze 调用，axes 静态已知。
+Call MakeUnsqueeze(Expr data, Array<int64_t> axes) {
+    return Call(GetOp("unsqueeze"), {data}, UnsqueezeAttrs::Create(std::move(axes)));
+}
+
 // 构造 softmax 调用。
 Call MakeSoftmax(Expr data, int axis) {
     return Call(GetOp("softmax"), {data}, SoftmaxAttrs::Create(axis));
@@ -187,6 +229,16 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.cast").set_body(ToPackedFunc(MakeCast));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_mean").set_body(ToPackedFunc(MakeReduceMean));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape").set_body(ToPackedFunc(MakeReshape));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.shape_of").set_body(ToPackedFunc(MakeShapeOf));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.shape_expr")
+    .set_body(ToPackedFunc(MakeShapeExpr));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape_dynamic")
+    .set_body(ToPackedFunc(MakeReshapeDynamic));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.expand").set_body(ToPackedFunc(MakeExpand));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.constant_of_shape")
+    .set_body(ToPackedFunc(MakeConstantOfShape));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.squeeze").set_body(ToPackedFunc(MakeSqueeze));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.unsqueeze")
+    .set_body(ToPackedFunc(MakeUnsqueeze));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.softmax").set_body(ToPackedFunc(MakeSoftmax));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.transpose").set_body(ToPackedFunc(MakeTranspose));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.gather").set_body(ToPackedFunc(MakeGather));

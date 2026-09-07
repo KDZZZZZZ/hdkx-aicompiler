@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,11 @@ namespace kxc::api::experimental::restricted_symbolic_shape::v1 {
 
 namespace specialization =
     kxc::api::experimental::shape_specialization::v1;
+
+// 由私有 M3 shape-value resolver 定义的编码三元组；仅前向声明。
+namespace shape_resolution {
+struct EncodedExpr;
+}
 
 inline constexpr uint32_t kRestrictedSymbolicShapeVersion = 1;
 inline constexpr uint32_t kBoundedCompileApplicabilityVersion = 2;
@@ -99,6 +105,11 @@ public:
     [[nodiscard]] Function logical_boundary_function() const;
     [[nodiscard]] const specialization::GraphTemplate& graph_template() const;
     [[nodiscard]] const specialization::ExactOracle& representative_oracle() const;
+    // 与模板 unit 顺序平行的形状值 value 表达式覆盖（编码三元组，相对
+    // 单元局部输入 0）；nullopt 表示由 unit 合同推导。
+    [[nodiscard]] const std::vector<
+        std::optional<shape_resolution::EncodedExpr>>&
+    unit_value_expressions() const;
     [[nodiscard]] const CompileConfig& compile_config() const;
     [[nodiscard]] const Target& target() const;
     [[nodiscard]] uint32_t applicability_version() const noexcept;

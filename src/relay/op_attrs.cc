@@ -14,6 +14,63 @@
 namespace kxc {
 namespace relay {
 
+// 创建 reshape_dynamic 的已解析目标形状表达式属性。
+ReshapeDynamicAttrs ReshapeDynamicAttrs::Create(Array<int64_t> expr_kinds,
+                                                Array<int64_t> expr_values,
+                                                Array<int64_t> expr_axes) {
+    auto* node = new ReshapeDynamicAttrsNode();
+    node->expr_kinds = std::move(expr_kinds);
+    node->expr_values = std::move(expr_values);
+    node->expr_axes = std::move(expr_axes);
+    return InternalCreate(node);
+}
+
+// 创建 expand 的受限目标形状表达式属性。
+ExpandAttrs ExpandAttrs::Create(Array<int64_t> expr_kinds,
+                                Array<int64_t> expr_values,
+                                Array<int64_t> expr_axes) {
+    auto* node = new ExpandAttrsNode();
+    node->expr_kinds = std::move(expr_kinds);
+    node->expr_values = std::move(expr_values);
+    node->expr_axes = std::move(expr_axes);
+    return InternalCreate(node);
+}
+
+// 创建 shape_expr 的受限形状表达式属性。
+ShapeExprAttrs ShapeExprAttrs::Create(Array<int64_t> expr_kinds,
+                                      Array<int64_t> expr_values,
+                                      Array<int64_t> expr_axes) {
+    auto* node = new ShapeExprAttrsNode();
+    node->expr_kinds = std::move(expr_kinds);
+    node->expr_values = std::move(expr_values);
+    node->expr_axes = std::move(expr_axes);
+    return InternalCreate(node);
+}
+
+// 创建 constant_of_shape 的常量目标形状与填充值属性。
+ConstantOfShapeAttrs ConstantOfShapeAttrs::Create(Array<int64_t> target,
+                                                  int dtype_code, double value) {
+    auto* node = new ConstantOfShapeAttrsNode();
+    node->target = std::move(target);
+    node->dtype_code = dtype_code;
+    node->value = value;
+    return InternalCreate(node);
+}
+
+// 创建 squeeze 的移除轴属性。
+SqueezeAttrs SqueezeAttrs::Create(Array<int64_t> axes) {
+    auto* node = new SqueezeAttrsNode();
+    node->axes = std::move(axes);
+    return InternalCreate(node);
+}
+
+// 创建 unsqueeze 的插入轴属性。
+UnsqueezeAttrs UnsqueezeAttrs::Create(Array<int64_t> axes) {
+    auto* node = new UnsqueezeAttrsNode();
+    node->axes = std::move(axes);
+    return InternalCreate(node);
+}
+
 KXC_OBJECT_DEFINE(OpNode)
 KXC_OBJECT_DEFINE(BaseAttrsNode)
 KXC_OBJECT_DEFINE(Conv2DAttrsNode)
@@ -35,6 +92,12 @@ KXC_OBJECT_DEFINE(FlattenAttrsNode)
 KXC_OBJECT_DEFINE(GemmAttrsNode)
 KXC_OBJECT_DEFINE(DeviceCopyAttrsNode)
 KXC_OBJECT_DEFINE(CollectiveAttrsNode)
+KXC_OBJECT_DEFINE(ReshapeDynamicAttrsNode)
+KXC_OBJECT_DEFINE(ExpandAttrsNode)
+KXC_OBJECT_DEFINE(ShapeExprAttrsNode)
+KXC_OBJECT_DEFINE(ConstantOfShapeAttrsNode)
+KXC_OBJECT_DEFINE(SqueezeAttrsNode)
+KXC_OBJECT_DEFINE(UnsqueezeAttrsNode)
 
 namespace {
 
@@ -95,6 +158,15 @@ void CanonicalAttrWriter::Add(std::string_view name, int64_t value) {
 
 void CanonicalAttrWriter::Add(std::string_view name, float value) {
     AddEncoded(name, "float32-bits", EncodeFloatBits(value));
+}
+
+void CanonicalAttrWriter::Add(std::string_view name, double value) {
+    static_assert(sizeof(double) == sizeof(uint64_t));
+    uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    std::ostringstream stream;
+    stream << std::hex << std::setw(16) << std::setfill('0') << bits;
+    AddEncoded(name, "float64-bits", stream.str());
 }
 
 void CanonicalAttrWriter::Add(std::string_view name,
@@ -248,6 +320,38 @@ void CollectiveAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const 
     writer.Add("in_group", in_group);
     writer.Add("group_id", group_id);
     writer.Add("root_worker", root_worker);
+}
+
+void ReshapeDynamicAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("expr_kinds", expr_kinds);
+    writer.Add("expr_values", expr_values);
+    writer.Add("expr_axes", expr_axes);
+}
+
+void ExpandAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("expr_kinds", expr_kinds);
+    writer.Add("expr_values", expr_values);
+    writer.Add("expr_axes", expr_axes);
+}
+
+void ShapeExprAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("expr_kinds", expr_kinds);
+    writer.Add("expr_values", expr_values);
+    writer.Add("expr_axes", expr_axes);
+}
+
+void ConstantOfShapeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("target", target);
+    writer.Add("dtype_code", dtype_code);
+    writer.Add("value", value);
+}
+
+void SqueezeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axes", axes);
+}
+
+void UnsqueezeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axes", axes);
 }
 
 // 构造并持有算子的稳定名称与说明元数据。

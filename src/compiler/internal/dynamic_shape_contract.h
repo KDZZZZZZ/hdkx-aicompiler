@@ -23,6 +23,12 @@ namespace restricted =
     kxc::api::experimental::restricted_symbolic_shape::v1;
 namespace specialization =
     kxc::api::experimental::shape_specialization::v1;
+// 私有 M3 resolver 编码三元组（定义见 shape_value_resolver.h）。
+// 注意：受限符号头已在其真实命名空间前向声明该类型，这里用别名引用；
+// 不能在 kxc::api::internal 内重开限定命名空间，否则会产生
+// kxc::api::internal::kxc::... 影子命名空间。
+namespace shape_resolution =
+    kxc::api::experimental::restricted_symbolic_shape::v1::shape_resolution;
 
 inline constexpr std::uint32_t kBoundedDynamicGraphVersion = 1;
 inline constexpr std::uint32_t kDynamicUnitShapeContractVersion = 3;
@@ -115,16 +121,27 @@ private:
 
     friend DynamicUnitShapeContract BuildDynamicUnitShapeContract(
         const specialization::GraphTemplate&, std::size_t,
-        const std::string&);
+        const std::string&, const std::optional<std::vector<DynamicShapeExpr>>&);
 };
 
 [[nodiscard]] DynamicUnitShapeContract BuildDynamicUnitShapeContract(
     const specialization::GraphTemplate& graph_template,
-    std::size_t ordered_unit_index, const std::string& operator_name);
+    std::size_t ordered_unit_index, const std::string& operator_name,
+    const std::optional<std::vector<DynamicShapeExpr>>&
+        value_expression_override = std::nullopt);
 [[nodiscard]] std::vector<DynamicUnitShapeContract>
 BuildDynamicUnitShapeContracts(
     const specialization::GraphTemplate& graph_template,
-    const std::vector<std::string>& operator_names);
+    const std::vector<std::string>& operator_names,
+    const std::vector<std::optional<std::vector<DynamicShapeExpr>>>&
+        value_expression_overrides = {});
+
+// 把受限解析器的编码三元组解码为合同层 DynamicShapeExpr 覆盖。
+[[nodiscard]] std::vector<std::optional<std::vector<DynamicShapeExpr>>>
+DecodeValueExpressionOverrides(
+    const std::vector<std::optional<
+        kxc::api::experimental::restricted_symbolic_shape::v1::
+            shape_resolution::EncodedExpr>>& encoded);
 
 /*! \brief Immutable pre-lowering result consumed by Compiler::CompileBounded.
  *

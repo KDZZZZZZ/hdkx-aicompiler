@@ -15,6 +15,7 @@
 #include "../internal/execution_contract.h"
 #include "runtime/internal/module_invocation_contract.h"
 #include "kxc/relay/transforms/infer_type.h"
+#include "shape_value_resolver.h"
 #include "support/canonical.h"
 
 namespace kxc::api::internal {
@@ -157,7 +158,11 @@ BoundsBySymbol AnalyzeTemplate(
             const auto& valid = named.contract.valid().dimensions();
             if (logical.empty() || !SameDimensions(logical, physical) ||
                 !SameDimensions(logical, valid)) {
-                Reject("every value must have a fixed nonzero rank and logical == physical == valid expressions");
+                Reject("every value must have a fixed nonzero rank and logical == physical == valid expressions (value '" +
+                       named.name + "', logical rank " +
+                       std::to_string(logical.size()) + ", physical rank " +
+                       std::to_string(physical.size()) + ", valid rank " +
+                       std::to_string(valid.size()) + ")");
             }
             for (const DimExpr& expression : logical) {
                 const DirectDimension direct = ReadDirectDimension(expression);
@@ -270,12 +275,19 @@ std::vector<std::string> ValueNames(const Array<ValueId>& ids) {
 
 bool IsSupportedOperation(const std::string& name) {
     return name == "relu" || name == "nn_relu" || name == "sqrt" ||
-           name == "add" || name == "mul" || name == "shape_of";
+           name == "add" || name == "mul" || name == "shape_of" ||
+           name == "shape_expr" || name == "reshape_dynamic" ||
+           name == "expand" || name == "squeeze" || name == "unsqueeze";
 }
 
-// M3 形状值算子：输出是物化输入维度的 int64 行向量，其元素来源与输出
+// M3 形状值算子：输出是物化受限表达式的 int64 行向量，其元素来源与输出
 // 形状是两个不同的事实，所以 unit 合同要分别记录 shape 表达式与 value 表达式。
 bool ProducesShapeValue(const std::string& name) {
+    return name == "shape_of" || name == "shape_expr";
+}
+
+// shape_of 的 value 表达式可从输入轴推导；shape_expr 必须由解析器覆盖提供。
+bool DerivesValueExpressionsFromInput(const std::string& name) {
     return name == "shape_of";
 }
 
@@ -676,7 +688,8 @@ const std::string& DynamicUnitShapeContract::canonical_bytes() const noexcept {
 
 DynamicUnitShapeContract BuildDynamicUnitShapeContract(
     const specialization::GraphTemplate& graph,
-    std::size_t ordered_unit_index, const std::string& operator_name) {
+    std::size_t ordered_unit_index, const std::string& operator_name,
+    const std::optional<std::vector<DynamicShapeExpr>>& value_expression_override) {
     if (!IsSupportedOperation(operator_name)) {
         Reject("bounded unit operator is unsupported: " + operator_name);
     }
@@ -752,31 +765,49 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
         output_expressions.push_back(std::move(expressions));
     }
 
-    // 形状值输出：物化输入维度的 int64 行向量，元素表达式直接取输入轴。
+    // 形状值输出：物化受限表达式的 int64 行向量。shape_of 的元素表达式
+    // 直接取输入轴；shape_expr 必须由解析器覆盖提供（唯一表达式来源）。
     std::vector<std::vector<DynamicShapeExpr>> output_value_expressions(
         unit.output_value_names.size());
     if (ProducesShapeValue(operator_name)) {
         if (unit.input_value_names.size() != 1) {
             Reject("a shape-value producer expects exactly one data input");
         }
-        const auto& input_dimensions =
-            FindNamed(graph, unit.input_value_names[0])
-                .contract.logical().dimensions();
         std::vector<DynamicShapeExpr>& value_expressions =
             output_value_expressions.front();
-        value_expressions.reserve(input_dimensions.size());
-        for (const DimExpr& dimension : input_dimensions) {
-            value_expressions.push_back(
-                anchored_expression(ReadDirectDimension(dimension)));
+        if (value_expression_override) {
+            value_expressions = *value_expression_override;
+        } else if (DerivesValueExpressionsFromInput(operator_name)) {
+            const auto& input_dimensions =
+                FindNamed(graph, unit.input_value_names[0])
+                    .contract.logical().dimensions();
+            value_expressions.reserve(input_dimensions.size());
+            for (const DimExpr& dimension : input_dimensions) {
+                value_expressions.push_back(
+                    anchored_expression(ReadDirectDimension(dimension)));
+            }
+            const auto& output_dimensions =
+                FindNamed(graph, unit.output_value_names[0])
+                    .contract.logical().dimensions();
+            if (output_dimensions.size() != 1 ||
+                output_dimensions.front() != DimExpr::Const(static_cast<int64_t>(
+                                                  input_dimensions.size()))) {
+                Reject("a shape_of output must be a rank-1 vector with one "
+                       "element per input axis");
+            }
+        } else {
+            Reject("a " + operator_name +
+                   " unit requires resolver-provided value expressions");
         }
         const auto& output_dimensions =
             FindNamed(graph, unit.output_value_names[0])
                 .contract.logical().dimensions();
         if (output_dimensions.size() != 1 ||
-            output_dimensions.front() != DimExpr::Const(static_cast<int64_t>(
-                                             input_dimensions.size()))) {
-            Reject("a shape-value output must be a rank-1 vector with one "
-                   "element per input axis");
+            value_expressions.size() !=
+                static_cast<size_t>(output_dimensions.front().Evaluate(
+                    specialization::BindingSet()))) {
+            Reject("a shape-value output must be a rank-1 vector whose length "
+                   "equals its value expression count");
         }
     }
 
@@ -792,19 +823,27 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
 
 std::vector<DynamicUnitShapeContract> BuildDynamicUnitShapeContracts(
     const specialization::GraphTemplate& graph,
-    const std::vector<std::string>& operator_names) {
+    const std::vector<std::string>& operator_names,
+    const std::vector<std::optional<std::vector<DynamicShapeExpr>>>&
+        value_expression_overrides) {
     (void)AnalyzeTemplate(graph);
     if (graph.ordered_units().empty()) {
         Reject("a bounded graph requires at least one unit");
     }
-    if (operator_names.size() != graph.ordered_units().size()) {
+    if (operator_names.size() != graph.ordered_units().size() ||
+        (!value_expression_overrides.empty() &&
+         value_expression_overrides.size() != graph.ordered_units().size())) {
         Reject("operator name count differs from the ordered unit sequence");
     }
     std::vector<DynamicUnitShapeContract> result;
     result.reserve(graph.ordered_units().size());
     for (std::size_t index = 0; index < graph.ordered_units().size(); ++index) {
+        std::optional<std::vector<DynamicShapeExpr>> override;
+        if (!value_expression_overrides.empty()) {
+            override = value_expression_overrides[index];
+        }
         result.push_back(BuildDynamicUnitShapeContract(
-            graph, index, operator_names[index]));
+            graph, index, operator_names[index], override));
     }
     return result;
 }
@@ -890,7 +929,10 @@ BoundedCompilePreparation PrepareBoundedCompile(
         for (const PrimitiveUnit& unit : representative_partition.units) {
             operator_names.push_back(std::string(unit.call.spec.name));
         }
-        contracts = BuildDynamicUnitShapeContracts(graph, operator_names);
+        contracts = BuildDynamicUnitShapeContracts(
+            graph, operator_names,
+            DecodeValueExpressionOverrides(
+                request.unit_value_expressions()));
     }
     ValidateValueContracts(graph, request.representative_oracle(),
                            representative_partition, bounded_partition);
@@ -1016,6 +1058,35 @@ runtime::ExecutablePlan BuildDynamicExecutablePlan(
         preparation.graph_input_guards());
     plan.Validate();
     return plan;
+}
+
+
+std::vector<std::optional<std::vector<DynamicShapeExpr>>>
+DecodeValueExpressionOverrides(
+    const std::vector<std::optional<
+        shape_resolution::EncodedExpr>>& encoded) {
+    using shape_resolution::kExprKindConst;
+    using shape_resolution::kExprKindInputAxis;
+    std::vector<std::optional<std::vector<DynamicShapeExpr>>> decoded;
+    decoded.reserve(encoded.size());
+    for (const auto& entry : encoded) {
+        if (!entry) {
+            decoded.push_back(std::nullopt);
+            continue;
+        }
+        std::vector<DynamicShapeExpr> expressions;
+        for (std::size_t i = 0; i < entry->kinds.size(); ++i) {
+            if (entry->kinds[i] == kExprKindConst) {
+                expressions.push_back(
+                    DynamicShapeExpr::Const(entry->values[i]));
+            } else {
+                expressions.push_back(DynamicShapeExpr::InputAxis(
+                    entry->values[i], entry->axes[i]));
+            }
+        }
+        decoded.push_back(std::move(expressions));
+    }
+    return decoded;
 }
 
 }  // namespace kxc::api::internal
