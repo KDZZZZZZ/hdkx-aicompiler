@@ -181,6 +181,7 @@ set(KXC_PUBLIC_HEADERS
 set(KXC_EXPERIMENTAL_HEADERS
   include/kxc/compiler/adaptive_hot_swap.h
   include/kxc/compiler/experimental_identity.h
+  include/kxc/compiler/kv_state_plan.h
   include/kxc/compiler/adaptive_hot_swap_preparation.h
   include/kxc/compiler/restricted_symbolic_shape.h
   include/kxc/compiler/shape_control.h
@@ -533,6 +534,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/lowering/lowered_function.cc
   src/compiler/lowering/lowered_graph.cc
   src/compiler/lowering/te_to_tir.cc
+  src/compiler/kv_state/kv_state_plan.cc
 )
 
 set(KXC_RUNTIME_SESSION_SOURCES
@@ -1048,6 +1050,8 @@ if(KXC_BUILD_PASS_TESTS)
   if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH)
     kxc_add_runtime_exe(bounded_dynamic_graph_llvm_test
       test/bounded_dynamic_graph_llvm_test.cpp)
+    kxc_add_runtime_exe(kv_state_llvm_test
+      test/kv_state_llvm_test.cpp)
   endif()
 
   set(KXC_CONTROL_FLOW_TESTS
@@ -1421,6 +1425,8 @@ kxc_add_ctest_if_target(restricted_symbolic_shape_test "shape;shape-restricted-s
 kxc_add_ctest_if_target(shape_exact_dispatch_test "shape;shape-dispatch;cpu")
 kxc_add_ctest_if_target(bounded_dynamic_graph_llvm_test
   "shape;bounded-dynamic;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(kv_state_llvm_test
+  "kv-state;llvm;dynamic-module;e2e;numeric")
 
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test

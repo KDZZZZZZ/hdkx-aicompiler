@@ -393,7 +393,7 @@ Array<int64_t> ToShape(const std::vector<ModuleExtent>& shape) { Array<int64_t> 
 struct ResolvedOutput { std::vector<ModuleExtent> logical, physical, valid; size_t bytes{0}; };
 struct ResolvedInvocation { std::vector<std::vector<ModuleExtent>> dimensions; std::vector<ResolvedOutput> outputs; std::vector<ModuleExtent> scalars; };
 
-ResolvedInvocation ResolveInvocation(const internal::CompiledModuleEntry& entry, const Map<String, runtime::NDArray>& constants, const Array<runtime::NDArray>& inputs, const DeviceStream& stream, size_t requested_budget) {
+ResolvedInvocation ResolveInvocation(const internal::CompiledModuleEntry& entry, const Map<String, runtime::NDArray>& constants, const Array<runtime::NDArray>& inputs, const DeviceStream& stream, size_t requested_budget, const std::vector<ModuleExtent>* state_extent_values = nullptr) {
     const ModuleInvocationContract& contract=*entry.invocation_contract;
 #if !KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
     if (!contract.IsConstantShape(entry.signature)) throw ModuleInvocationError(ModuleInvocationFailureKind::kDisabled, "dynamic compiled-module invocation ABI is disabled");
@@ -406,7 +406,26 @@ ResolvedInvocation ResolveInvocation(const internal::CompiledModuleEntry& entry,
     size_t total=0; result.outputs.reserve(contract.outputs().size());
     size_t output_index=0; for(const auto& tensor:contract.outputs()) { const auto& output_spec=output_specs[output_index++]; ResolvedOutput output{Evaluate(tensor.logical,result.dimensions),Evaluate(tensor.physical,result.dimensions),Evaluate(tensor.valid,result.dimensions)}; if(output.logical.size()!=output.physical.size()||output.valid.size()!=output.logical.size()) throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract,"module output ranks differ"); for(size_t d=0;d<output.logical.size();++d) if(output.valid[d]>output.logical[d]||output.logical[d]>output.physical[d]) throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract,"module output requires valid <= logical <= physical"); output.bytes=CheckedBytes(output.physical,output_spec->dtype); if(output.bytes>tensor.max_bytes||output.bytes>std::numeric_limits<size_t>::max()-total) throw ModuleInvocationError(ModuleInvocationFailureKind::kResource,"module output byte limit exceeded"); total+=output.bytes; result.outputs.push_back(std::move(output)); }
     const size_t contract_limit=contract.run_byte_budget(); const size_t limit=!requested_budget ? contract_limit : !contract_limit ? requested_budget : std::min(requested_budget,contract_limit); if(limit&&total>limit) throw ModuleInvocationError(ModuleInvocationFailureKind::kResource,"module invocation run byte budget exceeded");
-    result.scalars.reserve(contract.runtime_extent_scalars().size()); try { for(const auto& scalar:contract.runtime_extent_scalars()) result.scalars.push_back(scalar.expression.Evaluate(result.dimensions)); } catch(const std::exception& error) { throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract,std::string("module shape evaluation failed: ")+error.what()); }
+    result.scalars.reserve(contract.runtime_extent_scalars().size());
+    const bool state_injected = state_extent_values != nullptr;
+    for (const auto& scalar : contract.runtime_extent_scalars()) {
+        if (state_injected !=
+            (scalar.source == ModuleRuntimeExtentScalar::Source::kStateExtent)) {
+            throw ModuleInvocationError(
+                ModuleInvocationFailureKind::kInvalidContract,
+                "module runtime extent source does not match the invocation path");
+        }
+    }
+    if (state_injected) {
+        if (state_extent_values->size() != contract.runtime_extent_scalars().size()) {
+            throw ModuleInvocationError(
+                ModuleInvocationFailureKind::kInvalidContract,
+                "module state extent value count does not match the invocation contract");
+        }
+        result.scalars = *state_extent_values;
+    } else {
+        try { for(const auto& scalar:contract.runtime_extent_scalars()) result.scalars.push_back(scalar.expression->Evaluate(result.dimensions)); } catch(const std::exception& error) { throw ModuleInvocationError(ModuleInvocationFailureKind::kInvalidContract,std::string("module shape evaluation failed: ")+error.what()); }
+    }
     return result;
 }
 void ValidatePreallocated(const internal::CompiledModuleEntry& entry, const Map<String, runtime::NDArray>& constants, const Array<runtime::NDArray>& outputs, const ResolvedInvocation& resolved) {
@@ -426,8 +445,8 @@ AsyncOperation LaunchResolved(const CompiledModule& module, const internal::Comp
 }
 }  // namespace
 
-AsyncOperation internal::InvokeCompiledModuleWithOutputs(const CompiledModule& module, const String& symbol, const Array<runtime::NDArray>& data_inputs, const Array<runtime::NDArray>& outputs, const DeviceStream& stream, std::size_t budget) {
-    const auto* node=CheckedNode(module); const auto& entry=FindEntry(node,symbol); const auto resolved=ResolveInvocation(entry,node->constants_,data_inputs,stream,budget); ValidatePreallocated(entry,node->constants_,outputs,resolved); return LaunchResolved(module,entry,node->constants_,data_inputs,outputs,stream,resolved);
+AsyncOperation internal::InvokeCompiledModuleWithOutputs(const CompiledModule& module, const String& symbol, const Array<runtime::NDArray>& data_inputs, const Array<runtime::NDArray>& outputs, const DeviceStream& stream, std::size_t budget, const std::vector<ModuleExtent>* state_extent_values) {
+    const auto* node=CheckedNode(module); const auto& entry=FindEntry(node,symbol); const auto resolved=ResolveInvocation(entry,node->constants_,data_inputs,stream,budget,state_extent_values); ValidatePreallocated(entry,node->constants_,outputs,resolved); return LaunchResolved(module,entry,node->constants_,data_inputs,outputs,stream,resolved);
 }
 
 ModuleInvocationResult CompiledModule::Invoke(const String& symbol, const Array<runtime::NDArray>& data_inputs, const DeviceStream& stream, std::size_t budget) const {

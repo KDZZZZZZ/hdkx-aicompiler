@@ -25,6 +25,15 @@ public:
     RunAsyncResult RunAsync(const Array<NDArray>& inputs,
                             const DeviceStream& stream) const;
 
+    /*! \brief Committed valid length (tokens) of one session-owned state
+     *  value in the dynamic stateful mode; rejected for unknown ids and for
+     *  modes without state extent metadata. The value changes only after a
+     *  successful run completion commits it. */
+    int64_t StateExtent(int64_t state_value_id) const;
+    /*! \brief Diagnostic handle to one session-owned state buffer; treat as
+     *  read-only. The returned NDArray shares the session's storage. */
+    NDArray StateValue(int64_t state_value_id) const;
+
 private:
     const RuntimeSessionNode* operator->() const;
 };

@@ -141,7 +141,16 @@ ModuleInvocationContract::ModuleInvocationContract(std::vector<ModuleInputContra
         if (output.logical.size() != output.physical.size() || output.logical.size() != output.valid.size()) throw std::invalid_argument("module invocation output extents differ in rank");
         for (const auto* expressions : {&output.logical, &output.physical, &output.valid}) for (const auto& expression : *expressions) if (!expression.defined()) throw std::invalid_argument("module invocation output expression is undefined");
     }
-    for (const auto& scalar : runtime_extent_scalars_) if (!scalar.expression.defined()) throw std::invalid_argument("module runtime extent scalar expression is undefined");
+    for (const auto& scalar : runtime_extent_scalars_) {
+        if (scalar.source == ModuleRuntimeExtentScalar::Source::kStateExtent) {
+            if (scalar.expression.has_value()) {
+                throw std::invalid_argument(
+                    "state-sourced runtime extent scalar must not carry an input-axis expression");
+            }
+            continue;
+        }
+        if (!scalar.expression.has_value()) throw std::invalid_argument("module runtime extent scalar expression is undefined");
+    }
 }
 const std::vector<ModuleInputContract>& ModuleInvocationContract::inputs() const noexcept{return inputs_;}
 const std::vector<ModuleTensorContract>& ModuleInvocationContract::outputs() const noexcept{return outputs_;}
@@ -163,10 +172,10 @@ bool ModuleInvocationContract::IsConstantShape(const codegen::KernelSignature& s
     } catch (...) { return false; }
 }
 std::string ModuleInvocationContract::CanonicalBytes() const {
-    std::string b="KXC_MODULE_INVOKE_V2;"; Put(b,abi_version_);Put(b,inputs_.size());Put(b,outputs_.size());Put(b,runtime_extent_scalars_.size());Put(b,run_byte_budget_);
+    std::string b="KXC_MODULE_INVOKE_V3;"; Put(b,abi_version_);Put(b,inputs_.size());Put(b,outputs_.size());Put(b,runtime_extent_scalars_.size());Put(b,run_byte_budget_);
     for(const auto& i:inputs_){Put(b,i.axis_guards.size());for(const auto& g:i.axis_guards){Put(b,g.axis);Put(b,g.lower);Put(b,g.upper);Put(b,g.divisible_by);Put(b,g.exact?1:0);if(g.exact)Put(b,*g.exact);Put(b,g.equal_to?1:0);if(g.equal_to){Put(b,g.equal_to->input_index);Put(b,g.equal_to->axis);}}}
     for(const auto&o:outputs_){Put(b,o.max_bytes);for(const auto* v:{&o.logical,&o.physical,&o.valid}){Put(b,v->size());for(const auto&e:*v)e.AppendCanonical(b);}}
-    for(const auto& scalar:runtime_extent_scalars_) scalar.expression.AppendCanonical(b); return b;
+    for(const auto& scalar:runtime_extent_scalars_){Put(b,static_cast<ModuleExtent>(scalar.source));if(scalar.source==ModuleRuntimeExtentScalar::Source::kInputAxis)scalar.expression->AppendCanonical(b);} return b;
 }
 void ModuleInvocationContract::Validate(const codegen::KernelSignature& signature) const {
     signature.Validate(); if(abi_version_!=kAbiVersion) throw std::invalid_argument("module invocation ABI version is unsupported");
@@ -228,7 +237,7 @@ void ModuleInvocationContract::Validate(const codegen::KernelSignature& signatur
         if(!same_expression(contract_output.valid[axis],contract_output.logical[axis]) && valid.second>logical.first) throw std::invalid_argument("module output valid extent is not provably <= logical extent");
         if(!same_expression(contract_output.logical[axis],contract_output.physical[axis]) && logical.second>physical.first) throw std::invalid_argument("module output logical extent is not provably <= physical extent");
     }
-    for(const auto& scalar_contract:runtime_extent_scalars_) (void)validate_expression(scalar_contract.expression);
+    for(const auto& scalar_contract:runtime_extent_scalars_) if(scalar_contract.source!=ModuleRuntimeExtentScalar::Source::kStateExtent) (void)validate_expression(*scalar_contract.expression);
     size_t physical_output=0; for(const auto& arg:args) if(arg->role==codegen::KernelArgRole::kOutput) { const auto shape=arg.shape(); const auto& contract_output=outputs_[physical_output++]; for(size_t axis=0;axis<shape.size();++axis) if(shape[axis]!=codegen::kDynamicDimension && (!contract_output.physical[axis].IsConstant() || contract_output.physical[axis].Evaluate({})!=static_cast<ModuleExtent>(shape[axis]))) throw std::invalid_argument("module physical output ABI does not match KernelSignature"); }
 }
 }  // namespace kxc::api
