@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -449,28 +450,51 @@ void ValidateBoundSourceArguments(
     }
 }
 
+// 请求一次运行的观测关联；观测器缺失、被抑制或自身失败都返回空关联，
+// 观测永远不能改变执行结果。
+ExecutionRunCorrelation NotifyRunStart(ExecutionObserver* observer,
+                                       const ExecutionRunStart& run) {
+    if (observer == nullptr || ExecutionObservationHoldDepth() != 0) return {};
+    const ExecutionObservationHold hold;
+    try {
+        return observer->OnRunStart(run);
+    } catch (...) {
+        return {};
+    }
+}
+
 }  // namespace
 
 RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan) {
     ValidatedPlanContract contract = ValidateModuleAndPlan(module, plan);
     const auto values = IndexValues(plan);
+    // 观测器从模块继承：模块未启用 profiling 时访问器返回空，行为不变。
+    std::shared_ptr<ExecutionObserver> observer =
+        api::internal::BorrowCompiledModuleExecutionObserver(module);
     std::unordered_map<int64_t, NDArray> states;
-    for (int64_t value_id : plan.state_value_ids()) {
-        const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession state");
-        const auto alignment =
-            contract.required_alignment_by_storage.find(spec->storage_id);
-        if (alignment == contract.required_alignment_by_storage.end()) {
-            throw std::logic_error(
-                "RuntimeSession state has no alignment contract");
+    {
+        // 会话构造的 state 初始化分配也经过观测；此时没有运行上下文，
+        // 分配事件不带 run 关联（run_id 留空）。
+        std::optional<ExecutionObservationScope> observation;
+        if (observer) observation.emplace(observer.get(), ExecutionRunCorrelation{});
+        for (int64_t value_id : plan.state_value_ids()) {
+            const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession state");
+            const auto alignment =
+                contract.required_alignment_by_storage.find(spec->storage_id);
+            if (alignment == contract.required_alignment_by_storage.end()) {
+                throw std::logic_error(
+                    "RuntimeSession state has no alignment contract");
+            }
+            states.emplace(value_id, NDArray::Zeros(
+                                         spec.shape(), spec->dtype, spec->device,
+                                         alignment->second));
         }
-        states.emplace(value_id, NDArray::Zeros(
-                                     spec.shape(), spec->dtype, spec->device,
-                                     alignment->second));
     }
     SetData(new RuntimeSessionNode(
         std::move(module), std::move(plan), std::move(contract.device),
         std::move(contract.constant_keys_by_value),
-        std::move(contract.required_alignment_by_storage), std::move(states)));
+        std::move(contract.required_alignment_by_storage), std::move(states),
+        std::move(observer)));
 }
 
 RuntimeSession::RuntimeSession(const ObjectRef& ref) : ObjectRef(ref) {
@@ -491,93 +515,166 @@ Array<NDArray> RuntimeSession::Run(const Array<NDArray>& inputs) const {
 RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
                                         const DeviceStream& stream) const {
     const auto* node = operator->();
-    if (!stream.defined() || !stream.As<DeviceStreamNode>()) {
-        throw std::invalid_argument(
-            "RuntimeSession RunAsync requires a defined DeviceStream");
+    // 观测器为空时全部钩子只有一次空判断，行为与未装配时完全一致。
+    ExecutionObserver* observer = node->observer.get();
+    ExecutionRunCorrelation correlation;
+    if (observer) {
+        correlation = NotifyRunStart(observer,
+                                     ExecutionRunStart{node->device, inputs.size(),
+                                                       node->plan.calls().size()});
     }
-    if (stream.device() != node->device) {
-        throw std::invalid_argument("RuntimeSession stream device expected " +
-                                    node->device.ToString() + ", actual " +
-                                    stream.device().ToString());
-    }
-
-    const Array<int64_t> input_ids = node->plan.input_value_ids();
-    if (inputs.size() != input_ids.size()) {
-        throw std::invalid_argument("RuntimeSession input count expected " +
-                                    std::to_string(input_ids.size()) + ", actual " +
-                                    std::to_string(inputs.size()));
-    }
-
-    const auto values = IndexValues(node->plan);
-    auto table = std::make_shared<internal::ValueTable>();
-    for (size_t i = 0; i < inputs.size(); ++i) {
-        const ValueSpec& spec =
-            FindValue(values, input_ids[i], "RuntimeSession graph input");
-        ValidateRuntimeValue(spec, inputs[i],
-                             "RuntimeSession input[" + std::to_string(i) + "]");
-        table->Bind(spec, inputs[i]);
-    }
-
-    const Map<String, NDArray>& constants =
-        api::internal::BorrowCompiledModuleConstants(node->module);
-    for (int64_t value_id : node->plan.constant_value_ids()) {
-        const auto key = node->constant_keys_by_value.find(value_id);
-        if (key == node->constant_keys_by_value.end() || !constants.count(key->second)) {
-            throw std::logic_error(
-                "RuntimeSession validated constant binding disappeared");
-        }
-        const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession constant");
-        table->Bind(spec, constants.at(key->second));
-    }
-
-    std::unique_lock<std::mutex> state_lock;
-    if (!node->states_by_value.empty()) {
-        state_lock = std::unique_lock<std::mutex>(node->state_mutex);
-        if (node->state_completion.defined() &&
-            !node->state_completion.IsReady()) {
-            throw std::runtime_error(
-                "RuntimeSession state execution is still pending");
-        }
-        for (int64_t value_id : node->plan.state_value_ids()) {
-            const auto state = node->states_by_value.find(value_id);
-            if (state == node->states_by_value.end()) {
-                throw std::logic_error(
-                    "RuntimeSession validated state binding disappeared");
+    // 底层分配与拷贝路径经线程本地作用域查询当前观测器与运行关联。
+    std::optional<ExecutionObservationScope> observation;
+    if (observer) observation.emplace(observer, correlation);
+    std::size_t submit_count = 0;
+    try {
+        RunAsyncResult result = [&] {
+            if (!stream.defined() || !stream.As<DeviceStreamNode>()) {
+                throw std::invalid_argument(
+                    "RuntimeSession RunAsync requires a defined DeviceStream");
             }
-            const ValueSpec& spec =
-                FindValue(values, value_id, "RuntimeSession state");
-            table->Bind(spec, state->second);
+            if (stream.device() != node->device) {
+                throw std::invalid_argument("RuntimeSession stream device expected " +
+                                            node->device.ToString() + ", actual " +
+                                            stream.device().ToString());
+            }
+
+            const Array<int64_t> input_ids = node->plan.input_value_ids();
+            if (inputs.size() != input_ids.size()) {
+                throw std::invalid_argument("RuntimeSession input count expected " +
+                                            std::to_string(input_ids.size()) + ", actual " +
+                                            std::to_string(inputs.size()));
+            }
+
+            const auto values = IndexValues(node->plan);
+            auto table = std::make_shared<internal::ValueTable>();
+            if (observer) table->ObserveAllocations(observer, correlation);
+            for (size_t i = 0; i < inputs.size(); ++i) {
+                const ValueSpec& spec =
+                    FindValue(values, input_ids[i], "RuntimeSession graph input");
+                ValidateRuntimeValue(spec, inputs[i],
+                                     "RuntimeSession input[" + std::to_string(i) + "]");
+                table->Bind(spec, inputs[i]);
+            }
+
+            const Map<String, NDArray>& constants =
+                api::internal::BorrowCompiledModuleConstants(node->module);
+            for (int64_t value_id : node->plan.constant_value_ids()) {
+                const auto key = node->constant_keys_by_value.find(value_id);
+                if (key == node->constant_keys_by_value.end() || !constants.count(key->second)) {
+                    throw std::logic_error(
+                        "RuntimeSession validated constant binding disappeared");
+                }
+                const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession constant");
+                table->Bind(spec, constants.at(key->second));
+            }
+
+            std::unique_lock<std::mutex> state_lock;
+            if (!node->states_by_value.empty()) {
+                state_lock = std::unique_lock<std::mutex>(node->state_mutex);
+                if (node->state_completion.defined() &&
+                    !node->state_completion.IsReady()) {
+                    throw std::runtime_error(
+                        "RuntimeSession state execution is still pending");
+                }
+                for (int64_t value_id : node->plan.state_value_ids()) {
+                    const auto state = node->states_by_value.find(value_id);
+                    if (state == node->states_by_value.end()) {
+                        throw std::logic_error(
+                            "RuntimeSession validated state binding disappeared");
+                    }
+                    const ValueSpec& spec =
+                        FindValue(values, value_id, "RuntimeSession state");
+                    table->Bind(spec, state->second);
+                }
+            }
+            ValidateBoundSourceArguments(node->module, node->plan, values, table);
+
+            const Array<KernelCall> calls = node->plan.calls();
+            Array<AsyncOperation> operations;
+            std::size_t call_index = 0;
+            for (const auto& call : calls) {
+                if (observer) {
+                    DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                        sink.OnKernelBegin(
+                            KernelSubmitInfo{node->device, call_index,
+                                             std::string(call->symbol)},
+                            correlation);
+                    });
+                }
+                Array<NDArray> arguments = PrepareCallArguments(
+                    node->module, call, values,
+                    node->required_alignment_by_storage, table);
+                operations.push_back(InvokeOrderedModuleEntry(
+                    node->module, call->symbol, arguments, stream));
+                ++submit_count;
+                if (observer) {
+                    ExecutionCompletionCallback completion;
+                    DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                        completion = sink.OnKernelSubmitted(
+                            KernelSubmitInfo{node->device, call_index,
+                                             std::string(call->symbol)},
+                            correlation);
+                    });
+                    // 完成观测在 Wait/IsReady/析构之间恰好结算一次；CPU 同步
+                    // 后端注册即触发，异步后端在真实观测到完成时触发。
+                    if (completion && operations[operations.size() - 1].defined()) {
+                        operations[operations.size() - 1].ObserveCompletion(
+                            std::move(completion));
+                    }
+                }
+                ++call_index;
+            }
+
+            Array<NDArray> outputs;
+            for (int64_t value_id : node->plan.output_value_ids()) {
+                outputs.push_back(table->Get(value_id));
+            }
+
+            AsyncOperation completion = operations.empty()
+                                            ? AsyncOperation::Completed(stream)
+                                            : operations[operations.size() - 1];
+            Array<AsyncOperation> prior_operations;
+            for (size_t i = 0; i + 1 < operations.size(); ++i) {
+                prior_operations.push_back(operations[i]);
+            }
+            auto state = std::make_shared<RuntimeExecutionState>(RuntimeExecutionState{
+                node->module, node->plan, table, std::move(prior_operations)});
+            completion.RetainDependencies(table->RetainedStorage(), std::move(state));
+            if (state_lock.owns_lock()) node->state_completion = completion;
+            return RunAsyncResult{std::move(outputs), std::move(completion)};
+        }();
+        observation.reset();
+        if (observer) {
+            DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                sink.OnRunEnd(ExecutionRunEnd{node->device, inputs.size(),
+                                              node->plan.calls().size(),
+                                              submit_count, true, std::string()},
+                              correlation);
+            });
         }
+        return result;
+    } catch (...) {
+        observation.reset();
+        if (observer) {
+            // 错误复用 run span 的 status="error"，message 为原始异常文本，
+            // 不新增事件类型；校验失败发生在任何 kernel_submit 之前。
+            std::string message = "unknown runtime error";
+            try {
+                throw;
+            } catch (const std::exception& error) {
+                message = error.what();
+            } catch (...) {
+            }
+            DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                sink.OnRunEnd(ExecutionRunEnd{node->device, inputs.size(),
+                                              node->plan.calls().size(),
+                                              submit_count, false, message},
+                              correlation);
+            });
+        }
+        throw;
     }
-    ValidateBoundSourceArguments(node->module, node->plan, values, table);
-
-    const Array<KernelCall> calls = node->plan.calls();
-    Array<AsyncOperation> operations;
-    for (const auto& call : calls) {
-        Array<NDArray> arguments = PrepareCallArguments(
-            node->module, call, values,
-            node->required_alignment_by_storage, table);
-        operations.push_back(InvokeOrderedModuleEntry(
-            node->module, call->symbol, arguments, stream));
-    }
-
-    Array<NDArray> outputs;
-    for (int64_t value_id : node->plan.output_value_ids()) {
-        outputs.push_back(table->Get(value_id));
-    }
-
-    AsyncOperation completion = operations.empty()
-                                    ? AsyncOperation::Completed(stream)
-                                    : operations[operations.size() - 1];
-    Array<AsyncOperation> prior_operations;
-    for (size_t i = 0; i + 1 < operations.size(); ++i) {
-        prior_operations.push_back(operations[i]);
-    }
-    auto state = std::make_shared<RuntimeExecutionState>(RuntimeExecutionState{
-        node->module, node->plan, table, std::move(prior_operations)});
-    completion.RetainDependencies(table->RetainedStorage(), std::move(state));
-    if (state_lock.owns_lock()) node->state_completion = completion;
-    return RunAsyncResult{std::move(outputs), std::move(completion)};
 }
 
 const RuntimeSessionNode* RuntimeSession::operator->() const {

@@ -5,13 +5,25 @@
 #include "kxc/runtime/storage.h"
 #include "kxc/support/object_registration.h"
 
+#include <chrono>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 #include "kxc/runtime/device_api.h"
+#include "kxc/runtime/execution_observer.h"
 
 namespace kxc {
+
+// 执行观测钩子来自 runtime 子命名空间；本文件只消费其纯数据接口。
+using runtime::AllocationInfo;
+using runtime::AllocationKind;
+using runtime::CurrentExecutionObserver;
+using runtime::CurrentExecutionRunCorrelation;
+using runtime::DispatchExecutionObservation;
+using runtime::ExecutionObserver;
 
 KXC_OBJECT_DEFINE(StorageNode)
 
@@ -39,6 +51,7 @@ Storage::Storage(const ObjectRef& ref) : ObjectRef(ref) {
 }
 
 // 在指定设备分配独占 Storage；ObjectRef 先接管节点以覆盖分配异常。
+// 未装配观测器时只有一次空判断；记账路径被外层 hold 抑制时不重复上报。
 Storage Storage::Alloc(const Device& device, size_t nbytes, size_t alignment) {
     auto* node = new StorageNode();
     Storage storage(node);
@@ -46,7 +59,49 @@ Storage Storage::Alloc(const Device& device, size_t nbytes, size_t alignment) {
     node->capacity_bytes = nbytes;
     node->alignment = alignment;
     node->ownership = StorageOwnership::kOwned;
-    node->data = DeviceAlloc(device, nbytes, alignment);
+    ExecutionObserver* observer = CurrentExecutionObserver();
+    const std::chrono::steady_clock::time_point begin =
+        observer == nullptr ? std::chrono::steady_clock::time_point{}
+                            : std::chrono::steady_clock::now();
+    try {
+        node->data = DeviceAlloc(device, nbytes, alignment);
+    } catch (...) {
+        if (observer != nullptr) {
+            AllocationInfo info;
+            info.device = device;
+            info.bytes = nbytes;
+            info.alignment = alignment;
+            info.kind = AllocationKind::kFresh;
+            info.duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - begin)
+                                   .count();
+            try {
+                throw;
+            } catch (const std::exception& error) {
+                info.error_message = error.what();
+            } catch (...) {
+                info.error_message = "unknown allocation failure";
+            }
+            const AllocationInfo recorded = std::move(info);
+            DispatchExecutionObservation(observer, [&recorded](ExecutionObserver& sink) {
+                sink.OnAllocation(recorded, CurrentExecutionRunCorrelation());
+            });
+        }
+        throw;
+    }
+    if (observer != nullptr) {
+        AllocationInfo info;
+        info.device = device;
+        info.bytes = nbytes;
+        info.alignment = alignment;
+        info.kind = AllocationKind::kFresh;
+        info.duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - begin)
+                               .count();
+        DispatchExecutionObservation(observer, [&info](ExecutionObserver& sink) {
+            sink.OnAllocation(info, CurrentExecutionRunCorrelation());
+        });
+    }
     return storage;
 }
 
