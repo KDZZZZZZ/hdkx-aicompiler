@@ -1173,3 +1173,312 @@ def test_sqrt_rejects_non_float32_and_attributes():
 def test_arithmetic_rejects_missing_input_value():
     with pytest.raises(ValueError, match="input 'ghost' metadata is absent or unresolved"):
         import_onnx_model(_arith_model("Mul", [2, 3], [2, 3], node_inputs=("a", "ghost")))
+
+
+def test_cast_int_to_float32_maps_to_relay_code_zero():
+    for dtype in (TensorProto.INT32, TensorProto.INT64):
+        imported = import_onnx_model(_s1_model(
+            [helper.make_node("Cast", ["a"], ["out"], name="cast", to=TensorProto.FLOAT)],
+            [helper.make_tensor_value_info("a", dtype, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+        ))
+
+        assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+            ("cast", {"to": 0}),
+        ]
+        assert imported.function.outputs[0].dtype == "float32"
+        assert imported.function.outputs[0].shape == [2, 3]
+
+
+def test_cast_rejects_non_float32_targets():
+    for dtype, name in ((TensorProto.INT32, "int32"), (TensorProto.BOOL, "bool"),
+                        (TensorProto.DOUBLE, "float64")):
+        with pytest.raises(ValueError, match="supports only to=float32"):
+            import_onnx_model(_s1_model(
+                [helper.make_node("Cast", ["a"], ["out"], name="cast", to=dtype)],
+                [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2])],
+                [helper.make_tensor_value_info("out", dtype, [2])],
+            ))
+
+
+def test_cast_rejects_unsupported_source_dtypes():
+    for dtype in (TensorProto.FLOAT, TensorProto.BOOL, TensorProto.INT8):
+        with pytest.raises(ValueError, match="supports only int32/int64 to float32"):
+            import_onnx_model(_s1_model(
+                [helper.make_node("Cast", ["a"], ["out"], name="cast", to=TensorProto.FLOAT)],
+                [helper.make_tensor_value_info("a", dtype, [2])],
+                [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+            ))
+
+
+def test_cast_rejects_missing_or_malformed_to_attribute():
+    with pytest.raises(ValueError, match="requires exactly the 'to' attribute"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Cast", ["a"], ["out"], name="cast")],
+            [helper.make_tensor_value_info("a", TensorProto.INT64, [2])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+        ))
+    with pytest.raises(ValueError, match="'to' must have exact INT type"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Cast", ["a"], ["out"], name="cast", to=1.5)],
+            [helper.make_tensor_value_info("a", TensorProto.INT64, [2])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+        ))
+
+
+def test_cast_rejects_unsupported_dtype_enum_and_extra_attrs():
+    with pytest.raises(ValueError, match="unsupported 'to' dtype enum 999"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Cast", ["a"], ["out"], name="cast", to=999)],
+            [helper.make_tensor_value_info("a", TensorProto.INT64, [2])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+        ))
+    model = _s1_model(
+        [helper.make_node("Cast", ["a"], ["out"], name="cast", to=TensorProto.FLOAT)],
+        [helper.make_tensor_value_info("a", TensorProto.INT64, [2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+    )
+    model.graph.node[0].attribute.extend([helper.make_attribute("extra", 1)])
+    with pytest.raises(ValueError, match="requires exactly the 'to' attribute"):
+        import_onnx_model(model)
+
+
+def test_cast_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Cast", ["a"], ["out"], name="cast", to=TensorProto.FLOAT)],
+            [helper.make_tensor_value_info("a", TensorProto.INT64, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 4])],
+        ))
+
+
+def test_reduce_mean_maps_axes_keepdims_and_negative_axis():
+    imported = import_onnx_model(_s1_model(
+        [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce", axes=[1, -1],
+                          keepdims=1)],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3, 4])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 1, 1])],
+    ))
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("reduce_mean", {"axes": [1, -1], "keepdims": 1}),
+    ]
+    assert imported.function.outputs[0].shape == [2, 1, 1]
+
+
+def test_reduce_mean_keepdims_zero_prunes_axes():
+    imported = import_onnx_model(_s1_model(
+        [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce", axes=[-2],
+                          keepdims=0)],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3, 4])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 4])],
+    ))
+
+    assert imported.function.nodes[0].attrs == {"axes": [-2], "keepdims": 0}
+    assert imported.function.outputs[0].shape == [2, 4]
+
+
+def test_reduce_mean_absent_or_empty_axes_reduce_all():
+    imported = import_onnx_model(_s1_model(
+        [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce", keepdims=1)],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 1])],
+    ))
+    assert imported.function.nodes[0].attrs == {"axes": [], "keepdims": 1}
+    assert imported.function.outputs[0].shape == [1, 1]
+
+    model = _s1_model(
+        [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 1])],
+    )
+    attr = AttributeProto()
+    attr.name = "axes"
+    attr.type = AttributeProto.INTS
+    model.graph.node[0].attribute.append(attr)
+    imported = import_onnx_model(model)
+    assert imported.function.outputs[0].shape == [1, 1]
+
+
+def test_reduce_mean_opset18_input_form_is_rejected():
+    with pytest.raises(UnsupportedONNXOpError, match=r"ReduceMean opset 18.*input-form"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("ReduceMean", ["a", "axes"], ["out"], name="reduce")],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3]),
+             helper.make_tensor_value_info("axes", TensorProto.INT64, [1])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1])],
+            opset=18,
+        ))
+
+
+def test_reduce_mean_rejects_malformed_and_out_of_range_attrs():
+    with pytest.raises(ValueError, match="keepdims must be 0 or 1"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce",
+                              axes=[0], keepdims=2)],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 3])],
+        ))
+    with pytest.raises(ValueError, match="must have exact INTS type"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce", axes=0)],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 3])],
+        ))
+    with pytest.raises(ValueError, match="duplicate"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce",
+                              axes=[1, 1], keepdims=1)],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 1])],
+        ))
+    with pytest.raises(ValueError, match="axis 2 is out of range for rank 2"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce",
+                              axes=[2], keepdims=1)],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 3])],
+        ))
+
+
+def test_reduce_mean_rejects_non_float32_and_zero_extent_axes():
+    with pytest.raises(ValueError, match="requires float32 input in the static S1 subset"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce",
+                              axes=[0], keepdims=1)],
+            [helper.make_tensor_value_info("a", TensorProto.INT64, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 3])],
+        ))
+    with pytest.raises(ValueError, match="zero-extent axis"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce",
+                              axes=[1], keepdims=1)],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 0])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 1])],
+        ))
+
+
+def test_reduce_mean_rejects_unsupported_attrs_and_declared_mismatch():
+    with pytest.raises(ValueError, match="unsupported attribute"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce",
+                              axes=[0], keepdims=1, noop_with_empty_axes=0)],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 3])],
+        ))
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("ReduceMean", ["a"], ["out"], name="reduce",
+                              axes=[0], keepdims=1)],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+        ))
+
+
+def test_reshape_resolves_initializer_shape_to_proven_target():
+    imported = import_onnx_model(_s1_model(
+        [helper.make_node("Reshape", ["a", "shape"], ["out"], name="reshape")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3, 4])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [6, 4])],
+        initializers=[helper.make_tensor("shape", TensorProto.INT64, [2], [6, 4])],
+    ))
+
+    assert [(node.op_name, node.inputs, node.attrs) for node in imported.function.nodes] == [
+        ("reshape", ["a"], {"newshape": [6, 4], "allowzero": 0}),
+    ]
+    assert imported.function.outputs[0].shape == [6, 4]
+
+
+def test_reshape_resolves_zero_and_minus_one_from_constant_shape():
+    imported = import_onnx_model(_s1_model(
+        [helper.make_node("Constant", [], ["shape"], name="shape_const",
+                          value=helper.make_tensor("ignored", TensorProto.INT64, [3],
+                                                   [0, -1, 2])),
+         helper.make_node("Reshape", ["a", "shape"], ["out"], name="reshape")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [3, 4])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [3, 2, 2])],
+    ))
+
+    assert imported.function.nodes[0].attrs == {"newshape": [3, 2, 2], "allowzero": 0}
+    assert imported.param_order == ["shape"]
+
+
+def test_reshape_scalar_target_from_empty_shape_tensor():
+    imported = import_onnx_model(_s1_model(
+        [helper.make_node("Reshape", ["a", "shape"], ["out"], name="reshape")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [1, 1])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [])],
+        initializers=[helper.make_tensor("shape", TensorProto.INT64, [0], [])],
+    ))
+
+    assert imported.function.nodes[0].attrs == {"newshape": [], "allowzero": 0}
+    assert imported.function.outputs[0].shape == []
+
+
+def test_reshape_rejects_ambiguous_or_inconsistent_targets():
+    def reshape_model(raw_shape, data_shape=(2, 3), output_shape=(6,), shape_dtype=TensorProto.INT64):
+        return _s1_model(
+            [helper.make_node("Reshape", ["a", "shape"], ["out"], name="reshape")],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, list(data_shape))],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, list(output_shape))],
+            initializers=[helper.make_tensor("shape", shape_dtype, [len(raw_shape)],
+                                             list(raw_shape))],
+        )
+
+    with pytest.raises(ValueError, match="element count mismatch"):
+        import_onnx_model(reshape_model([7]))
+    with pytest.raises(ValueError, match="cannot prove a unique target shape"):
+        import_onnx_model(reshape_model([0, -1], data_shape=(0, 3), output_shape=[0]))
+    with pytest.raises(ValueError, match="allows at most one -1 dimension"):
+        import_onnx_model(reshape_model([-1, -1]))
+    with pytest.raises(ValueError, match="only supports positive, 0, and -1"):
+        import_onnx_model(reshape_model([-2]))
+    with pytest.raises(ValueError, match="must be int64"):
+        import_onnx_model(reshape_model([6], shape_dtype=TensorProto.INT32))
+    with pytest.raises(ValueError, match="must be a static initializer or Constant"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Reshape", ["a", "shape"], ["out"], name="reshape")],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3]),
+             helper.make_tensor_value_info("shape", TensorProto.INT64, [1])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [6])],
+        ))
+
+
+def test_reshape_rejects_allowzero_and_extra_attrs():
+    with pytest.raises(ValueError, match="requires allowzero=0"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Reshape", ["a", "shape"], ["out"], name="reshape",
+                              allowzero=1)],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [0, 3])],
+            initializers=[helper.make_tensor("shape", TensorProto.INT64, [2], [0, 3])],
+        ))
+    with pytest.raises(ValueError, match="unsupported attribute"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Reshape", ["a", "shape"], ["out"], name="reshape",
+                              unknown=1)],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [6])],
+            initializers=[helper.make_tensor("shape", TensorProto.INT64, [1], [6])],
+        ))
+
+
+def test_reshape_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Reshape", ["a", "shape"], ["out"], name="reshape")],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [7])],
+            initializers=[helper.make_tensor("shape", TensorProto.INT64, [1], [6])],
+        ))
+
+
+def test_reshape_int64_overflow_is_rejected():
+    huge = (1 << 63) - 1
+    with pytest.raises(ValueError, match="overflows int64"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Reshape", ["a", "shape"], ["out"], name="reshape")],
+            [helper.make_tensor_value_info("a", TensorProto.FLOAT, [huge, huge])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1])],
+            initializers=[helper.make_tensor("shape", TensorProto.INT64, [1], [-1])],
+        ))

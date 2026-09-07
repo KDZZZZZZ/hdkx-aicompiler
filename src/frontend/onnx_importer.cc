@@ -455,6 +455,65 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
         }
         return ObjectRef();
     }
+    if (op_name == "cast") {
+        const std::string ctx = "cast attrs";
+        if (attrs.o.size() != 1 || !OptionalField(attrs, "to")) {
+            throw std::runtime_error("Cast import attrs must contain exactly 'to': " +
+                                     node_name);
+        }
+        const int to = ReadInt(Field(attrs, "to", ctx), ctx + ".to");
+        if (to < 0 || to > 6) {
+            throw std::runtime_error("Cast import 'to' dtype code " + std::to_string(to) +
+                                     " is outside the supported Relay codes 0..6: " +
+                                     node_name);
+        }
+        return ObjectRef(relay::CastAttrs::Create(to));
+    }
+    if (op_name == "reduce_mean") {
+        const std::string ctx = "reduce_mean attrs";
+        if (attrs.o.size() != 2 || !OptionalField(attrs, "axes") ||
+            !OptionalField(attrs, "keepdims")) {
+            throw std::runtime_error(
+                "ReduceMean import attrs must contain exactly axes and keepdims: " +
+                node_name);
+        }
+        const int64_t keepdims =
+            ReadInt64(Field(attrs, "keepdims", ctx), ctx + ".keepdims");
+        if (keepdims != 0 && keepdims != 1) {
+            throw std::runtime_error(
+                "ReduceMean import keepdims must be 0 or 1: " + node_name);
+        }
+        return ObjectRef(relay::ReduceMeanAttrs::Create(
+            ToArray(ReadInt64Vector(Field(attrs, "axes", ctx), ctx + ".axes")),
+            keepdims));
+    }
+    if (op_name == "reshape") {
+        const std::string ctx = "reshape attrs";
+        if (attrs.o.size() != 2 || !OptionalField(attrs, "newshape") ||
+            !OptionalField(attrs, "allowzero")) {
+            throw std::runtime_error(
+                "Reshape import attrs must contain exactly newshape and allowzero: " +
+                node_name);
+        }
+        const std::vector<int64_t> newshape =
+            ReadInt64Vector(Field(attrs, "newshape", ctx), ctx + ".newshape");
+        for (size_t axis = 0; axis < newshape.size(); ++axis) {
+            if (newshape[axis] < 0) {
+                throw std::runtime_error(
+                    "Reshape import newshape must be the fully resolved target "
+                    "shape; negative dimensions are rejected: " +
+                    node_name);
+            }
+        }
+        const int64_t allowzero =
+            ReadInt64(Field(attrs, "allowzero", ctx), ctx + ".allowzero");
+        if (allowzero != 0) {
+            throw std::runtime_error(
+                "Reshape import requires allowzero=0 in the static S1 subset: " +
+                node_name);
+        }
+        return ObjectRef(relay::ReshapeAttrs::Create(ToArray(newshape), 0));
+    }
     if (op_name == "softmax") {
         return ObjectRef(relay::SoftmaxAttrs::Create(
             ReadInt(Field(attrs, "axis", "softmax attrs"), "softmax attrs.axis")));
@@ -536,6 +595,59 @@ void ValidateFloat32Inputs(const std::string& op_name, const Array<Expr>& args,
         if (!type || type->dtype != "float32") {
             throw std::runtime_error(
                 op_name + " import requires float32 inputs in the static S1 subset: " +
+                node_name);
+        }
+    }
+}
+
+// S1 Cast 只开放 int32/int64 到 float32；不信任 Python 已校验的手写 spec。
+void ValidateCastSubset(const Array<Expr>& args, const ObjectRef& attrs,
+                        const Array<Var>& function_params, const std::string& node_name) {
+    const auto* cast_attrs = attrs.As<relay::CastAttrsNode>();
+    if (!cast_attrs || cast_attrs->to != 0) {
+        throw std::runtime_error(
+            "Cast import supports only to=float32 (Relay code 0) in the static S1 "
+            "subset: " +
+            node_name);
+    }
+    InferArgTypes(args, function_params);
+    const auto* type = args[0].checked_type().As<TensorTypeNode>();
+    if (!type || (type->dtype != "int32" && type->dtype != "int64")) {
+        throw std::runtime_error(
+            "Cast import supports only int32/int64 sources in the static S1 subset: " +
+            node_name);
+    }
+}
+
+// S1 ReduceMean 只接收 float32，且不得在零尺寸轴上归约（结果未定义）。
+void ValidateReduceMeanSubset(const Array<Expr>& args, const ObjectRef& attrs,
+                              const Array<Var>& function_params,
+                              const std::string& node_name) {
+    InferArgTypes(args, function_params);
+    const auto* type = args[0].checked_type().As<TensorTypeNode>();
+    if (!type || type->dtype != "float32") {
+        throw std::runtime_error(
+            "ReduceMean import requires a float32 input in the static S1 subset: " +
+            node_name);
+    }
+    const auto* reduce_attrs = attrs.As<relay::ReduceMeanAttrsNode>();
+    if (!reduce_attrs) {
+        throw std::runtime_error("ReduceMean import requires ReduceMeanAttrs: " +
+                                 node_name);
+    }
+    const int rank = static_cast<int>(type->shape.size());
+    for (int64_t axis : reduce_attrs->axes) {
+        int64_t normalized = axis < 0 ? axis + rank : axis;
+        if (normalized < 0 || normalized >= rank) {
+            throw std::runtime_error("ReduceMean import axis " + std::to_string(axis) +
+                                     " is out of range for rank " +
+                                     std::to_string(rank) + ": " + node_name);
+        }
+        const int64_t extent = type->shape[static_cast<size_t>(normalized)];
+        if (extent == 0) {
+            throw std::runtime_error(
+                "ReduceMean import reduces over a zero-extent axis, which is "
+                "undefined and rejected in the static S1 subset: " +
                 node_name);
         }
     }
@@ -706,6 +818,12 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         if (op_name == "mul" || op_name == "subtract" || op_name == "divide" ||
             op_name == "sqrt") {
             ValidateFloat32Inputs(op_name, args, function_params, node_name);
+        }
+        if (op_name == "cast") {
+            ValidateCastSubset(args, attrs, function_params, node_name);
+        }
+        if (op_name == "reduce_mean") {
+            ValidateReduceMeanSubset(args, attrs, function_params, node_name);
         }
         Call call(relay::Op::Get(op_name), args, attrs);
         if (!values.emplace(output_names[0], call).second) {

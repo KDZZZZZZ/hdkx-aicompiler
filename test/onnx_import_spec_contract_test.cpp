@@ -424,6 +424,251 @@ bool TestNodeOutputNameConflictsWithValueAreRejected() {
     return true;
 }
 
+void WriteCastFixture(const TemporaryDirectory& directory,
+                      const std::string& input_dtype, const std::string& output_dtype,
+                      const std::string& attrs = R"json({"to": 0})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name": "data", "shape": [2, 3], "dtype": ")json" + input_dtype + R"json("}],
+    "outputs": [{"name": "out", "shape": [2, 3], "dtype": ")json" + output_dtype + R"json("}],
+    "nodes": [
+      {"name": "cast_node", "op_name": "cast", "inputs": ["data"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+void WriteReduceMeanFixture(const TemporaryDirectory& directory,
+                            const std::string& output_shape,
+                            const std::string& attrs =
+                                R"json({"axes": [1], "keepdims": 1})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name": "data", "shape": [2, 3, 4], "dtype": "float32"}],
+    "outputs": [{"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}],
+    "nodes": [
+      {"name": "reduce_node", "op_name": "reduce_mean", "inputs": ["data"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+void WriteReshapeFixture(const TemporaryDirectory& directory,
+                         const std::string& output_shape,
+                         const std::string& attrs =
+                             R"json({"newshape": [6, 4], "allowzero": 0})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name": "data", "shape": [2, 3, 4], "dtype": "float32"}],
+    "outputs": [{"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}],
+    "nodes": [
+      {"name": "reshape_node", "op_name": "reshape", "inputs": ["data"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+bool TestValidStaticCast() {
+    TemporaryDirectory directory;
+    WriteCastFixture(directory, "int64", "float32");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Cast import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 3}, "float32"),
+               "reified Cast output should carry the target dtype");
+    return true;
+}
+
+bool TestCastSubsetIsEnforced() {
+    TemporaryDirectory wrong_target;
+    WriteCastFixture(wrong_target, "int64", "int32", R"json({"to": 1})json");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (wrong_target.path() / "model.json").string(),
+                           (wrong_target.path() / "params.bin").string());
+                   },
+                   "cast_node", &message),
+               "hand-written Cast specs cannot target non-float32 dtypes");
+
+    TemporaryDirectory wrong_source;
+    WriteCastFixture(wrong_source, "float32", "float32");
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (wrong_source.path() / "model.json").string(),
+                           (wrong_source.path() / "params.bin").string());
+                   },
+                   "cast_node", &message),
+               "hand-written Cast specs cannot use float32 sources in S1");
+    return true;
+}
+
+bool TestCastAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WriteCastFixture(directory, "int64", "float32", R"json({"to": 0, "extra": 1})json");
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "Cast reifier must reject attrs outside the exact canonical set");
+    return true;
+}
+
+bool TestValidStaticReduceMean() {
+    TemporaryDirectory directory;
+    WriteReduceMeanFixture(directory, "[2, 1, 4]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(),
+               "valid static ReduceMean import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 1, 4}, "float32"),
+               "reified ReduceMean output should apply keepdims");
+    return true;
+}
+
+bool TestReduceMeanAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WriteReduceMeanFixture(directory, "[2, 1, 4]", R"json({"axes": [1]})json");
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "ReduceMean reifier must require axes and keepdims");
+
+    TemporaryDirectory bad_keepdims;
+    WriteReduceMeanFixture(bad_keepdims, "[2, 1, 4]",
+                           R"json({"axes": [1], "keepdims": 2})json");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (bad_keepdims.path() / "model.json").string(),
+                           (bad_keepdims.path() / "params.bin").string());
+                   },
+                   "reduce_node", &message),
+               "ReduceMean reifier must reject keepdims outside 0/1");
+    return true;
+}
+
+bool TestReduceMeanZeroExtentAxisIsRejected() {
+    TemporaryDirectory directory;
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name": "data", "shape": [2, 0], "dtype": "float32"}],
+    "outputs": [{"name": "out", "shape": [2, 1], "dtype": "float32"}],
+    "nodes": [
+      {"name": "reduce_node", "op_name": "reduce_mean", "inputs": ["data"], "outputs": ["out"], "attrs": {"axes": [1], "keepdims": 1}}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "reduce_node", &message),
+               "reducing over a zero-extent axis must fail closed");
+    return true;
+}
+
+bool TestReduceMeanDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteReduceMeanFixture(directory, "[2, 3, 4]");
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "declared ReduceMean output shape must match inferred output");
+    return true;
+}
+
+bool TestValidStaticReshape() {
+    TemporaryDirectory directory;
+    WriteReshapeFixture(directory, "[6, 4]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Reshape import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {6, 4}, "float32"),
+               "reified Reshape output should use the resolved target shape");
+    return true;
+}
+
+bool TestReshapeNegativeNewshapeIsRejected() {
+    TemporaryDirectory directory;
+    WriteReshapeFixture(directory, "[6, 4]", R"json({"newshape": [-1, 4], "allowzero": 0})json");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "reshape_node", &message),
+               "hand-written Reshape specs must carry the fully resolved newshape");
+    return true;
+}
+
+bool TestReshapeAllowzeroIsRejected() {
+    TemporaryDirectory directory;
+    WriteReshapeFixture(directory, "[2, 3, 4]",
+                        R"json({"newshape": [2, 3, 4], "allowzero": 1})json");
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "Reshape import requires allowzero=0");
+    return true;
+}
+
+bool TestReshapeDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteReshapeFixture(directory, "[6, 5]");
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "declared Reshape output shape must match inferred output");
+    return true;
+}
+
 void WriteExactTransformerOperatorSliceFixture(const TemporaryDirectory& directory) {
     const std::string json = R"json({
   "format": "kxc.onnx_import.v1",
@@ -805,6 +1050,17 @@ int main() {
         {"param_name_conflicts_are_rejected", TestParamNameConflictsAreRejected},
         {"node_output_name_conflicts_are_rejected",
          TestNodeOutputNameConflictsWithValueAreRejected},
+        {"valid_static_cast", TestValidStaticCast},
+        {"cast_subset_is_enforced", TestCastSubsetIsEnforced},
+        {"cast_attrs_are_strict", TestCastAttrsAreStrict},
+        {"valid_static_reduce_mean", TestValidStaticReduceMean},
+        {"reduce_mean_attrs_are_strict", TestReduceMeanAttrsAreStrict},
+        {"reduce_mean_zero_extent_axis_rejected", TestReduceMeanZeroExtentAxisIsRejected},
+        {"reduce_mean_declared_output_mismatch", TestReduceMeanDeclaredOutputMismatchIsRejected},
+        {"valid_static_reshape", TestValidStaticReshape},
+        {"reshape_negative_newshape_rejected", TestReshapeNegativeNewshapeIsRejected},
+        {"reshape_allowzero_rejected", TestReshapeAllowzeroIsRejected},
+        {"reshape_declared_output_mismatch", TestReshapeDeclaredOutputMismatchIsRejected},
         {"negative_input_dimension", TestNegativeInputDimensionIsRejected},
         {"declared_output_shape_mismatch", TestDeclaredOutputShapeMismatchIsRejected},
         {"declared_output_dtype_mismatch", TestDeclaredOutputDTypeMismatchIsRejected},

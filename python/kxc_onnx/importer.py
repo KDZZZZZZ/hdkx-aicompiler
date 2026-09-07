@@ -37,6 +37,16 @@ RELAY_CAST_DTYPE_CODES = {
 }
 # S1 Cast subset: only the conversions the target models need are opened.
 CAST_SUPPORTED_CONVERSIONS = {("int32", "float32"), ("int64", "float32")}
+# ONNX TensorProto dtype enum values accepted by the Cast boundary.
+ONNX_CAST_DTYPE_NAMES = {
+    TensorProto.FLOAT: "float32",
+    TensorProto.DOUBLE: "float64",
+    TensorProto.INT64: "int64",
+    TensorProto.INT32: "int32",
+    TensorProto.INT8: "int8",
+    TensorProto.UINT8: "uint8",
+    TensorProto.BOOL: "bool",
+}
 CONSTANT_SUPPORTED_DTYPES = WHERE_BRANCH_DTYPES
 # ONNX Constant-13 shortcut/sparse attributes that the dense-value S1 subset rejects.
 CONSTANT_DENSE_VALUE_ONLY_ATTRS = {
@@ -70,6 +80,9 @@ ONNX_TO_RELAY = {
     "Sub": "subtract",
     "Div": "divide",
     "Sqrt": "sqrt",
+    "Cast": "cast",
+    "ReduceMean": "reduce_mean",
+    "Reshape": "reshape",
 }
 
 
@@ -263,6 +276,21 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
+        if node.op_type == "Cast":
+            inferred_static_specs[node.output[0]] = _infer_cast_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
+        if node.op_type == "ReduceMean":
+            inferred_static_specs[node.output[0]] = _infer_reduce_mean_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
+            )
+        if node.op_type == "Reshape":
+            inferred_static_specs[node.output[0]] = _infer_reshape_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
         if node.op_type == "Where":
             inferred_static_specs[node.output[0]] = _infer_where_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
@@ -275,7 +303,8 @@ def import_onnx_model(
                 f"ONNX node '{node.name or node.op_type}' has missing input(s): {missing}"
             )
 
-        relay_inputs = [node.input[0]] if node.op_type == "Slice" else [name for name in node.input if name]
+        relay_inputs = ([node.input[0]] if node.op_type in {"Slice", "Reshape"}
+                        else [name for name in node.input if name])
         relay_outputs = ([node.output[0]] if node.op_type == "LayerNormalization"
                          else [name for name in node.output])
         nodes.append(
@@ -284,7 +313,8 @@ def import_onnx_model(
                 op_name=ONNX_TO_RELAY[node.op_type],
                 inputs=relay_inputs,
                 outputs=relay_outputs,
-                attrs=_convert_attrs(node, params, value_info_by_name, opset_version),
+                attrs=_convert_attrs(node, params, value_info_by_name, opset_version,
+                                     input_specs, inferred_static_specs),
             )
         )
         available_values.update(relay_outputs)
@@ -479,6 +509,293 @@ def _infer_sqrt_spec(
     result = TensorSpec(name=node.output[0], shape=list(data.shape), dtype="float32")
     _validate_declared_output("Sqrt", node_name, result, output_declarations, default_batch)
     return result
+
+
+def _cast_target_dtype(node: onnx.NodeProto) -> str:
+    """Resolve the Cast ``to`` attribute to a kxc dtype name under the S1 boundary."""
+    node_name = node.name or "<unnamed>"
+    attrs = _attrs_by_name(node)
+    if set(attrs) != {"to"}:
+        raise ValueError(
+            f"Cast node '{node_name}' requires exactly the 'to' attribute"
+        )
+    to = _int_attr(attrs, "to", -1)
+    if to not in ONNX_CAST_DTYPE_NAMES:
+        raise ValueError(
+            f"Cast node '{node_name}' has unsupported 'to' dtype enum {to}"
+        )
+    target = ONNX_CAST_DTYPE_NAMES[to]
+    if target != "float32":
+        raise ValueError(
+            f"Cast node '{node_name}' supports only to=float32 in the static S1 "
+            f"subset; got to={target}"
+        )
+    return target
+
+
+def _infer_cast_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(f"Cast node '{node_name}' requires exactly one non-empty input")
+    data = _resolve_static_input("Cast", node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    target = _cast_target_dtype(node)
+    if (data.dtype, target) not in CAST_SUPPORTED_CONVERSIONS:
+        raise ValueError(
+            f"Cast node '{node_name}' supports only int32/int64 to float32 in the "
+            f"static S1 subset; got {data.dtype} to {target}"
+        )
+    result = TensorSpec(name=node.output[0], shape=list(data.shape), dtype=target)
+    _validate_declared_output("Cast", node_name, result, output_declarations, default_batch)
+    return result
+
+
+def _reduce_mean_attrs(node: onnx.NodeProto, opset_version: int) -> dict[str, Any]:
+    """Validate ReduceMean attributes for the opset-17 static subset.
+
+    The axes-attribute form (opset <= 17) is required; the opset-18 input form
+    is never opened. Absent or empty axes mean "reduce all axes".
+    """
+    node_name = node.name or "<unnamed>"
+    if opset_version >= 18:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX ReduceMean opset {opset_version} in node "
+            f"'{node_name}': the input-form opset >= 18 is not supported; "
+            "the static axes-attribute form (opset <= 17) is required"
+        )
+    attrs = _attrs_by_name(node)
+    unsupported = set(attrs) - {"axes", "keepdims"}
+    if unsupported:
+        raise ValueError(
+            f"ReduceMean node '{node_name}' has unsupported attribute(s): "
+            f"{sorted(unsupported)}"
+        )
+    axes = _list_attr(attrs, "axes", [])
+    keepdims = _int_attr(attrs, "keepdims", 1)
+    if keepdims not in (0, 1):
+        raise ValueError(
+            f"ReduceMean node '{node_name}' keepdims must be 0 or 1; got {keepdims}"
+        )
+    if len(axes) != len(set(axes)):
+        raise ValueError(
+            f"ReduceMean node '{node_name}' axes must not contain duplicates"
+        )
+    return {"axes": axes, "keepdims": keepdims}
+
+
+def _infer_reduce_mean_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    attrs = _reduce_mean_attrs(node, opset_version)
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(
+            f"ReduceMean node '{node_name}' requires exactly one non-empty input"
+        )
+    data = _resolve_static_input("ReduceMean", node_name, node.input[0], input_specs,
+                                 params, inferred_specs, value_info_by_name, default_batch)
+    if data.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"ReduceMean node '{node_name}' requires float32 input in the static "
+            f"S1 subset; got {data.dtype}"
+        )
+    if any(dim < 0 for dim in data.shape):
+        raise ValueError(
+            f"ReduceMean node '{node_name}' requires non-negative static dimensions"
+        )
+    rank = len(data.shape)
+    normalized: list[int] = []
+    for axis in attrs["axes"]:
+        resolved = axis + rank if axis < 0 else axis
+        if resolved < 0 or resolved >= rank:
+            raise ValueError(
+                f"ReduceMean node '{node_name}' axis {axis} is out of range for rank {rank}"
+            )
+        normalized.append(resolved)
+    if not normalized:
+        # ONNX opset <= 17: absent or empty axes reduce all axes.
+        normalized = list(range(rank))
+    for axis in set(normalized):
+        if data.shape[axis] == 0:
+            raise ValueError(
+                f"ReduceMean node '{node_name}' reduces over zero-extent axis {axis}; "
+                "the result is undefined and is rejected in the static S1 subset"
+            )
+    output_shape: list[int] = []
+    for index, dim in enumerate(data.shape):
+        if index in normalized:
+            if attrs["keepdims"]:
+                output_shape.append(1)
+        else:
+            output_shape.append(dim)
+    result = TensorSpec(
+        name=node.output[0], shape=output_shape, dtype="float32",
+    )
+    _validate_declared_output(
+        "ReduceMean", node_name, result, output_declarations, default_batch
+    )
+    return result
+
+
+def _reshape_attrs(
+    node: onnx.NodeProto, params: dict[str, ParamTensor], input_shape: list[int]
+) -> dict[str, Any]:
+    """Resolve the Reshape constant shape input into a proven target shape.
+
+    The shape input must be an int64 rank-1 initializer or Constant node output.
+    With allowzero=0 the 0/-1 dimensions are resolved against the data shape and
+    the canonical attrs carry the fully resolved target shape.
+    """
+    node_name = node.name or "<unnamed>"
+    attrs = _attrs_by_name(node)
+    unsupported = set(attrs) - {"allowzero"}
+    if unsupported:
+        raise ValueError(
+            f"Reshape node '{node_name}' has unsupported attribute(s): {sorted(unsupported)}"
+        )
+    allowzero = _int_attr(attrs, "allowzero", 0)
+    if allowzero != 0:
+        raise ValueError(
+            f"Reshape node '{node_name}' requires allowzero=0 in the static S1 subset"
+        )
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Reshape node '{node_name}' requires exactly two non-empty inputs"
+        )
+    shape_name = node.input[1]
+    shape_param = params.get(shape_name)
+    if shape_param is None:
+        raise ValueError(
+            f"Reshape node '{node_name}' shape input '{shape_name}' must be a static "
+            "initializer or Constant node output"
+        )
+    if shape_param.dtype != "int64":
+        raise ValueError(
+            f"Reshape node '{node_name}' shape input '{shape_name}' must be int64 "
+            f"(Reshape-14 tensor(int64)); got {shape_param.dtype}"
+        )
+    if len(shape_param.shape) != 1:
+        raise ValueError(
+            f"Reshape node '{node_name}' shape input '{shape_name}' must be rank-1; "
+            f"got rank {len(shape_param.shape)}"
+        )
+    if len(shape_param.data) != 8 * shape_param.shape[0]:
+        raise ValueError(
+            f"Reshape node '{node_name}' shape initializer '{shape_name}' byte size "
+            "is invalid"
+        )
+    raw_shape: list[int] = [
+        int(value) for value in np.frombuffer(shape_param.data, dtype="<i8")
+    ]
+    return _resolve_reshape_target(node_name, raw_shape, input_shape, allowzero)
+
+
+def _infer_reshape_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Reshape node '{node_name}' requires exactly two non-empty inputs"
+        )
+    data = _resolve_static_input("Reshape", node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    if any(dim < 0 for dim in data.shape):
+        raise ValueError(
+            f"Reshape node '{node_name}' requires non-negative static input dimensions"
+        )
+    attrs = _reshape_attrs(node, params, data.shape)
+    result = TensorSpec(
+        name=node.output[0], shape=list(attrs["newshape"]), dtype=data.dtype,
+    )
+    _validate_declared_output(
+        "Reshape", node_name, result, output_declarations, default_batch
+    )
+    return result
+
+
+def _resolve_reshape_target(
+    node_name: str, raw_shape: list[int], input_shape: list[int], allowzero: int
+) -> dict[str, Any]:
+    """Resolve 0/-1 dimensions of a raw newshape against the data shape.
+
+    Returns the canonical attrs carrying the fully resolved target shape; every
+    ambiguous case (zero known product with -1, multiple -1, mismatched element
+    counts) is rejected instead of guessed.
+    """
+    infer_index: int | None = None
+    resolved: list[int] = []
+    known_product = 1
+    for index, dim in enumerate(raw_shape):
+        if dim == -1:
+            if infer_index is not None:
+                raise ValueError(
+                    f"Reshape node '{node_name}' allows at most one -1 dimension"
+                )
+            infer_index = len(resolved)
+            resolved.append(-1)
+        elif dim == 0 and not allowzero:
+            if index >= len(input_shape):
+                raise ValueError(
+                    f"Reshape node '{node_name}' 0-dim copy index exceeds input rank"
+                )
+            resolved.append(input_shape[index])
+            known_product *= input_shape[index]
+        elif dim > 0:
+            resolved.append(dim)
+            known_product *= dim
+        else:
+            raise ValueError(
+                f"Reshape node '{node_name}' only supports positive, 0, and -1 "
+                f"dimensions; got {dim}"
+            )
+    input_product = 1
+    for dim in input_shape:
+        input_product *= dim
+    if infer_index is not None:
+        if known_product == 0:
+            raise ValueError(
+                f"Reshape node '{node_name}' cannot prove a unique target shape for "
+                "-1: the known dimensions have zero elements"
+            )
+        if input_product % known_product != 0:
+            raise ValueError(
+                f"Reshape node '{node_name}' element count {input_product} is not "
+                f"divisible by the known dimensions product {known_product}"
+            )
+        resolved[infer_index] = input_product // known_product
+    elif input_product != known_product:
+        raise ValueError(
+            f"Reshape node '{node_name}' element count mismatch: input has "
+            f"{input_product} elements but the target shape has {known_product}"
+        )
+    for dim in resolved:
+        if dim > INT64_MAX:
+            raise ValueError(
+                f"Reshape node '{node_name}' resolved dimension {dim} overflows int64"
+            )
+    return {"newshape": resolved, "allowzero": allowzero}
 
 
 def _infer_matmul_spec(
@@ -957,7 +1274,11 @@ def _convert_attrs(
     params: dict[str, ParamTensor],
     value_info_by_name: dict[str, onnx.ValueInfoProto],
     opset_version: int,
+    input_specs: dict[str, TensorSpec] | None = None,
+    inferred_specs: dict[str, TensorSpec] | None = None,
 ) -> dict[str, Any]:
+    input_specs = input_specs or {}
+    inferred_specs = inferred_specs or {}
     attrs = _attrs_by_name(node)
     if node.op_type == "Slice":
         if opset_version < 10:
@@ -1050,6 +1371,16 @@ def _convert_attrs(
                 f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
+    if node.op_type == "Cast":
+        target = _cast_target_dtype(node)
+        return {"to": RELAY_CAST_DTYPE_CODES[target]}
+    if node.op_type == "ReduceMean":
+        return _reduce_mean_attrs(node, opset_version)
+    if node.op_type == "Reshape":
+        data = _resolve_static_input("Reshape", node.name or "<unnamed>", node.input[0],
+                                     input_specs, params, inferred_specs,
+                                     value_info_by_name, None)
+        return _reshape_attrs(node, params, data.shape)
     if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
         return {}
     raise UnsupportedONNXOpError(
