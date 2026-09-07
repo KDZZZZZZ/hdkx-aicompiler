@@ -114,21 +114,23 @@
 
 ## 2.1 外挂层有三个必须同步的表面
 
+> **更新（2026-09-07，第一波集成后）**：契约 24→**25**（新增 `equal`）、Relay 算子实现 24→**25**、importer 映射 15→**16**（新增 `Equal`；另有 `Constant` 节点经常量物化路径接受，不入映射表）。下文保留更新前的统计口径供追溯。
+
 | 表面 | 当前数量 | 位置 |
 |---|---|---|
-| 机器可读契约 | 24 | `contracts/relay_op_contract.json` |
-| Relay 算子实现 | 24 | `src/relay/op/` |
-| ONNX 导入映射 | 15 | `python/kxc_onnx/importer.py` |
+| 机器可读契约 | 25 | `contracts/relay_op_contract.json` |
+| Relay 算子实现 | 25 | `src/relay/op/` |
+| ONNX 导入映射 | 16 | `python/kxc_onnx/importer.py` |
 
-**三者不同步。** 导入器仅映射 15 个 ONNX 算子，以下 Relay 算子当前无法从任何 ONNX 名称到达：
+**仍不同步的部分收窄为**：以下 Relay 算子当前无法从任何 ONNX 名称到达：
 
 ```
-cast   divide   mul   reduce_mean   reshape   sqrt   subtract   nn_avg_pool2d   nn_dense
+nn_avg_pool2d   nn_dense
 ```
 
-（`nn_dense` 可能经 `Gemm` 间接到达，需核实。）这意味着**已实现的算子里有相当一部分对真实模型不可用** —— 扩算子时三个表面必须一起推进。
+（`nn_dense` 可能经 `Gemm` 间接到达，需核实；`nn_avg_pool2d` 仅 `AvgPool` 名称未映射。第一波前不可达的 `cast` `divide` `mul` `reduce_mean` `reshape` `sqrt` `subtract` 已由静态导入接通。）扩算子时三个表面必须一起推进。
 
-**按模型交集统计（与上表的"Relay 算子不可达"是两个不同口径）**：[OP_TODO](OP_TODO.md) 快照的 25 个模型 ONNX 名称与 importer 15 个映射的名称交集为 **8**（`Add` `Concat` `Gather` `MatMul` `Slice` `Softmax` `Transpose` `Where`），缺失 **17** 个名称（`Cast` `Constant` `ConstantOfShape` `Div` `Equal` `Erf` `Expand` `Mul` `Pow` `ReduceMean` `Reshape` `Shape` `Split` `Sqrt` `Squeeze` `Sub` `Unsqueeze`）。且名称交集不等于语义覆盖：交集中 `Concat` 只接受两个输入（模型出现三/四输入）、`Gather` 要求常量索引。
+**按模型交集统计（与上表的"Relay 算子不可达"是两个不同口径）**：[OP_TODO](OP_TODO.md) 快照的 25 个模型 ONNX 名称中，importer 现在接受 **17** 个（既有交集 8：`Add` `Concat` `Gather` `MatMul` `Slice` `Softmax` `Transpose` `Where`；第一波新增 9：`Cast` `Constant` `Div` `Equal` `Mul` `ReduceMean` `Reshape` `Sqrt` `Sub`），仍缺 **8** 个名称（`ConstantOfShape` `Erf` `Expand` `Pow` `Shape` `Split` `Squeeze` `Unsqueeze`）。且名称交集不等于语义覆盖：交集中 `Concat` 只接受两个输入（模型出现三/四输入）、`Gather` 要求常量索引、`ReduceMean` 的 keepdims 中间轴存在已知数值缺陷（见 [G1 记录](implementation/G1_RECORD.md)）。
 
 ## 2.2 现有 24 个算子的用途归属
 
@@ -137,14 +139,14 @@ cast   divide   mul   reduce_mean   reshape   sqrt   subtract   nn_avg_pool2d   
 
 ## 2.3 缺失算子：按"实际属于哪一层"分类
 
-目标 Transformer 模型用到 25 个 ONNX 算子，已覆盖 15 个。缺失的 10 个中，**只有 4 个是纯外挂**：
+目标 Transformer 模型用到 25 个 ONNX 算子，第一波后已覆盖 17 个（更新前 15 个）。仍缺的 8 个中，**只有 2 个是纯外挂**：
 
 | ONNX 算子 | 模型中出现 | 所需基座形态 | 基座就绪 | 实际归属 |
 |---|---:|---|---|---|
 | `Erf` | 6 | 一元 elementwise | ✅ | **纯外挂** |
 | `Pow` | 13 | 二元 elementwise | ✅ | **纯外挂** |
-| `Equal` | 1 | 布尔输出 elementwise | ✅（`where` 已用布尔） | **纯外挂** |
-| `Constant` | 180 | 常量物化（导入层） | ✅ | **纯外挂** |
+| ~~`Equal`~~ | 1 | 布尔输出 elementwise | ✅ | **已完成**（第一波 C 线 + B 线 ONNX 接线，LLVM 数值与 Equal→Where 组合证据见 [G1 记录](implementation/G1_RECORD.md)） |
+| ~~`Constant`~~ | 180 | 常量物化（导入层） | ✅ | **已完成**（第一波 B 线静态导入） |
 | `Squeeze` | 2 | 静态：reshape；动态：shape-as-value | 静态 ✅ / 动态 ❌ | **取决于形状模式** |
 | `Unsqueeze` | 30 | 同上 | 静态 ✅ / 动态 ❌ | **取决于形状模式** |
 | `Split` | 1 | 多输出导入 | Relay ✅ / 导入 ❌ | **基座**（导入层） |
@@ -152,7 +154,7 @@ cast   divide   mul   reduce_mean   reshape   sqrt   subtract   nn_avg_pool2d   
 | `Expand` | 1 | shape-as-value + 广播 | ❌ | **基座** |
 | `ConstantOfShape` | 1 | shape-as-value | ❌ | **基座** |
 
-**结论**：`Erf` / `Pow` / `Equal` / `Constant` 可以立刻做，成本低。其余六个中有四个必须先补 shape-as-value 基座 —— 它们是"伪装成算子缺口的基座缺口"，而且正是让 ONNX Transformer 图具备变长能力的那部分。
+**结论**：`Erf` / `Pow` 可以立刻做，成本低（`Equal` / `Constant` 已在第一波完成）。其余六个中有四个必须先补 shape-as-value 基座 —— 它们是"伪装成算子缺口的基座缺口"，而且正是让 ONNX Transformer 图具备变长能力的那部分。
 
 ## 2.4 视觉算子：第一步基础能力验证，不是多余
 

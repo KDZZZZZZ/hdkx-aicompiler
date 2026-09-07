@@ -1165,6 +1165,12 @@ if(KXC_BUILD_PASS_TESTS)
       KXC_ONNX_STATIC_S1_PARAMS_PATH="${KXC_ONNX_STATIC_S1_PARAMS}"
       KXC_ONNX_EQUAL_WHERE_JSON_PATH="${KXC_ONNX_EQUAL_WHERE_JSON}"
       KXC_ONNX_EQUAL_WHERE_PARAMS_PATH="${KXC_ONNX_EQUAL_WHERE_PARAMS}")
+    kxc_add_runtime_exe(g1_combined_profiling_test test/g1_combined_profiling_test.cpp)
+    add_dependencies(g1_combined_profiling_test onnx_importer_fixture)
+    target_compile_definitions(g1_combined_profiling_test PRIVATE
+      KXC_ONNX_EQUAL_WHERE_JSON_PATH="${KXC_ONNX_EQUAL_WHERE_JSON}"
+      KXC_ONNX_EQUAL_WHERE_PARAMS_PATH="${KXC_ONNX_EQUAL_WHERE_PARAMS}"
+      KXC_G1_BUNDLE_ROOT="${CMAKE_CURRENT_BINARY_DIR}/g1_bundles")
   else()
     message(WARNING "Python3 with onnx and numpy was not found; skipping onnx_importer_test target.")
   endif()
@@ -1376,6 +1382,7 @@ if(KXC_USE_LLVM)
 else()
   kxc_add_ctest_if_target(onnx_importer_test "onnx;integration")
 endif()
+kxc_add_ctest_if_target(g1_combined_profiling_test "g1;llvm;onnx;profiling;e2e;integration")
 kxc_add_ctest_if_target(codegen_cuda_test "cuda;hardware;codegen;local-evidence")
 kxc_add_ctest_if_target(cupti_smoke_test "cuda;hardware")
 

@@ -29,6 +29,7 @@
 - [模块实施计划总览](implementation/README.md) — 当前基线事实、M0–M8 模块表与模块间衔接。
 - [第一波并行计划](implementation/WAVE_1.md) — G0 共同基线、A/B/C 三条并行线、所有权与集成验收。
 - [G0 基线记录](implementation/G0_BASELINE.md) — 已完成的共同基点：commit、测试清单与口径。
+- [G1 第一波验收记录](implementation/G1_RECORD.md) — 第一波组合验收证据与已知缺陷。
 - [M0：共同基线与证据口径](implementation/M0_BASELINE.md)
 - [M1：执行侧观测](implementation/M1_RUNTIME_PROFILING.md)
 - [M2：KV cache 与动态运行状态](implementation/M2_KV_STATE.md)

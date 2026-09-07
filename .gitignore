@@ -62,3 +62,6 @@ profile_bundles/
 profile_bundle_test_output/
 test/cupti_smoke_test_output/
 .kxc_agent_memory/
+
+# Runtime profiling test bundle output (written next to the test cwd)
+runtime_profiling_output/

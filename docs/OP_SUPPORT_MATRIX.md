@@ -23,16 +23,16 @@
 
 | 类别 | 规范算子 |
 |---|---|
-| 张量数学运算 | `add`, `subtract`, `mul`, `divide`, `where`, `sqrt`, `matmul` |
+| 张量数学运算 | `add`, `subtract`, `mul`, `divide`, `where`, `sqrt`, `matmul`, `equal` |
 | 张量变换 | `nn_flatten`, `reshape`, `transpose`, `gather`, `cast`, `concatenate`, `slice` |
-| 张量归约 | `reduce_mean` |
+| 张量归约 | `reduce_mean`（已知缺陷：keepdims=1 的 size-1 保留轴后跟非单例轴时 LLVM 数值错误，见 [G1 记录](implementation/G1_RECORD.md)；Transformer fixture 使用的尾轴归约不受影响） |
 | 神经网络 | `nn_dense`, `nn_gemm`, `nn_layer_norm`, `nn_relu`, `nn_conv2d`, `nn_max_pool2d`, `nn_avg_pool2d`, `nn_global_avg_pool2d`, `softmax` |
 
-以上列表包含当前 24 个契约条目。不在机器契约中的算子，必须在对应的注册表、前端或编译器边界明确报错。
+以上列表包含当前 25 个契约条目。不在机器契约中的算子，必须在对应的注册表、前端或编译器边界明确报错。
 
 ## 注册自动化状态
 
-声明驱动的注册路径仍在渐进迁移。`add` 当前演示生成式注册翻译单元与静态链接锚点。其他已声明算子在迁移前仍保留唯一的手工注册权威。同一个算子禁止同时使用生成式注册和手工注册。
+声明驱动的注册路径仍在渐进迁移。`add` 与 `equal` 当前使用生成式注册翻译单元与静态链接锚点（`equal` 的 InferType/TE 符号由 generated TU 按契约绑定，静态库内单一注册来源）。其他已声明算子在迁移前仍保留唯一的手工注册权威。同一个算子禁止同时使用生成式注册和手工注册。
 
 迁移状态不改变运行时语义，也不改变目标后端的验证结论。
 
