@@ -1021,6 +1021,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(control_plan_test test/control_plan_test.cpp)
   kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
   kxc_add_runtime_exe(control_runtime_integration_test test/control_runtime_integration_test.cpp)
+  kxc_add_runtime_exe(control_llvm_receipt_test test/control_llvm_receipt_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
@@ -1067,11 +1068,17 @@ if(KXC_BUILD_PASS_TESTS)
   set_tests_properties(control_runtime_integration_test PROPERTIES
     LABELS "control-flow;control-runtime;runtime-plan;cpu"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+  add_test(NAME control_llvm_receipt_test
+    COMMAND "$<TARGET_FILE:control_llvm_receipt_test>")
+  set_tests_properties(control_llvm_receipt_test PROPERTIES
+    LABELS "control-flow;control-runtime;cpu"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   add_custom_target(run_control_flow_tests
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
             -L control-flow
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     DEPENDS ${KXC_CONTROL_FLOW_TESTS} control_runtime_integration_test
+            control_llvm_receipt_test
     USES_TERMINAL
     COMMENT "Run control-flow CTest suite")
   add_custom_target(run_control_runtime_tests
