@@ -95,6 +95,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/pass/context.h
   include/kxc/pass/pass.h
   include/kxc/profiling/profiling.h
+  include/kxc/profiling/runtime_observer.h
   include/kxc/relay/op.h
   include/kxc/relay/op_attr_types.h
   include/kxc/relay/op_macros.h
@@ -123,6 +124,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/device_info.h
   include/kxc/runtime/device_stream.h
   include/kxc/runtime/executable_plan.h
+  include/kxc/runtime/execution_observer.h
   include/kxc/runtime/kernel_abi.h
   include/kxc/runtime/ndarray.h
   include/kxc/runtime/module_invocation.h
@@ -1013,6 +1015,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
   kxc_add_runtime_exe(runtime_session_test test/runtime_session_test.cpp)
+  kxc_add_runtime_exe(runtime_profiling_test test/runtime_profiling_test.cpp)
   kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
   kxc_add_runtime_exe(te_schedule_test test/te_schedule_test.cpp)
 
@@ -1309,6 +1312,9 @@ foreach(_kxc_cpu_core_test IN ITEMS
   # Target snapshots; it neither requires nor launches CUDA hardware.
   kxc_add_ctest_if_target(${_kxc_cpu_core_test} "cpu;core")
 endforeach()
+
+# Runtime profiling covers execution observation contracts on CPU/LLVM.
+kxc_add_ctest_if_target(runtime_profiling_test "cpu;core;profiling")
 
 kxc_add_ctest_if_target(codegen_llvm_test "llvm;codegen")
 kxc_add_ctest_if_target(op_numeric_llvm_test "llvm;numeric")

@@ -153,6 +153,9 @@ public:
     std::string NextRunId(const std::string& prefix);
     /*! \brief 生成下一个 span id。 */
     std::string NextSpanId();
+    /*! \brief 当前单调时钟相对 bundle 起点的纳秒值；供跨线程补记 span
+     *  时与 RecordCompletedSpan 的相对时间轴保持一致。 */
+    std::int64_t ElapsedMonotonicNs() const;
 
     /*! \brief 记录一个已完成的耗时 span。 */
     void RecordCompletedSpan(const EventSpec& spec, const std::string& run_id,

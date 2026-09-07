@@ -1001,6 +1001,10 @@ std::string ProfileContext::NextSpanId() {
     return os.str();
 }
 
+std::int64_t ProfileContext::ElapsedMonotonicNs() const {
+    return NowSteadyNs() - start_monotonic_ns_;
+}
+
 void ProfileContext::RecordCompletedSpan(const EventSpec& spec, const std::string& run_id,
                                          const std::string& span_id,
                                          const std::string& parent_span_id,

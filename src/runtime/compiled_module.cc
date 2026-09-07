@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -18,6 +19,7 @@
 
 #include "internal/compiled_module_node.h"
 #include "internal/kernel_argument_validation.h"
+#include "kxc/profiling/runtime_observer.h"
 #include "kxc/runtime/device_api.h"
 
 namespace kxc::api {
@@ -286,13 +288,20 @@ CompiledModule internal::BuildCompiledModule(
     Target target,
     std::vector<CompiledModuleEntry> entries,
     Map<String, runtime::NDArray> constants,
-    std::shared_ptr<profiling::ProfileContext> profile_context) {
+    std::shared_ptr<profiling::ProfileContext> profile_context,
+    std::shared_ptr<runtime::ExecutionObserver> execution_observer) {
     if (!target.defined()) {
         throw std::invalid_argument("CompiledModule target must be defined");
     }
     if (entries.empty()) {
         throw std::invalid_argument(
             "CompiledModule must contain at least one entry");
+    }
+    // 显式传入的观测器优先；否则在 profiling 存在且启用时构造适配器，
+    // 使 RuntimeSession 能从模块继承观测能力。
+    if (!execution_observer) {
+        execution_observer =
+            profiling::MakeRuntimeExecutionObserver(profile_context);
     }
     const Device target_device = TargetDevice(target);
     std::unordered_set<std::string> symbols;
@@ -306,6 +315,22 @@ CompiledModule internal::BuildCompiledModule(
         }
     }
     const auto constant_alignments = ValidateConstants(entries, constants);
+    // 本文件属 runtime_executable 层，可直接使用 profiling 设施：模块构建期的
+    // 常量快照复制在这里直接记录，不经过 runtime 观测钩子。
+    std::optional<profiling::ScopedSpan> snapshot_span;
+    if (profile_context != nullptr && profile_context->options().enabled) {
+        profiling::EventSpec spec;
+        spec.component = "device_api";
+        spec.event_type = "copy";
+        spec.fields["timing"] = "host_execute";
+        spec.fields["copy_kind"] = "constant_snapshot";
+        double snapshot_bytes = 0;
+        for (const auto& item : constants) {
+            snapshot_bytes += static_cast<double>(item.second.NBytes());
+        }
+        spec.metrics["bytes"] = snapshot_bytes;
+        snapshot_span.emplace(profile_context, std::move(spec));
+    }
     Map<String, runtime::NDArray> owned_constants;
     try {
         // No source stream/completion enters this boundary.  Drain CUDA's
@@ -321,14 +346,20 @@ CompiledModule internal::BuildCompiledModule(
         }
         owned_constants = CloneConstantPayloads(constants, constant_alignments);
     } catch (const std::exception& error) {
+        if (snapshot_span && snapshot_span->active()) {
+            snapshot_span->SetStatus("error");
+            snapshot_span->SetMessage(error.what());
+            snapshot_span.reset();
+        }
         throw std::invalid_argument(
             std::string("CompiledModule failed to snapshot constants: ") +
             error.what());
     }
+    snapshot_span.reset();
 
     return CompiledModule(ObjectRef(new CompiledModuleNode(
         std::move(target), std::move(entries), std::move(owned_constants),
-        std::move(profile_context))));
+        std::move(profile_context), std::move(execution_observer))));
 }
 
 CompiledModule::CompiledModule(const ObjectRef& ref) : ObjectRef(ref) {
@@ -422,6 +453,11 @@ Map<String, runtime::NDArray> CompiledModule::constants() const {
 const Map<String, runtime::NDArray>&
 internal::BorrowCompiledModuleConstants(const CompiledModule& module) {
     return CheckedNode(module)->constants_;
+}
+
+std::shared_ptr<runtime::ExecutionObserver>
+internal::BorrowCompiledModuleExecutionObserver(const CompiledModule& module) {
+    return CheckedNode(module)->execution_observer_;
 }
 
 const ModuleInvocationContract&

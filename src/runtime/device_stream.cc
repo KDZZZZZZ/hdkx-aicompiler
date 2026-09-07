@@ -5,13 +5,25 @@
 #include "kxc/runtime/device_stream.h"
 #include "kxc/support/object_registration.h"
 
-#include <iostream>
+#include <chrono>
 #include <exception>
+#include <iostream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 #include "kxc/runtime/device_api.h"
+#include "kxc/runtime/execution_observer.h"
 
 namespace kxc {
+
+// 执行观测钩子来自 runtime 子命名空间；本文件只消费其纯数据接口。
+using runtime::AllocationInfo;
+using runtime::CopyInfo;
+using runtime::CurrentExecutionObserver;
+using runtime::CurrentExecutionRunCorrelation;
+using runtime::DispatchExecutionObservation;
+using runtime::ExecutionObserver;
 
 KXC_OBJECT_DEFINE(DeviceStreamNode)
 KXC_OBJECT_DEFINE(AsyncOperationNode)
@@ -52,6 +64,36 @@ void RetainFailedOperation(const AsyncOperation& operation) noexcept {
 bool RangesOverlap(size_t lhs_offset, size_t rhs_offset, size_t nbytes) {
     return nbytes != 0 && lhs_offset < rhs_offset + nbytes &&
            rhs_offset < lhs_offset + nbytes;
+}
+
+// 每个完成回调在 Wait/IsReady/析构之间恰好结算一次。结算时 completed 已经
+// 为 true，因此回调内再等待同一句柄会立即返回；回调异常被吞掉，观测不能
+// 改变执行结果。
+void SettleCompletionCallbacks(AsyncOperationNode& node, bool at_registration) noexcept {
+    std::vector<AsyncCompletionCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(node.mutex);
+        if (node.completion_settled) return;
+        node.completion_settled = true;
+        callbacks = std::move(node.completion_callbacks);
+        node.completion_callbacks.clear();
+    }
+    for (auto& callback : callbacks) {
+        if (!callback) continue;
+        try {
+            callback(at_registration);
+        } catch (...) {
+            // 完成观测不得影响执行结果。
+        }
+    }
+}
+
+// 上报一次同步拷贝记账；异常文本取自原始异常，不改变抛出行为。
+void DispatchCopyFailure(ExecutionObserver* observer, const CopyInfo& copy) noexcept {
+    if (observer == nullptr) return;
+    DispatchExecutionObservation(observer, [&copy](ExecutionObserver& sink) {
+        sink.OnCopy(copy, CurrentExecutionRunCorrelation());
+    });
 }
 
 }  // namespace
@@ -115,19 +157,27 @@ const DeviceStreamNode* DeviceStream::operator->() const {
 }
 
 // 最后一个引用释放时完成并回收 event，同时保证被保活资源可安全析构。
+// 析构是完成观测的最后一个结算点：真正观测到完成（等待 event 成功，或
+// 无后端 event 的 CPU 完成态句柄）时结算回调；无法确认完成时不结算，
+// 也不虚构完成。
 AsyncOperationNode::~AsyncOperationNode() {
-    if (completed || backend_event == nullptr || !stream.defined()) return;
-    // 析构不能抛；等待失败时把全部依赖转入永久保活区。
-    try {
-        DeviceAPI* api = GetDeviceAPI(stream.device().device_type());
-        api->WaitEvent(stream.device(), backend_event);
-        api->FreeEvent(stream.device(), backend_event);
-        backend_event = nullptr;
+    if (!completed && backend_event == nullptr) {
+        // 无后端 event 的句柄没有可等待的异步工作（CPU 语义下视为完成）。
         completed = true;
-    } catch (const std::exception& error) {
-        RetainFailedNode(*this);
-        std::cerr << "AsyncOperation completion failed: " << error.what() << '\n';
+    } else if (!completed && stream.defined()) {
+        // 析构不能抛；等待失败时把全部依赖转入永久保活区。
+        try {
+            DeviceAPI* api = GetDeviceAPI(stream.device().device_type());
+            api->WaitEvent(stream.device(), backend_event);
+            api->FreeEvent(stream.device(), backend_event);
+            backend_event = nullptr;
+            completed = true;
+        } catch (const std::exception& error) {
+            RetainFailedNode(*this);
+            std::cerr << "AsyncOperation completion failed: " << error.what() << '\n';
+        }
     }
+    if (completed) SettleCompletionCallbacks(*this, false);
 }
 
 // 从通用对象引用恢复 AsyncOperation，并执行运行时类型检查。
@@ -201,30 +251,63 @@ void AsyncOperation::RetainDependencies(Array<Storage> retained,
     mutable_node->retained_contexts.push_back(std::move(context));
 }
 
-// 阻塞等待并恰好释放一次完成 event。
+// 阻塞等待并恰好释放一次完成事件。
 void AsyncOperation::Wait() const {
     const auto* node = operator->();
     // Wait 与 IsReady 可能并发，互斥锁保证 event 恰好释放一次。
-    std::lock_guard<std::mutex> lock(node->mutex);
-    if (node->completed) return;
-    DeviceAPI* api = GetDeviceAPI(node->stream.device().device_type());
-    api->WaitEvent(node->stream.device(), node->backend_event);
-    api->FreeEvent(node->stream.device(), node->backend_event);
-    const_cast<AsyncOperationNode*>(node)->backend_event = nullptr;
-    node->completed = true;
+    std::unique_lock<std::mutex> lock(node->mutex);
+    if (!node->completed) {
+        DeviceAPI* api = GetDeviceAPI(node->stream.device().device_type());
+        api->WaitEvent(node->stream.device(), node->backend_event);
+        api->FreeEvent(node->stream.device(), node->backend_event);
+        const_cast<AsyncOperationNode*>(node)->backend_event = nullptr;
+        node->completed = true;
+    }
+    lock.unlock();
+    // 完成观测在锁外结算，回调内部仍可安全进入同一句柄的非等待路径。
+    SettleCompletionCallbacks(*const_cast<AsyncOperationNode*>(node), false);
 }
 
 // 非阻塞查询完成状态；首次观察到完成时回收 event。
 bool AsyncOperation::IsReady() const {
     const auto* node = operator->();
-    std::lock_guard<std::mutex> lock(node->mutex);
-    if (node->completed) return true;
-    DeviceAPI* api = GetDeviceAPI(node->stream.device().device_type());
-    if (!api->QueryEvent(node->stream.device(), node->backend_event)) return false;
-    api->FreeEvent(node->stream.device(), node->backend_event);
-    const_cast<AsyncOperationNode*>(node)->backend_event = nullptr;
-    node->completed = true;
+    std::unique_lock<std::mutex> lock(node->mutex);
+    if (!node->completed) {
+        DeviceAPI* api = GetDeviceAPI(node->stream.device().device_type());
+        if (!api->QueryEvent(node->stream.device(), node->backend_event)) return false;
+        api->FreeEvent(node->stream.device(), node->backend_event);
+        const_cast<AsyncOperationNode*>(node)->backend_event = nullptr;
+        node->completed = true;
+    }
+    lock.unlock();
+    SettleCompletionCallbacks(*const_cast<AsyncOperationNode*>(node), false);
     return true;
+}
+
+// 注册一次性完成观测；注册时已完成则立即触发，否则在 Wait/IsReady/析构
+// 首次观测到完成时结算。已完成且已结算后再注册不会触发。
+void AsyncOperation::ObserveCompletion(AsyncCompletionCallback callback) const {
+    if (!callback) return;
+    const auto* node = operator->();
+    bool fire_now = false;
+    {
+        std::lock_guard<std::mutex> lock(node->mutex);
+        if (node->completion_settled) return;
+        if (node->completed) {
+            node->completion_settled = true;
+            fire_now = true;
+        } else {
+            node->completion_callbacks.push_back(std::move(callback));
+        }
+    }
+    if (fire_now) {
+        // 注册时已完成：立即触发一次；completed 已为 true，回调内的嵌套
+        // 等待会直接返回。回调异常被吞掉，观测不能改变执行结果。
+        try {
+            callback(true);
+        } catch (...) {
+        }
+    }
 }
 
 // 返回承载该异步操作的 stream 设备。
@@ -250,8 +333,46 @@ void StorageCopySync(const Storage& from, size_t from_offset,
             throw std::invalid_argument("overlapping non-CPU Storage copy is unsupported");
         }
     }
-    DeviceCopySync(from.device(), from.data(), from_offset, to.device(), to.data(),
-                   to_offset, nbytes);
+    // 未装配观测器时只有一次空判断；没有发生的拷贝不虚构事件。
+    ExecutionObserver* observer = CurrentExecutionObserver();
+    const std::chrono::steady_clock::time_point begin =
+        observer == nullptr ? std::chrono::steady_clock::time_point{}
+                            : std::chrono::steady_clock::now();
+    try {
+        DeviceCopySync(from.device(), from.data(), from_offset, to.device(), to.data(),
+                       to_offset, nbytes);
+    } catch (...) {
+        if (observer != nullptr) {
+            CopyInfo info;
+            info.from_device = from.device();
+            info.to_device = to.device();
+            info.bytes = nbytes;
+            info.duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - begin)
+                                   .count();
+            try {
+                throw;
+            } catch (const std::exception& error) {
+                info.error_message = error.what();
+            } catch (...) {
+                info.error_message = "unknown copy failure";
+            }
+            DispatchCopyFailure(observer, info);
+        }
+        throw;
+    }
+    if (observer != nullptr) {
+        CopyInfo info;
+        info.from_device = from.device();
+        info.to_device = to.device();
+        info.bytes = nbytes;
+        info.duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - begin)
+                               .count();
+        DispatchExecutionObservation(observer, [&info](ExecutionObserver& sink) {
+            sink.OnCopy(info, CurrentExecutionRunCorrelation());
+        });
+    }
 }
 
 // 按复制方向选择 stream 设备，提交复制并保活所有异步依赖。
@@ -282,9 +403,54 @@ AsyncOperation StorageCopyAsync(const Storage& from, size_t from_offset,
     DeviceAPI* api = GetDeviceAPI(expected.device_type());
     Array<Storage> retained{from, to};
     if (expected.device_type() == kCPU) {
-        api->CopyDataAsync(from_device, from.data(), from_offset, to_device,
-                           to.data(), to_offset, nbytes, stream->backend_handle);
-        return AsyncOperation::Completed(stream, std::move(retained));
+        // CPU 异步拷贝在主机上同步完成；提交动作的耗时即主机执行耗时。
+        ExecutionObserver* observer = CurrentExecutionObserver();
+        const std::chrono::steady_clock::time_point begin =
+            observer == nullptr ? std::chrono::steady_clock::time_point{}
+                                : std::chrono::steady_clock::now();
+        try {
+            api->CopyDataAsync(from_device, from.data(), from_offset, to_device,
+                               to.data(), to_offset, nbytes, stream->backend_handle);
+        } catch (...) {
+            if (observer != nullptr) {
+                CopyInfo info;
+                info.from_device = from_device;
+                info.to_device = to_device;
+                info.bytes = nbytes;
+                info.submitted_async = true;
+                info.duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - begin)
+                                       .count();
+                try {
+                    throw;
+                } catch (const std::exception& error) {
+                    info.error_message = error.what();
+                } catch (...) {
+                    info.error_message = "unknown copy failure";
+                }
+                DispatchCopyFailure(observer, info);
+            }
+            throw;
+        }
+        AsyncOperation operation =
+            AsyncOperation::Completed(stream, std::move(retained));
+        if (observer != nullptr) {
+            CopyInfo info;
+            info.from_device = from_device;
+            info.to_device = to_device;
+            info.bytes = nbytes;
+            info.submitted_async = true;
+            info.duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - begin)
+                                   .count();
+            AsyncCompletionCallback completion;
+            DispatchExecutionObservation(observer, [&info, &completion](ExecutionObserver& sink) {
+                completion = sink.OnCopySubmitted(info, CurrentExecutionRunCorrelation());
+            });
+            // CPU 句柄已完成：注册即触发，两个观测点在同一主机时刻。
+            if (completion) operation.ObserveCompletion(std::move(completion));
+        }
+        return operation;
     }
     // 先建立 event 和保活对象再入队，确保任何已提交 DMA 都有所有权承载者。
     void* event = api->CreateEvent(expected);
@@ -295,6 +461,23 @@ AsyncOperation StorageCopyAsync(const Storage& from, size_t from_offset,
                            to.data(), to_offset, nbytes, stream->backend_handle);
         api->RecordEvent(expected, event, stream->backend_handle);
     } catch (...) {
+        // 观测提交失败不改变既有失败处理顺序：先记录，再同步确认完成。
+        ExecutionObserver* observer = CurrentExecutionObserver();
+        if (observer != nullptr) {
+            CopyInfo info;
+            info.from_device = from_device;
+            info.to_device = to_device;
+            info.bytes = nbytes;
+            info.submitted_async = true;
+            try {
+                throw;
+            } catch (const std::exception& error) {
+                info.error_message = error.what();
+            } catch (...) {
+                info.error_message = "unknown copy failure";
+            }
+            DispatchCopyFailure(observer, info);
+        }
         // 入队后失败先同步确认完成；同步也失败时永久保活并重抛原始错误。
         std::exception_ptr original = std::current_exception();
         try {
@@ -309,6 +492,19 @@ AsyncOperation StorageCopyAsync(const Storage& from, size_t from_offset,
             RetainFailedOperation(operation);
         }
         std::rethrow_exception(original);
+    }
+    ExecutionObserver* observer = CurrentExecutionObserver();
+    if (observer != nullptr) {
+        CopyInfo info;
+        info.from_device = from_device;
+        info.to_device = to_device;
+        info.bytes = nbytes;
+        info.submitted_async = true;
+        AsyncCompletionCallback completion;
+        DispatchExecutionObservation(observer, [&info, &completion](ExecutionObserver& sink) {
+            completion = sink.OnCopySubmitted(info, CurrentExecutionRunCorrelation());
+        });
+        if (completion) operation.ObserveCompletion(std::move(completion));
     }
     return operation;
 }
