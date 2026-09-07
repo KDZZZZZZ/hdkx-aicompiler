@@ -41,6 +41,12 @@ bool MatchesRelayDType(kxc::tir::DataType dtype, const std::string& relay_dtype)
            (relay_dtype == "bool" && dtype == kxc::tir::DataType::Bool());
 }
 
+// equal 内核层已验证的同类型输入 dtype 集合，与 IsEqualInputDType 的字符串集合一致。
+bool MatchesEqualInputDType(kxc::tir::DataType dtype) {
+    return dtype == kxc::tir::DataType::Int(32) || dtype == kxc::tir::DataType::Int(64) ||
+           dtype == kxc::tir::DataType::Float(32);
+}
+
 te::Tensor RequireDefined(const char* op_name, const te::Tensor& tensor) {
     if (!tensor.defined()) {
         throw std::runtime_error(std::string(op_name) + " lowering returned undefined tensor");
@@ -80,6 +86,24 @@ te::Tensor DivideCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     RequireInputCount("divide", inputs, 2);
     RequireTensorOutput("divide", out_type);
     return RequireDefined("divide", te::topi::divide(inputs[0], inputs[1], "T_divide"));
+}
+
+te::Tensor EqualCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                        const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("equal", inputs, 2);
+    const auto* output = RequireTensorOutput("equal", out_type);
+    if (inputs[0]->dtype != inputs[1]->dtype) {
+        throw std::runtime_error("equal input dtypes must match");
+    }
+    if (!MatchesEqualInputDType(inputs[0]->dtype)) {
+        throw std::runtime_error(
+            "equal supports same-dtype int32, int64, or float32 inputs before lowering");
+    }
+    if (output->dtype != "bool") {
+        throw std::runtime_error("equal output dtype must be bool");
+    }
+    return RequireDefined("equal", te::topi::equal(inputs[0], inputs[1], "T_equal"));
 }
 
 te::Tensor WhereCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,

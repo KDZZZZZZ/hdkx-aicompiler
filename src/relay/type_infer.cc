@@ -253,6 +253,25 @@ Type DivideInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return BinaryBroadcastInferType("divide", input_types);
 }
 
+// equal 已验证的同类型输入 dtype 集合；输出固定为 bool。
+bool IsEqualInputDType(const std::string& dtype) {
+    return dtype == "int32" || dtype == "int64" || dtype == "float32";
+}
+
+// 推导 equal 的广播结果类型；数值相等输出 bool，不支持位相等语义。
+Type EqualInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    RequireArity("equal", input_types, 2);
+    const auto* lhs = RequireTensor("equal", input_types[0], "lhs");
+    const auto* rhs = RequireTensor("equal", input_types[1], "rhs");
+    RequireSameDType("equal", lhs, rhs);
+    if (!IsEqualInputDType(lhs->dtype)) {
+        throw std::runtime_error(
+            "equal supports same-dtype int32, int64, or float32 inputs, got " + lhs->dtype);
+    }
+    return MakeTensorType(BroadcastShape("equal", ShapeVector(lhs), ShapeVector(rhs)), "bool");
+}
+
 bool IsWhereBranchDType(const std::string& dtype) {
     return dtype == "float32" || dtype == "float64" || dtype == "int32" ||
            dtype == "int64" || dtype == "int8" || dtype == "uint8" || dtype == "bool";

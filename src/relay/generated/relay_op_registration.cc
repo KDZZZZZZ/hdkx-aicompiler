@@ -5,6 +5,8 @@ namespace kxc::relay {
 
 Type AddInferType(const Attrs&, const Array<Type>&);
 te::Tensor AddCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type EqualInferType(const Attrs&, const Array<Type>&);
+te::Tensor EqualCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 
 KXC_REGISTER_OP(add)
     .describe("Element-wise addition.")
@@ -13,6 +15,14 @@ KXC_REGISTER_OP(add)
     .add_argument("rhs", "Tensor", "The right hand side input tensor.")
     .set_attr<FInferType>("FInferType", AddInferType)
     .set_attr<FRelayToTE>("FRelayToTE", AddCompute);
+
+KXC_REGISTER_OP(equal)
+    .describe("Element-wise equality comparison with broadcast.")
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The left hand side input tensor.")
+    .add_argument("rhs", "Tensor", "The right hand side input tensor.")
+    .set_attr<FInferType>("FInferType", EqualInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", EqualCompute);
 
 }  // namespace kxc::relay
 
