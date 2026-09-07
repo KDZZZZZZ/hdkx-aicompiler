@@ -831,6 +831,108 @@ bool TestWhereInferAndLoweringContract() {
     return true;
 }
 
+bool TestEqualInferAndLoweringContract() {
+    // ONNX Equal 语义：同 dtype 输入、多向广播、bool 输出、数值相等（非位相等）。
+    kxc::Var a("a", kxc::TensorType({3}, "int32"));
+    kxc::Var b("b", kxc::TensorType({3}, "int32"));
+    const kxc::relay::Op& equal_op = kxc::relay::Op::Get("equal");
+    kxc::Call equal(equal_op, {a, b});
+    kxc::Function func({a, b}, equal);
+    kxc::relay::InferTypePass(func);
+    TEST_CHECK(equal_op->description == "Element-wise equality comparison with broadcast." &&
+                   equal_op->arguments.size() == 2 &&
+                   equal_op->arguments[0].name == "lhs" &&
+                   equal_op->arguments[1].name == "rhs",
+               "generated equal schema must be retained by builtin anchoring");
+    const kxc::PackedFunc make_equal =
+        kxc::Registry::Global().Get("kxc.relay.op._make.equal");
+    TEST_CHECK(make_equal.defined(), "equal must retain its canonical FFI binding");
+    const kxc::Call ffi_equal = kxc::CastTo<kxc::Call>(make_equal(a, b));
+    TEST_CHECK(ffi_equal->args.size() == 2 && ffi_equal->args[0].get() == a.get() &&
+                   ffi_equal->args[1].get() == b.get() && !ffi_equal->attrs.defined(),
+               "equal FFI behavior must preserve argument order and fieldless attrs");
+    TEST_CHECK(CheckTensor(equal.checked_type(), {3}, "bool"),
+               "equal must infer a bool output for the doc example A=[1,2,3] vs B=[1,0,3]");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
+               "generated equal registration must lower through FRelayToTE");
+    TEST_CHECK(LowerUnits(func).size() == 1,
+               "one equal Relay Call must produce one lowering unit");
+
+    kxc::Var lhs("lhs", kxc::TensorType({2, 3}, "int64"));
+    kxc::Var rhs("rhs", kxc::TensorType({3}, "int64"));
+    kxc::Call broadcast_equal(kxc::relay::Op::Get("equal"), {lhs, rhs});
+    kxc::Function broadcast_func({lhs, rhs}, broadcast_equal);
+    kxc::relay::InferTypePass(broadcast_func);
+    TEST_CHECK(CheckTensor(broadcast_equal.checked_type(), {2, 3}, "bool"),
+               "equal should broadcast int64 inputs like the other binary math ops");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(broadcast_func)->prim_func.defined(),
+               "broadcast equal should lower to TIR");
+
+    kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
+    kxc::Var row("row", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call scalar_equal(kxc::relay::Op::Get("equal"), {scalar, row});
+    kxc::Function scalar_func({scalar, row}, scalar_equal);
+    kxc::relay::InferTypePass(scalar_func);
+    TEST_CHECK(CheckTensor(scalar_equal.checked_type(), {1, 3}, "bool"),
+               "equal should broadcast a rank-0 scalar against a rank-2 input");
+
+    kxc::Var empty_lhs("empty_lhs", kxc::TensorType({0, 3}, "float32"));
+    kxc::Var empty_rhs("empty_rhs", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call empty_equal(kxc::relay::Op::Get("equal"), {empty_lhs, empty_rhs});
+    kxc::Function empty_func({empty_lhs, empty_rhs}, empty_equal);
+    kxc::relay::InferTypePass(empty_func);
+    TEST_CHECK(CheckTensor(empty_equal.checked_type(), {0, 3}, "bool") &&
+                   kxc::test_support::LowerFirstPrimitive(empty_func)->prim_func.defined(),
+               "equal must preserve zero-extent broadcasts and lower to TIR");
+
+    kxc::Var mismatch("mismatch", kxc::TensorType({3}, "int64"));
+    kxc::Call dtype_mismatch(kxc::relay::Op::Get("equal"), {a, mismatch});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({a, mismatch}, dtype_mismatch));
+               }),
+               "equal with mismatched dtypes should fail type inference");
+
+    kxc::Var float64_data("float64_data", kxc::TensorType({3}, "float64"));
+    kxc::Var float64_other("float64_other", kxc::TensorType({3}, "float64"));
+    kxc::Call unsupported_dtype(kxc::relay::Op::Get("equal"),
+                                {float64_data, float64_other});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({float64_data, float64_other}, unsupported_dtype));
+               }),
+               "equal outside the verified int32/int64/float32 subset should fail closed");
+
+    kxc::Var bool_data("bool_data", kxc::TensorType({3}, "bool"));
+    kxc::Var bool_other("bool_other", kxc::TensorType({3}, "bool"));
+    kxc::Call bool_input(kxc::relay::Op::Get("equal"), {bool_data, bool_other});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({bool_data, bool_other}, bool_input));
+               }),
+               "equal bool inputs are not yet part of the verified subset and must be rejected");
+
+    kxc::Var incompatible("incompatible", kxc::TensorType({4}, "int32"));
+    kxc::Call invalid_broadcast(kxc::relay::Op::Get("equal"), {a, incompatible});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({a, incompatible}, invalid_broadcast));
+               }),
+               "equal with non-broadcastable shapes should fail type inference");
+
+    kxc::Var lone("lone", kxc::TensorType({3}, "int32"));
+    kxc::Call wrong_arity(kxc::relay::Op::Get("equal"), {lone});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({lone}, wrong_arity));
+               }),
+               "equal with one input should fail type inference before lowering");
+    kxc::Var extra("extra", kxc::TensorType({3}, "int32"));
+    kxc::Call too_many_inputs(kxc::relay::Op::Get("equal"), {a, b, extra});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({a, b, extra}, too_many_inputs));
+               }),
+               "equal with three inputs should fail type inference before lowering");
+    return true;
+}
+
 bool TestLayerNormInferAndLoweringContract() {
     kxc::Var data("data", kxc::TensorType({2, 3, 4}, "float32"));
     kxc::Var scale("scale", kxc::TensorType({3, 4}, "float32"));
@@ -1209,6 +1311,7 @@ int main() {
         {"concatenate_infer_and_lowering_contract", TestConcatenateInferAndLoweringContract},
         {"slice_infer_and_lowering_contract", TestSliceInferAndLoweringContract},
         {"where_infer_and_lowering_contract", TestWhereInferAndLoweringContract},
+        {"equal_infer_and_lowering_contract", TestEqualInferAndLoweringContract},
         {"layer_norm_infer_and_lowering_contract", TestLayerNormInferAndLoweringContract},
         {"exact_transformer_operator_slice", TestExactTransformerOperatorSliceComposition},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},
