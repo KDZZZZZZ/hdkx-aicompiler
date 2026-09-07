@@ -393,7 +393,7 @@ relay::LoweredFunction LowerPrimitiveUnitImpl(
 #if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
     schedule = shape_contract
                    ? relay::internal::BuildBoundedDynamicTESchedule(
-                         outputs, target)
+                         outputs, target, runtime_extent_buffers)
                    : relay::internal::BuildDefaultTESchedule(outputs, target);
     if (shape_contract) {
         ValidateDynamicTEOutputContracts(

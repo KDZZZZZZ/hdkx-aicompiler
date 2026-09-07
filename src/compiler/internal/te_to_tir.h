@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "lowered_function.h"
@@ -48,6 +49,11 @@ te::Schedule BuildDefaultTESchedule(const Array<te::Tensor>& outputs,
 // Bounded dynamic kernels are deliberately serial and LLVM/CPU-only.
 te::Schedule BuildBoundedDynamicTESchedule(
     const Array<te::Tensor>& outputs, const Target& target);
+// Shape-value units materialize static-shaped outputs whose kernel bodies
+// consume runtime extents as stored values; the buffer list authorizes them.
+te::Schedule BuildBoundedDynamicTESchedule(
+    const Array<te::Tensor>& outputs, const Target& target,
+    const Array<tir::Var>& runtime_extent_buffers);
 // Creates and recognizes the only accepted TE shape expression for a
 // generated uint64[1] runtime-extent buffer.
 tir::PrimExpr LoadRuntimeExtent(const tir::Var& buffer);
@@ -56,7 +62,8 @@ bool MatchRuntimeExtentLoad(const tir::PrimExpr& expression,
                             size_t* buffer_index);
 std::string CanonicalTEScheduleContract(
     const te::Schedule& schedule, const Target& target,
-    const Array<tir::Var>& runtime_extent_buffers = {});
+    const Array<tir::Var>& runtime_extent_buffers = {},
+    const std::unordered_set<const Object*>* body_consumed_extents = nullptr);
 std::string GetTEScheduleContract(const tir::PrimFunc& function);
 
 // runtime_extent_buffers is the canonical physical scalar order; the bounded

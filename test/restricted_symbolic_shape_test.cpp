@@ -401,7 +401,7 @@ bool TestBoundedCompileAdmissionAndUnitContracts() {
           "graph preflight guards must follow wildcard input-axis order");
 
     const auto rebuilt = compiler_internal::BuildDynamicUnitShapeContracts(
-        request.graph_template());
+        request.graph_template(), {"add", "nn_relu", "sqrt"});
     CHECK(rebuilt.size() == result.unit_shape_contracts().size(),
           "contract producer cardinality must be deterministic");
     for (size_t i = 0; i < rebuilt.size(); ++i) {
@@ -494,7 +494,7 @@ bool TestBoundedCompileFailsClosedStructurally() {
           kxc::api::UnitSemanticKey("bounded.test.relu"), {"x"}, {"y"}}});
     CHECK(Throws([&] {
               (void)compiler_internal::BuildDynamicUnitShapeContracts(
-                  arithmetic_graph);
+                  arithmetic_graph, {"nn_relu"});
           }),
           "complex output shape arithmetic must fail closed");
 
@@ -520,7 +520,7 @@ bool TestBoundedCompileFailsClosedStructurally() {
           kxc::api::UnitSemanticKey("bounded.test.relu"), {"x"}, {"y"}}});
     CHECK(Throws([&] {
               (void)compiler_internal::BuildDynamicUnitShapeContracts(
-                  broadcast_constraint_graph);
+                  broadcast_constraint_graph, {"nn_relu"});
           }),
           "broadcast constraints cannot masquerade as direct-axis proof");
     return true;

@@ -129,6 +129,18 @@ void ValidateFrozenUnits(const shape::GraphTemplate& graph,
             if (unit.input_value_names.size() != 2) Reject("binary arity mismatch");
             RequireSameShape(StaticValue(graph, unit.input_value_names[0]), output);
             RequireSameShape(StaticValue(graph, unit.input_value_names[1]), output);
+        } else if (operations[i] == "shape_of") {
+            // M3 形状值：输出是 int64[rank(input)] 的固定长度向量；长度与
+            // dtype 契约在 unit 合同与 partition 校验中再行钉死。
+            if (unit.input_value_names.size() != 1) {
+                Reject("shape_of expects exactly one data input");
+            }
+            const auto input = StaticValue(graph, unit.input_value_names[0]);
+            if (!ValidContract(output) || output.logical.size() != 1 ||
+                input.logical.empty() ||
+                output.logical[0] != static_cast<int64_t>(input.logical.size())) {
+                Reject("shape_of must materialize one int64 element per input axis");
+            }
         } else {
             Reject("unsupported frozen operation");
         }
@@ -149,7 +161,7 @@ void CollectOperations(const Expr& expression, const std::set<const Object*>& pa
     }
     const auto* op = call->op.As<relay::OpNode>();
     if (!op || (op->name != "relu" && op->name != "nn_relu" && op->name != "sqrt" &&
-                op->name != "add" && op->name != "mul")) {
+                op->name != "add" && op->name != "mul" && op->name != "shape_of")) {
         Reject("unsupported Relay operation");
     }
     const size_t arity = (op->name == "add" || op->name == "mul") ? 2 : 1;
@@ -582,7 +594,8 @@ BoundedCompileRequest RestrictedSymbolicShapeAdapter::MintBoundedCompileRequest(
     // This is the only GraphTemplate + UnitSkeleton contract producer. Calling
     // it here makes unsupported arithmetic/broadcast/rank forms fail before a
     // request can exist; no contract is caller-authored.
-    (void)internal::BuildDynamicUnitShapeContracts(prepared.impl_->graph);
+    (void)internal::BuildDynamicUnitShapeContracts(
+        prepared.impl_->graph, prepared.impl_->registry_operations);
     std::vector<std::vector<int64_t>> representative_shapes;
     representative_shapes.reserve(
         prepared.impl_->representative_snapshot->params.size());

@@ -75,6 +75,11 @@ Call MakeReshape(Expr data, Array<int64_t> newshape, int allowzero) {
     return Call(GetOp("reshape"), {data}, ReshapeAttrs::Create(std::move(newshape), allowzero));
 }
 
+// 构造 shape_of 调用，把输入维度物化为 int64 形状值。
+Call MakeShapeOf(Expr data) {
+    return Call(GetOp("shape_of"), {data});
+}
+
 // 构造 softmax 调用。
 Call MakeSoftmax(Expr data, int axis) {
     return Call(GetOp("softmax"), {data}, SoftmaxAttrs::Create(axis));
@@ -181,6 +186,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.matmul").set_body(ToPackedFunc(MakeMatmu
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.cast").set_body(ToPackedFunc(MakeCast));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_mean").set_body(ToPackedFunc(MakeReduceMean));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape").set_body(ToPackedFunc(MakeReshape));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.shape_of").set_body(ToPackedFunc(MakeShapeOf));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.softmax").set_body(ToPackedFunc(MakeSoftmax));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.transpose").set_body(ToPackedFunc(MakeTranspose));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.gather").set_body(ToPackedFunc(MakeGather));

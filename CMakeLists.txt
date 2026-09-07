@@ -440,6 +440,7 @@ set(KXC_RELAY_IR_SOURCES
   src/relay/op/tensor/math.cc
   src/relay/op/tensor/reduce.cc
   src/relay/op/tensor/transform.cc
+  src/relay/op/tensor/shape_ops.cc
   src/relay/op/nn/activation.cc
   src/relay/op/nn/convolution.cc
   src/relay/op/nn/pooling.cc
@@ -1047,6 +1048,8 @@ if(KXC_BUILD_PASS_TESTS)
   if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH)
     kxc_add_runtime_exe(bounded_dynamic_graph_llvm_test
       test/bounded_dynamic_graph_llvm_test.cpp)
+    kxc_add_runtime_exe(shape_value_llvm_test
+      test/shape_value_llvm_test.cpp)
   endif()
 
   set(KXC_CONTROL_FLOW_TESTS
@@ -1388,6 +1391,8 @@ kxc_add_ctest_if_target(restricted_symbolic_shape_test "shape;shape-restricted-s
 kxc_add_ctest_if_target(shape_exact_dispatch_test "shape;shape-dispatch;cpu")
 kxc_add_ctest_if_target(bounded_dynamic_graph_llvm_test
   "shape;bounded-dynamic;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(shape_value_llvm_test
+  "shape;shape-value;cpu;llvm;e2e;numeric")
 
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test

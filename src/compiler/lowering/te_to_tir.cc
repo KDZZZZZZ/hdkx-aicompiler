@@ -618,6 +618,48 @@ bool MatchRuntimeExtentLoadImpl(const tir::PrimExpr& expression,
     return false;
 }
 
+// 递归收集 TE compute 体中出现的 runtime extent buffer，供 schedule 合同
+// 区分“驱动循环轴的 extent”与“作为存储值被消费的 extent”。
+void CollectRuntimeExtentBufferUses(const tir::PrimExpr& expr,
+                                    const Array<tir::Var>& buffers,
+                                    std::unordered_set<const Object*>* used) {
+    if (!expr.defined()) return;
+    if (expr.As<tir::VarNode>() || expr.As<tir::IntImmNode>()) return;
+    if (auto* n = expr.As<tir::LoadNode>()) {
+        for (const tir::Var& buffer : buffers) {
+            if (buffer.get() == n->buffer_var.get()) {
+                used->insert(buffer.get());
+            }
+        }
+        CollectRuntimeExtentBufferUses(n->index, buffers, used);
+        if (n->predicate.defined()) {
+            CollectRuntimeExtentBufferUses(n->predicate, buffers, used);
+        }
+        return;
+    }
+    if (auto* n = expr.As<tir::BinaryOpNode>()) {
+        CollectRuntimeExtentBufferUses(n->a, buffers, used);
+        CollectRuntimeExtentBufferUses(n->b, buffers, used);
+        return;
+    }
+    if (auto* n = expr.As<tir::CallNode>()) {
+        for (const auto& arg : n->args) {
+            CollectRuntimeExtentBufferUses(arg, buffers, used);
+        }
+        return;
+    }
+    if (auto* n = expr.As<tir::SelectNode>()) {
+        CollectRuntimeExtentBufferUses(n->condition, buffers, used);
+        CollectRuntimeExtentBufferUses(n->true_value, buffers, used);
+        CollectRuntimeExtentBufferUses(n->false_value, buffers, used);
+        return;
+    }
+    if (auto* n = expr.As<tir::NotNode>()) {
+        CollectRuntimeExtentBufferUses(n->value, buffers, used);
+        return;
+    }
+}
+
 void ValidateLoweringTensor(
     const Array<tir::PrimExpr>& shape, tir::DataType dtype,
     const std::string& context, const Array<tir::Var>& runtime_buffers) {
@@ -959,6 +1001,41 @@ te::Schedule BuildBoundedDynamicTESchedule(
     return schedule;
 }
 
+te::Schedule BuildBoundedDynamicTESchedule(
+    const Array<te::Tensor>& outputs, const Target& target,
+    const Array<tir::Var>& runtime_extent_buffers) {
+    ValidateRuntimeExtentBuffers(runtime_extent_buffers);
+    if (runtime_extent_buffers.empty()) {
+        return BuildBoundedDynamicTESchedule(outputs, target);
+    }
+    ValidateScheduleTarget(target);
+    if (target->kind != "llvm" || target->device_type != kCPU) {
+        throw std::invalid_argument(
+            "Bounded dynamic TE scheduling is LLVM/CPU-only");
+    }
+    if (outputs.empty()) {
+        throw std::invalid_argument(
+            "BuildBoundedDynamicTESchedule requires output tensors");
+    }
+    Array<te::Operation> output_operations;
+    std::unordered_set<const Object*> seen;
+    for (const te::Tensor& output : outputs) {
+        if (!output.defined() || !output->op.defined()) {
+            throw std::invalid_argument(
+                "BuildBoundedDynamicTESchedule outputs must be defined");
+        }
+        if (seen.insert(output->op.get()).second) {
+            output_operations.push_back(output->op);
+        }
+    }
+    // M3 形状值单元（如 shape_of）的输出形状完全静态，但 kernel 体要消费
+    // runtime extent 作为存储值；此类单元仍属 bounded serial 策略。
+    te::Schedule schedule = te::create_schedule(output_operations);
+    schedule.operator->()->policy = kBoundedDynamicTESchedulePolicy;
+    ValidateSerialTESchedule(schedule, "Bounded dynamic TE schedule", false);
+    return schedule;
+}
+
 tir::PrimExpr LoadRuntimeExtent(const tir::Var& buffer) {
     if (!IsRuntimeExtentBufferVar(buffer) || buffer->name_hint.empty()) {
         throw std::invalid_argument(
@@ -978,7 +1055,8 @@ bool MatchRuntimeExtentLoad(const tir::PrimExpr& expression,
 
 std::string CanonicalTEScheduleContract(
     const te::Schedule& schedule, const Target& target,
-    const Array<tir::Var>& runtime_extent_buffers) {
+    const Array<tir::Var>& runtime_extent_buffers,
+    const std::unordered_set<const Object*>* body_consumed_extents) {
     ValidateScheduleTarget(target);
     ValidateRuntimeExtentBuffers(runtime_extent_buffers);
     if (!schedule.defined() || schedule->policy.empty() ||
@@ -1117,11 +1195,20 @@ std::string CanonicalTEScheduleContract(
             (void)BuildStageAxisPlan(stage, compute);
         }
     }
-    if (bounded_dynamic &&
-        std::find(used_runtime_extents.begin(), used_runtime_extents.end(),
-                  false) != used_runtime_extents.end()) {
-        throw std::invalid_argument(
-            "Every runtime extent buffer must drive a scheduled loop axis");
+    if (bounded_dynamic) {
+        for (size_t index = 0; index < used_runtime_extents.size(); ++index) {
+            if (used_runtime_extents[index]) continue;
+            if (body_consumed_extents &&
+                body_consumed_extents->count(
+                    runtime_extent_buffers[index].get()) != 0) {
+                // 形状值单元把 extent 作为存储值消费，而不是循环轴。
+                used_runtime_extents[index] = true;
+                continue;
+            }
+            throw std::invalid_argument(
+                "Every runtime extent buffer must drive a scheduled loop axis "
+                "or be consumed as a lowered compute value");
+        }
     }
     return std::move(encoder).Take();
 }
@@ -1252,9 +1339,22 @@ LoweredFunction LowerTensorGraphToTIR(
                 "TE schedule stages do not match producer-first graph order");
         }
     }
+    std::unordered_set<const Object*> body_consumed_extents;
+    if (!runtime_extent_buffers.empty()) {
+        for (const auto& operation : topo_ops) {
+            const auto* compute = operation.As<te::ComputeOpNode>();
+            if (!compute) continue;
+            for (const tir::PrimExpr& body_expr : compute->body) {
+                CollectRuntimeExtentBufferUses(body_expr,
+                                               runtime_extent_buffers,
+                                               &body_consumed_extents);
+            }
+        }
+    }
     const std::string schedule_contract =
         CanonicalTEScheduleContract(schedule, target,
-                                    runtime_extent_buffers);
+                                    runtime_extent_buffers,
+                                    &body_consumed_extents);
 
     Array<tir::Var> params;
     Map<tir::Var, tir::Buffer> buffer_map;

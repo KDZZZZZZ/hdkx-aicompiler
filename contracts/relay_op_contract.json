@@ -410,6 +410,34 @@
         "Reshape"
       ]
     },
+    "shape_of": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [],
+      "registration": {
+        "description": "Materialize the input tensor dimensions as an int64 rank-1 shape value.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor whose fixed rank becomes the vector length."
+          }
+        ],
+        "type_infer_symbol": "ShapeOfInferType",
+        "relay_to_te_symbol": "ShapeOfCompute"
+      }
+    },
     "slice": {
       "schema_version": 1,
       "category": "tensor.transform",

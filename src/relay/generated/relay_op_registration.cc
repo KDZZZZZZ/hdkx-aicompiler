@@ -7,6 +7,8 @@ Type AddInferType(const Attrs&, const Array<Type>&);
 te::Tensor AddCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 Type EqualInferType(const Attrs&, const Array<Type>&);
 te::Tensor EqualCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type ShapeOfInferType(const Attrs&, const Array<Type>&);
+te::Tensor ShapeOfCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 
 KXC_REGISTER_OP(add)
     .describe("Element-wise addition.")
@@ -23,6 +25,13 @@ KXC_REGISTER_OP(equal)
     .add_argument("rhs", "Tensor", "The right hand side input tensor.")
     .set_attr<FInferType>("FInferType", EqualInferType)
     .set_attr<FRelayToTE>("FRelayToTE", EqualCompute);
+
+KXC_REGISTER_OP(shape_of)
+    .describe("Materialize the input tensor dimensions as an int64 rank-1 shape value.")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor whose fixed rank becomes the vector length.")
+    .set_attr<FInferType>("FInferType", ShapeOfInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", ShapeOfCompute);
 
 }  // namespace kxc::relay
 

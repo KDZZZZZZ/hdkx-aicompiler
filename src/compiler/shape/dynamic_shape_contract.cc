@@ -202,8 +202,9 @@ std::string ContractCanonicalBytes(
     const UnitSemanticKey& representative_unit_semantic_key,
     const std::vector<std::vector<DynamicInputAxisGuard>>& input_guards,
     const std::vector<std::vector<DynamicShapeExpr>>& output_expressions,
+    const std::vector<std::vector<DynamicShapeExpr>>& output_value_expressions,
     const std::vector<DynamicShapeExpr>& runtime_extent_expressions) {
-    support::CanonicalBytesEncoder encoder("dynamic-unit-shape-contract-v2");
+    support::CanonicalBytesEncoder encoder("dynamic-unit-shape-contract-v3");
     encoder.IntegerField("version", kDynamicUnitShapeContractVersion);
     encoder.Field("representative_unit_semantics",
                   representative_unit_semantic_key.canonical_bytes());
@@ -231,6 +232,12 @@ std::string ContractCanonicalBytes(
         encoder.IntegerField("output_index", output);
         encoder.IntegerField("output_rank", output_expressions[output].size());
         for (const DynamicShapeExpr& expression : output_expressions[output]) {
+            AppendExpression(&encoder, expression);
+        }
+        encoder.IntegerField("output_value_count",
+                             output_value_expressions[output].size());
+        for (const DynamicShapeExpr& expression :
+             output_value_expressions[output]) {
             AppendExpression(&encoder, expression);
         }
     }
@@ -263,7 +270,13 @@ std::vector<std::string> ValueNames(const Array<ValueId>& ids) {
 
 bool IsSupportedOperation(const std::string& name) {
     return name == "relu" || name == "nn_relu" || name == "sqrt" ||
-           name == "add" || name == "mul";
+           name == "add" || name == "mul" || name == "shape_of";
+}
+
+// M3 形状值算子：输出是物化输入维度的 int64 行向量，其元素来源与输出
+// 形状是两个不同的事实，所以 unit 合同要分别记录 shape 表达式与 value 表达式。
+bool ProducesShapeValue(const std::string& name) {
+    return name == "shape_of";
 }
 
 int64_t LogicalBoundaryExtent(const DimExpr& expression) {
@@ -400,6 +413,10 @@ void ValidateUnits(
                              type->shape.size()) {
                 Reject("unit-local output expression rank differs from the partition value");
             }
+            if (ProducesShapeValue(fixed.call.spec.name) &&
+                (type->shape.size() != 1 || type->dtype != "int64")) {
+                Reject("a shape-value output must be a rank-1 int64 vector");
+            }
         }
     }
 }
@@ -512,6 +529,46 @@ std::size_t MaximumOutputBytes(
 
 }  // namespace
 
+// 有序 extent ABI：先按输出轴顺序收录输出 shape 表达式中的动态项，再按
+// 输入/轴顺序收录尚未出现的动态输入轴（kernel 体读取它们做索引），最后
+// 收录形状值输出尚未出现的动态元素表达式。去重保持首次出现顺序，因此
+// 既有 elementwise 单元的 ABI 顺序不变。
+std::vector<DynamicShapeExpr> OrderedRuntimeExtentExpressions(
+    const UnitSemanticKey& semantic_key,
+    const std::vector<std::vector<DynamicInputAxisGuard>>& input_guards,
+    const std::vector<std::vector<DynamicShapeExpr>>& output_shape_expressions,
+    const std::vector<std::vector<DynamicShapeExpr>>&
+        output_value_expressions) {
+    (void)semantic_key;
+    std::vector<DynamicShapeExpr> extents;
+    const auto append = [&extents](const DynamicShapeExpr& expression) {
+        if (expression.kind() != DynamicShapeExpr::Kind::kInputAxis) return;
+        for (const DynamicShapeExpr& existing : extents) {
+            if (existing == expression) return;
+        }
+        extents.push_back(expression);
+    };
+    for (const DynamicShapeExpr& expression :
+         output_shape_expressions.front()) {
+        append(expression);
+    }
+    for (std::size_t input = 0; input < input_guards.size(); ++input) {
+        for (const DynamicInputAxisGuard& guard : input_guards[input]) {
+            if (guard.exact) continue;
+            const DynamicInputAxisReference reference =
+                guard.equal_to.value_or(
+                    DynamicInputAxisReference{input, guard.axis});
+            append(DynamicShapeExpr::InputAxis(reference.input_index,
+                                               reference.axis));
+        }
+    }
+    for (const DynamicShapeExpr& expression :
+         output_value_expressions.front()) {
+        append(expression);
+    }
+    return extents;
+}
+
 DynamicShapeExpr::DynamicShapeExpr(Kind kind, std::uint64_t constant,
                                    std::size_t input_index,
                                    std::size_t axis)
@@ -558,30 +615,30 @@ DynamicUnitShapeContract::DynamicUnitShapeContract(
     UnitSemanticKey representative_unit_semantic_key,
     std::vector<std::vector<DynamicInputAxisGuard>> local_input_guards,
     std::vector<std::vector<DynamicShapeExpr>> output_shape_expressions,
+    std::vector<std::vector<DynamicShapeExpr>> output_value_expressions,
     std::vector<DynamicShapeExpr> runtime_extent_expressions)
     : representative_unit_semantic_key_(
           std::move(representative_unit_semantic_key)),
       local_input_guards_(std::move(local_input_guards)),
       output_shape_expressions_(std::move(output_shape_expressions)),
+      output_value_expressions_(std::move(output_value_expressions)),
       runtime_extent_expressions_(std::move(runtime_extent_expressions)) {
-    std::vector<DynamicShapeExpr> expected_runtime_extents;
-    if (output_shape_expressions_.size() == 1) {
-        for (const DynamicShapeExpr& expression :
-             output_shape_expressions_.front()) {
-            if (expression.kind() == DynamicShapeExpr::Kind::kInputAxis) {
-                expected_runtime_extents.push_back(expression);
-            }
-        }
-    }
+    std::vector<DynamicShapeExpr> expected_runtime_extents =
+        OrderedRuntimeExtentExpressions(
+            representative_unit_semantic_key_, local_input_guards_,
+            output_shape_expressions_, output_value_expressions_);
     if (!representative_unit_semantic_key_.defined() ||
         local_input_guards_.empty() || output_shape_expressions_.size() != 1 ||
+        output_value_expressions_.size() !=
+            output_shape_expressions_.size() ||
         runtime_extent_expressions_.empty() ||
         runtime_extent_expressions_ != expected_runtime_extents) {
         Reject("a DynamicUnitShapeContract is incomplete");
     }
     canonical_bytes_ = ContractCanonicalBytes(
         representative_unit_semantic_key_, local_input_guards_,
-        output_shape_expressions_, runtime_extent_expressions_);
+        output_shape_expressions_, output_value_expressions_,
+        runtime_extent_expressions_);
 }
 
 std::uint32_t DynamicUnitShapeContract::version() const noexcept {
@@ -603,6 +660,11 @@ DynamicUnitShapeContract::output_shape_expressions() const noexcept {
     return output_shape_expressions_;
 }
 
+const std::vector<std::vector<DynamicShapeExpr>>&
+DynamicUnitShapeContract::output_value_expressions() const noexcept {
+    return output_value_expressions_;
+}
+
 const std::vector<DynamicShapeExpr>&
 DynamicUnitShapeContract::runtime_extent_expressions() const noexcept {
     return runtime_extent_expressions_;
@@ -614,7 +676,10 @@ const std::string& DynamicUnitShapeContract::canonical_bytes() const noexcept {
 
 DynamicUnitShapeContract BuildDynamicUnitShapeContract(
     const specialization::GraphTemplate& graph,
-    std::size_t ordered_unit_index) {
+    std::size_t ordered_unit_index, const std::string& operator_name) {
+    if (!IsSupportedOperation(operator_name)) {
+        Reject("bounded unit operator is unsupported: " + operator_name);
+    }
     const BoundsBySymbol bounds = AnalyzeTemplate(graph);
     if (ordered_unit_index >= graph.ordered_units().size()) {
         Reject("ordered unit index is out of range");
@@ -661,6 +726,19 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
         input_guards.push_back(std::move(guards));
     }
 
+    const auto anchored_expression =
+        [&anchors](const DirectDimension& direct) -> DynamicShapeExpr {
+        if (direct.is_constant) {
+            return DynamicShapeExpr::Const(direct.constant);
+        }
+        const auto anchor = anchors.find(direct.symbol);
+        if (anchor == anchors.end()) {
+            Reject("a unit output symbol is not anchored by a local input axis");
+        }
+        return DynamicShapeExpr::InputAxis(anchor->second.input_index,
+                                           anchor->second.axis);
+    };
+
     std::vector<std::vector<DynamicShapeExpr>> output_expressions;
     for (const std::string& output_name : unit.output_value_names) {
         const auto& dimensions = FindNamed(graph, output_name)
@@ -669,41 +747,64 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
         expressions.reserve(dimensions.size());
         for (const DimExpr& dimension : dimensions) {
             const DirectDimension direct = ReadDirectDimension(dimension);
-            if (direct.is_constant) {
-                expressions.push_back(DynamicShapeExpr::Const(direct.constant));
-                continue;
-            }
-            const auto anchor = anchors.find(direct.symbol);
-            if (anchor == anchors.end()) {
-                Reject("a unit output symbol is not anchored by a local input axis");
-            }
-            expressions.push_back(DynamicShapeExpr::InputAxis(
-                anchor->second.input_index, anchor->second.axis));
+            expressions.push_back(anchored_expression(direct));
         }
         output_expressions.push_back(std::move(expressions));
     }
-    std::vector<DynamicShapeExpr> runtime_extent_expressions;
-    for (const DynamicShapeExpr& expression : output_expressions.front()) {
-        if (expression.kind() == DynamicShapeExpr::Kind::kInputAxis) {
-            runtime_extent_expressions.push_back(expression);
+
+    // 形状值输出：物化输入维度的 int64 行向量，元素表达式直接取输入轴。
+    std::vector<std::vector<DynamicShapeExpr>> output_value_expressions(
+        unit.output_value_names.size());
+    if (ProducesShapeValue(operator_name)) {
+        if (unit.input_value_names.size() != 1) {
+            Reject("a shape-value producer expects exactly one data input");
+        }
+        const auto& input_dimensions =
+            FindNamed(graph, unit.input_value_names[0])
+                .contract.logical().dimensions();
+        std::vector<DynamicShapeExpr>& value_expressions =
+            output_value_expressions.front();
+        value_expressions.reserve(input_dimensions.size());
+        for (const DimExpr& dimension : input_dimensions) {
+            value_expressions.push_back(
+                anchored_expression(ReadDirectDimension(dimension)));
+        }
+        const auto& output_dimensions =
+            FindNamed(graph, unit.output_value_names[0])
+                .contract.logical().dimensions();
+        if (output_dimensions.size() != 1 ||
+            output_dimensions.front() != DimExpr::Const(static_cast<int64_t>(
+                                             input_dimensions.size()))) {
+            Reject("a shape-value output must be a rank-1 vector with one "
+                   "element per input axis");
         }
     }
+
+    const std::vector<DynamicShapeExpr> runtime_extent_expressions =
+        OrderedRuntimeExtentExpressions(
+            unit.semantic_key, input_guards, output_expressions,
+            output_value_expressions);
     return DynamicUnitShapeContract(
         unit.semantic_key, std::move(input_guards),
-        std::move(output_expressions),
+        std::move(output_expressions), std::move(output_value_expressions),
         std::move(runtime_extent_expressions));
 }
 
 std::vector<DynamicUnitShapeContract> BuildDynamicUnitShapeContracts(
-    const specialization::GraphTemplate& graph) {
+    const specialization::GraphTemplate& graph,
+    const std::vector<std::string>& operator_names) {
     (void)AnalyzeTemplate(graph);
     if (graph.ordered_units().empty()) {
         Reject("a bounded graph requires at least one unit");
     }
+    if (operator_names.size() != graph.ordered_units().size()) {
+        Reject("operator name count differs from the ordered unit sequence");
+    }
     std::vector<DynamicUnitShapeContract> result;
     result.reserve(graph.ordered_units().size());
     for (std::size_t index = 0; index < graph.ordered_units().size(); ++index) {
-        result.push_back(BuildDynamicUnitShapeContract(graph, index));
+        result.push_back(BuildDynamicUnitShapeContract(
+            graph, index, operator_names[index]));
     }
     return result;
 }
@@ -778,8 +879,19 @@ BoundedCompilePreparation PrepareBoundedCompile(
     PartitionedGraph bounded_partition = PartitionValueGraph(
         BuildBoundedValueGraph(logical_boundary, device, admission));
 
-    std::vector<DynamicUnitShapeContract> contracts =
-        BuildDynamicUnitShapeContracts(graph);
+    std::vector<DynamicUnitShapeContract> contracts;
+    {
+        if (representative_partition.units.size() !=
+            graph.ordered_units().size()) {
+            Reject("partition unit cardinality differs from GraphTemplate");
+        }
+        std::vector<std::string> operator_names;
+        operator_names.reserve(representative_partition.units.size());
+        for (const PrimitiveUnit& unit : representative_partition.units) {
+            operator_names.push_back(std::string(unit.call.spec.name));
+        }
+        contracts = BuildDynamicUnitShapeContracts(graph, operator_names);
+    }
     ValidateValueContracts(graph, request.representative_oracle(),
                            representative_partition, bounded_partition);
     ValidateUnits(graph, request.representative_oracle(),

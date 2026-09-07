@@ -515,6 +515,26 @@ Type FlattenInferType(const Attrs& attrs, const Array<Type>& input_types) {
                           data->dtype);
 }
 
+// shape_of 的固定向量长度上限：Select 链与受限符号集都按此声明子集。
+constexpr int kMaxShapeOfRank = 8;
+
+// 推导 shape_of 的 int64[rank(data)] 输出；未知 rank 与超界 rank 拒绝。
+Type ShapeOfInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    RequireArity("shape_of", input_types, 1);
+    const auto* data = RequireTensor("shape_of", input_types[0], "data");
+    const int64_t rank = static_cast<int64_t>(data->shape.size());
+    if (rank < 1) {
+        throw std::runtime_error("shape_of requires data rank >= 1");
+    }
+    if (rank > kMaxShapeOfRank) {
+        throw std::runtime_error(
+            "shape_of supports fixed rank up to " + std::to_string(kMaxShapeOfRank) +
+            ", got rank " + std::to_string(rank));
+    }
+    return MakeTensorType({rank}, "int64");
+}
+
 // 解释 0、-1 与 allowzero 后推导 reshape 结果。
 Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("reshape", input_types, 1);

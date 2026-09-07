@@ -26,6 +26,7 @@ Type Pool2DInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type GlobalAvgPool2DInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type FlattenInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReshapeInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type ShapeOfInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types);

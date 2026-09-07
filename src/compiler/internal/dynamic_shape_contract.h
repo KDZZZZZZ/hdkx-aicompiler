@@ -25,7 +25,7 @@ namespace specialization =
     kxc::api::experimental::shape_specialization::v1;
 
 inline constexpr std::uint32_t kBoundedDynamicGraphVersion = 1;
-inline constexpr std::uint32_t kDynamicUnitShapeContractVersion = 2;
+inline constexpr std::uint32_t kDynamicUnitShapeContractVersion = 3;
 inline constexpr std::uint32_t kBoundedCompilePreparationVersion = 2;
 
 struct DynamicInputAxisReference final {
@@ -73,7 +73,13 @@ private:
  *
  * Input guards are grouped in physical boundary-input order. Output
  * expressions reference only those local inputs; runtime extents are exactly
- * the non-Const output expressions in output-axis order. Construction is
+ * the ordered, de-duplicated dynamic expressions the unit consumes: first the
+ * non-Const output shape expressions in output-axis order, then any remaining
+ * dynamic boundary-input axes in input/axis order, then the non-Const shape
+ * value element expressions of shape-producing outputs. Shape-value outputs
+ * (M3 shape-as-value producers such as shape_of) additionally carry
+ * output_value_expressions: one expression per element of the materialized
+ * int64 vector, rooted at the same local input axes. Construction is
  * private so every instance comes from GraphTemplate + ordered UnitSkeleton.
  */
 class DynamicUnitShapeContract final {
@@ -85,6 +91,8 @@ public:
     local_input_guards() const noexcept;
     [[nodiscard]] const std::vector<std::vector<DynamicShapeExpr>>&
     output_shape_expressions() const noexcept;
+    [[nodiscard]] const std::vector<std::vector<DynamicShapeExpr>>&
+    output_value_expressions() const noexcept;
     [[nodiscard]] const std::vector<DynamicShapeExpr>&
     runtime_extent_expressions() const noexcept;
     [[nodiscard]] const std::string& canonical_bytes() const noexcept;
@@ -94,25 +102,29 @@ private:
         UnitSemanticKey representative_unit_semantic_key,
         std::vector<std::vector<DynamicInputAxisGuard>> local_input_guards,
         std::vector<std::vector<DynamicShapeExpr>> output_shape_expressions,
+        std::vector<std::vector<DynamicShapeExpr>> output_value_expressions,
         std::vector<DynamicShapeExpr> runtime_extent_expressions);
 
     std::uint32_t version_{kDynamicUnitShapeContractVersion};
     UnitSemanticKey representative_unit_semantic_key_;
     std::vector<std::vector<DynamicInputAxisGuard>> local_input_guards_;
     std::vector<std::vector<DynamicShapeExpr>> output_shape_expressions_;
+    std::vector<std::vector<DynamicShapeExpr>> output_value_expressions_;
     std::vector<DynamicShapeExpr> runtime_extent_expressions_;
     std::string canonical_bytes_;
 
     friend DynamicUnitShapeContract BuildDynamicUnitShapeContract(
-        const specialization::GraphTemplate&, std::size_t);
+        const specialization::GraphTemplate&, std::size_t,
+        const std::string&);
 };
 
 [[nodiscard]] DynamicUnitShapeContract BuildDynamicUnitShapeContract(
     const specialization::GraphTemplate& graph_template,
-    std::size_t ordered_unit_index);
+    std::size_t ordered_unit_index, const std::string& operator_name);
 [[nodiscard]] std::vector<DynamicUnitShapeContract>
 BuildDynamicUnitShapeContracts(
-    const specialization::GraphTemplate& graph_template);
+    const specialization::GraphTemplate& graph_template,
+    const std::vector<std::string>& operator_names);
 
 /*! \brief Immutable pre-lowering result consumed by Compiler::CompileBounded.
  *
