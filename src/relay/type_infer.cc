@@ -312,6 +312,45 @@ Type PowInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(BroadcastShape("pow", ShapeVector(lhs), ShapeVector(rhs)), "float32");
 }
 
+// 推导 expand 的单输入形式：目标 shape 是导入期已解析进 ExpandAttrs 的常量
+// 控制输入；每个对齐后的 data 维度必须是 1 或等于目标维度（numpy
+// broadcast_to 规则），输出 rank 等于目标 rank，dtype 保持。
+Type ExpandInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("expand", input_types, 1);
+    const auto* data = RequireTensor("expand", input_types[0], "data");
+    const auto* expand_attrs = attrs.As<ExpandAttrsNode>();
+    if (!expand_attrs) {
+        throw std::runtime_error("expand static type inference requires ExpandAttrs");
+    }
+    std::vector<int64_t> target;
+    target.reserve(expand_attrs->target_shape.size());
+    for (int64_t dim : expand_attrs->target_shape) {
+        if (dim < 0) {
+            throw std::runtime_error(
+                "expand target_shape must carry non-negative static dimensions");
+        }
+        target.push_back(dim);
+    }
+    if (data->shape.size() > target.size()) {
+        throw std::runtime_error("expand data rank must not exceed the target rank");
+    }
+    const size_t offset = target.size() - data->shape.size();
+    for (size_t i = 0; i < data->shape.size(); ++i) {
+        const int64_t dim = data->shape[i];
+        if (!IsKnown(dim)) {
+            // 未知维度留给 backend；导入边界要求静态 shape 后才进入这里。
+            continue;
+        }
+        if (dim != target[offset + i] && dim != 1) {
+            throw std::runtime_error("expand data dimension " + std::to_string(dim) +
+                                     " at axis " + std::to_string(i) +
+                                     " must be 1 or equal to the target dimension " +
+                                     std::to_string(target[offset + i]));
+        }
+    }
+    return MakeTensorType(target, data->dtype);
+}
+
 bool IsWhereBranchDType(const std::string& dtype) {
     return dtype == "float32" || dtype == "float64" || dtype == "int32" ||
            dtype == "int64" || dtype == "int8" || dtype == "uint8" || dtype == "bool";

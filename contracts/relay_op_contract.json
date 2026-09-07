@@ -162,6 +162,24 @@
         "relay_to_te_symbol": "EqualCompute"
       }
     },
+    "expand": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "ExpandAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Expand"
+      ]
+    },
     "gather": {
       "schema_version": 1,
       "category": "tensor.transform",

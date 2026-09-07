@@ -101,6 +101,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.lowering_key = "FRelayToTE";
         return spec;
     }
+    if (name == "expand") {
+        OperatorSpec spec;
+        spec.name = "expand";
+        spec.schema_version = 1;
+        spec.category = "tensor.transform";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "ExpandAttrs";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
     if (name == "gather") {
         OperatorSpec spec;
         spec.name = "gather";

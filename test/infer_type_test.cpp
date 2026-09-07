@@ -1042,6 +1042,70 @@ bool TestPowInferAndLoweringContract() {
     return true;
 }
 
+// M4/M5 Expand 的类型、FFI 与 lowering 合同：单输入 + 已解析 ExpandAttrs，
+// numpy broadcast_to 规则（data 维度 1 或相等；rank 不超过目标 rank）。
+bool TestExpandInferAndLoweringContract() {
+    const kxc::relay::Op& expand_op = kxc::relay::Op::Get("expand");
+    kxc::Var data("data", kxc::TensorType({2, 1}, "float32"));
+    kxc::Call expand_call(expand_op, {data},
+                          kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function func({data}, expand_call);
+    kxc::relay::InferTypePass(func);
+    TEST_CHECK(expand_op->arguments.size() == 1 && expand_op->arguments[0].name == "data",
+               "generated expand schema must expose the data argument");
+    TEST_CHECK(CheckTensor(expand_call.checked_type(), {2, 3}, "float32"),
+               "expand must infer the target shape with the data dtype");
+    const kxc::PackedFunc make_expand =
+        kxc::Registry::Global().Get("kxc.relay.op._make.expand");
+    TEST_CHECK(make_expand.defined(), "expand must retain its canonical FFI binding");
+    const kxc::Call ffi_expand = kxc::CastTo<kxc::Call>(make_expand(data, kxc::Array<int64_t>{2, 3}));
+    TEST_CHECK(ffi_expand->args.size() == 1 && ffi_expand->args[0].get() == data.get() &&
+                   ffi_expand->attrs.defined(),
+               "expand FFI must carry the resolved target shape attrs");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
+               "expand must lower through FRelayToTE");
+    TEST_CHECK(LowerUnits(func).size() == 1,
+               "one expand Relay Call must produce one lowering unit");
+
+    // rank 提升：[3] → [2, 3]（前导轴隐式 1）。
+    kxc::Var vector("vector", kxc::TensorType({3}, "float32"));
+    kxc::Call rank_raise(expand_op, {vector},
+                         kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function rank_func({vector}, rank_raise);
+    kxc::relay::InferTypePass(rank_func);
+    TEST_CHECK(CheckTensor(rank_raise.checked_type(), {2, 3}, "float32"),
+               "expand must raise rank with implicit leading singleton axes");
+
+    kxc::Var missing_attrs_data("missing_attrs_data", kxc::TensorType({2, 1}, "float32"));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function(
+                       {missing_attrs_data},
+                       kxc::Call(expand_op, {missing_attrs_data})));
+               }),
+               "expand without ExpandAttrs should fail type inference");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function(
+                       {data}, kxc::Call(expand_op, {data},
+                                         kxc::relay::ExpandAttrs::Create({-2, 3}))));
+               }),
+               "expand with negative target dimensions should fail");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::Var triple("triple", kxc::TensorType({2, 3}, "float32"));
+                   kxc::relay::InferTypePass(kxc::Function(
+                       {triple}, kxc::Call(expand_op, {triple},
+                                           kxc::relay::ExpandAttrs::Create({2, 4}))));
+               }),
+               "expand with an incompatible data dimension should fail");
+    kxc::Var cubed("cubed", kxc::TensorType({2, 3, 4}, "float32"));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function(
+                       {cubed}, kxc::Call(expand_op, {cubed},
+                                          kxc::relay::ExpandAttrs::Create({3, 4}))));
+               }),
+               "expand with data rank above the target rank should fail");
+    return true;
+}
+
 bool TestLayerNormInferAndLoweringContract() {
     kxc::Var data("data", kxc::TensorType({2, 3, 4}, "float32"));
     kxc::Var scale("scale", kxc::TensorType({3, 4}, "float32"));
@@ -1424,6 +1488,7 @@ int main() {
         {"unary_float32_infer_and_lowering_contract",
          TestUnaryFloat32InferAndLoweringContract},
         {"pow_infer_and_lowering_contract", TestPowInferAndLoweringContract},
+        {"expand_infer_and_lowering_contract", TestExpandInferAndLoweringContract},
         {"layer_norm_infer_and_lowering_contract", TestLayerNormInferAndLoweringContract},
         {"exact_transformer_operator_slice", TestExactTransformerOperatorSliceComposition},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},

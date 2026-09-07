@@ -361,6 +361,130 @@ void WritePowFixture(const TemporaryDirectory& directory, const std::string& a_s
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+// M4/M5 Expand 的 reifier 合同：canonical attrs 携带已解析的静态目标形状；
+// attrs 键集、负维度、rank 越界、维度不兼容与输出声明失配都以节点名失败。
+void WriteExpandFixture(const TemporaryDirectory& directory,
+                        const std::string& data_shape,
+                        const std::string& target_shape,
+                        const std::string& output_shape,
+                        const std::string& attrs_prefix = "") {
+    const std::string attrs = attrs_prefix.empty()
+        ? R"json({"target_shape": )json" + target_shape + R"json(})json"
+        : attrs_prefix;
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": )json" + data_shape + R"json(, "dtype": "float32"}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "s1_expand", "op_name": "expand", "inputs": ["a"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+bool TestValidStaticExpand() {
+    TemporaryDirectory directory;
+    WriteExpandFixture(directory, "[2, 1]", "[2, 3]", "[2, 3]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Expand import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 3}, "float32"),
+               "reified Expand output should use the target shape");
+    return true;
+}
+
+bool TestExpandAttrsAreStrict() {
+    // 键集多余或缺失都必须失败，且诊断携带节点名。
+    for (const std::string& attrs :
+         {std::string(R"json({"target_shape": [2, 3], "axis": 0})json"),
+          std::string(R"json({})json"),
+          std::string(R"json({"newshape": [2, 3]})json")}) {
+        TemporaryDirectory directory;
+        WriteExpandFixture(directory, "[2, 1]", "[2, 3]", "[2, 3]", attrs);
+        std::string message;
+        TEST_CHECK(ThrowsWithMessage(
+                       [&] {
+                           kxc::frontend::LoadONNXImportSpec(
+                               (directory.path() / "model.json").string(),
+                               (directory.path() / "params.bin").string());
+                       },
+                       "s1_expand", &message),
+                   "Expand reifier must reject noncanonical attrs with the node name");
+    }
+    return true;
+}
+
+bool TestExpandNegativeTargetDimensionIsRejected() {
+    TemporaryDirectory directory;
+    WriteExpandFixture(directory, "[2, 1]", "[-2, 3]", "[2, 3]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s1_expand", &message),
+               "Expand import target_shape must reject negative dimensions");
+    return true;
+}
+
+bool TestExpandIncompatibleContractIsRejected() {
+    // 手写 spec 的数据维度既不等于目标维度也不是 1：reifier 必须拒绝。
+    TemporaryDirectory directory;
+    WriteExpandFixture(directory, "[3]", "[2, 4]", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s1_expand", &message),
+               "Expand reifier must reject incompatible data dimensions");
+    TEST_CHECK(message.find("must be 1 or equal to the target dimension") !=
+                   std::string::npos,
+               "Expand dimension diagnostic should name the rule");
+
+    // rank 超过目标 rank 也要失败。
+    TemporaryDirectory rank_directory;
+    WriteExpandFixture(rank_directory, "[2, 3, 4]", "[3, 4]", "[3, 4]");
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (rank_directory.path() / "model.json").string(),
+                       (rank_directory.path() / "params.bin").string());
+               }),
+               "Expand reifier must reject data rank above the target rank");
+    return true;
+}
+
+bool TestExpandDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteExpandFixture(directory, "[2, 1]", "[2, 3]", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s1_expand", &message),
+               "declared Expand output shape must match the target shape");
+    return true;
+}
+
 bool TestValidStaticPow() {
     TemporaryDirectory directory;
     WritePowFixture(directory, "[2, 1]", "[1, 3]", "[2, 3]");
@@ -1405,6 +1529,12 @@ int main() {
         {"valid_static_layer_norm", TestValidStaticLayerNorm},
         {"layer_norm_declared_output_mismatch", TestLayerNormDeclaredOutputMismatchIsRejected},
         {"layer_norm_unsupported_attrs", TestLayerNormUnsupportedAttrsAreRejected},
+        {"valid_static_expand", TestValidStaticExpand},
+        {"expand_attrs_are_strict", TestExpandAttrsAreStrict},
+        {"expand_negative_target_dimension_rejected",
+         TestExpandNegativeTargetDimensionIsRejected},
+        {"expand_incompatible_contract_rejected", TestExpandIncompatibleContractIsRejected},
+        {"expand_declared_output_mismatch", TestExpandDeclaredOutputMismatchIsRejected},
         {"valid_static_pow", TestValidStaticPow},
         {"pow_attrs_are_strict", TestPowAttrsAreStrict},
         {"pow_invalid_dtypes_rejected", TestPowInvalidDTypesAreRejected},

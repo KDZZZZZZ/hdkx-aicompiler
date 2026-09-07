@@ -25,6 +25,7 @@ KXC_OBJECT_DEFINE(AddAttrsNode)
 KXC_OBJECT_DEFINE(CastAttrsNode)
 KXC_OBJECT_DEFINE(ReduceMeanAttrsNode)
 KXC_OBJECT_DEFINE(ReshapeAttrsNode)
+KXC_OBJECT_DEFINE(ExpandAttrsNode)
 KXC_OBJECT_DEFINE(TransposeAttrsNode)
 KXC_OBJECT_DEFINE(GatherAttrsNode)
 KXC_OBJECT_DEFINE(ConcatenateAttrsNode)
@@ -205,6 +206,10 @@ void ReshapeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("allowzero", allowzero);
 }
 
+void ExpandAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("target_shape", target_shape);
+}
+
 void TransposeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("perm", perm);
 }
@@ -337,6 +342,13 @@ ReshapeAttrs ReshapeAttrs::Create(Array<int64_t> newshape, int allowzero) {
     auto* node = new ReshapeAttrsNode();
     node->newshape = std::move(newshape);
     node->allowzero = allowzero;
+    return InternalCreate(node);
+}
+
+// 创建 expand 的已解析静态目标形状属性。
+ExpandAttrs ExpandAttrs::Create(Array<int64_t> target_shape) {
+    auto* node = new ExpandAttrsNode();
+    node->target_shape = std::move(target_shape);
     return InternalCreate(node);
 }
 

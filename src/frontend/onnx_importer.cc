@@ -530,6 +530,26 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
         }
         return ObjectRef(relay::ReshapeAttrs::Create(ToArray(newshape), 0));
     }
+    if (op_name == "expand") {
+        // Expand 的目标 shape 是导入期已解析的常量控制输入，canonical attrs
+        // 携带完整的非负目标形状；手写 spec 不允许省略或注入负维度。
+        const std::string ctx = "expand attrs";
+        if (attrs.o.size() != 1 || !OptionalField(attrs, "target_shape")) {
+            throw std::runtime_error(
+                "Expand import attrs must contain exactly target_shape: " +
+                node_name);
+        }
+        const std::vector<int64_t> target_shape =
+            ReadInt64Vector(Field(attrs, "target_shape", ctx), ctx + ".target_shape");
+        for (size_t axis = 0; axis < target_shape.size(); ++axis) {
+            if (target_shape[axis] < 0) {
+                throw std::runtime_error(
+                    "Expand import target_shape must be non-negative static "
+                    "dimensions: " + node_name);
+            }
+        }
+        return ObjectRef(relay::ExpandAttrs::Create(ToArray(target_shape)));
+    }
     if (op_name == "softmax") {
         return ObjectRef(relay::SoftmaxAttrs::Create(
             ReadInt(Field(attrs, "axis", "softmax attrs"), "softmax attrs.axis")));
@@ -666,6 +686,48 @@ void ValidatePowSubset(const Array<Expr>& args, const Array<Var>& function_param
             throw std::runtime_error(
                 "pow import cannot broadcast shapes " + format_shape(lhs->shape) +
                 " and " + format_shape(rhs->shape) + ": " + node_name);
+        }
+    }
+}
+
+// Expand 的 reifier 复校验：不信任 Python。data 维度必须静态非负，且每个
+// 对齐后的 data 维度是 1 或等于目标维度（numpy broadcast_to 规则）。
+void ValidateExpandSubset(const Array<Expr>& args, const ObjectRef& attrs,
+                          const Array<Var>& function_params,
+                          const std::string& node_name) {
+    if (args.size() != 1) {
+        throw std::runtime_error("expand import expects exactly one data input: " +
+                                 node_name);
+    }
+    const auto* expand_attrs = attrs.As<relay::ExpandAttrsNode>();
+    if (!expand_attrs) {
+        throw std::runtime_error("Expand import requires ExpandAttrs: " + node_name);
+    }
+    InferArgTypes(args, function_params);
+    const auto* data = args[0].checked_type().As<TensorTypeNode>();
+    if (!data) {
+        throw std::runtime_error("Expand import expects a TensorType data input: " +
+                                 node_name);
+    }
+    const size_t target_rank = expand_attrs->target_shape.size();
+    if (data->shape.size() > target_rank) {
+        throw std::runtime_error(
+            "Expand import data rank must not exceed the target rank: " + node_name);
+    }
+    const size_t offset = target_rank - data->shape.size();
+    for (size_t axis = 0; axis < data->shape.size(); ++axis) {
+        const int64_t dim = data->shape[axis];
+        if (dim < 0) {
+            throw std::runtime_error(
+                "Expand import requires non-negative static data dimensions: " +
+                node_name);
+        }
+        const int64_t target = expand_attrs->target_shape[axis + offset];
+        if (dim != target && dim != 1) {
+            throw std::runtime_error(
+                "Expand import data dimension " + std::to_string(dim) + " at axis " +
+                std::to_string(axis) + " must be 1 or equal to the target dimension " +
+                std::to_string(target) + ": " + node_name);
         }
     }
 }
@@ -944,6 +1006,9 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         }
         if (op_name == "pow") {
             ValidatePowSubset(args, function_params, node_name);
+        }
+        if (op_name == "expand") {
+            ValidateExpandSubset(args, attrs, function_params, node_name);
         }
         if (op_name == "equal") {
             ValidateEqualSubset(args, function_params, node_name);

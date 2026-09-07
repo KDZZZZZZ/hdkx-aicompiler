@@ -1702,3 +1702,97 @@ def test_pow_rejects_invalid_static_contract(a_shape, b_shape, a_dtype, b_dtype,
 def test_pow_rejects_declared_output_mismatch():
     with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
         import_onnx_model(_pow_model([2, 3], [3], output_shape=[2, 4]))
+
+
+# ---------------------------------------------------------------------------
+# M4/M5: Expand (constant target shape control input, broadcast_to rules).
+# ---------------------------------------------------------------------------
+
+
+def _expand_model(data_shape, target, *, dtype=TensorProto.FLOAT,
+                  output_shape=None, output_dtype=None, opset=17):
+    return _s1_model(
+        [helper.make_node("Expand", ["a", "shape"], ["out"], name="s1_expand")],
+        [helper.make_tensor_value_info("a", dtype, data_shape)],
+        [helper.make_tensor_value_info("out", output_dtype or dtype,
+                                       output_shape or target)],
+        initializers=[helper.make_tensor("shape", TensorProto.INT64, [len(target)],
+                                         list(target))],
+        opset=opset,
+    )
+
+
+def test_expand_maps_constant_target_and_preserves_dtype():
+    imported = import_onnx_model(_expand_model([2, 1], [2, 3]))
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        ("expand", {"target_shape": [2, 3]}, ["a"]),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_expand_accepts_rank_raise_from_vector():
+    imported = import_onnx_model(_expand_model([3], [2, 3]))
+
+    assert imported.function.nodes[0].attrs == {"target_shape": [2, 3]}
+    assert imported.function.outputs[0].shape == [2, 3]
+
+
+def test_expand_rejects_dynamic_shape_input():
+    # 目标 shape 来自前一个节点的输出（非 initializer/Constant）必须拒绝：
+    # 动态 shape 输入由 M3 的形状值切片承接。
+    graph = _s1_model(
+        [helper.make_node("Expand", ["a", "dyn_shape"], ["out"], name="s1_expand")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 1]),
+         helper.make_tensor_value_info("dyn_shape", TensorProto.INT64, [2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+    )
+    with pytest.raises(ValueError, match="must be a static initializer or Constant node output"):
+        import_onnx_model(graph)
+
+
+def test_expand_rejects_pre_opset13():
+    with pytest.raises(UnsupportedONNXOpError, match="opset >= 13 form is required"):
+        import_onnx_model(_expand_model([2, 1], [2, 3], opset=12))
+
+
+def test_expand_rejects_attributes():
+    model = _expand_model([2, 1], [2, 3])
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+def test_expand_rejects_non_int64_shape_input():
+    graph = _s1_model(
+        [helper.make_node("Expand", ["a", "shape"], ["out"], name="s1_expand")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 1])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+        initializers=[helper.make_tensor("shape", TensorProto.INT32, [2], [2, 3])],
+    )
+    with pytest.raises(ValueError, match="must be int64"):
+        import_onnx_model(graph)
+
+
+def test_expand_rejects_negative_target_dimensions():
+    with pytest.raises(ValueError, match="must be non-negative"):
+        import_onnx_model(_expand_model([2, 1], [-2, 3], output_shape=[2, 3]))
+
+
+@pytest.mark.parametrize(
+    ("data_shape", "target", "message"),
+    [
+        ([2, 3, 4], [3, 4], "must not exceed"),
+        ([3], [2, 4], "must be 1 or equal to the target dimension"),
+        ([2, 3], [2, 4], "must be 1 or equal to the target dimension"),
+    ],
+)
+def test_expand_rejects_incompatible_contract(data_shape, target, message):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(_expand_model(data_shape, target))
+
+
+def test_expand_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_expand_model([2, 1], [2, 3], output_shape=[2, 4]))

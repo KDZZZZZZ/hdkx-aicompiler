@@ -95,6 +95,7 @@ ONNX_TO_RELAY = {
     "Neg": "neg",
     "Sigmoid": "sigmoid",
     "Pow": "pow",
+    "Expand": "expand",
 }
 
 
@@ -323,6 +324,11 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch, opset_version,
             )
+        if node.op_type == "Expand":
+            inferred_static_specs[node.output[0]] = _infer_expand_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
+            )
 
         missing = [name for name in node.input if name and name not in available_values]
         if missing:
@@ -330,7 +336,7 @@ def import_onnx_model(
                 f"ONNX node '{node.name or node.op_type}' has missing input(s): {missing}"
             )
 
-        relay_inputs = ([node.input[0]] if node.op_type in {"Slice", "Reshape"}
+        relay_inputs = ([node.input[0]] if node.op_type in {"Slice", "Reshape", "Expand"}
                         else [name for name in node.input if name])
         relay_outputs = ([node.output[0]] if node.op_type == "LayerNormalization"
                          else [name for name in node.output])
@@ -1345,6 +1351,111 @@ def _infer_pow_spec(
     return result
 
 
+def _int64_constant_vector(
+    op_type: str, node_name: str, name: str, params: dict[str, ParamTensor]
+) -> list[int]:
+    """Read a rank-1 int64 initializer/Constant payload as a list of ints.
+
+    Shared by the Expand target shape and the Unsqueeze axes control inputs:
+    the tensor must come from the static constant table, never from a
+    dynamically produced value (the M3 shape-value slice owns that).
+    """
+    shape_param = params.get(name)
+    if shape_param is None:
+        raise ValueError(
+            f"{op_type} node '{node_name}' control input '{name}' must be a static "
+            "initializer or Constant node output; dynamic shape inputs are not "
+            "supported in the M4/M5 static subset"
+        )
+    if shape_param.dtype != "int64":
+        raise ValueError(
+            f"{op_type} node '{node_name}' control input '{name}' must be int64; "
+            f"got {shape_param.dtype}"
+        )
+    if len(shape_param.shape) != 1:
+        raise ValueError(
+            f"{op_type} node '{node_name}' control input '{name}' must be rank-1; "
+            f"got rank {len(shape_param.shape)}"
+        )
+    if len(shape_param.data) != 8 * shape_param.shape[0]:
+        raise ValueError(
+            f"{op_type} node '{node_name}' control initializer '{name}' byte size "
+            "is invalid"
+        )
+    return [int(value) for value in np.frombuffer(shape_param.data, dtype="<i8")]
+
+
+def _expand_attrs(node: onnx.NodeProto, params: dict[str, ParamTensor]) -> dict[str, Any]:
+    """Resolve the Expand constant shape control input into canonical attrs."""
+    node_name = node.name or "<unnamed>"
+    if _attrs_by_name(node):
+        raise ValueError(f"Expand node '{node_name}' does not support attributes")
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Expand node '{node_name}' requires exactly two non-empty inputs "
+            "(data and target shape)"
+        )
+    values = _int64_constant_vector("Expand", node_name, node.input[1], params)
+    for dim in values:
+        if dim < 0:
+            raise ValueError(
+                f"Expand node '{node_name}' target shape dimensions must be "
+                f"non-negative; got {dim}"
+            )
+    return {"target_shape": values}
+
+
+def _infer_expand_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    """Infer the static output of an Expand node under the M4/M5 static subset.
+
+    The target shape must come from an initializer/Constant (unidirectional
+    numpy broadcast_to rules: output rank equals the target rank and each
+    aligned data dimension is 1 or equal to the target dimension). Dynamic
+    shape inputs are rejected here and handed to the M3 shape-value slice.
+    """
+    node_name = node.name or "<unnamed>"
+    if opset_version < M4M5_MATH_MIN_OPSET:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX Expand opset {opset_version} in node "
+            f"'{node_name}': the opset >= {M4M5_MATH_MIN_OPSET} form is required"
+        )
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Expand node '{node_name}' requires exactly two non-empty inputs"
+        )
+    data = _resolve_static_input("Expand", node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    if any(dim < 0 for dim in data.shape):
+        raise ValueError(
+            f"Expand node '{node_name}' requires non-negative static data dimensions"
+        )
+    target = _expand_attrs(node, params)["target_shape"]
+    if len(data.shape) > len(target):
+        raise ValueError(
+            f"Expand node '{node_name}' data rank {len(data.shape)} must not exceed "
+            f"the target rank {len(target)}"
+        )
+    offset = len(target) - len(data.shape)
+    for index, dim in enumerate(data.shape):
+        if dim != target[offset + index] and dim != 1:
+            raise ValueError(
+                f"Expand node '{node_name}' data dimension {dim} at axis {index} must "
+                f"be 1 or equal to the target dimension {target[offset + index]}"
+            )
+    result = TensorSpec(name=node.output[0], shape=list(target), dtype=data.dtype)
+    _validate_declared_output("Expand", node_name, result, output_declarations, default_batch)
+    return result
+
+
 def _tensor_spec_from_value_info(
     value_info: onnx.ValueInfoProto, default_batch: int | None
 ) -> TensorSpec:
@@ -1550,6 +1661,8 @@ def _convert_attrs(
                                      input_specs, params, inferred_specs,
                                      value_info_by_name, None)
         return _reshape_attrs(node, params, data.shape)
+    if node.op_type == "Expand":
+        return _expand_attrs(node, params)
     if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
         return {}
     raise UnsupportedONNXOpError(

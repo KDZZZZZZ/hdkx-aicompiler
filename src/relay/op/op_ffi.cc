@@ -90,6 +90,11 @@ Call MakeReshape(Expr data, Array<int64_t> newshape, int allowzero) {
     return Call(GetOp("reshape"), {data}, ReshapeAttrs::Create(std::move(newshape), allowzero));
 }
 
+// 构造 expand 调用，并保留已解析的静态目标形状。
+Call MakeExpand(Expr data, Array<int64_t> target_shape) {
+    return Call(GetOp("expand"), {data}, ExpandAttrs::Create(std::move(target_shape)));
+}
+
 // 构造 softmax 调用。
 Call MakeSoftmax(Expr data, int axis) {
     return Call(GetOp("softmax"), {data}, SoftmaxAttrs::Create(axis));
@@ -193,6 +198,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.equal").set_body(ToPackedFunc(MakeEqual)
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.neg").set_body(ToPackedFunc(MakeNeg));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sigmoid").set_body(ToPackedFunc(MakeSigmoid));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.pow").set_body(ToPackedFunc(MakePow));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.expand").set_body(ToPackedFunc(MakeExpand));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.where").set_body(ToPackedFunc(MakeWhere));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sqrt").set_body(ToPackedFunc(MakeSqrt));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.matmul").set_body(ToPackedFunc(MakeMatmul));

@@ -8,6 +8,7 @@
 #include "kxc/te/topi/broadcast.h"
 #include "kxc/te/topi/elemwise.h"
 #include "kxc/te/topi/nn.h"
+#include "kxc/te/topi/utils.h"
 
 #include <stdexcept>
 

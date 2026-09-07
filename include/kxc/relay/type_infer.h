@@ -18,6 +18,7 @@ bool IsEqualInputDType(const std::string& dtype);
 Type NegInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SigmoidInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type PowInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type ExpandInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type UnarySameInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type CastInferType(const Attrs& attrs, const Array<Type>& input_types);

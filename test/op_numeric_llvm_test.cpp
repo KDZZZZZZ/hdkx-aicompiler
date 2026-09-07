@@ -756,6 +756,42 @@ void TestPow() {
           "pow(-2,0.5) must be NaN per the pow declaration domain rule");
 }
 
+// 验证 Expand 在 LLVM 上的真实元素复制结果：dim-1 扩展、rank 提升（前导轴
+// 隐式 1）和原样维度；numpy broadcast_to 语义。
+void TestExpand() {
+    // [2,1] → [2,3]：axis-1 从 1 扩展到 3。
+    kxc::Var data("data", kxc::TensorType({2, 1}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("expand"), {data},
+                   kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function func({data}, call);
+    const std::vector<float> data_values = {10.0f, 20.0f};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("expand", func, {Input(data_values), Output(out)});
+    ExpectNear(out, {10, 10, 10, 20, 20, 20}, 0.0f);
+
+    // [3] → [2,3]：前导轴隐式 1。
+    kxc::Var vector("vector", kxc::TensorType({3}, "float32"));
+    kxc::Call rank_call(kxc::relay::Op::Get("expand"), {vector},
+                        kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function rank_func({vector}, rank_call);
+    const std::vector<float> vector_values = {1, 2, 3};
+    std::vector<float> rank_out(6, 0.0f);
+    CompileAndRun("expand_rank_raise", rank_func,
+                  {Input(vector_values), Output(rank_out)});
+    ExpectNear(rank_out, {1, 2, 3, 1, 2, 3}, 0.0f);
+
+    // 相等维度保持：[2,3] → [2,3]（恒等扩展）。
+    kxc::Var same("same", kxc::TensorType({2, 3}, "float32"));
+    kxc::Call identity_call(kxc::relay::Op::Get("expand"), {same},
+                            kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function identity_func({same}, identity_call);
+    const std::vector<float> same_values = {1, 2, 3, 4, 5, 6};
+    std::vector<float> identity_out(6, 0.0f);
+    CompileAndRun("expand_identity", identity_func,
+                  {Input(same_values), Output(identity_out)});
+    ExpectNear(identity_out, {1, 2, 3, 4, 5, 6}, 0.0f);
+}
+
 // 验证 Equal 的 bool 结果直接作为 Where 条件的真实 buffer 消费链。
 void TestEqualWhereComposition() {
     kxc::Var a("a", kxc::TensorType({2, 3}, "float32"));
@@ -1135,6 +1171,7 @@ int main() {
         {"neg", TestNeg},
         {"sigmoid", TestSigmoid},
         {"pow", TestPow},
+        {"expand", TestExpand},
         {"equal_where_composition", TestEqualWhereComposition},
         {"nn_layer_norm", TestLayerNorm},
         {"cast", TestCast},
