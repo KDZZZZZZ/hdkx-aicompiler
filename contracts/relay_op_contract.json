@@ -87,7 +87,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "Cast"
+      ]
     },
     "concatenate": {
       "schema_version": 1,
@@ -121,7 +123,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "Div"
+      ]
     },
     "gather": {
       "schema_version": 1,
@@ -171,7 +175,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "Mul"
+      ]
     },
     "nn_avg_pool2d": {
       "schema_version": 1,
@@ -347,7 +353,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "ReduceMean"
+      ]
     },
     "reshape": {
       "schema_version": 1,
@@ -363,7 +371,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "Reshape"
+      ]
     },
     "slice": {
       "schema_version": 1,
@@ -413,7 +423,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "Sqrt"
+      ]
     },
     "subtract": {
       "schema_version": 1,
@@ -429,7 +441,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "Sub"
+      ]
     },
     "transpose": {
       "schema_version": 1,
