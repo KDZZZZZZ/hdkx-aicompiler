@@ -66,6 +66,19 @@ bool Throws(const std::function<void()>& action) {
     return false;
 }
 
+// 与 Throws 相同，但额外要求诊断文本包含 needle（例如节点名）。
+bool ThrowsWithMessage(const std::function<void()>& action, const std::string& needle,
+                       std::string* message = nullptr) {
+    try {
+        action();
+    } catch (const std::exception& error) {
+        if (message != nullptr) *message = error.what();
+        return error.what() != nullptr && std::string(error.what()).find(needle) !=
+                                              std::string::npos;
+    }
+    return false;
+}
+
 void WriteFixture(const TemporaryDirectory& directory, const std::string& input_shape,
                   const std::string& output_shape,
                   const std::string& output_dtype = "float32") {
@@ -220,6 +233,195 @@ void WriteLayerNormFixture(const TemporaryDirectory& directory,
 })json";
     std::ofstream(directory.path() / "model.json") << json;
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+void WriteArithmeticFixture(const TemporaryDirectory& directory,
+                            const std::string& output_shape,
+                            const std::string& op_name = "mul",
+                            const std::string& attrs = R"json({})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "lhs", "shape": [2, 1, 3], "dtype": "float32"},
+      {"name": "rhs", "shape": [1, 4, 1], "dtype": "float32"}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "arith_node", "op_name": ")json" + op_name + R"json(", "inputs": ["lhs", "rhs"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+void WriteSqrtFixture(const TemporaryDirectory& directory,
+                      const std::string& output_shape,
+                      const std::string& attrs = R"json({})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name": "data", "shape": [2, 3], "dtype": "float32"}],
+    "outputs": [{"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}],
+    "nodes": [
+      {"name": "sqrt_node", "op_name": "sqrt", "inputs": ["data"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+bool TestValidStaticArithmetic() {
+    for (const std::string& op_name : {"mul", "subtract", "divide"}) {
+        TemporaryDirectory directory;
+        WriteArithmeticFixture(directory, "[2, 4, 3]", op_name);
+        const auto imported = kxc::frontend::LoadONNXImportSpec(
+            (directory.path() / "model.json").string(),
+            (directory.path() / "params.bin").string());
+        TEST_CHECK(imported.function.defined(),
+                   "valid static " + op_name + " import spec should reify");
+        TEST_CHECK(ShapeEquals(
+                       imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                       {2, 4, 3}, "float32"),
+                   "reified " + op_name + " output should use the broadcast shape");
+    }
+    return true;
+}
+
+bool TestArithmeticAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WriteArithmeticFixture(directory, "[2, 4, 3]", "mul", R"json({"axis": 0})json");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "arith_node", &message),
+               "arithmetic reifier must reject noncanonical attrs with the node name");
+    TEST_CHECK(message.find("mul") != std::string::npos,
+               "arithmetic attr diagnostics should name the canonical op");
+
+    TemporaryDirectory sqrt_directory;
+    WriteSqrtFixture(sqrt_directory, "[2, 3]", R"json({"axis": 0})json");
+    message.clear();
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (sqrt_directory.path() / "model.json").string(),
+                           (sqrt_directory.path() / "params.bin").string());
+                   },
+                   "sqrt_node", &message),
+               "Sqrt reifier must reject noncanonical attrs with the node name");
+    return true;
+}
+
+bool TestArithmeticNonFloat32InputsAreRejected() {
+    TemporaryDirectory directory;
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "lhs", "shape": [2, 3], "dtype": "int32"},
+      {"name": "rhs", "shape": [2, 3], "dtype": "int32"}
+    ],
+    "outputs": [{"name": "out", "shape": [2, 3], "dtype": "int32"}],
+    "nodes": [
+      {"name": "arith_node", "op_name": "divide", "inputs": ["lhs", "rhs"], "outputs": ["out"], "attrs": {}}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "arith_node", &message),
+               "hand-written specs cannot smuggle integer division past the reifier");
+    return true;
+}
+
+bool TestValidStaticSqrt() {
+    TemporaryDirectory directory;
+    WriteSqrtFixture(directory, "[2, 3]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Sqrt import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 3}, "float32"),
+               "reified Sqrt output should preserve shape and dtype");
+    return true;
+}
+
+bool TestParamNameConflictsAreRejected() {
+    TemporaryDirectory directory;
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name": "data", "shape": [2, 3], "dtype": "float32"}],
+    "outputs": [{"name": "out", "shape": [2, 3], "dtype": "float32"}],
+    "nodes": [
+      {"name": "sqrt_node", "op_name": "sqrt", "inputs": ["data"], "outputs": ["out"], "attrs": {}}
+    ]
+  },
+  "params": [
+    {"name": "data", "shape": [2, 3], "dtype": "float32", "offset": 0, "nbytes": 24}
+  ],
+  "param_order": ["data"]
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream binary(directory.path() / "params.bin", std::ios::binary);
+    binary.write("012345678901234567890123", 24);
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "params must not shadow graph inputs");
+    return true;
+}
+
+bool TestNodeOutputNameConflictsWithValueAreRejected() {
+    TemporaryDirectory directory;
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name": "data", "shape": [2, 3], "dtype": "float32"}],
+    "outputs": [{"name": "out", "shape": [2, 3], "dtype": "float32"}],
+    "nodes": [
+      {"name": "first", "op_name": "sqrt", "inputs": ["data"], "outputs": ["mid"], "attrs": {}},
+      {"name": "second", "op_name": "sqrt", "inputs": ["data"], "outputs": ["mid"], "attrs": {}}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (directory.path() / "model.json").string(),
+                       (directory.path() / "params.bin").string());
+               }),
+               "duplicate node output names must be rejected");
+    return true;
 }
 
 void WriteExactTransformerOperatorSliceFixture(const TemporaryDirectory& directory) {
@@ -596,6 +798,13 @@ int main() {
         {"valid_static_layer_norm", TestValidStaticLayerNorm},
         {"layer_norm_declared_output_mismatch", TestLayerNormDeclaredOutputMismatchIsRejected},
         {"layer_norm_unsupported_attrs", TestLayerNormUnsupportedAttrsAreRejected},
+        {"valid_static_arithmetic", TestValidStaticArithmetic},
+        {"arithmetic_attrs_are_strict", TestArithmeticAttrsAreStrict},
+        {"arithmetic_non_float32_inputs_rejected", TestArithmeticNonFloat32InputsAreRejected},
+        {"valid_static_sqrt", TestValidStaticSqrt},
+        {"param_name_conflicts_are_rejected", TestParamNameConflictsAreRejected},
+        {"node_output_name_conflicts_are_rejected",
+         TestNodeOutputNameConflictsWithValueAreRejected},
         {"negative_input_dimension", TestNegativeInputDimensionIsRejected},
         {"declared_output_shape_mismatch", TestDeclaredOutputShapeMismatchIsRejected},
         {"declared_output_dtype_mismatch", TestDeclaredOutputDTypeMismatchIsRejected},

@@ -22,6 +22,33 @@ CONCATENATE_DTYPES = WHERE_BRANCH_DTYPES
 SLICE_DTYPES = WHERE_BRANCH_DTYPES
 INT64_MAX = (1 << 63) - 1
 
+# S1 static subset: arithmetic (Mul/Sub/Div) and Sqrt only accept float32 so the
+# truncating-division and widening semantics of integer ONNX inputs are never claimed.
+ARITHMETIC_DTYPES = {"float32"}
+# Relay cast dtype codes as understood by CastDTypeFromCode in the C++ reifier.
+RELAY_CAST_DTYPE_CODES = {
+    "float32": 0,
+    "int32": 1,
+    "int64": 2,
+    "float64": 3,
+    "bool": 4,
+    "int8": 5,
+    "uint8": 6,
+}
+# S1 Cast subset: only the conversions the target models need are opened.
+CAST_SUPPORTED_CONVERSIONS = {("int32", "float32"), ("int64", "float32")}
+CONSTANT_SUPPORTED_DTYPES = WHERE_BRANCH_DTYPES
+# ONNX Constant-13 shortcut/sparse attributes that the dense-value S1 subset rejects.
+CONSTANT_DENSE_VALUE_ONLY_ATTRS = {
+    "sparse_value",
+    "value_float",
+    "value_floats",
+    "value_int",
+    "value_ints",
+    "value_string",
+    "value_strings",
+}
+
 
 ONNX_TO_RELAY = {
     "Concat": "concatenate",
@@ -39,6 +66,10 @@ ONNX_TO_RELAY = {
     "Where": "where",
     "LayerNormalization": "nn_layer_norm",
     "Slice": "slice",
+    "Mul": "mul",
+    "Sub": "subtract",
+    "Div": "divide",
+    "Sqrt": "sqrt",
 }
 
 
@@ -123,6 +154,12 @@ def import_onnx_model(
     inferred_static_specs: dict[str, TensorSpec] = {}
     available_values = {x.name for x in inputs} | set(params)
     for node in graph.node:
+        if node.op_type == "Constant":
+            _import_constant_node(
+                node, input_specs, params, param_order, available_values,
+                output_declarations, default_batch,
+            )
+            continue
         if node.op_type not in ONNX_TO_RELAY:
             raise UnsupportedONNXOpError(
                 f"Unsupported ONNX op '{node.op_type}' in node '{node.name or '<unnamed>'}'"
@@ -216,6 +253,16 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
+        if node.op_type in {"Mul", "Sub", "Div"}:
+            inferred_static_specs[node.output[0]] = _infer_binary_arithmetic_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
+        if node.op_type == "Sqrt":
+            inferred_static_specs[node.output[0]] = _infer_sqrt_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
         if node.op_type == "Where":
             inferred_static_specs[node.output[0]] = _infer_where_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
@@ -299,6 +346,139 @@ def _validate_declared_output(
                 f"{declared_spec.shape}/{declared_spec.dtype} does not match inferred "
                 f"{result.shape}/{result.dtype}"
             )
+
+
+def _import_constant_node(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    param_order: list[str],
+    available_values: set[str],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> None:
+    """Normalize an ONNX Constant node into the existing ParamTensor constant path.
+
+    The S1 subset only accepts the dense Tensor ``value`` attribute; every shortcut
+    (``value_float``...) and sparse form is rejected. Output names must be unique
+    and must not collide with initializers or graph inputs.
+    """
+    node_name = node.name or "<unnamed>"
+    if len(node.output) != 1 or not node.output[0]:
+        raise ValueError(
+            f"Constant node '{node_name}' requires exactly one non-empty output name"
+        )
+    attr_names = [attr.name for attr in node.attribute]
+    if len(attr_names) != len(set(attr_names)):
+        raise ValueError(
+            f"Constant node '{node_name}' has duplicate attribute names"
+        )
+    if not attr_names:
+        raise ValueError(
+            f"Constant node '{node_name}' requires exactly one value attribute; "
+            "none was provided"
+        )
+    if len(attr_names) > 1:
+        raise ValueError(
+            f"Constant node '{node_name}' requires exactly one value attribute; "
+            f"got {sorted(attr_names)}"
+        )
+    if attr_names != ["value"]:
+        raise ValueError(
+            f"Constant node '{node_name}' only supports the dense 'value' attribute "
+            f"in the static S1 subset; got {sorted(attr_names)}"
+        )
+    value_attr = node.attribute[0]
+    if value_attr.type != AttributeProto.TENSOR:
+        raise ValueError(
+            f"Constant node '{node_name}' attribute 'value' must have exact TENSOR type"
+        )
+    array = numpy_helper.to_array(value_attr.t)
+    # np.ascontiguousarray promotes 0-d arrays to shape (1,); scalars must stay scalar.
+    if array.ndim > 0:
+        array = np.ascontiguousarray(array)
+    dtype = str(array.dtype)
+    if dtype not in CONSTANT_SUPPORTED_DTYPES:
+        raise ValueError(
+            f"Constant node '{node_name}' has unsupported dtype '{dtype}'"
+        )
+    name = node.output[0]
+    if name in params or name in input_specs or name in available_values:
+        raise ValueError(
+            f"Constant node '{node_name}' output name '{name}' conflicts with an "
+            "existing graph input, initializer, or produced value"
+        )
+    param_order.append(name)
+    params[name] = ParamTensor(
+        name=name,
+        shape=[int(dim) for dim in array.shape],
+        dtype=dtype,
+        data=array.tobytes(order="C"),
+    )
+    available_values.add(name)
+    _validate_declared_output(
+        "Constant", node_name,
+        TensorSpec(name=name, shape=params[name].shape, dtype=dtype),
+        output_declarations, default_batch,
+    )
+
+
+def _infer_binary_arithmetic_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    op_type = node.op_type
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"{op_type} node '{node_name}' requires exactly two non-empty inputs"
+        )
+    lhs, rhs = (
+        _resolve_static_input(op_type, node_name, name, input_specs, params,
+                              inferred_specs, value_info_by_name, default_batch)
+        for name in node.input
+    )
+    if lhs.dtype not in ARITHMETIC_DTYPES or rhs.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"{op_type} node '{node_name}' requires float32 inputs in the static "
+            f"S1 subset; got {lhs.dtype} and {rhs.dtype}"
+        )
+    result = TensorSpec(
+        name=node.output[0],
+        shape=_broadcast_shapes(op_type, node_name, lhs.shape, rhs.shape),
+        dtype="float32",
+    )
+    _validate_declared_output(op_type, node_name, result, output_declarations, default_batch)
+    return result
+
+
+def _infer_sqrt_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(f"Sqrt node '{node_name}' requires exactly one non-empty input")
+    data = _resolve_static_input("Sqrt", node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    if data.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"Sqrt node '{node_name}' requires float32 input in the static S1 "
+            f"subset; got {data.dtype}"
+        )
+    result = TensorSpec(name=node.output[0], shape=list(data.shape), dtype="float32")
+    _validate_declared_output("Sqrt", node_name, result, output_declarations, default_batch)
+    return result
 
 
 def _infer_matmul_spec(
@@ -862,6 +1042,12 @@ def _convert_attrs(
         if attrs:
             raise ValueError(
                 f"Where node '{node.name or '<unnamed>'}' does not support attributes"
+            )
+        return {}
+    if node.op_type in {"Mul", "Sub", "Div", "Sqrt"}:
+        if attrs:
+            raise ValueError(
+                f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
     if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import onnx
 import pytest
-from onnx import TensorProto, helper
+from onnx import AttributeProto, TensorProto, helper, numpy_helper
 
 from kxc_onnx import (
     UnsupportedONNXOpError,
@@ -944,3 +944,232 @@ def onnx_import_metadata(path: Path) -> dict:
     import json
 
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _s1_model(nodes, graph_inputs, outputs, initializers=(), value_infos=(), opset=17):
+    graph = helper.make_graph(
+        nodes, "s1_static_test", list(graph_inputs), list(outputs),
+        initializer=list(initializers), value_info=list(value_infos),
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=8)
+
+
+def _constant_model(tensor, *, output_name="c", attrs=None, value_infos=(),
+                    extra_nodes=(), opset=17, output_dtype=TensorProto.FLOAT,
+                    output_shape=None):
+    attrs = {"value": tensor} if attrs is None else attrs
+    nodes = [helper.make_node("Constant", [], [output_name], name="constant", **attrs)]
+    nodes.extend(extra_nodes)
+    if output_shape is None:
+        output_shape = list(tensor.dims) if tensor is not None else []
+    return _s1_model(nodes, [],
+                     [helper.make_tensor_value_info(output_name, output_dtype, output_shape)],
+                     value_infos=value_infos, opset=opset)
+
+
+def _arith_model(op, a_shape, b_shape, *, a_dtype=TensorProto.FLOAT, b_dtype=TensorProto.FLOAT,
+                 out_shape=None, out_dtype=TensorProto.FLOAT, attrs=None,
+                 node_inputs=("a", "b"), opset=17, b_is_initializer=False):
+    nodes = [helper.make_node(op, list(node_inputs), ["out"], name="arith", **(attrs or {}))]
+    initializers = []
+    graph_inputs = [helper.make_tensor_value_info("a", a_dtype, a_shape)]
+    if b_is_initializer:
+        initializers.append(helper.make_tensor("b", b_dtype, b_shape, [1] * max(1, _size(b_shape))))
+    else:
+        graph_inputs.append(helper.make_tensor_value_info("b", b_dtype, b_shape))
+    outputs = [helper.make_tensor_value_info("out", out_dtype, out_shape if out_shape is not None else a_shape)]
+    return _s1_model(nodes, graph_inputs, outputs, initializers=initializers, opset=opset)
+
+
+def _size(shape):
+    count = 1
+    for dim in shape:
+        count *= dim
+    return count
+
+
+def test_constant_normalizes_to_param_and_preserves_dtype():
+    tensor = helper.make_tensor("ignored", TensorProto.INT64, [2], [7, -3])
+    imported = import_onnx_model(_constant_model(tensor, output_dtype=TensorProto.INT64))
+
+    assert imported.function.nodes == []
+    assert imported.param_order == ["c"]
+    constant = imported.params["c"]
+    assert constant.shape == [2]
+    assert constant.dtype == "int64"
+    assert constant.data == numpy_helper.to_array(tensor).tobytes()
+    assert imported.function.outputs[0].shape == [2]
+    assert imported.function.outputs[0].dtype == "int64"
+
+
+def test_constant_preserves_scalar_and_zero_size_semantics():
+    imported = import_onnx_model(_constant_model(
+        helper.make_tensor("ignored", TensorProto.FLOAT, [], [1.5])))
+    assert imported.params["c"].shape == []
+    assert imported.params["c"].dtype == "float32"
+
+    imported = import_onnx_model(_constant_model(
+        helper.make_tensor("ignored", TensorProto.FLOAT, [0], [])))
+    assert imported.params["c"].shape == [0]
+    assert imported.params["c"].data == b""
+
+
+def test_constant_downstream_consumers_use_the_param_name():
+    tensor = helper.make_tensor("ignored", TensorProto.FLOAT, [4], [1, 2, 4, 8])
+    graph = _s1_model(
+        [helper.make_node("Constant", [], ["c"], name="constant",
+                          value=helper.make_tensor("ignored", TensorProto.FLOAT, [4], [1, 2, 4, 8])),
+         helper.make_node("Mul", ["x", "c"], ["out"], name="mul")],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 4])],
+    )
+    imported = import_onnx_model(graph)
+
+    assert [node.op_name for node in imported.function.nodes] == ["mul"]
+    assert imported.function.nodes[0].inputs == ["x", "c"]
+    assert imported.params["c"].data == numpy_helper.to_array(tensor).tobytes()
+    assert imported.param_order == ["c"]
+
+
+def test_constant_rejects_shortcut_sparse_and_multi_attribute_forms():
+    with pytest.raises(ValueError, match="only supports the dense 'value' attribute"):
+        import_onnx_model(_constant_model(None, attrs={"value_float": 1.0}))
+    with pytest.raises(ValueError, match="only supports the dense 'value' attribute"):
+        import_onnx_model(_constant_model(None, attrs={"sparse_value": onnx.SparseTensorProto()}))
+    with pytest.raises(ValueError, match="exactly one value attribute"):
+        import_onnx_model(_constant_model(None, attrs={"value_int": 1, "value_float": 2.0}))
+    with pytest.raises(ValueError, match="exactly one value attribute"):
+        import_onnx_model(_constant_model(None, attrs={}))
+
+
+def test_constant_rejects_non_tensor_value_attribute():
+    model = _constant_model(None, attrs={})
+    attr = AttributeProto()
+    attr.name = "value"
+    attr.type = AttributeProto.INT
+    attr.i = 3
+    model.graph.node[0].attribute.append(attr)
+    with pytest.raises(ValueError, match="'value' must have exact TENSOR type"):
+        import_onnx_model(model)
+
+
+def test_constant_rejects_unsupported_dtype():
+    with pytest.raises(ValueError, match="unsupported dtype 'float16'"):
+        import_onnx_model(_constant_model(
+            helper.make_tensor("ignored", TensorProto.FLOAT16, [1], [1.0])))
+
+
+def test_constant_rejects_duplicate_output_names():
+    tensor = helper.make_tensor("ignored", TensorProto.FLOAT, [1], [1.0])
+    model = _s1_model(
+        [helper.make_node("Constant", [], ["c"], name="first", value=tensor),
+         helper.make_node("Constant", [], ["c"], name="second", value=tensor)],
+        [], [helper.make_tensor_value_info("c", TensorProto.FLOAT, [1])],
+    )
+    with pytest.raises(ValueError, match="conflicts with an existing graph input"):
+        import_onnx_model(model)
+
+
+def test_constant_rejects_initializer_and_graph_input_name_conflicts():
+    tensor = helper.make_tensor("ignored", TensorProto.FLOAT, [1], [1.0])
+    model = _s1_model(
+        [helper.make_node("Constant", [], ["weight"], name="constant", value=tensor)],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("weight", TensorProto.FLOAT, [1])],
+        initializers=[helper.make_tensor("weight", TensorProto.FLOAT, [1], [2.0])],
+    )
+    with pytest.raises(ValueError, match="conflicts with an existing graph input"):
+        import_onnx_model(model)
+
+    model = _s1_model(
+        [helper.make_node("Constant", [], ["x"], name="constant", value=tensor)],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+    )
+    with pytest.raises(ValueError, match="conflicts with an existing graph input"):
+        import_onnx_model(model)
+
+
+def test_constant_rejects_declared_value_info_mismatch():
+    model = _constant_model(
+        helper.make_tensor("ignored", TensorProto.FLOAT, [2], [1.0, 2.0]),
+        value_infos=[helper.make_tensor_value_info("c", TensorProto.FLOAT, [3])],
+    )
+    with pytest.raises(ValueError, match=r"output 'c' declaration.*does not match inferred"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize("op", ["Mul", "Sub", "Div"])
+def test_arithmetic_maps_with_trailing_broadcast(op):
+    imported = import_onnx_model(_arith_model(op, [2, 1, 3], [1, 4, 1], out_shape=[2, 4, 3]))
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ({"Mul": "mul", "Sub": "subtract", "Div": "divide"}[op], {}),
+    ]
+    assert imported.function.outputs[0].shape == [2, 4, 3]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+@pytest.mark.parametrize("op", ["Mul", "Sub", "Div"])
+def test_arithmetic_rejects_attributes(op):
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(_arith_model(op, [2, 2], [2, 2], attrs={"axis": 0}))
+
+
+@pytest.mark.parametrize("op", ["Mul", "Sub", "Div"])
+def test_arithmetic_rejects_non_float32_inputs(op):
+    with pytest.raises(ValueError, match="requires float32 inputs in the static S1 subset"):
+        import_onnx_model(_arith_model(op, [2, 2], [2, 2],
+                                       a_dtype=TensorProto.INT32, b_dtype=TensorProto.INT32))
+
+
+@pytest.mark.parametrize("op", ["Mul", "Sub", "Div"])
+def test_arithmetic_rejects_incompatible_broadcast(op):
+    with pytest.raises(ValueError, match="incompatible broadcast dimensions"):
+        import_onnx_model(_arith_model(op, [2, 3], [2, 4], out_shape=[2, 4]))
+
+
+def test_arithmetic_preserves_zero_extent_broadcast():
+    imported = import_onnx_model(_arith_model("Mul", [0, 3], [1, 3], out_shape=[0, 3]))
+
+    assert imported.function.outputs[0].shape == [0, 3]
+
+
+def test_arithmetic_rejects_declared_output_mismatch():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(_arith_model("Mul", [2, 3], [2, 3], out_shape=[2, 4]))
+
+
+def test_sqrt_maps_and_preserves_shape():
+    imported = import_onnx_model(_s1_model(
+        [helper.make_node("Sqrt", ["a"], ["out"], name="sqrt")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+    ))
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        ("sqrt", {}, ["a"]),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3]
+
+
+def test_sqrt_rejects_non_float32_and_attributes():
+    with pytest.raises(ValueError, match="requires float32 input in the static S1 subset"):
+        import_onnx_model(_s1_model(
+            [helper.make_node("Sqrt", ["a"], ["out"], name="sqrt")],
+            [helper.make_tensor_value_info("a", TensorProto.INT64, [2])],
+            [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+        ))
+    model = _s1_model(
+        [helper.make_node("Sqrt", ["a"], ["out"], name="sqrt")],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+    )
+    model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+def test_arithmetic_rejects_missing_input_value():
+    with pytest.raises(ValueError, match="input 'ghost' metadata is absent or unresolved"):
+        import_onnx_model(_arith_model("Mul", [2, 3], [2, 3], node_inputs=("a", "ghost")))

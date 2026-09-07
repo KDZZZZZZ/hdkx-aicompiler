@@ -409,7 +409,9 @@ std::string ReadTextFile(const std::string& path) {
 }
 
 // 按算子名称把 JSON 属性转换为对应的强类型 Relay Attrs 对象。
-ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
+// node_name 仅用于诊断：手写非法 spec 的报错必须能定位到具体节点。
+ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
+                    const std::string& node_name) {
     RequireKind(attrs, Json::Object, "attrs for " + op_name);
     if (op_name == "nn_conv2d") {
         return ObjectRef(relay::Conv2DAttrs::Create(
@@ -443,6 +445,14 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
         return ObjectRef();
     }
     if (op_name == "add" || op_name == "matmul") {
+        return ObjectRef();
+    }
+    if (op_name == "mul" || op_name == "subtract" || op_name == "divide" ||
+        op_name == "sqrt") {
+        if (!attrs.o.empty()) {
+            throw std::runtime_error("Node '" + node_name + "' (" + op_name +
+                                     ") import attrs must be empty");
+        }
         return ObjectRef();
     }
     if (op_name == "softmax") {
@@ -510,6 +520,25 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
             ReadInt(Field(attrs, "transB", "gemm attrs"), "gemm attrs.transB")));
     }
     throw std::runtime_error("Unsupported Relay op in ONNX import spec: " + op_name);
+}
+
+// 推导节点实参的静态类型；导入期先于最终 InferType 消费。
+void InferArgTypes(const Array<Expr>& args, const Array<Var>& function_params) {
+    relay::InferTypePass(Function(function_params, Tuple(args)));
+}
+
+// S1 算术/开方节点只接收 float32：手写 spec 不能依赖 Python 已校验的假设。
+void ValidateFloat32Inputs(const std::string& op_name, const Array<Expr>& args,
+                           const Array<Var>& function_params, const std::string& node_name) {
+    InferArgTypes(args, function_params);
+    for (size_t i = 0; i < args.size(); ++i) {
+        const auto* type = args[i].checked_type().As<TensorTypeNode>();
+        if (!type || type->dtype != "float32") {
+            throw std::runtime_error(
+                op_name + " import requires float32 inputs in the static S1 subset: " +
+                node_name);
+        }
+    }
 }
 
 void ValidateGatherConstantIndices(const Array<Expr>& args,
@@ -632,7 +661,10 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         array.CopyFromBytes(param_bytes.data() + offset, static_cast<size_t>(nbytes));
         result.params.emplace(name, array);
         result.param_order.push_back(name);
-        values[name] = Constant(array);
+        if (!values.emplace(name, Constant(array)).second) {
+            throw std::runtime_error(
+                "ONNX import param name conflicts with an existing value: " + name);
+        }
     }
 
     const Json* param_order_json = OptionalField(root, "param_order");
@@ -667,12 +699,20 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             }
             args.push_back(it->second);
         }
-        ObjectRef attrs = MakeAttrs(op_name, Field(node, "attrs", ctx));
+        ObjectRef attrs = MakeAttrs(op_name, Field(node, "attrs", ctx), node_name);
         if (op_name == "gather") {
             ValidateGatherConstantIndices(args, attrs, function_params, node_name);
         }
+        if (op_name == "mul" || op_name == "subtract" || op_name == "divide" ||
+            op_name == "sqrt") {
+            ValidateFloat32Inputs(op_name, args, function_params, node_name);
+        }
         Call call(relay::Op::Get(op_name), args, attrs);
-        values[output_names[0]] = call;
+        if (!values.emplace(output_names[0], call).second) {
+            throw std::runtime_error(
+                "ONNX import node output name conflicts with an existing value: " +
+                node_name);
+        }
     }
 
     Array<Expr> output_exprs;
