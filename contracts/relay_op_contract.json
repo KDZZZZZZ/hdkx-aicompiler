@@ -162,6 +162,24 @@
         "relay_to_te_symbol": "EqualCompute"
       }
     },
+    "expand": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "ExpandAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Expand"
+      ]
+    },
     "gather": {
       "schema_version": 1,
       "category": "tensor.transform",
@@ -213,6 +231,36 @@
       "onnx_ops": [
         "Mul"
       ]
+    },
+    "neg": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Neg"
+      ],
+      "registration": {
+        "description": "Element-wise negation on float32.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor."
+          }
+        ],
+        "type_infer_symbol": "NegInferType",
+        "relay_to_te_symbol": "NegCompute"
+      }
     },
     "nn_avg_pool2d": {
       "schema_version": 1,
@@ -374,6 +422,41 @@
         "Relu"
       ]
     },
+    "pow": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Pow"
+      ],
+      "registration": {
+        "description": "Element-wise power with broadcast on float32 (llvm.pow dispatch).",
+        "arguments": [
+          {
+            "name": "lhs",
+            "type": "Tensor",
+            "description": "The base tensor."
+          },
+          {
+            "name": "rhs",
+            "type": "Tensor",
+            "description": "The exponent tensor."
+          }
+        ],
+        "type_infer_symbol": "PowInferType",
+        "relay_to_te_symbol": "PowCompute"
+      }
+    },
     "reduce_mean": {
       "schema_version": 1,
       "category": "tensor.reduce",
@@ -409,6 +492,36 @@
       "onnx_ops": [
         "Reshape"
       ]
+    },
+    "sigmoid": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Sigmoid"
+      ],
+      "registration": {
+        "description": "Element-wise logistic sigmoid 1/(1+exp(-x)) on float32.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor."
+          }
+        ],
+        "type_infer_symbol": "SigmoidInferType",
+        "relay_to_te_symbol": "SigmoidCompute"
+      }
     },
     "slice": {
       "schema_version": 1,

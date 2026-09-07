@@ -6,8 +6,10 @@
 #include "kxc/relay/op.h"
 #include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/type_infer.h"
+#include "kxc/te/topi/broadcast.h"
 #include "kxc/te/topi/elemwise.h"
 #include "kxc/te/topi/transform.h"
+#include "kxc/te/topi/utils.h"
 
 #include <limits>
 #include <stdexcept>
@@ -265,6 +267,47 @@ te::Tensor ReshapeCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     return RequireDefined("reshape", out);
 }
 
+te::Tensor ExpandCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                         const kxc::Type& out_type) {
+    const auto* expand_attrs = attrs.As<ExpandAttrsNode>();
+    if (!expand_attrs) {
+        throw std::runtime_error("expand lowering requires ExpandAttrs");
+    }
+    RequireInputCount("expand", inputs, 1);
+    RequireTensorOutput("expand", out_type);
+    // 目标 shape 与 data 的兼容性在 lowering 前复校验：dim 1 或相等，且
+    // data rank 不超过目标 rank，防止 broadcast_to 的越界索引。
+    Array<kxc::tir::PrimExpr> target_shape;
+    for (int64_t dim : expand_attrs->target_shape) {
+        if (dim < 0) {
+            throw std::runtime_error("expand target_shape must be non-negative");
+        }
+        target_shape.push_back(kxc::tir::IntImm(dim, kxc::tir::DataType::Int(64)));
+    }
+    if (inputs[0]->shape.size() > target_shape.size()) {
+        throw std::runtime_error("expand data rank must not exceed the target rank");
+    }
+    const size_t offset = target_shape.size() - inputs[0]->shape.size();
+    for (size_t i = 0; i < inputs[0]->shape.size(); ++i) {
+        int64_t dim = 0;
+        if (!te::topi::GetConstInt(inputs[0]->shape[i], &dim)) {
+            continue;
+        }
+        int64_t target_dim = 0;
+        if (!te::topi::GetConstInt(target_shape[offset + i], &target_dim)) {
+            throw std::runtime_error("expand target dimensions must be static");
+        }
+        if (dim != target_dim && dim != 1) {
+            throw std::runtime_error("expand data dimension " + std::to_string(dim) +
+                                     " at axis " + std::to_string(i) +
+                                     " must be 1 or equal to the target dimension " +
+                                     std::to_string(target_dim));
+        }
+    }
+    return RequireDefined("expand",
+                          te::topi::broadcast_to(inputs[0], target_shape, "T_expand"));
+}
+
 te::Tensor TransposeCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                             const kxc::Type& out_type) {
     RequireInputCount("transpose", inputs, 1);
@@ -516,6 +559,14 @@ KXC_REGISTER_OP(gather)
     .set_attr<std::string>("TAttrs", "GatherAttrs")
     .set_attr<FInferType>("FInferType", GatherInferType)
     .set_attr<FRelayToTE>("FRelayToTE", GatherCompute);
+
+KXC_REGISTER_OP(expand)
+    .describe(R"doc(Expand data to a resolved static target shape with broadcast_to rules.)doc")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor to expand.")
+    .set_attr<std::string>("TAttrs", "ExpandAttrs")
+    .set_attr<FInferType>("FInferType", ExpandInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", ExpandCompute);
 
 }  // namespace relay
 }  // namespace kxc

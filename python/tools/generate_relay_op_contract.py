@@ -112,6 +112,12 @@ def render_registration(contract: dict[str, Any]) -> str:
                 "    .add_argument(" + q(argument["name"]) + ", " +
                 q(argument["type"]) + ", " + q(argument["description"]) + ")"
             )
+        if op["attrs"]:
+            # 契约声明了 attrs 类型的生成式注册必须同时绑定 TAttrs，
+            # 与手工注册（reshape 等）满足同一检查器合同。
+            lines.append(
+                "    .set_attr<std::string>(\"TAttrs\", " + q(op["attrs"]) + ")"
+            )
         lines.extend(
             [
                 "    .set_attr<FInferType>(\"FInferType\", " +

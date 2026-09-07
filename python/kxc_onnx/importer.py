@@ -41,6 +41,10 @@ RELAY_CAST_DTYPE_CODES = {
 }
 # S1 Cast subset: only the conversions the target models need are opened.
 CAST_SUPPORTED_CONVERSIONS = {("int32", "float32"), ("int64", "float32")}
+# M4/M5 subset: Neg/Sigmoid are fieldless float32 unary ops, Pow a fieldless
+# float32 binary broadcast op. The multidirectional-broadcast input form
+# (opset >= 13) is the declared ONNX boundary for all of them.
+M4M5_MATH_MIN_OPSET = 13
 # ONNX TensorProto dtype enum values accepted by the Cast boundary.
 ONNX_CAST_DTYPE_NAMES = {
     TensorProto.FLOAT: "float32",
@@ -88,6 +92,11 @@ ONNX_TO_RELAY = {
     "Cast": "cast",
     "ReduceMean": "reduce_mean",
     "Reshape": "reshape",
+    "Neg": "neg",
+    "Sigmoid": "sigmoid",
+    "Pow": "pow",
+    "Expand": "expand",
+    "Unsqueeze": "reshape",
 }
 
 
@@ -306,6 +315,26 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
+        if node.op_type in {"Neg", "Sigmoid"}:
+            inferred_static_specs[node.output[0]] = _infer_unary_math_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
+            )
+        if node.op_type == "Pow":
+            inferred_static_specs[node.output[0]] = _infer_pow_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
+            )
+        if node.op_type == "Expand":
+            inferred_static_specs[node.output[0]] = _infer_expand_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
+            )
+        if node.op_type == "Unsqueeze":
+            inferred_static_specs[node.output[0]] = _infer_unsqueeze_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
+            )
 
         missing = [name for name in node.input if name and name not in available_values]
         if missing:
@@ -313,7 +342,8 @@ def import_onnx_model(
                 f"ONNX node '{node.name or node.op_type}' has missing input(s): {missing}"
             )
 
-        relay_inputs = ([node.input[0]] if node.op_type in {"Slice", "Reshape"}
+        relay_inputs = ([node.input[0]]
+                        if node.op_type in {"Slice", "Reshape", "Expand", "Unsqueeze"}
                         else [name for name in node.input if name])
         relay_outputs = ([node.output[0]] if node.op_type == "LayerNormalization"
                          else [name for name in node.output])
@@ -1243,6 +1273,272 @@ def _infer_equal_spec(
     return result
 
 
+def _infer_unary_math_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    """Infer the static output of the fieldless float32 unary M4/M5 ops (Neg, Sigmoid).
+
+    Both ops keep shape and dtype: one float32 input, one float32 output, no
+    attributes. The multidirectional-broadcast input form (opset >= 13) is the
+    declared boundary; earlier opsets are rejected with the node name.
+    """
+    op_type = node.op_type
+    node_name = node.name or "<unnamed>"
+    if opset_version < M4M5_MATH_MIN_OPSET:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX {op_type} opset {opset_version} in node "
+            f"'{node_name}': the opset >= {M4M5_MATH_MIN_OPSET} form is required"
+        )
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(f"{op_type} node '{node_name}' requires exactly one non-empty input")
+    data = _resolve_static_input(op_type, node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    if data.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"{op_type} node '{node_name}' requires float32 input in the M4/M5 static "
+            f"subset; got {data.dtype}"
+        )
+    result = TensorSpec(name=node.output[0], shape=list(data.shape), dtype="float32")
+    _validate_declared_output(op_type, node_name, result, output_declarations, default_batch)
+    return result
+
+
+def _infer_pow_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    """Infer the static output of a Pow node under the M5 S2 float32 subset.
+
+    Pow is fieldless: two same-dtype float32 inputs (base and exponent) with
+    multidirectional trailing-axis broadcast. Integer and float64 inputs are
+    rejected; the ONNX boundary is the opset >= 13 broadcast form.
+    """
+    node_name = node.name or "<unnamed>"
+    if opset_version < M4M5_MATH_MIN_OPSET:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX Pow opset {opset_version} in node "
+            f"'{node_name}': the opset >= {M4M5_MATH_MIN_OPSET} form is required"
+        )
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(f"Pow node '{node_name}' requires exactly two non-empty inputs")
+    lhs, rhs = (
+        _resolve_static_input("Pow", node_name, name, input_specs, params,
+                              inferred_specs, value_info_by_name, default_batch)
+        for name in node.input
+    )
+    if lhs.dtype not in ARITHMETIC_DTYPES or rhs.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"Pow node '{node_name}' requires same-dtype float32 inputs in the "
+            f"M4/M5 static subset; got {lhs.dtype} and {rhs.dtype}"
+        )
+    if lhs.dtype != rhs.dtype:
+        raise ValueError(
+            f"Pow node '{node_name}' requires matching input dtypes; "
+            f"got {lhs.dtype} and {rhs.dtype}"
+        )
+    result = TensorSpec(
+        name=node.output[0],
+        shape=_broadcast_shapes("Pow", node_name, lhs.shape, rhs.shape),
+        dtype="float32",
+    )
+    _validate_declared_output("Pow", node_name, result, output_declarations, default_batch)
+    return result
+
+
+def _int64_constant_vector(
+    op_type: str, node_name: str, name: str, params: dict[str, ParamTensor]
+) -> list[int]:
+    """Read a rank-1 int64 initializer/Constant payload as a list of ints.
+
+    Shared by the Expand target shape and the Unsqueeze axes control inputs:
+    the tensor must come from the static constant table, never from a
+    dynamically produced value (the M3 shape-value slice owns that).
+    """
+    shape_param = params.get(name)
+    if shape_param is None:
+        raise ValueError(
+            f"{op_type} node '{node_name}' control input '{name}' must be a static "
+            "initializer or Constant node output; dynamic shape inputs are not "
+            "supported in the M4/M5 static subset"
+        )
+    if shape_param.dtype != "int64":
+        raise ValueError(
+            f"{op_type} node '{node_name}' control input '{name}' must be int64; "
+            f"got {shape_param.dtype}"
+        )
+    if len(shape_param.shape) != 1:
+        raise ValueError(
+            f"{op_type} node '{node_name}' control input '{name}' must be rank-1; "
+            f"got rank {len(shape_param.shape)}"
+        )
+    if len(shape_param.data) != 8 * shape_param.shape[0]:
+        raise ValueError(
+            f"{op_type} node '{node_name}' control initializer '{name}' byte size "
+            "is invalid"
+        )
+    return [int(value) for value in np.frombuffer(shape_param.data, dtype="<i8")]
+
+
+def _expand_attrs(node: onnx.NodeProto, params: dict[str, ParamTensor]) -> dict[str, Any]:
+    """Resolve the Expand constant shape control input into canonical attrs."""
+    node_name = node.name or "<unnamed>"
+    if _attrs_by_name(node):
+        raise ValueError(f"Expand node '{node_name}' does not support attributes")
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Expand node '{node_name}' requires exactly two non-empty inputs "
+            "(data and target shape)"
+        )
+    values = _int64_constant_vector("Expand", node_name, node.input[1], params)
+    for dim in values:
+        if dim < 0:
+            raise ValueError(
+                f"Expand node '{node_name}' target shape dimensions must be "
+                f"non-negative; got {dim}"
+            )
+    return {"target_shape": values}
+
+
+def _infer_expand_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    """Infer the static output of an Expand node under the M4/M5 static subset.
+
+    The target shape must come from an initializer/Constant (unidirectional
+    numpy broadcast_to rules: output rank equals the target rank and each
+    aligned data dimension is 1 or equal to the target dimension). Dynamic
+    shape inputs are rejected here and handed to the M3 shape-value slice.
+    """
+    node_name = node.name or "<unnamed>"
+    if opset_version < M4M5_MATH_MIN_OPSET:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX Expand opset {opset_version} in node "
+            f"'{node_name}': the opset >= {M4M5_MATH_MIN_OPSET} form is required"
+        )
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Expand node '{node_name}' requires exactly two non-empty inputs"
+        )
+    data = _resolve_static_input("Expand", node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    if any(dim < 0 for dim in data.shape):
+        raise ValueError(
+            f"Expand node '{node_name}' requires non-negative static data dimensions"
+        )
+    target = _expand_attrs(node, params)["target_shape"]
+    if len(data.shape) > len(target):
+        raise ValueError(
+            f"Expand node '{node_name}' data rank {len(data.shape)} must not exceed "
+            f"the target rank {len(target)}"
+        )
+    offset = len(target) - len(data.shape)
+    for index, dim in enumerate(data.shape):
+        if dim != target[offset + index] and dim != 1:
+            raise ValueError(
+                f"Expand node '{node_name}' data dimension {dim} at axis {index} must "
+                f"be 1 or equal to the target dimension {target[offset + index]}"
+            )
+    result = TensorSpec(name=node.output[0], shape=list(target), dtype=data.dtype)
+    _validate_declared_output("Expand", node_name, result, output_declarations, default_batch)
+    return result
+
+
+def _unsqueeze_attrs(
+    node: onnx.NodeProto, params: dict[str, ParamTensor], data_shape: list[int]
+) -> dict[str, Any]:
+    """Normalize an Unsqueeze-13 constant axes input into reshape canonical attrs.
+
+    The M4 S2 decision: with known axes and a provable output rank, Unsqueeze is
+    exactly a reshape (element count is unchanged; only 1s are inserted), so no
+    new canonical op is introduced. Axes must come from an initializer/Constant,
+    be unique after negative-axis normalization, and stay inside the output rank
+    ``rank(data) + len(axes)``; duplicates and out-of-range axes are rejected.
+    """
+    node_name = node.name or "<unnamed>"
+    if _attrs_by_name(node):
+        raise ValueError(f"Unsqueeze node '{node_name}' does not support attributes")
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Unsqueeze node '{node_name}' requires exactly two non-empty inputs "
+            "(data and axes)"
+        )
+    if any(dim < 0 for dim in data_shape):
+        raise ValueError(
+            f"Unsqueeze node '{node_name}' requires non-negative static data dimensions"
+        )
+    axes = _int64_constant_vector("Unsqueeze", node_name, node.input[1], params)
+    rank_out = len(data_shape) + len(axes)
+    normalized: list[int] = []
+    for axis in axes:
+        resolved = axis + rank_out if axis < 0 else axis
+        if resolved < 0 or resolved >= rank_out:
+            raise ValueError(
+                f"Unsqueeze node '{node_name}' axis {axis} is out of range for "
+                f"output rank {rank_out}"
+            )
+        if resolved in normalized:
+            raise ValueError(
+                f"Unsqueeze node '{node_name}' axes must be unique after "
+                f"normalization; duplicate axis {resolved}"
+            )
+        normalized.append(resolved)
+    newshape = list(data_shape)
+    for axis in sorted(normalized):
+        newshape.insert(axis, 1)
+    return {"newshape": newshape, "allowzero": 0}
+
+
+def _infer_unsqueeze_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    """Infer the static output of an Unsqueeze-13 node normalized to reshape."""
+    node_name = node.name or "<unnamed>"
+    if opset_version < M4M5_MATH_MIN_OPSET:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX Unsqueeze opset {opset_version} in node "
+            f"'{node_name}': the axes-input opset >= {M4M5_MATH_MIN_OPSET} form "
+            "is required"
+        )
+    if len(node.input) != 2 or not all(node.input):
+        raise ValueError(
+            f"Unsqueeze node '{node_name}' requires exactly two non-empty inputs"
+        )
+    data = _resolve_static_input("Unsqueeze", node_name, node.input[0], input_specs,
+                                 params, inferred_specs, value_info_by_name, default_batch)
+    attrs = _unsqueeze_attrs(node, params, data.shape)
+    result = TensorSpec(name=node.output[0], shape=attrs["newshape"], dtype=data.dtype)
+    _validate_declared_output("Unsqueeze", node_name, result, output_declarations,
+                              default_batch)
+    return result
+
+
 def _tensor_spec_from_value_info(
     value_info: onnx.ValueInfoProto, default_batch: int | None
 ) -> TensorSpec:
@@ -1432,6 +1728,12 @@ def _convert_attrs(
                 f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
+    if node.op_type in {"Neg", "Sigmoid", "Pow"}:
+        if attrs:
+            raise ValueError(
+                f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
+            )
+        return {}
     if node.op_type == "Cast":
         target = _cast_target_dtype(node)
         return {"to": RELAY_CAST_DTYPE_CODES[target]}
@@ -1442,6 +1744,13 @@ def _convert_attrs(
                                      input_specs, params, inferred_specs,
                                      value_info_by_name, None)
         return _reshape_attrs(node, params, data.shape)
+    if node.op_type == "Expand":
+        return _expand_attrs(node, params)
+    if node.op_type == "Unsqueeze":
+        data = _resolve_static_input("Unsqueeze", node.name or "<unnamed>", node.input[0],
+                                     input_specs, params, inferred_specs,
+                                     value_info_by_name, None)
+        return _unsqueeze_attrs(node, params, data.shape)
     if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
         return {}
     raise UnsupportedONNXOpError(

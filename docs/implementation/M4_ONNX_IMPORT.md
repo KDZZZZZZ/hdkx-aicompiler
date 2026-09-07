@@ -98,3 +98,18 @@ python3 python/tools/check_relay_op_contract.py --root .
 ## 身份与交接
 
 原有 op 的正确接线一般不改变其 kernel ABI；其 attrs、常量和形状仍由现有 semantic key 覆盖。新增 Split 的输出结构、规范 attrs 和必要格式版本必须进入既有身份规则。向 M3 交接清楚哪些控制输入仍必须是常量，不能在 importer 中暗自接受任意动态 tensor 后再让 backend 猜测。
+
+## 第二波 D 线实施记录（2026-09-07）
+
+S2 的 Unsqueeze 部分已实现：axes 已知、结果 rank 可证明时 Unsqueeze 在
+Python importer 内规范化为既有 `reshape`（不新增 canonical op），axes 必须
+来自 initializer/Constant、按 ONNX-13 在 `rank(data)+len(axes)` 上规范化负轴，
+重复/越界拒绝；动态 axes 输入不开放。本波同时接线 `Neg`、`Sigmoid`、`Pow`、
+`Expand`（opset >= 13 边界、float32 子集、C++ reifier 双侧负例）。
+
+`Expand` 的目标 shape 是常量控制输入：导入期解析为 canonical `expand` 算子的
+`ExpandAttrs`（与 Reshape 常量 shape 输入规范化到 attrs 的既有方式一致），使
+类型推导能证明唯一输出 shape；动态 shape 输入被拒绝并交接 M3 形状值切片。
+真实 protobuf 的五算子组合 fixture（`test/generate_onnx_m4m5_ops_fixture.py`
+→ `onnx_importer_test` 的 `TestRunM4M5OpsProtobufLLVM`）以独立手写参考逐元素
+比较（max_abs_error=0）。

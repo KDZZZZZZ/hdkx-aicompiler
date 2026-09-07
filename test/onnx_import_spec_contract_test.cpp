@@ -306,6 +306,399 @@ void WriteSqrtFixture(const TemporaryDirectory& directory,
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+// M4/M5 fieldless float32 一元算子的 reifier 合同：合法 spec 重建为 shape 保持
+// 的 Relay 调用；attrs 非空、dtype 越界、输出声明失配都以节点名失败。
+void WriteUnaryMathFixture(const TemporaryDirectory& directory, const std::string& op_name,
+                           const std::string& dtype, const std::string& output_shape,
+                           const std::string& output_dtype = "float32",
+                           const std::string& attrs = R"json({})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": [2, 3], "dtype": ")json" + dtype + R"json("}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": ")json" +
+      output_dtype + R"json("}
+    ],
+    "nodes": [
+      {"name": "s1_neg", "op_name": ")json" + op_name + R"json(", "inputs": ["a"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+// M5 S2 Pow 的 reifier 合同：合法广播 spec 重建；attrs 非空、dtype 越界/失配、
+// 不可广播与输出声明失配都以节点名失败。
+void WritePowFixture(const TemporaryDirectory& directory, const std::string& a_shape,
+                     const std::string& b_shape, const std::string& output_shape,
+                     const std::string& a_dtype = "float32",
+                     const std::string& b_dtype = "float32",
+                     const std::string& attrs = R"json({})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": )json" + a_shape + R"json(, "dtype": ")json" + a_dtype + R"json("},
+      {"name": "b", "shape": )json" + b_shape + R"json(, "dtype": ")json" + b_dtype + R"json("}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "s2_pow", "op_name": "pow", "inputs": ["a", "b"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+// M4/M5 Expand 的 reifier 合同：canonical attrs 携带已解析的静态目标形状；
+// attrs 键集、负维度、rank 越界、维度不兼容与输出声明失配都以节点名失败。
+void WriteExpandFixture(const TemporaryDirectory& directory,
+                        const std::string& data_shape,
+                        const std::string& target_shape,
+                        const std::string& output_shape,
+                        const std::string& attrs_prefix = "") {
+    const std::string attrs = attrs_prefix.empty()
+        ? R"json({"target_shape": )json" + target_shape + R"json(})json"
+        : attrs_prefix;
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": )json" + data_shape + R"json(, "dtype": "float32"}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "s1_expand", "op_name": "expand", "inputs": ["a"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+// M4 S2 Unsqueeze 规范化的 C++ 侧证据：规范化产物是 reshape 节点（无新算子
+// 表面），reifier 沿既有 reshape 合同校验；手写非法 spec 的失配诊断仍能通过
+// producer 节点名定位到规范化的 Unsqueeze 节点。
+void WriteUnsqueezeNormalizedFixture(const TemporaryDirectory& directory,
+                                     const std::string& newshape,
+                                     const std::string& output_shape) {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": [2, 4], "dtype": "float32"}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": "float32"}
+    ],
+    "nodes": [
+      {"name": "s2_unsqueeze", "op_name": "reshape", "inputs": ["a"], "outputs": ["out"],
+       "attrs": {"newshape": )json" + newshape + R"json(, "allowzero": 0}}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
+bool TestUnsqueezeNormalizationReifier() {
+    // 合法规范化：Unsqueeze([2,4], axes=[0]) → reshape [1,2,4]。
+    TemporaryDirectory directory;
+    WriteUnsqueezeNormalizedFixture(directory, "[1, 2, 4]", "[1, 2, 4]");
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(),
+               "a valid Unsqueeze-normalized reshape spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {1, 2, 4}, "float32"),
+               "the normalized reshape output should carry the proven target shape");
+
+    // 手写非法 spec：newshape 与声明的规范化输出不一致（元素数相同但 shape
+    // 不同）→ 输出契约失配，诊断含 producer 节点名。
+    TemporaryDirectory bad_directory;
+    WriteUnsqueezeNormalizedFixture(bad_directory, "[4, 2]", "[1, 2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (bad_directory.path() / "model.json").string(),
+                           (bad_directory.path() / "params.bin").string());
+                   },
+                   "s2_unsqueeze", &message),
+               "a hand-written normalized-reshape spec must fail with the node name");
+    TEST_CHECK(message.find("output contract mismatch for 'out'") != std::string::npos,
+               "the normalized-reshape diagnostic should name the output value");
+    return true;
+}
+
+bool TestValidStaticExpand() {
+    TemporaryDirectory directory;
+    WriteExpandFixture(directory, "[2, 1]", "[2, 3]", "[2, 3]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Expand import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 3}, "float32"),
+               "reified Expand output should use the target shape");
+    return true;
+}
+
+bool TestExpandAttrsAreStrict() {
+    // 键集多余或缺失都必须失败，且诊断携带节点名。
+    for (const std::string& attrs :
+         {std::string(R"json({"target_shape": [2, 3], "axis": 0})json"),
+          std::string(R"json({})json"),
+          std::string(R"json({"newshape": [2, 3]})json")}) {
+        TemporaryDirectory directory;
+        WriteExpandFixture(directory, "[2, 1]", "[2, 3]", "[2, 3]", attrs);
+        std::string message;
+        TEST_CHECK(ThrowsWithMessage(
+                       [&] {
+                           kxc::frontend::LoadONNXImportSpec(
+                               (directory.path() / "model.json").string(),
+                               (directory.path() / "params.bin").string());
+                       },
+                       "s1_expand", &message),
+                   "Expand reifier must reject noncanonical attrs with the node name");
+    }
+    return true;
+}
+
+bool TestExpandNegativeTargetDimensionIsRejected() {
+    TemporaryDirectory directory;
+    WriteExpandFixture(directory, "[2, 1]", "[-2, 3]", "[2, 3]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s1_expand", &message),
+               "Expand import target_shape must reject negative dimensions");
+    return true;
+}
+
+bool TestExpandIncompatibleContractIsRejected() {
+    // 手写 spec 的数据维度既不等于目标维度也不是 1：reifier 必须拒绝。
+    TemporaryDirectory directory;
+    WriteExpandFixture(directory, "[3]", "[2, 4]", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s1_expand", &message),
+               "Expand reifier must reject incompatible data dimensions");
+    TEST_CHECK(message.find("must be 1 or equal to the target dimension") !=
+                   std::string::npos,
+               "Expand dimension diagnostic should name the rule");
+
+    // rank 超过目标 rank 也要失败。
+    TemporaryDirectory rank_directory;
+    WriteExpandFixture(rank_directory, "[2, 3, 4]", "[3, 4]", "[3, 4]");
+    TEST_CHECK(Throws([&] {
+                   kxc::frontend::LoadONNXImportSpec(
+                       (rank_directory.path() / "model.json").string(),
+                       (rank_directory.path() / "params.bin").string());
+               }),
+               "Expand reifier must reject data rank above the target rank");
+    return true;
+}
+
+bool TestExpandDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteExpandFixture(directory, "[2, 1]", "[2, 3]", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s1_expand", &message),
+               "declared Expand output shape must match the target shape");
+    return true;
+}
+
+bool TestValidStaticPow() {
+    TemporaryDirectory directory;
+    WritePowFixture(directory, "[2, 1]", "[1, 3]", "[2, 3]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Pow import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 3}, "float32"),
+               "reified Pow output should use the broadcast shape");
+    return true;
+}
+
+bool TestPowAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WritePowFixture(directory, "[2, 3]", "[2, 3]", "[2, 3]", "float32", "float32",
+                    R"json({"axis": 0})json");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s2_pow", &message),
+               "Pow reifier must reject noncanonical attrs with the node name");
+    return true;
+}
+
+bool TestPowInvalidDTypesAreRejected() {
+    // 手写 spec 不能依赖 Python 已校验的假设：非 float32 与 dtype 失配都必须失败。
+    for (auto [a_dtype, b_dtype] :
+         {std::pair<std::string, std::string>{"int32", "int32"},
+          {"float64", "float64"},
+          {"float32", "int64"}}) {
+        TemporaryDirectory directory;
+        WritePowFixture(directory, "[2, 3]", "[2, 3]", "[2, 3]", a_dtype, b_dtype);
+        std::string message;
+        TEST_CHECK(ThrowsWithMessage(
+                       [&] {
+                           kxc::frontend::LoadONNXImportSpec(
+                               (directory.path() / "model.json").string(),
+                               (directory.path() / "params.bin").string());
+                       },
+                       "s2_pow", &message),
+                   "Pow reifier must reject dtypes outside the M4/M5 float32 subset");
+        TEST_CHECK(message.find("M4/M5 static subset") != std::string::npos,
+                   "Pow dtype diagnostic should name the subset");
+    }
+    return true;
+}
+
+bool TestPowIncompatibleBroadcastIsRejected() {
+    TemporaryDirectory directory;
+    WritePowFixture(directory, "[2, 3]", "[2, 4]", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s2_pow", &message),
+               "Pow reifier must reject incompatible broadcast shapes");
+    return true;
+}
+
+bool TestPowDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WritePowFixture(directory, "[2, 3]", "[3]", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s2_pow", &message),
+               "declared Pow output shape must match the inferred broadcast");
+    return true;
+}
+
+bool TestValidStaticUnaryMath() {
+    for (const std::string& op_name : {"neg", "sigmoid"}) {
+        TemporaryDirectory directory;
+        WriteUnaryMathFixture(directory, op_name, "float32", "[2, 3]");
+        const auto imported = kxc::frontend::LoadONNXImportSpec(
+            (directory.path() / "model.json").string(),
+            (directory.path() / "params.bin").string());
+        TEST_CHECK(imported.function.defined(),
+                   "valid static " + op_name + " import spec should reify");
+        TEST_CHECK(ShapeEquals(
+                       imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                       {2, 3}, "float32"),
+                   "reified " + op_name + " output should preserve shape and dtype");
+    }
+    return true;
+}
+
+bool TestUnaryMathAttrsAreStrict() {
+    for (const std::string& op_name : {"neg", "sigmoid"}) {
+        TemporaryDirectory directory;
+        WriteUnaryMathFixture(directory, op_name, "float32", "[2, 3]", "float32",
+                              R"json({"axis": 0})json");
+        std::string message;
+        TEST_CHECK(ThrowsWithMessage(
+                       [&] {
+                           kxc::frontend::LoadONNXImportSpec(
+                               (directory.path() / "model.json").string(),
+                               (directory.path() / "params.bin").string());
+                       },
+                       "s1_neg", &message),
+                   op_name + " reifier must reject noncanonical attrs with the node name");
+        TEST_CHECK(message.find("(" + op_name + ")") != std::string::npos,
+                   op_name + " attr diagnostics should name the canonical op");
+    }
+    return true;
+}
+
+bool TestUnaryMathNonFloat32InputsAreRejected() {
+    for (const std::string& dtype : {"int64", "float64"}) {
+        for (const std::string& op_name : {"neg", "sigmoid"}) {
+            TemporaryDirectory directory;
+            WriteUnaryMathFixture(directory, op_name, dtype, "[2, 3]", dtype);
+            std::string message;
+            TEST_CHECK(ThrowsWithMessage(
+                           [&] {
+                               kxc::frontend::LoadONNXImportSpec(
+                                   (directory.path() / "model.json").string(),
+                                   (directory.path() / "params.bin").string());
+                           },
+                           "s1_neg", &message),
+                       op_name + " reifier must reject dtypes outside the M4/M5 float32 subset");
+            TEST_CHECK(message.find("M4/M5 static subset") != std::string::npos,
+                       op_name + " dtype diagnostic should name the subset");
+        }
+    }
+    return true;
+}
+
+bool TestUnaryMathDeclaredOutputMismatchIsRejected() {
+    TemporaryDirectory directory;
+    WriteUnaryMathFixture(directory, "neg", "float32", "[2, 4]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "s1_neg", &message),
+               "declared neg output shape must match the inferred output");
+    return true;
+}
+
 bool TestValidStaticArithmetic() {
     for (const std::string& op_name : {"mul", "subtract", "divide"}) {
         TemporaryDirectory directory;
@@ -1194,6 +1587,22 @@ int main() {
         {"valid_static_layer_norm", TestValidStaticLayerNorm},
         {"layer_norm_declared_output_mismatch", TestLayerNormDeclaredOutputMismatchIsRejected},
         {"layer_norm_unsupported_attrs", TestLayerNormUnsupportedAttrsAreRejected},
+        {"unsqueeze_normalization_reifier", TestUnsqueezeNormalizationReifier},
+        {"valid_static_expand", TestValidStaticExpand},
+        {"expand_attrs_are_strict", TestExpandAttrsAreStrict},
+        {"expand_negative_target_dimension_rejected",
+         TestExpandNegativeTargetDimensionIsRejected},
+        {"expand_incompatible_contract_rejected", TestExpandIncompatibleContractIsRejected},
+        {"expand_declared_output_mismatch", TestExpandDeclaredOutputMismatchIsRejected},
+        {"valid_static_pow", TestValidStaticPow},
+        {"pow_attrs_are_strict", TestPowAttrsAreStrict},
+        {"pow_invalid_dtypes_rejected", TestPowInvalidDTypesAreRejected},
+        {"pow_incompatible_broadcast_rejected", TestPowIncompatibleBroadcastIsRejected},
+        {"pow_declared_output_mismatch", TestPowDeclaredOutputMismatchIsRejected},
+        {"valid_static_unary_math", TestValidStaticUnaryMath},
+        {"unary_math_attrs_are_strict", TestUnaryMathAttrsAreStrict},
+        {"unary_math_non_float32_inputs_rejected", TestUnaryMathNonFloat32InputsAreRejected},
+        {"unary_math_declared_output_mismatch", TestUnaryMathDeclaredOutputMismatchIsRejected},
         {"valid_static_arithmetic", TestValidStaticArithmetic},
         {"arithmetic_attrs_are_strict", TestArithmeticAttrsAreStrict},
         {"arithmetic_non_float32_inputs_rejected", TestArithmeticNonFloat32InputsAreRejected},
