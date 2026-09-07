@@ -55,5 +55,9 @@ PreparedCompilerGraph PrepareCompilerGraph(
 CompiledGraph AssembleCompiledGraph(
     const PreparedCompilerGraph& prepared,
     const CompiledPrimitiveBatch& batch);
+CompiledGraph AssembleCompiledGraph(
+    const PreparedCompilerGraph& prepared,
+    const CompiledPrimitiveBatch& batch,
+    runtime::ExecutablePlan plan);
 
 }  // namespace kxc::api::internal

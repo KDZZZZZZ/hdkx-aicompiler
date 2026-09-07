@@ -42,6 +42,19 @@ if(KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE AND NOT KXC_ENABLE_SHAPE_PRODUCTION_EXAC
   set(KXC_ENABLE_SHAPE_PRODUCTION_EXACT ON CACHE BOOL
     "Enable the production exact Relay/compiler/shape adapter" FORCE)
 endif()
+option(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+  "Enable bounded shape-polymorphic CPU/LLVM graph compilation" OFF)
+if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH AND
+   (NOT KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI OR
+    NOT KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE OR
+    NOT KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR
+    NOT KXC_ENABLE_LLVM))
+  message(FATAL_ERROR
+    "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH requires "
+    "KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON, "
+    "KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON, "
+    "KXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON, and KXC_ENABLE_LLVM=ON")
+endif()
 
 option(KXC_ENABLE_ADAPTIVE_HOT_SWAP
   "Enable default-off bounded whole-plan adaptive control plane" OFF)
@@ -173,6 +186,7 @@ set(KXC_EXPERIMENTAL_HEADERS
   include/kxc/compiler/shape_control.h
   include/kxc/compiler/shape_exact.h
   include/kxc/compiler/shape_specialization.h
+  include/kxc/compiler/shape_specialization_controller.h
   include/kxc/shape/shape.h
 )
 
@@ -227,6 +241,8 @@ foreach(_kxc_public_module IN ITEMS
 endforeach()
 target_compile_definitions(kxc_runtime_api INTERFACE
   KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>)
+target_compile_definitions(kxc_compiler_api INTERFACE
+  KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=$<BOOL:${KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH}>)
 
 if(KXC_ENABLE_CUDA)
   find_package(CUDAToolkit QUIET)
@@ -340,6 +356,10 @@ elseif(KXC_ENABLE_LLVM AND NOT LLVM_FOUND)
 else()
   set(KXC_USE_LLVM 0)
   message(STATUS "LLVM support: disabled by KXC_ENABLE_LLVM=OFF")
+endif()
+if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH AND NOT KXC_USE_LLVM)
+  message(FATAL_ERROR
+    "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH requires an available LLVM >= 20 backend")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -533,7 +553,9 @@ if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
     src/compiler/shape/shape_control.cc
     src/compiler/shape/shape_exact.cc
     src/compiler/shape/shape_specialization.cc
-    src/compiler/shape/restricted_symbolic_shape.cc)
+    src/compiler/shape/shape_specialization_controller.cc
+    src/compiler/shape/restricted_symbolic_shape.cc
+    src/compiler/shape/dynamic_shape_contract.cc)
 endif()
 
 set(KXC_CODEGEN_LLVM_SOURCES "")
@@ -563,6 +585,7 @@ function(kxc_configure_module_obj target)
     KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
+    KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=$<BOOL:${KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH}>
     KXC_ENABLE_ADAPTIVE_HOT_SWAP=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP}>)
 endfunction()
 
@@ -598,7 +621,9 @@ else()
     src/compiler/shape/shape_control.cc
     src/compiler/shape/shape_exact.cc
     src/compiler/shape/shape_specialization.cc
-    src/compiler/shape/restricted_symbolic_shape.cc)
+    src/compiler/shape/shape_specialization_controller.cc
+    src/compiler/shape/restricted_symbolic_shape.cc
+    src/compiler/shape/dynamic_shape_contract.cc)
   kxc_configure_module_obj(kxc_shape_experimental_test_obj)
 endif()
 
@@ -761,6 +786,7 @@ function(kxc_add_runtime_exe target source_file)
     KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
+    KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=$<BOOL:${KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH}>
     KXC_ENABLE_ADAPTIVE_HOT_SWAP=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP}>)
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
@@ -1018,6 +1044,10 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(runtime_profiling_test test/runtime_profiling_test.cpp)
   kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
   kxc_add_runtime_exe(te_schedule_test test/te_schedule_test.cpp)
+  if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH)
+    kxc_add_runtime_exe(bounded_dynamic_graph_llvm_test
+      test/bounded_dynamic_graph_llvm_test.cpp)
+  endif()
 
   set(KXC_CONTROL_FLOW_TESTS
     relay_anf_test
@@ -1356,6 +1386,8 @@ kxc_add_ctest_if_target(shape_control_test "shape;shape-control;cpu")
 kxc_add_ctest_if_target(shape_production_exact_test "shape;shape-production;cpu")
 kxc_add_ctest_if_target(restricted_symbolic_shape_test "shape;shape-restricted-symbolic;cpu")
 kxc_add_ctest_if_target(shape_exact_dispatch_test "shape;shape-dispatch;cpu")
+kxc_add_ctest_if_target(bounded_dynamic_graph_llvm_test
+  "shape;bounded-dynamic;cpu;llvm;e2e;numeric")
 
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test

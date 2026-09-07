@@ -14,6 +14,8 @@
 #include <vector>
 
 #include "runtime/internal/compiled_module_node.h"
+#include "runtime/internal/memory_plan.h"
+#include "kxc/compiler/compiler.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
 
@@ -59,10 +61,11 @@ bool ContainsLegacyDynamicDimension(const std::string& applicability) {
 }
 
 void AppendShape(std::string* out, const Array<int64_t>& shape,
-                 const char* context) {
+                 const char* context, bool allow_wildcards = false) {
     AppendInteger(out, "rank", shape.size());
     for (int64_t dimension : shape) {
-        if (dimension < 0) {
+        if (dimension < 0 &&
+            (!allow_wildcards || dimension != codegen::kDynamicDimension)) {
             throw std::invalid_argument(std::string(context) +
                                         " requires static exact dimensions");
         }
@@ -71,7 +74,8 @@ void AppendShape(std::string* out, const Array<int64_t>& shape,
 }
 
 void AppendValueContract(std::string* out,
-                         const runtime::ValueSpec& value) {
+                         const runtime::ValueSpec& value,
+                         bool allow_wildcards = false) {
     // Graph-local value/storage ids are locators, not reusable ABI identity.
     AppendInteger(out, "dtype_code", value->dtype.code);
     AppendInteger(out, "dtype_bits", value->dtype.bits);
@@ -86,7 +90,7 @@ void AppendValueContract(std::string* out,
     AppendInteger(out, "is_state", value->is_state);
     AppendInteger(out, "write_mode", static_cast<uint8_t>(value->write_mode));
     AppendInteger(out, "valid_bytes", value->valid_bytes);
-    AppendShape(out, value.shape(), "plan ABI");
+    AppendShape(out, value.shape(), "plan ABI", allow_wildcards);
 }
 
 const Target& ModuleTarget(const CompiledModule& module) {
@@ -366,10 +370,25 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     plan.Validate();
     std::string canonical;
-    // v6 covers callable/runtime ABI, including state and explicit donation.
-    // Selected artifacts and their generations/receipts are PlanVariant
-    // selection identity and must never affect compatibility.
-    AppendField(&canonical, "kind", "static-exact-plan-abi-v6-state-alias");
+    const bool bounded_dynamic =
+        plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1;
+    // Preserve static v7 bytes. Dynamic v8 additionally names the production
+    // gate contract; selected generations remain PlanVariant identity.
+    AppendField(
+        &canonical, "kind",
+        bounded_dynamic
+            ? "executable-plan-abi-v8-bounded-dynamic-graph"
+            : "executable-plan-abi-v7-dynamic-fresh-output");
+    AppendInteger(&canonical, "plan_mode", static_cast<uint8_t>(plan.mode()));
+    if (bounded_dynamic) {
+        AppendField(&canonical, "bounded_dynamic_graph_gate",
+                    "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH.v1");
+    }
+    AppendField(
+        &canonical, "memory_plan",
+        plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1
+            ? runtime::internal::kDynamicFreshOutputMemoryPlanVersion
+            : runtime::internal::kStaticMemoryPlanVersion);
     AppendTargetContract(&canonical, ModuleTarget(module));
     const Array<runtime::KernelCall> calls = plan.calls();
     if (ordered_artifacts.size() != calls.size()) {
@@ -384,14 +403,34 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
                 "plan ABI ordered artifact mapping differs from its call");
         }
     }
+    const bool allow_wildcards = bounded_dynamic;
+    const std::vector<runtime::GraphInputAxisGuard> graph_guards =
+        plan.graph_input_guards();
+    for (const auto& guard : graph_guards) {
+        AppendInteger(&canonical, "graph_guard_input", guard.input_index);
+        AppendInteger(&canonical, "graph_guard_axis", guard.axis);
+        AppendInteger(&canonical, "graph_guard_lower", guard.lower);
+        AppendInteger(&canonical, "graph_guard_upper", guard.upper);
+        AppendInteger(&canonical, "graph_guard_divisible_by",
+                      guard.divisible_by);
+        AppendInteger(&canonical, "graph_guard_has_equality",
+                      guard.equal_to.has_value());
+        if (guard.equal_to) {
+            AppendInteger(&canonical, "graph_guard_equal_input",
+                          guard.equal_to->input_index);
+            AppendInteger(&canonical, "graph_guard_equal_axis",
+                          guard.equal_to->axis);
+        }
+    }
+    AppendField(&canonical, "graph_guards_end", "v1");
     const Array<runtime::ValueSpec> values = plan.values();
     std::unordered_map<int64_t, size_t> value_ordinals;
     for (size_t ordinal = 0; ordinal < values.size(); ++ordinal) {
         value_ordinals.emplace(values[ordinal]->value_id, ordinal);
     }
     for (const auto& value : values) {
-        AppendField(&canonical, "value_begin", "v2");
-        AppendValueContract(&canonical, value);
+        AppendField(&canonical, "value_begin", "v3-wildcard");
+        AppendValueContract(&canonical, value, allow_wildcards);
         const auto source = value_ordinals.find(value->alias_source_value_id);
         AppendInteger(&canonical, "alias_source_ordinal",
                       source == value_ordinals.end()
@@ -420,6 +459,10 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
         metadata.Validate();
         AppendField(&canonical, "kernel_signature", signature.CanonicalBytes());
         AppendField(&canonical, "launch_metadata", metadata.CanonicalBytes());
+        AppendField(
+            &canonical, "module_invocation_contract",
+            internal::BorrowCompiledModuleInvocationContract(
+                module, call->symbol).CanonicalBytes());
     }
     for (int64_t id : plan.input_value_ids()) {
         AppendInteger(&canonical, "graph_input_ordinal", value_ordinals.at(id));
@@ -451,6 +494,30 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     AppendField(&canonical, "constants_end", "v1");
     return PlanAbiFingerprint(std::move(canonical));
+}
+
+PlanAbiFingerprint BuildPlanAbiFingerprint(const CompiledGraph& graph) {
+    if (!graph.defined()) {
+        throw std::invalid_argument(
+            "plan ABI requires a defined CompiledGraph");
+    }
+    const Array<runtime::KernelCall> calls = graph.plan().calls();
+    const auto& pins = graph.artifact_pins();
+    if (pins.size() != calls.size()) {
+        throw std::invalid_argument(
+            "plan ABI requires one ordered artifact pin per call");
+    }
+    std::vector<OrderedArtifactIdentity> artifacts;
+    artifacts.reserve(calls.size());
+    for (size_t index = 0; index < calls.size(); ++index) {
+        if (!pins[index].defined()) {
+            throw std::invalid_argument(
+                "plan ABI requires defined ordered artifact pins");
+        }
+        artifacts.push_back({index, std::string(calls[index]->symbol),
+                             pins[index].record().artifact_key});
+    }
+    return BuildPlanAbiFingerprint(graph.module(), graph.plan(), artifacts);
 }
 
 DispatchKey BuildStaticExactDispatchKey(

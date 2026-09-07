@@ -15,15 +15,21 @@
 #include <string>
 #include <utility>
 
+#include "../internal/dynamic_shape_contract.h"
 #include "../internal/kernel_abi_builder.h"
 #include "../internal/kernel_abi_equivalence.h"
 #include "../internal/lowered_graph.h"
 #include "../internal/primitive_cache.h"
 #include "../internal/te_to_tir.h"
 #include "runtime/internal/compiled_module_node.h"
+#include "runtime/internal/module_invocation_contract.h"
 #include "kxc/compiler/pipeline.h"
 #include "kxc/tir/printer/print_ir.h"
 #include "kxc/tir/transforms/bind_cuda_threads.h"
+
+#ifndef KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+#define KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH 0
+#endif
 
 #if KXC_USE_LLVM
 #include <llvm/IR/LLVMContext.h>
@@ -47,6 +53,7 @@ struct PrimitiveWork final {
     PrimitiveArtifactKey artifact_key;
     PrimitiveCacheLease lease;
     PrimitiveArtifactPin pin;
+    std::shared_ptr<const ModuleInvocationContract> invocation_contract;
     std::optional<codegen::KernelLaunchMetadata> launch_metadata;
     std::optional<codegen::CompiledKernel> kernel;
 };
@@ -272,12 +279,13 @@ void CompileBackendMisses(std::vector<PrimitiveWork>* work,
 
 }  // namespace
 
-CompiledPrimitiveBatch CompilePrimitiveUnits(
+static CompiledPrimitiveBatch CompilePrimitiveUnitsImpl(
     const std::vector<PrimitiveUnit>& units,
     const std::vector<LogicalValueContract>& values,
     const CompileConfig& config,
     const CompilerExecutionContract& contract,
-    const std::vector<PrimitiveUnitId>& requested_unit_ids) {
+    const std::vector<PrimitiveUnitId>& requested_unit_ids,
+    const std::vector<DynamicUnitShapeContract>* shape_contracts) {
     if (units.empty()) {
         throw std::invalid_argument(
             "CompilePrimitiveUnits requires at least one PrimitiveUnit");
@@ -300,6 +308,32 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
         }
     }
     config.Validate();
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+    if (shape_contracts) {
+        if (shape_contracts->size() != units.size()) {
+            throw std::invalid_argument(
+                "bounded CompilePrimitiveUnits requires one shape contract per unit");
+        }
+        if (config->target->kind != "llvm" ||
+            config->target->device_type != kCPU ||
+            config->target->device_id != 0) {
+            throw std::invalid_argument(
+                "bounded CompilePrimitiveUnits supports CPU/LLVM only");
+        }
+        for (const DynamicUnitShapeContract& shape_contract :
+             *shape_contracts) {
+            if (shape_contract.version() !=
+                kDynamicUnitShapeContractVersion) {
+                throw std::invalid_argument(
+                    "bounded CompilePrimitiveUnits shape contract version is unsupported");
+            }
+        }
+    }
+#else
+    if (shape_contracts) {
+        throw std::logic_error("bounded CompilePrimitiveUnits is disabled");
+    }
+#endif
     std::vector<std::pair<const PrimitiveUnit*, tir::PrimFunc>> lowered_units;
     lowered_units.reserve(requested_unit_ids.size());
     Map<String, runtime::NDArray> constants;
@@ -307,8 +341,16 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
         const PrimitiveUnit& unit = units[static_cast<std::size_t>(id)];
         ValidatePrimitiveUnit(unit, values);
         relay::LoweredFunction lowered = RunUnitPhase(
-            "per_unit_lowering", unit,
-            [&] { return LowerPrimitiveUnit(values, unit, config->target); });
+            "per_unit_lowering", unit, [&] {
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+                if (shape_contracts) {
+                    return LowerPrimitiveUnit(
+                        values, unit, config->target,
+                        shape_contracts->at(static_cast<std::size_t>(id)));
+                }
+#endif
+                return LowerPrimitiveUnit(values, unit, config->target);
+            });
         for (const auto& binding : lowered.constants()) {
             if (constants.count(binding->key) &&
                 constants.at(binding->key).get() != binding->value.get()) {
@@ -344,13 +386,23 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
             });
         const std::string schedule_contract =
             relay::internal::GetTEScheduleContract(lowered.second);
+        std::shared_ptr<const ModuleInvocationContract> invocation_contract;
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+        if (shape_contracts) {
+            invocation_contract = BuildDynamicModuleInvocationContract(
+                shape_contracts->at(static_cast<std::size_t>(unit.id)),
+                unit, values);
+            invocation_contract->Validate(signature);
+        }
+#endif
         PrimitiveArtifactKey artifact_key = BuildPrimitiveArtifactKey(
             unit.semantic_key, config->target, contract.canonical_bytes,
             schedule_contract.c_str(), contract.backend_version.c_str());
         work.push_back(PrimitiveWork{
             &unit, std::move(lowered.second), std::move(signature),
             std::move(artifact_key), PrimitiveCacheLease(),
-            PrimitiveArtifactPin(), std::nullopt, std::nullopt});
+            PrimitiveArtifactPin(), std::move(invocation_contract),
+            std::nullopt, std::nullopt});
     }
 
     std::vector<std::size_t> misses;
@@ -401,10 +453,21 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
         result.primitives.push_back(CompiledPrimitive{
             item.unit->id, std::move(item.tir), std::move(item.signature),
             std::move(item.pin),
-            item.lease.access() != PrimitiveCacheAccess::kOwner});
+            item.lease.access() != PrimitiveCacheAccess::kOwner,
+            std::move(item.invocation_contract)});
     }
     owner_guard.Dismiss();
     return result;
+}
+
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const std::vector<PrimitiveUnit>& units,
+    const std::vector<LogicalValueContract>& values,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract,
+    const std::vector<PrimitiveUnitId>& requested_unit_ids) {
+    return CompilePrimitiveUnitsImpl(
+        units, values, config, contract, requested_unit_ids, nullptr);
 }
 
 CompiledPrimitiveBatch CompilePrimitiveUnits(
@@ -417,6 +480,50 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
     return CompilePrimitiveUnits(
         units, values, config, contract, requested_unit_ids);
 }
+
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const BoundedCompilePreparation& preparation,
+    const PartitionedGraph& partitioned_graph,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract) {
+    const PartitionedGraph& authoritative =
+        preparation.partitioned_graph();
+    if (partitioned_graph.units.size() != authoritative.units.size() ||
+        partitioned_graph.value_graph.values.size() !=
+            authoritative.value_graph.values.size()) {
+        throw std::invalid_argument(
+            "bounded CompilePrimitiveUnits graph differs from its preparation");
+    }
+    for (std::size_t index = 0; index < partitioned_graph.units.size(); ++index) {
+        if (partitioned_graph.units[index].id != authoritative.units[index].id ||
+            partitioned_graph.units[index].semantic_key !=
+                authoritative.units[index].semantic_key) {
+            throw std::invalid_argument(
+                "bounded CompilePrimitiveUnits unit differs from its preparation");
+        }
+    }
+    for (std::size_t index = 0;
+         index < partitioned_graph.value_graph.values.size(); ++index) {
+        const LogicalValueContract& value =
+            partitioned_graph.value_graph.values[index];
+        const LogicalValueContract& expected =
+            authoritative.value_graph.values[index];
+        if (value.id != expected.id || value.origin != expected.origin ||
+            !SameLogicalValueContract(value, expected)) {
+            throw std::invalid_argument(
+                "bounded CompilePrimitiveUnits value differs from its preparation");
+        }
+    }
+    std::vector<PrimitiveUnitId> requested_unit_ids(
+        partitioned_graph.units.size());
+    std::iota(requested_unit_ids.begin(), requested_unit_ids.end(), 0);
+    return CompilePrimitiveUnitsImpl(
+        partitioned_graph.units, partitioned_graph.value_graph.values,
+        config, contract, requested_unit_ids,
+        &preparation.unit_shape_contracts());
+}
+#endif  // KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
 
 CompiledModule AssemblePrimitiveModule(
     const CompiledPrimitiveBatch& batch,
@@ -449,7 +556,8 @@ CompiledModule AssemblePrimitiveModule(
         entries.push_back(CompiledModuleEntry{
             primitive.current_signature, artifact.launch_metadata,
             RelocateCachedKernel(
-                primitive.pin, primitive.current_signature, Context(unit))});
+                primitive.pin, primitive.current_signature, Context(unit)),
+            primitive.invocation_contract});
     }
     return BuildCompiledModule(
         target, std::move(entries), batch.constants,

@@ -26,6 +26,10 @@ struct Slot final {
 
 ExecutablePlan PlanMemory(const ExecutablePlan& plan) {
     plan.Validate();
+    if (plan.mode() != ExecutablePlanMode::kStatic) {
+        throw std::invalid_argument(
+            "PlanMemory does not reuse dynamic fresh-output storage");
+    }
     const Array<ValueSpec> values = plan.values();
     const Array<KernelCall> calls = plan.calls();
     std::unordered_map<int64_t, ValueSpec> by_id;

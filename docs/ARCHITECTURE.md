@@ -13,11 +13,11 @@
 3. 编译结果包含不可变模块，以及与运行时实现无关的执行计划；
 4. 不支持的语义会在执行前明确报错，不做隐式回退。
 
-当前主路径面向静态精确、单目标编译。LLVM 是主要 CPU 后端；CUDA 仍是实验性后端，只开放保守的调度子集。控制流、符号形状决策、精确 Profile 路由、动态模块调用与自适应替换均为默认关闭的独立能力。
+默认主路径面向静态精确、单目标编译。LLVM 是主要 CPU 后端；CUDA 仍是实验性后端，只开放保守的调度子集。控制流、精确 Profile 路由、受限 bounded 动态图与自适应替换均为默认关闭的独立能力。开启完整门禁后，`Compiler::CompileBounded` 支持固定秩、有限 bounds 的 CPU/LLVM elementwise 纵向切片；它不是通用动态图执行。
 
 当前不作为生产承诺的能力包括：
 
-- 通用动态、参差、数据相关或多态执行；
+- 通用动态秩、参差、数据相关或任意 shape 多态执行；
 - 任意 CUDA 归约、间接访存或嵌套循环调度；
 - 自动微分与训练能力；
 - 分布式已编译内核执行；
@@ -63,6 +63,24 @@ PrepareRelayProgram
 `Compiler::Compile` 会拒绝残留控制拓扑。独立的
 `Compiler::CompileControlFlowExact` 入口仅在 `KXC_ENABLE_CONTROL_RUNTIME=ON` 时可用，
 当前要求使用受支持的精确 CPU 控制子集和真实 LLVM 编译产物。
+
+受限 bounded 生产路径为：
+
+```text
+RestrictedSymbolicShapeAdapter::Prepare
+  -> adapter-minted BoundedCompileRequest
+  -> Compiler::CompileBounded
+     -> BoundedCompilePreparation
+        -> DynamicUnitShapeContract[] + graph-input guards
+     -> CompilePrimitiveUnits(bounded overload)
+        -> dynamic TE -> serial TIR -> KernelSignature
+        -> ModuleInvocationContract（与 extent ABI 共用同一 ordered vector）
+        -> 既有 primitive cache 与 LLVM backend
+     -> CompiledModule + kDynamicFreshOutputV1 ExecutablePlan + ArtifactPin[]
+  -> RuntimeSession（同一 CompiledGraph 可运行多个合法 shape）
+```
+
+该路径只支持 `relu`、`sqrt`、等形 `add`/`mul`，固定秩 direct `InputAxis`/`Const`、有限范围与整除约束，以及 CPU:0/LLVM。它不做隐式路由、运行时编译或 CUDA 回退。
 
 ## 3. 模块与依赖方向
 
@@ -175,6 +193,8 @@ Relay 准备完成后，`BuildValueGraph` 会校验静态拓扑并创建逻辑�
 6. 获取或发布原语缓存；
 7. 返回就绪的 `ArtifactPin`。
 
+bounded overload 复用同一实现，只把 `DynamicUnitShapeContract` 注入 per-unit Lowering，并在缓存获取和后端编译前校验动态 `KernelSignature` 与 `ModuleInvocationContract`。`CompiledPrimitive` 持有本次图的 invocation applicability；可复用的 `CachedPrimitive` 只持有代码与物理 ABI。
+
 全图 `relay::LowerToTIR` 仍有用于兼容性和 IR 测试的用途，但不构成生产能力证据。
 
 ## 8. TE 调度与 TIR
@@ -197,7 +217,7 @@ TE 计算与调度解耦：
 这些原语会影响最终循环结构，并进入附着于 `PrimFunc` 与编译产物键的规范调度契约。非法或不安全用法会直接报错。
 `fuse`、`tile`、`bind`、`thread_axis`、`compute_at`、tensorization、autotuning 均未实现。
 
-CPU 默认调度保守处理单射与归约循环；CUDA TE 循环保持串行。
+CPU 默认调度保守处理单射与归约循环；CUDA TE 循环保持串行。bounded 动态路径使用独立的 serial policy：只有 `InputAxis` 表达式生成有序 `uint64[1]` extent buffer，`Const` 轴保持静态 TIR extent；同一顺序同时生成模块 invocation scalar，并进入调度与编译产物身份。
 `tir::BindCudaThreads` 是当前唯一能证明受支持的一维独占写映射并创建启动元数据的权威入口。
 它会在代码生成前拒绝嵌套归约、写冲突和间接加载索引。
 
@@ -237,18 +257,19 @@ CPU 默认调度保守处理单射与归约循环；CUDA TE 循环保持串行�
 - 当前会话单一执行设备；
 - 数据类型、形状、角色、常量键、对齐和元数均匹配；
 - 存储复用、别名链、状态值与写入顺序有效；
-- 不接受未支持的运行时范围绑定。
+- 静态模式不接受运行时范围绑定。
 
 `Run` 使用模块的默认设备流；`RunAsync` 返回输出与 `AsyncOperation`，并在任务完成前保留存储与模块所有权。状态缓冲区由会话持有，有状态运行会被串行化。会话不会编译缺失变体，不检查 Relay，也不改写原语缓存。
 
-非 `const` 模块调用契约可在 `KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI` 下构建，但在动态图内存规划完成前，`RuntimeSession` 仍会拒绝执行。
+`kDynamicFreshOutputV1` 模式的生产 producer 是 `CompileBounded`；`RuntimeSession` 只接收通过相同契约校验的 CPU/LLVM module/plan。它在首个 launch 前按 wildcard input-axis 顺序统一检查 graph bounds、整除和 shared-symbol 等式；每个 call 再由模块契约解析输出与 extent scalar。输出满足 `logical == physical == valid`，每次运行和每个中间值均使用独立 fresh storage。该模式拒绝 state、alias、donation、storage reuse、常量动态轴、控制计划和 CUDA。完成对象会保活模块、计划、中间存储和先前 operation。
 
 ## 11. 形状与自适应控制面
 
 静态编译仍要求精确形状。可选形状层不会把运行时变成通用动态编译器。
 
 - `KXC_ENABLE_SHAPE_PRODUCTION_EXACT` 启用生产级精确形状适配器，复用准备、原语编译与图组装链路；
-- `KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE` 启用源码树内的实验性决策层，把受限符号模板解析为精确值，并校验生成的精确编译产物；它不独立完成编译、缓存、分配或执行；
+- `KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE` 启用源码树内的实验性决策层，把受限符号模板解析为精确值，并校验生成的精确编译产物；它也能铸造不可由裸 `Function` 伪造的 `BoundedCompileRequest`，但 adapter 本身不编译、缓存、分配或执行；
+- `KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH` 启用显式 `Compiler::CompileBounded`。它要求 dynamic module ABI、restricted/exact shape gates 和可用 LLVM >= 20；编译结果仍是普通不可变 `CompiledGraph`，其 plan ABI 包含 bounded gate/version、graph guards 与每个 module invocation contract；
 - `ExactProfileRouteTable` 是调用方持有的有限路由表，用于查询已发布的精确图；未命中会报错，不允许产生隐式编译副作用；
 - `KXC_ENABLE_ADAPTIVE_HOT_SWAP` 启用边界受限的全图替换控制面。替换过程复用 `CompilePrimitiveUnits` 与 `AssembleCompiledGraph`，旧代际通过租约保活。
 
@@ -289,9 +310,10 @@ JSON 序列化、放置策略与 CPU 集合通信后端。该子系统与单目�
 | `KXC_ENABLE_LLVM` | ON | 仅当发现 LLVM >= 20 时可用；否则 LLVM 测试与编译不可用 |
 | `KXC_ENABLE_CUDA` | ON | 仅当发现 CUDA Toolkit 时启用；显式 CPU 预设会关闭 |
 | `KXC_ENABLE_CONTROL_RUNTIME` | OFF | CPU/LLVM 上的精确控制拓扑 |
-| `KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI` | OFF | 非 `const` 模块调用契约，不等同于通用动态会话内存规划 |
+| `KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI` | OFF | 非 `const` 模块调用契约；只有受支持 plan mode 才能执行 |
 | `KXC_ENABLE_SHAPE_PRODUCTION_EXACT` | OFF | 精确形状适配器 |
 | `KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE` | OFF | 受限决策型符号形状层，启用后进入精确形状适配器 |
+| `KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH` | OFF | 显式 bounded CPU/LLVM `CompileBounded`；要求前述 dynamic/restricted/exact gates 与 LLVM |
 | `KXC_ENABLE_ADAPTIVE_HOT_SWAP` | OFF | 有界全图自适应替换 |
 
 C 后端会输出可读源码，主要用于诊断和 AOT 构建。LLVM 产出可执行的 CPU 编译产物；CUDA 在 Toolkit 与设备可用时生成、加载并启动受支持的内核。

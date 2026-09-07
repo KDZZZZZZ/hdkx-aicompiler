@@ -18,6 +18,7 @@ class ExecutablePlan;
 
 namespace kxc::api {
 
+class CompiledGraph;
 class CompiledModule;
 
 /*! \brief One ordered plan-call to immutable primitive artifact mapping. */
@@ -92,7 +93,7 @@ private:
     std::string digest_;
 };
 
-/*! \brief Opaque, versioned static-exact ABI identity derived from a real plan. */
+/*! \brief Opaque, versioned callable ABI identity derived from a real plan. */
 class PlanAbiFingerprint final {
 public:
     PlanAbiFingerprint() = default;
@@ -120,6 +121,9 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     const CompiledModule& module,
     const runtime::ExecutablePlan& plan,
     const std::vector<OrderedArtifactIdentity>& ordered_artifacts);
+
+/*! \brief Derives the canonical ABI from a compiler graph and its ordered pins. */
+PlanAbiFingerprint BuildPlanAbiFingerprint(const CompiledGraph& graph);
 
 /*! \brief Builds exact input applicability from a graph artifact family and plan. */
 DispatchKey BuildStaticExactDispatchKey(

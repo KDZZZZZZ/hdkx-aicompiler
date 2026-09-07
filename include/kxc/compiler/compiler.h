@@ -17,6 +17,10 @@
 #include "kxc/support/container.h"
 #include "kxc/relay/relay.h"
 
+namespace kxc::api::experimental::restricted_symbolic_shape::v1 {
+class BoundedCompileRequest;
+}
+
 namespace kxc {
 namespace api {
 
@@ -81,6 +85,11 @@ public:
      * \return 可运行的编译模块。
      */
     static CompiledGraph Compile(Function func, CompileConfig config);
+
+    /*! \brief Compiles one adapter-minted bounded CPU/LLVM graph artifact. */
+    static CompiledGraph CompileBounded(
+        const experimental::restricted_symbolic_shape::v1::BoundedCompileRequest&
+            request);
 
     /*! \brief Explicit default-OFF production path for static CPU Relay control.
      *

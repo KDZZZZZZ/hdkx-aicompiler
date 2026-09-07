@@ -63,8 +63,10 @@ bool TestValidPlan() {
     TEST_CHECK(plan.calls()[0]->symbol == "unit_0" &&
                    plan.calls()[1]->symbol == "unit_1",
                "kernel call order must be stable");
-    TEST_CHECK(plan.values()[1]->is_constant,
-               "constant role must be preserved");
+    TEST_CHECK(plan.values()[1]->is_constant &&
+                   plan.mode() == ExecutablePlanMode::kStatic &&
+                   plan.graph_input_guards().empty(),
+               "constant role and default static mode must be preserved");
     TEST_CHECK(plan.constant_value_ids().size() == 1 &&
                    plan.constant_value_ids()[0] == 1,
                "constant value order must be explicit and stable");
@@ -367,6 +369,70 @@ bool TestMemoryReuseAndSharingGuards() {
     return true;
 }
 
+bool TestDynamicFreshOutputPlanMode() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const Array<ValueSpec> values = {
+        ValueSpec(0, 0, {-1, 4}, Float32(), Device::CPU(), true),
+        ValueSpec(1, 1, {-1, 4}, Float32(), Device::CPU(), true),
+        ValueSpec(2, 2, {-1, 4}, Float32(), Device::CPU()),
+        ValueSpec(3, 3, {-1, 4}, Float32(), Device::CPU(), false, false,
+                  true),
+    };
+    const Array<KernelCall> calls = {
+        KernelCall("dynamic_add", {0, 1}, {2}),
+        KernelCall("dynamic_relu", {2}, {3}),
+    };
+    const std::vector<GraphInputAxisGuard> guards = {
+        {0, 0, 2, 8, 2, std::nullopt},
+        {1, 0, 2, 8, 2, GraphInputAxisReference{0, 0}},
+    };
+    const ExecutablePlan plan(
+        values, calls, {0, 1}, {}, {3}, {},
+        ExecutablePlanMode::kDynamicFreshOutputV1, guards);
+    TEST_CHECK(plan.mode() == ExecutablePlanMode::kDynamicFreshOutputV1 &&
+                   plan.graph_input_guards().size() == 2 &&
+                   plan.values()[2].shape()[0] == -1,
+               "dynamic mode must retain fixed-rank wildcard values and guards");
+    auto detached_guards = plan.graph_input_guards();
+    detached_guards.clear();
+    TEST_CHECK(plan.graph_input_guards().size() == 2,
+               "returned graph guards must not mutate the plan");
+    TEST_CHECK(Throws([&] { (void)internal::PlanMemory(plan); }),
+               "dynamic fresh outputs must not enter static memory reuse");
+
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(values, calls, {0, 1}, {}, {3});
+               }),
+               "static mode must continue rejecting wildcard intermediates and outputs");
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(
+                       values, calls, {0, 1}, {}, {3}, {},
+                       ExecutablePlanMode::kDynamicFreshOutputV1,
+                       {guards[0]});
+               }),
+               "dynamic graph guards must cover every wildcard graph-input axis");
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(
+                       values, calls, {0, 1}, {}, {3}, {},
+                       ExecutablePlanMode::kDynamicFreshOutputV1,
+                       {{0, 0, 2, 8, 2, std::nullopt},
+                        {1, 0, 2, 8, 2,
+                         GraphInputAxisReference{1, 0}}});
+               }),
+               "shared-symbol guards must reference a prior input axis");
+    Array<ValueSpec> reused = values;
+    reused[3] = ValueSpec(3, 2, {-1, 4}, Float32(), Device::CPU(), false,
+                          false, true);
+    TEST_CHECK(Throws([&] {
+                   ExecutablePlan invalid(
+                       reused, calls, {0, 1}, {}, {3}, {},
+                       ExecutablePlanMode::kDynamicFreshOutputV1, guards);
+               }),
+               "dynamic mode must reject graph-level storage reuse");
+    return true;
+}
+
 bool TestDuplicateProducerAndUndefinedInput() {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -460,6 +526,7 @@ int main() {
         {"call_order_and_missing_output", TestCallOrderAndMissingOutput},
         {"role_lists_and_object_type_checks", TestRoleListsAndObjectTypeChecks},
         {"state_alias_and_extent_contracts", TestStateAliasAndExtentContracts},
+        {"dynamic_fresh_output_plan_mode", TestDynamicFreshOutputPlanMode},
         {"invalid_state_alias_and_extent_contracts",
          TestInvalidStateAliasAndExtentContracts},
         {"memory_reuse_and_sharing_guards", TestMemoryReuseAndSharingGuards},

@@ -7,6 +7,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -254,13 +255,65 @@ kxc::api::PlanAbiFingerprint PlanAbiForAlignment(
     return BuildPlanAbiFingerprint(module, plan, {{0, "entry", artifact}});
 }
 
+kxc::api::PlanAbiFingerprint DynamicPlanAbi(
+    int64_t graph_upper, kxc::api::ModuleExtent invocation_upper) {
+    using namespace kxc;
+    using namespace kxc::api;
+    using namespace kxc::codegen;
+    const DLDataType dtype{kDLFloat, 32, 1};
+    const KernelSignature signature(
+        "dynamic_identity",
+        {KernelArgSpec("input", KernelArgRole::kInput, dtype, {-1},
+                       Device::CPU(), 8),
+         KernelArgSpec("output", KernelArgRole::kOutput, dtype, {-1},
+                       Device::CPU(), 16, true)});
+    const KernelLaunchMetadata metadata(Device::CPU(),
+                                        CodeGenBackend::kLLVM);
+    ModuleInputContract input{{{0, 1, invocation_upper, 1, std::nullopt,
+                                std::nullopt}}};
+    const ModuleShapeExpr extent = ModuleShapeExpr::InputAxis(0, 0);
+    ModuleTensorContract output;
+    output.logical = {extent};
+    output.physical = {extent};
+    output.valid = {extent};
+    output.max_bytes = 16 * sizeof(float);
+    auto contract = std::make_shared<ModuleInvocationContract>(
+        std::vector<ModuleInputContract>{input},
+        std::vector<ModuleTensorContract>{output},
+        std::vector<ModuleRuntimeExtentScalar>{});
+    const auto launcher = std::make_shared<IdentityLauncher>();
+    const CompiledModule module = internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()),
+        {{signature, metadata,
+          CompiledKernel(signature, metadata, launcher), std::move(contract)}},
+        {});
+    const runtime::ExecutablePlan plan(
+        {runtime::ValueSpec(0, 0, {-1}, dtype, Device::CPU(), true),
+         runtime::ValueSpec(1, 1, {-1}, dtype, Device::CPU(), false, false,
+                            true)},
+        {runtime::KernelCall("dynamic_identity", {0}, {1})}, {0}, {}, {1},
+        {}, runtime::ExecutablePlanMode::kDynamicFreshOutputV1,
+        {{0, 0, 1, graph_upper, 1, std::nullopt}});
+    const PrimitiveArtifactKey artifact(
+        UnitSemanticKey("dynamic-identity-unit"), "cpu", "pipeline", 1,
+        "schedule", "backend");
+    return BuildPlanAbiFingerprint(
+        module, plan, {{0, "dynamic_identity", artifact}});
+}
+
 bool TestPlanAbiUsesKernelCanonicalBytes() {
     const kxc::api::PlanAbiFingerprint first = PlanAbiForAlignment(4);
     const kxc::api::PlanAbiFingerprint changed = PlanAbiForAlignment(8);
     TEST_CHECK(first.defined() && first != changed &&
-                   first.canonical_bytes().find("kxc.kernel-signature.v2") !=
+                   first.canonical_bytes().find("kxc.kernel-signature.v3") !=
                        std::string::npos &&
                    first.canonical_bytes().find("kxc.kernel-launch-metadata.v1") !=
+                       std::string::npos &&
+                   first.canonical_bytes().find(
+                       "executable-plan-abi-v7-dynamic-fresh-output") !=
+                       std::string::npos &&
+                   first.canonical_bytes().find(
+                       "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH") ==
                        std::string::npos &&
                    first.canonical_bytes().find("KernelSignature(") ==
                        std::string::npos,
@@ -280,6 +333,30 @@ bool TestPlanAbiIncludesStateAliasAndExtent() {
                    state_alias.canonical_bytes().find("states_end") !=
                        std::string::npos,
                "Plan ABI identity must include state, alias topology, and valid bytes");
+    return true;
+}
+
+bool TestPlanAbiIncludesDynamicModeGuardsAndInvocationContract() {
+    const kxc::api::PlanAbiFingerprint baseline = DynamicPlanAbi(8, 8);
+    const kxc::api::PlanAbiFingerprint graph_guard_changed =
+        DynamicPlanAbi(7, 8);
+    const kxc::api::PlanAbiFingerprint invocation_changed =
+        DynamicPlanAbi(8, 7);
+    TEST_CHECK(
+        baseline != graph_guard_changed && baseline != invocation_changed &&
+            baseline.canonical_bytes().find(
+                "executable-plan-abi-v8-bounded-dynamic-graph") !=
+                std::string::npos &&
+            baseline.canonical_bytes().find("plan_mode") !=
+                std::string::npos &&
+            baseline.canonical_bytes().find(
+                "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH.v1") !=
+                std::string::npos &&
+            baseline.canonical_bytes().find("graph_guard_upper") !=
+                std::string::npos &&
+            baseline.canonical_bytes().find("KXC_MODULE_INVOKE_V2") !=
+                std::string::npos,
+        "Plan ABI must version dynamic mode, wildcard guards, and invocation bytes");
     return true;
 }
 
@@ -401,6 +478,8 @@ int main() {
         {"dispatch_and_plan_are_separate", TestDispatchAndPlanVariantRemainSeparate},
         {"plan_abi_kernel_canonical", TestPlanAbiUsesKernelCanonicalBytes},
         {"plan_abi_state_alias_extent", TestPlanAbiIncludesStateAliasAndExtent},
+        {"plan_abi_dynamic_mode_guards_invocation",
+         TestPlanAbiIncludesDynamicModeGuardsAndInvocationContract},
         {"graph_identity_logical_placement",
          TestGraphSemanticIdentityCanonicalizesLogicalPlacement},
         {"graph_identity_rejects_undefined_exprs",

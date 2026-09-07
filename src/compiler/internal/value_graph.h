@@ -44,5 +44,8 @@ struct ValueGraph {
 bool IsOrdinaryCompute(relay::OperatorLoweringKind kind);
 ValueGraph BuildValueGraph(const Function& function,
                            Device execution_device = Device());
+ValueGraph BuildBoundedValueGraph(
+    const Function& function, Device execution_device,
+    const BoundedLogicalShapeAdmission& admission);
 
 }  // namespace kxc::api::internal

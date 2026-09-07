@@ -82,7 +82,8 @@ void ValidateValueContract(const ValueSpec& value,
 }
 
 void ValidateRuntimeValue(const ValueSpec& value, const NDArray& array,
-                          const std::string& context) {
+                          const std::string& context,
+                          bool allow_dynamic_dimensions = false) {
     if (!array.defined()) {
         throw std::invalid_argument(context + " requires a defined NDArray");
     }
@@ -94,7 +95,34 @@ void ValidateRuntimeValue(const ValueSpec& value, const NDArray& array,
                                     value->device.ToString() + ", actual " +
                                     array.device().ToString());
     }
-    ValidateShape(value.shape(), array.shape(), context, value->is_input);
+    ValidateShape(value.shape(), array.shape(), context,
+                  allow_dynamic_dimensions);
+}
+
+bool SameShapeExpression(const api::ModuleShapeExpr& lhs,
+                         const api::ModuleShapeExpr& rhs) {
+    std::string left;
+    std::string right;
+    lhs.AppendCanonical(left);
+    rhs.AppendCanonical(right);
+    return left == right;
+}
+
+void ValidateDynamicInvocationOutputs(
+    const api::ModuleInvocationContract& contract,
+    const std::string& context) {
+    for (const auto& output : contract.outputs()) {
+        for (size_t axis = 0; axis < output.logical.size(); ++axis) {
+            if (!SameShapeExpression(output.logical[axis],
+                                     output.physical[axis]) ||
+                !SameShapeExpression(output.logical[axis],
+                                     output.valid[axis])) {
+                throw std::invalid_argument(
+                    context +
+                    " requires logical, physical, and valid output extents to match");
+            }
+        }
+    }
 }
 
 ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
@@ -107,6 +135,15 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
         throw std::invalid_argument("RuntimeSession requires a defined ExecutablePlan");
     }
     plan.Validate();
+    const bool dynamic =
+        plan.mode() == ExecutablePlanMode::kDynamicFreshOutputV1;
+#if !KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
+    if (dynamic) {
+        throw std::invalid_argument(
+            "RuntimeSession dynamic fresh-output mode requires "
+            "KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON");
+    }
+#endif
     const Map<String, NDArray>& module_constants =
         api::internal::BorrowCompiledModuleConstants(module);
     const Array<String> module_symbols = module.symbols();
@@ -153,8 +190,19 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
         const api::ModuleInvocationContract& contract =
             api::internal::BorrowCompiledModuleInvocationContract(
                 module, call->symbol);
-        if (!contract.IsConstantShape(signature) ||
-            !contract.runtime_extent_scalars().empty()) {
+        if (dynamic) {
+            if (metadata->backend != codegen::CodeGenBackend::kLLVM ||
+                metadata->device != Device::CPU()) {
+                throw std::invalid_argument(
+                    context + " dynamic fresh-output mode supports CPU/LLVM only");
+            }
+            if (contract.IsConstantShape(signature)) {
+                throw std::invalid_argument(
+                    context + " has no dynamic invocation contract");
+            }
+            ValidateDynamicInvocationOutputs(contract, context);
+        } else if (!contract.IsConstantShape(signature) ||
+                   !contract.runtime_extent_scalars().empty()) {
             throw std::invalid_argument(
                 context + " requires unsupported nonstatic/scalar module invocation ABI");
         }
@@ -183,8 +231,11 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
                     value_id = regular_inputs[regular_index++];
                     break;
                 case codegen::KernelArgRole::kRuntimeExtent:
-                    throw std::invalid_argument(
-                        context + " cannot bind a generated runtime extent");
+                    if (!dynamic) {
+                        throw std::invalid_argument(
+                            context + " cannot bind a generated runtime extent");
+                    }
+                    continue;
                 case codegen::KernelArgRole::kConstant:
                     if (constant_index >= constant_inputs.size()) {
                         throw std::invalid_argument(
@@ -260,7 +311,7 @@ ValidatedPlanContract ValidateModuleAndPlan(const api::CompiledModule& module,
         ValidateRuntimeValue(FindValue(values, value_id, "RuntimeSession constant"),
                              module_constants.at(key_it->second),
                              "RuntimeSession constant value " +
-                                 std::to_string(value_id));
+                                 std::to_string(value_id), false);
     }
     return result;
 }
@@ -304,7 +355,7 @@ void ValidateStoredSession(const RuntimeSessionNode& node) {
         }
         ValidateRuntimeValue(spec, state->second,
                              "RuntimeSession state value " +
-                                 std::to_string(value_id));
+                                 std::to_string(value_id), false);
     }
     std::lock_guard<std::mutex> lock(node.state_mutex);
     if (node.state_completion.defined() &&
@@ -463,6 +514,76 @@ ExecutionRunCorrelation NotifyRunStart(ExecutionObserver* observer,
     }
 }
 
+void PreflightDynamicGraphInputs(const ExecutablePlan& plan,
+                                 const Array<NDArray>& inputs) {
+    for (const GraphInputAxisGuard& guard : plan.graph_input_guards()) {
+        const Array<int64_t> shape = inputs[guard.input_index].shape();
+        const int64_t extent = shape[guard.axis];
+        if (extent < guard.lower || extent > guard.upper ||
+            extent % guard.divisible_by != 0) {
+            throw std::invalid_argument(
+                "RuntimeSession dynamic graph input guard rejected before launch");
+        }
+        if (guard.equal_to) {
+            const Array<int64_t> reference_shape =
+                inputs[guard.equal_to->input_index].shape();
+            if (extent != reference_shape[guard.equal_to->axis]) {
+                throw std::invalid_argument(
+                    "RuntimeSession dynamic shared input axis rejected before launch");
+            }
+        }
+    }
+}
+
+AsyncOperation InvokeDynamicCall(
+    const api::CompiledModule& module, const KernelCall& call,
+    const std::unordered_map<int64_t, ValueSpec>& values,
+    const std::shared_ptr<internal::ValueTable>& table,
+    const DeviceStream& stream) {
+    Array<NDArray> inputs;
+    for (int64_t value_id : call.input_value_ids()) {
+        const ValueSpec& value =
+            FindValue(values, value_id, "RuntimeSession dynamic execution");
+        if (!value->is_constant) inputs.push_back(table->Get(value_id));
+    }
+    api::ModuleInvocationResult invoked =
+        module.Invoke(call->symbol, inputs, stream);
+    const Array<int64_t> output_ids = call.output_value_ids();
+    if (invoked.outputs.size() != output_ids.size()) {
+        throw std::logic_error(
+            "RuntimeSession dynamic invocation returned the wrong output count");
+    }
+    for (size_t index = 0; index < output_ids.size(); ++index) {
+        const api::ModuleInvocationOutput& output = invoked.outputs[index];
+        if (output.logical != output.physical ||
+            output.logical != output.valid) {
+            throw std::logic_error(
+                "RuntimeSession dynamic invocation returned non-logical extents");
+        }
+        const Array<int64_t> physical_shape = output.storage.shape();
+        if (physical_shape.size() != output.physical.size()) {
+            throw std::logic_error(
+                "RuntimeSession dynamic invocation returned a dynamic rank");
+        }
+        for (size_t axis = 0; axis < physical_shape.size(); ++axis) {
+            if (physical_shape[axis] < 0 ||
+                static_cast<api::ModuleExtent>(physical_shape[axis]) !=
+                    output.physical[axis]) {
+                throw std::logic_error(
+                    "RuntimeSession dynamic invocation output shape is inconsistent");
+            }
+        }
+        const ValueSpec& spec = FindValue(
+            values, output_ids[index], "RuntimeSession dynamic output");
+        ValidateRuntimeValue(
+            spec, output.storage,
+            "RuntimeSession dynamic output " + std::to_string(spec->value_id),
+            true);
+        table->Bind(spec, output.storage);
+    }
+    return std::move(invoked.operation);
+}
+
 }  // namespace
 
 RuntimeSession::RuntimeSession(api::CompiledModule module, ExecutablePlan plan) {
@@ -549,81 +670,116 @@ RunAsyncResult RuntimeSession::RunAsync(const Array<NDArray>& inputs,
             const auto values = IndexValues(node->plan);
             auto table = std::make_shared<internal::ValueTable>();
             if (observer) table->ObserveAllocations(observer, correlation);
+            const bool dynamic =
+                node->plan.mode() == ExecutablePlanMode::kDynamicFreshOutputV1;
             for (size_t i = 0; i < inputs.size(); ++i) {
                 const ValueSpec& spec =
                     FindValue(values, input_ids[i], "RuntimeSession graph input");
                 ValidateRuntimeValue(spec, inputs[i],
-                                     "RuntimeSession input[" + std::to_string(i) + "]");
+                                     "RuntimeSession input[" + std::to_string(i) + "]",
+                                     dynamic);
                 table->Bind(spec, inputs[i]);
             }
 
-            const Map<String, NDArray>& constants =
-                api::internal::BorrowCompiledModuleConstants(node->module);
-            for (int64_t value_id : node->plan.constant_value_ids()) {
-                const auto key = node->constant_keys_by_value.find(value_id);
-                if (key == node->constant_keys_by_value.end() || !constants.count(key->second)) {
-                    throw std::logic_error(
-                        "RuntimeSession validated constant binding disappeared");
-                }
-                const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession constant");
-                table->Bind(spec, constants.at(key->second));
-            }
-
-            std::unique_lock<std::mutex> state_lock;
-            if (!node->states_by_value.empty()) {
-                state_lock = std::unique_lock<std::mutex>(node->state_mutex);
-                if (node->state_completion.defined() &&
-                    !node->state_completion.IsReady()) {
-                    throw std::runtime_error(
-                        "RuntimeSession state execution is still pending");
-                }
-                for (int64_t value_id : node->plan.state_value_ids()) {
-                    const auto state = node->states_by_value.find(value_id);
-                    if (state == node->states_by_value.end()) {
-                        throw std::logic_error(
-                            "RuntimeSession validated state binding disappeared");
-                    }
-                    const ValueSpec& spec =
-                        FindValue(values, value_id, "RuntimeSession state");
-                    table->Bind(spec, state->second);
-                }
-            }
-            ValidateBoundSourceArguments(node->module, node->plan, values, table);
-
             const Array<KernelCall> calls = node->plan.calls();
             Array<AsyncOperation> operations;
-            std::size_t call_index = 0;
-            for (const auto& call : calls) {
-                if (observer) {
-                    DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
-                        sink.OnKernelBegin(
-                            KernelSubmitInfo{node->device, call_index,
-                                             std::string(call->symbol)},
-                            correlation);
-                    });
+            std::unique_lock<std::mutex> state_lock;
+            if (dynamic) {
+                PreflightDynamicGraphInputs(node->plan, inputs);
+                std::size_t call_index = 0;
+                for (const auto& call : calls) {
+                    if (observer) {
+                        DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                            sink.OnKernelBegin(
+                                KernelSubmitInfo{node->device, call_index,
+                                                 std::string(call->symbol)},
+                                correlation);
+                        });
+                    }
+                    operations.push_back(InvokeDynamicCall(
+                        node->module, call, values, table, stream));
+                    ++submit_count;
+                    if (observer) {
+                        ExecutionCompletionCallback completion;
+                        DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                            completion = sink.OnKernelSubmitted(
+                                KernelSubmitInfo{node->device, call_index,
+                                                 std::string(call->symbol)},
+                                correlation);
+                        });
+                        if (completion && operations[operations.size() - 1].defined()) {
+                            operations[operations.size() - 1].ObserveCompletion(
+                                std::move(completion));
+                        }
+                    }
+                    ++call_index;
                 }
-                Array<NDArray> arguments = PrepareCallArguments(
-                    node->module, call, values,
-                    node->required_alignment_by_storage, table);
-                operations.push_back(InvokeOrderedModuleEntry(
-                    node->module, call->symbol, arguments, stream));
-                ++submit_count;
-                if (observer) {
-                    ExecutionCompletionCallback completion;
-                    DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
-                        completion = sink.OnKernelSubmitted(
-                            KernelSubmitInfo{node->device, call_index,
-                                             std::string(call->symbol)},
-                            correlation);
-                    });
-                    // 完成观测在 Wait/IsReady/析构之间恰好结算一次；CPU 同步
-                    // 后端注册即触发，异步后端在真实观测到完成时触发。
-                    if (completion && operations[operations.size() - 1].defined()) {
-                        operations[operations.size() - 1].ObserveCompletion(
-                            std::move(completion));
+            } else {
+                const Map<String, NDArray>& constants =
+                    api::internal::BorrowCompiledModuleConstants(node->module);
+                for (int64_t value_id : node->plan.constant_value_ids()) {
+                    const auto key = node->constant_keys_by_value.find(value_id);
+                    if (key == node->constant_keys_by_value.end() || !constants.count(key->second)) {
+                        throw std::logic_error(
+                            "RuntimeSession validated constant binding disappeared");
+                    }
+                    const ValueSpec& spec = FindValue(values, value_id, "RuntimeSession constant");
+                    table->Bind(spec, constants.at(key->second));
+                }
+
+                if (!node->states_by_value.empty()) {
+                    state_lock = std::unique_lock<std::mutex>(node->state_mutex);
+                    if (node->state_completion.defined() &&
+                        !node->state_completion.IsReady()) {
+                        throw std::runtime_error(
+                            "RuntimeSession state execution is still pending");
+                    }
+                    for (int64_t value_id : node->plan.state_value_ids()) {
+                        const auto state = node->states_by_value.find(value_id);
+                        if (state == node->states_by_value.end()) {
+                            throw std::logic_error(
+                                "RuntimeSession validated state binding disappeared");
+                        }
+                        const ValueSpec& spec =
+                            FindValue(values, value_id, "RuntimeSession state");
+                        table->Bind(spec, state->second);
                     }
                 }
-                ++call_index;
+                ValidateBoundSourceArguments(node->module, node->plan, values, table);
+
+                std::size_t call_index = 0;
+                for (const auto& call : calls) {
+                    if (observer) {
+                        DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                            sink.OnKernelBegin(
+                                KernelSubmitInfo{node->device, call_index,
+                                                 std::string(call->symbol)},
+                                correlation);
+                        });
+                    }
+                    Array<NDArray> arguments = PrepareCallArguments(
+                        node->module, call, values,
+                        node->required_alignment_by_storage, table);
+                    operations.push_back(InvokeOrderedModuleEntry(
+                        node->module, call->symbol, arguments, stream));
+                    ++submit_count;
+                    if (observer) {
+                        ExecutionCompletionCallback completion;
+                        DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+                            completion = sink.OnKernelSubmitted(
+                                KernelSubmitInfo{node->device, call_index,
+                                                 std::string(call->symbol)},
+                                correlation);
+                        });
+                        // 完成观测在 Wait/IsReady/析构之间恰好结算一次；CPU 同步
+                        // 后端注册即触发，异步后端在真实观测到完成时触发。
+                        if (completion && operations[operations.size() - 1].defined()) {
+                            operations[operations.size() - 1].ObserveCompletion(
+                                std::move(completion));
+                        }
+                    }
+                    ++call_index;
+                }
             }
 
             Array<NDArray> outputs;

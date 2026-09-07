@@ -107,8 +107,7 @@ void ValidateCandidate(const ProductionCompileRequest& request,
         throw std::invalid_argument(
             "adaptive candidate dispatch differs from the exact request");
     }
-    if (BuildPlanAbiFingerprint(graph.module(), graph.plan(),
-                                candidate.identities) != request.plan_abi()) {
+    if (BuildPlanAbiFingerprint(graph) != request.plan_abi()) {
         throw std::invalid_argument(
             "adaptive candidate Plan ABI differs from the exact request");
     }
@@ -158,9 +157,7 @@ ProductionCompileRequest::ProductionCompileRequest(
         graph_semantic_key_, baseline_graph_.plan());
     dispatch_key_ = BuildStaticExactDispatchKey(graph_semantic_key_,
                                                 shape_profile_key_);
-    plan_abi_ = BuildPlanAbiFingerprint(baseline_graph_.module(),
-                                        baseline_graph_.plan(),
-                                        ordered_artifacts_);
+    plan_abi_ = BuildPlanAbiFingerprint(baseline_graph_);
     Validate();
 }
 
