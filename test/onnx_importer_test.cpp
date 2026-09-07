@@ -44,6 +44,14 @@
 #define KXC_ONNX_STATIC_S1_PARAMS_PATH "static_s1.params.bin"
 #endif
 
+#ifndef KXC_ONNX_EQUAL_WHERE_JSON_PATH
+#define KXC_ONNX_EQUAL_WHERE_JSON_PATH "equal_where.import.json"
+#endif
+
+#ifndef KXC_ONNX_EQUAL_WHERE_PARAMS_PATH
+#define KXC_ONNX_EQUAL_WHERE_PARAMS_PATH "equal_where.params.bin"
+#endif
+
 #ifndef KXC_USE_LLVM
 #define KXC_USE_LLVM 0
 #endif
@@ -329,6 +337,64 @@ bool TestRunStaticS1ProtobufLLVM() {
     return true;
 }
 
+// M4 接线验证：真实 protobuf 经 Python importer 序列化后，C++ reifier 重建
+// Equal→Where 组合图（Equal 的 bool 输出直接作 Where condition），通过 LLVM
+// Compiler 与 RuntimeSession 执行，并与独立 NumPy 参考逐元素 bit-exact 比较。
+// 图：Equal(a[2,3], b[3]) → cond[2,3] bool → Where(cond, x[1,3], y[]) → out[2,3]。
+// x/y 是 initializer 常量参数；Where 只做分支选择且比较值均可精确表示，
+// 因此期望结果为 bit-exact（容差 0）。
+bool TestRunEqualWhereProtobufLLVM() {
+    kxc::frontend::ImportedONNXModel imported =
+        kxc::frontend::LoadONNXImportSpec(
+            KXC_ONNX_EQUAL_WHERE_JSON_PATH,
+            KXC_ONNX_EQUAL_WHERE_PARAMS_PATH);
+    TEST_CHECK(imported.function.defined() && imported.function->params.size() == 2 &&
+                   imported.params.size() == 2 &&
+                   imported.input_names.size() == 2 &&
+                   imported.input_names[0] == "a" &&
+                   imported.input_names[1] == "b" &&
+                   imported.output_names.size() == 1 &&
+                   imported.output_names[0] == "out",
+               "Equal-Where fixture must preserve importer/reifier bindings");
+    TEST_CHECK(CheckTensor(imported.function->body.checked_type(), {2, 3}, "float32"),
+               "Equal-Where fixture output contract mismatch");
+#if KXC_USE_LLVM
+    const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
+    const auto compiled = kxc::api::Compiler::Compile(
+        prepared, kxc::api::CompileConfig::Create(
+                      kxc::BuildTarget(kxc::Device::CPU()), 1));
+    TEST_CHECK(compiled.module().IsReady() && compiled.plan().calls().size() == 2,
+               "Equal-Where fixture must compile to two LLVM units");
+
+    const std::vector<float> a_values = {1, 2, 3, 4, 5, 6};
+    const std::vector<float> b_values = {1, 0, 3};
+    // 独立参考：Equal 的 NumPy 多向广播 + Where 逐元素选择，手工展开。
+    const std::vector<float> expected = {10, -1, 30, -1, -1, -1};
+
+    kxc::runtime::NDArray a = kxc::runtime::NDArray::Empty(
+        {2, 3}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    a.CopyFromBytes(a_values.data(), a.NBytes());
+    kxc::runtime::NDArray b = kxc::runtime::NDArray::Empty(
+        {3}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    b.CopyFromBytes(b_values.data(), b.NBytes());
+    kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
+    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({a, b});
+    TEST_CHECK(outputs.size() == 1 && ShapeEquals(outputs[0], {2, 3}),
+               "Equal-Where RuntimeSession output shape mismatch");
+
+    std::vector<float> actual(6, 0.0f);
+    outputs[0].CopyToBytes(actual.data(), outputs[0].NBytes());
+    for (size_t index = 0; index < actual.size(); ++index) {
+        TEST_CHECK(actual[index] == expected[index],
+                   "Equal-Where RuntimeSession must match the NumPy reference "
+                   "bit-exactly at " +
+                       std::to_string(index) + ": got " +
+                       std::to_string(actual[index]));
+    }
+#endif
+    return true;
+}
+
 // 验证导入的 ResNet18 可完成 Relay 到 LLVM 编译。
 bool TestCompileResNet18ToLLVM() {
 #if KXC_USE_LLVM
@@ -429,6 +495,9 @@ int main() {
         if (!TestRunStaticS1ProtobufLLVM()) {
             return 1;
         }
+        if (!TestRunEqualWhereProtobufLLVM()) {
+            return 1;
+        }
         if (!TestCompileResNet18ToLLVM()) {
             return 1;
         }
@@ -444,6 +513,7 @@ int main() {
 #if KXC_USE_LLVM
     std::cout << "[PASS] onnx_transformer_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_static_s1_protobuf_reifier_llvm_runtime\n";
+    std::cout << "[PASS] onnx_equal_where_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_importer_compile_resnet18_llvm\n";
     if (ShouldRunResNet18Kernel()) {
         std::cout << "[PASS] onnx_importer_run_resnet18_llvm\n";
@@ -451,6 +521,7 @@ int main() {
 #else
     std::cout << "[SKIP] onnx_transformer_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
     std::cout << "[SKIP] onnx_static_s1_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
+    std::cout << "[SKIP] onnx_equal_where_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
 #endif
     std::cout << "All available ONNX importer tests passed.\n";
     return 0;

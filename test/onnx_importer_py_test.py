@@ -600,6 +600,113 @@ def test_where_rejects_invalid_static_contract(
         )
 
 
+def _equal_model(a_shape, b_shape, *, a_dtype=TensorProto.FLOAT, b_dtype=TensorProto.FLOAT,
+                 output_shape=(2, 3), output_dtype=TensorProto.BOOL, attrs=None,
+                 opset=17):
+    nodes = [helper.make_node("Equal", ["a", "b"], ["out"], name="equal")]
+    if attrs:
+        nodes[0].attribute.extend(
+            helper.make_attribute(name, value) for name, value in attrs.items()
+        )
+    graph = helper.make_graph(
+        nodes,
+        "equal_test",
+        [helper.make_tensor_value_info("a", a_dtype, a_shape),
+         helper.make_tensor_value_info("b", b_dtype, b_shape)],
+        [helper.make_tensor_value_info("out", output_dtype, output_shape)],
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6
+    )
+
+
+def test_equal_mapping_and_broadcast_output_contract():
+    imported = import_onnx_model(
+        _equal_model([2, 1], [], output_shape=[2, 1])
+    )
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("equal", {})
+    ]
+    assert imported.function.outputs[0].shape == [2, 1]
+    assert imported.function.outputs[0].dtype == "bool"
+
+
+@pytest.mark.parametrize("dtype", [TensorProto.INT32, TensorProto.INT64, TensorProto.FLOAT])
+def test_equal_accepts_each_supported_same_dtype(dtype):
+    imported = import_onnx_model(
+        _equal_model([2, 3], [3], a_dtype=dtype, b_dtype=dtype,
+                     output_shape=[2, 3])
+    )
+
+    assert imported.function.nodes[0].op_name == "equal"
+    assert imported.function.outputs[0].dtype == "bool"
+
+
+def test_equal_feeds_where_as_condition():
+    graph = helper.make_graph(
+        [
+            helper.make_node("Equal", ["a", "b"], ["cond"], name="s1_equal"),
+            helper.make_node("Where", ["cond", "x", "y"], ["out"], name="s1_where"),
+        ],
+        "equal_where_test",
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2, 3]),
+         helper.make_tensor_value_info("b", TensorProto.FLOAT, [3]),
+         helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3]),
+         helper.make_tensor_value_info("y", TensorProto.FLOAT, [])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 3])],
+    )
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=6
+    )
+
+    imported = import_onnx_model(model)
+
+    assert [(node.op_name, node.attrs) for node in imported.function.nodes] == [
+        ("equal", {}),
+        ("where", {}),
+    ]
+    assert imported.function.outputs[0].shape == [2, 3]
+    assert imported.function.outputs[0].dtype == "float32"
+
+
+def test_equal_rejects_attributes():
+    model = _equal_model([2, 3], [3], attrs={"axis": 0})
+    with pytest.raises(ValueError, match="does not support attributes"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize(
+    ("a_shape", "b_shape", "a_dtype", "b_dtype", "message"),
+    [
+        ([2, 3], [2, 3], TensorProto.INT32, TensorProto.FLOAT,
+         "matching input dtypes"),
+        ([2, 3], [2, 3], TensorProto.DOUBLE, TensorProto.DOUBLE,
+         "same-dtype int32, int64, or float32"),
+        ([2, 3], [2, 3], TensorProto.BOOL, TensorProto.BOOL,
+         "same-dtype int32, int64, or float32"),
+        ([2, 3], [2, 4], TensorProto.FLOAT, TensorProto.FLOAT,
+         "incompatible broadcast dimensions"),
+    ],
+)
+def test_equal_rejects_invalid_static_contract(
+    a_shape, b_shape, a_dtype, b_dtype, message
+):
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(
+            _equal_model(a_shape, b_shape, a_dtype=a_dtype, b_dtype=b_dtype,
+                         output_shape=[2, 3])
+        )
+
+
+def test_equal_rejects_declared_output_not_bool():
+    with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
+        import_onnx_model(
+            _equal_model([2, 3], [3], output_shape=[2, 3],
+                         output_dtype=TensorProto.FLOAT)
+        )
+
+
 def test_matmul_softmax_transpose_mapping_and_attrs():
     model = _static_operator_model(
         [

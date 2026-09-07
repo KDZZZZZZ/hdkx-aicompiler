@@ -209,6 +209,33 @@ void WriteWhereFixture(const TemporaryDirectory& directory,
     std::ofstream(directory.path() / "params.bin", std::ios::binary);
 }
 
+void WriteEqualFixture(const TemporaryDirectory& directory,
+                       const std::string& a_dtype, const std::string& b_dtype,
+                       const std::string& output_shape,
+                       const std::string& output_dtype = "bool",
+                       const std::string& attrs = R"json({})json") {
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": [2, 3], "dtype": ")json" + a_dtype + R"json("},
+      {"name": "b", "shape": [3], "dtype": ")json" + b_dtype + R"json("}
+    ],
+    "outputs": [
+      {"name": "out", "shape": )json" + output_shape + R"json(, "dtype": ")json" +
+      output_dtype + R"json("}
+    ],
+    "nodes": [
+      {"name": "equal_node", "op_name": "equal", "inputs": ["a", "b"], "outputs": ["out"], "attrs": )json" + attrs + R"json(}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+}
+
 void WriteLayerNormFixture(const TemporaryDirectory& directory,
                            const std::string& output_shape,
                            const std::string& attrs =
@@ -937,6 +964,123 @@ bool TestWhereUnsupportedBranchDTypeIsRejected() {
     return true;
 }
 
+bool TestValidStaticEqual() {
+    TemporaryDirectory directory;
+    WriteEqualFixture(directory, "float32", "float32", "[2, 3]");
+
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(), "valid static Equal import spec should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 3}, "bool"),
+               "reified Equal output should use the broadcast shape and bool dtype");
+    return true;
+}
+
+bool TestEqualAttrsAreStrict() {
+    TemporaryDirectory directory;
+    WriteEqualFixture(directory, "float32", "float32", "[2, 3]", "bool",
+                      R"json({"axis": 0})json");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "equal_node", &message),
+               "Equal reifier must reject noncanonical attrs with the node name");
+    return true;
+}
+
+bool TestEqualMismatchedDTypesAreRejected() {
+    TemporaryDirectory directory;
+    WriteEqualFixture(directory, "int32", "float32", "[2, 3]");
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "equal_node", &message),
+               "hand-written Equal specs cannot compare mixed dtypes");
+    TEST_CHECK(message.find("matching input dtypes") != std::string::npos,
+               "Equal dtype-mismatch diagnostic should name the rule");
+    return true;
+}
+
+bool TestEqualUnsupportedDTypesAreRejected() {
+    for (const std::string& dtype : {"float64", "bool"}) {
+        TemporaryDirectory directory;
+        WriteEqualFixture(directory, dtype, dtype, "[2, 3]");
+        std::string message;
+        TEST_CHECK(ThrowsWithMessage(
+                       [&] {
+                           kxc::frontend::LoadONNXImportSpec(
+                               (directory.path() / "model.json").string(),
+                               (directory.path() / "params.bin").string());
+                       },
+                       "equal_node", &message),
+                       "Equal reifier must reject dtypes outside int32/int64/float32");
+        TEST_CHECK(message.find("same-dtype int32, int64, or float32") !=
+                       std::string::npos,
+                   "Equal unsupported-dtype diagnostic should name the subset");
+    }
+    return true;
+}
+
+bool TestEqualIncompatibleBroadcastIsRejected() {
+    // 手写 spec 把 b 声明为 [4]：广播不可行，必须连同节点名一起失败。
+    TemporaryDirectory directory;
+    const std::string json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [
+      {"name": "a", "shape": [2, 3], "dtype": "float32"},
+      {"name": "b", "shape": [4], "dtype": "float32"}
+    ],
+    "outputs": [{"name": "out", "shape": [2, 3], "dtype": "bool"}],
+    "nodes": [
+      {"name": "equal_node", "op_name": "equal", "inputs": ["a", "b"], "outputs": ["out"], "attrs": {}}
+    ]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    std::ofstream(directory.path() / "model.json") << json;
+    std::ofstream(directory.path() / "params.bin", std::ios::binary);
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "equal_node", &message),
+               "Equal reifier must reject incompatible broadcast shapes");
+    return true;
+}
+
+bool TestEqualNonBoolDeclaredOutputIsRejected() {
+    TemporaryDirectory directory;
+    WriteEqualFixture(directory, "float32", "float32", "[2, 3]", "float32");
+
+    std::string message;
+    TEST_CHECK(ThrowsWithMessage(
+                   [&] {
+                       kxc::frontend::LoadONNXImportSpec(
+                           (directory.path() / "model.json").string(),
+                           (directory.path() / "params.bin").string());
+                   },
+                   "equal_node", &message),
+               "declared Equal output must be bool to match the inferred output");
+    TEST_CHECK(message.find("output contract mismatch for 'out'") != std::string::npos,
+               "Equal declared-output diagnostic should name the output value");
+    return true;
+}
+
 bool TestValidStaticLayerNorm() {
     TemporaryDirectory directory;
     WriteLayerNormFixture(directory, "[2, 3, 4]");
@@ -1040,6 +1184,13 @@ int main() {
         {"where_strict_attrs", TestWhereAttrsAreStrict},
         {"where_declared_output_mismatch", TestWhereDeclaredOutputMismatchIsRejected},
         {"where_unsupported_branch_dtype", TestWhereUnsupportedBranchDTypeIsRejected},
+        {"valid_static_equal", TestValidStaticEqual},
+        {"equal_strict_attrs", TestEqualAttrsAreStrict},
+        {"equal_mismatched_dtypes_rejected", TestEqualMismatchedDTypesAreRejected},
+        {"equal_unsupported_dtypes_rejected", TestEqualUnsupportedDTypesAreRejected},
+        {"equal_incompatible_broadcast_rejected", TestEqualIncompatibleBroadcastIsRejected},
+        {"equal_non_bool_declared_output_rejected",
+         TestEqualNonBoolDeclaredOutputIsRejected},
         {"valid_static_layer_norm", TestValidStaticLayerNorm},
         {"layer_norm_declared_output_mismatch", TestLayerNormDeclaredOutputMismatchIsRejected},
         {"layer_norm_unsupported_attrs", TestLayerNormUnsupportedAttrsAreRejected},
