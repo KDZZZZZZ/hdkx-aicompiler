@@ -4,7 +4,7 @@
 
 这一波的入口是 [M9 模型与导出验收](M9_MINIMIND_TARGET.md)。M9 的 E0 只需锁定并审计导出合同即可先行；导出合同稳定后，M2、M3、M4/M5 可以并行。M10 作为独立 E 线审计仓库里已经存在的结构化控制流：`KXC_ENABLE_CONTROL_RUNTIME` 默认关闭，gate-on 才能验证静态精确 `If` 和有界 `While` 的真实 LLVM 路径。M10 不阻塞 L1a；只有在 M2/M3 的 state/extent 合同落定后，才评估它是否用于 L1b 生成循环。M1 的第一波实现保留为基础，第二波只补 MiniMind 所需的关联字段和真实模型 profile，不重新设计事件系统。
 
-> 状态：待执行。第一波已完成的证据见 [G0](G0_BASELINE.md) / [G1](G1_RECORD.md)；本计划是当前第一组可分派工作。模块总览见 [README](README.md)，目标模型阶梯见 [PROJECT_GOAL](../PROJECT_GOAL.md) §2.2。
+> 状态：**已执行，G2 部分通过（2026-09-08）**。逐项结果、L1a 的确切阻塞点与跨线冲突处置见 [G2 验收记录](G2_RECORD.md)；第一波证据见 [G0](G0_BASELINE.md) / [G1](G1_RECORD.md)。原始分派内容保留如下。模块总览见 [README](README.md)，目标模型阶梯见 [PROJECT_GOAL](../PROJECT_GOAL.md) §2.2。
 
 ## 1. 先过模型门禁
 

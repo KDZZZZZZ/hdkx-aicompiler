@@ -31,6 +31,7 @@
 - [第二波 MiniMind-L1 并行计划](implementation/WAVE_2.md) — 导出门禁、L1a prefill、KV/形状/前端/控制流五条并行线和 G2 验收。
 - [G0 基线记录](implementation/G0_BASELINE.md) — 已完成的共同基点：commit、测试清单与口径。
 - [G1 第一波验收记录](implementation/G1_RECORD.md) — 第一波组合验收证据与已知缺陷。
+- [G2 第二波验收记录](implementation/G2_RECORD.md) — 第二波逐项结果、L1a 的确切阻塞点与跨线冲突处置。
 - [第二波并行计划](implementation/WAVE_2.md) — MiniMind-L1 的 A–E 五条并行线与 G2 组合验收。
 - [M9：MiniMind 模型目标与导出验收](implementation/M9_MINIMIND_TARGET.md) — 导出门禁 E0 与 L1a/L1b 证据阶梯。
 - [M0：共同基线与证据口径](implementation/M0_BASELINE.md)
