@@ -38,15 +38,19 @@ Tensor comm_reduce(const Tensor& data, const Array<int>& axis, bool keepdims, FC
             Array<PrimExpr> eval_indices;
             size_t idx_counter = 0;
             size_t red_counter = 0;
-            
+
             for (size_t i = 0; i < ndim; ++i) {
                 if (reduce_set.count(i)) {
                     eval_indices.push_back(AsPrimExpr(reduce_axes[red_counter++]));
+                } else if (keepdims) {
+                    // keepdims 输出轴与输入轴一一对应（被归约轴以 1 保留在原位），
+                    // 非归约输入轴 i 必须读输出轴 i；压缩计数只适用于 keepdims=0。
+                    eval_indices.push_back(indices[i]);
                 } else {
                     eval_indices.push_back(indices[idx_counter++]);
                 }
             }
-            
+
             return combiner(data(eval_indices), reduce_axes);
         },
         name,

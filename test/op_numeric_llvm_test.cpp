@@ -493,6 +493,7 @@ void TestSlice() {
 }
 
 // 验证 ReduceMean 的轴和 keepdims 语义。
+// 三维用例统一使用 data[i][j][k] = i*100 + j*10 + k 的 [2,3,4] 输入。
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("reduce_mean"), {data},
@@ -502,7 +503,76 @@ void TestReduceMean() {
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6};
     std::vector<float> out(2, 0.0f);
     CompileAndRun("reduce_mean", func, {Input(data_buf), Output(out)});
+    // mean over j: [1,2,3]->2, [4,5,6]->5。
     ExpectNear(out, {2.0f, 5.0f});
+
+    // keepdims=0 且多轴归约：mean over (i,j) 固定 k = 60+k。
+    kxc::Var cube("cube", kxc::TensorType({2, 3, 4}, "float32"));
+    kxc::Call flat_mean(kxc::relay::Op::Get("reduce_mean"), {cube},
+                        kxc::relay::ReduceMeanAttrs::Create({0, 1}, 0));
+    kxc::Function flat_func({cube}, flat_mean);
+
+    std::vector<float> cube_buf(24);
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            for (int k = 0; k < 4; ++k) {
+                cube_buf[static_cast<size_t>(i * 12 + j * 4 + k)] =
+                    static_cast<float>(i * 100 + j * 10 + k);
+            }
+        }
+    }
+    std::vector<float> flat_out(4, 0.0f);
+    CompileAndRun("reduce_mean_keepdims0_multi_axis", flat_func,
+                  {Input(cube_buf), Output(flat_out)});
+    ExpectNear(flat_out, {60.0f, 61.0f, 62.0f, 63.0f});
+
+    // keepdims=1 归约中间轴：mean over j 固定 (i,k) = i*100 + 10 + k，
+    // 输出 [2,1,4]，不得把保留轴之后的列塌缩为首列值。
+    kxc::Call mid_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                       kxc::relay::ReduceMeanAttrs::Create({1}, 1));
+    kxc::Function mid_keep_func({cube}, mid_keep);
+    std::vector<float> mid_keep_out(8, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_axis1", mid_keep_func,
+                  {Input(cube_buf), Output(mid_keep_out)});
+    ExpectNear(mid_keep_out, {10, 11, 12, 13, 110, 111, 112, 113});
+
+    // keepdims=1 归约首轴：mean over i 固定 (j,k) = 50 + j*10 + k，
+    // 输出 [1,3,4]。
+    kxc::Call head_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                        kxc::relay::ReduceMeanAttrs::Create({0}, 1));
+    kxc::Function head_keep_func({cube}, head_keep);
+    std::vector<float> head_keep_out(12, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_axis0", head_keep_func,
+                  {Input(cube_buf), Output(head_keep_out)});
+    ExpectNear(head_keep_out,
+               {50, 51, 52, 53, 60, 61, 62, 63, 70, 71, 72, 73});
+
+    // keepdims=1 同时归约前两轴：mean over (i,j) = 60 + k，输出 [1,1,4]。
+    kxc::Call head2_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                         kxc::relay::ReduceMeanAttrs::Create({0, 1}, 1));
+    kxc::Function head2_keep_func({cube}, head2_keep);
+    std::vector<float> head2_keep_out(4, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_axis01", head2_keep_func,
+                  {Input(cube_buf), Output(head2_keep_out)});
+    ExpectNear(head2_keep_out, {60, 61, 62, 63});
+
+    // keepdims=1 负轴 [-2] 等价于轴 1，输出 [2,1,4]。
+    kxc::Call negative_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                            kxc::relay::ReduceMeanAttrs::Create({-2}, 1));
+    kxc::Function negative_keep_func({cube}, negative_keep);
+    std::vector<float> negative_keep_out(8, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_axis_neg2", negative_keep_func,
+                  {Input(cube_buf), Output(negative_keep_out)});
+    ExpectNear(negative_keep_out, {10, 11, 12, 13, 110, 111, 112, 113});
+
+    // keepdims=1 归约尾轴：mean over k = i*100 + j*10 + 1.5，输出 [2,3,1]。
+    kxc::Call tail_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                        kxc::relay::ReduceMeanAttrs::Create({2}, 1));
+    kxc::Function tail_keep_func({cube}, tail_keep);
+    std::vector<float> tail_keep_out(6, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_tail_axis", tail_keep_func,
+                  {Input(cube_buf), Output(tail_keep_out)});
+    ExpectNear(tail_keep_out, {1.5f, 11.5f, 21.5f, 101.5f, 111.5f, 121.5f});
 }
 
 // 验证 Softmax 通过 max-subtraction 在极大正负 logits 下保持有限。
