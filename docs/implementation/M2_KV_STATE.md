@@ -1,10 +1,20 @@
 # M2：KV cache 与动态有效状态
 
-自回归模型每生成一个 token，都要读取前面 token 的 Key/Value。KV cache 就是把这些数据留在内存里，下一步追加新内容后继续使用。现在 KXC 已有会话持久内存、原地写和异步保活，但还没有把这些机制组成真正的缓存追加、有效长度和注意力读取协议。
+MiniMind 是当前 L1 纯文本 decoder，MiniMind-O 的 Thinker 复用同一 backbone。第一波已经证明 RuntimeSession 可以重复运行并记录执行事件，也有 state/alias/persistent buffer 的通用机制；但这些机制还没有表达 Transformer 的 past/present、每层 KV 布局、cursor 和有效长度。当前导出目录有静态 prefill/decode 图，decode 的 past/present 只是外部张量，不能据此宣称 session 自己维护了 cache。
 
-本模块要实现“分配一块有上限的缓存，多次运行逐步写入，后续计算只读取有效部分”。例如容量为 8 个 token，先写入 3 个，再追加 1 个，长度从 3 变为 4；不能把尚未写入的 4 个位置算进去，也不能超出容量继续运行。第一切片只证明追加/读取；完整 prefill + decode 还需要 M3 的有界注意力算子。
+本模块要先让 MiniMind-L1 在同一个 RuntimeSession 中完成 prefill 后的多步 decode：固定物理容量，追加新 K/V，更新 valid extent，注意力只读取有效区。MiniMind-O 的 Mimi 流式卷积 ring buffer 是更强的状态，留到 L3，不把它混入这份 KV 合同。
 
-> 状态：待实施，第二波优先模块。依赖 [M0](M0_BASELINE.md)；观测沿用 [M1](M1_RUNTIME_PROFILING.md)。当前状态机制见[架构总览](../ARCHITECTURE.md)，返回[模块总览](README.md)。
+> 状态：待实施，第二波 B 线优先模块。先通过 M9 的 decode 签名门禁，再与 M3 的 extent/shape 合同协同；观测沿用第一波 M1。M10 的控制流运行时当前明确拒绝 state 和 runtime extent；若后续要让 bounded `While` 承载真实 decode，本模块的 `ExecutablePlan`/`RuntimeSession` state owner 与 extent ABI 必须先成为唯一交接点。当前目标模型以 PROJECT_GOAL.md §2.2 为准，第一波证据见 G1_RECORD.md。
+
+## 本模块要做的模块
+
+| 模块 | 需要定义的内容 | 首个可验收结果 |
+|---|---|---|
+| KV layout | 层、K/V、batch、sequence、kv_heads、head_dim 的稳定顺序；当前导出记录为 batch, seq, kv_heads, head_dim | past/present 输入输出顺序和字节布局可复现 |
+| capacity/extent | 物理容量与当前有效长度分离，total = past + current | 超容量、负值、溢出在 launch 前拒绝 |
+| append/read | prefill 写入，decode 追加，attention 只读有效区 | 同一 session 连续三步 decode 与全量参考一致 |
+| ownership | session 持有 state，completion 保活，失败后的 session 状态明确 | cache 地址跨 run 稳定，不能跨 session 偷传裸指针 |
+| evidence | profile 关联 stage、layer、extent 和 state version | bundle 能解释每步读写，不改变 kernel ABI |
 
 ## 当前支持与缺口
 
@@ -41,7 +51,7 @@
 5. RuntimeSession 在首次构造时分配，run 时绑定持久 Storage；长度更新在成功完成后提交。在失败前拒绝的调用不能改变长度或缓存。
 6. 做 3、1、1 个 token 的连续追加，与独立 CPU 参考逐元素对比，证明有效长度依次为 3、4、5。
 
-S1 可以先跑通，不等待完整 shape-as-value 或 ONNX decoder，但必须说明它只证明状态能力。
+S1 可以先用受控的生产 state 图跑通，不等待完整 shape-as-value；但只有在 M9 E2 锁定 MiniMind past/present 签名后，才能把它接到真实 decoder。受控图只证明状态能力，不代表 MiniMind-L1 已通过。
 
 ### S2：prefill 和 decode 沿用同一份状态
 
@@ -49,7 +59,7 @@ S1 可以先跑通，不等待完整 shape-as-value 或 ONNX decoder，但必须
 
 如果需要两个不同计划，必须先在现有 runtime owner 中明确状态绑定/交接合同，并测试容量、布局、ABI 和生命周期；不能把裸指针从一个会话递给另一个会话。两个方案不能同时形成两套缓存权威。
 
-验收使用固定权重的微型因果注意力：一次 prefill 后至少三步 decode，每一步与全量重算参考比较；检查无效容量区填入的哨兵值不会影响结果。真实 ONNX 路径由 M4 另行接通。
+验收使用固定权重的微型因果注意力：一次 prefill 后至少三步 decode，每一步与全量重算参考比较；检查无效容量区填入的哨兵值不会影响结果。真实 MiniMind ONNX 路径由 M4/M9 共同接通；如果 dynamic_axes 导出仍未通过，先使用固定形状 decode 和明确标注的 external-KV 证据。
 
 ### S3：扩展目标与执行形态
 

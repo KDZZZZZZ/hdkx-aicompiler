@@ -1,10 +1,20 @@
 # M3：形状作为值与有界 Transformer 计算
 
-模型不只计算浮点数据，也会计算“下一步张量应该有多长”。例如先读取输入的序列长度，再拼出一个目标形状，最后做 Reshape 或 Expand。现在已有形状代数和精确 profile 路由，但 ONNX 里的这条形状计算链还没有接通；有界动态分支也只证明了窄的逐元素执行。
+MiniMind-L1 的目标是 prefill + decode，MiniMind-O 的 Thinker 复用这条文本 backbone。第一波 G0 已证明一份 CPU/LLVM fresh-output 产物可以服务多个合法 shape，但它明确拒绝 state、alias 和动态有效长度；第一波 G1 也只接通了静态 ONNX 子集。MiniMind 的 dynamic_axes 原始导出会出现 Shape、Gather、Concat、Range、ConstantOfShape 和大量 Unsqueeze，静态/常量折叠后又会消失一部分，因此“图里出现 Shape”不等于必须照搬导出器的 shape 链。
 
-本模块要让编译器理解由输入维度和常量推导的形状，并在已声明的范围内执行。它还必须把有界能力扩展到实际需要的注意力算子。否则即使 Shape 节点能导入，MatMul 和 Softmax 仍会在动态维度上被拒绝，变长 Transformer 依然无法运行。
+本模块要把真正需要的形状值接入唯一的 ShapeProgram/ModuleInvocationContract：先验证 MiniMind 导出的 batch、prefill sequence、past 和 total 关系，再在固定 rank、有界范围和整除约束内执行。它还要把有界能力扩展到实际 attention；否则 Shape 虽可计算，MatMul/Softmax/KV 仍不能在变长输入上运行。未知 rank、数据相关任意形状和运行时隐式编译继续拒绝。
 
-> 状态：待实施，G0 后推进。与 [M2](M2_KV_STATE.md)、[M4](M4_ONNX_IMPORT.md)协同。现有边界见[架构总览](../ARCHITECTURE.md)，返回[模块总览](README.md)。
+> 状态：待实施，第二波 C 线。先过 [M9](M9_MINIMIND_TARGET.md) E0 的导出审计，与 [M2](M2_KV_STATE.md) 的 extent 合同、[M4](M4_ONNX_IMPORT.md) 的节点重建协同；M10 的控制流 runtime 当前拒绝运行时生成的 extent，因此若控制图要参与 decode，必须消费本模块发布的受限 shape/extent ABI，不能在控制流 executor 里复制 ShapeProgram。第一波证据见 [G0](G0_BASELINE.md)/[G1](G1_RECORD.md)。
+
+## 本模块要做的模块
+
+| 模块 | 要解决的问题 | 首个证据 |
+|---|---|---|
+| 导出 shape 审计 | 真实 past/total/batch/seq 轴和输出顺序未锁定 | M9 receipt + 轴/范围报告 |
+| Shape-as-value | Shape 等控制张量不能稳定进入 Reshape/Expand | Shape→Reshape 真实生产链，结果不是 metadata |
+| 有界 attention | dynamic batch/sequence 下 attention 仍会被拒绝 | 两个合法 shape 的同一产物 LLVM 结果 |
+| 交接 M2 | KV 的 cursor/valid extent 不能由普通数据 shape 猜出 | prefill→decode 的显式 extent ABI |
+| 失败边界 | route miss、越界、未知 rank 可能触发隐式编译 | launch 前零调用/零编译负例 |
 
 ## 当前可以复用什么
 
@@ -19,6 +29,8 @@ ShapeProgram 是编译控制面的形状权威；runtime 使用既有 ModuleInvo
 
 首版只接受固定 rank、有限范围、来自输入维度和常量的可证明表达式。一个 shape tensor 的长度必须可知，它表示的每个维度有界。由普通张量内容决定的任意输出大小，以及未知 rank，继续拒绝。
 
+MiniMind 首轮只绑定这些维度：batch、prefill sequence、decode current sequence（首版为 1）、past length 和 total length；hidden、heads、kv_heads、head_dim、vocab 和层数固定。`total = past + current`、GQA 的 repeat factor、RoPE 的 head 维度必须在导出 receipt 和 invocation contract 中各出现一次，不能由 importer、router、RuntimeSession 分别推导。
+
 例如输入为 `[B,S,H]`，B、S 有明确上下限，H 固定。编译器可以证明由输入维度组成的目标形状；运行时在 guard 通过后只求值并分配。它不能遇到一个没见过的 S 就编译新模型。
 
 ## 分阶段实施
@@ -31,7 +43,7 @@ ShapeProgram 是编译控制面的形状权威；runtime 使用既有 ModuleInvo
 4. 如果 shape 值本身是图输出，也要物化为真实结果，不能只更新调试 metadata；如果只作为形状控制输入，lower 到既有 invocation/extent 合同。
 5. shape-to-module 的翻译验证范围、溢出、参数顺序和 producer/consumer 对应，运行时不增加第二个任意 shape VM。
 
-S1 第一项定义和最后一项消费者必须同一纵向切片交付，不能先合入一个没有 lowerer 的 shape tensor API。
+S1 第一项定义和最后一项消费者必须同一纵向切片交付，不能先合入一个没有 lowerer 的 shape tensor API。若 M9 的 dynamic decoder 导出失败，S1 先用静态/受控 shape fixture 验证合同，同时把真实动态路径留在失败清单。
 
 ### S2：模型中的形状算子
 
@@ -53,6 +65,8 @@ S1 第一项定义和最后一项消费者必须同一纵向切片交付，不�
 每次只放开已实现的动态维度组合。例如 head_dim/归约容量先保持固定，batch/序列长度有界；需要动态归约时，明确 init/update、loop extent、有效区和尾部访问的证明。通用 Gather 的运行时索引还需独立范围检查，不能沿用 ONNX 当前“常量索引已证明安全”的结论。
 
 与 M2 联合完成一个同会话 prefill + decode 的有界图；各形状的输出都与显式 exact 编译或独立参考比较。若还缺某个动态算子，则保留该项 unsupported，不把 S1/S2 结果替代 S3。
+
+MiniMind 的第一组 attention 证据固定 head_dim=96、kv_heads=4、current sequence=1，先只放开 batch 和 past/total 的有限区间。不要把把 static prefill 图上 650 个实算节点的通过，写成 dynamic attention 已通过；动态轴导出中额外的 Shape/Range/ConstantOfShape 只有在真实图仍保留且被执行时才进入能力矩阵。
 
 ## 实现落点与分工
 

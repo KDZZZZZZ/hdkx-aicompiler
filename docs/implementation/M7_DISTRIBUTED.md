@@ -1,10 +1,10 @@
 # M7：分布式模块先补证据，再决定是否接入内核
 
-现在 `distributed/` 有会话、worker、放置、JSON 计划和 CPU 集合通信代码，规模约 2,487 行。但现有执行器对 compiled module kernel 仍会报“launch is not implemented”，仓库里没有对应的分布式测试集。因此这些代码可以证明计划解释和通信行为，不能证明多 worker 执行了 KXC 编译产物。
+第一波和第二波都以单机 CPU/LLVM MiniMind-L1 为验收边界。当前 distributed/ 有会话、worker、放置、JSON 计划和 CPU 集合通信代码，规模约 2,487 行；执行器对 compiled module kernel 仍会报 launch 未实现，也没有多 worker 数值证据。因此 MiniMind 单机通过不能升级成分布式能力，MiniMind-O 的多流会话也不属于本模块首版。
 
-本模块先把事实补齐，不把单机模拟包装成分布式生产能力。第一阶段增加计划/放置/通信的可重复测试和 compiled-kernel 缺口的负例；第二阶段只有在明确 ABI 桥接方案后，才接一个 CPU compiled module 纵向切片。
+本模块先证明计划、放置、通信和失败诊断，再决定是否桥接一个已经编译的 CPU kernel。worker 只能执行外部提供的 artifact，不编译、不猜 shape、不维护 KV registry；若 ABI 无法安全表达就保留为 unsupported。
 
-> 状态：待实施，低于第一波优先级。边界见[架构总览](../ARCHITECTURE.md)，返回[模块总览](README.md)。不处理 KV 一致性或跨机器服务化。
+> 状态：待实施，低于 MiniMind-L1 核心波次优先级。当前安排见 [WAVE_2](WAVE_2.md)，边界见 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.3。不处理 KV 一致性或跨机器服务化。
 
 ## S1：计划和通信证据
 

@@ -1,18 +1,28 @@
-# M5：Equal、Pow、Erf 的完整算子链
+# M5：Equal、Pow、Erf 与 MiniMind 逐元素缺口
 
-现在已有逐元素计算、广播、TIR 比较和 LLVM 算术代码生成，但 Equal、Pow、Erf 还不是可从契约一路运行的完整算子。特别是现有 LLVM 数学调用名单没有 Pow/Erf，不能只增加 Relay 名称就认为能执行。Constant 是导入层的常量物化，由 M4 负责，不需要新数学算子。
+第一波 C 线已经完成 Equal 的声明、InferType、TE/TIR、LLVM 数值、负例，并由 B 线接通 Equal→Where 的 ONNX 组合；Constant 也已由第一波导入。MiniMind 的实际静态折叠图仍需要 Pow、Mul、Div、Sqrt、ReduceMean、Reshape、Expand、Neg、Sigmoid、Unsqueeze 等语义，dynamic_axes 图还会保留更多 shape 控制算子。导入器里“有名字”不等于该 dtype、广播、属性和 LLVM 执行都已验证。
 
-本模块第一波只做 Equal：比较两份输入，产生布尔张量，再把结果交给现有 Where。这样能用最少的新语义验证“声明、生成注册、类型、lowering、实际执行”整条链。Pow 和 Erf 在后续独立切片中加入，并各自验证 backend 调用和数值边界。
+本模块的后续工作按 M9 的真实 prefill/decode inventory 排序：先补 L1a 实际用到的逐元素/静态变形算子，再独立处理 Pow/Erf；不为了凑算子数量放开任意 dtype、广播或外部函数。MiniMind-O 的音频算子不属于本模块。
 
-> 状态：待实施。第一波 C 线，依赖 [M0](M0_BASELINE.md)，ONNX 接线交给 [M4](M4_ONNX_IMPORT.md)。现有支持以[算子支持矩阵](../OP_SUPPORT_MATRIX.md)和[架构总览](../ARCHITECTURE.md)为准。
+> 状态：Equal 第一波已完成；Pow/Erf 和 MiniMind 实际缺口待实施。第一波证据见 [G1](G1_RECORD.md)，当前分派见 [WAVE_2](WAVE_2.md)。现有能力以 [OP_SUPPORT_MATRIX.md](../OP_SUPPORT_MATRIX.md) 和 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.2 为准。
 
-## S1：Equal 的具体行为
+## 本模块要做的模块
+
+| 模块 | 当前情况 | 计划结果 |
+|---|---|---|
+| Equal | Relay/LLVM/ONNX/Where 闭环已验收 | 只维护回归和能力矩阵，不重复注册 |
+| L1a 算子 | OP_TODO 的静态折叠口径列出 Expand、Neg、Pow、Sigmoid、Unsqueeze 等缺口 | 每个实际节点有 dtype/广播/attrs/LLVM/负例证据 |
+| Pow | LLVM 数学调用和边界仍未闭环 | float32 受限指数子集，独立数值误差合同 |
+| Erf | 主要服务后续 GELU/视觉链，MiniMind 当前未必使用 | 只有真实 inventory 命中后才进入 L1；否则保持 deferred |
+| shape/control | dynamic_axes 下的 Shape/ConstantOfShape 等不是纯逐元素 | 交给 M3/M4，不在此模块偷做 shape VM |
+
+## S1：Equal 的具体行为（已完成）
 
 例如 `A=[1,2,3]`、`B=[1,0,3]`，结果应为 `[true,false,true]`。广播允许时，小输入可以按已证明的轴关系参与比较；不兼容 shape 或未支持 dtype 必须拒绝。ONNX 语义采用逐元素比较和多向广播，见[官方 Equal 定义](https://onnx.ai/onnx/operators/onnx__Equal.html)。
 
 首版以静态精确 CPU/LLVM 为目标，明确列出支持的同类型 int32/int64/float32 输入；bool 输入仅在验证通过后纳入。输出沿用仓库已有 bool 存储约定。浮点 NaN、正负零和普通值的比较遵守选定语义，不能用整数位相等代替数值相等。
 
-## S1 实施步骤
+## S1 实施步骤（第一波已完成，以下作为回归基线）
 
 1. 在 [relay_op_contract.json](../../contracts/relay_op_contract.json) 增加 canonical `equal`，声明固定二元输入、单输出、无 attrs、纯计算和确定性。优先使用现有 generated subset。
 2. 复用现有广播 shape 工具实现 InferType。输出逻辑 dtype 为 bool，输入 dtype 不匹配或 shape 不可广播时立即报错。
@@ -62,10 +72,10 @@ ctest --test-dir out/build/dev-ninja-cpu --output-on-failure --no-tests=error \
 
 完成相应构建后执行上述测试，再跑公共检查及 LLVM 全量。不能手改 generated 文件。
 
-- [ ] Equal 有单一注册、正确 dtype/广播推导、真实生产 lowering 和 LLVM 数值结果。
-- [ ] bool 结果能够直接被 Where 消费；空张量和物理 buffer 表示正确。
-- [ ] 非法元数、类型、广播在 backend launch 前拒绝。
-- [ ] ONNX 接线与合同一致，C/B 两线的联合 fixture 通过。
+- [x] Equal 有单一注册、正确 dtype/广播推导、真实生产 lowering 和 LLVM 数值结果。
+- [x] bool 结果能够直接被 Where 消费；空张量和物理 buffer 表示正确。
+- [x] 非法元数、类型、广播在 backend launch 前拒绝。
+- [x] ONNX 接线与合同一致，C/B 两线的联合 fixture 通过。
 - [ ] Pow/Erf 各自独立标记实现、编译和数值层结果，不能用 Equal 验证替代。
 
 ## 身份和风险

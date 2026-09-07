@@ -26,8 +26,9 @@
 
 当前生效的分派计划例外地维护在 [implementation/](implementation/README.md) 下，随实施推进逐步退出：
 
-- [模块实施计划总览](implementation/README.md) — 当前基线事实、M0–M8 模块表与模块间衔接。
-- [第一波并行计划](implementation/WAVE_1.md) — G0 共同基线、A/B/C 三条并行线、所有权与集成验收。
+- [模块实施计划总览](implementation/README.md) — 第一波收尾状态、MiniMind-L1 目标、M0–M10 模块表与模块间衔接。
+- [第一波并行计划](implementation/WAVE_1.md) — 已完成的 G0 共同基线、A/B/C 三条并行线、所有权与集成验收记录。
+- [第二波 MiniMind-L1 并行计划](implementation/WAVE_2.md) — 导出门禁、L1a prefill、KV/形状/前端/控制流五条并行线和 G2 验收。
 - [G0 基线记录](implementation/G0_BASELINE.md) — 已完成的共同基点：commit、测试清单与口径。
 - [G1 第一波验收记录](implementation/G1_RECORD.md) — 第一波组合验收证据与已知缺陷。
 - [M0：共同基线与证据口径](implementation/M0_BASELINE.md)
@@ -39,6 +40,8 @@
 - [M6：热替换执行与决策证据](implementation/M6_HOT_SWAP.md)
 - [M7：分布式证据与执行桥接](implementation/M7_DISTRIBUTED.md)
 - [M8：TE Program 与首个跨算子融合](implementation/M8_TE_PROGRAM.md)
+- [M9：MiniMind 模型目标与导出验收](implementation/M9_MINIMIND_TARGET.md)
+- [M10：结构化控制流（If / 有界 While）](implementation/M10_STRUCTURED_CONTROL.md)
 
 ## 工具文档
 
