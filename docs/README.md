@@ -41,6 +41,8 @@
 - [M7：分布式证据与执行桥接](implementation/M7_DISTRIBUTED.md)
 - [M8：TE Program 与首个跨算子融合](implementation/M8_TE_PROGRAM.md)
 - [M9：MiniMind 模型目标与导出验收](implementation/M9_MINIMIND_TARGET.md)
+- [M9 E0 导出 receipt](implementation/M9_E0_RECEIPT.md) — 锁定的导出合同、SHA 与动态导出门禁结论。
+- [M9 E2 decode 签名审计](implementation/M9_E2_SIGNATURE.md) — past/present 签名与 M2 绑定要求。
 - [M10：结构化控制流（If / 有界 While）](implementation/M10_STRUCTURED_CONTROL.md)
 - [M10 控制流 receipt](implementation/M10_CONTROL_RECEIPT.md) — C0 审计、C1 gate-on 证据与 L1b 循环选择。
 
