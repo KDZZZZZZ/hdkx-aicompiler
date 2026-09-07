@@ -73,3 +73,18 @@ ctest --test-dir out/build/dev-ninja-cpu --output-on-failure --no-tests=error \
 新 op 名、attrs、类型和常量进入已有 semantic key；backend 调用规则变化进入相应 backend/pipeline 身份。仅增加新算子条目不意味着无条件提升整个合同格式版本，只有实际兼容性变化才升级。
 
 三项设计检查：复用现有 TIR EQ/广播/调用分派；不产生第二 registry 或 bool ABI；每项新入口都有真实编译运行者和负例。第一波验收只要求 S1 及其 ONNX 交接，不把 S2/S3 顺手加入同一个 PR。
+
+## 第二波 D 线实施记录（2026-09-07）
+
+S2 Pow 已实现：canonical `pow`（fieldless、同 dtype float32 二元广播），
+TE `te::topi::power` 发射 `"pow"` TIR 调用，LLVM math-call 分派显式固定参数
+数量（2）、操作数 float 类型与位宽，并绑定 `llvm.pow` 声明（libm `powf` 经
+JIT host 符号解析）；未使用 `exp(b·log a)`——负底数整数指数
+`pow(-2,3) = -8` 的真实执行结果本身即排除该替代。数值矩阵：零指数（含
+`0^0=1`）、负底数整数指数、合法分数指数、`pow(+0,-1)=+inf`、
+`pow(-2,0.5)=NaN`（按 C99/llvm.pow 声明）。
+
+同批 canonical `sigmoid` 选定语义为 `1/(1+exp(-x))`（直接调用既有 exp 分派，
+不用 tanh 近似），与独立 double 参考在测试点对齐到 1e-5；canonical `neg`
+实现为 `0 - x`（+0.0 输入得 +0.0 而非 -0.0，边界已在算子实现注释声明）。
+S3 Erf 不在本波范围。
