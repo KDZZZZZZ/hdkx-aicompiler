@@ -106,7 +106,15 @@ decode 单步 4s / 1.49 GB（本线独立复测确认 666 kernel、6.85453e-06�
 
 该性质由两条独立路径确认——生成侧比对内存中的数组，本线比对落盘后的 `in_*.bin` / `ref_*.bin` 字节。两条路的数据源不同，因此结论不依赖于 fixture 生成代码本身是否有缺陷。
 
-这解掉了原先「要么加一次拷贝、要么把 past 输入与 present 输出绑到同一块 state」的二选一：**后者的语义前提已经成立**，那次拷贝是冗余的，剩下的是 runtime 绑定的工程问题而非语义风险。
+这解掉了「绑同一块存储会不会破坏历史」这一层顾虑：重叠区的语义安全已经成立，那次拷贝在**这一点上**是冗余的。
+
+**但它没有解掉第 2 项。** 本文早先把剩余工作写成「runtime 绑定的工程问题而非语义风险」，那个判断过于乐观，此处更正。
+
+真实 decode 图的 KV 结构是 `present_k_i = Concat(past_k_i, new_k, axis=1)`，拼接在序列轴上；`past_k_i` 唯一的消费者就是这个 Concat，而其结果沿 `Unsqueeze → Expand → Reshape → Transpose → MatMul` 直接成为 **attention 的归约维**（本线追链确认，`past [1,16,4,96] → present [1,17,4,96]`）。
+
+而 M2 的定容 state 是 `[batch, capacity, heads, head_dim]`，capacity 固定、有效长度靠 extent 表达。两者**不是绑定问题，是结构不匹配**：按 capacity 喂 past，attention 会把无效槽位一并算进归约，`Concat` 出来的 present 也会是 `capacity+1` 而不是 `extent+1`。
+
+第 2 项要求的「无效容量哨兵不影响 logits」正好卡在这里——append-only 保证了**重叠区**的安全，没有解决**无效区参与计算**。因此第 8 项的真实工作量可能不在 runtime 绑定，而在下面两条路本身。
 
 要真正通过第 2 项，二选一（详见 [M9 E2 签名](M9_E2_SIGNATURE.md) §4）：
 
@@ -154,9 +162,13 @@ decode 单步 4s / 1.49 GB（本线独立复测确认 666 kernel、6.85453e-06�
    - **有界动态 past**——一个产物覆盖所有步，依赖 M3 的受限 shape 绑定；
    - **定容 state + 有效长度掩码**——依赖 M2 §3 第 1、2 条。
 
-   §3.5 已确认 `present` 前缀逐位等于输入 `past`，真实图对 cache 只追加不改写，因此把 past 输入与 present 输出绑到同一块 state 在语义上安全，无需冗余拷贝。这是走第 2 条路的前提，已经成立。
+   §3.5 已确认 `present` 前缀逐位等于输入 `past`（只追加不改写），因此绑同一块存储不会破坏历史。但**这不足以通过第 2 项**：真实图把 past 长度直接带进 attention 的归约维，而定容 state 的无效槽位会一并参与计算——这是结构不匹配，不是绑定工程问题。详见 §3.5 的更正。
 
-   实操提示（避免重复摸索）：`export_minimind_onnx.py` 已有 `--past N`，「每步一个产物」这条现状随时可复现，不需要新工具。真正的工作量在 runtime 侧——M2 的 `KvStatePlanDeclaration` 是声明式生成 plan 的，接真实图需要**新增一条绑定路径**把 `past` 输入与 `present` 输出绑到同一块 state，而不是去改那个声明。
+   实操提示（避免重复摸索）：
+   - `export_minimind_onnx.py` 已有 `--past N`，「每步一个产物」这条现状随时可复现，不需要新工具。
+   - 先排除最省事的一条：试导入 E0 的**动态轴 decode 图**（SHA `6d3f4262…`）。若它能走通有界路径，一个产物即可覆盖所有步，第 2 项直接成立且不必动 M2 的 state。预期走不通（importer 要求静态形状、M3 受限子集未必覆盖 transformer），但必须先排除。
+   - 若走不通，则需量化「让真实图变成 extent 感知」的代价。大概率要在导出侧按有效长度加 attention mask——那属于 **M9 的导出合同变更**，不是 runtime 能单独解决的。
+   - M2 的 `KvStatePlanDeclaration` 是声明式生成 plan 的，不消费任意 Relay 图；接真实图需要新增路径而不是改那个声明。
 9. **G2 第 4 项**：host greedy 生成循环 + bundle 与 export receipt / run_id 的关联字段。依赖第 8 项拿到可复用的多步产物。
 10. **根因收口（建议单独立项）**：给 `RelayPassFunctor` 遍历基类提供默认记忆化，见 §3.3。本波修的四处是同一模式的四个实例；不收口的话，每新增一个按树遍历就重新引入一次指数缺陷。**这项独立于 L1，不阻塞任何人，但拖得越久新写的 pass 越多。**
 11. **插桩惰性化**：`RunInstrumentedPass` 无条件渲染两次全图 IR 文本（Relay/TIR 两处同构），见 §3.4。8 层 7 秒说明 TIR 侧没有同样的爆炸，优先级低于第 10 项。
