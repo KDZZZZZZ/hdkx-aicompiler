@@ -110,11 +110,12 @@ void WriteGatherFixture(const TemporaryDirectory& directory,
                         const std::string& output_shape,
                         const std::string& attrs = R"json({"axis": 1})json",
                         const std::vector<int64_t>& indices = {0, -3},
-                        bool constant_indices = true) {
+                        bool constant_indices = true,
+                        const std::string& index_dtype = "int64") {
     const std::string index_input = constant_indices
         ? ""
         : R"json(,
-      {"name": "indices", "shape": [2], "dtype": "int64"})json";
+      {"name": "indices", "shape": [2], "dtype": ")json" + index_dtype + R"json("})json";
     const std::string params = constant_indices
         ? R"json([{"name": "indices", "shape": [2], "dtype": "int64", "offset": 0, "nbytes": 16}])json"
         : "[]";
@@ -930,8 +931,20 @@ bool TestCastSubsetIsEnforced() {
                    "cast_node", &message),
                "hand-written Cast specs cannot target non-float32 dtypes");
 
+    // float32 源是恒等转换：MiniMind 的 RMSNorm 用 `.float()` 提升精度，在已是
+    // float32 的图上导出成恒等 Cast。Relay cast 对 dtype 不设限，同 dtype 经
+    // topi 落成一次拷贝，因此这条路径被接受而不是拒绝。
+    TemporaryDirectory identity_source;
+    WriteCastFixture(identity_source, "float32", "float32");
+    const auto identity = kxc::frontend::LoadONNXImportSpec(
+        (identity_source.path() / "model.json").string(),
+        (identity_source.path() / "params.bin").string());
+    TEST_CHECK(identity.function.defined(),
+               "an identity float32 Cast should reify");
+
+    // 未支持的源 dtype 仍然拒绝：合同只放开恒等这一格。
     TemporaryDirectory wrong_source;
-    WriteCastFixture(wrong_source, "float32", "float32");
+    WriteCastFixture(wrong_source, "bool", "float32");
     TEST_CHECK(ThrowsWithMessage(
                    [&] {
                        kxc::frontend::LoadONNXImportSpec(
@@ -939,7 +952,7 @@ bool TestCastSubsetIsEnforced() {
                            (wrong_source.path() / "params.bin").string());
                    },
                    "cast_node", &message),
-               "hand-written Cast specs cannot use float32 sources in S1");
+               "hand-written Cast specs cannot use unsupported source dtypes");
     return true;
 }
 
@@ -1205,16 +1218,38 @@ bool TestGatherDeclaredOutputMismatchIsRejected() {
     return true;
 }
 
-bool TestGatherDynamicIndicesAreRejected() {
+// 运行时索引是 embedding 查表的形态：值到 launch 才存在，导入期只能固定
+// 形状/dtype/axis 合同。值域由已 lower 的 GatherCompute 守卫承担——负索引按
+// ONNX 语义折回，越界经 Select 取零且不形成越界 Load。
+bool TestGatherRuntimeIndicesAreAccepted() {
     TemporaryDirectory directory;
     WriteGatherFixture(directory, "[2, 2, 4]", R"json({"axis": 1})json",
                        {0, -3}, false);
+    const auto imported = kxc::frontend::LoadONNXImportSpec(
+        (directory.path() / "model.json").string(),
+        (directory.path() / "params.bin").string());
+    TEST_CHECK(imported.function.defined(),
+               "Gather with a runtime index tensor should reify");
+    TEST_CHECK(ShapeEquals(imported.function->body.checked_type().As<kxc::TensorTypeNode>(),
+                           {2, 2, 4}, "float32"),
+               "runtime-index Gather keeps the declared output contract");
+    TEST_CHECK(imported.input_names.size() == 2 &&
+                   imported.input_names[1] == "indices",
+               "the index tensor stays a real graph input");
+    return true;
+}
+
+// 运行时索引仍须是整数张量：dtype 合同在导入期就要成立。
+bool TestGatherRuntimeIndicesRejectNonIntegerDType() {
+    TemporaryDirectory directory;
+    WriteGatherFixture(directory, "[2, 2, 4]", R"json({"axis": 1})json",
+                       {0, -3}, false, "float32");
     TEST_CHECK(Throws([&] {
                    kxc::frontend::LoadONNXImportSpec(
                        (directory.path() / "model.json").string(),
                        (directory.path() / "params.bin").string());
                }),
-               "Gather reifier must reject dynamic indices even in hand-written specs");
+               "Gather reifier must reject a non-integer runtime index tensor");
     return true;
 }
 
@@ -1564,7 +1599,9 @@ int main() {
         {"valid_static_gather", TestValidStaticGather},
         {"gather_strict_attrs", TestGatherAttrsAreStrict},
         {"gather_declared_output_mismatch", TestGatherDeclaredOutputMismatchIsRejected},
-        {"gather_dynamic_indices_rejected", TestGatherDynamicIndicesAreRejected},
+        {"gather_runtime_indices_accepted", TestGatherRuntimeIndicesAreAccepted},
+        {"gather_runtime_indices_reject_non_integer_dtype",
+         TestGatherRuntimeIndicesRejectNonIntegerDType},
         {"gather_oob_constant_indices_rejected",
          TestGatherOutOfDomainConstantIndicesAreRejected},
         {"valid_static_concatenate", TestValidStaticConcatenate},

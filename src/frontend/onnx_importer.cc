@@ -792,9 +792,14 @@ void ValidateCastSubset(const Array<Expr>& args, const ObjectRef& attrs,
     }
     InferArgTypes(args, function_params);
     const auto* type = args[0].checked_type().As<TensorTypeNode>();
-    if (!type || (type->dtype != "int32" && type->dtype != "int64")) {
+    // float32 源是恒等转换：MiniMind 的 RMSNorm 用 `.float()` 提升精度，在已是
+    // float32 的图上导出成恒等 Cast。Relay cast 对 dtype 不设限，同 dtype 经
+    // topi 落成一次拷贝。
+    if (!type || (type->dtype != "int32" && type->dtype != "int64" &&
+                  type->dtype != "float32")) {
         throw std::runtime_error(
-            "Cast import supports only int32/int64 sources in the static S1 subset: " +
+            "Cast import supports only int32/int64/float32 sources in the static S1 "
+            "subset: " +
             node_name);
     }
 }
@@ -833,21 +838,22 @@ void ValidateReduceMeanSubset(const Array<Expr>& args, const ObjectRef& attrs,
     }
 }
 
-void ValidateGatherConstantIndices(const Array<Expr>& args,
-                                   const ObjectRef& attrs,
-                                   const Array<Var>& function_params,
-                                   const std::string& node_name) {
+// 索引可以是常量，也可以是运行时张量（embedding 查表就是后者）。两条路径都
+// 固定 data rank / axis / extent / 索引 dtype 合同；差别只在值域：常量索引在
+// 导入期逐值证明落在 ONNX 域内，运行时索引的值到 launch 才存在，由 lowering
+// 后的 GatherCompute 守卫承担——负索引按 ONNX 语义折回，越界经 Select 取零
+// 且不形成越界 Load。
+void ValidateGatherIndices(const Array<Expr>& args,
+                           const ObjectRef& attrs,
+                           const Array<Var>& function_params,
+                           const std::string& node_name) {
     if (args.size() != 2) {
         throw std::runtime_error(
-            "Gather import node must contain exactly data and constant indices: " +
-            node_name);
+            "Gather import node must contain exactly data and indices: " + node_name);
     }
-    const auto* constant = args[1].As<ConstantNode>();
     const auto* gather_attrs = attrs.As<relay::GatherAttrsNode>();
-    if (!constant || !constant->data.defined() || !gather_attrs) {
-        throw std::runtime_error(
-            "Gather import indices must be a constant initializer payload: " +
-            node_name);
+    if (!gather_attrs) {
+        throw std::runtime_error("Gather import requires GatherAttrs: " + node_name);
     }
 
     relay::InferTypePass(Function(function_params, args[0]));
@@ -869,6 +875,22 @@ void ValidateGatherConstantIndices(const Array<Expr>& args,
             node_name);
     }
 
+    const auto* constant = args[1].As<ConstantNode>();
+    if (!constant) {
+        relay::InferTypePass(Function(function_params, args[1]));
+        const auto* index_type = args[1].checked_type().As<TensorTypeNode>();
+        if (!index_type ||
+            (index_type->dtype != "int32" && index_type->dtype != "int64")) {
+            throw std::runtime_error(
+                "Gather import runtime indices must be an int32 or int64 tensor: " +
+                node_name);
+        }
+        return;
+    }
+    if (!constant->data.defined()) {
+        throw std::runtime_error(
+            "Gather import constant indices have no payload: " + node_name);
+    }
     const DLDataType dtype = constant->data.dtype();
     if (dtype.code != kDLInt || dtype.lanes != 1 ||
         (dtype.bits != 32 && dtype.bits != 64)) {
@@ -995,7 +1017,7 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         }
         ObjectRef attrs = MakeAttrs(op_name, Field(node, "attrs", ctx), node_name);
         if (op_name == "gather") {
-            ValidateGatherConstantIndices(args, attrs, function_params, node_name);
+            ValidateGatherIndices(args, attrs, function_params, node_name);
         }
         if (op_name == "mul" || op_name == "subtract" || op_name == "divide" ||
             op_name == "sqrt") {

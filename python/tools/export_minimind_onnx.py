@@ -110,13 +110,17 @@ def main():
     ap.add_argument("--max-pos", type=int, default=2048, help="RoPE 表长度，只影响常量大小")
     ap.add_argument("--flash", action="store_true", help="保留 SDPA 融合路径（默认关闭以导出显式 attention）")
     ap.add_argument("--static", action="store_true", help="不声明 dynamic_axes，导出固定形状图（用于对照）")
+    ap.add_argument("--layers", type=int, default=8,
+                    help="解码层数。默认 8 即 E0 锁定的配置；调小只用于生成"
+                         "能在内存受限机器上编译的缩减 fixture，缩减模型不得"
+                         "当作 E0 合同的证据")
     a = ap.parse_args()
 
     MiniMindConfig, MiniMindForCausalLM = load_model_module(a.src)
 
     cfg = MiniMindConfig(
         hidden_size=768,
-        num_hidden_layers=8,
+        num_hidden_layers=a.layers,
         use_moe=False,
         flash_attn=a.flash,
         max_position_embeddings=a.max_pos,
