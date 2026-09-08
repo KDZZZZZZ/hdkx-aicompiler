@@ -35,3 +35,28 @@
 2. prefill 把输出 KV 写入缓存（extent=seq）；每个 decode 步追加 1 个 token（extent+1）并把 `present_i` 对应的有效区交给图；图级 `total` 由 extent 派生，不由 importer 或 runtime 各自推导。
 3. `logits` 的形状/布局和 16 个 present 的层序必须与上表逐一对应；任何顺序/别名错位在 launch 前拒绝。
 4. 真实 MiniMind 图绑定（E1/E2 编译运行）依赖 M4 的 `Pow/Neg/Sigmoid/Expand/Unsqueeze`（见 E0 receipt §5）与 M3 的受限 shape 绑定；在这些落地前，受控外部-KV fixture 按本文签名构造。
+
+## 4. 实测补充（2026-09-08）：静态导出下的多步行为
+
+真实 decode 图现在已经能走完整生产链路（见 [E1 receipt](M9_E1_RECEIPT.md) 的同一条 importer → Relay → LLVM → RuntimeSession）。用 prefill 的 `present` 作为 decode 的 `past` 做真实自回归续接，逐步实测：
+
+| 步 | 图 | past → present | 实算节点 | 与 ONNX 参考的最坏逐元素差 |
+|---|---|---|---:|---|
+| prefill | `--static` | — → 16 | 650 | 8.82149e-06 |
+| decode 第 1 步 | `--static`（默认 `--past 16`） | 16 → 17 | 666 | 6.85453e-06 |
+| decode 第 2 步 | `--static --past 17` | 17 → 18 | 666 | 5.54323e-06 |
+
+**两条对 M2 有直接影响的事实：**
+
+1. **`present` 的前缀与输入 `past` 逐元素完全相同**（两步都验证过）。真实图对 cache 只追加、不改写历史。因此把 `past` 输入与 `present` 输出绑到**同一块存储**在语义上是安全的——重叠区本来就一致，那次拷贝是冗余的。这正是 §3 第 2 条要求的原址更新可以成立的依据。
+
+2. **静态导出下每一步需要一个独立产物**。`past` 的长度被烤进形状：`--past 16` 的图是 `past[1,16,4,96] → present[1,17,4,96]`，`--past 17` 的图是 `past[1,17,4,96] → present[1,18,4,96]`，节点数同为 1173 但形状不同，因此是两个不同的编译产物。
+
+第 2 条决定了 **G2 第 2 项不能用静态导出达成**：该项要求同一 session、同一产物、cache 地址不变、runtime 期间不发生隐式编译，而静态图每步换产物与之直接冲突。目前得到的是 WAVE_2 §4 允许的「真实图 + 外部-KV 受控证据」，不是第 2 项本身。
+
+要真正通过第 2 项，二选一：
+
+- **有界动态 past**：把 `past`/`total` 导成有界符号轴，一个产物覆盖所有步（M3 的受限 shape 绑定）；或
+- **定容 state + 有效长度**：图按 `capacity` 读、按 extent 掩码，`past` 输入与 `present` 输出绑同一块 state（M2 §3 第 1、2 条）。事实 1 说明这条路径的语义前提已经成立。
+
+复现：`export_minimind_onnx.py --static --past N` 导出对应步的图，`make_minimind_l1a_fixture.py --graph decode` 生成 fixture，`minimind_l1a_llvm_test` 执行。
