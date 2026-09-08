@@ -21,7 +21,7 @@
 | # | 验收项 | 结果 | 证据 / 阻塞 |
 |---|---|---|---|
 | 1 | 真实 ONNX prefill → importer → Relay → LLVM → RuntimeSession，数值对齐参考 | **通过** | E0 锁定的完整 8 层图：650 kernel 调用，全部输出与 ONNX 参考逐元素对齐，最坏差 8.82e-06。见 §3 |
-| 2 | 同一 session prefill 后 ≥3 步 decode，地址不变、extent 递增、哨兵不污染 | **部分通过** | `kv_state_llvm_test` 的 `s1_append_read_progression`、`s1_in_place_address_and_sentinels`、`s2_causal_attention_decode_loop` 全部通过，但图是**合成注意力声明**，不是 E0 锁定的真实 decode 图 |
+| 2 | 同一 session prefill 后 ≥3 步 decode，地址不变、extent 递增、哨兵不污染 | **未通过**（证据等级已升一档） | 真实 decode 图三步链已端到端验证，但**每步需要一个独立编译产物**，与「同一产物、runtime 期间不编译」直接冲突。见 §3.5 |
 | 3 | 两个合法 bounded shape 同产物执行，无隐式编译；非法输入零 launch | **通过** | `shape_value_llvm_test::bounded_shape_to_reshape_production`：同一产物在 `[4,5,3]`/`[6,7,3]` 上执行，前后 primitive cache 统计不变；越界 extent 与整除 guard 违规均在 launch 前拒绝且 cache 统计不变。另有 `bounded_dynamic_graph_llvm_test` |
 | 4 | 最小 greedy token 序列；bundle 按 export receipt / run_id / kernel / state extent 关联 | **未通过** | 仓库中无 greedy 采样或 token 序列测试；bundle 与 export receipt 的关联字段未接入。依赖第 1 项 |
 | 5 | M10 控制流 gate-on 证据独立完成 | **通过** | [M10 receipt](M10_CONTROL_RECEIPT.md) C1：`If` 双分支 launch 计数 1/0 与 0/1；`While` 0/1/3 次迭代 carried value 正确；越 `max_trip_count` 抛错；gate-off 拒绝路径保留 |
@@ -84,6 +84,31 @@ E0 锁定的真实图（prefill 1141 节点 / decode 1173 节点）现在完整�
 
 > 记账口径：3.3 的四处修复由并行会话 `hdkx-aicompiler-bb` 提交（`8a27ef7`），不在本线的提交里；本文记录是因为它们直接决定第 1 项能否达成。§3.2 的全部数字由本线独立复测确认。
 
+### 3.5 第 2 项：真实 decode 图已验证，但判未通过
+
+真实 decode 图（666 kernel）端到端通过，且不是孤立测一张图——**past 取自 prefill 参考的 present**，`present[1,16,4,96]` 与 `past[1,16,4,96]` 精确对接，因此验证的是一次真实的自回归续接。三步链实测：
+
+| 步 | 图 | 误差 |
+|---|---|---|
+| prefill | 650 kernel | 8.82149e-06 |
+| decode（past 16→17） | 666 kernel | 6.85453e-06 |
+| decode（past 17→18） | 666 kernel | 5.54e-06 |
+
+decode 单步 4s / 1.49 GB（本线独立复测确认 666 kernel、6.85453e-06）。
+
+**但这不是第 2 项。** past 长度被烤进静态导出的形状：`--past 16` 是 `past[1,16,…]→present[1,17,…]`，`--past 17` 是 `past[1,17,…]→present[1,18,…]`，节点数同为 1173 但形状不同，**每步需要一个独立编译产物**。而第 2 项要求同一 session、同一产物、cache 地址不变、runtime 期间不发生隐式编译——直接冲突。
+
+因此现在拿到的是 [WAVE_2](WAVE_2.md) §4 明确允许的「真实图 + 外部-KV 受控证据」：比原先的合成 attention fixture 强一档，但不能替代第 2 项本身。`kv_state_llvm_test` 的合成 `AttentionDeclaration` 未改动——M2 的状态机是声明式的、不消费任意 Relay 图，硬塞真实图会变成为通过而通过。
+
+**一个对 M2 有决定意义的新事实**：`present` 的前缀与输入 `past` **逐元素完全相同**。本线独立复核了全部 16 对 (past, present)，past 长度 16 对 present 17，前 16 位逐位相同，无一例外。也就是说真实图对 cache **只追加、不改写历史**。
+
+这解掉了原先「要么加一次拷贝、要么把 past 输入与 present 输出绑到同一块 state」的二选一：**后者的语义前提已经成立**，那次拷贝是冗余的，剩下的是 runtime 绑定的工程问题而非语义风险。
+
+要真正通过第 2 项，二选一（详见 [M9 E2 签名](M9_E2_SIGNATURE.md) §4）：
+
+1. **有界动态 past**：一个产物覆盖所有步，依赖 M3 的受限 shape 绑定；
+2. **定容 state + 有效长度掩码**：依赖 [M2](M2_KV_STATE.md) §3 第 1、2 条。
+
 ### 3.4 顺带记录的插桩缺陷
 
 `RunInstrumentedPass`（`src/relay/transforms/pipeline.cc:126` 与 `src/tir/transforms/pipeline.cc:136` 两处同构）无条件渲染前后两次全图 IR 文本，只为算一个变更 hash 和 `ir_*_bytes` 指标；文本仅在 `ShouldCaptureIR` 为真时才需要落 artifact。这是上面指数缺陷能打到编译热路径的直接原因。改成惰性会动到 M1 的 profiling 契约（`ir_changed` 依赖 hash、hash 依赖文本，且 `test/profile_bundles` 有录好的 bundle），本轮不动，留档待立项。
@@ -109,26 +134,29 @@ E0 锁定的真实图（prefill 1141 节点 / decode 1173 节点）现在完整�
 
 ## 6. 下一波的入口
 
-1. ~~补 `Identity` 透传~~ —— 已完成（`dbe7b6b`）。
-2. ~~导入侧常量折叠 pass~~ —— 已完成（`9996f63`）。491 个静态节点折掉，`ConstantOfShape`/`Trilu`/`Expand` 形状链三个缺口一次消解，未新增算子。
-3. ~~带运行时索引的 `Gather`~~ —— 已完成（`9996f63` / `9d99941`，Python 与 C++ 两侧）。
-4. ~~L1a 端到端与数值对齐~~ —— **已完成**（`9d99941`）。E0 锁定的完整 8 层图 650 kernel 全部输出对齐，最坏差 8.82e-06。
-5. ~~消除编译规模限制~~ —— 已完成（`8a27ef7`，四处 DAG 遍历修复）。
+已完成：
+
+1. ~~`Identity` 透传~~（`dbe7b6b`）。
+2. ~~导入侧常量折叠~~（`9996f63`）。491 个静态节点折掉，三个缺口一次消解，未新增算子。
+3. ~~运行时索引 `Gather`~~（`9996f63` / `9d99941`）。
+4. ~~L1a 端到端与数值对齐~~（`9d99941`）。完整 8 层 650 kernel，最坏差 8.82e-06。
+5. ~~消除编译规模限制~~（`8a27ef7`）。四处 DAG 遍历修复。
+6. ~~发布 M9 E1 receipt~~（`282534e`）。覆盖 L1a 静态 prefill。
+7. ~~真实 decode 图端到端~~（`c60beeb`、`32fc222`）。666 kernel，past 取自 prefill 的 present。
 
 仍待办：
 
-6. **发布 M9 E1 receipt**：第 1 项已具备全部证据（导出 SHA、输入输出签名、650 实算节点、逐元素误差、可复现的 fixture 生成器），把它固化成 receipt，M2/M3 才能按真实图 ABI 绑定。
-7. **第 2 项换掉合成 fixture**：M2 的三步 decode 目前用合成注意力图，改用 E0 锁定的真实 decode 图。导入已通过（666 个 Relay 节点、446 参数，与 prefill 同源同折叠路径）。落地时注意签名与 prefill 不同——decode 是 **17 输入对 17 输出**：
+8. **通过 G2 第 2 项**（当前最主要的缺口，见 §3.5）。静态导出每步换产物的路走不通，二选一：
+   - **有界动态 past**——一个产物覆盖所有步，依赖 M3 的受限 shape 绑定；
+   - **定容 state + 有效长度掩码**——依赖 M2 §3 第 1、2 条。
 
-   ```
-   输入：input_ids [1,1] int64，随后按层交错 past_k_i / past_v_i [1,16,4,96] float32
-   输出：logits，随后按层交错 present_k_i / present_v_i
-   ```
+   §3.5 已确认 `present` 前缀逐元素等于输入 `past`，真实图对 cache 只追加不改写，因此把 past 输入与 present 输出绑到同一块 state 在语义上安全，无需冗余拷贝。这是走第 2 条路的前提，已经成立。
+9. **G2 第 4 项**：host greedy 生成循环 + bundle 与 export receipt / run_id 的关联字段。依赖第 8 项拿到可复用的多步产物。
+10. **根因收口（建议单独立项）**：给 `RelayPassFunctor` 遍历基类提供默认记忆化，见 §3.3。本波修的四处是同一模式的四个实例；不收口的话，每新增一个按树遍历就重新引入一次指数缺陷。**这项独立于 L1，不阻塞任何人，但拖得越久新写的 pass 越多。**
+11. **插桩惰性化**：`RunInstrumentedPass` 无条件渲染两次全图 IR 文本（Relay/TIR 两处同构），见 §3.4。8 层 7 秒说明 TIR 侧没有同样的爆炸，优先级低于第 10 项。
+12. 能力矩阵在第 8、9 项完成后统一刷新逐格证据。
 
-   现有的 `python/tools/make_minimind_l1a_fixture.py` 只喂 `{"input_ids": token_ids}` 一个输入，加 decode 分支必须把 16 个 past 张量一并喂给 `ReferenceEvaluator`，否则参考值算不出来。这份签名与 [M9 E2 审计](M9_E2_SIGNATURE.md)一致，M2 的状态合同即按此绑定。
-8. **第 4 项**：host greedy 生成循环 + bundle 与 export receipt / run_id 的关联字段。
-9. **根因收口（建议单独立项）**：给 `RelayPassFunctor` 遍历基类提供默认记忆化，见 §3.3。这是本轮唯一未做的根因修复，不做的话每新增一个按树遍历就重新引入一次指数缺陷。
-10. **插桩惰性化**：`RunInstrumentedPass` 无条件渲染两次全图 IR 文本（Relay/TIR 两处同构），见 §3.4。8 层 6 秒说明 TIR 侧没有同样的爆炸，优先级低于第 9 项，但理由不变。
-11. 能力矩阵在第 2、4 项完成后统一刷新逐格证据。
-
-> 方法论提醒：§3.1 的四个原始缺口是静态审计一次列全的，但其余四处（`Gather` 运行时索引、三个缺失的推导链、恒等 `Cast`）是逐个跑出来的——审计只覆盖了算子种类和结构约束，没覆盖 dtype 与元数据推导。同理 §3.3 的第 3、4 处不占内存，只有在标准流水线下按耗时才暴露。两条合起来是一个教训：**审计能列出结构性缺口，但列不全语义与性能缺口；且测量条件必须与验收条件一致。**
+> 方法论提醒（本波三次踩到）：
+> - §3.1 的四个原始缺口是静态审计一次列全的，但其余四处（`Gather` 运行时索引、三个缺失的推导链、恒等 `Cast`）是逐个跑出来的——审计能列出结构性缺口，列不全语义缺口。
+> - §3.3 的第 3、4 处不多占任何内存，在所有 RSS 曲线里隐身，只有在标准流水线下按耗时才暴露；早期用 `KXC_MINIMIND_RELAY_PASSES=""` 绕过流水线的测量根本没走到 mutator，据此得出的结论不完整。**测量条件必须与验收条件一致。**
+> - §3.5 的 decode 三步链单看数值全部通过，只有追问「同一产物吗」才发现不满足第 2 项。**通过的数值不等于通过的验收项。**
