@@ -1,13 +1,17 @@
 /*! \file test/minimind_l1a_llvm_test.cpp
- * \brief L1a 验收：E0 锁定的真实 MiniMind 静态 prefill 图经真实 importer →
- *        Relay → LLVM → RuntimeSession 运行，与 ONNX 参考实现逐元素比较。
+ * \brief L1a/L1b 验收：E0 锁定的真实 MiniMind 静态图经真实 importer → Relay →
+ *        LLVM → RuntimeSession 运行，与 ONNX 参考实现逐元素比较。
  *
- * 产物不入库（权重 275 MB）。由 `python/tools/make_minimind_l1a_fixture.py`
+ * 两张图共用同一条链路：prefill（1 输入 / 17 输出）与 decode（17 输入 /
+ * 17 输出）。签名不写死在代码里，而是从 fixture 的 inputs.txt / outputs.txt
+ * 读出后**逐项校验结构**——这样同一个测试能覆盖两张图，签名漂移仍然必然失败。
+ *
+ * 产物不入库（权重数百 MB）。由 `python/tools/make_minimind_l1a_fixture.py`
  * 生成后，用 `KXC_MINIMIND_IMPORT_DIR` 指向该目录才会真正执行；未设置时跳过，
  * 以免把大产物变成构建硬依赖。
  *
- * 输出签名（17 个，顺序固定）直接钉在本文件里：它就是 M9 E2 审计确定、M2/M3
- * 依赖的那份 ABI，写死等于让签名漂移必然触发失败。
+ * 本测试始终走标准 Relay 流水线。不要加绕过流水线的开关：绕过之后测到的
+ * 规模数据不完整（会漏掉 mutator 一侧的行为），这个坑踩过一次。
  */
 
 #include "kxc/compiler/compiler.h"
@@ -18,7 +22,6 @@
 
 #include <cmath>
 #include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -35,49 +38,80 @@ namespace {
         }                                                                     \
     } while (false)
 
-struct ExpectedOutput final {
+struct TensorEntry final {
     std::string name;
+    std::string dtype;  // 输出清单省略 dtype，一律 float32
     std::vector<int64_t> shape;
 };
 
-// 从 fixture 的 outputs.txt 读出签名（每行 "name d0 d1 ..."）。签名由 E0 导出
-// 决定，本测试只负责钉住它：顺序、命名与形状任何漂移都会失败。
-std::vector<ExpectedOutput> ReadExpectedOutputs(const std::string& path, bool* ok) {
+// 读清单：每行 "name [dtype] d0 d1 ..."。dtype 只出现在 inputs.txt。
+std::vector<TensorEntry> ReadManifest(const std::string& path, bool with_dtype,
+                                      bool* ok) {
     std::ifstream stream(path);
-    std::vector<ExpectedOutput> outputs;
+    std::vector<TensorEntry> entries;
     if (!stream) {
         *ok = false;
-        return outputs;
+        return entries;
     }
     std::string line;
     while (std::getline(stream, line)) {
         if (line.empty()) continue;
         std::istringstream fields(line);
-        ExpectedOutput output;
-        if (!(fields >> output.name)) {
+        TensorEntry entry;
+        entry.dtype = "float32";
+        if (!(fields >> entry.name)) {
             *ok = false;
-            return outputs;
+            return entries;
+        }
+        if (with_dtype && !(fields >> entry.dtype)) {
+            *ok = false;
+            return entries;
         }
         int64_t dim = 0;
-        while (fields >> dim) output.shape.push_back(dim);
-        if (output.shape.empty()) {
+        while (fields >> dim) entry.shape.push_back(dim);
+        if (entry.shape.empty()) {
             *ok = false;
-            return outputs;
+            return entries;
         }
-        outputs.push_back(std::move(output));
+        entries.push_back(std::move(entry));
     }
-    *ok = !outputs.empty();
-    return outputs;
+    *ok = !entries.empty();
+    return entries;
 }
 
-// 签名结构：logits 打头，随后按层交错 present_k_i / present_v_i。
-bool SignatureIsWellFormed(const std::vector<ExpectedOutput>& outputs) {
+std::string ReadLine(const std::string& path, bool* ok) {
+    std::ifstream stream(path);
+    std::string line;
+    *ok = static_cast<bool>(std::getline(stream, line));
+    return line;
+}
+
+// 输出签名：logits 打头，随后按层交错 present_k_i / present_v_i。两张图相同。
+bool OutputSignatureIsWellFormed(const std::vector<TensorEntry>& outputs) {
     if (outputs.empty() || outputs.front().name != "logits") return false;
     if ((outputs.size() - 1) % 2 != 0) return false;
     for (size_t layer = 0; layer * 2 + 1 < outputs.size(); ++layer) {
         const std::string suffix = std::to_string(layer);
         if (outputs[layer * 2 + 1].name != "present_k_" + suffix) return false;
         if (outputs[layer * 2 + 2].name != "present_v_" + suffix) return false;
+    }
+    return true;
+}
+
+// 输入签名：prefill 只有 input_ids；decode 是 input_ids 后按层交错的
+// past_k_i / past_v_i。past 的层序错了必须被发现，否则会静默算错。
+bool InputSignatureIsWellFormed(const std::vector<TensorEntry>& inputs,
+                                const std::string& graph) {
+    if (inputs.empty() || inputs.front().name != "input_ids" ||
+        inputs.front().dtype != "int64") {
+        return false;
+    }
+    if (graph == "prefill") return inputs.size() == 1;
+    if ((inputs.size() - 1) % 2 != 0) return false;
+    for (size_t layer = 0; layer * 2 + 1 < inputs.size(); ++layer) {
+        const std::string suffix = std::to_string(layer);
+        if (inputs[layer * 2 + 1].name != "past_k_" + suffix) return false;
+        if (inputs[layer * 2 + 2].name != "past_v_" + suffix) return false;
     }
     return true;
 }
@@ -108,73 +142,92 @@ kxc::Function PrepareJitRelayFunction(kxc::Function function) {
     return kxc::relay::InferTypePass(function);
 }
 
-bool TestMiniMindL1aPrefill() {
+bool RunLockedGraph() {
 #if !KXC_USE_LLVM
-    std::cout << "[SKIP] minimind L1a: KXC_USE_LLVM=0\n";
+    std::cout << "[SKIP] minimind: KXC_USE_LLVM=0\n";
     return true;
 #else
     const char* directory = std::getenv("KXC_MINIMIND_IMPORT_DIR");
     if (!directory) {
-        std::cout << "[SKIP] minimind L1a: set KXC_MINIMIND_IMPORT_DIR to the "
+        std::cout << "[SKIP] minimind: set KXC_MINIMIND_IMPORT_DIR to the "
                      "generated fixture directory\n";
         return true;
     }
     const std::string root(directory);
 
-    
-    const kxc::frontend::ImportedONNXModel imported =
-        kxc::frontend::LoadONNXImportSpec(root + "/prefill.json",
-                                          root + "/prefill.params");
-    
     bool ok = true;
-    const std::vector<ExpectedOutput> expected =
-        ReadExpectedOutputs(root + "/outputs.txt", &ok);
-    CHECK(ok, "outputs.txt must list the fixture's output signature");
-    CHECK(SignatureIsWellFormed(expected),
-          "the signature must be logits followed by per-layer present_k/present_v");
-    CHECK(imported.output_names.size() == expected.size(),
-          "the imported prefill graph must keep the fixture's output signature");
-    for (size_t i = 0; i < expected.size(); ++i) {
-        CHECK(imported.output_names[i] == expected[i].name,
-              "output " + std::to_string(i) + " must stay '" + expected[i].name + "'");
-    }
-    CHECK(imported.input_names.size() == 1 &&
-              imported.input_names[0] == "input_ids",
-          "the prefill graph takes exactly one int64 input_ids tensor");
+    const std::string graph = ReadLine(root + "/graph.txt", &ok);
+    CHECK(ok && (graph == "prefill" || graph == "decode"),
+          "graph.txt must name the fixture's graph: prefill or decode");
 
-    
+    const kxc::frontend::ImportedONNXModel imported =
+        kxc::frontend::LoadONNXImportSpec(root + "/" + graph + ".json",
+                                          root + "/" + graph + ".params");
+
+    const std::vector<TensorEntry> declared_inputs =
+        ReadManifest(root + "/inputs.txt", /*with_dtype=*/true, &ok);
+    CHECK(ok, "inputs.txt must list the fixture's input signature");
+    const std::vector<TensorEntry> declared_outputs =
+        ReadManifest(root + "/outputs.txt", /*with_dtype=*/false, &ok);
+    CHECK(ok, "outputs.txt must list the fixture's output signature");
+
+    CHECK(InputSignatureIsWellFormed(declared_inputs, graph),
+          "the input signature must be input_ids, then per-layer past_k/past_v");
+    CHECK(OutputSignatureIsWellFormed(declared_outputs),
+          "the output signature must be logits, then per-layer present_k/present_v");
+
+    CHECK(imported.input_names.size() == declared_inputs.size(),
+          "the imported graph must keep the fixture's input arity");
+    for (size_t i = 0; i < declared_inputs.size(); ++i) {
+        CHECK(imported.input_names[i] == declared_inputs[i].name,
+              "input " + std::to_string(i) + " must stay '" +
+                  declared_inputs[i].name + "'");
+    }
+    CHECK(imported.output_names.size() == declared_outputs.size(),
+          "the imported graph must keep the fixture's output arity");
+    for (size_t i = 0; i < declared_outputs.size(); ++i) {
+        CHECK(imported.output_names[i] == declared_outputs[i].name,
+              "output " + std::to_string(i) + " must stay '" +
+                  declared_outputs[i].name + "'");
+    }
+
     const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
-    
     const auto config = kxc::api::CompileConfig::Create(
         kxc::BuildTarget(kxc::Device::CPU()), 0);
-    
     const kxc::api::CompiledGraph compiled =
         kxc::api::Compiler::Compile(prepared, config);
-    
     CHECK(compiled.module().IsReady(),
-          "the real MiniMind prefill graph must compile to a ready LLVM module");
-    std::cout << "[INFO] minimind L1a: " << compiled.plan().calls().size()
-              << " kernel calls, " << compiled.module().constants().size()
-              << " constants\n";
+          "the real MiniMind " + graph + " graph must compile to a ready LLVM module");
+    std::cout << "[INFO] minimind " << graph << ": "
+              << compiled.plan().calls().size() << " kernel calls, "
+              << compiled.module().constants().size() << " constants\n";
 
-    const std::vector<char> input_bytes = ReadFile(root + "/input_ids.bin", &ok);
-    const int64_t batch = expected.front().shape[0];
-    const int64_t seq = expected.front().shape[1];
-    CHECK(ok && input_bytes.size() == static_cast<size_t>(batch * seq) * sizeof(int64_t),
-          "input_ids.bin must hold the fixture's int64[batch, seq] token ids");
-    const kxc::runtime::NDArray input = kxc::runtime::NDArray::Empty(
-        {batch, seq}, kxc::runtime::DataTypeFromString("int64"), kxc::Device::CPU());
-    input.CopyFromBytes(input_bytes.data(), input_bytes.size());
+    // 按声明顺序构造全部输入；decode 的 16 个 past 也从这里进来。
+    kxc::Array<kxc::runtime::NDArray> inputs;
+    for (const TensorEntry& declared : declared_inputs) {
+        const std::vector<char> bytes =
+            ReadFile(root + "/in_" + declared.name + ".bin", &ok);
+        const size_t width = declared.dtype == "int64" ? sizeof(int64_t) : sizeof(float);
+        const size_t elements = static_cast<size_t>(ElementCount(declared.shape));
+        CHECK(ok && bytes.size() == elements * width,
+              "in_" + declared.name + ".bin is missing or sized wrong");
+        const kxc::runtime::NDArray tensor = kxc::runtime::NDArray::Empty(
+            kxc::Array<int64_t>(declared.shape),
+            kxc::runtime::DataTypeFromString(declared.dtype), kxc::Device::CPU());
+        tensor.CopyFromBytes(bytes.data(), bytes.size());
+        inputs.push_back(tensor);
+    }
 
     kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
-    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({input});
-    CHECK(outputs.size() == expected.size(),
+    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run(inputs);
+    CHECK(outputs.size() == declared_outputs.size(),
           "the runtime plan must return one tensor per declared output");
 
+    // 逐个输出比较，不只比 logits：KV 错而 logits 对的情况是存在的。
     double worst = 0.0;
     std::string worst_name;
-    for (size_t i = 0; i < expected.size(); ++i) {
-        const ExpectedOutput& declared = expected[i];
+    for (size_t i = 0; i < declared_outputs.size(); ++i) {
+        const TensorEntry& declared = declared_outputs[i];
         const kxc::runtime::NDArray actual = outputs[i];
         CHECK(actual.shape().size() == declared.shape.size(),
               declared.name + " rank must match the locked signature");
@@ -201,11 +254,13 @@ bool TestMiniMindL1aPrefill() {
             }
         }
     }
-    std::cout << "[INFO] minimind L1a worst absolute difference " << worst
-              << " at '" << worst_name << "'\n";
-    // 实测最坏误差随层数平稳增长：1/2/3/4/8 层 = 4.91 / 6.93 / 8.17 / 8.70 /
-    // 8.82e-06，就是 float32 舍入噪声（差异只来自 MatMul 的归约顺序）。阈值取
-    // 1e-4，比实测高一个数量级，够容纳更深的模型，又不至于放过真实的数值退化。
+    std::cout << "[INFO] minimind " << graph << " worst absolute difference "
+              << worst << " at '" << worst_name << "'\n";
+    // 实测最坏误差随层数平稳增长：prefill 1/2/3/4/8 层 = 4.91 / 6.93 / 8.17 /
+    // 8.70 / 8.82e-06，就是 float32 舍入噪声（差异只来自 MatMul 的归约顺序）。
+    // 阈值取 1e-4，比实测高一个数量级，够容纳更深的模型，又不至于放过真实的
+    // 数值退化。decode 若超出这个阈值，那是真实信号——先查清楚，不要为了让它
+    // 通过而放宽 prefill 也在用的这个值。
     CHECK(worst <= 1e-4,
           "every output must match the ONNX reference element-wise within 1e-4");
     return true;
@@ -216,7 +271,7 @@ bool TestMiniMindL1aPrefill() {
 
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
-        {"minimind_l1a_prefill", TestMiniMindL1aPrefill},
+        {"minimind_locked_graph", RunLockedGraph},
     };
     for (const auto& [name, test] : tests) {
         try {
