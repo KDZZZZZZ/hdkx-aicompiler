@@ -27,26 +27,46 @@
 | 5 | M10 控制流 gate-on 证据独立完成 | **通过** | [M10 receipt](M10_CONTROL_RECEIPT.md) C1：`If` 双分支 launch 计数 1/0 与 0/1；`While` 0/1/3 次迭代 carried value 正确；越 `max_trip_count` 抛错；gate-off 拒绝路径保留 |
 | 6 | 完整回归 + 全部检查器 + 能力矩阵 | **通过（回归与检查器）** | 见 §4。能力矩阵逐格更新尚未随本波结果刷新，随第 1 项一并处理 |
 
-## 3. 第 1 项的确切阻塞点
+## 3. 第 1 项的确切阻塞点（2026-09-08 实测更新）
 
-**算子覆盖已经不是瓶颈。** L1a 静态 prefill（常量折叠后 650 个实算节点）所需的 18 种 ONNX 算子，`python/kxc_onnx/importer.py` **已全部映射 18/18**：
+**算子覆盖不是瓶颈。** L1a 静态 prefill 所需的 18 种 ONNX 算子，`python/kxc_onnx/importer.py` 已全部映射。真实图（`out/minimind_onnx_noninplace/minimind_prefill_static.onnx`，1141 节点 / 60 initializer；decode 图 1173 节点，形态一致）的完整节点级缺口如下。
+
+### 3.1 原始（未折叠）图的四个缺口
+
+| 缺口 | 节点数 | 性质 | 状态 |
+|---|---:|---|---|
+| `Identity` 未映射 | 31 | 导出器对逐字节相同的 initializer 去重后的**权重别名**：输入全是 initializer，无一喂图输出，也不串联 | **已解决**（`dbe7b6b`，归一为参数别名，零 Relay 节点、零拷贝 kernel） |
+| `ConstantOfShape` 未映射 | 16 | Relay 侧算子 `constant_of_shape` 已由 M3 S2 交付，只差导入映射 | 待办 |
+| `Expand` 控制形状来自 Shape 链（非 initializer） | 16 | 正是 M3 S2 `expand_dynamic` 受限形状值链的目标场景，编译侧能力已具备 | 待办 |
+| `Trilu` 未映射 | 8 | 因果 mask 上三角，Relay 侧无对应算子 | 待办 |
+
+### 3.2 关键发现：这三个待办缺口都是**常量子图**
+
+对全图做静态可达性分析（值只依赖 initializer/Constant，不依赖任何图输入）：
+
+- 16 个 `ConstantOfShape` 输出 **全部静态**；
+- 8 个 `Trilu` 输出 **全部静态**（`Trilu(ConstantOfShape(…), k, upper=1)`，两个输入都来自 `Constant`）；
+- 16 个 `Expand` 的**控制形状输入全部静态**（数据输入才是运行时值）；
+- 全图 1141 节点中 **491 个是纯静态可折叠节点**（含 388 个 `Constant`、31 个 `Identity`、以及整条 mask 子图 `ConstantOfShape`/`Mul`/`Equal`/`Where`/`Trilu`）。
+
+**折叠后剩 650 个实算节点，18 种算子全部已映射，节点级约束冲突只剩 1 处**（该 650 与 [E0 receipt](M9_E0_RECEIPT.md) 记录的实算规模一致）：
 
 ```
-Add Cast Concat Div Expand Gather MatMul Mul Neg Pow
-ReduceMean Reshape Sigmoid Slice Softmax Sqrt Transpose Unsqueeze
+Mul 114  Add 73  MatMul 73  Cast 57  Reshape 48  Div 41  Pow 33
+ReduceMean 33  Sqrt 33  Slice 32  Transpose 32  Neg 16  Concat 16
+Unsqueeze 16  Expand 16  Softmax 8  Sigmoid 8  Gather 1
 ```
 
-实测导入 E0 锁定的真实图（`out/minimind_onnx_noninplace/minimind_prefill_static.onnx`，1141 节点 / 60 initializer，静态形状 + 非原地 mask 补丁）：
+| 折叠后仅存的缺口 | 节点数 | 说明 |
+|---|---:|---|
+| `Gather` 运行时索引 | 1 | token embedding 查表 `embed_tokens.weight[input_ids]`；导入器现要求 initializer-backed 常量索引。[M3 任务书](M3_SHAPE_VALUES.md) S3 已预告：通用 Gather 的运行时索引需要独立范围检查，不能沿用「常量索引已证明安全」的结论 |
 
-```
-UnsupportedONNXOpError: Unsupported ONNX op 'Identity' in node 'Identity_388'
-```
+### 3.3 由此修正的实施路线
 
-`Identity` 在[模型算子清单](../OP_TODO.md)的实算表中不出现，因为常量折叠后它归零（原始图 31 个，折叠后 0 个）；但导入器读的是**未折叠的原始图**，因此仍会遇到。这是一个透传语义缺口，不是新计算能力：
+打通 L1a **不需要新增 `ConstantOfShape` / `Trilu` 两个算子，也不需要为 Expand 接形状值链**。更小且更正确的做法是：
 
-- 归属：M4 导入层（D 线 owns `python/kxc_onnx/`），处置方式应与 `Unsqueeze → reshape` 的归一化一致；
-- 这是**第一个**错误，不是唯一一个。修掉后需要重跑导入以暴露后续节点级缺口（属性边界、多输入 `Concat`、`Gather` 常量索引限制等在 G1 已记录的既有限制都可能再次命中）；
-- 在第 1 项通过之前，第 2 项的真实图绑定、第 4 项的生成循环与 bundle 关联都不具备前置条件。
+1. 在导入侧加一个**常量折叠 pass**（折叠 491 个纯静态节点）。它一次性消解 3.1 表里剩下的三个缺口：`ConstantOfShape` 与 `Trilu` 整体消失，`Expand` 的控制形状变成 initializer-backed 常量，直接落到 D 线已挂载的静态 `expand`。
+2. 之后唯一需要真正新增的能力是 **带运行时索引的 `Gather`**（含索引范围检查），只有 1 个节点，但它是 embedding 查表，无法绕开。
 
 ## 4. 回归与检查器实测
 
@@ -69,7 +89,11 @@ UnsupportedONNXOpError: Unsupported ONNX op 'Identity' in node 'Identity_388'
 
 ## 6. 下一波的入口
 
-1. **补 `Identity` 透传并重跑真实图导入**，把节点级缺口一次性列全 —— 这是 L1a 唯一的当前阻塞。
-2. L1a 通过后发布 E1 receipt，M2/M3 再按真实图的 ABI 绑定，替换当前的合成 fixture。
-3. 第 4 项的 host 生成循环与 bundle 关联字段随 E1/E4 一并推进。
-4. 能力矩阵在第 1 项通过后统一刷新逐格证据，不以基座能力就绪代替端到端运行证据。
+1. ~~补 `Identity` 透传~~ —— **已完成**（`dbe7b6b`）。
+2. **导入侧常量折叠 pass**（491 个纯静态节点）。这是当前性价比最高的一步：一次消解 `ConstantOfShape`(16)、`Trilu`(8)、`Expand` 形状链(16) 三个缺口，且不新增任何算子。折叠后须重跑导入确认实算算子集与 §3.2 的 650 节点一致。
+3. **带运行时索引的 `Gather`**（含索引范围检查）—— 折叠后唯一剩余的真实能力缺口，embedding 查表无法绕开。
+4. 前两项通过后跑通 L1a 端到端并发布 E1 receipt；M2/M3 再按真实图 ABI 绑定，替换第 2 项的合成 fixture。
+5. 补第 4 项：host greedy 生成循环 + bundle 与 export receipt / run_id 的关联字段。
+6. 能力矩阵在第 1 项通过后统一刷新逐格证据，不以基座能力就绪代替端到端运行证据。
+
+> 记账口径提醒：§3 的缺口是**逐个暴露**的——导入器在拓扑序上先撞到 `Gather`，`ConstantOfShape`/`Trilu` 在其后。四个缺口是静态审计一次列全的，不是靠反复试错得到的；后续每改一处仍须重跑导入，确认没有新的节点级约束（属性边界、多输入 `Concat` 等）被激活。
