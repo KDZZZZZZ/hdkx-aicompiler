@@ -8,6 +8,7 @@ import numpy as np
 import onnx
 from onnx import AttributeProto, ModelProto, TensorProto, numpy_helper
 
+from .fold import ConstantFoldingError, fold_static_subgraph
 from .spec import (
     ImportedONNXModel,
     ParamTensor,
@@ -40,7 +41,15 @@ RELAY_CAST_DTYPE_CODES = {
     "uint8": 6,
 }
 # S1 Cast subset: only the conversions the target models need are opened.
-CAST_SUPPORTED_CONVERSIONS = {("int32", "float32"), ("int64", "float32")}
+# ("float32", "float32") 是恒等转换：MiniMind 的 RMSNorm 用 `.float()` 提升精度，
+# 在已是 float32 的图上导出成 57 个恒等 Cast。Relay `cast` 对 dtype 不设限，
+# 同 dtype 经 topi 落成一次拷贝，语义正确。消除这层拷贝需要值别名改写，
+# 属于优化而非正确性，留待后续。
+CAST_SUPPORTED_CONVERSIONS = {
+    ("int32", "float32"),
+    ("int64", "float32"),
+    ("float32", "float32"),
+}
 # M4/M5 subset: Neg/Sigmoid are fieldless float32 unary ops, Pow a fieldless
 # float32 binary broadcast op. The multidirectional-broadcast input form
 # (opset >= 13) is the declared ONNX boundary for all of them.
@@ -120,18 +129,29 @@ def onnx_dtype_to_kxc(dtype: int) -> str:
 
 
 def import_onnx(
-    model_path: str | Path, default_batch: int | None = None
+    model_path: str | Path, default_batch: int | None = None,
+    fold_constants: bool = True,
 ) -> ImportedONNXModel:
     model_path = Path(model_path)
     model = onnx.load(str(model_path))
-    return import_onnx_model(model, default_batch=default_batch, base_dir=model_path.parent)
+    return import_onnx_model(model, default_batch=default_batch,
+                             base_dir=model_path.parent,
+                             fold_constants=fold_constants)
 
 
 def import_onnx_model(
     model: ModelProto,
     default_batch: int | None = None,
     base_dir: str | Path | None = None,
+    fold_constants: bool = True,
 ) -> ImportedONNXModel:
+    """把 ONNX 模型导入成 Relay 图规格。
+
+    ``fold_constants`` 默认开启：先用 ONNX 参考实现求值掉纯静态子图，再进入
+    唯一的节点导入链路。导出器留下的 mask 构造（``ConstantOfShape``/``Trilu``）
+    和喂 ``Expand`` 的 ``Shape`` 链因此在导入前消失，不需要为它们新增运行时
+    算子。关闭后按原始图导入，未映射算子照常报错。
+    """
     if default_batch is not None and (
         not isinstance(default_batch, int)
         or isinstance(default_batch, bool)
@@ -139,6 +159,8 @@ def import_onnx_model(
     ):
         raise ValueError("default_batch must be a positive integer when explicitly supplied")
 
+    if fold_constants:
+        model, _fold_report = fold_static_subgraph(model)
     graph = model.graph
     base_dir_path = Path(base_dir) if base_dir is not None else None
     opset_version = next(
@@ -286,8 +308,26 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
-        if node.op_type in {"Mul", "Sub", "Div"}:
+        if node.op_type in {"Mul", "Sub", "Div"} or (
+            node.op_type == "Add"
+            and _inputs_are_resolvable(node, input_specs, params,
+                                       inferred_static_specs, value_info_by_name)
+        ):
             inferred_static_specs[node.output[0]] = _infer_binary_arithmetic_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
+        if node.op_type == "Softmax" and _inputs_are_resolvable(
+            node, input_specs, params, inferred_static_specs, value_info_by_name
+        ):
+            inferred_static_specs[node.output[0]] = _infer_softmax_spec(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch,
+            )
+        if node.op_type == "Transpose" and _inputs_are_resolvable(
+            node, input_specs, params, inferred_static_specs, value_info_by_name
+        ):
+            inferred_static_specs[node.output[0]] = _infer_transpose_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
@@ -591,6 +631,106 @@ def _infer_binary_arithmetic_spec(
         dtype="float32",
     )
     _validate_declared_output(op_type, node_name, result, output_declarations, default_batch)
+    return result
+
+
+
+
+def _inputs_are_resolvable(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+) -> bool:
+    """节点的每个输入是否都有可用元数据。
+
+    Add/Softmax/Transpose 进入推导链只是为了**给下游填元数据**，本身不消费结论。
+    当某个输入的元数据确实拿不到时（例如 resnet18 里 Conv 的输出既无 value_info
+    也不在推导链内），它们保持沉默，把报错留给真正需要该元数据的消费者——这与
+    加入它们之前的行为一致，不会把原先能导入的图变成失败。
+    """
+    for name in node.input:
+        if not name:
+            continue
+        if name in inferred_specs or name in params or name in input_specs:
+            continue
+        if value_info_by_name.get(name) is not None:
+            continue
+        return False
+    return True
+
+
+def _infer_softmax_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    """Softmax 保形保 dtype；只校验 axis 落在秩内（opset 13 起 axis 不做 coerce）。"""
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(f"Softmax node '{node_name}' requires exactly one non-empty input")
+    data = _resolve_static_input("Softmax", node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    if data.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"Softmax node '{node_name}' requires float32 input in the static S1 "
+            f"subset; got {data.dtype}"
+        )
+    attrs = _attrs_by_name(node)
+    unsupported = set(attrs) - {"axis"}
+    if unsupported:
+        raise ValueError(
+            f"Softmax node '{node_name}' has unsupported attribute(s): {sorted(unsupported)}"
+        )
+    rank = len(data.shape)
+    axis = _int_attr(attrs, "axis", -1)
+    if axis < 0:
+        axis += rank
+    if rank < 1 or axis < 0 or axis >= rank:
+        raise ValueError(f"Softmax node '{node_name}' axis is out of range for rank {rank}")
+    result = TensorSpec(name=node.output[0], shape=list(data.shape), dtype="float32")
+    _validate_declared_output("Softmax", node_name, result, output_declarations, default_batch)
+    return result
+
+
+def _infer_transpose_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> TensorSpec:
+    """Transpose 按 perm 重排轴；perm 必须是秩的一个完整置换，缺省为逆序。"""
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(f"Transpose node '{node_name}' requires exactly one non-empty input")
+    data = _resolve_static_input("Transpose", node_name, node.input[0], input_specs, params,
+                                 inferred_specs, value_info_by_name, default_batch)
+    attrs = _attrs_by_name(node)
+    unsupported = set(attrs) - {"perm"}
+    if unsupported:
+        raise ValueError(
+            f"Transpose node '{node_name}' has unsupported attribute(s): {sorted(unsupported)}"
+        )
+    rank = len(data.shape)
+    perm = [int(axis) for axis in _list_attr(attrs, "perm", list(reversed(range(rank))))]
+    if sorted(perm) != list(range(rank)):
+        raise ValueError(
+            f"Transpose node '{node_name}' perm {perm} is not a permutation of rank {rank}"
+        )
+    result = TensorSpec(
+        name=node.output[0],
+        shape=[data.shape[axis] for axis in perm],
+        dtype=data.dtype,
+    )
+    _validate_declared_output("Transpose", node_name, result, output_declarations, default_batch)
     return result
 
 
@@ -983,10 +1123,6 @@ def _infer_gather_spec(
         raise ValueError(
             f"Gather node '{node_name}' requires int32 or int64 indices; got {indices.dtype}"
         )
-    if node.input[1] not in params:
-        raise ValueError(
-            f"Gather node '{node_name}' requires initializer-backed constant indices"
-        )
     attrs = _attrs_by_name(node)
     unsupported = set(attrs) - {"axis"}
     if unsupported:
@@ -1002,22 +1138,29 @@ def _infer_gather_spec(
         raise ValueError(
             f"Gather node '{node_name}' int32 indices cannot address axis extent > INT32_MAX"
         )
-    index_param = params[node.input[1]]
-    dtype = np.dtype("<i4" if index_param.dtype == "int32" else "<i8")
-    values = np.frombuffer(index_param.data, dtype=dtype)
-    expected_values = math.prod(index_param.shape)
-    if values.size != expected_values:
-        raise ValueError(
-            f"Gather node '{node_name}' indices initializer byte size is invalid"
-        )
     extent = data.shape[axis]
-    for value in values:
-        index = int(value)
-        if index < -extent or index >= extent:
+    if node.input[1] in params:
+        # 常量索引：在导入期就把每个索引证明在 ONNX 域内，保留比运行时守卫
+        # 更强的结论。
+        index_param = params[node.input[1]]
+        dtype = np.dtype("<i4" if index_param.dtype == "int32" else "<i8")
+        values = np.frombuffer(index_param.data, dtype=dtype)
+        expected_values = math.prod(index_param.shape)
+        if values.size != expected_values:
             raise ValueError(
-                f"Gather node '{node_name}' constant index {index} is outside "
-                f"the ONNX domain [{-extent}, {extent - 1}]"
+                f"Gather node '{node_name}' indices initializer byte size is invalid"
             )
+        for value in values:
+            index = int(value)
+            if index < -extent or index >= extent:
+                raise ValueError(
+                    f"Gather node '{node_name}' constant index {index} is outside "
+                    f"the ONNX domain [{-extent}, {extent - 1}]"
+                )
+    # 运行时索引（embedding 查表就是这一支）：索引值到 launch 时才存在，导入期
+    # 无法证明其范围。生产 lowering 的 GatherCompute 已经带守卫——负索引按
+    # ONNX 语义折回，越界经 Select 取零且**不形成越界 Load**。因此这里只固定
+    # 形状、dtype、axis 与可寻址性合同，值域交给已 lower 的守卫。
     result = TensorSpec(
         name=node.output[0],
         shape=data.shape[:axis] + indices.shape + data.shape[axis + 1 :],

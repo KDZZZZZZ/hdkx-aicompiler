@@ -4,6 +4,7 @@ import onnx
 import pytest
 from onnx import AttributeProto, TensorProto, helper, numpy_helper
 
+from kxc_onnx.fold import ConstantFoldingError, fold_static_subgraph
 from kxc_onnx import (
     UnsupportedONNXOpError,
     import_onnx,
@@ -173,13 +174,13 @@ def test_explicit_default_batch_must_be_positive(default_batch):
         import_onnx_model(_model_with_io_shapes(["batch", 3]), default_batch=default_batch)
 
 
-def _static_operator_model(nodes, opset):
+def _static_operator_model(nodes, opset, output_shape=(1, 2, 2)):
     graph = helper.make_graph(
         nodes,
         "static_operator_model",
         [helper.make_tensor_value_info("a", TensorProto.FLOAT, [1, 2, 3]),
          helper.make_tensor_value_info("b", TensorProto.FLOAT, [1, 3, 2])],
-        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 2, 2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, list(output_shape))],
     )
     return helper.make_model(
         graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=6
@@ -248,7 +249,10 @@ def test_matmul_rejects_missing_non_matmul_intermediate_metadata():
     graph = helper.make_graph(
         [
             helper.make_node("MatMul", ["a", "b"], ["scores"], name="first"),
-            helper.make_node("Softmax", ["scores"], ["weights"], name="softmax"),
+            # Relu 不在导入器的逐算子推导链里，其输出也没有 value_info，
+            # 因此 weights 的元数据确实无从解析。Softmax 已可推导，不再适合
+            # 用来构造这个负例。
+            helper.make_node("Relu", ["scores"], ["weights"], name="relu"),
             helper.make_node("MatMul", ["weights", "c"], ["out"], name="second"),
         ],
         "matmul_missing_metadata",
@@ -339,11 +343,22 @@ def test_gather_rejects_declared_output_mismatch():
         )
 
 
-def test_gather_rejects_dynamic_indices_and_empty_output_name():
-    with pytest.raises(ValueError, match="initializer-backed constant indices"):
-        import_onnx_model(_gather_model(
-            [2, 3], [1], axis=1, dynamic_indices=True, output_shape=[2, 1]
-        ))
+def test_gather_accepts_runtime_indices():
+    """运行时索引是 embedding 查表的形态：导入期只定形状/dtype/axis 合同。
+
+    索引值域交给已 lower 的 GatherCompute 守卫——负索引按 ONNX 语义折回，
+    越界经 Select 取零且不形成越界 Load。
+    """
+    imported = import_onnx_model(_gather_model(
+        [2, 3], [1], axis=1, dynamic_indices=True, output_shape=[2, 1]
+    ))
+
+    assert imported.function.nodes[0].op_name == "gather"
+    assert imported.function.nodes[0].inputs == ["data", "indices"]
+    assert imported.function.outputs[0].shape == [2, 1]
+
+
+def test_gather_rejects_empty_output_name():
     with pytest.raises(ValueError, match="exactly one non-empty output"):
         import_onnx_model(_gather_model(
             [2, 3], [1], axis=1, node_outputs=("",), output_shape=[2, 1]
@@ -763,11 +778,14 @@ def test_transpose_empty_perm_uses_relay_default():
             helper.make_node("Transpose", ["weights"], ["out"], name="transpose"),
         ],
         opset=13,
+        # 缺省 perm 在 ONNX 与 Relay 里都是逆序：[1,2,2] -> [2,2,1]。
+        output_shape=(2, 2, 1),
     )
     imported = import_onnx_model(model)
 
     assert imported.function.nodes[1].attrs == {"axis": -1}
     assert imported.function.nodes[2].attrs == {"perm": []}
+    assert imported.function.outputs[0].shape == [2, 2, 1]
 
 
 def test_unsupported_op_error_includes_op_type_and_node_name():
@@ -1383,8 +1401,20 @@ def test_cast_rejects_non_float32_targets():
             ))
 
 
+def test_cast_accepts_the_identity_float32_conversion():
+    """MiniMind 的 RMSNorm `.float()` 在已是 float32 的图上导出成恒等 Cast。"""
+    imported = import_onnx_model(_s1_model(
+        [helper.make_node("Cast", ["a"], ["out"], name="cast", to=TensorProto.FLOAT)],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+    ))
+
+    assert imported.function.nodes[0].op_name == "cast"
+    assert imported.function.outputs[0].dtype == "float32"
+
+
 def test_cast_rejects_unsupported_source_dtypes():
-    for dtype in (TensorProto.FLOAT, TensorProto.BOOL, TensorProto.INT8):
+    for dtype in (TensorProto.BOOL, TensorProto.INT8):
         with pytest.raises(ValueError, match="supports only int32/int64 to float32"):
             import_onnx_model(_s1_model(
                 [helper.make_node("Cast", ["a"], ["out"], name="cast", to=TensorProto.FLOAT)],
@@ -1954,3 +1984,135 @@ def test_unsqueeze_rejects_non_int64_and_attributes():
 def test_unsqueeze_rejects_declared_output_mismatch():
     with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
         import_onnx_model(_unsqueeze_model([2, 3], [0], output_shape=[2, 3, 1]))
+
+# ---------------------------------------------------------------- 常量折叠
+
+def _fold_model(nodes, inputs, outputs, initializers=(), opset=17):
+    graph = helper.make_graph(nodes, "fold_test", inputs, outputs,
+                              initializer=list(initializers))
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)],
+                             ir_version=8)
+
+
+def test_folding_evaluates_the_static_mask_subgraph():
+    """ConstantOfShape -> Trilu 是导出器留下的纯静态 mask 构造。
+
+    这两个算子都没有 Relay 映射，也不需要有：折叠后它们整体消失，只留下一个
+    物化的常量，被保留的实算节点消费。
+    """
+    nodes = [
+        helper.make_node("Constant", [], ["s"], name="shape_const",
+                         value=helper.make_tensor("v", TensorProto.INT64, [2], [2, 2])),
+        helper.make_node("Constant", [], ["k"], name="k_const",
+                         value=helper.make_tensor("v", TensorProto.INT64, [], [1])),
+        helper.make_node("ConstantOfShape", ["s"], ["filled"], name="cos",
+                         value=helper.make_tensor("v", TensorProto.FLOAT, [1], [-3.0])),
+        helper.make_node("Trilu", ["filled", "k"], ["mask"], name="trilu", upper=1),
+        helper.make_node("Add", ["x", "mask"], ["out"], name="add"),
+    ]
+    model = _fold_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 2])],
+    )
+    folded, report = fold_static_subgraph(model)
+
+    assert report.folded_nodes == 4
+    assert report.remaining_nodes == 1
+    assert [node.op_type for node in folded.graph.node] == ["Add"]
+    assert report.materialized == ["mask"]
+    mask = numpy_helper.to_array(
+        next(i for i in folded.graph.initializer if i.name == "mask"))
+    assert mask.tolist() == [[0.0, -3.0], [0.0, 0.0]]
+
+    # 未映射的 ConstantOfShape/Trilu 折叠后不再出现，整图可导入。
+    imported = import_onnx_model(model)
+    assert [node.op_name for node in imported.function.nodes] == ["add"]
+
+
+def test_folding_leaves_graph_input_dependent_nodes_alone():
+    nodes = [
+        helper.make_node("Constant", [], ["c"], name="c",
+                         value=helper.make_tensor("v", TensorProto.FLOAT, [2], [1.0, 2.0])),
+        helper.make_node("Mul", ["x", "c"], ["out"], name="mul"),
+    ]
+    model = _fold_model(
+        nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+    )
+    folded, report = fold_static_subgraph(model)
+
+    assert report.folded_nodes == 1 and report.remaining_nodes == 1
+    assert [node.op_type for node in folded.graph.node] == ["Mul"]
+
+
+def test_folding_keeps_nodes_that_produce_graph_outputs():
+    """图输出必须由节点产出，不能被折成 initializer。"""
+    nodes = [
+        helper.make_node("Constant", [], ["c"], name="c",
+                         value=helper.make_tensor("v", TensorProto.FLOAT, [2], [1.0, 2.0])),
+        helper.make_node("Sqrt", ["c"], ["out"], name="sqrt"),
+    ]
+    model = _fold_model(
+        nodes, [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+    )
+    folded, report = fold_static_subgraph(model)
+
+    assert "Sqrt" in [node.op_type for node in folded.graph.node]
+    assert report.materialized == ["c"]
+
+
+def test_folding_refuses_to_exceed_the_byte_budget():
+    nodes = [
+        helper.make_node("Constant", [], ["s"], name="s",
+                         value=helper.make_tensor("v", TensorProto.INT64, [2], [256, 256])),
+        helper.make_node("ConstantOfShape", ["s"], ["big"], name="cos",
+                         value=helper.make_tensor("v", TensorProto.FLOAT, [1], [1.0])),
+        helper.make_node("Add", ["x", "big"], ["out"], name="add"),
+    ]
+    model = _fold_model(
+        nodes, [helper.make_tensor_value_info("x", TensorProto.FLOAT, [256, 256])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [256, 256])],
+    )
+    with pytest.raises(ConstantFoldingError, match="over the .*-byte budget"):
+        fold_static_subgraph(model, byte_budget=1024)
+
+
+def test_folding_can_be_disabled_and_then_the_raw_op_is_rejected():
+    nodes = [
+        helper.make_node("Constant", [], ["s"], name="s",
+                         value=helper.make_tensor("v", TensorProto.INT64, [2], [2, 2])),
+        helper.make_node("ConstantOfShape", ["s"], ["mask"], name="cos",
+                         value=helper.make_tensor("v", TensorProto.FLOAT, [1], [0.0])),
+        helper.make_node("Add", ["x", "mask"], ["out"], name="add"),
+    ]
+    model = _fold_model(
+        nodes, [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2, 2])],
+    )
+    assert [n.op_name for n in import_onnx_model(model).function.nodes] == ["add"]
+    with pytest.raises(UnsupportedONNXOpError, match="ConstantOfShape"):
+        import_onnx_model(model, fold_constants=False)
+
+
+def test_folding_only_materializes_the_frontier():
+    """纯中间静态值不进 initializer，只物化被保留节点消费的那一层。"""
+    nodes = [
+        helper.make_node("Constant", [], ["c"], name="c",
+                         value=helper.make_tensor("v", TensorProto.FLOAT, [2], [4.0, 9.0])),
+        helper.make_node("Sqrt", ["c"], ["mid"], name="sqrt"),
+        helper.make_node("Sqrt", ["mid"], ["root"], name="sqrt2"),
+        helper.make_node("Mul", ["x", "root"], ["out"], name="mul"),
+    ]
+    model = _fold_model(
+        nodes, [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+    )
+    folded, report = fold_static_subgraph(model)
+
+    assert report.materialized == ["root"]
+    names = {i.name for i in folded.graph.initializer}
+    assert "mid" not in names and "c" not in names
+
