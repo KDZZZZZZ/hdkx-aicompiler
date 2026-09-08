@@ -71,9 +71,12 @@ def fold_static_subgraph(
     produced_by_fold = {output for node in foldable for output in node.output if output}
 
     # 折叠前沿：被保留节点消费的静态产出。纯中间值不物化。
-    frontier = sorted(
-        {name for node in kept for name in node.input if name in produced_by_fold}
-    )
+    #
+    # 顺序按**原图的产出顺序**，不排序：物化值会作为 initializer 进入
+    # param_order，而 param_order 是序列化参数的 ABI 顺序，折叠不得重排它。
+    consumed = {name for node in kept for name in node.input if name in produced_by_fold}
+    frontier = [output for node in foldable for output in node.output
+                if output in consumed]
     if not frontier:
         return model, report
 
