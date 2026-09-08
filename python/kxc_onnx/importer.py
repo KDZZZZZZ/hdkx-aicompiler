@@ -187,6 +187,12 @@ def import_onnx_model(
                 output_declarations, default_batch,
             )
             continue
+        if node.op_type == "Identity":
+            _import_identity_node(
+                node, params, param_order, available_values, input_specs,
+                output_declarations, default_batch,
+            )
+            continue
         if node.op_type not in ONNX_TO_RELAY:
             raise UnsupportedONNXOpError(
                 f"Unsupported ONNX op '{node.op_type}' in node '{node.name or '<unnamed>'}'"
@@ -489,6 +495,67 @@ def _import_constant_node(
     _validate_declared_output(
         "Constant", node_name,
         TensorSpec(name=name, shape=params[name].shape, dtype=dtype),
+        output_declarations, default_batch,
+    )
+
+
+def _import_identity_node(
+    node: onnx.NodeProto,
+    params: dict[str, ParamTensor],
+    param_order: list[str],
+    available_values: set[str],
+    input_specs: dict[str, TensorSpec],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+) -> None:
+    """Normalize an ONNX Identity node into a parameter alias.
+
+    ``torch.onnx.export`` dedupes byte-identical initializers and re-exposes the
+    survivors through Identity, so every Identity in the locked MiniMind export
+    aliases one initializer under a second weight name. Routing that through the
+    existing ParamTensor path keeps the pass-through free: no Relay node and no
+    copy kernel is emitted, which is why Identity never appears in the folded
+    operator inventory.
+
+    Aliasing a computed value would need either downstream input rewriting or a
+    real copy unit; it stays rejected rather than binding a name nothing produces.
+    """
+    node_name = node.name or "<unnamed>"
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(
+            f"Identity node '{node_name}' requires exactly one non-empty input name"
+        )
+    if len(node.output) != 1 or not node.output[0]:
+        raise ValueError(
+            f"Identity node '{node_name}' requires exactly one non-empty output name"
+        )
+    source, name = node.input[0], node.output[0]
+    if source not in available_values:
+        raise ValueError(
+            f"Identity node '{node_name}' has unresolved input '{source}'"
+        )
+    if name in params or name in input_specs:
+        raise ValueError(
+            f"Identity node '{node_name}' output '{name}' collides with an existing "
+            "initializer, Constant or graph input"
+        )
+    if source not in params:
+        raise UnsupportedONNXOpError(
+            f"Identity node '{node_name}' aliases '{source}', which is not an initializer "
+            "or Constant; only parameter aliases are supported in the static-shape MVP"
+        )
+    aliased = params[source]
+    param_order.append(name)
+    params[name] = ParamTensor(
+        name=name,
+        shape=list(aliased.shape),
+        dtype=aliased.dtype,
+        data=aliased.data,
+    )
+    available_values.add(name)
+    _validate_declared_output(
+        "Identity", node_name,
+        TensorSpec(name=name, shape=params[name].shape, dtype=params[name].dtype),
         output_declarations, default_batch,
     )
 

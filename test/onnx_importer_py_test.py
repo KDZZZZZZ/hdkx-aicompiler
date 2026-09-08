@@ -773,9 +773,9 @@ def test_transpose_empty_perm_uses_relay_default():
 def test_unsupported_op_error_includes_op_type_and_node_name():
     graph = helper.make_graph(
         [
-            helper.make_node("Identity", ["input"], ["output"], name="bad_identity"),
+            helper.make_node("Trilu", ["input"], ["output"], name="bad_trilu", upper=1),
         ],
-        "unsupported_identity",
+        "unsupported_trilu",
         [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3])],
         [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 3])],
     )
@@ -785,7 +785,7 @@ def test_unsupported_op_error_includes_op_type_and_node_name():
         ir_version=6,
     )
 
-    with pytest.raises(UnsupportedONNXOpError, match="Identity.*bad_identity"):
+    with pytest.raises(UnsupportedONNXOpError, match="Trilu.*bad_trilu"):
         import_onnx_model(model, default_batch=1)
 
 
@@ -1194,6 +1194,81 @@ def test_constant_rejects_initializer_and_graph_input_name_conflicts():
         [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
     )
     with pytest.raises(ValueError, match="conflicts with an existing graph input"):
+        import_onnx_model(model)
+
+
+
+def _identity_model(*, source="w", alias="w_alias", extra_nodes=(), source_is_initializer=True,
+                    node_inputs=None, node_outputs=None):
+    """Identity aliasing a shared initializer, the shape torch.onnx.export emits."""
+    # 用 is None 区分"未指定"与"显式空列表"，否则零输入的负例构造不出来。
+    nodes = [helper.make_node("Identity",
+                              [source] if node_inputs is None else list(node_inputs),
+                              [alias] if node_outputs is None else list(node_outputs),
+                              name="ident")]
+    nodes.extend(extra_nodes)
+    initializers = ([helper.make_tensor(source, TensorProto.FLOAT, [2], [1.5, 2.5])]
+                    if source_is_initializer else [])
+    graph_inputs = [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])]
+    if not source_is_initializer:
+        nodes.insert(0, helper.make_node("Mul", ["x", "x"], [source], name="produce"))
+    return _s1_model(nodes, graph_inputs,
+                     [helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])]
+                     if extra_nodes else
+                     [helper.make_tensor_value_info(alias, TensorProto.FLOAT, [2])],
+                     initializers=initializers)
+
+
+def test_identity_aliases_a_deduped_initializer_into_a_param():
+    imported = import_onnx_model(_identity_model())
+
+    # 透传不产生 Relay 节点，也不产生拷贝 kernel。
+    assert imported.function.nodes == []
+    assert imported.param_order == ["w", "w_alias"]
+    assert imported.params["w_alias"].shape == [2]
+    assert imported.params["w_alias"].dtype == "float32"
+    assert imported.params["w_alias"].data == imported.params["w"].data
+    assert imported.params["w_alias"].name == "w_alias"
+
+
+def test_identity_alias_is_consumable_by_downstream_nodes():
+    imported = import_onnx_model(_identity_model(
+        extra_nodes=[helper.make_node("Mul", ["x", "w_alias"], ["out"], name="mul")]))
+
+    assert [node.op_name for node in imported.function.nodes] == ["mul"]
+    assert imported.function.nodes[0].inputs == ["x", "w_alias"]
+    assert imported.params["w_alias"].data == imported.params["w"].data
+
+
+def test_identity_rejects_aliasing_a_computed_value():
+    with pytest.raises(UnsupportedONNXOpError, match="is not an initializer or Constant"):
+        import_onnx_model(_identity_model(source="t", source_is_initializer=False))
+
+
+def test_identity_rejects_name_collisions():
+    model = _s1_model(
+        [helper.make_node("Identity", ["w"], ["x"], name="ident")],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])],
+        initializers=[helper.make_tensor("w", TensorProto.FLOAT, [2], [1.0, 2.0])],
+    )
+    with pytest.raises(ValueError, match="collides with an existing"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize("inputs,outputs", [([], ["a"]), (["w", "w"], ["a"]), (["w"], [""])])
+def test_identity_rejects_malformed_arity(inputs, outputs):
+    with pytest.raises(ValueError, match="Identity node"):
+        import_onnx_model(_identity_model(node_inputs=inputs, node_outputs=outputs))
+
+
+def test_identity_rejects_unresolved_input():
+    model = _s1_model(
+        [helper.make_node("Identity", ["missing"], ["a"], name="ident")],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])],
+        [helper.make_tensor_value_info("a", TensorProto.FLOAT, [2])],
+    )
+    with pytest.raises(ValueError, match="unresolved input"):
         import_onnx_model(model)
 
 
