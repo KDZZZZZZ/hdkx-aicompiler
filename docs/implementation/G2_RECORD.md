@@ -118,7 +118,14 @@ E0 锁定的真实图（prefill 1141 节点 / decode 1173 节点）现在完整�
 仍待办：
 
 6. **发布 M9 E1 receipt**：第 1 项已具备全部证据（导出 SHA、输入输出签名、650 实算节点、逐元素误差、可复现的 fixture 生成器），把它固化成 receipt，M2/M3 才能按真实图 ABI 绑定。
-7. **第 2 项换掉合成 fixture**：M2 的三步 decode 目前用合成注意力图，改用 E0 锁定的真实 decode 图（导入已通过，666 个 Relay 节点）。
+7. **第 2 项换掉合成 fixture**：M2 的三步 decode 目前用合成注意力图，改用 E0 锁定的真实 decode 图。导入已通过（666 个 Relay 节点、446 参数，与 prefill 同源同折叠路径）。落地时注意签名与 prefill 不同——decode 是 **17 输入对 17 输出**：
+
+   ```
+   输入：input_ids [1,1] int64，随后按层交错 past_k_i / past_v_i [1,16,4,96] float32
+   输出：logits，随后按层交错 present_k_i / present_v_i
+   ```
+
+   现有的 `python/tools/make_minimind_l1a_fixture.py` 只喂 `{"input_ids": token_ids}` 一个输入，加 decode 分支必须把 16 个 past 张量一并喂给 `ReferenceEvaluator`，否则参考值算不出来。这份签名与 [M9 E2 审计](M9_E2_SIGNATURE.md)一致，M2 的状态合同即按此绑定。
 8. **第 4 项**：host greedy 生成循环 + bundle 与 export receipt / run_id 的关联字段。
 9. **根因收口（建议单独立项）**：给 `RelayPassFunctor` 遍历基类提供默认记忆化，见 §3.3。这是本轮唯一未做的根因修复，不做的话每新增一个按树遍历就重新引入一次指数缺陷。
 10. **插桩惰性化**：`RunInstrumentedPass` 无条件渲染两次全图 IR 文本（Relay/TIR 两处同构），见 §3.4。8 层 6 秒说明 TIR 侧没有同样的爆炸，优先级低于第 9 项，但理由不变。
