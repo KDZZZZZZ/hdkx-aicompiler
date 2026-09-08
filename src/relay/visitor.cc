@@ -110,12 +110,33 @@ PassContext PassContextFromRelay(const Function& func) {
 }  // namespace relay
 
 Expr RelayPass::Mutate(const Expr& expr) {
+    if (!expr.defined()) return expr;
+    // 只记忆内部节点：叶子重写是 O(1)，且 Var 可能随作用域重命名。
+    const bool memoizable = !expr.As<VarNode>() && !expr.As<ConstantNode>() &&
+                            !expr.As<relay::OpNode>();
+    if (memoizable) {
+        const auto found = memo_.find(expr.get());
+        if (found != memo_.end()) return found->second;
+    }
+
     PassContext pass_ctx = PassContext::Current();
     if (!pass_ctx.defined()) {
         pass_ctx = relay::PassContextFromRelay(expr);
     }
     PassContext::Scope scope(pass_ctx);
-    return VisitExpr(expr);
+
+    ++depth_;
+    Expr result;
+    try {
+        result = VisitExpr(expr);
+    } catch (...) {
+        if (--depth_ == 0) memo_.clear();
+        throw;
+    }
+    if (memoizable) memo_.emplace(expr.get(), result);
+    // 顶层调用返回时丢弃记忆：节点释放后指针可能被复用，跨调用保留会命中陈旧项。
+    if (--depth_ == 0) memo_.clear();
+    return result;
 }
 
 // 重写 Relay Function 并验证结果仍为 Function。
