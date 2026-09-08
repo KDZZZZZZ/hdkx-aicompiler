@@ -203,9 +203,11 @@ bool TestMiniMindL1aPrefill() {
     }
     std::cout << "[INFO] minimind L1a worst absolute difference " << worst
               << " at '" << worst_name << "'\n";
-    // 阈值按实测最坏误差留一位余量；本图的差异只来自 MatMul 归约顺序。
-    CHECK(worst <= 2e-3,
-          "every output must match the ONNX reference element-wise within 2e-3");
+    // 实测最坏误差随层数平稳增长：1/2/3/4/8 层 = 4.91 / 6.93 / 8.17 / 8.70 /
+    // 8.82e-06，就是 float32 舍入噪声（差异只来自 MatMul 的归约顺序）。阈值取
+    // 1e-4，比实测高一个数量级，够容纳更深的模型，又不至于放过真实的数值退化。
+    CHECK(worst <= 1e-4,
+          "every output must match the ONNX reference element-wise within 1e-4");
     return true;
 #endif
 }
