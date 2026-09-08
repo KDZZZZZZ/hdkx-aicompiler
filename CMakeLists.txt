@@ -1053,6 +1053,9 @@ if(KXC_BUILD_PASS_TESTS)
   # L1a 验收：真实 MiniMind prefill 图。产物 275 MB 不入库，运行时由
   # KXC_MINIMIND_IMPORT_DIR 指向；未设置则跳过，不做构建硬依赖。
   kxc_add_runtime_exe(minimind_l1a_llvm_test test/minimind_l1a_llvm_test.cpp)
+  # G2 第 2 项：定容 KV 的多步 decode，同样由环境变量指向 fixture，未设置则跳过。
+  kxc_add_runtime_exe(minimind_decode_loop_llvm_test
+    test/minimind_decode_loop_llvm_test.cpp)
   if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH)
     kxc_add_runtime_exe(bounded_dynamic_graph_llvm_test
       test/bounded_dynamic_graph_llvm_test.cpp)
@@ -1439,6 +1442,8 @@ kxc_add_ctest_if_target(kv_state_llvm_test
   "kv-state;llvm;dynamic-module;e2e;numeric")
 kxc_add_ctest_if_target(minimind_l1a_llvm_test
   "minimind;l1a;onnx;llvm;cpu;e2e;numeric")
+kxc_add_ctest_if_target(minimind_decode_loop_llvm_test
+  "minimind;l1b;kv-state;onnx;llvm;cpu;e2e;numeric")
 
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test

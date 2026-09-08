@@ -84,6 +84,36 @@ class Decode(nn.Module):
         return (out.logits, *flat)
 
 
+class CapacityDecode(nn.Module):
+    """定容 KV 的单步前向。
+
+    与 `Decode` 的区别是 past 按 `capacity` 定长而不是按实际历史长度：有效长度
+    由 `attention_mask` 和 `position` 两个运行时输入决定，形状里不再含历史长度。
+    因此同一个编译产物可以服务任意步，不需要每步换产物。
+
+    需要 `minimind_capacity_kv.patch`：RoPE 起始位置改为来自运行时 `position`，
+    而不是从 `past.shape[1]` 推——定容之后 past 的形状是 capacity，不是 extent。
+
+    无效容量区的填充值有上限：掩码是加性的 `(1 - mask) * -1e9`，只能压住 1e9
+    量级的分数。实测填充值 <= 1e6 时输出与精确长度 past 逐位相同，>= 1e9 时掩码
+    失效。所以调用方必须用有限的小哨兵，不能用 1e30 量级的值。
+    """
+
+    def __init__(self, model, num_layers):
+        super().__init__()
+        self.model = model
+        self.num_layers = num_layers
+
+    def forward(self, input_ids, position, attention_mask, *flat_past):
+        past = [(flat_past[2 * i], flat_past[2 * i + 1]) for i in range(self.num_layers)]
+        out = self.model(input_ids, attention_mask=attention_mask,
+                         past_key_values=past, use_cache=True, position=position)
+        flat = []
+        for k, v in out.past_key_values:
+            flat += [k, v]
+        return (out.logits, *flat)
+
+
 def export(stage, wrapper, args, names_in, names_out, dyn, path, opset):
     print(f"  导出 {stage} -> {path.name}", flush=True)
     torch.onnx.export(
@@ -110,6 +140,10 @@ def main():
     ap.add_argument("--max-pos", type=int, default=2048, help="RoPE 表长度，只影响常量大小")
     ap.add_argument("--flash", action="store_true", help="保留 SDPA 融合路径（默认关闭以导出显式 attention）")
     ap.add_argument("--static", action="store_true", help="不声明 dynamic_axes，导出固定形状图（用于对照）")
+    ap.add_argument("--capacity", type=int, default=0,
+                    help="额外导出一张定容 KV 的 decode 图：past 按该容量定长，"
+                         "有效长度由 attention_mask 与 position 决定，同一产物可"
+                         "服务任意步。需要 minimind_capacity_kv.patch。0 表示不导出")
     ap.add_argument("--layers", type=int, default=8,
                     help="解码层数。默认 8 即 E0 锁定的配置；调小只用于生成"
                          "能在内存受限机器上编译的缩减 fixture，缩减模型不得"
@@ -165,6 +199,23 @@ def main():
                ["logits"] + present_names, None if a.static else dyn,
                a.out / ("minimind_decode_static.onnx" if a.static else "minimind_decode.onnx"), a.opset)
         written.append(a.out / ("minimind_decode_static.onnx" if a.static else "minimind_decode.onnx"))
+
+        # ---- 定容 decode（可选）----
+        if a.capacity > 0:
+            cap = a.capacity
+            ids1 = torch.randint(0, V, (a.batch, 1), dtype=torch.long)
+            position = torch.tensor([0], dtype=torch.long)
+            mask = torch.ones(a.batch, cap + 1)
+            past = []
+            for _ in range(L):
+                past += [torch.zeros(a.batch, cap, KV, HD),
+                         torch.zeros(a.batch, cap, KV, HD)]
+            path = a.out / "minimind_decode_capacity.onnx"
+            export("decode_capacity", CapacityDecode(model, L),
+                   (ids1, position, mask, *past),
+                   ["input_ids", "position", "attention_mask"] + kv_names,
+                   ["logits"] + present_names, None, path, a.opset)
+            written.append(path)
 
     commit = minimind_commit(a.src)
     meta = {
