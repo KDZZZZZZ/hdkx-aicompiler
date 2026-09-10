@@ -558,6 +558,24 @@
         "relay_to_te_symbol": "PowCompute"
       }
     },
+    "reduce_max": {
+      "schema_version": 1,
+      "category": "tensor.reduce",
+      "num_inputs": 1,
+      "attrs": "ReduceMaxAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "ReduceMax"
+      ]
+    },
     "reduce_mean": {
       "schema_version": 1,
       "category": "tensor.reduce",
@@ -574,6 +592,24 @@
       "tests": true,
       "onnx_ops": [
         "ReduceMean"
+      ]
+    },
+    "reduce_min": {
+      "schema_version": 1,
+      "category": "tensor.reduce",
+      "num_inputs": 1,
+      "attrs": "ReduceMinAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "ReduceMin"
       ]
     },
     "reshape": {

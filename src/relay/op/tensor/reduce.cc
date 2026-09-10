@@ -113,6 +113,47 @@ KXC_REGISTER_OP(reduce_mean)
     .set_attr<FInferType>("FInferType", ReduceMeanInferType)
     .set_attr<FRelayToTE>("FRelayToTE", ReduceMeanCompute);
 
+// 将 Relay reduce_max / reduce_min 降为 TOPI 最大/最小归约。
+te::Tensor ReduceMaxCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                            const kxc::Type& out_type) {
+    RequireInputCount("reduce_max", inputs, 1);
+    RequireTensorOutput("reduce_max", out_type);
+    const auto* reduce_attrs = attrs.As<ReduceMaxAttrsNode>();
+    const int rank = static_cast<int>(inputs[0]->shape.size());
+    const std::vector<int> axes = NormalizeAxes(
+        "reduce_max", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{}, rank);
+    const bool keepdims = !reduce_attrs || reduce_attrs->keepdims != 0;
+    return te::topi::max(inputs[0], ToAxisArray(axes), keepdims, "T_reduce_max");
+}
+
+te::Tensor ReduceMinCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                            const kxc::Type& out_type) {
+    RequireInputCount("reduce_min", inputs, 1);
+    RequireTensorOutput("reduce_min", out_type);
+    const auto* reduce_attrs = attrs.As<ReduceMinAttrsNode>();
+    const int rank = static_cast<int>(inputs[0]->shape.size());
+    const std::vector<int> axes = NormalizeAxes(
+        "reduce_min", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{}, rank);
+    const bool keepdims = !reduce_attrs || reduce_attrs->keepdims != 0;
+    return te::topi::min(inputs[0], ToAxisArray(axes), keepdims, "T_reduce_min");
+}
+
+KXC_REGISTER_OP(reduce_max)
+    .describe(R"doc(Computes the maximum of elements across given dimensions.)doc")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "ReduceMaxAttrs")
+    .set_attr<FInferType>("FInferType", ReduceMaxInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", ReduceMaxCompute);
+
+KXC_REGISTER_OP(reduce_min)
+    .describe(R"doc(Computes the minimum of elements across given dimensions.)doc")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "ReduceMinAttrs")
+    .set_attr<FInferType>("FInferType", ReduceMinInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", ReduceMinCompute);
+
 }  // namespace relay
 }  // namespace kxc
 

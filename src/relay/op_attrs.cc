@@ -86,6 +86,8 @@ KXC_OBJECT_DEFINE(LayerNormAttrsNode)
 KXC_OBJECT_DEFINE(AddAttrsNode)
 KXC_OBJECT_DEFINE(CastAttrsNode)
 KXC_OBJECT_DEFINE(ReduceMeanAttrsNode)
+KXC_OBJECT_DEFINE(ReduceMaxAttrsNode)
+KXC_OBJECT_DEFINE(ReduceMinAttrsNode)
 KXC_OBJECT_DEFINE(ReshapeAttrsNode)
 KXC_OBJECT_DEFINE(ExpandAttrsNode)
 KXC_OBJECT_DEFINE(TransposeAttrsNode)
@@ -280,6 +282,16 @@ void ReduceMeanAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const 
     writer.Add("keepdims", keepdims);
 }
 
+void ReduceMaxAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axes", axes);
+    writer.Add("keepdims", keepdims);
+}
+
+void ReduceMinAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axes", axes);
+    writer.Add("keepdims", keepdims);
+}
+
 void ReshapeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("newshape", newshape);
     writer.Add("allowzero", allowzero);
@@ -460,6 +472,20 @@ CastAttrs CastAttrs::Create(int to) {
 // 创建均值归约的轴集合和维度保留属性。
 ReduceMeanAttrs ReduceMeanAttrs::Create(Array<int64_t> axes, int64_t keepdims) {
     auto* node = new ReduceMeanAttrsNode();
+    node->axes = std::move(axes);
+    node->keepdims = keepdims;
+    return InternalCreate(node);
+}
+
+ReduceMaxAttrs ReduceMaxAttrs::Create(Array<int64_t> axes, int64_t keepdims) {
+    auto* node = new ReduceMaxAttrsNode();
+    node->axes = std::move(axes);
+    node->keepdims = keepdims;
+    return InternalCreate(node);
+}
+
+ReduceMinAttrs ReduceMinAttrs::Create(Array<int64_t> axes, int64_t keepdims) {
+    auto* node = new ReduceMinAttrsNode();
     node->axes = std::move(axes);
     node->keepdims = keepdims;
     return InternalCreate(node);

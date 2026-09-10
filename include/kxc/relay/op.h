@@ -320,6 +320,34 @@ public:
     static ReduceMeanAttrs Create(Array<int64_t> axes, int64_t keepdims = 1);
 };
 
+/*! \brief reduce.max / reduce.min 的归约轴和 keepdims 属性。 */
+class ReduceMaxAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> axes;
+    int64_t keepdims = 1;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ReduceMaxAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ReduceMaxAttrs, ReduceMaxAttrsNode)
+
+public:
+    static ReduceMaxAttrs Create(Array<int64_t> axes, int64_t keepdims = 1);
+};
+class ReduceMinAttrsNode : public BaseAttrsNode {
+public:
+    Array<int64_t> axes;
+    int64_t keepdims = 1;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ReduceMinAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ReduceMinAttrs, ReduceMinAttrsNode)
+
+public:
+    static ReduceMinAttrs Create(Array<int64_t> axes, int64_t keepdims = 1);
+};
+
 /*! \brief reshape 的目标形状和 allowzero 语义属性。 */
 class ReshapeAttrsNode : public BaseAttrsNode {
 public:

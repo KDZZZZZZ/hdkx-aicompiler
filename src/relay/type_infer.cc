@@ -1259,15 +1259,14 @@ Type SliceInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(out, data->dtype);
 }
 
-// 按 axes 与 keepdims 推导 reduce_mean 结果 shape。
-Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    RequireArity("reduce_mean", input_types, 1);
-    const auto* data = RequireTensor("reduce_mean", input_types[0], "data");
-    const auto* reduce_attrs = attrs.As<ReduceMeanAttrsNode>();
+// 按 axes 与 keepdims 推导 reduce 结果 shape（mean/max/min 共用）。
+Type ReduceInferTypeImpl(const char* op, const Array<int64_t>& raw_axes,
+                         int64_t raw_keepdims, const Array<Type>& input_types) {
+    RequireArity(op, input_types, 1);
+    const auto* data = RequireTensor(op, input_types[0], "data");
     const std::vector<int> axes =
-        NormalizeAxes("reduce_mean", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{},
-                      static_cast<int>(data->shape.size()));
-    const bool keepdims = !reduce_attrs || reduce_attrs->keepdims != 0;
+        NormalizeAxes(op, raw_axes, static_cast<int>(data->shape.size()));
+    const bool keepdims = raw_keepdims != 0;
 
     std::vector<bool> reduce_axis(data->shape.size(), false);
     for (int axis : axes) {
@@ -1285,6 +1284,28 @@ Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
         }
     }
     return MakeTensorType(out, data->dtype);
+}
+
+// 按 axes 与 keepdims 推导 reduce_mean 结果 shape。
+Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    const auto* reduce_attrs = attrs.As<ReduceMeanAttrsNode>();
+    return ReduceInferTypeImpl(
+        "reduce_mean", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{},
+        reduce_attrs ? reduce_attrs->keepdims : 1, input_types);
+}
+
+Type ReduceMaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    const auto* reduce_attrs = attrs.As<ReduceMaxAttrsNode>();
+    return ReduceInferTypeImpl(
+        "reduce_max", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{},
+        reduce_attrs ? reduce_attrs->keepdims : 1, input_types);
+}
+
+Type ReduceMinInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    const auto* reduce_attrs = attrs.As<ReduceMinAttrsNode>();
+    return ReduceInferTypeImpl(
+        "reduce_min", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{},
+        reduce_attrs ? reduce_attrs->keepdims : 1, input_types);
 }
 
 // 校验 softmax 轴并保持输入类型。
