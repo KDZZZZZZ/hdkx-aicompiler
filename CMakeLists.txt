@@ -1060,6 +1060,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
   kxc_add_runtime_exe(m10_unified_control_llvm_test test/m10_unified_control_llvm_test.cpp)
   kxc_add_runtime_exe(bounded_control_flow_llvm_test test/bounded_control_flow_llvm_test.cpp)
+  kxc_add_runtime_exe(m10_control_loop_llvm_test test/m10_control_loop_llvm_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
@@ -1154,6 +1155,11 @@ if(KXC_BUILD_PASS_TESTS)
   add_test(NAME bounded_control_flow_llvm_test
     COMMAND "$<TARGET_FILE:bounded_control_flow_llvm_test>")
   set_tests_properties(bounded_control_flow_llvm_test PROPERTIES
+    LABELS "control-flow;control-runtime;bounded;cpu"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+  add_test(NAME m10_control_loop_llvm_test
+    COMMAND "$<TARGET_FILE:m10_control_loop_llvm_test>")
+  set_tests_properties(m10_control_loop_llvm_test PROPERTIES
     LABELS "control-flow;control-runtime;bounded;cpu"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   add_custom_target(run_control_flow_tests
