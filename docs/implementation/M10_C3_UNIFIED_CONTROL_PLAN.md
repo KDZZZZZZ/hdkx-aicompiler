@@ -461,14 +461,15 @@ git diff --check
 
 验证：`test/bounded_control_flow_llvm_test.cpp` 的 `bounded_state_append_at_loop_region` 证明一次循环迭代恰好提交一行（extent 1→2），且追加行落在推进后的 extent；gate-on CTest 77/77、Python 362/362、全部检查器通过。
 
-**PR5（真实 MiniMind 图内循环）未完成**，依赖 PR4（已完成）。已完成的前置与剩余阻塞：
+**PR5（真实 MiniMind 图内循环）机制已打通，真实模型 4 步数值验收未完成。**
 
-- **已完成**：图内 token 选择的两个算子已挂载：`reduce_max`/`reduce_min`（值半部）与 `argmax`（索引选择半部，索引跟踪归约 + 显式 tie-breaking：默认 first-occurrence，`select_last_index=1` 为 last-occurrence；int64 输出；ONNX ArgMax 映射）。契约 44/44，数值与生产 lowering 测试通过。
-- **剩余阻塞一：循环内的动态 KV 写入。** 容量型 decode（`out/fx_decode_stateful`，past `[1,32,4,96]` 固定）要在循环体内把新 token 的 KV 写到递增的 `position` 槽位。仓库没有 scatter / 动态 in-place 写入原语（算子集里只有 `gather` 读），而 PR4 的 region 提交是**在循环体外**由会话把 append source 复制到 state——它无法把"写到 body 内部第 `position` 槽"表达成一个 Relay 计算体。紧凑型 decode（`out/fx_minimind_bounded_decode`，past `[1,P,4,96]` → present `[1,P+1,...]`）则每次迭代改变 tensor shape，被 PR3 的循环形状不变量拒绝。因此需要新增一个动态写入原语（或把导出改成直接输出"追加的 KV token"）。
-- **剩余阻塞二：把导入图内联进 While body。** 真实 decode 是独立导入的 Function（1559 节点 / 446 参数），Relay 没有函数内联/参数替换工具，While body 必须是同一 Function 内的表达式。需要新增参数替换（param → loop-carried var）或按导入图直接生成 loop body。
-- **尚未开始**：主机调度合同（position/mask/停止条件）与真实模型图内循环的数值验收。
+- **已完成：图内 token 选择算子**：`reduce_max`/`reduce_min` 与 `argmax`（索引跟踪归约，显式 tie-breaking：默认 first-occurrence，`select_last_index=1` 为 last-occurrence，int64 输出，ONNX ArgMax 映射）。契约 44/44。
+- **已完成：参数替换 pass**（`pass_utils::SubstituteVars` / `InlineFunctionParameters`）：DAG 安全、词法作用域感知、同时替换（不级联）的变量替换，arity 不匹配 fail-closed。这是把导入 Function 内联进 While body 的前提。
+- **已完成：真实图内联**：`m10_control_loop_llvm_test` Part 1 用该 pass 内联**真实导入的 MiniMind bounded-decode 代表图**（经 adapter 附形状属性后的 17 参数 representative）并重新推导类型成功。
+- **已完成：图内循环机制**：Part 2 编译一个 While 循环，body 由内联一个独立 Function 得到；它在运行时 `position` 处用 `where(equal(slot_vector, position), row, table)` 把行写入固定容量表（静态容量形式不需要 scatter 原语），每轮推进 position，并用 argmax 逐行选 token，全部 loop-carried。测试核对写入槽位、position 推进与 argmax token。
+- **剩余：真实模型 4 步数值验收。** 需要把**容量型** decode（`out/fx_minimind_cuda_state/decode_capacity.json`，past `[1,32,4,96]` 定长、present `[1,33,...]`，新 KV 恒在下标 32）作为循环 body 接入，并把 position/mask/token 作为 loop-carried 标量、KV 由 PR4 的 region 边界在每轮提交，再与 `ref_step0..3_*.bin` 逐项对齐。紧凑型导出（`out/fx_minimind_bounded_decode`，past `[1,P,...]`）每轮改变形状，被 PR3 的循环形状不变量拒绝，必须改用定长容量导出。这一步是导出格式 + 主机调度合同 + 数值验收的整合，尚未开始。
 
-这两个阻塞都是新的编译器能力（动态写入原语 + 函数内联），不是已完成的“统一执行权威 / region-aware bounded admission / region 边界状态提交”重构的一部分。
+已完成部分（统一执行权威、region-aware bounded admission、region 边界状态提交、图内 argmax、参数内联、图内循环机制）都以 gate-on CTest 与真实 fixture 证据验证；真实模型 4 步循环数值验收仍是显式未完成项。
 
 **PR6（清退第二执行权威）已完成。** `CompileControlFlowExact` 的消费者是既有控制流测试；随 PR1/PR2 已把这些测试迁移到普通 `Compiler::Compile`/`RuntimeSession`，旧入口与其私有类型、两个旧测试均已删除。
 
