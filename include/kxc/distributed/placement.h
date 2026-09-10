@@ -37,6 +37,7 @@ public:
 
     const WorkerPlacementNode* operator->() const;
     std::string ToString() const;
+    void Validate() const;
 };
 
 class DiscoPlacementNode : public Object {
@@ -63,6 +64,7 @@ public:
     bool empty() const;
     int FindWorker(const VirtualDevice& virtual_device) const;
     std::string ToString() const;
+    void Validate() const;
 };
 
 DiscoPlacement BuildDiscoPlacement(const Array<VirtualDevice>& virtual_devices,

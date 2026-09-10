@@ -4,7 +4,11 @@ MiniMind-L1 的目标是 prefill + decode，MiniMind-O 的 Thinker 复用这条�
 
 本模块要把真正需要的形状值接入唯一的 ShapeProgram/ModuleInvocationContract：先验证 MiniMind 导出的 batch、prefill sequence、past 和 total 关系，再在固定 rank、有界范围和整除约束内执行。它还要把有界能力扩展到实际 attention；否则 Shape 虽可计算，MatMul/Softmax/KV 仍不能在变长输入上运行。未知 rank、数据相关任意形状和运行时隐式编译继续拒绝。
 
-> 状态：待实施，第二波 C 线。先过 [M9](M9_MINIMIND_TARGET.md) E0 的导出审计，与 [M2](M2_KV_STATE.md) 的 extent 合同、[M4](M4_ONNX_IMPORT.md) 的节点重建协同；M10 的控制流 runtime 当前拒绝运行时生成的 extent，因此若控制图要参与 decode，必须消费本模块发布的受限 shape/extent ABI，不能在控制流 executor 里复制 ShapeProgram。第一波证据见 [G0](G0_BASELINE.md)/[G1](G1_RECORD.md)。
+> 状态：**部分完成（2026-09-10）**。S1/S2 受限 Shape→Gather/Concat→ReshapeDynamic 链已有同产物多形状执行；静态形状算子边界由 `shape_value_llvm_test` 验证。S3 普通 MatMul/Transpose/Softmax 的有界 attention 核心已通过，见 [注意力报告](M3_BOUNDED_ATTENTION_REPORT.md)。共享 Call DAG、重复实参与明确的 tuple 输出已接通 bounded/exact，见 [图结构报告](M3_GRAPH_STRUCTURE_REPORT.md)。静态权重、可证明广播与真实第一层 RMSNorm/QKV 子图已接通，见 [加权投影报告](M3_WEIGHTED_PROJECTION_REPORT.md)。实际 ONNX 标量索引/多输入 Concat 拆头链与 Q/K RMSNorm 已接通，见 [拆头报告](M3_ONNX_HEADS_REPORT.md)。实际 K/V GQA 的形状条件证明、重复链和动态 Squeeze/Unsqueeze 已完成，见 [GQA 报告](M3_GQA_REPORT.md)。实际 RMSNorm/QKV/分头/RoPE 组合链与静态操作轴 Slice/Concat 已接通，见 [RoPE 报告](M3_ROPE_REPORT.md)。真实第一层的上述路径已联合到因果 mask、Softmax、合头和输出投影，见 [因果 attention 报告](M3_CAUSAL_ATTENTION_REPORT.md)，同产物四组 B/S 及未来激活扰动通过。完整八层变长 prefill 已从 token 接通至 logits/16 KV，四组 B/S 加未来 token 扰动共 3710 次 LLVM 调用、最大误差 8.46386e-6，见 [完整 prefill 报告](M3_FULL_PREFILL_REPORT.md)。完整八层变长 decode 和四步 LLVM greedy 反馈已通过，共 6192 次模型调用，见 [完整 decode 报告](M3_FULL_DECODE_REPORT.md)；与 [M2](M2_KV_STATE.md) 的会话 state/extent 联合已通过两份 bounded 计划的显式交接完成，见 [状态报告](M2_BOUNDED_STATE_REPORT.md)；单计划多 token 当前长度与外部 K/V prefill→decode 交接已完成，边界和证据见 [多 token 报告](M3_MULTITOKEN_REPORT.md)。可变 P、持久 state 仍由 M2/M3 state contract 负责。M10 若消费动态形状，仍须复用本模块的合同，不能复制 ShapeProgram。
+
+有界 KV 长度追加已完成一条独立切片：一个动态 P 与静态 C 的 Concatenate、派生形状传播和连续追加通过 48 次 LLVM 调用，见 [技术报告](M3_KV_APPEND_REPORT.md)。完整 decode 的位置窗口和整型形状运算已接通；持久 state 交接已由 RuntimeSession 接通，见 [状态报告](M2_BOUNDED_STATE_REPORT.md)。
+
+CUDA 的单阶段有界输出、shape_of 和 rank-2 MatMul 已有 [基础执行报告](GPU_BOUNDED_CORE_REPORT.md)；多阶段 Softmax/MaskedSoftmax、固定轴 ReduceMean/RMS 和三头注意力已有 [后续报告](GPU_BOUNDED_REDUCTION_REPORT.md)。静态表的有界间接访存、形状重排和完整模型已通过 742 个原语的证明与 PTX 编译，见 [接入报告](GPU_BOUNDED_PREFILL_REPORT.md)；完整模型 GPU 数值、设备活动与 bounded state 仍待推进。
 
 ## 本模块要做的模块
 
@@ -24,6 +28,8 @@ MiniMind-L1 的目标是 prefill + decode，MiniMind-O 的 Thinker 复用这条�
 - [ModuleInvocationContract](../../include/kxc/runtime/compiled_module.h)：运行时消费的形状/容量及 extent 参数合同。
 
 ShapeProgram 是编译控制面的形状权威；runtime 使用既有 ModuleInvocationContract 表达和验证已经 lower 的合同。不能让 RuntimeSession 直接依赖 compiler 的 ShapeProgram，也不能在 Python importer、router 中各复制一套形状解释器。
+
+显式 `masked_softmax` 已按相同形状权威接入有界编译，当前适用性版本为 14；四组 B/S/T 同产物执行、全 mask 行零输出及错误 mask 零启动见 [全 mask 注意力报告](M5_MASKED_SOFTMAX_REPORT.md)。
 
 ## 允许处理的形状来源
 
@@ -50,7 +56,7 @@ S1 第一项定义和最后一项消费者必须同一纵向切片交付，不�
 | 算子/链路 | 最小实现范围 | 验证重点 |
 |---|---|---|
 | Shape | 固定 rank，来源为输入维度 | 输出内容、dtype、固定长度 |
-| Gather/Concat 组成的形状表达式 | 常量索引、静态已知的向量长度 | 保持唯一表达式来源，索引越界拒绝 |
+| Gather/Unsqueeze/Concat 组成的形状表达式 | 常量标量或向量索引，标量经 Unsqueeze 成向量，可混入 int64 字面向量 | 保持唯一表达式来源，索引越界拒绝 |
 | Reshape | 元素总数可证明相同，控制输入来自受限形状表达式 | 0、-1、元素数和溢出，opset 行为一致 |
 | Expand | 受限形状表达式确定目标，各轴广播合法 | 多向广播、零维度、输出容量 |
 | ConstantOfShape | 有界目标形状和明确填充值类型 | 标量值、空结果、字节上限 |
@@ -87,18 +93,20 @@ shape 表达式、bounds、控制输入来源以及有序 extent ABI 都必须�
 
 ```bash
 ctest --test-dir out/build/bounded-llvm --output-on-failure --no-tests=error \
-  -R 'shape_.*test|bounded_attention_llvm_test|restricted_symbolic_shape_test|bounded_dynamic_graph_llvm_test|infer_type_test|te_schedule_test|compiled_module.*test|compiler_identity_test|onnx_importer_test'
+  -R 'shape_.*test|bounded_attention_llvm_test|bounded_graph_structure_llvm_test|bounded_projection_llvm_test|onnx_shape_source_llvm_test|bounded_gqa_llvm_test|bounded_rope_llvm_test|restricted_symbolic_shape_test|bounded_dynamic_graph_llvm_test|infer_type_test|te_schedule_test|compiled_module.*test|compiler_identity_test|onnx_importer_test'
 ```
 
-S1/S2 的生产 fixture 拟放入新 `test/shape_value_llvm_test.cpp`，S3 拟放入新 `test/bounded_attention_llvm_test.cpp`。将同名目标注册并用 `ctest -N` 确认后，运行公共检查和完整 LLVM 回归。必须证明：
+S1/S2 的生产 fixture 为 `test/shape_value_llvm_test.cpp`，S3 核心 fixture 为 `test/bounded_attention_llvm_test.cpp`；共享计算与多结果另由 `test/bounded_graph_structure_llvm_test.cpp` 验证，加权投影和实际 MiniMind 子图由 `test/bounded_projection_llvm_test.cpp` 验证；显式 ONNX source 与输出合同另由 `test/onnx_shape_source_llvm_test.cpp` 验证；实际 GQA、固定形状条件及动态轴编辑由 `test/bounded_gqa_llvm_test.cpp` 验证，均已注册为 CTest。以下清单区分通用计算证据和模型/状态联合证据：
 
-- [ ] 同一产物在两个以上合法 shape 上返回正确数值和实际输出形状，runtime 期间编译/cache 统计不变。
+- [x] 同一产物在两个以上合法 shape 上返回正确数值和实际输出形状，runtime 期间编译/cache 统计不变。S1/S2 形状值链和 S3 attention 四组 B/Q/T 分别验证。
 - [ ] 缺失 binding、重复 symbol 不一致、越界、整除失败、非法广播和溢出均在 launch 前拒绝。
 - [ ] 数据相关任意 shape、未知 rank 和无法证明的 axis 行为仍拒绝。
 - [ ] route miss 不编译，不偷偷扩大 bucket，不选择近似 shape。
-- [ ] shape 值本身被输出或消费时，结果来自真实执行链，非仅 metadata。
+- [x] shape 值本身被输出或消费时，结果来自真实执行链，非仅 metadata；见 `shape_value_llvm_test`。
 - [ ] S3 动态算子和 M2 状态的联合证据独立列出，不能由 elementwise 例子推断。
 
 ## 下一步交接
 
-给 M4 一份受支持的 shape 子图、opset/axes 限制和报错规则；给 M2 一份 prefill/decode 可共用的具体 shape/extent ABI；给集成负责人逐格证据。请求级动态合批另行立项，不能把本模块的 batch 维可变写成 continuous batching 已实现。
+给 M4 一份受支持的 shape 子图、opset/axes 限制和报错规则；给 M2 一份 prefill/decode 可共用的具体 shape/extent ABI；给集成负责人逐格证据。请求级动态合批已有独立的 [CPU/LLVM 首版报告](M2_REQUEST_BATCHING_REPORT.md)，包括队列、进入/退出和 KV 槽位；不能仅以本模块的 batch 维可变作为请求调度证据。
+
+RoPE 的新增生产 fixture 为 `test/bounded_rope_llvm_test.cpp`：独立 Q/K 旋转参考、实际投影到位置旋转的组合链、静态切片属性深快照，以及参数/常量名称交错回归；来源证明与运行时无副作用反例共同执行。

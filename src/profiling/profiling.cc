@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -303,17 +304,15 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(mu_);
-        // 绑定期间产生的 activity 记录归这个 context 负责 flush 和落盘。
-        bound_context_ = ctx;
-        correlation_map_.clear();
-        external_id_to_text_.clear();
-        next_external_id_ = 1;
+        ContextClock clock{ctx};
         std::uint64_t origin = 0;
+        const auto before = ctx->ElapsedMonotonicNs();
         if (get_timestamp_ != nullptr && get_timestamp_(&origin) == CUPTI_SUCCESS) {
-            cupti_origin_ns_ = origin;
-        } else {
-            cupti_origin_ns_ = 0;
+            clock.cupti_origin_ns = origin;
+            const auto after = ctx->ElapsedMonotonicNs();
+            clock.host_origin_ns = before + (after - before) / 2;
         }
+        contexts_.emplace(ctx->session_id(), clock);
     }
 
     void UnbindContext(ProfileContext* ctx) {
@@ -321,23 +320,27 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(mu_);
-        if (bound_context_ == ctx) {
-            bound_context_ = nullptr;
+        contexts_.erase(ctx->session_id());
+        for (auto it = correlation_map_.begin(); it != correlation_map_.end();)
+            it = it->second.session_id == ctx->session_id() ? correlation_map_.erase(it) : std::next(it);
+        for (auto it = external_ids_.begin(); it != external_ids_.end();)
+            it = it->second.session_id == ctx->session_id() ? external_ids_.erase(it) : std::next(it);
+        if (contexts_.empty()) {
             correlation_map_.clear();
-            external_id_to_text_.clear();
+            external_ids_.clear();
         }
     }
 
-    bool PushRunCorrelation(const std::string& run_id) {
-        return PushCorrelation(CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0, run_id);
+    bool PushRunCorrelation(ProfileContext* ctx, const std::string& run_id) {
+        return PushCorrelation(CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0, ctx, run_id);
     }
 
     void PopRunCorrelation() {
         PopCorrelation(CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0);
     }
 
-    bool PushSpanCorrelation(const std::string& span_id) {
-        return PushCorrelation(CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM1, span_id);
+    bool PushSpanCorrelation(ProfileContext* ctx, const std::string& span_id) {
+        return PushCorrelation(CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM1, ctx, span_id);
     }
 
     void PopSpanCorrelation() {
@@ -352,7 +355,17 @@ public:
     }
 
 private:
+    struct ContextClock {
+        ProfileContext* context;
+        std::uint64_t cupti_origin_ns{0};
+        std::int64_t host_origin_ns{0};
+    };
+    struct ExternalId {
+        std::string session_id;
+        std::string text;
+    };
     struct CorrelationContext {
+        std::string session_id;
         std::string run_id;
         std::string span_id;
     };
@@ -367,7 +380,6 @@ private:
     using ActivityPopExternalCorrelationIdFn =
         decltype(&cuptiActivityPopExternalCorrelationId);
     using GetTimestampFn = decltype(&cuptiGetTimestamp);
-    using GetResultStringFn = decltype(&cuptiGetResultString);
 
     static CuptiAdapter* Current() { return ResolveCuptiAdapter(true); }
 
@@ -383,10 +395,10 @@ private:
                                          uint8_t* buffer, size_t size,
                                          size_t valid_size) {
         (void)size;
-        CuptiAdapter* adapter = Current();
-        if (adapter != nullptr) {
-            adapter->ConsumeBuffer(context, stream_id, buffer, valid_size);
-        }
+        try {
+            if (CuptiAdapter* adapter = Current())
+                adapter->ConsumeBuffer(context, stream_id, buffer, valid_size);
+        } catch (...) { /* Observation failures must not escape CUPTI's C callback. */ }
         std::free(buffer);
     }
 
@@ -422,8 +434,6 @@ private:
                                "cuptiActivityPopExternalCorrelationId"));
         get_timestamp_ = reinterpret_cast<GetTimestampFn>(
             GetProcAddress(static_cast<HMODULE>(handle_), "cuptiGetTimestamp"));
-        get_result_string_ = reinterpret_cast<GetResultStringFn>(
-            GetProcAddress(static_cast<HMODULE>(handle_), "cuptiGetResultString"));
 #else
         handle_ = dlopen("libcupti.so.13", RTLD_LAZY);
         if (handle_ == nullptr) {
@@ -451,15 +461,12 @@ private:
                 dlsym(handle_, "cuptiActivityPopExternalCorrelationId"));
         get_timestamp_ =
             reinterpret_cast<GetTimestampFn>(dlsym(handle_, "cuptiGetTimestamp"));
-        get_result_string_ =
-            reinterpret_cast<GetResultStringFn>(dlsym(handle_, "cuptiGetResultString"));
 #endif
         if (activity_register_callbacks_ == nullptr || activity_enable_ == nullptr ||
             activity_flush_all_ == nullptr || activity_get_next_record_ == nullptr ||
             activity_get_num_dropped_records_ == nullptr ||
             activity_push_external_correlation_id_ == nullptr ||
-            activity_pop_external_correlation_id_ == nullptr || get_timestamp_ == nullptr ||
-            get_result_string_ == nullptr) {
+            activity_pop_external_correlation_id_ == nullptr || get_timestamp_ == nullptr) {
             return;
         }
 
@@ -470,32 +477,30 @@ private:
     }
 
     bool EnableActivities() {
-        if (!Check(activity_register_callbacks_(BufferRequested, BufferCompleted),
-                   "cuptiActivityRegisterCallbacks")) {
-            return false;
-        }
-        return Check(activity_enable_(CUPTI_ACTIVITY_KIND_RUNTIME), "enable runtime") &&
-               Check(activity_enable_(CUPTI_ACTIVITY_KIND_DRIVER), "enable driver") &&
-               Check(activity_enable_(CUPTI_ACTIVITY_KIND_MEMCPY), "enable memcpy") &&
-               Check(activity_enable_(CUPTI_ACTIVITY_KIND_MEMSET), "enable memset") &&
-               Check(activity_enable_(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL),
-                     "enable concurrent kernel") &&
-               Check(activity_enable_(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION),
-                     "enable external correlation");
+        return activity_register_callbacks_(BufferRequested, BufferCompleted) == CUPTI_SUCCESS &&
+               activity_enable_(CUPTI_ACTIVITY_KIND_RUNTIME) == CUPTI_SUCCESS &&
+               activity_enable_(CUPTI_ACTIVITY_KIND_DRIVER) == CUPTI_SUCCESS &&
+               activity_enable_(CUPTI_ACTIVITY_KIND_MEMCPY) == CUPTI_SUCCESS &&
+               activity_enable_(CUPTI_ACTIVITY_KIND_MEMSET) == CUPTI_SUCCESS &&
+               activity_enable_(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL) == CUPTI_SUCCESS &&
+               activity_enable_(CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION) == CUPTI_SUCCESS;
     }
 
-    bool PushCorrelation(CUpti_ExternalCorrelationKind kind, const std::string& text) {
-        if (!available_ || text.empty()) {
+    bool PushCorrelation(CUpti_ExternalCorrelationKind kind, ProfileContext* ctx,
+                         const std::string& text) {
+        if (!available_) {
             return false;
         }
         std::uint64_t external_id = 0;
         {
             std::lock_guard<std::mutex> lock(mu_);
             external_id = next_external_id_++;
-            external_id_to_text_[external_id] = text;
+            // Empty/disabled contexts still push a barrier so an enclosing
+            // model's IDs cannot leak into unobserved work.
+            const bool bound = ctx && contexts_.count(ctx->session_id());
+            external_ids_[external_id] = {bound ? ctx->session_id() : "", bound ? text : ""};
         }
-        return Check(activity_push_external_correlation_id_(kind, external_id),
-                     "push external correlation");
+        return activity_push_external_correlation_id_(kind, external_id) == CUPTI_SUCCESS;
     }
 
     void PopCorrelation(CUpti_ExternalCorrelationKind kind) {
@@ -506,74 +511,57 @@ private:
         activity_pop_external_correlation_id_(kind, &last_id);
     }
 
-    bool Check(CUptiResult result, const char* action) {
-        if (result == CUPTI_SUCCESS) {
-            last_error_.clear();
-            return true;
-        }
-        const char* text = nullptr;
-        if (get_result_string_ != nullptr) {
-            get_result_string_(result, &text);
-        }
-        last_error_ = std::string(action) + ": " + (text ? text : "unknown CUPTI error");
-        return false;
-    }
-
-    std::optional<CorrelationContext> LookupCorrelation(std::uint32_t correlation_id) {
-        std::lock_guard<std::mutex> lock(mu_);
-        auto it = correlation_map_.find(correlation_id);
-        if (it == correlation_map_.end()) {
-            return std::nullopt;
-        }
-        return it->second;
-    }
-
     void UpdateCorrelation(std::uint32_t correlation_id, CUpti_ExternalCorrelationKind kind,
                            std::uint64_t external_id) {
         std::lock_guard<std::mutex> lock(mu_);
-        auto text_it = external_id_to_text_.find(external_id);
-        if (text_it == external_id_to_text_.end()) {
+        auto text_it = external_ids_.find(external_id);
+        if (text_it == external_ids_.end()) {
             return;
         }
         CorrelationContext& entry = correlation_map_[correlation_id];
+        if (entry.session_id != text_it->second.session_id) entry = {};
+        entry.session_id = text_it->second.session_id;
         if (kind == CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM0) {
-            entry.run_id = text_it->second;
+            entry.run_id = text_it->second.text;
         } else if (kind == CUPTI_EXTERNAL_CORRELATION_KIND_CUSTOM1) {
-            entry.span_id = text_it->second;
+            entry.span_id = text_it->second.text;
         }
     }
 
-    std::int64_t ToRelativeNs(std::uint64_t timestamp) const {
-        if (timestamp == 0 || cupti_origin_ns_ == 0 || timestamp < cupti_origin_ns_) {
-            return 0;
+    static std::int64_t ToRelativeNs(std::uint64_t timestamp, const ContextClock& clock) {
+        if (timestamp == 0 || clock.cupti_origin_ns == 0) return 0;
+        // Both device and host events use ProfileContext's origin. CUPTI
+        // initialization happens later, so subtracting only its timestamp
+        // origin would shift every device event before its host submission.
+        if (timestamp < clock.cupti_origin_ns) {
+            const auto delta = clock.cupti_origin_ns - timestamp;
+            return delta <= static_cast<uint64_t>(clock.host_origin_ns)
+                ? clock.host_origin_ns - static_cast<int64_t>(delta) : 0;
         }
-        return static_cast<std::int64_t>(timestamp - cupti_origin_ns_);
+        const auto delta = timestamp - clock.cupti_origin_ns;
+        if (delta > static_cast<uint64_t>(INT64_MAX - clock.host_origin_ns)) return 0;
+        return clock.host_origin_ns + static_cast<int64_t>(delta);
     }
 
     void EmitActivityEvent(EventSpec spec, std::uint32_t correlation_id,
                            std::uint32_t fallback_runtime_correlation_id,
                            std::uint64_t start, std::uint64_t end) {
-        ProfileContext* ctx = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            ctx = bound_context_;
-        }
-        if (ctx == nullptr) {
-            return;
-        }
-
-        // CUPTI 可能先上报 driver/kernel 记录，再上报对应 runtime id；
-        // 主 correlation id 缺失时退回使用 runtime correlation id。
-        std::optional<CorrelationContext> correlation =
-            LookupCorrelation(correlation_id != 0 ? correlation_id
-                                                  : fallback_runtime_correlation_id);
-        const std::string run_id = correlation ? correlation->run_id : std::string();
-        const std::string parent_span_id = correlation ? correlation->span_id : std::string();
+        // Keep registration locked through emission: UnbindContext cannot
+        // destroy the destination while a CUPTI callback is writing into it.
+        std::lock_guard<std::mutex> lock(mu_);
+        auto correlation = correlation_map_.find(correlation_id);
+        if (correlation == correlation_map_.end())
+            correlation = correlation_map_.find(fallback_runtime_correlation_id);
+        if (correlation == correlation_map_.end()) return;
+        const auto binding = contexts_.find(correlation->second.session_id);
+        if (binding == contexts_.end()) return;
+        auto* ctx = binding->second.context;
         const std::string span_id = ctx->NextSpanId();
-        const std::int64_t start_ns = ToRelativeNs(start);
+        const std::int64_t start_ns = ToRelativeNs(start, binding->second);
         const std::int64_t end_ns =
-            end > 0 ? ToRelativeNs(end) : start_ns;
-        ctx->RecordCompletedSpan(spec, run_id, span_id, parent_span_id, start_ns, end_ns);
+            end > 0 ? ToRelativeNs(end, binding->second) : start_ns;
+        ctx->RecordCompletedSpan(spec, correlation->second.run_id, span_id,
+                                correlation->second.span_id, start_ns, end_ns);
     }
 
     void ConsumeBuffer(CUcontext context, uint32_t stream_id, uint8_t* buffer,
@@ -582,15 +570,17 @@ private:
             return;
         }
         CUpti_Activity* record = nullptr;
+        // External records precede their API record, but device records may
+        // be interleaved. Resolve the complete buffer before emitting spans.
+        while (activity_get_next_record_(buffer, valid_size, &record) == CUPTI_SUCCESS) {
+            if (record->kind == CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION) {
+                auto* external = reinterpret_cast<CUpti_ActivityExternalCorrelation*>(record);
+                UpdateCorrelation(external->correlationId, external->externalKind, external->externalId);
+            }
+        }
+        record = nullptr;
         while (activity_get_next_record_(buffer, valid_size, &record) == CUPTI_SUCCESS) {
             switch (record->kind) {
-                case CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION: {
-                    auto* external =
-                        reinterpret_cast<CUpti_ActivityExternalCorrelation*>(record);
-                    UpdateCorrelation(external->correlationId, external->externalKind,
-                                      external->externalId);
-                    break;
-                }
                 case CUPTI_ACTIVITY_KIND_RUNTIME:
                 case CUPTI_ACTIVITY_KIND_DRIVER: {
                     auto* api = reinterpret_cast<CUpti_ActivityAPI*>(record);
@@ -601,6 +591,7 @@ private:
                                           : "cuda_runtime_api";
                     spec.phase = "complete";
                     spec.device = "cuda";
+                    spec.fields["timing"] = "host_execute";
                     spec.fields["backend.cuda.cbid"] = std::to_string(api->cbid);
                     spec.fields["backend.cuda.correlation_id"] =
                         std::to_string(api->correlationId);
@@ -621,6 +612,7 @@ private:
                     EventSpec spec;
                     spec.component = "backend.cuda";
                     spec.event_type = "cuda_memcpy";
+                    spec.fields["timing"] = "device_execute";
                     spec.device = "cuda:" + std::to_string(memcpy->deviceId);
                     spec.fields["backend.cuda.copy_kind"] =
                         std::to_string(memcpy->copyKind);
@@ -645,6 +637,7 @@ private:
                     EventSpec spec;
                     spec.component = "backend.cuda";
                     spec.event_type = "cuda_memset";
+                    spec.fields["timing"] = "device_execute";
                     spec.device = "cuda:" + std::to_string(memset->deviceId);
                     spec.fields["backend.cuda.stream_id"] =
                         std::to_string(memset->streamId);
@@ -662,10 +655,16 @@ private:
                 }
                 case CUPTI_ACTIVITY_KIND_KERNEL:
                 case CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL: {
+#if CUPTI_API_VERSION >= 130000
                     auto* kernel = reinterpret_cast<CUpti_ActivityKernel10*>(record);
+#else
+                    // CUDA 12.9 emits Kernel9; Kernel10 was introduced in 13.0.
+                    auto* kernel = reinterpret_cast<CUpti_ActivityKernel9*>(record);
+#endif
                     EventSpec spec;
                     spec.component = "backend.cuda";
                     spec.event_type = "cuda_kernel";
+                    spec.fields["timing"] = "device_execute";
                     spec.device = "cuda:" + std::to_string(kernel->deviceId);
                     spec.kernel_symbol = kernel->name ? kernel->name : "";
                     spec.fields["backend.cuda.context_id"] =
@@ -699,13 +698,9 @@ private:
             activity_get_num_dropped_records_(context, stream_id, &dropped);
         }
         if (dropped > 0) {
-            ProfileContext* ctx = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(mu_);
-                ctx = bound_context_;
-            }
-            if (ctx != nullptr) {
-                ctx->RecordLog(LogSeverity::kWarn, "backend.cuda",
+            std::lock_guard<std::mutex> lock(mu_);
+            for (const auto& binding : contexts_) {
+                binding.second.context->RecordLog(LogSeverity::kWarn, "backend.cuda",
                                "CUPTI dropped activity records",
                                MakeFields({{"backend.cuda.dropped_records",
                                             std::to_string(dropped)}}));
@@ -715,7 +710,6 @@ private:
 
     bool requested_{false};
     bool available_{false};
-    std::string last_error_;
     void* handle_{nullptr};
     ActivityRegisterCallbacksFn activity_register_callbacks_{nullptr};
     ActivityEnableFn activity_enable_{nullptr};
@@ -725,12 +719,10 @@ private:
     ActivityPushExternalCorrelationIdFn activity_push_external_correlation_id_{nullptr};
     ActivityPopExternalCorrelationIdFn activity_pop_external_correlation_id_{nullptr};
     GetTimestampFn get_timestamp_{nullptr};
-    GetResultStringFn get_result_string_{nullptr};
     mutable std::mutex mu_;
-    ProfileContext* bound_context_{nullptr};
-    std::uint64_t cupti_origin_ns_{0};
+    std::unordered_map<std::string, ContextClock> contexts_;
     std::uint64_t next_external_id_{1};
-    std::unordered_map<std::uint64_t, std::string> external_id_to_text_;
+    std::unordered_map<std::uint64_t, ExternalId> external_ids_;
     std::unordered_map<std::uint32_t, CorrelationContext> correlation_map_;
 };
 
@@ -745,12 +737,12 @@ public:
     bool available() const { return false; }
     void BindContext(ProfileContext* ctx) { (void)ctx; }
     void UnbindContext(ProfileContext* ctx) { (void)ctx; }
-    bool PushRunCorrelation(const std::string& run_id) {
+    bool PushRunCorrelation(ProfileContext*, const std::string& run_id) {
         (void)run_id;
         return false;
     }
     void PopRunCorrelation() {}
-    bool PushSpanCorrelation(const std::string& span_id) {
+    bool PushSpanCorrelation(ProfileContext*, const std::string& span_id) {
         (void)span_id;
         return false;
     }
@@ -842,16 +834,29 @@ std::string DefaultBundleDir(const std::string& trace_id) {
 
 }  // namespace
 
-ActivationScope::ActivationScope(std::shared_ptr<ProfileContext> ctx, std::string run_id)
+ActivationScope::ActivationScope(std::shared_ptr<ProfileContext> ctx, std::string run_id,
+                                 std::string parent_span_id)
     : previous_ctx_(tls_profile_ctx), previous_run_id_(tls_run_id),
       previous_span_stack_(tls_span_stack) {
-    // 保存原有嵌套激活状态，让临时 profiling run 可以组合使用。
+    // Allocate the new span stack before modifying the previous thread state.
+    std::vector<std::string> spans;
+    if (!parent_span_id.empty()) spans.push_back(parent_span_id);
     tls_profile_ctx = std::move(ctx);
     tls_run_id = std::move(run_id);
-    tls_span_stack.clear();
-    if (tls_profile_ctx && tls_profile_ctx->cupti_adapter_ != nullptr) {
-        pushed_cupti_run_ =
-            AsCuptiAdapter(tls_profile_ctx->cupti_adapter_)->PushRunCorrelation(tls_run_id);
+    tls_span_stack = std::move(spans);
+    try {
+        cupti_adapter_ = ResolveCuptiAdapter(false);
+        if (auto* adapter = AsCuptiAdapter(cupti_adapter_)) {
+            pushed_cupti_run_ = adapter->PushRunCorrelation(tls_profile_ctx.get(), tls_run_id);
+            // An empty span is also a barrier against an unrelated outer span.
+            pushed_cupti_span_ = adapter->PushSpanCorrelation(tls_profile_ctx.get(), parent_span_id);
+        }
+    } catch (...) {
+        if (pushed_cupti_run_) AsCuptiAdapter(cupti_adapter_)->PopRunCorrelation();
+        tls_profile_ctx = std::move(previous_ctx_);
+        tls_run_id = std::move(previous_run_id_);
+        tls_span_stack = std::move(previous_span_stack_);
+        throw;
     }
     active_ = true;
 }
@@ -860,8 +865,9 @@ ActivationScope::~ActivationScope() {
     if (!active_) {
         return;
     }
-    if (tls_profile_ctx && pushed_cupti_run_ && tls_profile_ctx->cupti_adapter_ != nullptr) {
-        AsCuptiAdapter(tls_profile_ctx->cupti_adapter_)->PopRunCorrelation();
+    if (auto* adapter = AsCuptiAdapter(cupti_adapter_)) {
+        if (pushed_cupti_span_) adapter->PopSpanCorrelation();
+        if (pushed_cupti_run_) adapter->PopRunCorrelation();
     }
     tls_profile_ctx = std::move(previous_ctx_);
     tls_run_id = std::move(previous_run_id_);
@@ -886,13 +892,18 @@ ScopedSpan::ScopedSpan(std::shared_ptr<ProfileContext> ctx, EventSpec spec, std:
     start_ns_ = NowSteadyNs() - ctx_->start_monotonic_ns_;
     tls_span_stack.push_back(span_id_);
     pushed_to_stack_ = true;
-    if (ctx_->options().enable_nvtx) {
-        if (NvtxAdapter* adapter = ResolveNvtxAdapter(true)) {
-            adapter->Push(spec_.event_type.empty() ? spec_.component : spec_.event_type);
+    try {
+        if (ctx_->cupti_adapter_ != nullptr) {
+            pushed_cupti_span_ = AsCuptiAdapter(ctx_->cupti_adapter_)->PushSpanCorrelation(ctx_.get(), span_id_);
         }
-    }
-    if (ctx_->cupti_adapter_ != nullptr) {
-        pushed_cupti_span_ = AsCuptiAdapter(ctx_->cupti_adapter_)->PushSpanCorrelation(span_id_);
+        if (ctx_->options().enable_nvtx) {
+            if (NvtxAdapter* adapter = ResolveNvtxAdapter(true))
+                adapter->Push(spec_.event_type.empty() ? spec_.component : spec_.event_type);
+        }
+    } catch (...) {
+        if (pushed_cupti_span_) AsCuptiAdapter(ctx_->cupti_adapter_)->PopSpanCorrelation();
+        tls_span_stack.pop_back();
+        throw;
     }
     active_ = true;
 }
@@ -903,9 +914,11 @@ ScopedSpan::ScopedSpan(ScopedSpan&& other) noexcept
     : ctx_(std::move(other.ctx_)), spec_(std::move(other.spec_)),
       run_id_(std::move(other.run_id_)), span_id_(std::move(other.span_id_)),
       parent_span_id_(std::move(other.parent_span_id_)), start_ns_(other.start_ns_),
-      active_(other.active_), pushed_to_stack_(other.pushed_to_stack_) {
+      active_(other.active_), pushed_to_stack_(other.pushed_to_stack_),
+      pushed_cupti_span_(other.pushed_cupti_span_) {
     other.active_ = false;
     other.pushed_to_stack_ = false;
+    other.pushed_cupti_span_ = false;
 }
 
 ScopedSpan& ScopedSpan::operator=(ScopedSpan&& other) noexcept {
@@ -921,8 +934,10 @@ ScopedSpan& ScopedSpan::operator=(ScopedSpan&& other) noexcept {
     start_ns_ = other.start_ns_;
     active_ = other.active_;
     pushed_to_stack_ = other.pushed_to_stack_;
+    pushed_cupti_span_ = other.pushed_cupti_span_;
     other.active_ = false;
     other.pushed_to_stack_ = false;
+    other.pushed_cupti_span_ = false;
     return *this;
 }
 
@@ -938,24 +953,25 @@ void ScopedSpan::AddMetric(const std::string& key, double value) {
     spec_.metrics[key] = value;
 }
 
-void ScopedSpan::Close() {
+void ScopedSpan::Close() noexcept {
     if (!active_) {
         return;
     }
-    if (ctx_->options().enable_nvtx) {
-        if (NvtxAdapter* adapter = ResolveNvtxAdapter(true)) {
-            adapter->Pop();
-        }
-    }
+    active_ = false;
+    try {
+        if (ctx_->options().enable_nvtx)
+            if (NvtxAdapter* adapter = ResolveNvtxAdapter(true)) adapter->Pop();
+    } catch (...) {}
     if (pushed_cupti_span_ && ctx_->cupti_adapter_ != nullptr) {
         AsCuptiAdapter(ctx_->cupti_adapter_)->PopSpanCorrelation();
     }
     if (pushed_to_stack_ && !tls_span_stack.empty() && tls_span_stack.back() == span_id_) {
         tls_span_stack.pop_back();
     }
-    std::int64_t end_ns = NowSteadyNs() - ctx_->start_monotonic_ns_;
-    ctx_->RecordCompletedSpan(spec_, run_id_, span_id_, parent_span_id_, start_ns_, end_ns);
-    active_ = false;
+    try {
+        std::int64_t end_ns = NowSteadyNs() - ctx_->start_monotonic_ns_;
+        ctx_->RecordCompletedSpan(spec_, run_id_, span_id_, parent_span_id_, start_ns_, end_ns);
+    } catch (...) { /* A failed report must not replace the launcher's result. */ }
 }
 
 ProfileContext::ProfileContext(ProfileOptions options)
@@ -976,7 +992,7 @@ ProfileContext::ProfileContext(ProfileOptions options)
 }
 
 ProfileContext::~ProfileContext() {
-    Flush();
+    try { Flush(); } catch (...) { /* Best-effort destruction; explicit Flush reports I/O errors. */ }
     if (cupti_adapter_ != nullptr && cupti_bound_) {
         AsCuptiAdapter(cupti_adapter_)->UnbindContext(this);
         cupti_bound_ = false;
@@ -1101,7 +1117,7 @@ void ProfileContext::WriteAllOutputsLocked() {
              << "\"enable_nvtx\":" << (options_.enable_nvtx ? "true" : "false") << ","
              << "\"enable_cupti\":" << (options_.enable_cupti ? "true" : "false") << ","
              << "\"cupti_available\":"
-             << ((cupti_adapter_ != nullptr && AsCuptiAdapter(cupti_adapter_)->available())
+             << ((cupti_bound_ && cupti_adapter_ != nullptr && AsCuptiAdapter(cupti_adapter_)->available())
                      ? "true"
                      : "false")
              << ","

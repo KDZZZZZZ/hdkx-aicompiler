@@ -1,10 +1,10 @@
 # M2：KV cache 与动态有效状态
 
-MiniMind 是当前 L1 纯文本 decoder，MiniMind-O 的 Thinker 复用同一 backbone。第一波已经证明 RuntimeSession 可以重复运行并记录执行事件，也有 state/alias/persistent buffer 的通用机制；但这些机制还没有表达 Transformer 的 past/present、每层 KV 布局、cursor 和有效长度。当前导出目录有静态 prefill/decode 图，decode 的 past/present 只是外部张量，不能据此宣称 session 自己维护了 cache。
+MiniMind 是当前 L1 纯文本 decoder，MiniMind-O 的 Thinker 复用同一 backbone。第二波开始时，state/alias/persistent buffer 只有通用机制，真实 decode 的 past/present 仍由调用方持有。现在已有动态有效长度协议和真实容量图的会话状态绑定，下面保留分阶段目标并明确剩余范围。
 
 本模块要先让 MiniMind-L1 在同一个 RuntimeSession 中完成 prefill 后的多步 decode：固定物理容量，追加新 K/V，更新 valid extent，注意力只读取有效区。MiniMind-O 的 Mimi 流式卷积 ring buffer 是更强的状态，留到 L3，不把它混入这份 KV 合同。
 
-> 状态：待实施，第二波 B 线优先模块。先通过 M9 的 decode 签名门禁，再与 M3 的 extent/shape 合同协同；观测沿用第一波 M1。M10 的控制流运行时当前明确拒绝 state 和 runtime extent；若后续要让 bounded `While` 承载真实 decode，本模块的 `ExecutablePlan`/`RuntimeSession` state owner 与 extent ABI 必须先成为唯一交接点。当前目标模型以 PROJECT_GOAL.md §2.2 为准，第一波证据见 G1_RECORD.md。
+> 状态：S1/S2 基础合同、真实静态容量和 bounded 模型状态绑定已接通（2026-09-09）。[M2 技术报告](M2_MINIMIND_STATE_REPORT.md)记录 LLVM prefill 输出初始化、同一 decode session 四步追加、有效长度与数值证据。新 `kStaticStatefulExternalV1` 通过显式尾段复制挂载静态容量图；既有 `kDynamicStatefulV1` 继续使用 kernel extent ABI。两份 bounded 计划的实际 LLVM prefill 交接、四组 B/P 的状态 decode 与四步 greedy 已通过，见 [bounded 状态报告](M2_BOUNDED_STATE_REPORT.md)。请求级 CPU/LLVM 等长批处理、队列与 KV 槽位已通过真实模型验证，见 [批处理报告](M2_REQUEST_BATCHING_REPORT.md)。静态容量 CUDA 状态与完整八层四步 decode 已通过，见 [GPU 状态报告](GPU_KV_STATE_REPORT.md)。bounded CUDA 状态和 GPU 请求批处理已接入生产 consumer，设备验收仍待执行，见 [请求批处理接入报告](GPU_REQUEST_BATCHING_REPORT.md)。静态容量 CPU KV 已接入请求步间热替换，保留同一状态 owner 与缓存地址，见 [M6 状态报告](M6_STATEFUL_REPORT.md)。同一计划兼顾 prefill/decode 继续推进。M10 控制运行时继续明确拒绝 state/runtime extent，不因此自动获得这些能力。
 
 ## 本模块要做的模块
 
@@ -20,14 +20,14 @@ MiniMind 是当前 L1 纯文本 decoder，MiniMind-O 的 Thinker 复用同一 ba
 
 | 已有机制 | 真实缺口 |
 |---|---|
-| ValueSpec 的 is_state、alias_source、kInPlace | 没有动态 cursor/valid extent 的读写协议 |
-| RuntimeSession 独占持久 state storage | 没有生产编译路径生成 Transformer 缓存更新计划 |
+| ValueSpec 的 is_state、alias_source、kInPlace | `kDynamicStatefulV1` 已定义动态 cursor/valid extent 的读写协议 |
+| RuntimeSession 独占持久 state storage | production KV 编译器、CPU/LLVM 与静态 CUDA 容量图均已消费；bounded CUDA 后续扩展 |
 | 静态 valid_bytes | 不能把一个会变化的序列长度塞进这个静态字段 |
 | pending 有状态 RunAsync 会被拒绝 | 需要保持明确提交顺序，不能假设不同 stream 自动同步 |
-| 新 bounded 分支运行 fresh-output 图 | 此模式明确拒绝 state、alias、donation 和 reuse |
-| 已有 external-KV decode fixture | 外部传入 K/V 不是会话自己维护和更新的 KV cache |
+| bounded fresh-output 与独立 stateful 模式 | 前者保留拒绝；后者通过固定容量、复用 prefix 和 append 绑定执行真实模型 |
+| 真实容量 decode fixture | 已由 `BindStateOutputs` / `InitializeState` 接入会话状态，见技术报告 |
 
-另外，一个 RuntimeSession 当前绑定固定 plan。分别创建 prefill 和 decode 会话会得到不同的 state，不能把两个独立的零初始化缓存当成共享状态。
+一个 RuntimeSession 当前绑定固定 plan。真实静态与 bounded 模型都选择两份显式编译的计划：prefill 的已完成输出经 `InitializeState` 复制到 decode 会话自己的缓存；这是初始化交接，不是共享两个会话的 state。
 
 ## 首切片的明确合同
 
@@ -87,16 +87,18 @@ S1 可以先用受控的生产 state 图跑通，不等待完整 shape-as-value�
 
 ```bash
 ctest --test-dir out/build/bounded-llvm --output-on-failure --no-tests=error \
-  -R 'kv_state_llvm_test|executable_plan_test|runtime_session_test|codegen_llvm_test|compiler_identity_test|compiled_module.*test|kernel_signature_test'
+  -R 'minimind_bounded_decode_llvm_test|kv_state_llvm_test|executable_plan_test|runtime_session_test|codegen_llvm_test|compiler_identity_test|compiled_module.*test|kernel_signature_test'
 ```
 
-为 S1/S2 新增 `test/kv_state_llvm_test.cpp`（拟用目标 `kv_state_llvm_test`），注册到 CTest 后用 `ctest -N` 确认存在，再运行公共检查和 LLVM 全量。测试至少覆盖：
+S1/S2 的 `test/kv_state_llvm_test.cpp` 已注册到 gate-on CTest；2026-09-08 的 bounded 全量 52/52 通过。真实模型后续证据见技术报告。已验证：
 
-- [ ] 连续追加、零长度、刚好达到容量、超过容量、负值和整数溢出。
-- [ ] 真实 LLVM 原址写入且 buffer 地址跨 run 不变；未更新区域不被误读。
-- [ ] 独立 session 隔离、pending async 拒绝、会话销毁后 completion 保活。
-- [ ] 所有 contract mismatch 的 launcher 计数为零。
-- [ ] 结构性 extent/alias/布局变化改变 identity，运行 cursor 变化不触发编译。
-- [ ] S2 的 prefill + 多步 decode 与全量参考一致，生产链使用同一份有效状态。
+- [x] 连续追加、零长度、刚好达到容量、超过容量、负值和整数溢出。
+- [x] 真实 LLVM 原址写入且 buffer 地址跨 run 不变；未更新区域不被误读。
+- [x] 独立 session 隔离、pending async 拒绝、会话销毁后 completion 保活。
+- [x] contract mismatch 的 launcher 计数为零。
+- [x] 结构性 extent/alias/布局变化改变 identity，运行 cursor 变化不触发编译。
+- [x] S2 微型因果注意力的 prefill + 多步 decode 使用同一份有效状态并对齐参考；真实 MiniMind 的静态和 bounded 计划均通过显式初始化交接完成四步 decode，bounded 证据见 [报告](M2_BOUNDED_STATE_REPORT.md)。
+
+- [x] 请求级 CPU/LLVM 首版：有限槽位、每请求一个排队步骤、等长同形合批、进入/退出与旧编号拒绝；真实八层 MiniMind 的 7 请求步在 5 批执行，logits 与 16 份 KV 对齐独立 LLVM，见 [批处理报告](M2_REQUEST_BATCHING_REPORT.md)。
 
 S1 与 S2 分别标记完成，只有 S1 不得将 kv_cache 全行改为已验证。矩阵中的参考/mock numeric 证据继续与真正编译运行证据区分。

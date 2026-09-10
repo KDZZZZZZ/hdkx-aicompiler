@@ -50,7 +50,7 @@ inline OperatorSpec Spec(const std::string& name) {
     if (name == "concatenate") {
         OperatorSpec spec;
         spec.name = "concatenate";
-        spec.schema_version = 1;
+        spec.schema_version = 3;
         spec.category = "tensor.transform";
         spec.input_arity.num_inputs = 2;
         spec.input_arity.min_inputs = -1;
@@ -68,11 +68,11 @@ inline OperatorSpec Spec(const std::string& name) {
     if (name == "constant_of_shape") {
         OperatorSpec spec;
         spec.name = "constant_of_shape";
-        spec.schema_version = 1;
+        spec.schema_version = 3;
         spec.category = "tensor.transform";
-        spec.input_arity.num_inputs = 1;
-        spec.input_arity.min_inputs = -1;
-        spec.input_arity.max_inputs = -1;
+        spec.input_arity.num_inputs = -1;
+        spec.input_arity.min_inputs = 1;
+        spec.input_arity.max_inputs = 2;
         spec.attrs_type_key = "ConstantOfShapeAttrs";
         spec.output_arity = 1;
         spec.type_relation_key = "FInferType";
@@ -119,6 +119,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.lowering_key = "FRelayToTE";
         return spec;
     }
+    if (name == "erf") {
+        OperatorSpec spec;
+        spec.name = "erf";
+        spec.schema_version = 1;
+        spec.category = "tensor.math";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
     if (name == "expand") {
         OperatorSpec spec;
         spec.name = "expand";
@@ -140,7 +158,7 @@ inline OperatorSpec Spec(const std::string& name) {
     if (name == "expand_dynamic") {
         OperatorSpec spec;
         spec.name = "expand_dynamic";
-        spec.schema_version = 1;
+        spec.schema_version = 2;
         spec.category = "tensor.transform";
         spec.input_arity.num_inputs = 2;
         spec.input_arity.min_inputs = -1;
@@ -158,12 +176,30 @@ inline OperatorSpec Spec(const std::string& name) {
     if (name == "gather") {
         OperatorSpec spec;
         spec.name = "gather";
-        spec.schema_version = 1;
+        spec.schema_version = 2;
         spec.category = "tensor.transform";
         spec.input_arity.num_inputs = 2;
         spec.input_arity.min_inputs = -1;
         spec.input_arity.max_inputs = -1;
         spec.attrs_type_key = "GatherAttrs";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
+    if (name == "masked_softmax") {
+        OperatorSpec spec;
+        spec.name = "masked_softmax";
+        spec.schema_version = 1;
+        spec.category = "nn";
+        spec.input_arity.num_inputs = 2;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "SoftmaxAttrs";
         spec.output_arity = 1;
         spec.type_relation_key = "FInferType";
         spec.effect = OperatorEffectKind::kPure;
@@ -446,7 +482,7 @@ inline OperatorSpec Spec(const std::string& name) {
     if (name == "reshape_dynamic") {
         OperatorSpec spec;
         spec.name = "reshape_dynamic";
-        spec.schema_version = 1;
+        spec.schema_version = 2;
         spec.category = "tensor.transform";
         spec.input_arity.num_inputs = 2;
         spec.input_arity.min_inputs = -1;
@@ -464,7 +500,7 @@ inline OperatorSpec Spec(const std::string& name) {
     if (name == "shape_expr") {
         OperatorSpec spec;
         spec.name = "shape_expr";
-        spec.schema_version = 1;
+        spec.schema_version = 2;
         spec.category = "tensor.transform";
         spec.input_arity.num_inputs = 1;
         spec.input_arity.min_inputs = -1;
@@ -518,11 +554,11 @@ inline OperatorSpec Spec(const std::string& name) {
     if (name == "slice") {
         OperatorSpec spec;
         spec.name = "slice";
-        spec.schema_version = 1;
+        spec.schema_version = 5;
         spec.category = "tensor.transform";
-        spec.input_arity.num_inputs = 1;
-        spec.input_arity.min_inputs = -1;
-        spec.input_arity.max_inputs = -1;
+        spec.input_arity.num_inputs = -1;
+        spec.input_arity.min_inputs = 1;
+        spec.input_arity.max_inputs = 5;
         spec.attrs_type_key = "SliceAttrs";
         spec.output_arity = 1;
         spec.type_relation_key = "FInferType";
@@ -549,6 +585,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.alias_contract = "none";
         spec.lowering_kind = OperatorLoweringKind::kSingleTE;
         spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
+    if (name == "split") {
+        OperatorSpec spec;
+        spec.name = "split";
+        spec.schema_version = 1;
+        spec.category = "tensor.transform";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "SplitAttrs";
+        spec.output_arity = 0;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kMultiTE;
+        spec.lowering_key = "FRelayToTEMulti";
         return spec;
     }
     if (name == "sqrt") {
@@ -605,6 +659,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.lowering_key = "FRelayToTE";
         return spec;
     }
+    if (name == "tanh") {
+        OperatorSpec spec;
+        spec.name = "tanh";
+        spec.schema_version = 1;
+        spec.category = "tensor.math";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
     if (name == "transpose") {
         OperatorSpec spec;
         spec.name = "transpose";
@@ -614,6 +686,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.input_arity.min_inputs = -1;
         spec.input_arity.max_inputs = -1;
         spec.attrs_type_key = "TransposeAttrs";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
+    if (name == "trilu") {
+        OperatorSpec spec;
+        spec.name = "trilu";
+        spec.schema_version = 1;
+        spec.category = "tensor.transform";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "TriluAttrs";
         spec.output_arity = 1;
         spec.type_relation_key = "FInferType";
         spec.effect = OperatorEffectKind::kPure;

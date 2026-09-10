@@ -1,5 +1,5 @@
 /*! \file src/compiler/adaptive/adaptive_hot_swap_preparation.cc
- * \brief Static-exact candidate preparation for production adaptive compilers.
+ * \brief Static and bounded candidate preparation for adaptive compilers.
  */
 
 #include "kxc/compiler/adaptive_hot_swap_preparation.h"
@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "../internal/kernel_abi_equivalence.h"
+#include "../internal/dynamic_shape_contract.h"
 #include "../internal/primitive_cache.h"
 #include "runtime/internal/compiled_module_node.h"
 #include "runtime/internal/memory_plan.h"
@@ -40,6 +41,18 @@ struct VerifiedGraphArtifacts final {
     std::vector<OrderedArtifactIdentity> identities;
 };
 
+bool IsBounded(const runtime::ExecutablePlan& plan) {
+    return plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1 ||
+        plan.mode() == runtime::ExecutablePlanMode::kBoundedStatefulExternalV1;
+}
+ShapeProfileKey Profile(const GraphSemanticKey& key, const runtime::ExecutablePlan& plan) {
+    return IsBounded(plan) ? BuildBoundedShapeProfileKey(key, plan)
+                           : BuildStaticExactShapeProfileKey(key, plan);
+}
+DispatchKey Dispatch(const GraphSemanticKey& key, const ShapeProfileKey& profile, bool bounded) {
+    return bounded ? BuildBoundedDispatchKey(key, profile) : BuildStaticExactDispatchKey(key, profile);
+}
+
 VerifiedGraphArtifacts VerifyGraphArtifacts(
     const CompiledGraph& graph, const CompileConfig& config,
     const GraphSemanticKey& graph_semantic_key) {
@@ -50,21 +63,29 @@ VerifiedGraphArtifacts VerifyGraphArtifacts(
     }
     const Array<runtime::KernelCall> calls = graph.plan().calls();
     const auto& pins = graph.artifact_pins();
-    if (calls.empty()) {
-        throw std::invalid_argument("adaptive candidate requires ordered plan calls");
+    if (calls.empty() || pins.size() != calls.size()) {
+        throw std::invalid_argument("adaptive candidate requires one artifact pin per ordered plan call");
+    }
+    const bool bounded = IsBounded(graph.plan());
+    if ((!KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH && bounded) ||
+        !((graph.plan().mode() == runtime::ExecutablePlanMode::kStatic &&
+           graph.plan().state_value_ids().empty()) ||
+          graph.plan().mode() == runtime::ExecutablePlanMode::kStaticStatefulExternalV1 || bounded)) {
+        throw std::invalid_argument(
+            "adaptive replacement requires a static or enabled bounded plan");
     }
     VerifiedGraphArtifacts verified;
     verified.identities.reserve(calls.size());
     for (size_t index = 0; index < calls.size(); ++index) {
         const auto pin = internal::ArtifactPinAccess::Unwrap(pins[index]);
         const auto signature = graph.module().signature(calls[index]->symbol);
-        for (const auto& argument : signature.arguments()) {
+        if (!bounded) for (const auto& argument : signature.arguments()) {
             RequireStaticShape(argument.shape(), "adaptive KernelSignature");
         }
         verified.identities.push_back(OrderedArtifactIdentity{
             index, std::string(calls[index]->symbol), pin.key()});
     }
-    for (const auto& value : graph.plan().values()) {
+    if (!bounded) for (const auto& value : graph.plan().values()) {
         RequireStaticShape(value.shape(), "adaptive ExecutablePlan");
     }
     return verified;
@@ -99,17 +120,17 @@ void ValidateCandidate(const ProductionCompileRequest& request,
                 "adaptive candidate changed a verified callable ABI");
         }
     }
-    const ShapeProfileKey candidate_profile = BuildStaticExactShapeProfileKey(
+    const ShapeProfileKey candidate_profile = Profile(
         request.graph_semantic_key(), graph.plan());
     if (candidate_profile != request.shape_profile_key() ||
-        BuildStaticExactDispatchKey(request.graph_semantic_key(),
-                                    candidate_profile) != request.dispatch_key()) {
+        Dispatch(request.graph_semantic_key(), candidate_profile,
+                 IsBounded(graph.plan())) != request.dispatch_key()) {
         throw std::invalid_argument(
-            "adaptive candidate dispatch differs from the exact request");
+            "adaptive candidate dispatch differs from the request");
     }
     if (BuildPlanAbiFingerprint(graph) != request.plan_abi()) {
         throw std::invalid_argument(
-            "adaptive candidate Plan ABI differs from the exact request");
+            "adaptive candidate Plan ABI differs from the request");
     }
 }
 
@@ -124,7 +145,17 @@ PlanVariantKey BuildSelectionPlanKey(
     }
     return BuildPlanVariantKey(request.graph_semantic_key(),
                                request.shape_profile_key(), selections,
-                               runtime::internal::kStaticMemoryPlanVersion);
+        request.baseline_graph().plan().request_batching()
+            ? runtime::internal::kRequestBatchingMemoryPlanVersion
+            :
+        request.baseline_graph().plan().mode() == runtime::ExecutablePlanMode::kBoundedStatefulExternalV1
+            ? runtime::internal::kBoundedExternalStatefulMemoryPlanVersion
+            : request.baseline_graph().plan().mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1
+            ? runtime::internal::kDynamicFreshOutputMemoryPlanVersion
+            :
+        request.baseline_graph().plan().mode() == runtime::ExecutablePlanMode::kStaticStatefulExternalV1
+            ? runtime::internal::kStaticExternalStatefulMemoryPlanVersion
+            : runtime::internal::kStaticMemoryPlanVersion);
 }
 
 }  // namespace
@@ -135,10 +166,30 @@ ProductionCompileRequest::ProductionCompileRequest(
     : graph_(std::move(graph)), config_(std::move(config)),
       baseline_graph_(std::move(baseline_graph)),
       requested_unit_ids_(std::move(requested_unit_ids)) {
+    Initialize();
+}
+
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+ProductionCompileRequest::ProductionCompileRequest(
+    experimental::restricted_symbolic_shape::v1::BoundedCompileRequest bounded,
+    CompiledGraph baseline_graph, std::vector<std::int64_t> requested_unit_ids)
+    : graph_(bounded.representative()), config_(bounded.compile_config()),
+      baseline_graph_(std::move(baseline_graph)),
+      requested_unit_ids_(std::move(requested_unit_ids)) {
+    bounded_ = std::make_shared<const internal::BoundedCompilePreparation>(
+        internal::PrepareBoundedCompile(bounded));
+    Initialize();
+}
+#endif
+
+void ProductionCompileRequest::Initialize() {
     config_.Validate();
     graph_semantic_key_ = Compiler::BuildGraphSemanticKey(graph_);
     const VerifiedGraphArtifacts baseline = VerifyGraphArtifacts(
         baseline_graph_, config_, graph_semantic_key_);
+    if (bool(bounded_) != IsBounded(baseline_graph_.plan())) {
+        throw std::invalid_argument("bounded adaptive baseline requires adapter-minted compilation authority");
+    }
     ordered_artifacts_ = baseline.identities;
     std::sort(requested_unit_ids_.begin(), requested_unit_ids_.end());
     if (requested_unit_ids_.empty()) {
@@ -153,10 +204,44 @@ ProductionCompileRequest::ProductionCompileRequest(
                 "adaptive compile request has invalid replacement unit ids");
         }
     }
-    shape_profile_key_ = BuildStaticExactShapeProfileKey(
+    shape_profile_key_ = Profile(
         graph_semantic_key_, baseline_graph_.plan());
-    dispatch_key_ = BuildStaticExactDispatchKey(graph_semantic_key_,
-                                                shape_profile_key_);
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+    if (bounded_) {
+        const auto expected = internal::BuildDynamicExecutablePlan(*bounded_);
+        if (Profile(graph_semantic_key_, expected) != shape_profile_key_) {
+            throw std::invalid_argument("bounded adaptive baseline differs from its input applicability authority");
+        }
+        const auto actual_calls = baseline_graph_.plan().calls();
+        const auto expected_calls = expected.calls();
+        const auto same_ids = [](const Array<int64_t>& a, const Array<int64_t>& b) {
+            return std::equal(a.begin(), a.end(), b.begin(), b.end());
+        };
+        const auto bindings = baseline_graph_.plan().state_output_bindings();
+        const auto original_reads = [&](const Array<int64_t>& ids) {
+            Array<int64_t> original;
+            for (int64_t id : ids) {
+                for (const auto& binding : bindings) {
+                    if (id == binding.input_value_id) { id = binding.state_value_id; break; }
+                }
+                original.push_back(id);
+            }
+            return original;
+        };
+        if (actual_calls.size() != expected_calls.size() ||
+            !same_ids(original_reads(baseline_graph_.plan().input_value_ids()), expected.input_value_ids())) {
+            throw std::invalid_argument("bounded adaptive baseline changed the authorized graph boundary");
+        }
+        for (size_t i = 0; i < actual_calls.size(); ++i) {
+            if (!(actual_calls[i]->symbol == expected_calls[i]->symbol) ||
+                !same_ids(original_reads(actual_calls[i].input_value_ids()), expected_calls[i].input_value_ids()) ||
+                !same_ids(actual_calls[i].output_value_ids(), expected_calls[i].output_value_ids())) {
+                throw std::invalid_argument("bounded adaptive baseline changed the authorized call wiring");
+            }
+        }
+    }
+#endif
+    dispatch_key_ = Dispatch(graph_semantic_key_, shape_profile_key_, bool(bounded_));
     plan_abi_ = BuildPlanAbiFingerprint(baseline_graph_);
     Validate();
 }
@@ -170,6 +255,16 @@ const PlanAbiFingerprint& ProductionCompileRequest::plan_abi() const noexcept { 
 const std::vector<OrderedArtifactIdentity>& ProductionCompileRequest::ordered_artifacts() const noexcept { return ordered_artifacts_; }
 const CompiledGraph& ProductionCompileRequest::baseline_graph() const noexcept { return baseline_graph_; }
 const std::vector<std::int64_t>& ProductionCompileRequest::requested_unit_ids() const noexcept { return requested_unit_ids_; }
+const experimental::restricted_symbolic_shape::v1::BoundedCompileRequest*
+ProductionCompileRequest::bounded_request() const noexcept {
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+    return bounded_ ? &bounded_->request() : nullptr;
+#else
+    return nullptr;
+#endif
+}
+const internal::BoundedCompilePreparation*
+ProductionCompileRequest::bounded_preparation() const noexcept { return bounded_.get(); }
 
 void ProductionCompileRequest::Validate() const {
     if (!graph_.defined() || !graph_semantic_key_.defined() ||
@@ -214,7 +309,7 @@ const PlanAbiFingerprint& ProductionExecutionRequest::plan_abi() const noexcept 
 void ProductionExecutionRequest::Validate() const {
     if (!dispatch_key_.defined() || !plan_abi_.defined()) {
         throw std::invalid_argument(
-            "adaptive execution requires exact dispatch and Plan ABI identities");
+            "adaptive execution requires explicit dispatch and Plan ABI identities");
     }
 }
 
@@ -227,10 +322,12 @@ PreparedCandidate::PreparedCandidate(
       selection_plan_key_(std::move(selection_plan_key)),
       selected_artifacts_(std::move(selected_artifacts)),
       validation_receipt_(std::move(validation_receipt)) {
-    if (!session_ || !session_->defined() || !selection_plan_key_.defined() ||
+    const bool stateful = !graph_.plan().state_value_ids().empty();
+    if ((stateful ? bool(session_) : (!session_ || !session_->defined())) ||
+        !selection_plan_key_.defined() ||
         selected_artifacts_.empty() || validation_receipt_.empty()) {
         throw std::invalid_argument(
-            "prepared adaptive candidate requires session, selection, and receipt");
+            "prepared adaptive candidate requires appropriate session ownership, selection, and receipt");
     }
 }
 const CompiledGraph& PreparedCandidate::compiled_graph() const noexcept { return graph_; }
@@ -249,8 +346,11 @@ std::shared_ptr<const PreparedCandidate> PrepareCandidate(
     const VerifiedGraphArtifacts verified = VerifyGraphArtifacts(
         graph, request.config(), request.graph_semantic_key());
     ValidateCandidate(request, graph);
-    auto session = std::make_shared<const runtime::RuntimeSession>(
-        graph.module(), graph.plan());
+    runtime::RuntimeSession::Validate(graph.module(), graph.plan());
+    std::shared_ptr<const runtime::RuntimeSession> session;
+    if (graph.plan().state_value_ids().empty()) {
+        session = std::make_shared<const runtime::RuntimeSession>(graph.module(), graph.plan());
+    }
     return std::shared_ptr<const PreparedCandidate>(new PreparedCandidate(
         std::move(graph), std::move(session),
         BuildSelectionPlanKey(request, verified.identities), verified.identities,

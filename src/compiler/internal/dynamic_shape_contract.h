@@ -31,8 +31,8 @@ namespace shape_resolution =
     kxc::api::experimental::restricted_symbolic_shape::v1::shape_resolution;
 
 inline constexpr std::uint32_t kBoundedDynamicGraphVersion = 1;
-inline constexpr std::uint32_t kDynamicUnitShapeContractVersion = 3;
-inline constexpr std::uint32_t kBoundedCompilePreparationVersion = 2;
+inline constexpr std::uint32_t kDynamicUnitShapeContractVersion = 9;
+inline constexpr std::uint32_t kBoundedCompilePreparationVersion = 3;
 
 struct DynamicInputAxisReference final {
     std::size_t input_index{0};
@@ -54,12 +54,13 @@ public:
 
     static DynamicShapeExpr Const(std::uint64_t value);
     static DynamicShapeExpr InputAxis(std::size_t input_index,
-                                      std::size_t axis);
+                                      std::size_t axis, std::uint64_t offset = 0);
 
     [[nodiscard]] Kind kind() const noexcept;
     [[nodiscard]] std::uint64_t constant() const;
     [[nodiscard]] std::size_t input_index() const;
     [[nodiscard]] std::size_t axis() const;
+    [[nodiscard]] std::uint64_t offset() const noexcept;
     [[nodiscard]] bool operator==(const DynamicShapeExpr& other) const noexcept;
     [[nodiscard]] bool operator!=(const DynamicShapeExpr& other) const noexcept {
         return !(*this == other);
@@ -67,12 +68,14 @@ public:
 
 private:
     DynamicShapeExpr(Kind kind, std::uint64_t constant,
-                     std::size_t input_index, std::size_t axis);
+                     std::size_t input_index, std::size_t axis,
+                     std::uint64_t offset = 0);
 
     Kind kind_;
     std::uint64_t constant_{0};
     std::size_t input_index_{0};
     std::size_t axis_{0};
+    std::uint64_t offset_{0};
 };
 
 /*! \brief One unit's sole bounded shape authority.

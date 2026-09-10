@@ -539,8 +539,12 @@ bool TestExecutionPlanKernelFailsClosed() {
     Map<int, std::string> dtypes;
     dtypes.Set(0, "float32");
     dtypes.Set(1, "float32");
-    ExecutionPlan plan({ObjectRef(kernel)}, {}, {0}, {}, shapes, dtypes, 2,
-                       pass_ctx, DiscoPlacement(), 1);
+    const VirtualDevice vd(Device::CPU(), BuildTarget(Device::CPU()), "global", 0);
+    Map<int, VirtualDevice> devices;
+    devices.Set(0, vd);
+    devices.Set(1, vd);
+    ExecutionPlan plan({ObjectRef(kernel)}, devices, {0}, {}, shapes, dtypes, 2,
+                       pass_ctx, BuildDiscoPlacement({vd}), 1);
 
     disco::DiscoSession session = disco::DiscoSession::ThreadedSession(1, 1);
     disco::DRef input = session.Empty({1}, "float32", false, false);
@@ -549,12 +553,12 @@ bool TestExecutionPlanKernelFailsClosed() {
     disco::ExecutionPlanExecutor executor(session);
     TEST_CHECK(ThrowsWithMessage(
                    [&] { (void)executor.Execute(plan, initial_values); },
-                   "CompiledModule launch is not implemented"),
+                   "requires a ready bound CompiledModule"),
                "ExecutionPlan kernel path should fail before producing an output");
 
     TEST_CHECK(!Registry::Global().Get("kxc.disco.execute_plan").defined() &&
                    !Registry::Global().Get("kxc.disco.execute_plan_json").defined(),
-               "incomplete ExecutionPlan execution should not be exposed through FFI");
+               "ExecutionPlan must require explicit typed module binding instead of an unsafe FFI entry");
     return true;
 }
 

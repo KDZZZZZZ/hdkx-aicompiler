@@ -284,8 +284,6 @@ def operator_contract_issues(op: str, spec: dict[str, Any]) -> list[str]:
             binding_num_inputs = spec.get("num_inputs")
             if not isinstance(binding_num_inputs, int) or binding_num_inputs < 0:
                 issues.append(f"{op}: generated registration currently requires fixed arity")
-            if spec.get("attrs") is not None:
-                issues.append(f"{op}: generated registration currently requires fieldless attrs")
             if spec.get("output_arity") != 1:
                 issues.append(f"{op}: generated registration currently requires one output")
             if spec.get("type_relation_key") != "FInferType":

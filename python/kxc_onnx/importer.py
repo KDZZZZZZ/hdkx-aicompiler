@@ -26,6 +26,11 @@ INT64_MAX = (1 << 63) - 1
 # S1 static subset: arithmetic (Mul/Sub/Div) and Sqrt only accept float32 so the
 # truncating-division and widening semantics of integer ONNX inputs are never claimed.
 ARITHMETIC_DTYPES = {"float32"}
+# ONNX Add also carries shape/index values in the capacity-shaped MiniMind
+# export (`position + arange`).  Add has no truncating-division or widening
+# ambiguity, so the production subset admits exact int64 addition while the
+# other arithmetic operators remain float32-only.
+ADD_DTYPES = {"float32", "int64"}
 # M5 Equal subset (pinned by the C-line InferType contract): both inputs must carry
 # the same dtype from this set and the broadcast result is bool. bool/float64 and
 # mixed-dtype comparisons are rejected with the canonical diagnostics.
@@ -94,6 +99,7 @@ ONNX_TO_RELAY = {
     "Equal": "equal",
     "LayerNormalization": "nn_layer_norm",
     "Slice": "slice",
+    "Split": "split",
     "Mul": "mul",
     "Sub": "subtract",
     "Div": "divide",
@@ -103,9 +109,14 @@ ONNX_TO_RELAY = {
     "Reshape": "reshape",
     "Neg": "neg",
     "Sigmoid": "sigmoid",
+    "Tanh": "tanh",
+    "Erf": "erf",
     "Pow": "pow",
     "Expand": "expand",
     "Unsqueeze": "reshape",
+    "Shape": "shape_of",
+    "ConstantOfShape": "constant_of_shape",
+    "Trilu": "trilu",
 }
 
 
@@ -131,12 +142,14 @@ def onnx_dtype_to_kxc(dtype: int) -> str:
 def import_onnx(
     model_path: str | Path, default_batch: int | None = None,
     fold_constants: bool = True,
+    preserve_shape_values: bool = False,
 ) -> ImportedONNXModel:
     model_path = Path(model_path)
     model = onnx.load(str(model_path))
     return import_onnx_model(model, default_batch=default_batch,
                              base_dir=model_path.parent,
-                             fold_constants=fold_constants)
+                             fold_constants=fold_constants,
+                             preserve_shape_values=preserve_shape_values)
 
 
 def import_onnx_model(
@@ -144,6 +157,7 @@ def import_onnx_model(
     default_batch: int | None = None,
     base_dir: str | Path | None = None,
     fold_constants: bool = True,
+    preserve_shape_values: bool = False,
 ) -> ImportedONNXModel:
     """把 ONNX 模型导入成 Relay 图规格。
 
@@ -151,6 +165,11 @@ def import_onnx_model(
     唯一的节点导入链路。导出器留下的 mask 构造（``ConstantOfShape``/``Trilu``）
     和喂 ``Expand`` 的 ``Shape`` 链因此在导入前消失，不需要为它们新增运行时
     算子。关闭后按原始图导入，未映射算子照常报错。
+
+    ``preserve_shape_values=True`` emits kxc.onnx_shape_source.v1: a concrete
+    representative with original shape controls retained for the C++ restricted
+    producer. This is a source graph, not an executable/static import. ONNX shape
+    inference supplies representative metadata; it does not erase Shape calls.
     """
     if default_batch is not None and (
         not isinstance(default_batch, int)
@@ -159,8 +178,21 @@ def import_onnx_model(
     ):
         raise ValueError("default_batch must be a positive integer when explicitly supplied")
 
+    if not isinstance(preserve_shape_values, bool):
+        raise ValueError("preserve_shape_values must be bool")
+    for node in model.graph.node:
+        if node.domain not in {"", "ai.onnx"}:
+            raise UnsupportedONNXOpError(
+                f"Unsupported ONNX domain '{node.domain}' in node '{node.name or node.op_type}'"
+            )
+    if preserve_shape_values and any(node.op_type in {"Tanh", "Erf"} for node in model.graph.node):
+        raise UnsupportedONNXOpError("Tanh/Erf currently require the static import contract")
     if fold_constants:
         model, _fold_report = fold_static_subgraph(model)
+    model = _binary_concats(model)
+    if preserve_shape_values:
+        model = onnx.shape_inference.infer_shapes(
+            model, strict_mode=True, data_prop=True)
     graph = model.graph
     base_dir_path = Path(base_dir) if base_dir is not None else None
     opset_version = next(
@@ -174,7 +206,8 @@ def import_onnx_model(
         array = numpy_helper.to_array(
             initializer, base_dir=str(base_dir_path) if base_dir_path is not None else ""
         )
-        array = np.ascontiguousarray(array)
+        if array.ndim > 0:
+            array = np.ascontiguousarray(array)
         param_order.append(initializer.name)
         params[initializer.name] = ParamTensor(
             name=initializer.name,
@@ -202,6 +235,8 @@ def import_onnx_model(
     input_specs = {spec.name: spec for spec in inputs}
     inferred_static_specs: dict[str, TensorSpec] = {}
     available_values = {x.name for x in inputs} | set(params)
+    reserved_values = set(value_info_by_name) | available_values
+    reserved_values.update(name for node in graph.node for name in list(node.input) + list(node.output))
     for node in graph.node:
         if node.op_type == "Constant":
             _import_constant_node(
@@ -229,11 +264,83 @@ def import_onnx_model(
                 raise ValueError(
                     f"LayerNormalization node '{node_name}' does not support non-empty Mean or InvStdDev outputs"
                 )
+        elif node.op_type == "Split":
+            if len(node.output) < 2 or not all(node.output):
+                raise ValueError(
+                    f"Split node '{node.name or '<unnamed>'}' requires at least two non-empty outputs"
+                )
         elif len(node.output) != 1:
             raise ValueError(
                 f"ONNX node '{node.name or node.op_type}' has {len(node.output)} outputs; "
                 "only single-output nodes are supported in the static-shape MVP"
             )
+
+        if node.op_type == "Shape":
+            if len(node.input) != 1 or not node.input[0] or _attrs_by_name(node):
+                raise ValueError("Shape requires one input and full-rank semantics without attributes")
+            _, rank = _resolve_ranked_input("Shape", node.name, node.input[0], input_specs,
+                                            params, inferred_static_specs, value_info_by_name)
+            if not 1 <= rank <= 8:
+                raise ValueError("Shape requires data rank in [1,8]")
+            result = TensorSpec(node.output[0], [rank], "int64")
+            _validate_declared_output("Shape", node.name, result, output_declarations, default_batch)
+            inferred_static_specs[node.output[0]] = result
+
+        if node.op_type == "ConstantOfShape":
+            if not preserve_shape_values:
+                raise UnsupportedONNXOpError("ConstantOfShape requires explicit shape-source mode or constant folding")
+            fill_attrs = _shape_source_fill_attrs(node)
+            if len(node.input) != 1 or not node.input[0]:
+                raise ValueError("Shape-source ConstantOfShape requires one input")
+            control = _resolve_static_input("ConstantOfShape", node.name, node.input[0],
+                input_specs, params, inferred_static_specs, value_info_by_name, default_batch)
+            if control.dtype != "int64" or len(control.shape) != 1:
+                raise ValueError("Shape-source ConstantOfShape requires an int64 target vector")
+            if fill_attrs["dtype_code"] == 2:
+                if control.shape != [1]:
+                    raise ValueError("Shape-source integer ConstantOfShape requires a one-element target vector")
+                result = _tensor_spec_from_value_info(value_info_by_name[node.output[0]], default_batch)
+                if result.dtype != "int64" or len(result.shape) != 1 or not 0 <= result.shape[0] <= 16:
+                    raise ValueError("Shape-source ConstantOfShape supports int64 control vectors of length <=16")
+                inferred_static_specs[node.output[0]] = result
+            elif not 1 <= control.shape[0] <= 8:
+                raise ValueError("Shape-source float32 ConstantOfShape requires target rank in [1,8]")
+
+        if node.op_type == "Trilu":
+            _trilu_attrs(node, params, opset_version)
+            if preserve_shape_values and node.input[0] not in params:
+                declaration = value_info_by_name.get(node.input[0])
+                if declaration is None:
+                    raise ValueError("Trilu requires input dtype/rank metadata")
+                tensor = declaration.type.tensor_type
+                if tensor.elem_type != TensorProto.FLOAT or not tensor.HasField("shape") or len(tensor.shape.dim) < 2:
+                    raise ValueError("Trilu requires float32 input of rank >= 2")
+            else:
+                data = _resolve_static_input("Trilu", node.name, node.input[0], input_specs,
+                    params, inferred_static_specs, value_info_by_name, default_batch)
+                if data.dtype != "float32" or len(data.shape) < 2:
+                    raise ValueError("Trilu requires float32 input of rank >= 2")
+                result = TensorSpec(node.output[0], data.shape, data.dtype)
+                _validate_declared_output("Trilu", node.name, result, output_declarations, default_batch)
+                inferred_static_specs[node.output[0]] = result
+
+        # Unresolved source extents remain ONNX metadata. The C++ producer
+        # proves them and checks declared outputs; do not guess from a sample.
+        deferred_shape = preserve_shape_values and any(
+            name in value_info_by_name and any(not dim.HasField("dim_value")
+                for dim in value_info_by_name[name].type.tensor_type.shape.dim)
+            for name in node.input if name)
+        if deferred_shape and node.op_type in {"Neg", "Sigmoid", "Pow", "Sqrt", "ReduceMean"}:
+            arity = 2 if node.op_type == "Pow" else 1
+            if len(node.input) != arity or not all(node.input):
+                raise ValueError(f"Shape-source {node.op_type} requires {arity} nonempty inputs")
+            if node.op_type in {"Neg", "Sigmoid", "Tanh", "Erf", "Pow"} and opset_version < M4M5_MATH_MIN_OPSET:
+                raise UnsupportedONNXOpError(f"Shape-source {node.op_type} requires opset >=13")
+            for name in node.input:
+                dtype, _ = _resolve_ranked_input(node.op_type, node.name, name, input_specs,
+                    params, inferred_static_specs, value_info_by_name)
+                if dtype != "float32":
+                    raise ValueError(f"Shape-source {node.op_type} requires float32 inputs")
 
         if node.op_type == "Slice":
             node_name = node.name or "<unnamed>"
@@ -250,12 +357,49 @@ def import_onnx_model(
                 raise ValueError(f"Slice node '{node_name}' requires exactly one non-empty output")
             if node.input[0] not in available_values:
                 raise ValueError(f"Slice node '{node_name}' has unresolved data input")
-            inferred_static_specs[node.output[0]] = _infer_slice_spec(
-                node, input_specs, params, inferred_static_specs, value_info_by_name,
-                output_declarations, default_batch,
-            )
-        if node.op_type == "Concat":
+            if preserve_shape_values:
+                if len(node.input) != 5 or not all(node.input) or node.attribute:
+                    raise ValueError("Shape-source Slice requires all five inputs and no attrs")
+                for control_name in node.input[1:]:
+                    control = _resolve_static_input("Slice", node_name, control_name,
+                        input_specs, params, inferred_static_specs, value_info_by_name, default_batch)
+                    if control.dtype != "int64" or len(control.shape) != 1 or not 1 <= control.shape[0] <= 16:
+                        raise ValueError("Shape-source Slice requires nonempty int64 control vectors of length <=16")
+            else:
+                inferred_static_specs[node.output[0]] = _infer_slice_spec(
+                    node, input_specs, params, inferred_static_specs, value_info_by_name,
+                    output_declarations, default_batch,
+                )
+        if node.op_type == "Concat" and len(node.input) == 1 and preserve_shape_values:
+            raise UnsupportedONNXOpError("Singleton Concat currently requires the static import contract")
+        if node.op_type == "Concat" and not deferred_shape:
             node_name = node.name or "<unnamed>"
+            if len(node.input) == 1 and node.input[0]:
+                if node.input[0] not in available_values:
+                    raise ValueError(f"Concat node '{node_name}' has unresolved prior input")
+                source = _resolve_static_input("Concat", node_name, node.input[0],
+                    input_specs, params, inferred_static_specs, value_info_by_name, default_batch)
+                attrs = _attrs_by_name(node)
+                if set(attrs) != {"axis"}:
+                    raise ValueError(f"Concat node '{node_name}' requires exactly the axis attribute")
+                axis = _int_attr(attrs, "axis", 0)
+                if not source.shape or not -len(source.shape) <= axis < len(source.shape):
+                    raise ValueError(f"Concat node '{node_name}' requires rank >= 1 and an in-range axis")
+                # The existing binary op's zero-width identity preserves fresh
+                # output storage and bit patterns, without a new copy operator.
+                empty_shape = list(source.shape)
+                empty_shape[axis] = 0
+                empty_name = node.output[0] + "__kxc_concat_empty"
+                while empty_name in reserved_values:
+                    empty_name += "_"
+                reserved_values.add(empty_name)
+                params[empty_name] = ParamTensor(empty_name, empty_shape, source.dtype, b"")
+                param_order.append(empty_name)
+                available_values.add(empty_name)
+                binary = onnx.NodeProto()
+                binary.CopyFrom(node)
+                binary.input.append(empty_name)
+                node = binary
             if len(node.input) != 2 or not all(node.input):
                 raise ValueError(f"Concat node '{node_name}' requires exactly two non-empty inputs")
             if not node.output[0]:
@@ -289,7 +433,7 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
-        if node.op_type == "MatMul":
+        if node.op_type == "MatMul" and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_matmul_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
@@ -308,49 +452,68 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
-        if node.op_type in {"Mul", "Sub", "Div"} or (
+        if not deferred_shape and (node.op_type in {"Mul", "Sub", "Div"} or (
             node.op_type == "Add"
             and _inputs_are_resolvable(node, input_specs, params,
                                        inferred_static_specs, value_info_by_name)
-        ):
+        )):
             inferred_static_specs[node.output[0]] = _infer_binary_arithmetic_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
-                output_declarations, default_batch,
+                output_declarations, default_batch, allow_int64=preserve_shape_values,
             )
-        if node.op_type == "Softmax" and _inputs_are_resolvable(
+        if node.op_type == "Softmax" and not deferred_shape and _inputs_are_resolvable(
             node, input_specs, params, inferred_static_specs, value_info_by_name
         ):
             inferred_static_specs[node.output[0]] = _infer_softmax_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
-        if node.op_type == "Transpose" and _inputs_are_resolvable(
+        if node.op_type == "Transpose" and not deferred_shape and _inputs_are_resolvable(
             node, input_specs, params, inferred_static_specs, value_info_by_name
         ):
             inferred_static_specs[node.output[0]] = _infer_transpose_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
-        if node.op_type == "Sqrt":
+        if node.op_type == "Sqrt" and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_sqrt_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
-        if node.op_type == "Cast":
+        if node.op_type == "Cast" and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_cast_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
-                output_declarations, default_batch,
+                output_declarations, default_batch, allow_shape_control=preserve_shape_values,
             )
-        if node.op_type == "ReduceMean":
+        if node.op_type == "ReduceMean" and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_reduce_mean_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch, opset_version,
             )
         if node.op_type == "Reshape":
-            inferred_static_specs[node.output[0]] = _infer_reshape_spec(
-                node, input_specs, params, inferred_static_specs, value_info_by_name,
-                output_declarations, default_batch,
-            )
+            if preserve_shape_values:
+                attrs = _attrs_by_name(node)
+                if set(attrs) - {"allowzero"} or _int_attr(attrs, "allowzero", 0) != 0:
+                    raise ValueError("Shape-source Reshape requires allowzero=0 and no other attrs")
+                if len(node.input) != 2 or not all(node.input):
+                    raise ValueError("Shape-source Reshape requires data and shape inputs")
+                control = _resolve_static_input("Reshape", node.name, node.input[1], input_specs,
+                    params, inferred_static_specs, value_info_by_name, default_batch)
+                if control.dtype != "int64" or len(control.shape) != 1 or control.shape[0] < 1:
+                    raise ValueError("Shape-source Reshape requires a nonempty int64 shape vector")
+                declaration = value_info_by_name.get(node.output[0])
+                if declaration is None or not declaration.type.tensor_type.HasField("shape"):
+                    raise ValueError("Shape-source Reshape requires known-rank metadata")
+                dimensions = declaration.type.tensor_type.shape.dim
+                if len(dimensions) != control.shape[0]:
+                    raise ValueError("Shape-source Reshape output rank differs from control length")
+                if all(dim.HasField("dim_value") for dim in dimensions):
+                    inferred_static_specs[node.output[0]] = _tensor_spec_from_value_info(declaration, default_batch)
+            else:
+                inferred_static_specs[node.output[0]] = _infer_reshape_spec(
+                    node, input_specs, params, inferred_static_specs, value_info_by_name,
+                    output_declarations, default_batch,
+                )
         if node.op_type == "Where":
             inferred_static_specs[node.output[0]] = _infer_where_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
@@ -361,26 +524,54 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
-        if node.op_type in {"Neg", "Sigmoid"}:
+        if node.op_type in {"Neg", "Sigmoid", "Tanh", "Erf"} and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_unary_math_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch, opset_version,
             )
-        if node.op_type == "Pow":
+        if node.op_type == "Pow" and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_pow_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch, opset_version,
             )
         if node.op_type == "Expand":
-            inferred_static_specs[node.output[0]] = _infer_expand_spec(
-                node, input_specs, params, inferred_static_specs, value_info_by_name,
-                output_declarations, default_batch, opset_version,
-            )
-        if node.op_type == "Unsqueeze":
+            if preserve_shape_values:
+                if opset_version < 13 or _attrs_by_name(node) or len(node.input) != 2 or not all(node.input):
+                    raise ValueError("Shape-source Expand requires opset >=13, two inputs and no attrs")
+                dtype, rank = _resolve_ranked_input("Expand", node.name, node.input[0], input_specs,
+                    params, inferred_static_specs, value_info_by_name)
+                control = _resolve_static_input("Expand", node.name, node.input[1], input_specs,
+                    params, inferred_static_specs, value_info_by_name, default_batch)
+                if dtype != "float32" or control.dtype != "int64" or control.shape != [rank]:
+                    raise ValueError("Shape-source Expand requires float32 data and a same-rank int64 target")
+                declaration = value_info_by_name.get(node.output[0])
+                if declaration is None or not declaration.type.tensor_type.HasField("shape"):
+                    raise ValueError("Shape-source Expand requires known representative output rank")
+                output_type = declaration.type.tensor_type
+                if onnx_dtype_to_kxc(output_type.elem_type) != dtype or len(output_type.shape.dim) != rank:
+                    raise ValueError("Shape-source Expand representative output rank/dtype mismatch")
+                # ONNX shape inference does not propagate Where's control values.
+                # Keep unresolved intermediate extents for the C++ producer;
+                # declared graph outputs still require concrete representatives.
+                if all(dimension.HasField("dim_value") for dimension in output_type.shape.dim):
+                    inferred_static_specs[node.output[0]] = _tensor_spec_from_value_info(declaration, default_batch)
+            else:
+                inferred_static_specs[node.output[0]] = _infer_expand_spec(
+                    node, input_specs, params, inferred_static_specs, value_info_by_name,
+                    output_declarations, default_batch, opset_version,
+                )
+        if node.op_type == "Unsqueeze" and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_unsqueeze_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch, opset_version,
             )
+        if node.op_type == "Split":
+            split_specs = _infer_split_specs(
+                node, input_specs, params, inferred_static_specs, value_info_by_name,
+                output_declarations, default_batch, opset_version,
+            )
+            for spec in split_specs:
+                inferred_static_specs[spec.name] = spec
 
         missing = [name for name in node.input if name and name not in available_values]
         if missing:
@@ -389,18 +580,46 @@ def import_onnx_model(
             )
 
         relay_inputs = ([node.input[0]]
-                        if node.op_type in {"Slice", "Reshape", "Expand", "Unsqueeze"}
+                        if (node.op_type in {"Unsqueeze", "Trilu", "Split"} or
+                            (node.op_type == "Slice" and not preserve_shape_values) or
+                            (node.op_type in {"Reshape", "Expand"} and not preserve_shape_values))
                         else [name for name in node.input if name])
         relay_outputs = ([node.output[0]] if node.op_type == "LayerNormalization"
                          else [name for name in node.output])
+        op_name = ONNX_TO_RELAY[node.op_type]
+        if preserve_shape_values and node.op_type == "Reshape":
+            op_name, relay_attrs = "reshape_dynamic", {}
+        elif preserve_shape_values and node.op_type == "Expand":
+            op_name, relay_attrs = "expand_dynamic", {}
+        elif preserve_shape_values and node.op_type == "Slice":
+            relay_attrs = {}
+        elif preserve_shape_values and node.op_type == "Cast":
+            target = _cast_target_dtype(node, allow_shape_control=True)
+            if deferred_shape:
+                dtype = onnx_dtype_to_kxc(value_info_by_name[node.input[0]].type.tensor_type.elem_type)
+                if (dtype, target) not in CAST_SUPPORTED_CONVERSIONS and not dtype == target == "int64":
+                    raise ValueError("Shape-source Cast supports float32 conversions or int64 identity controls")
+            relay_attrs = {"to": RELAY_CAST_DTYPE_CODES[target]}
+        elif preserve_shape_values and node.op_type == "ConstantOfShape":
+            relay_attrs = _shape_source_fill_attrs(node)
+        elif preserve_shape_values and node.op_type == "Unsqueeze":
+            if opset_version < M4M5_MATH_MIN_OPSET:
+                raise UnsupportedONNXOpError("Shape-source Unsqueeze requires opset >=13")
+            _, rank = _resolve_ranked_input("Unsqueeze", node.name, node.input[0], input_specs,
+                params, inferred_static_specs, value_info_by_name)
+            _unsqueeze_axes(node, params, rank)
+            op_name = "unsqueeze"
+            relay_attrs = {"axes": _int64_constant_vector("Unsqueeze", node.name, node.input[1], params)}
+        else:
+            relay_attrs = _convert_attrs(node, params, value_info_by_name, opset_version,
+                                        input_specs, inferred_static_specs)
         nodes.append(
             RelayNodeSpec(
                 name=node.name or f"{node.op_type}_{len(nodes)}",
-                op_name=ONNX_TO_RELAY[node.op_type],
+                op_name=op_name,
                 inputs=relay_inputs,
                 outputs=relay_outputs,
-                attrs=_convert_attrs(node, params, value_info_by_name, opset_version,
-                                     input_specs, inferred_static_specs),
+                attrs=relay_attrs,
             )
         )
         available_values.update(relay_outputs)
@@ -409,7 +628,103 @@ def import_onnx_model(
         function=RelayFunctionSpec(inputs=inputs, outputs=outputs, nodes=nodes),
         params=params,
         param_order=param_order,
+        preserve_shape_values=preserve_shape_values,
     )
+
+
+def _shape_source_fill_attrs(node: onnx.NodeProto) -> dict[str, Any]:
+    if (len(node.attribute) != 1 or node.attribute[0].name != "value"
+            or node.attribute[0].type != AttributeProto.TENSOR):
+        raise ValueError("Shape-source ConstantOfShape requires an explicit tensor value")
+    array = numpy_helper.to_array(node.attribute[0].t)
+    if array.dtype == np.float32 and array.shape == (1,) and not np.isnan(array[0]):
+        # Exact IEEE bits keep +/-inf valid in strict JSON, without a second
+        # expression evaluator or nonstandard JSON Infinity tokens.
+        return {"dtype_code": RELAY_CAST_DTYPE_CODES["float32"],
+                "value_bits": int(array.view(np.uint32)[0])}
+    if array.dtype != np.int64 or array.shape != (1,) or abs(int(array[0])) > 2**53:
+        raise ValueError("Shape-source ConstantOfShape requires one exactly representable int64 fill")
+    return {"dtype_code": RELAY_CAST_DTYPE_CODES["int64"], "value": int(array[0])}
+
+
+def _trilu_attrs(node: onnx.NodeProto, params: dict[str, ParamTensor], opset: int) -> dict[str, int]:
+    if opset < 14:
+        raise UnsupportedONNXOpError(f"Unsupported ONNX Trilu opset {opset} in node '{node.name}': requires >=14")
+    attrs = _attrs_by_name(node)
+    upper = _int_attr(attrs, "upper", 1)
+    if set(attrs) - {"upper"} or upper not in {0, 1}:
+        raise ValueError("Trilu requires upper 0 or 1 and no other attributes")
+    if len(node.input) not in {1, 2} or not node.input[0]:
+        raise ValueError("Trilu requires data and an optional constant scalar diagonal")
+    k = 0
+    if len(node.input) == 2 and node.input[1]:
+        diagonal = params.get(node.input[1])
+        if diagonal is None or diagonal.dtype != "int64" or diagonal.shape != []:
+            raise ValueError("Trilu diagonal must be a static int64 scalar")
+        k = int(np.frombuffer(diagonal.data, dtype=np.int64)[0])
+    return {"upper": upper, "k": k}
+
+
+def _binary_concats(model: ModelProto) -> ModelProto:
+    """Normalize variadic ONNX Concat to the existing ordered binary Relay op.
+
+    Static and shape-source imports share this conversion. Reserve every value
+    mention, including unresolved inputs and metadata, so generated names cannot
+    repair an invalid graph by capturing a missing value. No data are evaluated.
+    """
+    if not any(node.op_type == "Concat" and len(node.input) > 2 for node in model.graph.node):
+        return model
+    result = ModelProto()
+    result.CopyFrom(model)
+    used = {v.name for v in list(model.graph.input) + list(model.graph.initializer)
+            + list(model.graph.output) + list(model.graph.value_info)}
+    used.update(v for node in model.graph.node for v in list(node.input) + list(node.output))
+    used_node_names = {node.name for node in model.graph.node}
+    nodes = []
+    for node in model.graph.node:
+        if node.op_type != "Concat" or len(node.input) <= 2:
+            nodes.append(node)
+            continue
+        if len(node.output) != 1 or not node.output[0] or not all(node.input):
+            raise ValueError("Concat requires nonempty inputs and one output")
+        attrs = _attrs_by_name(node)
+        if set(attrs) != {"axis"}:
+            raise ValueError("Concat requires exactly the axis attribute")
+        axis = _int_attr(attrs, "axis", 0)
+        previous = node.input[0]
+        for index, value in enumerate(node.input[1:]):
+            output = node.output[0]
+            if index != len(node.input) - 2:
+                output += f"__kxc_concat_{index}"
+                while output in used:
+                    output += "_"
+                used.add(output)
+            name = f"{node.name or 'Concat'}_part{index}"
+            while name in used_node_names:
+                name += "_"
+            used_node_names.add(name)
+            nodes.append(onnx.helper.make_node("Concat", [previous, value], [output],
+                         name=name, domain=node.domain, axis=axis))
+            previous = output
+    del result.graph.node[:]
+    result.graph.node.extend(nodes)
+    return result
+
+
+def _resolve_ranked_input(
+    op_type: str, node_name: str, name: str,
+    input_specs: dict[str, TensorSpec], params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec], value_info_by_name: dict[str, onnx.ValueInfoProto],
+) -> tuple[str, int]:
+    """Read dtype and fixed rank without inventing unresolved source extents."""
+    for specs in (inferred_specs, params, input_specs):
+        if name in specs:
+            return specs[name].dtype, len(specs[name].shape)
+    value = value_info_by_name.get(name)
+    if value is None or not value.type.tensor_type.HasField("shape"):
+        raise ValueError(f"{op_type} node '{node_name}' input '{name}' requires known-rank metadata")
+    tensor = value.type.tensor_type
+    return onnx_dtype_to_kxc(tensor.elem_type), len(tensor.shape.dim)
 
 
 def _resolve_static_input(
@@ -608,6 +923,7 @@ def _infer_binary_arithmetic_spec(
     value_info_by_name: dict[str, onnx.ValueInfoProto],
     output_declarations: dict[str, list[onnx.ValueInfoProto]],
     default_batch: int | None,
+    allow_int64: bool = False,
 ) -> TensorSpec:
     op_type = node.op_type
     node_name = node.name or "<unnamed>"
@@ -620,7 +936,17 @@ def _infer_binary_arithmetic_spec(
                               inferred_specs, value_info_by_name, default_batch)
         for name in node.input
     )
-    if lhs.dtype not in ARITHMETIC_DTYPES or rhs.dtype not in ARITHMETIC_DTYPES:
+    allowed_dtypes = ADD_DTYPES if op_type == "Add" else ARITHMETIC_DTYPES
+    if allow_int64 and op_type in {"Add", "Sub", "Mul", "Div"}:
+        allowed_dtypes = allowed_dtypes | {"int64"}
+        if lhs.dtype != rhs.dtype:
+            raise ValueError(f"{op_type} shape-source operands require matching dtypes")
+    if lhs.dtype not in allowed_dtypes or rhs.dtype not in allowed_dtypes:
+        if op_type == "Add":
+            raise ValueError(
+                f"Add node '{node_name}' requires float32 or int64 inputs in the "
+                f"static S1 subset; got {lhs.dtype} and {rhs.dtype}"
+            )
         raise ValueError(
             f"{op_type} node '{node_name}' requires float32 inputs in the static "
             f"S1 subset; got {lhs.dtype} and {rhs.dtype}"
@@ -628,7 +954,7 @@ def _infer_binary_arithmetic_spec(
     result = TensorSpec(
         name=node.output[0],
         shape=_broadcast_shapes(op_type, node_name, lhs.shape, rhs.shape),
-        dtype="float32",
+        dtype=lhs.dtype,
     )
     _validate_declared_output(op_type, node_name, result, output_declarations, default_batch)
     return result
@@ -758,7 +1084,7 @@ def _infer_sqrt_spec(
     return result
 
 
-def _cast_target_dtype(node: onnx.NodeProto) -> str:
+def _cast_target_dtype(node: onnx.NodeProto, *, allow_shape_control: bool = False) -> str:
     """Resolve the Cast ``to`` attribute to a kxc dtype name under the S1 boundary."""
     node_name = node.name or "<unnamed>"
     attrs = _attrs_by_name(node)
@@ -772,7 +1098,7 @@ def _cast_target_dtype(node: onnx.NodeProto) -> str:
             f"Cast node '{node_name}' has unsupported 'to' dtype enum {to}"
         )
     target = ONNX_CAST_DTYPE_NAMES[to]
-    if target != "float32":
+    if target != "float32" and not (allow_shape_control and target == "int64"):
         raise ValueError(
             f"Cast node '{node_name}' supports only to=float32 in the static S1 "
             f"subset; got to={target}"
@@ -788,14 +1114,16 @@ def _infer_cast_spec(
     value_info_by_name: dict[str, onnx.ValueInfoProto],
     output_declarations: dict[str, list[onnx.ValueInfoProto]],
     default_batch: int | None,
+    *, allow_shape_control: bool = False,
 ) -> TensorSpec:
     node_name = node.name or "<unnamed>"
     if len(node.input) != 1 or not node.input[0]:
         raise ValueError(f"Cast node '{node_name}' requires exactly one non-empty input")
     data = _resolve_static_input("Cast", node_name, node.input[0], input_specs, params,
                                  inferred_specs, value_info_by_name, default_batch)
-    target = _cast_target_dtype(node)
-    if (data.dtype, target) not in CAST_SUPPORTED_CONVERSIONS:
+    target = _cast_target_dtype(node, allow_shape_control=allow_shape_control)
+    if (data.dtype, target) not in CAST_SUPPORTED_CONVERSIONS and not (
+        allow_shape_control and data.dtype == target == "int64"):
         raise ValueError(
             f"Cast node '{node_name}' supports only int32/int64 to float32 in the "
             f"static S1 subset; got {data.dtype} to {target}"
@@ -1316,6 +1644,104 @@ def _infer_concatenate_spec(
     return result
 
 
+def _split_sections(
+    node: onnx.NodeProto, params: dict[str, ParamTensor], opset_version: int
+) -> tuple[int, list[int]]:
+    """Resolve static constant Split sections from attrs or an initializer."""
+    node_name = node.name or "<unnamed>"
+    if opset_version < 2:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX Split opset {opset_version} in node '{node_name}'"
+        )
+    attrs = _attrs_by_name(node)
+    unsupported = set(attrs) - {"axis", "split"}
+    if unsupported:
+        raise ValueError(
+            f"Split node '{node_name}' has unsupported attribute(s): {sorted(unsupported)}"
+        )
+    axis = _int_attr(attrs, "axis", 0)
+    has_attr = "split" in attrs
+    if has_attr and len(node.input) != 1:
+        raise ValueError(
+            f"Split node '{node_name}' cannot combine split attribute with a second input"
+        )
+    if has_attr:
+        sections = _list_attr(attrs, "split", [])
+    elif len(node.input) == 2 and node.input[1]:
+        sections = _int64_constant_vector("Split", node_name, node.input[1], params)
+    else:
+        raise ValueError(
+            f"Split node '{node_name}' requires a constant split attribute or int64 initializer input"
+        )
+    if len(node.input) not in {1, 2} or not node.input[0]:
+        raise ValueError(f"Split node '{node_name}' requires one data input")
+    if len(sections) < 2:
+        raise ValueError(
+            f"Split node '{node_name}' requires at least two constant sections"
+        )
+    if any(type(section) is not int or section < 0 for section in sections):
+        raise ValueError(
+            f"Split node '{node_name}' sections must be non-negative integers"
+        )
+    return axis, sections
+
+
+def _infer_split_specs(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> list[TensorSpec]:
+    node_name = node.name or "<unnamed>"
+    if len(node.output) < 2 or not all(node.output):
+        raise ValueError(
+            f"Split node '{node_name}' requires at least two non-empty outputs"
+        )
+    if len(node.input) not in {1, 2} or not node.input[0]:
+        raise ValueError(f"Split node '{node_name}' requires one data input")
+    data = _resolve_static_input(
+        "Split", node_name, node.input[0], input_specs, params,
+        inferred_specs, value_info_by_name, default_batch
+    )
+    if data.dtype not in CONCATENATE_DTYPES:
+        raise ValueError(
+            f"Split node '{node_name}' requires dtype in "
+            "{float32,float64,int32,int64,int8,uint8,bool}"
+        )
+    if not data.shape:
+        raise ValueError(f"Split node '{node_name}' requires data rank >= 1")
+    axis, sections = _split_sections(node, params, opset_version)
+    if len(node.output) != len(sections):
+        raise ValueError(
+            f"Split node '{node_name}' output count must equal the number of sections"
+        )
+    if axis < 0:
+        axis += len(data.shape)
+    if axis < 0 or axis >= len(data.shape):
+        raise ValueError(f"Split node '{node_name}' axis is out of range")
+    if any(dim < 0 for dim in data.shape):
+        raise ValueError(
+            f"Split node '{node_name}' requires non-negative static data dimensions"
+        )
+    if sum(sections) != data.shape[axis]:
+        raise ValueError(
+            f"Split node '{node_name}' sections must sum to the input axis extent"
+        )
+    outputs: list[TensorSpec] = []
+    for name, section in zip(node.output, sections):
+        shape = list(data.shape)
+        shape[axis] = section
+        result = TensorSpec(name=name, shape=shape, dtype=data.dtype)
+        _validate_declared_output("Split", node_name, result,
+                                  output_declarations, default_batch)
+        outputs.append(result)
+    return outputs
+
+
 def _infer_layer_normalization_spec(
     node: onnx.NodeProto,
     input_specs: dict[str, TensorSpec],
@@ -1493,7 +1919,7 @@ def _infer_unary_math_spec(
     default_batch: int | None,
     opset_version: int,
 ) -> TensorSpec:
-    """Infer the static output of the fieldless float32 unary M4/M5 ops (Neg, Sigmoid).
+    """Infer the static output of the fieldless float32 unary ops (Neg, Sigmoid, Tanh, Erf).
 
     Both ops keep shape and dtype: one float32 input, one float32 output, no
     attributes. The multidirectional-broadcast input form (opset >= 13) is the
@@ -1673,17 +2099,10 @@ def _infer_expand_spec(
     return result
 
 
-def _unsqueeze_attrs(
-    node: onnx.NodeProto, params: dict[str, ParamTensor], data_shape: list[int]
-) -> dict[str, Any]:
-    """Normalize an Unsqueeze-13 constant axes input into reshape canonical attrs.
-
-    The M4 S2 decision: with known axes and a provable output rank, Unsqueeze is
-    exactly a reshape (element count is unchanged; only 1s are inserted), so no
-    new canonical op is introduced. Axes must come from an initializer/Constant,
-    be unique after negative-axis normalization, and stay inside the output rank
-    ``rank(data) + len(axes)``; duplicates and out-of-range axes are rejected.
-    """
+def _unsqueeze_axes(
+    node: onnx.NodeProto, params: dict[str, ParamTensor], data_rank: int
+) -> list[int]:
+    """Validate static axes using fixed rank, independently of input extents."""
     node_name = node.name or "<unnamed>"
     if _attrs_by_name(node):
         raise ValueError(f"Unsqueeze node '{node_name}' does not support attributes")
@@ -1692,12 +2111,8 @@ def _unsqueeze_attrs(
             f"Unsqueeze node '{node_name}' requires exactly two non-empty inputs "
             "(data and axes)"
         )
-    if any(dim < 0 for dim in data_shape):
-        raise ValueError(
-            f"Unsqueeze node '{node_name}' requires non-negative static data dimensions"
-        )
     axes = _int64_constant_vector("Unsqueeze", node_name, node.input[1], params)
-    rank_out = len(data_shape) + len(axes)
+    rank_out = data_rank + len(axes)
     normalized: list[int] = []
     for axis in axes:
         resolved = axis + rank_out if axis < 0 else axis
@@ -1712,6 +2127,16 @@ def _unsqueeze_attrs(
                 f"normalization; duplicate axis {resolved}"
             )
         normalized.append(resolved)
+    return normalized
+
+
+def _unsqueeze_attrs(
+    node: onnx.NodeProto, params: dict[str, ParamTensor], data_shape: list[int]
+) -> dict[str, Any]:
+    """Normalize a static Unsqueeze-13 into reshape canonical attrs."""
+    if any(dim < 0 for dim in data_shape):
+        raise ValueError(f"Unsqueeze node '{node.name or '<unnamed>'}' requires non-negative static data dimensions")
+    normalized = _unsqueeze_axes(node, params, len(data_shape))
     newshape = list(data_shape)
     for axis in sorted(normalized):
         newshape.insert(axis, 1)
@@ -1841,6 +2266,12 @@ def _convert_attrs(
     input_specs = input_specs or {}
     inferred_specs = inferred_specs or {}
     attrs = _attrs_by_name(node)
+    if node.op_type == "Trilu":
+        return _trilu_attrs(node, params, opset_version)
+    if node.op_type == "Shape":
+        if attrs:
+            raise ValueError("Shape import only admits full-rank shape without attributes")
+        return {}
     if node.op_type == "Slice":
         if opset_version < 10:
             raise UnsupportedONNXOpError(
@@ -1855,7 +2286,16 @@ def _convert_attrs(
                 f"Concat node '{node.name or '<unnamed>'}' requires exactly the axis attribute"
             )
         return {"axis": _int_attr(attrs, "axis", 0)}
+    if node.op_type == "Split":
+        axis, sections = _split_sections(node, params, opset_version)
+        return {"axis": axis, "sections": sections}
     if node.op_type == "Conv":
+        auto_pad = attrs.get("auto_pad", "NOTSET")
+        if not isinstance(auto_pad, str) or auto_pad not in {"NOTSET", "VALID"}:
+            raise UnsupportedONNXOpError(
+                f"Conv node '{node.name or '<unnamed>'}' requires explicit pads or auto_pad=VALID; got {auto_pad!r}")
+        if auto_pad == "VALID" and "pads" in attrs:
+            raise ValueError("Conv auto_pad=VALID cannot be combined with explicit pads")
         if len(node.input) < 2 or node.input[1] not in params:
             raise ValueError(f"Conv node '{node.name or '<unnamed>'}' is missing weight initializer")
         weight = params[node.input[1]]
@@ -1891,6 +2331,8 @@ def _convert_attrs(
             "transB": _int_attr(attrs, "transB", 0),
         }
     if node.op_type == "Softmax":
+        if set(attrs) - {"axis"}:
+            raise ValueError("Softmax supports only axis attribute")
         if opset_version < 13:
             raise UnsupportedONNXOpError(
                 f"Unsupported ONNX Softmax opset {opset_version} in node "
@@ -1899,6 +2341,8 @@ def _convert_attrs(
             )
         return {"axis": _int_attr(attrs, "axis", -1)}
     if node.op_type == "Transpose":
+        if set(attrs) - {"perm"}:
+            raise ValueError("Transpose supports only perm attribute")
         return {"perm": _list_attr(attrs, "perm", [])}
     if node.op_type == "Gather":
         unsupported = set(attrs) - {"axis"}
@@ -1932,13 +2376,13 @@ def _convert_attrs(
                 f"Equal node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
-    if node.op_type in {"Mul", "Sub", "Div", "Sqrt"}:
+    if node.op_type in {"Add", "Mul", "Sub", "Div", "Sqrt"}:
         if attrs:
             raise ValueError(
                 f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
-    if node.op_type in {"Neg", "Sigmoid", "Pow"}:
+    if node.op_type in {"Neg", "Sigmoid", "Tanh", "Erf", "Pow"}:
         if attrs:
             raise ValueError(
                 f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
@@ -1961,7 +2405,9 @@ def _convert_attrs(
                                      input_specs, params, inferred_specs,
                                      value_info_by_name, None)
         return _unsqueeze_attrs(node, params, data.shape)
-    if node.op_type in {"Relu", "Add", "GlobalAveragePool", "MatMul"}:
+    if node.op_type in {"Relu", "GlobalAveragePool", "MatMul"}:
+        if node.op_type == "MatMul" and attrs:
+            raise ValueError("MatMul does not accept attributes")
         return {}
     raise UnsupportedONNXOpError(
         f"Unsupported ONNX op '{node.op_type}' in node '{node.name or '<unnamed>'}'"

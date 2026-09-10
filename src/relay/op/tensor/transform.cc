@@ -330,7 +330,9 @@ te::Tensor CastCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
 
 te::Tensor SliceCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                         const kxc::Type& out_type) {
-    RequireInputCount("slice", inputs, 1);
+    if (inputs.size() != 1 && inputs.size() != 2 && inputs.size() != 3) {
+        throw std::runtime_error("slice lowering requires one static input or prepared prefix/window inputs");
+    }
     const auto* output_type = RequireTensorOutput("slice", out_type);
     const auto* slice_attrs = attrs.As<SliceAttrsNode>();
     if (!slice_attrs) {
@@ -340,6 +342,61 @@ te::Tensor SliceCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         throw std::runtime_error("slice lowering requires a defined supported input tensor");
     }
     const int rank = static_cast<int>(inputs[0]->shape.size());
+    if (inputs.size() == 2 || inputs.size() == 3) {
+        if (!inputs[1].defined() || (inputs.size() == 3 && !inputs[2].defined()) ||
+            !slice_attrs->starts.empty() || !slice_attrs->ends.empty() ||
+            !slice_attrs->axes.empty() || !slice_attrs->steps.empty() ||
+            slice_attrs->prefix_axis < 0 || slice_attrs->prefix_axis >= rank ||
+            slice_attrs->extent_axis < 0 ||
+            static_cast<size_t>(slice_attrs->extent_axis) >= inputs[1]->shape.size() ||
+            (inputs.size() == 2 && (slice_attrs->window_size < -1 ||
+                                    slice_attrs->window_extent_axis != -1)) ||
+            (inputs.size() == 3 && (slice_attrs->window_size != -2 ||
+                                    slice_attrs->window_extent_axis < 0 ||
+                                    static_cast<size_t>(slice_attrs->window_extent_axis) >=
+                                        inputs[2]->shape.size())) ||
+            output_type->shape.size() != static_cast<size_t>(rank) ||
+            !MatchesRelayDType(inputs[0]->dtype, output_type->dtype)) {
+            throw std::runtime_error("slice prepared prefix lowering contract mismatch");
+        }
+        Array<kxc::tir::PrimExpr> shape;
+        for (const auto& dim : inputs[0]->shape) {
+            if (StaticExtent(dim, "slice prefix table") < 0) {
+                throw std::runtime_error("slice prefix table dimensions must be nonnegative");
+            }
+            shape.push_back(dim);
+        }
+        const auto extent = inputs[1]->shape[slice_attrs->extent_axis];
+        const auto window_extent = inputs.size() == 3
+            ? inputs[2]->shape[slice_attrs->window_extent_axis] : extent;
+        const int64_t count = slice_attrs->window_size;
+        const int64_t capacity = StaticExtent(shape[slice_attrs->prefix_axis],"slice table capacity");
+        if (count >= -1 && count > capacity) throw std::runtime_error("slice window exceeds table capacity");
+        if (const auto* fixed = extent.As<kxc::tir::IntImmNode>()) {
+            if (fixed->value < 0 || (count >= -1 && fixed->value > capacity - (count < 0 ? 0 : count))) {
+                throw std::runtime_error("slice prefix/window extent exceeds table capacity");
+            }
+        }
+        shape[slice_attrs->prefix_axis] = count == -1 ? extent
+            : count == -2 ? window_extent
+            : kxc::tir::IntImm(count,kxc::tir::DataType::Int(64));
+        for (size_t axis = 0; axis < shape.size(); ++axis) {
+            const auto* fixed = shape[axis].As<kxc::tir::IntImmNode>();
+            if (output_type->shape[axis] != (fixed ? fixed->value : -1)) {
+                throw std::runtime_error("slice prefix output shape disagrees with its anchor");
+            }
+        }
+        return RequireDefined("slice", te::compute(shape,
+            [data = inputs[0], extent, count, axis = slice_attrs->prefix_axis](const Array<kxc::tir::Var>& indices) {
+                Array<kxc::tir::PrimExpr> coordinates;
+                for (const auto& index : indices) coordinates.push_back(index);
+                if (count != -1) coordinates[axis] = coordinates[axis] + extent;
+                return data(coordinates);
+            }, count < 0 ? "T_slice_prefix" : "T_slice_window"));
+    }
+    if (slice_attrs->prefix_axis != -1 || slice_attrs->extent_axis != -1 || slice_attrs->window_size != -1) {
+        throw std::runtime_error("slice prefix lowering requires a shape anchor");
+    }
     const size_t count = slice_attrs->starts.size();
     if (rank < 1 || count == 0 || slice_attrs->ends.empty() || slice_attrs->axes.empty() ||
         slice_attrs->steps.empty() || slice_attrs->ends.size() != count ||
@@ -349,11 +406,8 @@ te::Tensor SliceCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         throw std::runtime_error("slice lowering input, attrs, or output type mismatch");
     }
     std::vector<int64_t> starts(static_cast<size_t>(rank), 0);
-    std::vector<int64_t> expected_shape;
-    expected_shape.reserve(static_cast<size_t>(rank));
-    for (int axis = 0; axis < rank; ++axis) {
-        expected_shape.push_back(StaticExtent(inputs[0]->shape[static_cast<size_t>(axis)], "slice"));
-    }
+    Array<kxc::tir::PrimExpr> expected_shape;
+    for (const auto& extent : inputs[0]->shape) expected_shape.push_back(extent);
     std::vector<bool> seen(static_cast<size_t>(rank), false);
     for (size_t index = 0; index < count; ++index) {
         if (slice_attrs->steps[index] != 1) {
@@ -366,20 +420,21 @@ te::Tensor SliceCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
         }
         const size_t axis = static_cast<size_t>(raw_axis);
         seen[axis] = true;
-        const int64_t start = ClampPositiveStepEndpoint(slice_attrs->starts[index],
-                                                        expected_shape[axis]);
-        const int64_t end = ClampPositiveStepEndpoint(slice_attrs->ends[index],
-                                                      expected_shape[axis]);
+        const int64_t extent = StaticExtent(expected_shape[axis], "slice selected axis");
+        const int64_t start = ClampPositiveStepEndpoint(slice_attrs->starts[index], extent);
+        const int64_t end = ClampPositiveStepEndpoint(slice_attrs->ends[index], extent);
         starts[axis] = start;
-        expected_shape[axis] = std::max(end - start, int64_t{0});
+        expected_shape[axis] = kxc::tir::IntImm(std::max(end - start, int64_t{0}),
+                                               kxc::tir::DataType::Int(64));
     }
     for (int axis = 0; axis < rank; ++axis) {
-        if (output_type->shape[static_cast<size_t>(axis)] != expected_shape[static_cast<size_t>(axis)]) {
+        const auto* extent = expected_shape[axis].As<kxc::tir::IntImmNode>();
+        if (output_type->shape[axis] != (extent ? extent->value : -1)) {
             throw std::runtime_error("slice lowering output shape disagrees with attrs and input");
         }
     }
     return RequireDefined("slice", te::compute(
-        ShapeFromTensorType(output_type, "slice"),
+        expected_shape,
         [input = inputs[0], starts](const Array<kxc::tir::Var>& indices) {
             Array<kxc::tir::PrimExpr> input_indices;
             for (size_t axis = 0; axis < indices.size(); ++axis) {
@@ -392,7 +447,7 @@ te::Tensor SliceCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
 }
 
 te::Tensor ConcatenateCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
-                               const kxc::Type& out_type) {
+                              const kxc::Type& out_type) {
     RequireInputCount("concatenate", inputs, 2);
     const auto* output_type = RequireTensorOutput("concatenate", out_type);
     const auto* concatenate_attrs = attrs.As<ConcatenateAttrsNode>();
@@ -420,6 +475,26 @@ te::Tensor ConcatenateCompute(const Attrs& attrs, const Array<te::Tensor>& input
     }
     int64_t axis_sum = 0;
     for (size_t index = 0; index < rank; ++index) {
+        if (static_cast<int>(index) == axis &&
+            (!inputs[0]->shape[index].As<kxc::tir::IntImmNode>() ||
+             !inputs[1]->shape[index].As<kxc::tir::IntImmNode>())) {
+            const auto* left = inputs[0]->shape[index].As<kxc::tir::IntImmNode>();
+            const auto* right = inputs[1]->shape[index].As<kxc::tir::IntImmNode>();
+            if ((!left && !right) || (left && left->value < 0) ||
+                (right && right->value < 0) || output_type->shape[index] != -1) {
+                throw std::runtime_error("concatenate requires one static axis and a symbolic output extent");
+            }
+            continue;
+        }
+        if (static_cast<int>(index) != axis &&
+            !inputs[0]->shape[index].As<kxc::tir::IntImmNode>() &&
+            !inputs[1]->shape[index].As<kxc::tir::IntImmNode>()) {
+            // The restricted producer proves these are identical DimExprs.
+            if (output_type->shape[index] != -1) {
+                throw std::runtime_error("concatenate symbolic output extent mismatch");
+            }
+            continue;
+        }
         const int64_t lhs_extent = StaticExtent(inputs[0]->shape[index], "concatenate");
         const int64_t rhs_extent = StaticExtent(inputs[1]->shape[index], "concatenate");
         if (static_cast<int>(index) != axis && lhs_extent != rhs_extent) {
@@ -437,6 +512,83 @@ te::Tensor ConcatenateCompute(const Attrs& attrs, const Array<te::Tensor>& input
         }
     }
     return RequireDefined("concatenate", te::topi::concatenate(inputs, axis, "T_concatenate"));
+}
+
+Array<te::Tensor> SplitCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                               const kxc::Type& out_type) {
+    RequireInputCount("split", inputs, 1);
+    const auto* output_tuple = out_type.As<TupleTypeNode>();
+    const auto* split_attrs = attrs.As<SplitAttrsNode>();
+    if (!output_tuple || !split_attrs) {
+        throw std::runtime_error("split lowering requires a TupleType and SplitAttrs");
+    }
+    if (split_attrs->sections.size() < 2 ||
+        output_tuple->fields.size() != split_attrs->sections.size()) {
+        throw std::runtime_error("split lowering requires one output per section (at least two)");
+    }
+    const te::Tensor& data = inputs[0];
+    if (!data.defined() || !IsConcatenateDType(data->dtype)) {
+        throw std::runtime_error("split lowering requires a supported defined input tensor");
+    }
+    const int rank = static_cast<int>(data->shape.size());
+    if (rank < 1) throw std::runtime_error("split lowering requires data rank >= 1");
+    int axis = split_attrs->axis;
+    if (axis < 0) axis += rank;
+    if (axis < 0 || axis >= rank) throw std::runtime_error("split lowering axis out of range");
+    const auto* axis_extent = data->shape[static_cast<size_t>(axis)].As<kxc::tir::IntImmNode>();
+    if (!axis_extent || axis_extent->value < 0) {
+        throw std::runtime_error("split lowering requires a static split axis extent");
+    }
+    int64_t total = 0;
+    for (int64_t section : split_attrs->sections) {
+        if (section < 0 || total > std::numeric_limits<int64_t>::max() - section) {
+            throw std::runtime_error("split lowering sections must be non-negative and fit int64");
+        }
+        total += section;
+    }
+    if (total != axis_extent->value) {
+        throw std::runtime_error("split lowering sections must sum to the input axis extent");
+    }
+
+    Array<te::Tensor> outputs;
+    int64_t offset = 0;
+    for (size_t output_index = 0; output_index < split_attrs->sections.size(); ++output_index) {
+        const int64_t section = split_attrs->sections[output_index];
+        Array<kxc::tir::PrimExpr> shape;
+        for (const auto& dimension : data->shape) {
+            shape.push_back(dimension);
+        }
+        shape[static_cast<size_t>(axis)] =
+            kxc::tir::IntImm(section, kxc::tir::DataType::Int(64));
+        const auto* expected = output_tuple->fields[output_index].As<TensorTypeNode>();
+        if (!expected || !MatchesRelayDType(data->dtype, expected->dtype) ||
+            expected->shape.size() != shape.size()) {
+            throw std::runtime_error("split lowering output type rank or dtype mismatch");
+        }
+        for (size_t dimension = 0; dimension < shape.size(); ++dimension) {
+            const auto* fixed = shape[dimension].As<kxc::tir::IntImmNode>();
+            if (!fixed || expected->shape[dimension] != fixed->value) {
+                throw std::runtime_error("split lowering output shape mismatch");
+            }
+        }
+        const kxc::tir::PrimExpr begin =
+            kxc::tir::IntImm(offset, kxc::tir::DataType::Int(64));
+        outputs.push_back(RequireDefined(
+            "split", te::compute(
+                         shape,
+                         [data, axis, begin](const Array<kxc::tir::Var>& indices) {
+                             Array<kxc::tir::PrimExpr> source_indices;
+                             for (const auto& index : indices) {
+                                 source_indices.push_back(index);
+                             }
+                             source_indices[static_cast<size_t>(axis)] =
+                                 source_indices[static_cast<size_t>(axis)] + begin;
+                             return data(source_indices);
+                         },
+                         "T_split_" + std::to_string(output_index))));
+        offset += section;
+    }
+    return outputs;
 }
 
 kxc::tir::PrimExpr TypedZero(kxc::tir::DataType dtype) {
@@ -472,8 +624,22 @@ te::Tensor GatherCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     const kxc::tir::PrimExpr zero_index = kxc::tir::IntImm(0, index_dtype);
     const kxc::tir::PrimExpr negative_extent = kxc::tir::IntImm(-extent->value, index_dtype);
     const size_t indices_rank = inputs[1]->shape.size();
+    Array<kxc::tir::PrimExpr> output_shape;
+    for (int i=0;i<axis;++i) output_shape.push_back(inputs[0]->shape[i]);
+    for (const auto& dim:inputs[1]->shape) output_shape.push_back(dim);
+    for (size_t i=static_cast<size_t>(axis)+1;i<inputs[0]->shape.size();++i) output_shape.push_back(inputs[0]->shape[i]);
+    if (output_type->shape.size() != output_shape.size() ||
+        !MatchesRelayDType(inputs[0]->dtype, output_type->dtype)) {
+        throw std::runtime_error("gather lowering output rank or dtype mismatch");
+    }
+    for (size_t i = 0; i < output_shape.size(); ++i) {
+        const auto* fixed = output_shape[i].As<kxc::tir::IntImmNode>();
+        if (output_type->shape[i] != (fixed ? fixed->value : -1)) {
+            throw std::runtime_error("gather lowering output shape mismatch");
+        }
+    }
     return RequireDefined("gather", te::compute(
-        ShapeFromTensorType(output_type, "gather"),
+        output_shape,
         [data = inputs[0], indices = inputs[1], axis, indices_rank, axis_extent,
          zero_index, negative_extent](const Array<kxc::tir::Var>& output_indices) {
             Array<kxc::tir::PrimExpr> index_coordinates;
@@ -535,8 +701,8 @@ KXC_REGISTER_OP(cast)
     .set_attr<FRelayToTE>("FRelayToTE", CastCompute);
 
 KXC_REGISTER_OP(slice)
-    .describe(R"doc(Exact-static ONNX/Python positive-step slice into a fresh output.)doc")
-    .set_num_inputs(1)
+    .describe(R"doc(Slice static axes or a proved 0:extent prefix into a fresh output. Five-input source calls require restricted preparation; a prepared prefix uses a second input only for its shape.)doc")
+    .set_input_arity_range(1, 5)
     .add_argument("data", "Tensor", "The input tensor.")
     .set_attr<std::string>("TAttrs", "SliceAttrs")
     .set_attr<FInferType>("FInferType", SliceInferType)
@@ -550,6 +716,14 @@ KXC_REGISTER_OP(concatenate)
     .set_attr<std::string>("TAttrs", "ConcatenateAttrs")
     .set_attr<FInferType>("FInferType", ConcatenateInferType)
     .set_attr<FRelayToTE>("FRelayToTE", ConcatenateCompute);
+
+KXC_REGISTER_OP(split)
+    .describe(R"doc(Split a static tensor axis into two or more fresh outputs.)doc")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "SplitAttrs")
+    .set_attr<FInferType>("FInferType", SplitInferType)
+    .set_attr<FRelayToTEMulti>("FRelayToTEMulti", SplitCompute);
 
 KXC_REGISTER_OP(gather)
     .describe(R"doc(Gather slices along an axis; invalid runtime indices produce typed zero.)doc")

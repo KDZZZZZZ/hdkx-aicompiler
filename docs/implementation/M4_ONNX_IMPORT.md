@@ -1,10 +1,10 @@
 # M4：把 MiniMind 模型入口接通，并支持多输出
 
-第一波 B 线已经完成 Constant、Cast、Div、Mul、Sub、Sqrt、ReduceMean、Reshape 的受限静态导入，并由 G1 证明 Equal→Where 的 ONNX 组合可以进入 LLVM RuntimeSession。目标已经从旧的匿名 Encoder 快照改为 MiniMindForCausalLM：实际导出包含 prefill 和 decode 两张图，decode 有 8 层 past/present，静态非原地 mask 的常量折叠统计与 dynamic_axes 原始统计不同。当前仍不能把 importer 的名称交集写成“MiniMind 可运行”，因为 Concat 输入数、Gather 索引、ReduceMean 中间轴和动态 shape 控制值都有语义边界；Split 多输出也尚未形成真实模型证据。
+第一波 B 线已经完成 Constant、Cast、Div、Mul、Sub、Sqrt、ReduceMean、Reshape 的受限静态导入，并由 G1 证明 Equal→Where 的 ONNX 组合可以进入 LLVM RuntimeSession。目标已经从旧的匿名 Encoder 快照改为 MiniMindForCausalLM：实际导出包含 prefill 和 decode 两张图，decode 有 8 层 past/present，静态非原地 mask 的常量折叠统计与 dynamic_axes 原始统计不同。当前仍不能把 importer 的名称交集写成“MiniMind 可运行”，因为 Concat 输入数、Gather 索引、ReduceMean 中间轴和动态 shape 控制值都有语义边界；Split 已在静态常量两路以上的子集形成完整纵向证据。
 
 本模块的下一段工作是以 M9 锁定的导出为唯一输入，按实际节点和属性补齐 L1a prefill，再接通 decode 的 past/present 输出顺序。静态常量控制输入可以在 importer 中证明；Shape/Expand/ConstantOfShape 等运行时 shape 值交给 M3，KV 所有权和 extent 交给 M2。不能在 Python 中偷算普通模型数据来绕过 Relay/TE/Runtime。
 
-> 状态：第一波静态 S1 已完成；MiniMind 节点补齐与多输出仍待实施。第一波证据见 G1，当前分派见 WAVE_2。入口限制以 ONNX_IMPORTER.md 和 PROJECT_GOAL.md §2.2 为准。
+> 状态（2026-09-10）：静态 MiniMind prefill/decode 与多图输出已完成，见 [G2](G2_RECORD.md)和 [M2 报告](M2_MINIMIND_STATE_REPORT.md)。显式 shape-source 已接通真实拆头、Q/K 归一化、RoPE 组合链与 K/V GQA，见 [拆头报告](M3_ONNX_HEADS_REPORT.md)、[GQA 报告](M3_GQA_REPORT.md)和 [RoPE 报告](M3_ROPE_REPORT.md)。ConstantOfShape 与 Expand 控制输入保留到 producer 证明，内部暂未确定的 Expand extent 不在 Python 中冻结。float32 ConstantOfShape、静态对角 Trilu 与可证明固定商的 Reshape -1 已联合到实际第一层 attention，见 [因果 attention 报告](M3_CAUSAL_ATTENTION_REPORT.md)。完整八层变长 prefill 已通过，含 embedding、图内位置前缀、FFN/残差和全部 17 个输出，见 [完整 prefill 报告](M3_FULL_PREFILL_REPORT.md)。完整八层变长 decode 已从原始 source 图导入，并验证不同 B/P 与连续 greedy，见 [完整 decode 报告](M3_FULL_DECODE_REPORT.md)；state/extent 联合已通过，见 [状态报告](M2_BOUNDED_STATE_REPORT.md)。M4-D Split 已完成限定范围的 ONNX → Relay → LLVM → RuntimeSession 静态常量两路以上输出验证，详见 [基础 Split 技术报告](M4_SPLIT_REPORT.md)和[多路扩展报告](M4_SPLIT_VARIADIC_REPORT.md)。下文保留分阶段计划，实际入口边界以 [ONNX importer](../ONNX_IMPORTER.md) 为准。
 
 ## 本模块要做的模块
 
@@ -13,7 +13,7 @@
 | M4-A 真实图审计 | M9 有 exporter/inventory；raw 图和折叠图统计口径不同 | 每个 MiniMind stage 有 opset、输入/输出顺序、attrs 和拒绝原因报告 |
 | M4-B L1a prefill | 第一波静态子集已接通，仍缺实际 MiniMind 算子 | 真实 prefill protobuf → Relay → LLVM → RuntimeSession 数值证据 |
 | M4-C decode 多输出 | 8 层 past/present 名称存在于导出包装器 | 输出顺序、Tuple/叶子绑定和 ABI 与 M2 state 合同一致 |
-| M4-D 后续 Split | 当前没有 Split 的完整 canonical 纵向证据 | 单独的双输出 fixture，不阻塞 L1a/L1b |
+| M4-D 后续 Split | 已完成静态常量 Split 的 canonical 纵向证据 | 已有双路和三路 fixture、下游/图输出顺序、负例和 LLVM 数值报告；动态 split lengths、少于两路和输出数不匹配仍关闭 |
 
 ## 当前需要区分的三个表面
 
@@ -23,7 +23,7 @@
 | Python ONNX 解析和序列化 | 已能导入第一波静态子集，M9 inventory 中的动态控制节点和部分属性仍未开放 | 以真实 MiniMind opset 17 图逐节点校验；不把名称交集当成能力 |
 | C++ spec 重建 | 第一波已同步 Constant 与算术 attrs；多输出和 past/present 顺序仍需证明 | 同步重建同一 canonical op；手写错误 spec、输出数量和名字顺序都拒绝 |
 
-当前 `Gemm` 映射到 `nn_gemm`，不是 `nn_dense`。当前 Relay 契约也没有 `split` 条目；已有的是 Tuple/多输出基础能力，不等于 Split 已经实现。
+当前 `Gemm` 映射到 `nn_gemm`，不是 `nn_dense`。Split 使用独立的 canonical `split` 条目和既有 Tuple/多输出 ABI；该条目开放静态常量、至少两路的分段子集。
 
 ## S1：第一波静态范围（已完成）
 
@@ -61,7 +61,7 @@ S1 后单独增加静态 Squeeze/Unsqueeze 规范化和多输入 Concat。axes �
 ## S3：多输出与 Split
 
 1. 审计当前序列化 spec 的 outputs 数组、版本合同，以及 C++ 单输出断言。必要时最小提升格式版本，旧单输出规格仍按原规则处理。
-2. 新增 Split 的 canonical op、attrs、输出叶子数量与 InferType；首例固定两个输出、静态 axis、常量 split sizes，按所选 opset 验证。
+2. 新增 Split 的 canonical op、attrs、输出叶子数量与 InferType；支持至少两个输出、静态 axis、常量 split sizes，按所选 opset 验证。
 3. 复用既有 FRelayToTEMulti 和扁平多输出 lowering；generated 注册对 attrs/multi-output 不足的部分随这个真实算子最小扩展，不能新建第二 registry。
 4. C++ 只构造一次 Call，将各输出名按顺序绑定到对应 TupleGetItem，防止重复计算或把所有名字都指向同一个结果。
 5. 校验结果数量、名字唯一性、声明 shape/dtype、叶子顺序及 kernel 输出 ABI。已有多输出计划若已足够就直接复用，不预先重做整个 ABI。
@@ -93,7 +93,7 @@ python3 python/tools/check_relay_op_contract.py --root .
 - [ ] Constant 不被错误抹成 float32，不新增多余运行 kernel；常量字节参与既有 identity。
 - [ ] Python 和 C++ 手写 spec 的负例都覆盖，未依赖 Python 作为唯一校验边界。
 - [x] 与 C 线联合完成 Equal ONNX 入口，合同映射和生成文件一致（第一波 G1）。
-- [ ] S3 单独证明两个输出的顺序、类型、后续消费和数值，旧单输出/optional output 不回归。
+- [x] S3 单独证明至少两个输出的顺序、类型、后续消费和数值，旧单输出/optional output 不回归；详见 [基础 Split 技术报告](M4_SPLIT_REPORT.md)和[多路扩展报告](M4_SPLIT_VARIADIC_REPORT.md)。
 
 ## 身份与交接
 

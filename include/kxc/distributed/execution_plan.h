@@ -10,7 +10,12 @@
 #include "kxc/distributed/placement.h"
 #include "kxc/pass/context.h"
 
+namespace kxc::api { class CompiledModule; }
+namespace kxc::runtime { class ExecutablePlan; }
+
 namespace kxc {
+
+inline constexpr int kDistributedExecutionContractVersion = 3;
 
 enum class ExecNodeKind : int {
     kKernel = 0,
@@ -41,6 +46,8 @@ class KernelExecNode : public ExecNodeBaseNode {
 public:
     std::string op_name;
     std::string kernel_symbol;
+    /*! Module-owned KernelSignature::CanonicalBytes(), checked before any work. */
+    std::string kernel_abi;
 
     KXC_OBJECT_DECLARE
 };
@@ -51,7 +58,7 @@ public:
     explicit KernelExec(const ObjectRef& ref) : ExecNodeBase(ref) {}
     KernelExec(std::string op_name, Array<int> input_values,
                Array<int> output_values, Array<int> worker_set,
-               std::string kernel_symbol = "");
+               std::string kernel_symbol = "", std::string kernel_abi = "");
     const KernelExecNode* operator->() const {
         return static_cast<const KernelExecNode*>(object_);
     }
@@ -115,6 +122,8 @@ public:
     int num_values{0};
     PassContext pass_ctx;
     DiscoPlacement placement;
+    /*! Ordered graph outputs; output_value is the checked first-output compatibility view. */
+    Array<int> output_value_ids;
     int output_value{-1};
 
     KXC_OBJECT_DECLARE
@@ -129,10 +138,26 @@ public:
                   Map<int, Array<int64_t>> value_shapes, Map<int, std::string> value_dtypes,
                   int num_values, PassContext pass_ctx, DiscoPlacement placement,
                   int output_value);
+    ExecutionPlan(Array<ObjectRef> nodes, Map<int, VirtualDevice> value_virtual_devices,
+                  Array<int> input_value_ids, Array<int> constant_value_ids,
+                  Map<int, Array<int64_t>> value_shapes, Map<int, std::string> value_dtypes,
+                  int num_values, PassContext pass_ctx, DiscoPlacement placement,
+                  Array<int> output_value_ids);
+    /*! Bind an already compiled static, fresh-output CPU graph to explicit
+     *  input/call workers and one output worker. Reuses the module's ABI and
+     *  constants; inserts only declared point-to-point copies. No compilation,
+     *  tensor allocation or communication occurs here. Input/output order is
+     *  the source ExecutablePlan order; distributed value ids are local. */
+    static ExecutionPlan FromExecutablePlan(const api::CompiledModule& module,
+        const runtime::ExecutablePlan& source, const DiscoPlacement& placement,
+        const Array<int>& input_workers, const Array<int>& call_workers,
+        int output_worker);
     const ExecutionPlanNode* operator->() const {
         return static_cast<const ExecutionPlanNode*>(object_);
     }
     std::string ToString() const;
+    /*! Validate placement, static value contracts and the complete use/def order. */
+    void Validate() const;
 };
 
 bool IsCommunicationOpName(const std::string& op_name);

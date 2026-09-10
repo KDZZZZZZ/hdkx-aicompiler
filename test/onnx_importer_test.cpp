@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
@@ -467,6 +468,98 @@ bool TestRunM4M5OpsProtobufLLVM() {
     return true;
 }
 
+// Split 三路 fixture 走完整 JSON spec reifier、Relay/LLVM 编译和 RuntimeSession，
+// 用独立切片参考检查输出顺序与多输出 ABI。fixture 不依赖外部 ONNX/Python 运行时。
+bool TestRunSplitMultiOutputProtobufLLVM() {
+    const std::string json_path = "/tmp/kxc_split_multi_output.import.json";
+    const std::string params_path = "/tmp/kxc_split_multi_output.params.bin";
+    const char* json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name":"data","shape":[2,6],"dtype":"float32"}],
+    "outputs": [
+      {"name":"left","shape":[2,1],"dtype":"float32"},
+      {"name":"middle","shape":[2,3],"dtype":"float32"},
+      {"name":"right","shape":[2,2],"dtype":"float32"}
+    ],
+    "nodes": [{
+      "name":"split",
+      "op_name":"split",
+      "inputs":["data"],
+      "outputs":["left","middle","right"],
+      "attrs":{"axis":1,"sections":[1,3,2]}
+    }]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    {
+        std::ofstream output(json_path, std::ios::trunc);
+        TEST_CHECK(output.good(), "split fixture JSON should be writable");
+        output << json;
+    }
+    {
+        std::ofstream output(params_path, std::ios::binary | std::ios::trunc);
+        TEST_CHECK(output.good(), "split fixture params should be writable");
+    }
+
+    const auto cleanup = [&] {
+        std::remove(json_path.c_str());
+        std::remove(params_path.c_str());
+    };
+    try {
+        kxc::frontend::ImportedONNXModel imported =
+            kxc::frontend::LoadONNXImportSpec(json_path, params_path);
+        TEST_CHECK(imported.function.defined() && imported.function->params.size() == 1 &&
+                       imported.output_names.size() == 3 &&
+                       imported.output_names[0] == "left" &&
+                       imported.output_names[1] == "middle" &&
+                       imported.output_names[2] == "right",
+                   "Split fixture must preserve three output bindings and order");
+        const auto* output_tuple = imported.function->body.checked_type().As<kxc::TupleTypeNode>();
+        TEST_CHECK(output_tuple && output_tuple->fields.size() == 3 &&
+                       CheckTensor(output_tuple->fields[0], {2, 1}, "float32") &&
+                       CheckTensor(output_tuple->fields[1], {2, 3}, "float32") &&
+                       CheckTensor(output_tuple->fields[2], {2, 2}, "float32"),
+                   "Split fixture output tuple type mismatch");
+#if KXC_USE_LLVM
+        const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
+        const auto compiled = kxc::api::Compiler::Compile(
+            prepared, kxc::api::CompileConfig::Create(
+                          kxc::BuildTarget(kxc::Device::CPU()), 1));
+        TEST_CHECK(compiled.module().IsReady() && compiled.plan().calls().size() == 1,
+                   "Split fixture must compile to one LLVM multi-output unit");
+        kxc::runtime::NDArray input = kxc::runtime::NDArray::Empty(
+            {2, 6}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+        const std::vector<float> values{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+        input.CopyFromBytes(values.data(), input.NBytes());
+        kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
+        const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({input});
+        TEST_CHECK(outputs.size() == 3 && ShapeEquals(outputs[0], {2, 1}) &&
+                       ShapeEquals(outputs[1], {2, 3}) &&
+                       ShapeEquals(outputs[2], {2, 2}),
+                   "Split RuntimeSession output shapes must preserve order");
+        const std::vector<float> expected_left{0, 6};
+        const std::vector<float> expected_middle{1, 2, 3, 7, 8, 9};
+        const std::vector<float> expected_right{4, 5, 10, 11};
+        std::vector<float> actual_left(expected_left.size());
+        std::vector<float> actual_middle(expected_middle.size());
+        std::vector<float> actual_right(expected_right.size());
+        outputs[0].CopyToBytes(actual_left.data(), outputs[0].NBytes());
+        outputs[1].CopyToBytes(actual_middle.data(), outputs[1].NBytes());
+        outputs[2].CopyToBytes(actual_right.data(), outputs[2].NBytes());
+        TEST_CHECK(actual_left == expected_left && actual_middle == expected_middle &&
+                       actual_right == expected_right,
+                   "Split RuntimeSession values must match independent slicing reference");
+#endif
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+    cleanup();
+    return true;
+}
+
 // 验证导入的 ResNet18 可完成 Relay 到 LLVM 编译。
 bool TestCompileResNet18ToLLVM() {
 #if KXC_USE_LLVM
@@ -573,6 +666,9 @@ int main() {
         if (!TestRunM4M5OpsProtobufLLVM()) {
             return 1;
         }
+        if (!TestRunSplitMultiOutputProtobufLLVM()) {
+            return 1;
+        }
         if (!TestCompileResNet18ToLLVM()) {
             return 1;
         }
@@ -590,6 +686,7 @@ int main() {
     std::cout << "[PASS] onnx_static_s1_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_equal_where_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_m4m5_ops_protobuf_reifier_llvm_runtime\n";
+    std::cout << "[PASS] onnx_split_multi_output_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_importer_compile_resnet18_llvm\n";
     if (ShouldRunResNet18Kernel()) {
         std::cout << "[PASS] onnx_importer_run_resnet18_llvm\n";
@@ -599,6 +696,7 @@ int main() {
     std::cout << "[SKIP] onnx_static_s1_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
     std::cout << "[SKIP] onnx_equal_where_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
     std::cout << "[SKIP] onnx_m4m5_ops_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
+    std::cout << "[SKIP] onnx_split_multi_output_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
 #endif
     std::cout << "All available ONNX importer tests passed.\n";
     return 0;

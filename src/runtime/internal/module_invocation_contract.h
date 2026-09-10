@@ -78,7 +78,7 @@ struct ModuleRuntimeExtentScalar {
 
 class ModuleInvocationContract final {
 public:
-    static constexpr std::uint32_t kAbiVersion = 3;
+    static constexpr std::uint32_t kAbiVersion = 4;
     static constexpr std::size_t kMaxExpressions = 4096;
     ModuleInvocationContract(std::vector<ModuleInputContract> inputs,
                              std::vector<ModuleTensorContract> outputs,

@@ -436,11 +436,11 @@ inline const std::vector<PassSpec>& Specs() {
         {
             PassSpec spec;
             spec.name = String("bind_cuda_threads");
-            spec.schema_version = 1;
+            spec.schema_version = 8;
             spec.dialect = ParseIRDialect("tir");
             spec.scope = ParsePassScope("prim_func");
             spec.phase = String("tir_schedule");
-            spec.opt_level = 3;
+            spec.opt_level = 2;
             spec.required_invariants = {};
             spec.produced_invariants = {String("prim_func_defined")};
             spec.declarative_only_invariants = {};
@@ -484,6 +484,7 @@ inline Array<String> Pipeline(const std::string& name) {
     if (name == "tir.compiler.o1") return {String("fold_constant"), String("simplify_expr")};
     if (name == "tir.compiler.o2") return {String("fold_constant"), String("simplify_expr"), String("force_narrow_index_to_i32"), String("convert_for_loops_serial")};
     if (name == "tir.compiler.cpu.o3") return {String("fold_constant"), String("simplify_expr"), String("force_narrow_index_to_i32"), String("convert_for_loops_serial"), String("loop_partition"), String("unroll_loop"), String("vectorize_loop"), String("remove_no_op")};
+    if (name == "tir.compiler.cuda.o2") return {String("fold_constant"), String("simplify_expr"), String("force_narrow_index_to_i32"), String("remove_no_op"), String("bind_cuda_threads")};
     if (name == "tir.compiler.cuda.o3") return {String("fold_constant"), String("simplify_expr"), String("force_narrow_index_to_i32"), String("remove_no_op"), String("bind_cuda_threads")};
     throw std::invalid_argument("unknown generated pipeline: " + name);
 }

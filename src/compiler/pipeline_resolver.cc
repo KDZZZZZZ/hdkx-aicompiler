@@ -150,7 +150,14 @@ Array<String> CompilerPolicy(const PipelineRequest& request) {
         throw std::invalid_argument("PipelineResolver requires opt_level in [0, 3]");
     }
     std::string name = dialect + ".compiler.";
-    if (request.dialect == IRDialect::kTIR && request.opt_level == 3) {
+    if (request.dialect == IRDialect::kTIR && request.target->kind == "cuda" &&
+        request.target->device_type == kCUDA && request.opt_level >= 2) {
+        if (request.opt_level == 2) {
+            name += "cuda.o2";
+        } else {
+            name += "cuda.o3";
+        }
+    } else if (request.dialect == IRDialect::kTIR && request.opt_level == 3) {
         if (request.target->kind == "cuda" && request.target->device_type == kCUDA) {
             name += "cuda.o3";
         } else if (request.target->kind == "llvm" &&

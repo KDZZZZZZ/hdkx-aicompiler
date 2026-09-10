@@ -48,12 +48,17 @@ ShapeExprAttrs ShapeExprAttrs::Create(Array<int64_t> expr_kinds,
 }
 
 // 创建 constant_of_shape 的常量目标形状与填充值属性。
-ConstantOfShapeAttrs ConstantOfShapeAttrs::Create(Array<int64_t> target,
-                                                  int dtype_code, double value) {
+ConstantOfShapeAttrs ConstantOfShapeAttrs::Create(Array<int64_t> target, int dtype_code,
+    double value, Array<int64_t> expr_kinds, Array<int64_t> expr_values, Array<int64_t> expr_axes) {
     auto* node = new ConstantOfShapeAttrsNode();
-    node->target = std::move(target);
-    node->dtype_code = dtype_code;
-    node->value = value;
+    node->target = std::move(target); node->dtype_code = dtype_code; node->value = value;
+    node->expr_kinds = std::move(expr_kinds); node->expr_values = std::move(expr_values);
+    node->expr_axes = std::move(expr_axes);
+    return InternalCreate(node);
+}
+
+TriluAttrs TriluAttrs::Create(int upper, int64_t k) {
+    auto* node = new TriluAttrsNode(); node->upper = upper; node->k = k;
     return InternalCreate(node);
 }
 
@@ -86,6 +91,7 @@ KXC_OBJECT_DEFINE(ExpandAttrsNode)
 KXC_OBJECT_DEFINE(TransposeAttrsNode)
 KXC_OBJECT_DEFINE(GatherAttrsNode)
 KXC_OBJECT_DEFINE(ConcatenateAttrsNode)
+KXC_OBJECT_DEFINE(SplitAttrsNode)
 KXC_OBJECT_DEFINE(SliceAttrsNode)
 KXC_OBJECT_DEFINE(ReluAttrsNode)
 KXC_OBJECT_DEFINE(GlobalAvgPool2DAttrsNode)
@@ -97,6 +103,7 @@ KXC_OBJECT_DEFINE(ReshapeDynamicAttrsNode)
 KXC_OBJECT_DEFINE(ExpandDynamicAttrsNode)
 KXC_OBJECT_DEFINE(ShapeExprAttrsNode)
 KXC_OBJECT_DEFINE(ConstantOfShapeAttrsNode)
+KXC_OBJECT_DEFINE(TriluAttrsNode)
 KXC_OBJECT_DEFINE(SqueezeAttrsNode)
 KXC_OBJECT_DEFINE(UnsqueezeAttrsNode)
 
@@ -294,11 +301,20 @@ void ConcatenateAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const
     writer.Add("axis", axis);
 }
 
+void SplitAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axis", axis);
+    writer.Add("sections", sections);
+}
+
 void SliceAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("starts", starts);
     writer.Add("ends", ends);
     writer.Add("axes", axes);
     writer.Add("steps", steps);
+    writer.Add("prefix_axis", prefix_axis);
+    writer.Add("extent_axis", extent_axis);
+    writer.Add("window_size", window_size);
+    writer.Add("window_extent_axis", window_extent_axis);
 }
 
 void FlattenAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
@@ -349,6 +365,14 @@ void ConstantOfShapeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) c
     writer.Add("target", target);
     writer.Add("dtype_code", dtype_code);
     writer.Add("value", value);
+    writer.Add("expr_kinds", expr_kinds);
+    writer.Add("expr_values", expr_values);
+    writer.Add("expr_axes", expr_axes);
+}
+
+void TriluAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("upper", upper);
+    writer.Add("k", k);
 }
 
 void SqueezeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
@@ -475,13 +499,26 @@ ConcatenateAttrs ConcatenateAttrs::Create(int axis) {
     return InternalCreate(node);
 }
 
+SplitAttrs SplitAttrs::Create(int axis, Array<int64_t> sections) {
+    auto* node = new SplitAttrsNode();
+    node->axis = axis;
+    node->sections = std::move(sections);
+    return InternalCreate(node);
+}
+
 SliceAttrs SliceAttrs::Create(Array<int64_t> starts, Array<int64_t> ends,
-                               Array<int64_t> axes, Array<int64_t> steps) {
+                               Array<int64_t> axes, Array<int64_t> steps,
+                               int64_t prefix_axis, int64_t extent_axis, int64_t window_size,
+                               int64_t window_extent_axis) {
     auto* node = new SliceAttrsNode();
     node->starts = std::move(starts);
     node->ends = std::move(ends);
     node->axes = std::move(axes);
     node->steps = std::move(steps);
+    node->prefix_axis = prefix_axis;
+    node->extent_axis = extent_axis;
+    node->window_size = window_size;
+    node->window_extent_axis = window_extent_axis;
     return InternalCreate(node);
 }
 

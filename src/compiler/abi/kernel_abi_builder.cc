@@ -82,7 +82,7 @@ Array<int64_t> ShapeFromBuffer(
     }
     if ((role != KernelArgRole::kInput &&
          role != KernelArgRole::kOutput) ||
-        !relay::internal::MatchRuntimeExtentLoad(
+        !relay::internal::MatchRuntimeExtentOffset(
             extent, runtime_extent_buffers, nullptr)) {
       throw std::invalid_argument(
           "Dynamic input/output Buffer extents must load a generated runtime extent");
@@ -139,11 +139,6 @@ KernelSignature BuildKernelSignature(const tir::PrimFunc& function,
           static_cast<int64_t>(function->params.size())) {
     throw std::invalid_argument(
         "PrimFunc version or parameter count attrs are inconsistent");
-  }
-  if (runtime_extent_count != 0 &&
-      (target->kind != "llvm" || target->device_type != kCPU)) {
-    throw std::invalid_argument(
-        "Runtime extent kernel ABI is LLVM/CPU-only");
   }
   const int64_t constant_start =
       input_count + runtime_extent_count;

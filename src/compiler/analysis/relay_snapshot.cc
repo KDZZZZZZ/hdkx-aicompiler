@@ -163,6 +163,10 @@ private:
             result = relay::GatherAttrs::Create(node->axis);
         } else if (const auto* node = source.As<relay::ConcatenateAttrsNode>()) {
             result = relay::ConcatenateAttrs::Create(node->axis);
+        } else if (const auto* node = source.As<relay::SliceAttrsNode>()) {
+            result = relay::SliceAttrs::Create(CloneIntArray(node->starts), CloneIntArray(node->ends),
+                CloneIntArray(node->axes), CloneIntArray(node->steps), node->prefix_axis, node->extent_axis,
+                node->window_size, node->window_extent_axis);
         } else if (const auto* node = source.As<relay::ShapeExprAttrsNode>()) {
             result = relay::ShapeExprAttrs::Create(
                 CloneIntArray(node->expr_kinds), CloneIntArray(node->expr_values),
@@ -179,7 +183,10 @@ private:
         } else if (const auto* node =
                        source.As<relay::ConstantOfShapeAttrsNode>()) {
             result = relay::ConstantOfShapeAttrs::Create(
-                CloneIntArray(node->target), node->dtype_code, node->value);
+                CloneIntArray(node->target), node->dtype_code, node->value,
+                CloneIntArray(node->expr_kinds), CloneIntArray(node->expr_values), CloneIntArray(node->expr_axes));
+        } else if (const auto* node = source.As<relay::TriluAttrsNode>()) {
+            result = relay::TriluAttrs::Create(node->upper, node->k);
         } else if (const auto* node = source.As<relay::SqueezeAttrsNode>()) {
             result = relay::SqueezeAttrs::Create(CloneIntArray(node->axes));
         } else if (const auto* node = source.As<relay::UnsqueezeAttrsNode>()) {

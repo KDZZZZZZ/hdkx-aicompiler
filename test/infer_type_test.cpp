@@ -695,6 +695,68 @@ bool TestConcatenateInferAndLoweringContract() {
     return true;
 }
 
+bool TestSplitInferAndLoweringContract() {
+    kxc::Var data("split_data", kxc::TensorType({2, 6}, "float32"));
+    kxc::Call split(kxc::relay::Op::Get("split"), {data},
+                    kxc::relay::SplitAttrs::Create(-1, {2, 4}));
+    kxc::Tuple result({kxc::TupleGetItem(split, 0), kxc::TupleGetItem(split, 1)});
+    kxc::Function function({data}, result);
+    kxc::relay::InferTypePass(function);
+    const auto* tuple_type = split.checked_type().As<kxc::TupleTypeNode>();
+    TEST_CHECK(tuple_type && tuple_type->fields.size() == 2 &&
+                   CheckTensor(tuple_type->fields[0], {2, 2}, "float32") &&
+                   CheckTensor(tuple_type->fields[1], {2, 4}, "float32"),
+               "split must normalize axis and infer both output shapes");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(function)->prim_func.defined() &&
+                   LowerUnits(function).size() == 1,
+               "one split call must lower to one multi-output primitive unit");
+    const std::string attrs = kxc::relay::SerializeAttrs(
+        kxc::relay::SplitAttrs::Create(-1, {2, 4}));
+    TEST_CHECK(attrs.find("SplitAttrsNode") != std::string::npos &&
+                   attrs.find("sections") != std::string::npos,
+               "split attrs must canonically preserve sections");
+    const kxc::PackedFunc make_split =
+        kxc::Registry::Global().Get("kxc.relay.op._make.split");
+    TEST_CHECK(make_split.defined(), "canonical split FFI entry must be registered");
+    const kxc::Call ffi_split =
+        kxc::CastTo<kxc::Call>(make_split(data, -1, kxc::Array<int64_t>{2, 4}));
+    const auto* ffi_split_attrs = ffi_split->attrs.As<kxc::relay::SplitAttrsNode>();
+    TEST_CHECK(ffi_split->args.size() == 1 && ffi_split_attrs &&
+                   ffi_split_attrs->axis == -1 && ffi_split_attrs->sections.size() == 2 &&
+                   ffi_split_attrs->sections[0] == 2 && ffi_split_attrs->sections[1] == 4,
+               "split FFI invocation must preserve data, axis and sections");
+
+    kxc::Call wrong_sum(kxc::relay::Op::Get("split"), {data},
+                        kxc::relay::SplitAttrs::Create(1, {1, 4}));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data}, wrong_sum));
+               }),
+               "split must reject sections whose sum differs from the input extent");
+    kxc::Call three_way(kxc::relay::Op::Get("split"), {data},
+                        kxc::relay::SplitAttrs::Create(1, {1, 2, 3}));
+    kxc::relay::InferTypePass(kxc::Function({data}, three_way));
+    const auto* three_type = three_way.checked_type().As<kxc::TupleTypeNode>();
+    TEST_CHECK(three_type && three_type->fields.size() == 3 &&
+                   CheckTensor(three_type->fields[0], {2, 1}, "float32") &&
+                   CheckTensor(three_type->fields[1], {2, 2}, "float32") &&
+                   CheckTensor(three_type->fields[2], {2, 3}, "float32"),
+               "split must infer all statically declared output sections");
+    kxc::Call one_way(kxc::relay::Op::Get("split"), {data},
+                      kxc::relay::SplitAttrs::Create(1, {6}));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data}, one_way));
+               }),
+               "split must reject fewer than two output sections");
+    kxc::Var dynamic("split_dynamic", kxc::TensorType({2, -1}, "float32"));
+    kxc::Call dynamic_axis(kxc::relay::Op::Get("split"), {dynamic},
+                           kxc::relay::SplitAttrs::Create(1, {1, 1}));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({dynamic}, dynamic_axis));
+               }),
+               "split must reject a dynamic partition axis");
+    return true;
+}
+
 bool TestSliceInferAndLoweringContract() {
     kxc::Var data("data", kxc::TensorType({2, 3, 4}, "float32"));
     kxc::Call slice(kxc::relay::Op::Get("slice"), {data},
@@ -745,8 +807,19 @@ bool TestSliceInferAndLoweringContract() {
                    bad(data, kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {-1})) &&
                    bad(data, kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {2})) &&
                    bad(kxc::Var("dynamic", kxc::TensorType({2, -1}, "float32")),
-                       kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1})),
+                       kxc::relay::SliceAttrs::Create({0}, {1}, {1}, {1})),
                "slice must reject rank/dtype/vector/axis/step/dynamic-shape violations");
+    kxc::Var symbolic("symbolic", kxc::TensorType({2, -1}, "float32"));
+    kxc::Call fixed_axis(kxc::relay::Op::Get("slice"), {symbolic},
+                        kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1}));
+    kxc::relay::InferTypePass(kxc::Function({symbolic}, fixed_axis));
+    TEST_CHECK(CheckTensor(fixed_axis.checked_type(), {1, -1}, "float32"),
+               "Slice must retain symbolic non-operated axes without freezing them");
+    kxc::Var control("control", kxc::TensorType({1}, "int64"));
+    kxc::Call unresolved(kxc::relay::Op::Get("slice"), {data, control, control, control, control});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data, control}, unresolved));
+               }), "five-input Slice must require source preparation even with valid input types");
     kxc::Call minimum(kxc::relay::Op::Get("slice"), {data},
                       kxc::relay::SliceAttrs::Create({std::numeric_limits<int64_t>::min()},
                                                       {std::numeric_limits<int64_t>::max()},
@@ -936,11 +1009,17 @@ bool TestEqualInferAndLoweringContract() {
 // M4/M5 fieldless float32 一元算子（Neg/Sigmoid）的类型、FFI 与 lowering 合同：
 // shape/dtype 保持、float32-only、错误 arity 与 lowering 前拒绝。
 bool TestUnaryFloat32InferAndLoweringContract() {
-    for (const std::string& op_name : {"neg", "sigmoid"}) {
+    for (const std::string& op_name : {"neg", "sigmoid", "tanh", "erf"}) {
         const kxc::relay::Op& op = kxc::relay::Op::Get(op_name);
         kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
         kxc::Call call(op, {data});
         kxc::Function func({data}, call);
+        if (op_name == "tanh" || op_name == "erf") {
+            TEST_CHECK(ExpectThrow([&] {
+                kxc::relay::InferTypePass(kxc::Function({data}, kxc::Call(op, {data},
+                    kxc::relay::SoftmaxAttrs::Create(-1))));
+            }), op_name + " must reject attributes");
+        }
         kxc::relay::InferTypePass(func);
         TEST_CHECK(call.checked_type().As<kxc::TensorTypeNode>() &&
                        CheckTensor(call.checked_type(), {2, 3}, "float32"),
@@ -1482,6 +1561,7 @@ int main() {
         {"flatten_and_reshape_product_arithmetic", TestFlattenAndReshapeProductArithmetic},
         {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},
         {"concatenate_infer_and_lowering_contract", TestConcatenateInferAndLoweringContract},
+        {"split_infer_and_lowering_contract", TestSplitInferAndLoweringContract},
         {"slice_infer_and_lowering_contract", TestSliceInferAndLoweringContract},
         {"where_infer_and_lowering_contract", TestWhereInferAndLoweringContract},
         {"equal_infer_and_lowering_contract", TestEqualInferAndLoweringContract},

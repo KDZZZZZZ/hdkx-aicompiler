@@ -29,10 +29,10 @@
 
 ## C2：L1b 生成循环选择记录
 
-**选择：host-side deterministic greedy loop（L1 首选）。**
+**选择：host-side deterministic greedy loop（L1 首选）。** 已在 [G2 greedy 报告](G2_GREEDY_REPORT.md) 中用真实定容 LLVM fixture 验证。
 
 - 理由：`generate()` 的采样与停止条件在 host 侧；导出的静态图无控制节点；host 循环能直接验证 M2 的 append/read、M3 的 `total = past + current` 与 M1 的 generation 关联，不需要把采样器塞进 Relay 控制图；`ControlRuntimeSession` 当前拒绝 state 与 runtime extent，接入真实 decode 必须等 M2 的 state owner 与 M3 的 extent ABI（C3 交接）。
 - **bounded graph loop = 后续候选**：仅在真实导出保留 `While`、循环上限可静态证明、谓词为 CPU 标量 bool、循环携带值/输出 shape 可表达于现有 ABI、且 M2/M3 交接完成后评估；本波保留其拒绝证据（上表）。
-- 本选择不声称"图已支持生成循环"；MiniMind L1b 的每步 decode 由 host 驱动（见第二波并行计划 G2 第 4 条）。
+- 本选择不声称"图已支持生成循环"；MiniMind L1b 的每步 decode 由 host 驱动。真实 fixture 已完成固定 4 步 greedy argmax、ONNX 数值对齐和 bundle metadata 关联（见 [G2 greedy 报告](G2_GREEDY_REPORT.md)）。
 
 C4（MiniMind-O 双自回归调度、Mimi ring buffer、80ms 预算）需求清单另行立项，不进入 L1 合同。

@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "../internal/dynamic_shape_contract.h"
+#include "../internal/logical_value.h"
 #include "../internal/relay_snapshot.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
@@ -126,13 +127,38 @@ void ValidateFrozenUnits(const shape::GraphTemplate& graph,
         const auto& unit = graph.ordered_units()[i];
         if (unit.output_value_names.size() != 1) Reject("multiple outputs are unsupported");
         const auto output = StaticValue(graph, unit.output_value_names[0]);
-        if (operations[i] == "relu" || operations[i] == "sqrt") {
+        if (operations[i] == "relu" || operations[i] == "sqrt" || operations[i] == "neg" ||
+            operations[i] == "softmax" || operations[i] == "sigmoid" || operations[i] == "cast" || operations[i] == "trilu") {
             if (unit.input_value_names.size() != 1) Reject("shape-transparent unary arity mismatch");
             RequireSameShape(StaticValue(graph, unit.input_value_names[0]), output);
-        } else if (operations[i] == "add" || operations[i] == "mul") {
-            if (unit.input_value_names.size() != 2) Reject("binary arity mismatch");
+        } else if (operations[i] == "masked_softmax") {
+            if (unit.input_value_names.size() != 2) Reject("masked_softmax requires data and mask");
             RequireSameShape(StaticValue(graph, unit.input_value_names[0]), output);
-            RequireSameShape(StaticValue(graph, unit.input_value_names[1]), output);
+            if (!ValidContract(StaticValue(graph, unit.input_value_names[1]))) {
+                Reject("invalid frozen masked_softmax mask");
+            }
+        } else if (operations[i] == "add" || operations[i] == "mul" ||
+                   operations[i] == "divide" || operations[i] == "pow") {
+            // Call arity is validated before partitioning. The physical unit
+            // boundary deduplicates a logical call such as mul(x, x).
+            if (unit.input_value_names.empty() || unit.input_value_names.size() > 2) {
+                Reject("binary input boundary mismatch");
+            }
+            if (!ValidContract(output)) Reject("invalid frozen broadcast output");
+            // Symbolic broadcast proof comes from the resolver; ordinary
+            // InferType has validated the representative's shapes and dtype.
+        } else if (operations[i] == "matmul" || operations[i] == "transpose" ||
+                   operations[i] == "reduce_mean" || operations[i] == "slice" ||
+                   operations[i] == "concatenate" || operations[i] == "gather") {
+            // The resolver proves symbolic axis relationships; ordinary
+            // InferType validates the frozen representative and its attrs.
+            const size_t arity = operations[i] == "slice" ? 3 :
+                (operations[i] == "matmul" || operations[i] == "concatenate" ||
+                 operations[i] == "gather" ? 2 : 1);
+            if (unit.input_value_names.empty() ||
+                unit.input_value_names.size() > arity || !ValidContract(output)) {
+                Reject("invalid frozen attention operator contract");
+            }
         } else if (operations[i] == "shape_of") {
             // M3 形状值：输出是 int64[rank(input)] 的固定长度向量；长度与
             // dtype 契约在 unit 合同与 partition 校验中再行钉死。
@@ -152,6 +178,15 @@ void ValidateFrozenUnits(const shape::GraphTemplate& graph,
             if (!ValidContract(output) || output.logical.size() != 1 ||
                 output.logical[0] < 1) {
                 Reject("shape_expr must materialize a nonempty int64 vector");
+            }
+        } else if (operations[i] == "constant_of_shape") {
+            if (unit.input_value_names.empty() || unit.input_value_names.size() > 2) {
+                Reject("constant_of_shape expects shape or data+shape");
+            }
+            const auto control = StaticValue(graph, unit.input_value_names.back());
+            if (!ValidContract(output) || !ValidContract(control) || control.logical.size() != 1 ||
+                control.logical[0] < 1 || output.logical.size() != static_cast<size_t>(control.logical[0])) {
+                Reject("constant_of_shape output rank must equal control length");
             }
         } else if (operations[i] == "reshape_dynamic") {
             if (unit.input_value_names.size() != 2) {
@@ -189,18 +224,21 @@ void ValidateFrozenUnits(const shape::GraphTemplate& graph,
 }
 
 bool IsRestrictedSyntaxOp(const std::string& name) {
-    return name == "relu" || name == "nn_relu" || name == "sqrt" ||
-           name == "add" || name == "mul" || name == "shape_of" ||
+    return name == "relu" || name == "nn_relu" || name == "sqrt" || name == "sigmoid" || name == "neg" || name == "slice" ||
+           name == "add" || name == "subtract" || name == "mul" || name == "divide" || name == "pow" ||
+           name == "cast" || name == "reduce_mean" || name == "matmul" ||
+           name == "transpose" || name == "softmax" || name == "masked_softmax" || name == "shape_of" ||
            name == "gather" || name == "concatenate" ||
            // shape_expr 是解析器折叠 gather/concat 链后的单元形态，只出现在
            // 重写后的快照里；constant_of_shape 由受限目标形状驱动。
-           name == "shape_expr" || name == "constant_of_shape" ||
+           name == "shape_expr" || name == "constant_of_shape" || name == "trilu" ||
            name == "reshape_dynamic" || name == "expand_dynamic" ||
            name == "squeeze" || name == "unsqueeze";
 }
 
 size_t RestrictedSyntaxArity(const std::string& name) {
-    if (name == "add" || name == "mul" || name == "gather" ||
+    if (name == "add" || name == "subtract" || name == "mul" || name == "divide" || name == "pow" ||
+        name == "matmul" || name == "gather" || name == "masked_softmax" ||
         name == "concatenate" || name == "reshape_dynamic" || name == "expand_dynamic") {
         return 2;
     }
@@ -209,8 +247,7 @@ size_t RestrictedSyntaxArity(const std::string& name) {
 
 void CollectOperations(const Expr& expression, const std::set<const Object*>& parameters,
                        std::set<const Object*>* seen, std::vector<std::string>* operations,
-                       std::vector<std::string>* registry_operations,
-                       bool* has_operation_attrs) {
+                       std::vector<std::string>* registry_operations) {
     if (expression.As<VarNode>()) {
         if (!parameters.count(expression.get())) Reject("graph references a non-parameter variable");
         return;
@@ -219,21 +256,29 @@ void CollectOperations(const Expr& expression, const std::set<const Object*>& pa
         // 常量（Gather 索引等）由受限形状解析器裁决；此处只允许通过。
         return;
     }
-    const auto* call = expression.As<CallNode>();
-    if (!call || !seen->insert(expression.get()).second) {
-        Reject("only a tree of restricted calls is supported");
+    if (!seen->insert(expression.get()).second) return;
+    if (const auto* tuple = expression.As<TupleNode>()) {
+        if (tuple->fields.empty()) Reject("empty result tuples are unsupported");
+        for (const Expr& field : tuple->fields) {
+            CollectOperations(field, parameters, seen, operations,
+                              registry_operations);
+        }
+        return;
     }
+    const auto* call = expression.As<CallNode>();
+    if (!call) Reject("unsupported restricted graph expression");
     const auto* op = call->op.As<relay::OpNode>();
     if (!op || !IsRestrictedSyntaxOp(op->name)) {
         Reject("unsupported Relay operation");
     }
-    if (call->args.size() != RestrictedSyntaxArity(op->name)) {
+    if (call->args.size() != RestrictedSyntaxArity(op->name) &&
+        !((op->name == "constant_of_shape" || op->name == "slice") &&
+          (call->args.size() == 2 || (op->name == "slice" && call->args.size() == 3)))) {
         Reject("unsupported Relay operation arity");
     }
-    *has_operation_attrs = *has_operation_attrs || call->attrs.defined();
     for (const Expr& argument : call->args) {
         CollectOperations(argument, parameters, seen, operations,
-                          registry_operations, has_operation_attrs);
+                          registry_operations);
     }
     operations->push_back(op->name == "nn_relu" ? "relu" : op->name);
     // 物化必须用注册表原名重放，不能用规范化别名。
@@ -243,7 +288,6 @@ void CollectOperations(const Expr& expression, const std::set<const Object*>& pa
 struct RestrictedSyntax final {
     std::vector<std::string> operations;           // 规范化名，供 frozen unit 校验
     std::vector<std::string> registry_operations;  // 注册表原名，供物化重放
-    bool has_operation_attrs{false};
 };
 
 // 参数形态：固定非标量 rank、无遗留负 extent、无重复。形状值解析器读取
@@ -271,25 +315,12 @@ RestrictedSyntax ValidateSyntax(const Function& function) {
     std::set<const Object*> seen;
     RestrictedSyntax result;
     CollectOperations(function->body, parameters, &seen, &result.operations,
-                      &result.registry_operations,
-                      &result.has_operation_attrs);
+                      &result.registry_operations);
     return result;
 }
 
 std::vector<int64_t> Dimensions(const shape::NamedTensorContract& value) {
     return value.contract.Evaluate(shape::BindingSet()).logical;
-}
-
-shape::NamedTensorContract Overlay(
-    const shape::NamedTensorContract& source,
-    const std::map<std::vector<int64_t>, std::vector<shape::DimExpr>>& shapes) {
-    const auto found = shapes.find(Dimensions(source));
-    const std::vector<shape::DimExpr>& dimensions = found == shapes.end()
-        ? source.contract.logical().dimensions() : found->second;
-    return {source.name, shape::TensorShapeContract(
-        shape::LogicalShape(dimensions, source.contract.logical().axis_names()),
-        shape::PhysicalCapacity(dimensions),
-        shape::ValidExtent(dimensions))};
 }
 
 void VerifyBindings(const shape::GraphTemplate& graph, const shape::BindingSet& bindings) {
@@ -345,13 +376,11 @@ struct PreparedRestrictedSymbolicTemplate::Impl final {
     shape::GraphTemplate graph;
     std::vector<InputAxisSymbol> symbols;
     shape_exact::v1::ShapeExactPreparationCounters counters;
-    // 物化重放所需：注册表原名的有序调用序列、attrs 快照与参数 dtype。
+    // 单元合同所需的注册表原名；原始调用接线由 Relay
+    // 快照持有，不能从去重后的 unit boundary 重建逻辑参数。
     std::vector<std::string> registry_operations;
-    std::vector<relay::Attrs> unit_attrs;
     std::vector<std::optional<shape_resolution::EncodedExpr>>
         unit_value_expressions;
-    std::vector<std::string> input_dtypes;
-    bool has_operation_attrs{false};
     Function representative_snapshot;
     CompileConfig config;
 };
@@ -418,7 +447,8 @@ bool RestrictedSymbolicShapeAdapter::IsEnabled() noexcept {
 }
 
 PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
-    Function representative, CompileConfig config, std::vector<InputAxisSymbol> input_axis_symbols) {
+    Function representative, CompileConfig config, std::vector<InputAxisSymbol> input_axis_symbols,
+    std::vector<TensorType> representative_outputs) {
     RequireEnabled();
     config.Validate();
     CompileConfig frozen_config = config;
@@ -431,10 +461,22 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
         shape_resolution::ResolveShapeValues(representative_snapshot,
                                              input_axis_symbols);
     representative_snapshot = resolution.rewritten;
-    // 调用体的树形/算子/元数不变量是**折叠后**的性质：形状链里一个
-    // shape_of 被多个 gather 共享是合法的 DAG 输入，折叠成单个
-    // shape_expr 单元后才成为树。因此在解析之后校验。
+    // 形状链折叠后校验受支持的算子与逻辑元数；共享调用只记录一次。
     (void)ValidateSyntax(representative_snapshot);
+    if (!representative_outputs.empty()) {
+        const Function typed = relay::InferTypePass(representative_snapshot);
+        const auto actual = internal::FlattenLogicalTensorTypes(
+            typed->body.checked_type(), "restricted imported outputs");
+        if (actual.size() != representative_outputs.size()) {
+            Reject("declared imported output count differs from the resolved graph");
+        }
+        for (size_t i = 0; i < actual.size(); ++i) {
+            if (!TypeEqual(actual[i], representative_outputs[i])) {
+                Reject("declared imported output " + std::to_string(i) +
+                       " differs from the resolved graph");
+            }
+        }
+    }
     const std::vector<std::string>& operations = [&] {
         std::vector<std::string> normalized;
         normalized.reserve(resolution.registry_operations.size());
@@ -445,13 +487,6 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
     }();
     const std::vector<std::string>& registry_operations =
         resolution.registry_operations;
-    const bool has_operation_attrs = resolution.has_operation_attrs;
-    std::vector<std::string> input_dtypes;
-    input_dtypes.reserve(representative_snapshot->params.size());
-    for (const Var& parameter : representative_snapshot->params) {
-        input_dtypes.push_back(
-            parameter->type_annotation.As<TensorTypeNode>()->dtype);
-    }
     if (input_axis_symbols.empty()) Reject("at least one explicit input-axis symbol is required");
     std::sort(input_axis_symbols.begin(), input_axis_symbols.end(), [](const auto& a, const auto& b) {
         return std::tie(a.parameter_index, a.axis, a.symbol) < std::tie(b.parameter_index, b.axis, b.symbol);
@@ -485,23 +520,30 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
             representative_snapshot, frozen_config);
     const shape::GraphTemplate& static_graph = frozen.graph_template();
     ValidateFrozenUnits(static_graph, operations);
-    if (static_graph.shape_program().inputs().size() != representative_snapshot->params.size()) {
-        Reject("restricted graph cannot contain constants or hidden inputs");
+    if (static_graph.shape_program().inputs().size() < representative_snapshot->params.size()) {
+        Reject("restricted graph has missing parameters");
     }
-    std::map<std::vector<int64_t>, std::vector<shape::DimExpr>> shape_overlays;
+    std::vector<shape::NamedTensorContract> inputs, outputs;
+    std::set<std::string> parameter_values;
     for (size_t parameter = 0; parameter < representative_snapshot->params.size(); ++parameter) {
-        const auto static_shape = Dimensions(
-            ParameterContract(static_graph, parameter));
+        const auto& source = ParameterContract(static_graph, parameter);
+        parameter_values.insert(source.name);
+        const auto static_shape = Dimensions(source);
         std::vector<shape::DimExpr> dimensions;
         for (int64_t extent : static_shape) dimensions.push_back(shape::DimExpr::Const(extent));
         for (const auto& symbol : input_axis_symbols) {
             if (symbol.parameter_index == parameter) dimensions[symbol.axis] = shape::DimExpr::Symbol(symbol.symbol);
         }
-        const auto existing = shape_overlays.find(static_shape);
-        if (existing != shape_overlays.end() && existing->second != dimensions) {
-            Reject("equal-shape inputs must share an identical explicit overlay");
-        }
-        shape_overlays.emplace(static_shape, std::move(dimensions));
+        // Equal representative sizes do not imply equal symbolic dimensions:
+        // query and key lengths may coincide in the sample and vary separately.
+        inputs.push_back({source.name, shape::TensorShapeContract(
+            shape::LogicalShape(dimensions, source.contract.logical().axis_names()),
+            shape::PhysicalCapacity(dimensions), shape::ValidExtent(dimensions))});
+    }
+    // ShapeProgram sorts canonical names lexically: value.10 precedes value.2.
+    // Distinguish parameters by their ValueGraph names, never by list position.
+    for (const auto& input : static_graph.shape_program().inputs()) {
+        if (!parameter_values.count(input.name)) inputs.push_back(input);
     }
     std::vector<shape::Constraint> constraints;
     for (const auto& [name, symbol] : definitions) {
@@ -509,27 +551,28 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
         constraints.push_back(shape::Constraint::Range(expression, symbol.lower, symbol.upper));
         constraints.push_back(shape::Constraint::DivisibleBy(expression, symbol.divisible_by));
     }
-    std::vector<shape::NamedTensorContract> inputs, outputs;
-    for (const auto& value : static_graph.shape_program().inputs()) inputs.push_back(Overlay(value, shape_overlays));
     // 输出合同由解析器的符号维表达式驱动：链折叠后的目标（如
     // reshape_dynamic / expand / squeeze / unsqueeze）不再能由静态形状键
     // 匹配近似表达。
-    const auto resolver_dims = [&](const std::string& name)
-        -> const std::vector<shape::DimExpr>* {
-        const auto found = resolution.value_dimensions.find(name);
-        return found == resolution.value_dimensions.end() ? nullptr
-                                                          : &found->second;
-    };
+    if (resolution.unit_output_dimensions.size() != static_graph.ordered_units().size()) {
+        Reject("dimension proofs do not match the frozen unit sequence");
+    }
+    std::map<std::string, std::vector<shape::DimExpr>> dimensions_by_value;
+    for (size_t i = 0; i < static_graph.ordered_units().size(); ++i) {
+        dimensions_by_value.emplace(
+            static_graph.ordered_units()[i].output_value_names[0],
+            resolution.unit_output_dimensions[i]);
+    }
     for (const auto& value : static_graph.shape_program().outputs()) {
-        const auto* dims = resolver_dims(value.name);
-        if (!dims) {
+        const auto found = dimensions_by_value.find(value.name);
+        if (found == dimensions_by_value.end()) {
             Reject("the restricted resolver has no dimension proof for " +
                    value.name);
         }
+        const auto& dims = found->second;
         outputs.push_back({value.name, shape::TensorShapeContract(
-            shape::LogicalShape(*dims, value.contract.logical().axis_names()),
-            shape::PhysicalCapacity(*dims),
-            shape::ValidExtent(*dims))});
+            shape::LogicalShape(dims, value.contract.logical().axis_names()),
+            shape::PhysicalCapacity(dims), shape::ValidExtent(dims))});
     }
     shape::GraphTemplate graph(static_graph.key(), shape::ShapeProgram(
         std::vector<std::string>(names.begin(), names.end()), std::move(inputs), std::move(outputs),
@@ -539,8 +582,7 @@ PreparedRestrictedSymbolicTemplate RestrictedSymbolicShapeAdapter::Prepare(
         PreparedRestrictedSymbolicTemplate::Impl{
             std::move(frozen), std::move(graph),
             std::move(input_axis_symbols), counters, registry_operations,
-            resolution.unit_attrs, resolution.unit_value_expressions,
-            std::move(input_dtypes), has_operation_attrs,
+            resolution.unit_value_expressions,
             std::move(representative_snapshot),
             std::move(frozen_config)}));
 }
@@ -612,69 +654,27 @@ void RequireDecisionOwnership(
     }
 }
 
-// ShapeProgram::outputs() 按 BuildTemplate 语义收录全部计算值（含被后续
-// unit 消费的中间值）；图输出是其中未被任何 unit 消费的那些。
-std::vector<shape::NamedTensorContract> GraphOutputs(
-    const shape::GraphTemplate& graph) {
-    std::set<std::string> consumed;
-    for (const auto& unit : graph.ordered_units()) {
-        consumed.insert(unit.input_value_names.begin(),
-                        unit.input_value_names.end());
-    }
-    std::vector<shape::NamedTensorContract> outputs;
-    for (const auto& value : graph.shape_program().outputs()) {
-        if (!consumed.count(value.name)) outputs.push_back(value);
-    }
-    return outputs;
-}
-
 using ReplayShape = std::function<Array<int64_t>(
     size_t, const shape::NamedTensorContract&)>;
 
-Function ReplayRestrictedFunction(
+Function MaterializeRestrictedFunction(
     const shape::GraphTemplate& graph,
-    const std::vector<std::string>& registry_operations,
-    const std::vector<relay::Attrs>& unit_attrs,
-    const std::vector<std::string>& input_dtypes,
+    const Function& representative,
     const ReplayShape& replay_shape) {
-    if (graph.shape_program().inputs().size() != input_dtypes.size()) {
-        Reject("restricted template parameter dtype cardinality drifted");
+    if (graph.shape_program().inputs().size() < representative->params.size()) {
+        Reject("restricted template parameter cardinality drifted");
     }
-    Array<Var> params;
-    std::map<std::string, Expr> values;
-    for (size_t i = 0; i < input_dtypes.size(); ++i) {
+    // The snapshot is the sole authority for Call arguments and function
+    // results. Retyping its private parameters preserves DAG sharing, repeated
+    // arguments, nested result tuples, and outputs that also have consumers.
+    Function result = internal::CloneRelaySnapshot(representative);
+    for (size_t i = 0; i < result->params.size(); ++i) {
         const auto& named = ParameterContract(graph, i);
-        Var parameter(named.name, TensorType(replay_shape(i, named),
-                                             input_dtypes[i]));
-        params.push_back(parameter);
-        values.emplace(named.name, parameter);
+        auto* parameter = const_cast<VarNode*>(result->params[i].operator->());
+        const auto* type = parameter->type_annotation.As<TensorTypeNode>();
+        parameter->type_annotation = TensorType(replay_shape(i, named), type->dtype);
     }
-    const auto& units = graph.ordered_units();
-    if (units.size() != registry_operations.size()) {
-        Reject("frozen unit sequence does not match the recorded call replay");
-    }
-    for (size_t i = 0; i < units.size(); ++i) {
-        Array<Expr> args;
-        for (const std::string& input : units[i].input_value_names) {
-            const auto found = values.find(input);
-            if (found == values.end()) Reject("unit consumes an unknown value");
-            args.push_back(found->second);
-        }
-        relay::Attrs attrs;
-        if (i < unit_attrs.size()) attrs = unit_attrs[i];
-        const Call call(relay::Op::Get(registry_operations[i]), args, attrs);
-        if (units[i].output_value_names.size() != 1 ||
-            !values.emplace(units[i].output_value_names[0], call).second) {
-            Reject("frozen unit output wiring is not a single-assignment tree");
-        }
-    }
-    const auto graph_outputs = GraphOutputs(graph);
-    if (graph_outputs.size() != 1) {
-        Reject("restricted template must have exactly one graph output");
-    }
-    const auto output = values.find(graph_outputs[0].name);
-    if (output == values.end()) Reject("graph output was never produced");
-    return Function(params, output->second);
+    return relay::InferTypePass(result);
 }
 
 Array<int64_t> BoundedBoundaryShape(
@@ -684,11 +684,12 @@ Array<int64_t> BoundedBoundaryShape(
          named.contract.logical().dimensions()) {
         if (expression.kind() == shape::DimExpr::Kind::kConst) {
             dimensions.push_back(expression.Evaluate(shape::BindingSet()));
-        } else if (expression.kind() == shape::DimExpr::Kind::kSymbol &&
+        } else if ((expression.kind() == shape::DimExpr::Kind::kSymbol ||
+                    expression.kind() == shape::DimExpr::Kind::kAdd) &&
                    expression.Symbols().size() == 1) {
             dimensions.push_back(-1);
         } else {
-            Reject("bounded boundary accepts only direct Symbol or Const axes");
+            Reject("bounded boundary accepts Const or a single symbol with a constant offset");
         }
     }
     return dimensions;
@@ -702,9 +703,9 @@ BoundedCompileRequest RestrictedSymbolicShapeAdapter::MintBoundedCompileRequest(
     if (!prepared.impl_) Reject("prepared template is undefined");
     prepared.impl_->config.Validate();
     const Target& target = prepared.impl_->config->target;
-    if (target->kind != "llvm" || target->device_type != kCPU ||
-        target->device_id != 0) {
-        Reject("bounded v1 admits only CPU/LLVM targets");
+    if (!((target->kind == "llvm" && target->device_type == kCPU && target->device_id == 0) ||
+          (target->kind == "cuda" && target->device_type == kCUDA))) {
+        Reject("bounded compilation requires CPU:0/LLVM or CUDA");
     }
     // M3：attrs 策略由受限形状解析器在准备时强制（attr-free 算子不带属性，
     // 受控算子的目标表达式是链式证明的唯一投影），此处无需再整体拒绝。
@@ -735,13 +736,12 @@ BoundedCompileRequest RestrictedSymbolicShapeAdapter::MintBoundedCompileRequest(
     (void)shape::MakeExactSpecializationRequests(
         prepared.impl_->graph, representative_oracle);
 
-    Function logical_boundary = relay::InferTypePass(
-        ReplayRestrictedFunction(
-            prepared.impl_->graph, prepared.impl_->registry_operations,
-            prepared.impl_->unit_attrs, prepared.impl_->input_dtypes,
+    Function logical_boundary =
+        MaterializeRestrictedFunction(
+            prepared.impl_->graph, prepared.impl_->representative_snapshot,
             [](size_t, const shape::NamedTensorContract& named) {
                 return BoundedBoundaryShape(named);
-            }));
+            });
     BoundedCompileRequest request(
         std::make_shared<BoundedCompileRequest::Impl>(
             BoundedCompileRequest::Impl{
@@ -766,9 +766,8 @@ Function RestrictedSymbolicShapeAdapter::MaterializeExactFunction(
     RequireDecisionOwnership(prepared.impl_->graph, *decision.impl_);
     const shape::ExactShapeProfile& profile =
         decision.impl_->exact_oracle.profile();
-    return ReplayRestrictedFunction(
-        prepared.impl_->graph, prepared.impl_->registry_operations,
-        prepared.impl_->unit_attrs, prepared.impl_->input_dtypes,
+    return MaterializeRestrictedFunction(
+        prepared.impl_->graph, prepared.impl_->representative_snapshot,
         [&profile](size_t, const shape::NamedTensorContract& named) {
             Array<int64_t> dimensions;
             for (int64_t extent : profile.Value(named.name).contract.logical) {
@@ -812,16 +811,15 @@ void RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
         throw std::runtime_error(
             "restricted exact variant: call count differs from template units");
     }
-    const shape::ExactShapeProfile& profile =
-        decision.impl_->exact_oracle.profile();
-    const auto& program = prepared.impl_->graph.shape_program();
+    const Function expected_function =
+        MaterializeExactFunction(prepared, decision);
     std::map<int64_t, runtime::ValueSpec> specs;
     for (const auto& value : plan.values()) specs.emplace(value->value_id, value);
     const auto check_boundary =
         [&](const Array<int64_t>& ids,
-            const std::vector<shape::NamedTensorContract>& named,
+            const std::vector<Type>& types,
             const char* what) {
-            if (ids.size() != named.size()) {
+            if (ids.size() != types.size()) {
                 throw std::runtime_error(
                     std::string("restricted exact variant: ") + what +
                     " arity differs from the decision");
@@ -833,8 +831,9 @@ void RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
                         std::string("restricted exact variant: ") + what +
                         " references an unknown plan value");
                 }
-                const auto& expected =
-                    profile.Value(named[i].name).contract.logical;
+                const auto* type = types[i].As<TensorTypeNode>();
+                if (!type) Reject("materialized boundary must have tensor leaves");
+                const auto& expected = type->shape;
                 const Array<int64_t> actual = found->second.shape();
                 bool same = actual.size() == expected.size();
                 for (size_t axis = 0; same && axis < expected.size(); ++axis) {
@@ -845,33 +844,27 @@ void RestrictedSymbolicShapeAdapter::VerifyCompiledExactVariant(
                         std::string("restricted exact variant: ") + what +
                         " boundary shape differs from the decision");
                 }
+                const DLDataType expected_dtype = runtime::DataTypeFromString(type->dtype);
+                const DLDataType actual_dtype = found->second->dtype;
+                if (actual_dtype.code != expected_dtype.code ||
+                    actual_dtype.bits != expected_dtype.bits ||
+                    actual_dtype.lanes != expected_dtype.lanes) {
+                    throw std::runtime_error(
+                        std::string("restricted exact variant: ") + what +
+                        " dtype differs from the materialized function");
+                }
             }
         };
-    std::vector<shape::NamedTensorContract> parameter_contracts;
-    parameter_contracts.reserve(prepared.impl_->input_dtypes.size());
-    for (size_t i = 0; i < prepared.impl_->input_dtypes.size(); ++i) {
-        parameter_contracts.push_back(
-            ParameterContract(prepared.impl_->graph, i));
+    std::vector<Type> parameter_types;
+    for (const Var& parameter : expected_function->params) {
+        parameter_types.push_back(parameter->type_annotation);
     }
-    check_boundary(plan.input_value_ids(), parameter_contracts, "input");
-    check_boundary(plan.output_value_ids(), GraphOutputs(prepared.impl_->graph),
-                   "output");
-    for (size_t i = 0; i < plan.input_value_ids().size(); ++i) {
-        const DLDataType expected =
-            runtime::DataTypeFromString(prepared.impl_->input_dtypes[i]);
-        const DLDataType actual = specs.at(plan.input_value_ids()[i])->dtype;
-        if (actual.code != expected.code || actual.bits != expected.bits ||
-            actual.lanes != expected.lanes) {
-            throw std::runtime_error(
-                "restricted exact variant: input dtype differs from the "
-                "representative");
-        }
-    }
+    check_boundary(plan.input_value_ids(), parameter_types, "input");
+    check_boundary(plan.output_value_ids(), internal::FlattenLogicalTensorTypes(
+        expected_function.checked_type(), "restricted exact variant outputs"), "output");
     // 语义绑定：边界一致不构成授权——同 shape/dtype/call 数但算子不同的
     // 图（如 sqrt 换 relu）必须被拒绝。产物身份必须等于按本决策物化出的
     // concrete Function 的语义身份；类型（含输出 dtype）是身份的一部分。
-    const Function expected_function =
-        MaterializeExactFunction(prepared, decision);
     if (!(compiled.graph_semantic_key() ==
           Compiler::BuildGraphSemanticKey(expected_function))) {
         throw std::runtime_error(
@@ -885,8 +878,8 @@ shape::BindingSet RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(
     const std::vector<std::vector<int64_t>>& input_shapes) {
     RequireEnabled();
     if (!prepared.impl_) Reject("prepared template is undefined");
-    const auto& program = prepared.impl_->graph.shape_program();
-    if (input_shapes.size() != program.inputs().size()) {
+    const size_t parameter_count = prepared.impl_->representative_snapshot->params.size();
+    if (input_shapes.size() != parameter_count) {
         Reject("input shape count differs from the template parameters");
     }
     std::map<std::string, int64_t> bound;
@@ -906,7 +899,7 @@ shape::BindingSet RestrictedSymbolicShapeAdapter::BindingsFromInputShapes(
     for (const auto& [name, value] : bound) bindings_list.push_back({name, value});
     const shape::BindingSet bindings(std::move(bindings_list));
     // 非 overlay 静态轴与 rank 必须与模板求值结果一致。
-    for (size_t i = 0; i < program.inputs().size(); ++i) {
+    for (size_t i = 0; i < parameter_count; ++i) {
         const auto evaluated =
             ParameterContract(prepared.impl_->graph, i)
                 .contract.Evaluate(bindings);

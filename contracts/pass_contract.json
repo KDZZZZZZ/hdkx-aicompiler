@@ -118,6 +118,13 @@
       "vectorize_loop",
       "remove_no_op"
     ],
+    "tir.compiler.cuda.o2": [
+      "fold_constant",
+      "simplify_expr",
+      "force_narrow_index_to_i32",
+      "remove_no_op",
+      "bind_cuda_threads"
+    ],
     "tir.compiler.cuda.o3": [
       "fold_constant",
       "simplify_expr",
@@ -388,11 +395,11 @@
     },
     "tir.bind_cuda_threads": {
       "name": "bind_cuda_threads",
-      "schema_version": 1,
+      "schema_version": 8,
       "dialect": "tir",
       "scope": "prim_func",
       "phase": "tir_schedule",
-      "opt_level": 3,
+      "opt_level": 2,
       "implementation_key": "kxc.tir.transform.bind_cuda_threads",
       "deterministic": true,
       "idempotent": false,

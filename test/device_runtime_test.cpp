@@ -237,6 +237,35 @@ bool TestCUDAPath() {
     round_trip.CopyFrom(async_cuda);
     round_trip.CopyToBytes(actual.data(), round_trip.NBytes());
     TEST_CHECK(actual == values, "async operation retains source storage");
+
+    // A synchronous producer must be visible immediately to a nonblocking
+    // consumer stream. Allocate everything first: cudaMalloc/cudaFree or a
+    // legacy-stream readback between producer and consumer would hide the race.
+    for (int64_t bytes : {int64_t(33 * 323 * 8), int64_t(4 * 1024 * 1024)}) {
+        const auto u8 = kxc::runtime::DataTypeFromString("uint8");
+        auto source = kxc::runtime::NDArray::Empty({bytes}, u8, cuda);
+        auto destination = kxc::runtime::NDArray::Empty({bytes}, u8, cuda);
+        auto observed = kxc::runtime::NDArray::Empty({bytes}, u8, kxc::Device::CPU());
+        std::vector<uint8_t> payload(static_cast<size_t>(bytes));
+        std::vector<uint8_t> received(payload.size());
+        const auto consume = [&](const kxc::runtime::NDArray& array) {
+            observed.CopyFromAsync(array, stream).Wait();
+            observed.CopyToBytes(received.data(), observed.NBytes());
+        };
+        for (int pattern = 0; pattern < 16; ++pattern) {
+            for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<uint8_t>(i * 17 + pattern * 31 + 1);
+            source.CopyFromBytes(payload.data(), source.NBytes());
+            consume(source);
+            TEST_CHECK(received == payload, "sync H2D must complete before nonblocking-stream consumption");
+            destination.CopyFrom(source);
+            consume(destination);
+            TEST_CHECK(received == payload, "sync D2D must complete before nonblocking-stream consumption");
+            kxc::GetDeviceAPI(kxc::kCUDA)->ZeroData(cuda, destination.storage().data(), 0, destination.NBytes());
+            consume(destination);
+            for (uint8_t value : received) TEST_CHECK(value == 0, "sync zero must complete before nonblocking-stream consumption");
+        }
+    }
+    std::cout << "[PASS] CUDA synchronous producers -> nonblocking consumer: 96 exact payload checks\n";
     return true;
 #endif
 }

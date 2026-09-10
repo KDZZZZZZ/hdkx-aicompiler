@@ -30,7 +30,7 @@ ALLOWED = {
     "pass": {"pass", "target", "runtime", "support"},
     "ir": {"ir", "support"},
     "tir": {"tir", "ir", "ffi", "pass", "profiling", "runtime", "support", "target"},
-    "te": {"te", "tir", "ir", "support"},
+    "te": {"te", "tir", "ir", "support", "target"},
     "relay": {
         "relay", "te", "tir", "ir", "distributed", "pass", "profiling",
         "runtime", "support", "ffi", "target",

@@ -83,9 +83,9 @@ void ValidateCompiledGraphCandidate(
     if (module.entry_count() != calls.size() || pins.size() != calls.size()) {
         throw std::invalid_argument("CompiledGraph requires one module entry and pin per plan call");
     }
-    // Reuse the runtime's existing module/plan ABI validator transiently.  It
-    // retains no pins and is discarded before the immutable graph is published.
-    (void)runtime::RuntimeSession(module, plan);
+    // Validate through the runtime owner without allocating unused state while
+    // compiling or publishing a graph. Actual sessions allocate their own state.
+    runtime::RuntimeSession::Validate(module, plan);
     std::unordered_set<std::string> call_symbols;
     for (size_t index = 0; index < calls.size(); ++index) {
         const runtime::KernelCall& call = calls[index];
@@ -168,6 +168,22 @@ const std::vector<ArtifactPin>& CompiledGraph::artifact_pins() const {
 const GraphSemanticKey& CompiledGraph::graph_semantic_key() const {
     if (!state_) throw std::logic_error("CompiledGraph is undefined");
     return state_->graph_semantic_key;
+}
+CompiledGraph CompiledGraph::BindStateOutputs(
+    std::vector<runtime::StateOutputBinding> bindings, double state_fill) const {
+    return internal::CompiledGraphAccess::Create(module(),
+        plan().BindStateOutputs(std::move(bindings), state_fill), artifact_pins(), graph_semantic_key());
+}
+CompiledGraph CompiledGraph::BindBoundedStateOutputs(
+    std::vector<runtime::StateOutputBinding> bindings,
+    std::vector<Array<int64_t>> physical_shapes, double state_fill) const {
+    return internal::CompiledGraphAccess::Create(module(),
+        plan().BindBoundedStateOutputs(std::move(bindings), std::move(physical_shapes), state_fill),
+        artifact_pins(), graph_semantic_key());
+}
+CompiledGraph CompiledGraph::BindRequestBatching(int64_t max_batch_size) const {
+    return internal::CompiledGraphAccess::Create(module(), plan().BindRequestBatching(max_batch_size),
+        artifact_pins(), graph_semantic_key());
 }
 namespace {
 
@@ -295,8 +311,7 @@ void AddPrimitiveBatchFields(
         const internal::CachedPrimitive& artifact = primitive.pin.artifact();
         span->AddField(prefix + "symbol", std::string(unit.symbol));
         span->AddField(
-            prefix + "operator", std::string(unit.call.spec.name) + "@v" +
-                std::to_string(unit.call.spec.schema_version));
+            prefix + "operator", internal::PrimitiveUnitOperatorIdentity(unit));
         span->AddField(prefix + "ir_hash", support::HashText(text));
         span->AddMetric(prefix + "ir_bytes",
                         static_cast<double>(text.size()));
@@ -321,12 +336,14 @@ const char* BackendVersion(const Target& target) {
         return "llvm-orc-v1";
     }
     if (target->kind == "cuda" && target->device_type == kCUDA) {
-        return "cuda-nvrtc-driver-v1";
+        return "cuda-nvrtc-driver-v8";
     }
     throw std::invalid_argument("Primitive cache target has no backend version");
 }
 
-internal::CompilerExecutionContract ResolveBoundedExecutionContract(
+}  // namespace
+
+internal::CompilerExecutionContract internal::ResolveBoundedExecutionContract(
     const CompileConfig& config) {
     internal::CompilerExecutionContract contract =
         internal::ResolveCompilerExecutionContract(config);
@@ -361,6 +378,8 @@ internal::CompilerExecutionContract ResolveBoundedExecutionContract(
     contract.fingerprint = support::HashText(contract.canonical_bytes);
     return contract;
 }
+
+namespace {
 
 CompiledGraph CompilePipeline(
     Function function, CompileConfig config,
@@ -416,50 +435,7 @@ CompiledGraph CompilePipeline(
 
 
 std::string internal::CanonicalTargetSnapshot(const Target& target) {
-    const auto* node = target.As<TargetNode>();
-    if (!node) {
-        throw std::invalid_argument(
-            "CanonicalTargetSnapshot requires a defined TargetNode");
-    }
-    std::string canonical;
-    AppendPipelineIdentityField(&canonical, "kind", "target-snapshot-v1");
-    AppendPipelineIdentityField(&canonical, "target_kind", node->kind);
-    AppendPipelineIdentityField(
-        &canonical, "device_type",
-        std::to_string(static_cast<int>(node->device_type)));
-    AppendPipelineIdentityField(&canonical, "device_id",
-                                std::to_string(node->device_id));
-    const DeviceAttributes& attrs = node->attrs;
-    const auto append_integer = [&canonical](const char* name, int64_t value) {
-        AppendPipelineIdentityField(&canonical, name, std::to_string(value));
-    };
-    append_integer("exists", attrs.exists);
-    append_integer("max_threads_per_block", attrs.max_threads_per_block);
-    append_integer("warp_size", attrs.warp_size);
-    append_integer("max_shared_memory_per_block",
-                   attrs.max_shared_memory_per_block);
-    AppendPipelineIdentityField(&canonical, "compute_version",
-                                attrs.compute_version);
-    AppendPipelineIdentityField(&canonical, "device_name", attrs.device_name);
-    append_integer("max_clock_rate_khz", attrs.max_clock_rate_khz);
-    append_integer("max_registers_per_block", attrs.max_registers_per_block);
-    append_integer("api_version", attrs.api_version);
-    append_integer("driver_version", attrs.driver_version);
-    append_integer("l2_cache_size_bytes", attrs.l2_cache_size_bytes);
-    append_integer("total_global_memory", attrs.total_global_memory);
-    // available_global_memory is a volatile observation, not a codegen
-    // capability. It is deliberately excluded from reusable identity.
-    append_integer("max_shared_memory_per_multiprocessor",
-                   attrs.max_shared_memory_per_multiprocessor);
-    append_integer("max_registers_per_multiprocessor",
-                   attrs.max_registers_per_multiprocessor);
-    append_integer("max_threads_per_multiprocessor",
-                   attrs.max_threads_per_multiprocessor);
-    append_integer("compute_version_major", attrs.compute_version_major);
-    append_integer("compute_version_minor", attrs.compute_version_minor);
-    append_integer("multi_processor_count", attrs.multi_processor_count);
-    AppendPipelineIdentityField(&canonical, "arch", attrs.arch);
-    return canonical;
+    return target.CanonicalBytes();
 }
 
 internal::CompilerExecutionContract
@@ -479,12 +455,16 @@ internal::ResolveCompilerExecutionContract(
         relay::internal::kDefaultTESchedulePolicy;
     contract.backend_version = BackendVersion(config->target);
     AppendPipelineIdentityField(&contract.canonical_bytes, "kind",
-                                "compiler-execution-plan-v4");
+                                "compiler-execution-plan-v5");
     AppendPipelineIdentityField(
         &contract.canonical_bytes, "relay",
         std::string(contract.relay_pipeline.canonical_bytes));
     AppendPipelineIdentityField(&contract.canonical_bytes, "lowering",
-                                "per-unit-boundary-lowering-v1");
+                                "static-te-program-lowering-v1");
+    AppendPipelineIdentityField(&contract.canonical_bytes, "partition",
+        config->opt_level == 3 && config->target->kind == "llvm" &&
+            config->target->device_type == kCPU && config->target->device_id == 0
+            ? "static-add-sqrt-v1" : "single-call-v1");
     AppendPipelineIdentityField(
         &contract.canonical_bytes, "tir",
         std::string(contract.tir_pipeline.canonical_bytes));
@@ -545,7 +525,8 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
     PreparedStaticGraph graph;
     try {
         graph = PrepareStaticGraph(prepared.typed_anf(), device, target,
-                                   String(contract.fingerprint));
+            String(contract.fingerprint), config->opt_level == 3 && target->kind == "llvm" &&
+                target->device_type == kCPU && target->device_id == 0);
     } catch (const std::exception& error) {
         prepare_span.SetStatus("error");
         prepare_span.SetMessage(error.what());
@@ -562,6 +543,29 @@ internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
         std::move(profile_context), run_id, relay_graph_pipelines,
         capability_boundary_checks, value_graph_builds, partitions};
 }
+
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+internal::PreparedCompilerGraph internal::PrepareCompilerGraph(
+    const BoundedCompilePreparation& preparation,
+    const CompilerExecutionContract& contract) {
+    const auto& request = preparation.request();
+    const auto config = request.compile_config();
+    if (contract.canonical_bytes != ResolveBoundedExecutionContract(config).canonical_bytes) {
+        throw std::invalid_argument("bounded preparation execution contract differs from its request");
+    }
+    auto context = MaybeCreateProfileContext(config);
+    const std::string run_id = context ? context->NextRunId("compile_bounded") : "";
+    PreparedStaticGraph graph;
+    graph.partitioned = preparation.partitioned_graph();
+    graph.device = Device(config->target->device_type, config->target->device_id);
+    graph.target = config->target;
+    graph.pipeline_fingerprint = String(contract.fingerprint);
+    PreparedCompilerGraph prepared{request.graph_template().key(), std::move(graph),
+        config->target, contract.canonical_bytes, context, run_id};
+    FreezePreparedOperators(&prepared);
+    return prepared;
+}
+#endif
 
 CompiledGraph internal::AssembleCompiledGraph(
     const PreparedCompilerGraph& prepared,
@@ -651,10 +655,10 @@ CompiledGraph Compiler::CompileBounded(
     throw std::runtime_error(
         "Compiler::CompileBounded is disabled; configure with "
         "-DKXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=ON");
-#elif !KXC_USE_LLVM
+#elif !KXC_USE_LLVM && !KXC_USE_CUDA
     (void)request;
     throw std::runtime_error(
-        "Compiler::CompileBounded requires an available LLVM backend");
+        "Compiler::CompileBounded requires an available LLVM or CUDA backend");
 #else
     const internal::BoundedCompilePreparation preparation =
         internal::PrepareBoundedCompile(request);
@@ -672,24 +676,13 @@ CompiledGraph Compiler::CompileBounded(
     CompileConfig config = request.compile_config();
     config.Validate();
     const internal::CompilerExecutionContract contract =
-        ResolveBoundedExecutionContract(config);
-    auto profile_context = MaybeCreateProfileContext(config);
-    const std::string run_id =
-        profile_context ? profile_context->NextRunId("compile_bounded") : "";
+        internal::ResolveBoundedExecutionContract(config);
+    const auto prepared = internal::PrepareCompilerGraph(preparation, contract);
+    const auto& profile_context = prepared.profile_context;
+    const auto& run_id = prepared.profile_run_id;
     profiling::ActivationScope activation(profile_context, run_id);
     profiling::ScopedSpan compile_span(
         profile_context, MakeStageEvent("compile_bounded", config), run_id);
-
-    internal::PreparedStaticGraph graph;
-    graph.partitioned = preparation.partitioned_graph();
-    graph.device = Device(config->target->device_type,
-                          config->target->device_id);
-    graph.target = config->target;
-    graph.pipeline_fingerprint = String(contract.fingerprint);
-    internal::PreparedCompilerGraph prepared{
-        request.graph_template().key(), std::move(graph), config->target,
-        contract.canonical_bytes, profile_context, run_id};
-    internal::FreezePreparedOperators(&prepared);
 
     internal::CompiledPrimitiveBatch batch;
     {

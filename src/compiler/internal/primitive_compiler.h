@@ -60,6 +60,13 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
     const CompileConfig& config,
     const CompilerExecutionContract& contract);
 
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const BoundedCompilePreparation& preparation,
+    const PartitionedGraph& partitioned_graph,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract,
+    const std::vector<PrimitiveUnitId>& requested_unit_ids);
+
 CompiledModule AssemblePrimitiveModule(
     const CompiledPrimitiveBatch& batch,
     const std::vector<PrimitiveUnit>& units, const Target& target,

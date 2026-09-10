@@ -44,7 +44,7 @@
       "valid_extent": 0,
       "seed": 0,
       "tolerance": 1e-12,
-      "expected_gate": "reject_unsupported",
+      "expected_gate": "cpu_reference",
       "model_revision": "reference-v1",
       "target": "cpu-reference",
       "driver": "none",
@@ -66,7 +66,7 @@
         "causal": null,
         "padding_lengths": null
       },
-      "fingerprint": "8e9d56c0f3a1742a10c25eeff6e42064921042c1867f09ced8a857d1c0605749"
+      "fingerprint": "6be24f9d3fbd54619a873c9b59b9d9a67a803cb5b96a7700a3bb17aa59edd1b4"
     },
     {
       "id": "prefill_exact_attention",

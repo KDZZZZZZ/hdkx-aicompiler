@@ -4,7 +4,7 @@
 
 本模块把“目标模型是什么”和“导出的图是否就是要支持的图”变成可重复的入口。L1 先完成纯文本 MiniMind 的固定形状 prefill，再完成同一会话的多步 decode；L2 的 MiniMind-V 和 L3 的 MiniMind-O 只复用并扩展这条证据链。它不把一份 ONNX 节点统计表当成编译器能力，也不在导出失败时用隐式 Python 推理或临时算子绕过编译器。
 
-> 状态：待实施，下一波的模型入口门禁。第一波证据见 [G0](G0_BASELINE.md) 和 [G1](G1_RECORD.md)，并行安排见 [WAVE_2](WAVE_2.md)。目标阶梯以 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.2 为准，节点统计以 [OP_TODO.md](../OP_TODO.md) 为准。
+> 状态：本文件保留模型入口计划。L1 的实际 prefill、decode、状态和 greedy 已有后续 receipt；L2 完整静态视觉链见 [视觉报告](M9_MINIMIND_V_VISION_REPORT.md)，固定单图的完整图文 prefill 与会话 KV 四步 decode 已通过 CPU/LLVM，见 [联合报告](M9_MINIMIND_V_JOINT_REPORT.md)。纯文本 B1/S16 的完整八层 GPU prefill 已有 [数值证据](GPU_MINIMIND_PREFILL_REPORT.md)；GPU decode/state、多图、图文变长与 L3 仍待验收。第一波证据见 [G0](G0_BASELINE.md) 和 [G1](G1_RECORD.md)，并行安排见 [WAVE_2](WAVE_2.md)。目标阶梯以 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.2 为准，节点统计以 [OP_TODO.md](../OP_TODO.md) 为准。
 
 ## 当前事实与要做的模块
 
@@ -44,6 +44,8 @@
 先实现 host 侧确定性 greedy 循环，避免把采样器和编译器混在一起：prefill 返回 logits 与 KV，选择一个 token；之后每一步只输入新 token 和同一 session 的 cache，直到固定步数或 EOS。每步记录 input token、past/total extent、selected token、输出 checksum 和 profile run id。temperature/top-k/top-p/repetition penalty 作为后续可替换策略，不能在首个 L1 证据中偷偷改变图合同。M10 的 gate-on `While` 只作为独立静态/合成能力和后续候选；在 M2/M3 尚未交付 state/extent ABI 前，不得把它写成 L1b 已使用的生成循环。
 
 ## E5：L2/L3 预研出口
+
+L3 的退出条件现已固定为 [MiniMind-O 完成边界](M9_MINIMIND_O_BOUNDARY_REPORT.md)（L3-C1）：dense 发布模型、当前单机 CUDA 目标、六类组件与持久状态、真实多模态流式运行、1,000 帧软实时预算和有状态热替换必须全部通过。该合同不替代 L1/L2 现有数值门禁，也不把服务 UI 当作编译器完成条件。
 
 L1b 通过后，才对 MiniMind-V 的 256×256、64 patch token 静态视觉链做算子复用核对；再对 MiniMind-O 的 Thinker/Talker、SenseVoice、SigLIP2、Mimi、CAM++ 分别导出和盘点。Mimi 每层 ring buffer、Talker 12.5 Hz（80 ms）预算和 barge-in/近双工会话需要新的状态/服务决策，不能用 KV cache 的通过项代替。
 

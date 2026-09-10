@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 
 namespace kxc::api {
@@ -27,7 +28,9 @@ public:
 private:
     explicit GraphSemanticKey(std::string canonical_bytes);
 
-    std::string canonical_bytes_;
+    // Graph identity includes constant payloads. Copies share immutable bytes
+    // so per-unit contracts never duplicate all model weights.
+    std::shared_ptr<const std::string> canonical_bytes_;
     std::string digest_;
 
     friend class internal::IdentityAccess;

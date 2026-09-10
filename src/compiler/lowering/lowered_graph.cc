@@ -1,14 +1,16 @@
 /*! \file src/compiler/lowering/lowered_graph.cc
- * \brief Lowers each ordinary compute Call through boundary-only TE placeholders.
+ * \brief Lowers primitive Calls and static regions through frozen TE candidates.
  */
 
 #include "../internal/lowered_graph.h"
 #include "../internal/dynamic_shape_contract.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -152,8 +154,7 @@ te::Tensor MakeDynamicBoundaryTensor(
     const DynamicUnitShapeContract& contract,
     const Array<tir::Var>& runtime_extent_buffers) {
     if (value.origin == ValueOrigin::kConstant) {
-        throw std::invalid_argument(
-            "bounded dynamic per-unit lowering does not support constants");
+        return MakeBoundaryTensor(value);
     }
     const auto* tensor_type = value.checked_type.As<TensorTypeNode>();
     return te::placeholder(
@@ -293,11 +294,14 @@ void ValidateDynamicTEOutputContracts(
                 continue;
             }
             std::size_t actual_extent = 0;
+            int64_t actual_offset = 0;
             if (type->shape[axis] != codegen::kDynamicDimension ||
-                !relay::internal::MatchRuntimeExtentLoad(
+                !relay::internal::MatchRuntimeExtentOffset(
                     output->shape[axis], runtime_extent_buffers,
-                    &actual_extent) ||
-                actual_extent != RuntimeExtentIndex(contract, expression)) {
+                    &actual_extent, &actual_offset) ||
+                static_cast<uint64_t>(actual_offset) != expression.offset() ||
+                actual_extent != RuntimeExtentIndex(contract, DynamicShapeExpr::InputAxis(
+                    expression.input_index(), expression.axis()))) {
                 throw std::invalid_argument(
                     "dynamic TE output axis differs from runtime extent order");
             }
@@ -325,13 +329,29 @@ namespace {
 relay::LoweredFunction LowerPrimitiveUnitImpl(
     const std::vector<LogicalValueContract>& values,
     const PrimitiveUnit& unit, const Target& target,
-    const DynamicUnitShapeContract* shape_contract) {
+    const DynamicUnitShapeContract* shape_contract,
+    const std::string& tir_pipeline_canonical) {
+    if (shape_contract && unit.producer) {
+        throw std::invalid_argument("Static TE region cannot enter bounded dynamic lowering");
+    }
     const ResolvedRelayCall& resolved = ValidateUnitOperator(values, unit);
     const relay::OperatorSpec& spec = resolved.spec;
     Array<tir::Var> runtime_extent_buffers;
+    std::vector<int64_t> runtime_extent_upper_bounds;
 #if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
     if (shape_contract) {
         runtime_extent_buffers = RuntimeExtentBuffers(*shape_contract);
+        for (const DynamicShapeExpr& expression :
+             shape_contract->runtime_extent_expressions()) {
+            const auto upper = shape_contract->local_input_guards()
+                .at(expression.input_index()).at(expression.axis()).upper;
+            if (upper > static_cast<uint64_t>(
+                            std::numeric_limits<int32_t>::max())) {
+                throw std::invalid_argument(
+                    "bounded extent exceeds the int32 loop domain");
+            }
+            runtime_extent_upper_bounds.push_back(static_cast<int64_t>(upper));
+        }
         if (shape_contract->local_input_guards().size() !=
             unit.boundary_input_value_ids.size()) {
             throw std::invalid_argument(
@@ -378,6 +398,29 @@ relay::LoweredFunction LowerPrimitiveUnitImpl(
     }
 
     Array<te::Tensor> logical_inputs;
+    if (unit.producer) {
+        Array<te::Tensor> producer_inputs;
+        for (const ValueId id : unit.producer->argument_value_ids) {
+            producer_inputs.push_back(boundary_tensors.at(id));
+        }
+        const auto producer_outputs = InvokeCurrentCall(unit.producer->call, producer_inputs,
+            unit.producer->call.call.checked_type());
+        if (producer_outputs.size() != 1) throw std::invalid_argument("TE region producer output arity drifted");
+        const auto& value = GetValue(values, unit.producer->output_value_ids[0]);
+        const auto* type = value.checked_type.As<TensorTypeNode>();
+        relay::internal::ValidateStaticLoweringTensor(producer_outputs[0]->shape,
+            producer_outputs[0]->dtype, "TE region producer");
+        if (producer_outputs[0]->dtype != TIRDataType(type) ||
+            producer_outputs[0]->shape.size() != type->shape.size()) {
+            throw std::invalid_argument("TE region producer type drifted");
+        }
+        for (size_t axis = 0; axis < type->shape.size(); ++axis) {
+            int64_t extent = -1;
+            if (!relay::internal::EvaluateStaticLoweringInt64(producer_outputs[0]->shape[axis], &extent) ||
+                extent != type->shape[axis]) throw std::invalid_argument("TE region producer shape drifted");
+        }
+        boundary_tensors.emplace(value.id, producer_outputs[0]);
+    }
     for (const int64_t value_id : unit.argument_value_ids) {
         const auto tensor_it = boundary_tensors.find(value_id);
         if (tensor_it == boundary_tensors.end()) {
@@ -391,7 +434,7 @@ relay::LoweredFunction LowerPrimitiveUnitImpl(
         resolved, logical_inputs, unit.call.call.checked_type());
     te::Schedule schedule;
 #if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
-    schedule = shape_contract
+    schedule = shape_contract && !runtime_extent_buffers.empty()
                    ? relay::internal::BuildBoundedDynamicTESchedule(
                          outputs, target, runtime_extent_buffers)
                    : relay::internal::BuildDefaultTESchedule(outputs, target);
@@ -406,20 +449,56 @@ relay::LoweredFunction LowerPrimitiveUnitImpl(
     schedule = relay::internal::BuildDefaultTESchedule(outputs, target);
     ValidateTEOutputContracts(values, unit, outputs, spec.name);
 #endif
+    Array<te::Tensor> metadata_only_inputs;
+    const std::string operator_name = spec.name;
+    if (operator_name == "shape_of" || operator_name == "shape_expr" || operator_name == "constant_of_shape") {
+        metadata_only_inputs = abi_inputs;
+    } else if ((operator_name == "reshape_dynamic" || operator_name == "expand_dynamic") &&
+               logical_inputs.size() == 2) {
+        // The shape resolver already proved/projected this control dependency
+        // into attrs. Its physical value is retained in the ABI, not read by TE.
+        for (const auto& input : abi_inputs) {
+            if (input.get() == logical_inputs[1].get()) metadata_only_inputs.push_back(input);
+        }
+    } else if (operator_name == "slice" && logical_inputs.size() >= 2) {
+        const auto* attrs = resolved.attrs.As<relay::SliceAttrsNode>();
+        if (attrs && attrs->prefix_axis >= 0) {
+            // Prepared prefix/window forms use one or two shape-only anchors.
+            // Keep both in the ABI for extent loads while excluding them from
+            // the data dependency walk used by TE scheduling.
+            for (std::size_t input_index = 1; input_index < logical_inputs.size(); ++input_index) {
+                for (const auto& input : abi_inputs) {
+                    if (input.get() == logical_inputs[input_index].get()) {
+                        metadata_only_inputs.push_back(input);
+                    }
+                }
+            }
+        }
+    }
+    const relay::internal::PrimFuncIdentity identity{
+        unit.symbol, unit.id, String(unit.producer ? "add+sqrt" : spec.name), spec.schema_version,
+        String(unit.semantic_key.digest())};
+    if (!shape_contract) {
+        Array<te::Tensor> constant_tensors;
+        for (const auto& constant : constants) constant_tensors.push_back(constant.tensor);
+        const te::Program program(abi_inputs, constant_tensors, outputs, schedule,
+                                  target, tir_pipeline_canonical, metadata_only_inputs);
+        return relay::internal::LowerProgramToTIR(
+            program, constants, target, tir_pipeline_canonical, identity);
+    }
     return relay::internal::LowerTensorGraphToTIR(
         abi_inputs, constants, outputs, schedule, target,
-        relay::internal::PrimFuncIdentity{
-            unit.symbol, unit.id, String(spec.name), spec.schema_version,
-            String(unit.semantic_key.digest())},
-        runtime_extent_buffers);
+        identity,
+        runtime_extent_buffers, {}, runtime_extent_upper_bounds, metadata_only_inputs);
 }
 
 }  // namespace
 
 relay::LoweredFunction LowerPrimitiveUnit(
     const std::vector<LogicalValueContract>& values,
-    const PrimitiveUnit& unit, const Target& target) {
-    return LowerPrimitiveUnitImpl(values, unit, target, nullptr);
+    const PrimitiveUnit& unit, const Target& target,
+    const std::string& tir_pipeline_canonical) {
+    return LowerPrimitiveUnitImpl(values, unit, target, nullptr, tir_pipeline_canonical);
 }
 
 #if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
@@ -427,13 +506,14 @@ relay::LoweredFunction LowerPrimitiveUnit(
     const std::vector<LogicalValueContract>& values,
     const PrimitiveUnit& unit, const Target& target,
     const DynamicUnitShapeContract& shape_contract) {
-    return LowerPrimitiveUnitImpl(values, unit, target, &shape_contract);
+    return LowerPrimitiveUnitImpl(values, unit, target, &shape_contract, {});
 }
 #endif  // KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
 
 PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
                                        Target target,
-                                       String pipeline_fingerprint) {
+                                       String pipeline_fingerprint,
+                                       bool fuse_static_add_sqrt) {
     if (!function.defined() || !device.defined()) {
         throw std::invalid_argument(
             "PrepareStaticGraph requires a defined Function and Device");
@@ -450,7 +530,7 @@ PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
     ValueGraph value_graph = BuildValueGraph(function, device);
     prepared.value_graph_builds = 1;
     FreezeConstantPayloads(&value_graph);
-    prepared.partitioned = PartitionValueGraph(std::move(value_graph));
+    prepared.partitioned = PartitionValueGraph(std::move(value_graph), fuse_static_add_sqrt);
     prepared.partitions = 1;
     prepared.device = std::move(device);
     prepared.target = std::move(target);
@@ -462,7 +542,14 @@ runtime::ExecutablePlan BuildStaticExecutablePlan(
     const PreparedStaticGraph& prepared) {
     ValidatePartition(prepared.partitioned);
     Array<runtime::ValueSpec> value_specs;
+    std::unordered_set<ValueId> internal_values;
+    for (const auto& unit : prepared.partitioned.units) {
+        if (unit.producer) {
+            for (const ValueId id : unit.producer->output_value_ids) internal_values.insert(id);
+        }
+    }
     for (const ValueInfo& value : prepared.partitioned.value_graph.values) {
+        if (internal_values.count(value.id)) continue;
         const auto* type = value.checked_type.As<TensorTypeNode>();
         const bool is_graph_output =
             std::find(prepared.partitioned.output_value_ids.begin(),

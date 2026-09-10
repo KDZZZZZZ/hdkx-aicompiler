@@ -218,7 +218,7 @@ ResolvedRelayCall ResolveRelayCall(
             &output_leaf_types, path + ".checked_type");
     }
     if (output_leaf_types.empty() ||
-        (op->spec.output_arity >= 0 &&
+        (op->spec.output_arity > 0 &&
          static_cast<std::size_t>(op->spec.output_arity) !=
              output_leaf_types.size())) {
         Fail(std::move(path), "operator_output_arity",

@@ -401,6 +401,20 @@ llvm::Value* CodeGenLLVM::GenLoad(const tir::LoadNode* op) {
 llvm::Value* CodeGenLLVM::GenCall(const tir::CallNode* op) {
     llvm::Type* ret_type = GetLLVMType(op->dtype);
 
+    if (op->name == "tanh" || op->name == "erf") {
+        if (op->args.size() != 1 || op->dtype != tir::DataType::Float(32) ||
+            op->args[0]->dtype != op->dtype) {
+            throw std::runtime_error("CodeGenLLVM: " + op->name +
+                                     " requires exactly one float32 argument and result");
+        }
+        // Exact C ABI; the existing ORC host-symbol generator resolves libm.
+        // Do not approximate tanh with exp (overflow) or erf with a polynomial.
+        auto callee = module_->getOrInsertFunction(
+            op->name + "f", llvm::FunctionType::get(ret_type, {ret_type}, false));
+        return builder_.CreateCall(callee, {GenExprInContext(op->args[0], "libm argument")},
+                                   "call_" + op->name);
+    }
+
     if (op->name == "cast") {
         if (op->args.size() != 1) {
             throw std::runtime_error("CodeGenLLVM: cast expects exactly one argument");

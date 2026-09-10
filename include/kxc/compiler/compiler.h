@@ -39,6 +39,15 @@ public:
     const std::vector<ArtifactPin>& artifact_pins() const;
     const GraphSemanticKey& graph_semantic_key() const;
 
+    /*! \brief Derive a state plan through the existing validated bindings,
+     *  retaining this module, artifact pins and graph semantics. */
+    CompiledGraph BindStateOutputs(std::vector<runtime::StateOutputBinding> bindings,
+                                   double state_fill = 0) const;
+    CompiledGraph BindBoundedStateOutputs(std::vector<runtime::StateOutputBinding> bindings,
+        std::vector<Array<int64_t>> physical_shapes, double state_fill = 0) const;
+    /*! \brief Declare the existing bounded plan's independent request rows. */
+    CompiledGraph BindRequestBatching(int64_t max_batch_size) const;
+
 private:
     friend struct internal::CompiledGraphAccess;
 
@@ -86,7 +95,7 @@ public:
      */
     static CompiledGraph Compile(Function func, CompileConfig config);
 
-    /*! \brief Compiles one adapter-minted bounded CPU/LLVM graph artifact. */
+    /*! \brief Compiles one adapter-minted bounded LLVM or CUDA graph artifact. */
     static CompiledGraph CompileBounded(
         const experimental::restricted_symbolic_shape::v1::BoundedCompileRequest&
             request);

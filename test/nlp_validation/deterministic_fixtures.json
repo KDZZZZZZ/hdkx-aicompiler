@@ -23,10 +23,11 @@
       "valid_extent": 0,
       "seed": 0,
       "tolerance": 1e-12,
-      "expected_gate": "reject_unsupported",
+      "expected_gate": "cpu_reference",
       "logits": [1000.0, -1000.0],
       "mask": [false, false],
-      "fingerprint": "e1025543a629143370a1e07cfc0d3cdbae79cc3153df4a753d8bc3daa0458a5f"
+      "expected": [0.0, 0.0],
+      "fingerprint": "236c4a9db1aa6a8916fd4292103be57d44633cd84b8f22dfc9a568e8b660e049"
     },
     {
       "id": "prefill_exact_attention",

@@ -1,10 +1,12 @@
-# M7：分布式模块先补证据，再决定是否接入内核
+# M7：分布式计划与已编译 CPU 内核执行
 
-第一波和第二波都以单机 CPU/LLVM MiniMind-L1 为验收边界。当前 distributed/ 有会话、worker、放置、JSON 计划和 CPU 集合通信代码，规模约 2,487 行；执行器对 compiled module kernel 仍会报 launch 未实现，也没有多 worker 数值证据。因此 MiniMind 单机通过不能升级成分布式能力，MiniMind-O 的多流会话也不属于本模块首版。
+第一波和第二波都以单机 CPU/LLVM MiniMind-L1 为验收边界。实施前 distributed/ 已有约 2,487 行会话、worker、放置、JSON 计划与 CPU 集合通信代码，但没有多 worker 数值证据。现已补齐真实 CPU kernel 桥接与独立验证。因此 MiniMind 单机通过不能升级成分布式能力，MiniMind-O 的多流会话也不属于本模块首版。
+
+后续 S4 已接入公开整图绑定和有序多输出，完整八层静态 MiniMind prefill 在两个 worker、两套显式放置下均与单机精确一致，见 [整图报告](M7_MODEL_REPORT.md)。该报告单独记录完整模型与最终集成验收，不把首版小图结果当作模型证据。
 
 本模块先证明计划、放置、通信和失败诊断，再决定是否桥接一个已经编译的 CPU kernel。worker 只能执行外部提供的 artifact，不编译、不猜 shape、不维护 KV registry；若 ABI 无法安全表达就保留为 unsupported。
 
-> 状态：待实施，低于 MiniMind-L1 核心波次优先级。当前安排见 [WAVE_2](WAVE_2.md)，边界见 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.3。不处理 KV 一致性或跨机器服务化。
+> 状态（2026-09-10）：S1/S2/S3 已接入并完成；S4 的公开整图绑定、有序多输出和完整静态 MiniMind prefill 也已完成，最终证据、合同 v3、四配置回归和限制见 [整图技术报告](M7_MODEL_REPORT.md)。本页仍不把结果扩展为分布式 KV 一致性或跨机器服务化。
 
 ## S1：计划和通信证据
 
@@ -59,8 +61,8 @@ python3 tools/architecture/check_public_headers.py --root . --compile
 
 ## 完成条件
 
-- [ ] S1 的计划、placement、JSON、CCL 和失败路径有独立测试。
-- [ ] compiled module 尚未接入时，负例明确报错且不执行 kernel。
-- [ ] 若接入 S2，单机多 worker 的 compiled CPU kernel 与 RuntimeSession 数值一致，ABI mismatch 为零 launch。
-- [ ] 没有声称 CUDA、KV coherence、多机网络或 Transformer 全图已支持。
-- [ ] 矩阵将计划/通信证据与 compiled-kernel 证据分开记录。
+- [x] S1 的计划、placement、JSON、CCL 和失败路径有独立测试。
+- [x] compiled module 尚未接入时，负例明确报错且不执行 kernel。
+- [x] 若接入 S2，单机多 worker 的 compiled CPU kernel 与 RuntimeSession 数值一致，ABI mismatch 为零 launch。
+- [x] 首版小图与后续完整静态 prefill 分开验收；不将其推广为 CUDA、持久 KV 一致性或多机网络能力。
+- [x] 矩阵将计划/通信证据与 compiled-kernel 证据分开记录。

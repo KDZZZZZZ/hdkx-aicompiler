@@ -4,6 +4,7 @@
 
 #include "kxc/frontend/onnx_importer.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -411,8 +412,52 @@ std::string ReadTextFile(const std::string& path) {
 // 按算子名称把 JSON 属性转换为对应的强类型 Relay Attrs 对象。
 // node_name 仅用于诊断：手写非法 spec 的报错必须能定位到具体节点。
 ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
-                    const std::string& node_name) {
+                    const std::string& node_name, bool shape_source = false) {
     RequireKind(attrs, Json::Object, "attrs for " + op_name);
+    if (op_name == "shape_of" ||
+        (shape_source && (op_name == "reshape_dynamic" || op_name == "expand_dynamic" ||
+                          (op_name == "slice" && attrs.o.empty())))) {
+        if (!attrs.o.empty()) {
+            throw std::runtime_error("Shape source controls must arrive without attrs: " + node_name);
+        }
+        return ObjectRef();
+    }
+    if (shape_source && op_name == "constant_of_shape") {
+        if (attrs.o.size() != 2 || !OptionalField(attrs, "dtype_code")) {
+            throw std::runtime_error("Shape source ConstantOfShape requires dtype and one fill payload: " + node_name);
+        }
+        const int dtype = ReadInt(Field(attrs, "dtype_code", node_name), node_name + ".dtype_code");
+        if (dtype == 0) {
+            const int64_t bits = ReadInt64(Field(attrs, "value_bits", node_name), node_name + ".value_bits");
+            if (bits < 0 || bits > std::numeric_limits<uint32_t>::max()) {
+                throw std::runtime_error("Shape source float32 fill bits out of range: " + node_name);
+            }
+            const uint32_t raw = static_cast<uint32_t>(bits);
+            float fill;
+            std::memcpy(&fill, &raw, sizeof(fill));
+            if (std::isnan(fill)) throw std::runtime_error("Shape source fill rejects NaN: " + node_name);
+            return ObjectRef(relay::ConstantOfShapeAttrs::Create({}, 0, fill));
+        }
+        if (dtype != 2) throw std::runtime_error("Shape source fill requires float32 or int64: " + node_name);
+        const int64_t fill = ReadInt64(Field(attrs, "value", node_name), node_name + ".value");
+        if (fill < -(int64_t{1} << 53) || fill > (int64_t{1} << 53)) {
+            throw std::runtime_error("Shape source fill exceeds exact double integer range: " + node_name);
+        }
+        return ObjectRef(relay::ConstantOfShapeAttrs::Create({}, dtype, static_cast<double>(fill)));
+    }
+    if (op_name == "trilu") {
+        if (attrs.o.size() != 2) throw std::runtime_error("Trilu requires upper/k only: " + node_name);
+        return ObjectRef(relay::TriluAttrs::Create(
+            ReadInt(Field(attrs, "upper", node_name), node_name + ".upper"),
+            ReadInt64(Field(attrs, "k", node_name), node_name + ".k")));
+    }
+    if (shape_source && op_name == "unsqueeze") {
+        if (attrs.o.size() != 1 || !OptionalField(attrs, "axes")) {
+            throw std::runtime_error("Shape source Unsqueeze requires exactly axes: " + node_name);
+        }
+        return ObjectRef(relay::UnsqueezeAttrs::Create(
+            ToArray(ReadInt64Vector(Field(attrs, "axes", node_name), node_name + ".axes"))));
+    }
     if (op_name == "nn_conv2d") {
         return ObjectRef(relay::Conv2DAttrs::Create(
             ReadInt64Vector(Field(attrs, "strides", "conv attrs"), "conv attrs.strides"),
@@ -463,7 +508,7 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
         }
         return ObjectRef();
     }
-    if (op_name == "neg" || op_name == "sigmoid" || op_name == "pow") {
+    if (op_name == "neg" || op_name == "sigmoid" || op_name == "tanh" || op_name == "erf" || op_name == "pow") {
         // ONNX Neg/Sigmoid/Pow(opset 13+) 是 fieldless 算子：无属性。
         if (!attrs.o.empty()) {
             throw std::runtime_error("Node '" + node_name + "' (" + op_name +
@@ -599,6 +644,17 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
         }
         return ObjectRef(relay::ConcatenateAttrs::Create(
             ReadInt(Field(attrs, "axis", ctx), ctx + ".axis")));
+    }
+    if (op_name == "split") {
+        const std::string ctx = "split attrs";
+        if (attrs.o.size() != 2 || !OptionalField(attrs, "axis") ||
+            !OptionalField(attrs, "sections")) {
+            throw std::runtime_error(
+                "Split import attrs must contain exactly axis and sections: " + node_name);
+        }
+        return ObjectRef(relay::SplitAttrs::Create(
+            ReadInt(Field(attrs, "axis", ctx), ctx + ".axis"),
+            ToArray(ReadInt64Vector(Field(attrs, "sections", ctx), ctx + ".sections"))));
     }
     if (op_name == "nn_global_avg_pool2d") {
         return ObjectRef(relay::GlobalAvgPool2DAttrs::Create());
@@ -919,13 +975,15 @@ void ValidateGatherIndices(const Array<Expr>& args,
 
 }  // namespace
 
-// 装载 ONNX 中间规范、参数 Storage 和 Relay 数据流，返回可编译函数及参数表。
-ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
-                                     const std::string& params_path) {
+namespace {
+// Both formats share the parser, constant storage and graph reconstruction.
+// A shape source defers type-dependent validation to the restricted producer.
+ImportedONNXModel LoadSpec(const std::string& json_path,
+                          const std::string& params_path, bool shape_source) {
     Json root = JsonParser(ReadTextFile(json_path)).Parse();
     RequireKind(root, Json::Object, "root");
     std::string format = ReadString(Field(root, "format", "root"), "root.format");
-    if (format != "kxc.onnx_import.v1") {
+    if (format != (shape_source ? "kxc.onnx_shape_source.v1" : "kxc.onnx_import.v1")) {
         throw std::runtime_error("Unsupported ONNX import spec format: " + format);
     }
 
@@ -1001,9 +1059,15 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             ReadStringVector(Field(node, "inputs", ctx), ctx + ".inputs");
         std::vector<std::string> output_names =
             ReadStringVector(Field(node, "outputs", ctx), ctx + ".outputs");
-        if (output_names.size() != 1 || output_names[0].empty()) {
+        const bool multi_output = op_name == "split";
+        if ((multi_output && output_names.size() < 2) ||
+            (!multi_output && output_names.size() != 1) ||
+            std::any_of(output_names.begin(), output_names.end(),
+                        [](const std::string& name) { return name.empty(); })) {
             throw std::runtime_error(
-                "ONNX import node must have one non-empty output: " + node_name);
+                multi_output
+                    ? "Split import node must have at least two non-empty outputs: " + node_name
+                    : "ONNX import node must have one non-empty output: " + node_name);
         }
 
         Array<Expr> args;
@@ -1015,39 +1079,46 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             }
             args.push_back(it->second);
         }
-        ObjectRef attrs = MakeAttrs(op_name, Field(node, "attrs", ctx), node_name);
-        if (op_name == "gather") {
-            ValidateGatherIndices(args, attrs, function_params, node_name);
-        }
-        if (op_name == "mul" || op_name == "subtract" || op_name == "divide" ||
-            op_name == "sqrt") {
-            ValidateFloat32Inputs(op_name, args, function_params, node_name);
-        }
-        if (op_name == "neg" || op_name == "sigmoid") {
-            ValidateFloat32MathInputs(op_name, args, function_params, node_name);
-        }
-        if (op_name == "pow") {
-            ValidatePowSubset(args, function_params, node_name);
-        }
-        if (op_name == "expand") {
-            ValidateExpandSubset(args, attrs, function_params, node_name);
-        }
-        if (op_name == "equal") {
-            ValidateEqualSubset(args, function_params, node_name);
-        }
-        if (op_name == "cast") {
-            ValidateCastSubset(args, attrs, function_params, node_name);
-        }
-        if (op_name == "reduce_mean") {
-            ValidateReduceMeanSubset(args, attrs, function_params, node_name);
+        ObjectRef attrs = MakeAttrs(op_name, Field(node, "attrs", ctx), node_name, shape_source);
+        if (!shape_source) {
+            if (op_name == "gather") {
+                ValidateGatherIndices(args, attrs, function_params, node_name);
+            }
+            if (op_name == "mul" || op_name == "subtract" || op_name == "divide" ||
+                op_name == "sqrt") {
+                ValidateFloat32Inputs(op_name, args, function_params, node_name);
+            }
+            if (op_name == "neg" || op_name == "sigmoid" || op_name == "tanh" || op_name == "erf") {
+                ValidateFloat32MathInputs(op_name, args, function_params, node_name);
+            }
+            if (op_name == "pow") {
+                ValidatePowSubset(args, function_params, node_name);
+            }
+            if (op_name == "expand") {
+                ValidateExpandSubset(args, attrs, function_params, node_name);
+            }
+            if (op_name == "equal") {
+                ValidateEqualSubset(args, function_params, node_name);
+            }
+            if (op_name == "cast") {
+                ValidateCastSubset(args, attrs, function_params, node_name);
+            }
+            if (op_name == "reduce_mean") {
+                ValidateReduceMeanSubset(args, attrs, function_params, node_name);
+            }
         }
         Call call(relay::Op::Get(op_name), args, attrs);
-        if (!values.emplace(output_names[0], call).second) {
-            throw std::runtime_error(
-                "ONNX import node output name conflicts with an existing value: " +
-                node_name);
+        for (size_t output_index = 0; output_index < output_names.size(); ++output_index) {
+            Expr value = multi_output ? Expr(kxc::TupleGetItem(call,
+                                                               static_cast<int>(output_index)))
+                                      : Expr(call);
+            if (!values.emplace(output_names[output_index], value).second) {
+                throw std::runtime_error(
+                    "ONNX import node output name conflicts with an existing value: " +
+                    node_name);
+            }
+            producer_node_by_value.emplace(output_names[output_index], node_name);
         }
-        producer_node_by_value.emplace(output_names[0], node_name);
     }
 
     Array<Expr> output_exprs;
@@ -1069,6 +1140,8 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             ReadStaticShape(Field(output, "shape", ctx), ctx + ".shape"));
         declared_output_dtypes.push_back(
             ReadString(Field(output, "dtype", ctx), ctx + ".dtype"));
+        result.declared_output_types.emplace_back(ToArray(declared_output_shapes.back()),
+                                                  declared_output_dtypes.back());
         auto it = values.find(name);
         if (it == values.end()) {
             throw std::runtime_error("Missing graph output value in ONNX import spec: " + name);
@@ -1080,6 +1153,10 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         throw std::runtime_error("ONNX import spec has no graph outputs");
     }
     Expr body = output_exprs.size() == 1 ? output_exprs[0] : Expr(Tuple(output_exprs));
+    if (shape_source) {
+        result.function = Function(function_params, body);
+        return result;
+    }
     result.function = relay::InferTypePass(Function(function_params, body));
     for (size_t i = 0; i < output_exprs.size(); ++i) {
         const auto* inferred = output_exprs[i].checked_type().As<TensorTypeNode>();
@@ -1094,6 +1171,17 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         }
     }
     return result;
+}
+}  // namespace
+
+ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
+                                    const std::string& params_path) {
+    return LoadSpec(json_path, params_path, false);
+}
+
+ImportedONNXModel LoadONNXShapeSource(const std::string& json_path,
+                                    const std::string& params_path) {
+    return LoadSpec(json_path, params_path, true);
 }
 
 }  // namespace frontend

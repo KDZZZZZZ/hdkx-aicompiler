@@ -8,6 +8,7 @@
 #include <chrono>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -24,6 +25,7 @@ using runtime::CurrentExecutionObserver;
 using runtime::CurrentExecutionRunCorrelation;
 using runtime::DispatchExecutionObservation;
 using runtime::ExecutionObserver;
+using runtime::ExecutionObservationScope;
 
 KXC_OBJECT_DEFINE(DeviceStreamNode)
 KXC_OBJECT_DEFINE(AsyncOperationNode)
@@ -335,6 +337,14 @@ void StorageCopySync(const Storage& from, size_t from_offset,
     }
     // 未装配观测器时只有一次空判断；没有发生的拷贝不虚构事件。
     ExecutionObserver* observer = CurrentExecutionObserver();
+    std::optional<ExecutionObservationScope> copy_scope;
+    if (observer) {
+        CopyInfo info;
+        info.from_device = from.device();
+        info.to_device = to.device();
+        info.bytes = nbytes;
+        copy_scope.emplace(observer, CurrentExecutionRunCorrelation(), nullptr, &info);
+    }
     const std::chrono::steady_clock::time_point begin =
         observer == nullptr ? std::chrono::steady_clock::time_point{}
                             : std::chrono::steady_clock::now();
@@ -402,6 +412,15 @@ AsyncOperation StorageCopyAsync(const Storage& from, size_t from_offset,
     }
     DeviceAPI* api = GetDeviceAPI(expected.device_type());
     Array<Storage> retained{from, to};
+    std::optional<ExecutionObservationScope> copy_scope;
+    if (auto* observer = CurrentExecutionObserver()) {
+        CopyInfo info;
+        info.from_device = from_device;
+        info.to_device = to_device;
+        info.bytes = nbytes;
+        info.submitted_async = true;
+        copy_scope.emplace(observer, CurrentExecutionRunCorrelation(), nullptr, &info);
+    }
     if (expected.device_type() == kCPU) {
         // CPU 异步拷贝在主机上同步完成；提交动作的耗时即主机执行耗时。
         ExecutionObserver* observer = CurrentExecutionObserver();

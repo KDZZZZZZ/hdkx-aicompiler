@@ -10,15 +10,16 @@
 //   分配事件的父 span；事件语义见 M1 文档，每个事件带 timing 字段。
 // - 本适配器必须吞掉自身异常：观测永远不能改变执行结果。完成回调可能
 //   在 run 作用域结束后、甚至别的线程触发，因此按值捕获全部关联信息。
-// - 实现整体内联在本公共头中；ProfileContext 只通过公共 API 使用，
-//   新增实现文件需要动共享的 CMake 源列表，超出 A 线所有权。
+// - 同步作用域只覆盖实际提交线程；异步完成只记录捕获的关联，不迁移 TLS。
 
 #pragma once
 
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -37,6 +38,61 @@ public:
     explicit RuntimeExecutionObserver(std::shared_ptr<ProfileContext> context)
         : context_(std::move(context)) {}
 
+    runtime::ExecutionScopeExit OnScopeEnter(
+        const runtime::ExecutionRunCorrelation& correlation,
+        const runtime::KernelSubmitInfo* kernel) override {
+        return EnterScope(correlation, kernel, nullptr);
+    }
+
+    runtime::ExecutionScopeExit OnCopyScopeEnter(
+        const runtime::ExecutionRunCorrelation& correlation,
+        const runtime::CopyInfo& copy) override {
+        return EnterScope(correlation, nullptr, &copy);
+    }
+
+private:
+    runtime::ExecutionScopeExit EnterScope(
+        const runtime::ExecutionRunCorrelation& correlation,
+        const runtime::KernelSubmitInfo* kernel, const runtime::CopyInfo* copy) {
+        if (!context_) return {};
+        try {
+            const bool own_context = CurrentContext() == context_;
+            const runtime::ExecutionRunCorrelation effective{
+                correlation.run_id.empty() && own_context ? CurrentRunId() : correlation.run_id,
+                correlation.span_id.empty() && own_context ? CurrentSpanId() : correlation.span_id};
+            auto scope = std::make_shared<ActiveScope>(context_, effective);
+            if (kernel) {
+                EventSpec spec;
+                spec.component = "execution_plan";
+                spec.event_type = "kernel_launch";
+                spec.device = kernel->device.ToString();
+                spec.kernel_symbol = kernel->kernel_symbol;
+                spec.fields["timing"] = "host_submit";
+                spec.fields["call_index"] = std::to_string(kernel->call_index);
+                AddRunMetadata(&spec, LookupMetadata(effective.run_id));
+                scope->launch.emplace(context_, std::move(spec), effective.run_id, effective.span_id);
+            }
+            if (copy) {
+                EventSpec spec;
+                spec.component = "device_api";
+                spec.event_type = "copy_launch";
+                spec.device = copy->to_device.ToString();
+                spec.fields["timing"] = "host_submit";
+                spec.fields["from_device"] = copy->from_device.ToString();
+                spec.fields["to_device"] = copy->to_device.ToString();
+                spec.fields["submitted_async"] = copy->submitted_async ? "true" : "false";
+                spec.metrics["bytes"] = static_cast<double>(copy->bytes);
+                AddRunMetadata(&spec, LookupMetadata(effective.run_id));
+                scope->launch.emplace(context_, std::move(spec), effective.run_id, effective.span_id);
+                PendingCopyIds().push_back({context_.get(), scope->launch->span_id(), effective});
+            }
+            return [scope = std::move(scope)]() mutable { scope.reset(); };
+        } catch (...) {
+            return {};
+        }
+    }
+
+public:
     runtime::ExecutionRunCorrelation OnRunStart(
         const runtime::ExecutionRunStart& run) override {
         runtime::ExecutionRunCorrelation correlation;
@@ -47,6 +103,7 @@ public:
             state->span_id = context_->NextSpanId();
             state->start_ns = context_->ElapsedMonotonicNs();
             state->device = run.device.ToString();
+            state->metadata = run.metadata;
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 active_runs_[state->run_id] = state;
@@ -77,6 +134,7 @@ public:
             spec.event_type = "runtime_session_run";
             spec.device = run.device.ToString();
             spec.fields["timing"] = "host_execute";
+            AddRunMetadata(&spec, state->metadata);
             spec.metrics["input_count"] = static_cast<double>(run.input_count);
             spec.metrics["kernel_count"] = static_cast<double>(run.kernel_count);
             spec.metrics["submit_count"] = static_cast<double>(run.submit_count);
@@ -97,7 +155,7 @@ public:
         if (!context_) return;
         try {
             // 内核提交前时刻；提交路径在单线程内 begin→submitted 相邻，
-            // 用线程本地栈保存起点，提交失败残留的起点由下一次 begin 覆盖。
+            // 用线程本地栈保存起点，提交失败由 lexical scope 清理残留起点。
             PendingKernelStarts().push_back(context_->ElapsedMonotonicNs());
         } catch (...) {
             // 观测失败不能改变执行结果。
@@ -108,6 +166,7 @@ public:
         const runtime::KernelSubmitInfo& kernel,
         const runtime::ExecutionRunCorrelation& correlation) override {
         if (!context_) return nullptr;
+        const runtime::ExecutionMetadata metadata = LookupMetadata(correlation.run_id);
         // 主机完成一次内核提交动作的时刻；不代表执行完成。
         try {
             EventSpec spec;
@@ -118,6 +177,7 @@ public:
             spec.kernel_symbol = kernel.kernel_symbol;
             spec.fields["timing"] = "host_submit";
             spec.fields["call_index"] = std::to_string(kernel.call_index);
+            AddRunMetadata(&spec, metadata);
             context_->RecordInstant(spec, correlation.run_id,
                                     correlation.span_id);
         } catch (...) {
@@ -143,7 +203,8 @@ public:
                 parent_span_id = correlation.span_id,
                 kernel_symbol = kernel.kernel_symbol,
                 device = kernel.device.ToString(),
-                call_index = kernel.call_index](bool at_registration) {
+                call_index = kernel.call_index,
+                metadata](bool at_registration) {
             if (!context) return;
             try {
                 EventSpec spec;
@@ -156,6 +217,7 @@ public:
                 spec.fields["timing"] =
                     at_registration ? "host_execute" : "host_observed_complete";
                 spec.fields["call_index"] = std::to_string(call_index);
+                AddRunMetadata(&spec, metadata);
                 context->RecordCompletedSpan(spec, run_id, context->NextSpanId(),
                                              parent_span_id, start_ns,
                                              context->ElapsedMonotonicNs());
@@ -168,6 +230,7 @@ public:
     void OnAllocation(const runtime::AllocationInfo& allocation,
                       const runtime::ExecutionRunCorrelation& correlation) override {
         if (!context_) return;
+        const runtime::ExecutionMetadata metadata = LookupMetadata(correlation.run_id);
         try {
             EventSpec spec;
             spec.component = "device_api";
@@ -178,6 +241,7 @@ public:
             spec.fields["alignment"] = std::to_string(allocation.alignment);
             spec.fields["reused"] =
                 allocation.kind == runtime::AllocationKind::kFresh ? "false" : "true";
+            AddRunMetadata(&spec, metadata);
             switch (allocation.kind) {
                 case runtime::AllocationKind::kFresh:
                     spec.fields["alloc_kind"] = "fresh";
@@ -208,6 +272,8 @@ public:
                 const runtime::ExecutionRunCorrelation& correlation) override {
         if (!context_) return;
         try {
+            const auto effective = CopyCorrelation(correlation);
+            const runtime::ExecutionMetadata metadata = LookupMetadata(effective.run_id);
             EventSpec spec;
             spec.component = "device_api";
             spec.event_type = "copy";
@@ -217,6 +283,9 @@ public:
             spec.fields["from_device"] = copy.from_device.ToString();
             spec.fields["to_device"] = copy.to_device.ToString();
             spec.fields["submitted_async"] = copy.submitted_async ? "true" : "false";
+            const std::string copy_id = CurrentCopyId();
+            spec.fields["copy_id"] = copy_id;
+            AddRunMetadata(&spec, metadata);
             if (!copy.error_message.empty()) {
                 spec.status = "error";
                 spec.message = copy.error_message;
@@ -224,9 +293,9 @@ public:
             const std::int64_t end_ns = context_->ElapsedMonotonicNs();
             std::int64_t start_ns = end_ns - copy.duration_ns;
             if (start_ns < 0) start_ns = 0;
-            context_->RecordCompletedSpan(spec, correlation.run_id,
+            context_->RecordCompletedSpan(spec, effective.run_id,
                                           context_->NextSpanId(),
-                                          correlation.span_id, start_ns, end_ns);
+                                          effective.span_id, start_ns, end_ns);
         } catch (...) {
             // 观测失败不能改变执行结果。
         }
@@ -236,7 +305,10 @@ public:
         const runtime::CopyInfo& copy,
         const runtime::ExecutionRunCorrelation& correlation) override {
         if (!context_) return nullptr;
+        const auto effective = CopyCorrelation(correlation);
+        const runtime::ExecutionMetadata metadata = LookupMetadata(effective.run_id);
         const std::int64_t submit_ns = context_->ElapsedMonotonicNs();
+        const std::string copy_id = CurrentCopyId();
         try {
             EventSpec spec;
             spec.component = "device_api";
@@ -245,20 +317,23 @@ public:
             spec.device = copy.to_device.ToString();
             spec.metrics["bytes"] = static_cast<double>(copy.bytes);
             spec.fields["timing"] = "host_submit";
+            spec.fields["copy_id"] = copy_id;
             spec.fields["from_device"] = copy.from_device.ToString();
             spec.fields["to_device"] = copy.to_device.ToString();
-            context_->RecordInstant(spec, correlation.run_id,
-                                    correlation.span_id);
+            AddRunMetadata(&spec, metadata);
+            // Keep empty correlation explicit when another profile is active.
+            const ActivationScope scope(context_,effective.run_id);
+            context_->RecordInstant(spec, effective.run_id,effective.span_id);
         } catch (...) {
             // 观测失败不能改变执行结果。
         }
-        if (correlation.run_id.empty()) return nullptr;
         auto context = context_;
-        return [context, submit_ns, bytes = copy.bytes,
+        return [context, submit_ns, copy_id, duration_ns = copy.duration_ns, bytes = copy.bytes,
                 from_device = copy.from_device.ToString(),
                 to_device = copy.to_device.ToString(),
-                run_id = correlation.run_id,
-                parent_span_id = correlation.span_id](bool at_registration) {
+                run_id = effective.run_id,
+                parent_span_id = effective.span_id,
+                metadata](bool at_registration) {
             if (!context) return;
             try {
                 EventSpec spec;
@@ -271,9 +346,16 @@ public:
                 spec.fields["from_device"] = from_device;
                 spec.fields["to_device"] = to_device;
                 spec.fields["submitted_async"] = "true";
+                spec.fields["copy_id"] = copy_id;
+                AddRunMetadata(&spec, metadata);
+                // CPU CopyDataAsync already executed before this callback was
+                // registered. Report that measured work, not observer overhead.
+                const std::int64_t end_ns = at_registration
+                    ? submit_ns : context->ElapsedMonotonicNs();
+                const std::int64_t start_ns = at_registration
+                    ? (duration_ns < submit_ns ? submit_ns - duration_ns : 0) : submit_ns;
                 context->RecordCompletedSpan(spec, run_id, context->NextSpanId(),
-                                             parent_span_id, submit_ns,
-                                             context->ElapsedMonotonicNs());
+                                             parent_span_id, start_ns, end_ns);
             } catch (...) {
                 // 观测失败不能改变执行结果。
             }
@@ -281,12 +363,81 @@ public:
     }
 
 private:
+    struct ActiveScope {
+        ActivationScope activation;
+        std::optional<ScopedSpan> launch;
+        std::size_t kernel_depth{PendingKernelStarts().size()};
+        std::size_t copy_depth{PendingCopyIds().size()};
+        int exceptions{std::uncaught_exceptions()};
+        ActiveScope(const std::shared_ptr<ProfileContext>& context,
+                    const runtime::ExecutionRunCorrelation& correlation)
+            : activation(context, correlation.run_id, correlation.span_id) {}
+        ~ActiveScope() {
+            if (PendingKernelStarts().size() > kernel_depth)
+                PendingKernelStarts().resize(kernel_depth);
+            if (PendingCopyIds().size() > copy_depth)
+                PendingCopyIds().resize(copy_depth);
+            if (launch && std::uncaught_exceptions() > exceptions) {
+                try { launch->SetStatus("error"); } catch (...) {}
+            }
+        }
+    };
+
+    struct ActiveCopy {
+        const ProfileContext* context;
+        std::string id;
+        runtime::ExecutionRunCorrelation correlation;
+    };
+
+    static std::vector<ActiveCopy>& PendingCopyIds() {
+        thread_local std::vector<ActiveCopy> ids;
+        return ids;
+    }
+
+    const ActiveCopy* CurrentCopy() const {
+        const auto& ids = PendingCopyIds();
+        if (!ids.empty() && ids.back().context == context_.get() &&
+            ids.back().id == CurrentSpanId()) return &ids.back();
+        return nullptr;
+    }
+
+    std::string CurrentCopyId() {
+        if (const auto* copy = CurrentCopy()) return copy->id;
+        return context_->NextSpanId();
+    }
+
+    runtime::ExecutionRunCorrelation CopyCorrelation(
+        const runtime::ExecutionRunCorrelation& correlation) const {
+        // The copy launch is a child of the caller. Preserve the caller for
+        // submit/completion even when the runtime supplied empty correlation.
+        if (const auto* copy = CurrentCopy()) return copy->correlation;
+        const bool own_context = CurrentContext() == context_;
+        return {correlation.run_id.empty() && own_context ? CurrentRunId() : correlation.run_id,
+                correlation.span_id.empty() && own_context ? CurrentSpanId() : correlation.span_id};
+    }
+
+    /*! \brief 将调用方字段附加到 runtime 事件，保留运行时保留字段。 */
+    static void AddRunMetadata(EventSpec* spec,
+                               const runtime::ExecutionMetadata& metadata) {
+        for (const auto& item : metadata) {
+            spec->fields.emplace(item.first, item.second);
+        }
+    }
+
+    runtime::ExecutionMetadata LookupMetadata(const std::string& run_id) {
+        if (run_id.empty()) return {};
+        std::lock_guard<std::mutex> lock(mu_);
+        const auto it = active_runs_.find(run_id);
+        return it == active_runs_.end() ? runtime::ExecutionMetadata{} : it->second->metadata;
+    }
+
     /*! \brief 一次运行的在途状态；OnRunEnd 依据 run id 找回并关闭 span。 */
     struct RunState {
         std::string run_id;
         std::string span_id;
         std::string device;
         std::int64_t start_ns{0};
+        runtime::ExecutionMetadata metadata;
     };
 
     /*! \brief 本线程待提交内核的执行区间起点；begin→submitted 相邻消费。 */

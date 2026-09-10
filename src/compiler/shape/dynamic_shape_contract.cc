@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "../internal/execution_contract.h"
+#include "../internal/relay_program.h"
 #include "runtime/internal/module_invocation_contract.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "shape_value_resolver.h"
@@ -40,7 +41,23 @@ struct DirectDimension final {
     bool is_constant{false};
     std::uint64_t constant{0};
     std::string symbol;
+    std::uint64_t offset{0};
 };
+
+// Recognize only Symbol + nonnegative constant. DimExpr owns evaluation and
+// canonical equality; sampling alone never establishes this proof.
+DirectDimension ReadOffsetDimension(const DimExpr& expression) {
+    if (expression.kind() == DimExpr::Kind::kConst) {
+        return {true, static_cast<std::uint64_t>(expression.Evaluate(specialization::BindingSet())), {}};
+    }
+    const auto symbols = expression.Symbols();
+    if (symbols.size() != 1) Reject("a derived dimension must be Symbol plus a nonnegative constant");
+    const auto offset = shape_resolution::ProveNonnegativeConstantOffset(expression,DimExpr::Symbol(symbols[0]));
+    if (!offset) {
+        Reject("a derived dimension must be Symbol plus a nonnegative constant");
+    }
+    return {false, 0, symbols[0], static_cast<std::uint64_t>(*offset)};
+}
 
 DirectDimension ReadDirectDimension(const DimExpr& expression) {
     if (expression.kind() == DimExpr::Kind::kConst) {
@@ -156,16 +173,17 @@ BoundsBySymbol AnalyzeTemplate(
             const auto& logical = named.contract.logical().dimensions();
             const auto& physical = named.contract.physical().dimensions();
             const auto& valid = named.contract.valid().dimensions();
-            if (logical.empty() || !SameDimensions(logical, physical) ||
+            if (!SameDimensions(logical, physical) ||
                 !SameDimensions(logical, valid)) {
-                Reject("every value must have a fixed nonzero rank and logical == physical == valid expressions (value '" +
+                Reject("every value must have a fixed rank and logical == physical == valid expressions (value '" +
                        named.name + "', logical rank " +
                        std::to_string(logical.size()) + ", physical rank " +
                        std::to_string(physical.size()) + ", valid rank " +
                        std::to_string(valid.size()) + ")");
             }
             for (const DimExpr& expression : logical) {
-                const DirectDimension direct = ReadDirectDimension(expression);
+                const DirectDimension direct = is_input ? ReadDirectDimension(expression)
+                                                        : ReadOffsetDimension(expression);
                 if (!direct.is_constant && is_input) {
                     input_symbols.insert(direct.symbol);
                 }
@@ -188,6 +206,19 @@ BoundsBySymbol AnalyzeTemplate(
         }
         ValidateNonemptyDomain(symbol, value);
     }
+    std::vector<kxc::shape::experimental::v1::Binding> upper_bindings;
+    for (const auto& [symbol, value] : bounds) {
+        upper_bindings.push_back({symbol, static_cast<int64_t>(value.upper)});
+    }
+    const specialization::BindingSet uppers(std::move(upper_bindings));
+    for (const auto& named : program.outputs()) {
+        for (const auto& dimension : named.contract.logical().dimensions()) {
+            if (dimension.kind() == DimExpr::Kind::kAdd &&
+                dimension.Evaluate(uppers) > std::numeric_limits<int32_t>::max()) {
+                Reject("derived dimension exceeds the int32 loop domain");
+            }
+        }
+    }
     return bounds;
 }
 
@@ -200,6 +231,7 @@ void AppendExpression(support::CanonicalBytesEncoder* encoder,
     } else {
         encoder->IntegerField("input_index", expression.input_index());
         encoder->IntegerField("axis", expression.axis());
+        encoder->IntegerField("offset", expression.offset());
     }
 }
 
@@ -274,9 +306,13 @@ std::vector<std::string> ValueNames(const Array<ValueId>& ids) {
 }
 
 bool IsSupportedOperation(const std::string& name) {
-    return name == "relu" || name == "nn_relu" || name == "sqrt" ||
-           name == "add" || name == "mul" || name == "shape_of" ||
+    return name == "relu" || name == "nn_relu" || name == "sqrt" || name == "sigmoid" ||
+           name == "neg" || name == "slice" || name == "concatenate" ||
+           name == "add" || name == "mul" || name == "divide" || name == "pow" ||
+           name == "cast" || name == "reduce_mean" || name == "matmul" ||
+           name == "transpose" || name == "softmax" || name == "masked_softmax" || name == "shape_of" || name == "gather" ||
            name == "shape_expr" || name == "reshape_dynamic" ||
+           name == "constant_of_shape" || name == "trilu" ||
            name == "expand_dynamic" || name == "squeeze" || name == "unsqueeze";
 }
 
@@ -292,7 +328,7 @@ bool DerivesValueExpressionsFromInput(const std::string& name) {
 }
 
 int64_t LogicalBoundaryExtent(const DimExpr& expression) {
-    const DirectDimension direct = ReadDirectDimension(expression);
+    const DirectDimension direct = ReadOffsetDimension(expression);
     if (direct.is_constant) {
         if (direct.constant >
             static_cast<std::uint64_t>(std::numeric_limits<int64_t>::max())) {
@@ -326,7 +362,6 @@ void ValidateValueContracts(
         const LogicalValueContract& dynamic = dynamic_values[index];
         if (fixed.id != static_cast<ValueId>(index) || dynamic.id != fixed.id ||
             fixed.origin != dynamic.origin ||
-            fixed.origin == LogicalValueOrigin::kConstant ||
             fixed.device != dynamic.device) {
             Reject("representative and bounded logical value identities differ");
         }
@@ -339,7 +374,11 @@ void ValidateValueContracts(
             fixed_type->shape.size() != dynamic_type->shape.size() ||
             fixed_type->shape.size() !=
                 named.contract.logical().dimensions().size()) {
-            Reject("value dtype or fixed rank differs across Function, template, and bounded graph");
+            Reject("value dtype or fixed rank differs across Function, template, and bounded graph at " +
+                   name + " (fixed=" + TypeToString(fixed.checked_type) +
+                   ", bounded=" + TypeToString(dynamic.checked_type) +
+                   ", contract_rank=" +
+                   std::to_string(named.contract.logical().dimensions().size()) + ")");
         }
         const auto& exact = representative_oracle.profile().Value(name).contract;
         if (ContractDefect(exact) != nullptr || !IsExactContract(exact) ||
@@ -347,6 +386,10 @@ void ValidateValueContracts(
             Reject("representative oracle has an invalid value contract");
         }
         for (std::size_t axis = 0; axis < fixed_type->shape.size(); ++axis) {
+            if (fixed.origin == LogicalValueOrigin::kConstant &&
+                named.contract.logical().dimensions()[axis].kind() != DimExpr::Kind::kConst) {
+                Reject("constant values cannot carry dynamic shape expressions");
+            }
             if (fixed_type->shape[axis] != exact.logical[axis] ||
                 dynamic_type->shape[axis] != LogicalBoundaryExtent(
                     named.contract.logical().dimensions()[axis])) {
@@ -484,10 +527,12 @@ std::vector<runtime::GraphInputAxisGuard> BuildGraphInputGuards(
 }
 
 ModuleShapeExpr ToModuleShapeExpr(const DynamicShapeExpr& expression) {
-    return expression.kind() == DynamicShapeExpr::Kind::kConst
-               ? ModuleShapeExpr::Const(expression.constant())
-               : ModuleShapeExpr::InputAxis(expression.input_index(),
-                                            expression.axis());
+    if (expression.kind() == DynamicShapeExpr::Kind::kConst) {
+        return ModuleShapeExpr::Const(expression.constant());
+    }
+    auto axis = ModuleShapeExpr::InputAxis(expression.input_index(), expression.axis());
+    return expression.offset() == 0 ? axis
+        : ModuleShapeExpr::Add(std::move(axis), ModuleShapeExpr::Const(expression.offset()));
 }
 
 const LogicalValueContract& ContractValue(
@@ -521,6 +566,10 @@ std::size_t MaximumOutputBytes(
             }
             extent = input_guards[expression.input_index()]
                                  [expression.axis()].upper;
+            if (extent > std::numeric_limits<std::uint64_t>::max() - expression.offset()) {
+                Reject("a dynamic output extent overflows uint64");
+            }
+            extent += expression.offset();
         }
         if (extent > std::numeric_limits<std::size_t>::max() ||
             (extent != 0 &&
@@ -553,8 +602,9 @@ std::vector<DynamicShapeExpr> OrderedRuntimeExtentExpressions(
         output_value_expressions) {
     (void)semantic_key;
     std::vector<DynamicShapeExpr> extents;
-    const auto append = [&extents](const DynamicShapeExpr& expression) {
-        if (expression.kind() != DynamicShapeExpr::Kind::kInputAxis) return;
+    const auto append = [&extents](const DynamicShapeExpr& value) {
+        if (value.kind() != DynamicShapeExpr::Kind::kInputAxis) return;
+        const auto expression = DynamicShapeExpr::InputAxis(value.input_index(), value.axis());
         for (const DynamicShapeExpr& existing : extents) {
             if (existing == expression) return;
         }
@@ -583,17 +633,19 @@ std::vector<DynamicShapeExpr> OrderedRuntimeExtentExpressions(
 
 DynamicShapeExpr::DynamicShapeExpr(Kind kind, std::uint64_t constant,
                                    std::size_t input_index,
-                                   std::size_t axis)
-    : kind_(kind), constant_(constant), input_index_(input_index), axis_(axis) {}
+                                   std::size_t axis, std::uint64_t offset)
+    : kind_(kind), constant_(constant), input_index_(input_index), axis_(axis), offset_(offset) {}
 
 DynamicShapeExpr DynamicShapeExpr::Const(std::uint64_t value) {
     return DynamicShapeExpr(Kind::kConst, value, 0, 0);
 }
 
 DynamicShapeExpr DynamicShapeExpr::InputAxis(std::size_t input_index,
-                                              std::size_t axis) {
-    return DynamicShapeExpr(Kind::kInputAxis, 0, input_index, axis);
+                                              std::size_t axis, std::uint64_t offset) {
+    return DynamicShapeExpr(Kind::kInputAxis, 0, input_index, axis, offset);
 }
+
+std::uint64_t DynamicShapeExpr::offset() const noexcept { return offset_; }
 
 DynamicShapeExpr::Kind DynamicShapeExpr::kind() const noexcept { return kind_; }
 
@@ -620,7 +672,7 @@ std::size_t DynamicShapeExpr::axis() const {
 
 bool DynamicShapeExpr::operator==(const DynamicShapeExpr& other) const noexcept {
     return kind_ == other.kind_ && constant_ == other.constant_ &&
-           input_index_ == other.input_index_ && axis_ == other.axis_;
+           input_index_ == other.input_index_ && axis_ == other.axis_ && offset_ == other.offset_;
 }
 
 DynamicUnitShapeContract::DynamicUnitShapeContract(
@@ -643,7 +695,6 @@ DynamicUnitShapeContract::DynamicUnitShapeContract(
         local_input_guards_.empty() || output_shape_expressions_.size() != 1 ||
         output_value_expressions_.size() !=
             output_shape_expressions_.size() ||
-        runtime_extent_expressions_.empty() ||
         runtime_extent_expressions_ != expected_runtime_extents) {
         Reject("a DynamicUnitShapeContract is incomplete");
     }
@@ -703,7 +754,7 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
         Reject("bounded v1 requires unit inputs and exactly one output");
     }
 
-    std::map<std::string, DynamicInputAxisReference> anchors;
+    std::map<std::string, std::pair<DirectDimension, DynamicInputAxisReference>> anchors;
     std::vector<std::vector<DynamicInputAxisGuard>> input_guards;
     input_guards.reserve(unit.input_value_names.size());
     for (std::size_t input = 0; input < unit.input_value_names.size(); ++input) {
@@ -713,7 +764,7 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
         std::vector<DynamicInputAxisGuard> guards;
         guards.reserve(dimensions.size());
         for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
-            const DirectDimension direct = ReadDirectDimension(dimensions[axis]);
+            const DirectDimension direct = ReadOffsetDimension(dimensions[axis]);
             DynamicInputAxisGuard guard;
             guard.axis = axis;
             if (direct.is_constant) {
@@ -722,16 +773,20 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
                 guard.exact = direct.constant;
             } else {
                 const SymbolBounds& symbol_bounds = bounds.at(direct.symbol);
-                guard.lower = symbol_bounds.lower;
-                guard.upper = symbol_bounds.upper;
-                guard.divisible_by = symbol_bounds.divisible_by;
+                guard.lower = dimensions[axis].Evaluate(specialization::BindingSet(
+                    {{direct.symbol, static_cast<int64_t>(symbol_bounds.lower)}}));
+                guard.upper = dimensions[axis].Evaluate(specialization::BindingSet(
+                    {{direct.symbol, static_cast<int64_t>(symbol_bounds.upper)}}));
+                guard.divisible_by = direct.offset == 0 ? symbol_bounds.divisible_by : 1;
                 const DynamicInputAxisReference current{input, axis};
-                const auto inserted = anchors.emplace(direct.symbol, current);
+                const auto inserted = anchors.emplace(dimensions[axis].CanonicalString(), std::make_pair(direct, current));
                 if (!inserted.second) {
-                    if (inserted.first->second.input_index >= input) {
-                        Reject("a repeated symbol must reference a strictly prior unit input");
+                    const auto& prior = inserted.first->second.second;
+                    if (prior.input_index > input ||
+                        (prior.input_index == input && prior.axis >= axis)) {
+                        Reject("a repeated symbol must reference a prior unit input axis");
                     }
-                    guard.equal_to = inserted.first->second;
+                    guard.equal_to = prior;
                 }
             }
             guards.push_back(std::move(guard));
@@ -744,12 +799,19 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
         if (direct.is_constant) {
             return DynamicShapeExpr::Const(direct.constant);
         }
-        const auto anchor = anchors.find(direct.symbol);
-        if (anchor == anchors.end()) {
-            Reject("a unit output symbol is not anchored by a local input axis");
+        // Prefer an identical local dimension, then a smaller offset of the
+        // same symbol. No subtraction or inverse input binding is admitted.
+        for (bool exact : {true, false}) {
+            for (const auto& item : anchors) {
+                const auto& [dimension, reference] = item.second;
+                if (dimension.symbol == direct.symbol && dimension.offset <= direct.offset &&
+                    (!exact || dimension.offset == direct.offset)) {
+                    return DynamicShapeExpr::InputAxis(reference.input_index, reference.axis,
+                        direct.offset - dimension.offset);
+                }
+            }
         }
-        return DynamicShapeExpr::InputAxis(anchor->second.input_index,
-                                           anchor->second.axis);
+        Reject("a unit output symbol is not anchored by a local input axis");
     };
 
     std::vector<std::vector<DynamicShapeExpr>> output_expressions;
@@ -759,8 +821,14 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
         std::vector<DynamicShapeExpr> expressions;
         expressions.reserve(dimensions.size());
         for (const DimExpr& dimension : dimensions) {
-            const DirectDimension direct = ReadDirectDimension(dimension);
-            expressions.push_back(anchored_expression(direct));
+            const DirectDimension direct = ReadOffsetDimension(dimension);
+            const auto expression = anchored_expression(direct);
+            if (expression.offset() != 0 && operator_name != "concatenate" &&
+                operator_name != "constant_of_shape" && operator_name != "reshape_dynamic" &&
+                operator_name != "expand_dynamic") {
+                Reject("a constant offset in an output dimension requires concatenate or an explicit target shape");
+            }
+            expressions.push_back(expression);
         }
         output_expressions.push_back(std::move(expressions));
     }
@@ -784,7 +852,7 @@ DynamicUnitShapeContract BuildDynamicUnitShapeContract(
             value_expressions.reserve(input_dimensions.size());
             for (const DimExpr& dimension : input_dimensions) {
                 value_expressions.push_back(
-                    anchored_expression(ReadDirectDimension(dimension)));
+                    anchored_expression(ReadOffsetDimension(dimension)));
             }
             const auto& output_dimensions =
                 FindNamed(graph, unit.output_value_names[0])
@@ -890,11 +958,12 @@ BoundedCompilePreparation PrepareBoundedCompile(
     }
     request.compile_config().Validate();
     const Target& target = request.target();
-    if (!target.defined() || target->kind != "llvm" ||
-        target->device_type != kCPU || target->device_id != 0 ||
+    if (!target.defined() ||
+        !((target->kind == "llvm" && target->device_type == kCPU && target->device_id == 0) ||
+          (target->kind == "cuda" && target->device_type == kCUDA)) ||
         CanonicalTargetSnapshot(target) != CanonicalTargetSnapshot(
             request.compile_config()->target)) {
-        Reject("bounded v1 requires the request's immutable CPU/LLVM target snapshot");
+        Reject("bounded compilation requires the request's immutable CPU:0/LLVM or CUDA target snapshot");
     }
     const specialization::GraphTemplate& graph = request.graph_template();
     graph.Verify();
@@ -906,13 +975,18 @@ BoundedCompilePreparation PrepareBoundedCompile(
         graph, request.representative_oracle());
 
     const Device device(target->device_type, target->device_id);
-    Function representative =
-        relay::InferTypePass(request.representative());
+    // Use the same declared production pipeline as exact preparation. ANF
+    // hoists calls before atomic constants at their consumers, so inferring
+    // types on the original DAG alone can assign different ValueIds.
+    Function representative = PrepareRelayProgram(
+        request.representative(), request.compile_config(),
+        ControlFlowPolicy::StaticOnly()).typed_anf();
     PartitionedGraph representative_partition = PartitionValueGraph(
         BuildValueGraph(representative, device));
 
-    Function logical_boundary =
-        relay::InferTypePass(request.logical_boundary_function());
+    Function logical_boundary = PrepareRelayProgram(
+        request.logical_boundary_function(), request.compile_config(),
+        ControlFlowPolicy::StaticOnly()).typed_anf();
     const BoundedLogicalShapeAdmission admission =
         BoundedCompilePreparationAccess::MintLogicalShapeAdmission();
     PartitionedGraph bounded_partition = PartitionValueGraph(
@@ -965,8 +1039,23 @@ BuildDynamicModuleInvocationContract(
             values, unit.boundary_input_value_ids[input],
             "a dynamic module input");
         if (value.origin == LogicalValueOrigin::kConstant) {
-            Reject("bounded dynamic v1 does not support constants");
+            // Constants are an ABI role, not Invoke data inputs. The existing
+            // ValueGraph boundary is [data inputs][constants], so input-axis
+            // references retain their indices when the suffix is omitted.
+            const auto* type = value.checked_type.As<TensorTypeNode>();
+            const auto& guards = shape_contract.local_input_guards()[input];
+            if (!type || guards.size() != type->shape.size()) {
+                Reject("constant guard rank differs from its frozen tensor");
+            }
+            for (size_t axis = 0; axis < guards.size(); ++axis) {
+                if (type->shape[axis] < 0 || !guards[axis].exact || guards[axis].equal_to ||
+                    *guards[axis].exact != static_cast<uint64_t>(type->shape[axis])) {
+                    Reject("constant input guards must match static payload extents");
+                }
+            }
+            continue;
         }
+        if (input != inputs.size()) Reject("constant inputs must follow data inputs in the unit ABI");
         ModuleInputContract module_input;
         for (const DynamicInputAxisGuard& source :
              shape_contract.local_input_guards()[input]) {
@@ -1079,10 +1168,11 @@ DecodeValueExpressionOverrides(
             if (entry->kinds[i] == kExprKindConst) {
                 expressions.push_back(
                     DynamicShapeExpr::Const(entry->values[i]));
-            } else {
-                expressions.push_back(DynamicShapeExpr::InputAxis(
-                    entry->values[i], entry->axes[i]));
-            }
+            } else if (entry->kinds[i] == kExprKindInputAxis) {
+                expressions.push_back(DynamicShapeExpr::InputAxis(entry->values[i], entry->axes[i]));
+            } else if (entry->kinds[i] == shape_resolution::kExprKindInputAxisOffset && entry->values[i] >= 0) {
+                expressions.push_back(DynamicShapeExpr::InputAxis(0,entry->axes[i],entry->values[i]));
+            } else Reject("shape value expression kind or offset is invalid");
         }
         decoded.push_back(std::move(expressions));
     }

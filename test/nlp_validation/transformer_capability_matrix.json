@@ -8,134 +8,190 @@
         "reason": "ONNX Softmax opset >= 13 imports single-axis semantics with default -1; pre-13 flattened-axis semantics fail closed.",
         "evidence": [
           "python/kxc_onnx/importer.py",
-          "test/onnx_importer_py_test.py"
+          "test/onnx_importer_py_test.py",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "relay": {
         "status": "implemented",
-        "gate": "static_unmasked_only",
-        "reason": "Relay softmax is registered for static floating-point tensors; masked/all-masked semantics remain unsupported.",
+        "gate": "restricted_attention_shapes",
+        "reason": "Static floating-point Softmax remains available; the bounded adapter admits a fixed axis with a provably positive reduction extent. Finite additive masks are composed as Add; ordinary Softmax semantics are unchanged. Explicit bool-mask/all-masked behavior is provided by the separate masked_softmax contract.",
         "evidence": [
+          "src/compiler/shape/shape_value_resolver.cc",
           "src/relay/op/nn/softmax.cc",
-          "contracts/relay_op_contract.json"
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md",
+          "docs/implementation/M5_MASKED_SOFTMAX_REPORT.md"
         ]
       },
       "lowering": {
         "status": "implemented",
-        "gate": "max_subtraction_static",
-        "reason": "TE lowering computes max, subtracts it, then performs exp/sum/div for a static axis.",
+        "gate": "bounded_serial_attention_v2",
+        "reason": "Existing max-subtraction TE stages lower with direct runtime reduction extents; intermediate allocation maxima are checked against the same invocation bounds.",
         "evidence": [
-          "src/relay/op/nn/softmax.cc",
-          "test/infer_type_test.cpp"
+          "src/compiler/lowering/te_to_tir.cc",
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "llvm": {
         "status": "implemented",
-        "gate": "llvm_extreme_test_not_run_local",
-        "reason": "LLVM extreme-logit numeric coverage exists, but local LLVM is unavailable so this session does not mark it validated.",
+        "gate": "cpu_llvm_bounded_attention_executed",
+        "reason": "Executed LLVM 20 tests: four bounded attention shapes and three non-trailing Softmax shapes with extreme +/-10000 logits; no CUDA claim.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_reduction_unsupported",
-        "reason": "CUDA Compiler integration validates fail-closed rejection of reduction graphs; no device numeric support is claimed.",
+        "status": "implemented",
+        "gate": "cuda_softmax_static_and_bounded_multistage_local_evidence",
+        "reason": "Static float32/64 Softmax covers rank-1/2/3 and first/middle/last axes. BindCudaThreads v6 additionally executes bounded float32 Softmax on [B,S,7], B<=19, 1<=S<=18, with middle/last axes, logits shifted by 1000, empty batch and two nondefault streams. The bounded three-head QK-mask-Softmax-V chain varies B/Q/T in one artifact. Row ownership, private upper-bound scratch, ordered extent DMA and unchanged runtime cache are checked. Windows RTX 4070 Ti SUPER / CUDA 12.9 local correctness evidence; full bounded MiniMind and cooperative performance remain unvalidated.",
         "evidence": [
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "src/codegen/cuda/codegen_cuda.cc",
+          "test/cuda_schedule_test.cpp",
           "test/codegen_cuda_test.cpp",
-          "test/cuda_schedule_test.cpp"
+          "docs/implementation/GPU_MULTISTAGE_REDUCTION_REPORT.md",
+          "docs/implementation/GPU_BOUNDED_REDUCTION_REPORT.md",
+          "test/bounded_cuda_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "contracts/pass_contract.json",
+          "src/compiler/lowering/te_to_tir.cc",
+          "src/runtime/session.cc"
         ]
       },
       "runtime": {
         "status": "implemented",
-        "gate": "llvm_numeric_test_not_run_local",
-        "reason": "The LLVM numeric test is wired through Compiler and RuntimeSession, but local LLVM is unavailable.",
+        "gate": "bounded_fresh_output_attention",
+        "reason": "One immutable bounded artifact executes changing B/Q/T through RuntimeSession; invalid shapes, ranks, dtype and input count reject before kernel submission or allocation.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "src/runtime/session.cc",
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "numeric": {
         "status": "validated",
-        "gate": "python_reference",
-        "reason": "Deterministic CPU reference max-subtraction passes; this does not claim current Relay numerical stability.",
+        "gate": "bounded_attention_independent_cpu",
+        "reason": "Independent double-precision references: bounded attention worst absolute error 5.43662e-7, non-trailing Softmax 1.0386e-8; primitive cache counters stay unchanged during Run.",
         "evidence": [
-          "test/nlp_validation/deterministic_fixtures.json",
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
+        "status": "implemented",
+        "gate": "bounded_attention_shape_bundle",
+        "reason": "Four successful attention runs produce 20 submit/exec pairs and 120 associated runtime events with shape/stage/plan ABI metadata; nine invalid runs add no submit or allocation. Internal kernel malloc is not in the alloc events.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       }
     },
     "masked_softmax_all_masked": {
       "frontend": {
-        "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "status": "implemented",
+        "gate": "explicit_relay_ffi_masked_softmax",
+        "reason": "Explicit C++ Relay and FFI constructor for bool-mask softmax; no ONNX Attention importer or implicit replacement of ONNX Softmax is claimed.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "src/relay/op/op_ffi.cc",
+          "test/masked_softmax_llvm_test.cpp",
+          "docs/implementation/M5_MASKED_SOFTMAX_REPORT.md"
         ]
       },
       "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "status": "implemented",
+        "gate": "bool_mask_zero_row_contract_v1",
+        "reason": "Rank-positive float32/float64 logits, fixed axis and trailing bool broadcast that cannot expand logits; finite active entries normalize, masked entries and all-False rows are exact positive zero.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "contracts/relay_op_contract.json",
+          "src/relay/type_infer.cc",
+          "test/masked_softmax_llvm_test.cpp",
+          "docs/implementation/M5_MASKED_SOFTMAX_REPORT.md"
         ]
       },
       "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "status": "implemented",
+        "gate": "existing_te_masked_reductions",
+        "reason": "Generated typed-attrs registration reaches production primitive lowering using existing Select, broadcast, max, exp and sum; bounded applicability v14 proves mask axes and a positive reduction extent.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/op/nn/softmax.cc",
+          "src/compiler/shape/shape_value_resolver.cc",
+          "test/masked_softmax_llvm_test.cpp",
+          "docs/implementation/M5_MASKED_SOFTMAX_REPORT.md"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "cpu_llvm_masked_softmax_executed",
+        "reason": "Real static LLVM execution covers float32/64, finite extremes, axes, broadcast, empty outer axes and masked NaN/Inf. Axis identity and cached bool constant relocation are checked.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/relay/op/nn/softmax.cc",
+          "test/masked_softmax_llvm_test.cpp",
+          "docs/implementation/M5_MASKED_SOFTMAX_REPORT.md"
         ]
       },
       "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_reduction_unsupported",
-        "reason": "CUDA reduction is not locally validated.",
+        "status": "implemented",
+        "gate": "cuda_masked_softmax_static_and_bounded_multistage_local_evidence",
+        "reason": "Static float32/64 masked_softmax covers same-shape/scalar/broadcast bool masks and non-last axes. Bounded float32 [B,S,7] logits with [B,S,1] bool masks now cover B<=19, 1<=S<=18, partial/all-false rows, empty batch and two streams. Masked NaN/+Inf/-Inf does not leak; false positions and all-false rows are exact positive zero. BindCudaThreads v6 proves common-prefix row ownership and private scratch; CUPTI verifies fixed launches and ordered extent DMA. This local CUDA 12.9 evidence does not open ONNX Attention or full bounded MiniMind.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "src/codegen/cuda/codegen_cuda.cc",
+          "test/cuda_schedule_test.cpp",
+          "test/codegen_cuda_test.cpp",
+          "docs/implementation/GPU_MULTISTAGE_REDUCTION_REPORT.md",
+          "docs/implementation/GPU_BOUNDED_REDUCTION_REPORT.md",
+          "test/bounded_cuda_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "contracts/pass_contract.json",
+          "src/compiler/lowering/te_to_tir.cc",
+          "src/runtime/session.cc"
         ]
       },
       "runtime": {
-        "status": "contracted",
-        "gate": "reference_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
+        "status": "implemented",
+        "gate": "bounded_masked_attention_shared_axes",
+        "reason": "One bounded attention artifact executes four B/S/T combinations through RuntimeSession with fresh outputs and no runtime cache mutation; mismatched mask axes reject before any kernel submit.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "src/compiler/shape/dynamic_shape_contract.cc",
+          "test/masked_softmax_llvm_test.cpp",
+          "docs/implementation/M5_MASKED_SOFTMAX_REPORT.md"
         ]
       },
       "numeric": {
-        "status": "unsupported",
-        "gate": "all_masked_contract_unsupported",
-        "reason": "All-masked behavior lacks a validation contract, so numeric validation is unsupported.",
+        "status": "validated",
+        "gate": "masked_attention_independent_cpu",
+        "reason": "Independent scalar references verify probabilities within 2e-6 and composed QK-scale-masked-softmax-V context within 3e-6; all-masked rows are exact positive zero. This is a composed graph, not a new full MiniMind or ONNX Attention validation.",
         "evidence": [
           "test/nlp_validation/deterministic_fixtures.json",
-          "python/tools/check_nlp_gpu_validation.py"
+          "python/tools/check_nlp_gpu_validation.py",
+          "test/masked_softmax_llvm_test.cpp",
+          "docs/implementation/M5_MASKED_SOFTMAX_REPORT.md"
         ]
       },
       "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
+        "status": "implemented",
+        "gate": "masked_attention_shape_bundle",
+        "reason": "The deterministic masked_softmax_profile bundle records static and bounded LLVM kernel submissions and B/S/T metadata; the four bounded cases each submit four kernels. No GPU timing or throughput claim.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/masked_softmax_llvm_test.cpp",
+          "docs/implementation/M5_MASKED_SOFTMAX_REPORT.md"
         ]
       }
     },
@@ -146,697 +202,1060 @@
         "reason": "ONNX MatMul fail-closed frontend validates two resolved static inputs, rank >= 2, dtype/K equality, NumPy batch broadcasting, and declared output shape/dtype; missing metadata rejects.",
         "evidence": [
           "python/kxc_onnx/importer.py",
-          "test/onnx_importer_py_test.py"
+          "test/onnx_importer_py_test.py",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "relay": {
         "status": "implemented",
-        "gate": "rank_ge_2_batch_broadcast",
-        "reason": "Relay infers ONNX/NumPy leading batch broadcasting and rejects incompatible static K or batch dimensions.",
+        "gate": "restricted_attention_shapes",
+        "reason": "Static rank>=2 batch broadcasting remains available. Bounded MatMul admits ranks >=2 with identical K expressions and batch axes proven equal or constant singleton; equal representative sizes alone never prove symbol equality. The actual MiniMind projection also exercises rank-3 activations with rank-2 constant weights.",
         "evidence": [
+          "src/compiler/shape/shape_value_resolver.cc",
           "src/relay/type_infer.cc",
-          "test/infer_type_test.cpp"
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_projection_llvm_test.cpp",
+          "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "lowering": {
         "status": "implemented",
-        "gate": "static_batch_broadcast",
-        "reason": "TOPI matmul lowers static-compatible broadcast batches with a reduction axis.",
+        "gate": "bounded_serial_attention_v2",
+        "reason": "TOPI MatMul uses existing reduction compute; bounded serial TIR consumes generated input extents for data and reduction loops. Proven equal-or-one batch broadcasting and static weight constants are admitted; runtime-disjunctive broadcast is not.",
         "evidence": [
           "src/te/topi/nn.cc",
-          "test/infer_type_test.cpp"
+          "src/compiler/lowering/te_to_tir.cc",
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_projection_llvm_test.cpp",
+          "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "llvm": {
         "status": "implemented",
-        "gate": "llvm_numeric_test_not_run_local",
-        "reason": "Batched matmul numeric LLVM coverage exists but local LLVM is unavailable, so it is not validated here.",
+        "gate": "cpu_llvm_bounded_attention_executed",
+        "reason": "Executed both QK-transpose and probability-V MatMul in a five-kernel LLVM attention graph at four B/Q/T shapes, with H=4 and D=96.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_reduction_unsupported",
-        "reason": "CUDA Compiler integration validates fail-closed rejection of reduction graphs; no device numeric support is claimed.",
+        "status": "implemented",
+        "gate": "cuda_output_owned_matmul_static_and_bounded_attention_local_evidence",
+        "reason": "Static float32/64 MatMul/Dense and equal-or-one batch broadcast, plus bounded float32 rank-2 N<=19/K<=23/M<=17, retain their prior evidence. Bounded float32 three-head QK-mask-Softmax-V now executes B<=3, Q<=19, 1<=T<=23, head_dim=7 and value_dim=5 across 12 runs, including empty B/Q and Q!=T. All 2,940 outputs match an independent reference within 2.38418579102e-7; 60 kernels and 168 ordered extent DMA preserve fixed launches and runtime cache statistics. This scoped CUDA 12.9 attention evidence does not validate full bounded MiniMind or tiled/tensor-core performance.",
         "evidence": [
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "contracts/pass_contract.json",
           "test/codegen_cuda_test.cpp",
-          "test/cuda_schedule_test.cpp"
+          "test/cuda_schedule_test.cpp",
+          "docs/implementation/GPU_OWNED_REDUCTION_REPORT.md",
+          "docs/implementation/GPU_BOUNDED_CORE_REPORT.md",
+          "test/bounded_cuda_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "src/compiler/lowering/te_to_tir.cc",
+          "src/runtime/session.cc",
+          "docs/implementation/GPU_BOUNDED_REDUCTION_REPORT.md"
         ]
       },
       "runtime": {
         "status": "implemented",
-        "gate": "llvm_numeric_test_not_run_local",
-        "reason": "The batched numeric test is wired through Compiler and RuntimeSession, but local LLVM is unavailable.",
+        "gate": "bounded_fresh_output_attention",
+        "reason": "One RuntimeSession uses the same compiled graph across four legal shapes. Shared input-axis mismatch is caught by graph preflight before even the first transpose kernel.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "src/runtime/session.cc",
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "numeric": {
-        "status": "implemented",
-        "gate": "llvm_numeric_test_not_run_local",
-        "reason": "Static batch-broadcast numeric expectations are encoded in the LLVM test but were not run locally.",
+        "status": "validated",
+        "gate": "bounded_attention_independent_cpu",
+        "reason": "Full attention outputs match an independent double-precision reference with worst absolute error 5.43662e-7, including non-square and batched cases; no runtime compilation.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
+        "status": "implemented",
+        "gate": "bounded_attention_shape_bundle",
+        "reason": "The executed attention bundle associates both MatMul stages with B/Q/T, stage, run ID and plan ABI; 20 submit/exec pairs across four runs.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/bounded_attention_llvm_test.cpp",
+          "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       }
     },
     "embedding_gather": {
       "frontend": {
         "status": "implemented",
-        "gate": "constant_in_range_gather_axis_output_contract",
-        "reason": "ONNX Gather requires initializer-backed int32/int64 indices, validates every value in [-extent, extent-1], maps axis, and checks declared output shape/dtype; dynamic or OOB indices fail closed.",
+        "gate": "static_and_bounded_runtime_gather_source",
+        "reason": "Static Gather validates initializer indices and accepts runtime int32/int64 indices under the KXC guarded-load contract. Explicit shape-source preserves token input B/S for C++ restricted preparation; the full eight-layer prefill is imported and executed.",
         "evidence": [
           "python/kxc_onnx/importer.py",
           "test/onnx_importer_py_test.py",
-          "test/onnx_import_spec_contract_test.cpp"
+          "test/onnx_import_spec_contract_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
         ]
       },
       "relay": {
         "status": "implemented",
-        "gate": "static_rank_axis_indices_contract",
-        "reason": "Relay normalizes axis, requires rank >= 1 data and int32/int64 indices, and infers inserted index dimensions.",
+        "gate": "static_table_dynamic_index_shape",
+        "reason": "Gather v2 keeps the declared axis/dtype/rank checks. The bounded producer requires a static table and inserts the proven index tensor dimensions into the output shape.",
         "evidence": [
           "src/relay/type_infer.cc",
-          "test/infer_type_test.cpp"
+          "test/infer_type_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
         ]
       },
       "lowering": {
         "status": "implemented",
-        "gate": "static_gather_zero_fill",
-        "reason": "TE lowering accepts static non-negative axis extents and deterministically zero-fills out-of-domain indices.",
+        "gate": "existing_te_guarded_bounded_gather",
+        "reason": "The existing TE Gather keeps dynamic index extents. Lazy Select normalizes valid negative indices and returns typed zero for out-of-domain runtime values without forming an invalid load.",
         "evidence": [
           "src/relay/op/tensor/transform.cc",
-          "test/infer_type_test.cpp"
+          "test/infer_type_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
         ]
       },
       "llvm": {
         "status": "implemented",
-        "gate": "llvm_gather_numeric_test_not_run_local",
-        "reason": "LLVM numeric coverage exercises valid positive/negative indices, OOB zero-fill, INT64_MIN, and zero axis extent; local LLVM is unavailable.",
+        "gate": "cpu_llvm_bounded_embedding_executed",
+        "reason": "CPU/LLVM 20.1.2 executed int32/int64 bounded embedding and full MiniMind prefill. The subsequent bounded CUDA static-table indexing path has structural/whole-model PTX evidence only; bounded device numerics remain unvalidated.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/op_numeric_llvm_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
         ]
       },
       "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_indirect_load_schedule_unsupported",
-        "reason": "The generic CUDA schedule rejects Gather's indirect Load index before backend execution; no device numeric support is claimed.",
+        "status": "implemented",
+        "gate": "cuda_guarded_gather_static_local_evidence",
+        "reason": "Static read-only Gather uses branch-sensitive bounds and integer-overflow proof in BindCudaThreads v4. Windows RTX 4070 Ti SUPER / CUDA 12.9: 120 exact numeric cases, int32/int64 runtime indices, float32/64/int32/64/bool values, negative and out-of-range indices, scalar/multidimensional indices and empty tensors; repeated sessions change indices. This static numeric receipt does not certify arbitrary indirect or bounded CUDA access. The subsequent v7 bounded static-table proof has structural and whole-model PTX evidence only.",
         "evidence": [
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "test/cuda_schedule_test.cpp",
           "test/codegen_cuda_test.cpp",
-          "test/executable_capability_test.cpp",
-          "test/cuda_schedule_test.cpp"
+          "docs/implementation/GPU_GATHER_POW_REPORT.md"
         ]
       },
       "runtime": {
         "status": "implemented",
-        "gate": "llvm_gather_numeric_test_not_run_local",
-        "reason": "The conditional LLVM numeric test uses Compiler and RuntimeSession; local LLVM is unavailable.",
+        "gate": "bounded_embedding_fresh_outputs",
+        "reason": "One compiled artifact runs four B/S cases without cache changes. Invalid shape/rank/dtype inputs fail before runtime allocation or kernel submission. Runtime index values use the explicit zero-fill extension.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/op_numeric_llvm_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
         ]
       },
       "numeric": {
-        "status": "implemented",
-        "gate": "llvm_gather_numeric_test_not_run_local",
-        "reason": "Expected Gather values cover the deterministic KXC zero-fill extension, but local LLVM execution was not run.",
+        "status": "validated",
+        "gate": "embedding_independent_and_full_prefill_cpu",
+        "reason": "Independent embedding/position/SwiGLU/residual references cover positive/negative and out-of-domain indices including integer extrema. Full prefill compares logits and all 16 KV outputs against dynamic ONNX references and checks future-token causality.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/op_numeric_llvm_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
         ]
       },
       "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
+        "status": "implemented",
+        "gate": "minimind_bounded_prefill_shape_bundle",
+        "reason": "The full bounded prefill bundle associates 3710 model kernel submissions/executions with stage, B/S, eight-layer count, export receipt and plan ABI. Synthetic embedding/FFN adds 80 guarded numeric launches.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
         ]
       }
     },
     "mask_select": {
       "frontend": {
         "status": "implemented",
-        "gate": "onnx_where_static_contract",
-        "reason": "ONNX Where imports only resolved static bool condition and matching supported branch dtypes with joint broadcast/output validation; this does not define masked-softmax or all-masked behavior.",
+        "gate": "static_where_and_causal_mask_source",
+        "reason": "Static ONNX Where remains supported. Shape-source float32 ConstantOfShape preserves exact IEEE bits and proved bounded targets; Trilu admits float32 rank>=2, upper 0/1 and constant scalar int64 k (opset>=14).",
         "evidence": [
           "python/kxc_onnx/importer.py",
           "test/onnx_importer_py_test.py",
-          "docs/ONNX_IMPORTER.md"
+          "docs/ONNX_IMPORTER.md",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "test/codegen_llvm_test.cpp",
+          "test/te_schedule_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "relay": {
         "status": "implemented",
-        "gate": "where_bool_supported_branch_dtype_broadcast",
-        "reason": "Relay Where requires bool condition and same branch dtype in {float32,float64,int32,int64,int8,uint8,bool}, then infers joint trailing-axis broadcast; it does not define masked-softmax or all-masked behavior.",
+        "gate": "where_and_float32_trilu_contract",
+        "reason": "Where retains its bool/broadcast contract; ConstantOfShape schema v2 and Trilu v1 use existing attrs/type/lowering ownership. Repeated S/S axes and a single statically inferred Reshape dimension are proved before compilation.",
         "evidence": [
           "src/relay/type_infer.cc",
           "test/infer_type_test.cpp",
-          "contracts/relay_op_contract.json"
+          "contracts/relay_op_contract.json",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "test/codegen_llvm_test.cpp",
+          "test/te_schedule_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "lowering": {
         "status": "implemented",
-        "gate": "where_static_select_broadcast",
-        "reason": "TOPI Where lowers static bool-condition selection with joint broadcast; it does not define masked-softmax or all-masked behavior.",
+        "gate": "existing_te_causal_mask_select",
+        "reason": "Existing TE Select lowers triangular zero/-inf masks. Shape-only extent use in input buffer metadata is explicit; payload reads and unused extent arguments are rejected. No new IR.",
         "evidence": [
           "src/relay/op/tensor/math.cc",
           "src/te/topi/broadcast.cc",
-          "test/infer_type_test.cpp"
+          "test/infer_type_test.cpp",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "test/codegen_llvm_test.cpp",
+          "test/te_schedule_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "llvm": {
         "status": "implemented",
-        "gate": "llvm_where_numeric_test_not_run_local",
-        "reason": "LLVM numeric coverage exists for static Where, but local LLVM is unavailable so it is not validated here.",
+        "gate": "cpu_llvm_causal_attention_executed",
+        "reason": "Static Where and twelve rectangular/batched Trilu cases execute through LLVM. The actual MiniMind first-layer causal attention subgraph executes four B/S cases and a future-activation perturbation on one artifact.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/op_numeric_llvm_test.cpp",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "test/codegen_llvm_test.cpp",
+          "test/te_schedule_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "cuda": {
         "status": "implemented",
-        "gate": "cuda_where_1d_nonempty_local_evidence",
-        "reason": "Source implements a non-empty 1-D exact-static Where Compiler/RuntimeSession fixture, but no committed GPU-CI/local-run artifact exists, so it is not validated; multidimensional Where fails closed at the target schedule.",
+        "gate": "cuda_where_static_nd_local_evidence",
+        "reason": "Windows CUDA 12.9 executed existing nonempty 1-D Where and 3-D float32 Where with a bool [1,3,1] constant mask and [2,3,5]/[1,1,5] value broadcast through Compiler/RuntimeSession. Values match exactly. Evidence is scoped to these static fixtures; bounded shapes and complete attention graphs are not validated.",
         "evidence": [
           "src/tir/transforms/bind_cuda_threads.cc",
-          "test/codegen_cuda_test.cpp"
+          "contracts/pass_contract.json",
+          "test/codegen_cuda_test.cpp",
+          "test/cuda_schedule_test.cpp",
+          "docs/implementation/GPU_OWNED_REDUCTION_REPORT.md"
         ]
       },
       "runtime": {
         "status": "implemented",
-        "gate": "where_llvm_runtime_test_not_run_local",
-        "reason": "The LLVM numeric source wires static Where through Compiler and RuntimeSession, including its byte-backed bool condition ABI; local LLVM is unavailable.",
+        "gate": "bounded_causal_attention_repeated_axes",
+        "reason": "One bounded RuntimeSession artifact serves four B/S pairs without cache activity. Same-input S/S guards are checked by both RuntimeSession and direct Module Invoke before allocation; fresh outputs include consumed K/V intermediates.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/op_numeric_llvm_test.cpp",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "test/codegen_llvm_test.cpp",
+          "test/te_schedule_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "numeric": {
-        "status": "implemented",
-        "gate": "where_llvm_numeric_test_not_run_local",
-        "reason": "Static branch-selection expectations are encoded with uint8_t byte-backed bool condition input, but local LLVM execution was not run; this does not define masked-softmax or all-masked behavior.",
+        "status": "validated",
+        "gate": "causal_attention_independent_and_actual_onnx",
+        "reason": "Independent double causal attention max_abs_error=9.93489e-8; actual first-layer ONNX output/K/V max_abs_error=3.69549e-6 across four B/S pairs (308 calls). Future-token perturbations preserve prefixes exactly and change suffixes. Static Where and Trilu pass too; all-masked Softmax semantics remain outside this evidence.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/op_numeric_llvm_test.cpp",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "test/codegen_llvm_test.cpp",
+          "test/te_schedule_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       },
       "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
+        "status": "implemented",
+        "gate": "minimind_causal_attention_shape_bundle",
+        "reason": "Profile events associate 385 actual MiniMind LLVM submissions/executions (four references plus one causality perturbation) with stage, B/S, position offset, export SHA and plan ABI. Mandatory synthetic, inferred-reshape and S/S tests have separate stages; rejection asserts no new allocation/submission.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/nlp_validation/transformer_capability_matrix.json",
+          "test/bounded_causal_attention_llvm_test.cpp",
+          "test/codegen_llvm_test.cpp",
+          "test/te_schedule_test.cpp",
+          "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"
         ]
       }
     },
     "normalization": {
       "frontend": {
         "status": "implemented",
-        "gate": "onnx_layer_normalization_opset17_static_exact",
-        "reason": "ONNX LayerNormalization opset >= 17 imports three resolved float32 inputs and Y; empty optional Mean/InvStdDev slots are accepted but non-empty requests fail closed. Attrs record float64 internal accumulation.",
+        "gate": "static_layer_norm_and_minimind_projection_import",
+        "reason": "Static ONNX LayerNormalization opset >=17 remains supported with Y-only output. Actual MiniMind RMSNorm/QKV is extracted from its dynamic ONNX export and imported through an explicit [1,4,768] representative; B/S overlays are supplied to the C++ restricted adapter. Whole dynamic ONNX import is not claimed. The explicit shape-source mode also preserves the actual head reshapes and Q/K RMSNorm controls, with declared representative outputs checked by the C++ producer.",
         "evidence": [
           "python/kxc_onnx/importer.py",
-          "test/onnx_importer_py_test.py"
+          "test/onnx_importer_py_test.py",
+          "python/tools/make_minimind_projection_fixture.py",
+          "test/bounded_projection_llvm_test.cpp",
+          "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md",
+          "docs/implementation/M3_ONNX_HEADS_REPORT.md",
+          "test/onnx_shape_source_llvm_test.cpp"
         ]
       },
       "relay": {
         "status": "implemented",
-        "gate": "layer_norm_exact_static_float32",
-        "reason": "Relay nn_layer_norm requires exact-static float32 data/scale/bias and output, exact suffix affine shapes, finite positive float32 epsilon, and accurately records float64 internal accumulation.",
+        "gate": "static_layer_norm_and_fixed_reduction_rmsnorm",
+        "reason": "Static float32 nn_layer_norm retains suffix affine/float64 accumulation semantics. Bounded RMSNorm uses existing Cast/Pow/ReduceMean/Add/Sqrt/Div/Mul with static positive reduced axes and proven equal-or-one broadcast; native bounded nn_layer_norm and variable reduction denominators are not admitted.",
         "evidence": [
+          "src/compiler/shape/shape_value_resolver.cc",
           "src/relay/type_infer.cc",
-          "test/infer_type_test.cpp"
+          "test/infer_type_test.cpp",
+          "test/bounded_projection_llvm_test.cpp",
+          "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md"
         ]
       },
       "lowering": {
         "status": "implemented",
-        "gate": "layer_norm_suffix_reduction_float64",
-        "reason": "One Relay call casts float32 inputs to float64 for sum/mean/centered/variance/sqrt/affine stages over every normalized suffix axis, then casts Y back to float32.",
+        "gate": "existing_te_weighted_bounded_projection",
+        "reason": "Existing TE callbacks lower the bounded float32 RMSNorm chain and rank>=2 MatMul with static weights. Fully static weight transforms use the existing default schedule in the same plan; declared Relay preparation normalizes both representative and bounded ValueGraphs. Static LayerNorm still accumulates in float64.",
         "evidence": [
+          "src/compiler/shape/dynamic_shape_contract.cc",
+          "src/compiler/lowering/lowered_graph.cc",
           "src/relay/op/nn/layer_norm.cc",
-          "test/infer_type_test.cpp"
+          "test/bounded_projection_llvm_test.cpp",
+          "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md"
         ]
       },
       "llvm": {
         "status": "implemented",
-        "gate": "llvm_layer_norm_numeric_test_not_run_local",
-        "reason": "Conditional LLVM RuntimeSession numeric source covers FLT_MAX constant rows, huge offsets, multi-axis, axis 0, empty prefix, and tiny variance; local LLVM is unavailable.",
+        "gate": "cpu_llvm_normalization_executed",
+        "reason": "LLVM 20 executed static LayerNorm numeric cases and the weighted bounded projection: four synthetic shapes plus four shapes of the actual exported MiniMind layer-0 RMSNorm/QKV slice. CUDA execution is not claimed. The actual head reshape plus Q/K RMSNorm slice also executes four B/S cases (132 LLVM launches).",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/op_numeric_llvm_test.cpp",
+          "test/bounded_projection_llvm_test.cpp",
+          "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md",
+          "docs/implementation/M3_ONNX_HEADS_REPORT.md"
         ]
       },
       "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_reduction_unsupported",
-        "reason": "CUDA nested reductions are rejected by the normalized generic target schedule; no CPU fallback or device numeric support is claimed.",
+        "status": "implemented",
+        "gate": "cuda_normalization_static_and_bounded_rms_local_evidence",
+        "reason": "Static LayerNorm uses float32 inputs/scale/bias with float64 accumulation; static float32/64 ReduceMean covers multiple axes and scalar output. Bounded float32 [B,S,7], B<=19, 1<=S<=18, now executes fixed-axis ReduceMean and RMS composition through mul/reduce_mean/add/sqrt/divide, including zero rows and empty batch. The combined reduction consumer compares 38,664 values with maximum error 1.19209289551e-7; CUPTI validates real execution. Bounded nn_layer_norm, complete bounded projection/model and throughput remain unvalidated.",
         "evidence": [
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "src/codegen/cuda/codegen_cuda.cc",
+          "test/cuda_schedule_test.cpp",
           "test/codegen_cuda_test.cpp",
-          "test/executable_capability_test.cpp"
+          "docs/implementation/GPU_MULTISTAGE_REDUCTION_REPORT.md",
+          "docs/implementation/GPU_BOUNDED_REDUCTION_REPORT.md",
+          "test/bounded_cuda_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "contracts/pass_contract.json",
+          "src/compiler/lowering/te_to_tir.cc",
+          "src/runtime/session.cc"
         ]
       },
       "runtime": {
         "status": "implemented",
-        "gate": "layer_norm_llvm_runtime_test_not_run_local",
-        "reason": "The conditional LLVM numeric test wires LayerNorm through Compiler and RuntimeSession; local LLVM is unavailable.",
+        "gate": "bounded_projection_frozen_weights",
+        "reason": "RuntimeSession executes changing B/S without primitive-cache changes. Caller weight mutation after preparation and mutation of returned constant copies cannot alter results; eight malformed inputs fail before allocation or launch. Direct constant results remain rejected.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "src/runtime/session.cc",
+          "test/bounded_projection_llvm_test.cpp",
+          "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md"
         ]
       },
       "numeric": {
-        "status": "implemented",
-        "gate": "layer_norm_llvm_numeric_test_not_run_local",
-        "reason": "A float64 host reference and full-range/multi-axis/axis-0/empty-prefix cases are encoded in the conditional LLVM numeric test, but were not run locally.",
+        "status": "validated",
+        "gate": "normalization_independent_cpu",
+        "reason": "Independent double RMSNorm/MatMul reference worst absolute error 1.90407e-7; actual MiniMind RMSNorm/QKV worst 2.74181e-6 against ONNX ReferenceEvaluator over four B/S shapes. Static LayerNorm float-range, tiny variance, multi-axis and empty-prefix cases also execute in the LLVM numeric suite; no full dynamic-model or arbitrary RMSNorm magnitude claim. The actual normalized-head slice has worst absolute error 4.29153e-6 against its dynamic ONNX reference over the same four shapes.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/op_numeric_llvm_test.cpp",
+          "python/tools/make_minimind_projection_fixture.py",
+          "test/bounded_projection_llvm_test.cpp",
+          "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md",
+          "docs/implementation/M3_ONNX_HEADS_REPORT.md"
         ]
       },
       "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
+        "status": "implemented",
+        "gate": "minimind_projection_shape_bundle",
+        "reason": "Actual exported RMSNorm/QKV runs carry dynamic-slice SHA256, stage, B/S and builder-derived plan ABI metadata in the runtime bundle. Synthetic invalid-input runs add no submit or runtime allocation. Kernel-internal malloc is outside alloc events; this is not profiling evidence for every normalization operator. The normalized-head slice contributes 664 associated events: four runs, 132 submit/exec pairs and 396 runtime allocations.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "include/kxc/profiling/runtime_observer.h",
+          "test/bounded_projection_llvm_test.cpp",
+          "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md",
+          "docs/implementation/M3_ONNX_HEADS_REPORT.md"
         ]
       }
     },
     "slice_concat": {
       "frontend": {
         "status": "implemented",
-        "gate": "exact_static_slice_concat",
-        "reason": "Exact-static Slice requires all provided control initializers to share int32 or int64 width and canonicalizes values to int64 attrs; binary Concat imports canonical axis attrs.",
+        "gate": "static_slice_and_proved_rope_source",
+        "reason": "Ordinary static Slice retains initializer-only int32/int64 controls. Explicit shape-source retains five Slice inputs and identity int64 Cast; the C++ producer must prove the controls constant before ordinary InferType. Actual MiniMind RMSNorm/QKV/head/RoPE imports without freezing B/S. Full bounded prefill also executes producer-proved 0:S prefixes of static position tables; S upper bounds cannot exceed capacity.",
         "evidence": [
           "python/kxc_onnx/importer.py",
+          "test/onnx_importer_py_test.py",
+          "test/bounded_rope_llvm_test.cpp",
+          "docs/implementation/M3_ROPE_REPORT.md",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
+        ]
+      },
+      "relay": {
+        "status": "implemented",
+        "gate": "static_operated_axes_symbolic_other_axes",
+        "reason": "Slice schema v2 declares the ordinary one-input attrs form and the five-input source form requiring preparation. Slice axes and Concat axis must be static; other axes may remain symbolic only with producer proofs. Positive unit steps and matching non-concat DimExprs are enforced. Full bounded prefill also executes producer-proved 0:S prefixes of static position tables; S upper bounds cannot exceed capacity. Bounded native Relay also executes a single dynamic P plus a static fragment C, including prepend, empty extents and chained P+2: 48 LLVM calls over 16 runs with exact payload/shape results; fresh outputs only.",
+        "evidence": [
+          "include/kxc/relay/op.h",
+          "src/relay/type_infer.cc",
+          "test/infer_type_test.cpp",
+          "test/bounded_rope_llvm_test.cpp",
+          "docs/implementation/M3_ROPE_REPORT.md",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/bounded_kv_append_llvm_test.cpp",
+          "docs/implementation/M3_KV_APPEND_REPORT.md"
+        ]
+      },
+      "lowering": {
+        "status": "implemented",
+        "gate": "existing_te_bounded_slice_concat",
+        "reason": "Existing Slice TE and TOPI concatenate retain symbolic non-operated axes and produce fresh outputs. Slice deep snapshots isolate attrs; the existing ValueGraph names distinguish parameters from constants after ShapeProgram lexical sorting. No new IR or shape evaluator. Full bounded prefill also executes producer-proved 0:S prefixes of static position tables; S upper bounds cannot exceed capacity. Bounded native Relay also executes a single dynamic P plus a static fragment C, including prepend, empty extents and chained P+2: 48 LLVM calls over 16 runs with exact payload/shape results; fresh outputs only.",
+        "evidence": [
+          "src/relay/op/tensor/transform.cc",
+          "src/te/topi/transform.cc",
+          "test/infer_type_test.cpp",
+          "test/bounded_rope_llvm_test.cpp",
+          "docs/implementation/M3_ROPE_REPORT.md",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/bounded_kv_append_llvm_test.cpp",
+          "docs/implementation/M3_KV_APPEND_REPORT.md"
+        ]
+      },
+      "llvm": {
+        "status": "implemented",
+        "gate": "cpu_llvm_rope_slice_concat_executed",
+        "reason": "LLVM 20 executed static Slice/Concat numeric cases and bounded Q/K rotary graphs: 72 synthetic launches plus 204 launches of the actual exported RMSNorm/QKV/heads/RoPE chain over four B/S cases. CUDA execution is not claimed. Full bounded prefill also executes producer-proved 0:S prefixes of static position tables; S upper bounds cannot exceed capacity. Bounded native Relay also executes a single dynamic P plus a static fragment C, including prepend, empty extents and chained P+2: 48 LLVM calls over 16 runs with exact payload/shape results; fresh outputs only.",
+        "evidence": [
+          "test/op_numeric_llvm_test.cpp",
+          "test/bounded_rope_llvm_test.cpp",
+          "docs/implementation/M3_ROPE_REPORT.md",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/bounded_kv_append_llvm_test.cpp",
+          "docs/implementation/M3_KV_APPEND_REPORT.md"
+        ]
+      },
+      "cuda": {
+        "status": "implemented",
+        "gate": "cuda_slice_concat_static_nd_local_evidence",
+        "reason": "Windows CUDA 12.9 executed nonempty 1-D and 3-D float32 Slice/Concatenate through Compiler/RuntimeSession with exact values. Slice retains the +1-only step contract and negative axis normalization; binary Concatenate uses axis -2. Empty-output, arbitrary step and bounded CUDA are not claimed.",
+        "evidence": [
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "contracts/pass_contract.json",
+          "test/codegen_cuda_test.cpp",
+          "test/cuda_schedule_test.cpp",
+          "docs/implementation/GPU_OWNED_REDUCTION_REPORT.md"
+        ]
+      },
+      "runtime": {
+        "status": "implemented",
+        "gate": "bounded_rope_fresh_outputs",
+        "reason": "One RuntimeSession plan runs changing B/S with all primitive-cache stats unchanged. Ten invalid Q/K/cos/sin input cases add no allocation or submit. Two-shape deep-snapshot and parameter/constant lexical-order regressions also execute numerically. Full bounded prefill also executes producer-proved 0:S prefixes of static position tables; S upper bounds cannot exceed capacity. Bounded native Relay also executes a single dynamic P plus a static fragment C, including prepend, empty extents and chained P+2: 48 LLVM calls over 16 runs with exact payload/shape results; fresh outputs only.",
+        "evidence": [
+          "test/op_numeric_llvm_test.cpp",
+          "test/infer_type_test.cpp",
+          "test/bounded_rope_llvm_test.cpp",
+          "docs/implementation/M3_ROPE_REPORT.md",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/bounded_kv_append_llvm_test.cpp",
+          "docs/implementation/M3_KV_APPEND_REPORT.md"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "rope_independent_and_actual_onnx_cpu",
+        "reason": "Independent double Q/K rotary reference worst absolute error 9.56492e-8; actual exported MiniMind composition worst 4.05312e-6 against dynamic ONNX ReferenceEvaluator. Two-shape static-axis Slice snapshot/clamping and interleaved parameter/constant cases are exact. This does not establish dynamic slicing of sequence axes or a whole dynamic model. Full bounded prefill also executes producer-proved 0:S prefixes of static position tables; S upper bounds cannot exceed capacity. Bounded native Relay also executes a single dynamic P plus a static fragment C, including prepend, empty extents and chained P+2: 48 LLVM calls over 16 runs with exact payload/shape results; fresh outputs only.",
+        "evidence": [
+          "test/op_numeric_llvm_test.cpp",
+          "test/nlp_validation/transformer_capability_matrix.json",
+          "test/bounded_rope_llvm_test.cpp",
+          "docs/implementation/M3_ROPE_REPORT.md",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/bounded_kv_append_llvm_test.cpp",
+          "docs/implementation/M3_KV_APPEND_REPORT.md"
+        ]
+      },
+      "profile": {
+        "status": "implemented",
+        "gate": "minimind_rope_shape_bundle",
+        "reason": "Actual rotary runs contain 1016 associated runtime events: 4 runs, 204 submit/exec pairs and 604 allocations, each carrying export SHA, stage, B/S, position offset and plan ABI. Synthetic/ownership regressions are also associated; ten invalid inputs add only failure run records. Alloc excludes kernel-internal malloc. Full bounded prefill also executes producer-proved 0:S prefixes of static position tables; S upper bounds cannot exceed capacity. Bounded native Relay also executes a single dynamic P plus a static fragment C, including prepend, empty extents and chained P+2: 48 LLVM calls over 16 runs with exact payload/shape results; fresh outputs only.",
+        "evidence": [
+          "test/nlp_validation/transformer_capability_matrix.json",
+          "test/bounded_rope_llvm_test.cpp",
+          "docs/implementation/M3_ROPE_REPORT.md",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/bounded_kv_append_llvm_test.cpp",
+          "docs/implementation/M3_KV_APPEND_REPORT.md"
+        ]
+      }
+    },
+    "prefill_exact": {
+      "frontend": {
+        "status": "implemented",
+        "gate": "minimind_static_and_bounded_prefill_import",
+        "reason": "Actual exported MiniMind static prefill and explicit bounded shape-source graphs import through the production ONNX frontend, with model/export receipts recorded.",
+        "evidence": [
+          "test/adaptive_runtime_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M6_RUNTIME_REPORT.md",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "src/frontend/onnx_importer.cc",
+          "python/kxc_onnx/importer.py"
+        ]
+      },
+      "relay": {
+        "status": "implemented",
+        "gate": "minimind_exact_and_bounded_prefill_contracts",
+        "reason": "Complete eight-layer MiniMind prefill is represented by existing Relay operators and static weights; bounded B/S are proved by the restricted adapter, without arbitrary dynamic shapes.",
+        "evidence": [
+          "test/adaptive_runtime_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M6_RUNTIME_REPORT.md",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
+        ]
+      },
+      "lowering": {
+        "status": "implemented",
+        "gate": "ordinary_minimind_prefill_primitives",
+        "reason": "Full static and bounded model graphs reach ordinary primitive lowering and LLVM, not a reference executor or handwritten model kernel.",
+        "evidence": [
+          "test/adaptive_runtime_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M6_RUNTIME_REPORT.md",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md"
+        ]
+      },
+      "llvm": {
+        "status": "implemented",
+        "gate": "cpu_llvm_minimind_prefill_executed",
+        "reason": "Actual static prefill executes 650 LLVM calls per generation; bounded prefill executes 742 per run. These are model-specific local CPU execution receipts, not CUDA coverage. Full static B1/S16 prefill additionally executes two explicit 2-worker placements with the same compiled module: 1300 LLVM calls total, 325 calls per worker per placement.",
+        "evidence": [
+          "test/adaptive_runtime_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M6_RUNTIME_REPORT.md",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/distributed_runtime_test.cpp",
+          "docs/implementation/M7_MODEL_REPORT.md"
+        ]
+      },
+      "cuda": {
+        "status": "implemented",
+        "gate": "cuda_minimind_prefill_b1_s16_local_evidence",
+        "reason": "Full eight-layer random-weight MiniMind static B1/S16 prefill executes all 650 production CUDA primitives. Two runs compare all logits and 16 K/V outputs (401408 elements) against independent ONNX references; worst absolute error 1.001358032e-5, runtime cache counters unchanged, outputs own fresh GPU storage. Windows RTX 4070 Ti SUPER / CUDA 12.9 local evidence; all 1300 CUPTI kernels now join their model run and exact call_index through unique launch spans with aligned clocks. Static capacity decode/state have separate local-evidence gates; this prefill record does not certify bounded CUDA.",
+        "evidence": [
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "test/codegen_cuda_test.cpp",
+          "test/minimind_prefill_cuda_test.cpp",
+          "python/tools/make_minimind_decode_loop_fixture.py",
+          "docs/implementation/GPU_GATHER_POW_REPORT.md",
+          "docs/implementation/GPU_MINIMIND_PREFILL_REPORT.md",
+          "test/cuda_profile_bundle_test.py",
+          "docs/implementation/M1_CUDA_CORRELATION_REPORT.md"
+        ]
+      },
+      "runtime": {
+        "status": "implemented",
+        "gate": "minimind_prefill_and_state_handoff",
+        "reason": "Static and bounded RuntimeSession paths return logits plus all 16 present K/V tensors. Bounded prefill outputs initialize the existing decode state owner for subsequent greedy steps. The distributed whole-graph binding now consumes the validated static ExecutablePlan, keeps constants in the module, inserts explicit cross-worker copies and returns all 17 outputs in order. Every declared output is checked before any work. This is process-local stateless prefill, not distributed KV ownership.",
+        "evidence": [
+          "test/adaptive_runtime_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M6_RUNTIME_REPORT.md",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_BOUNDED_STATE_REPORT.md",
+          "test/distributed_runtime_test.cpp",
+          "docs/implementation/M7_MODEL_REPORT.md",
+          "include/kxc/distributed/execution_plan.h",
+          "src/distributed/execution_plan.cc",
+          "src/distributed/executor.cc"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "minimind_prefill_logits_and_present_cpu",
+        "reason": "Static hot-swap generations match all 17 outputs bitwise (ONNX max error 8.82149e-6). Four B/S cases plus causal perturbation execute 3710 bounded LLVM calls, max error 8.46386e-6; inputs and all KV values are checked. Two distributed placements additionally compare 401,408 ONNX values (maximum absolute error 8.82149e-6 within 5e-5) and 401,408 independent single-session LLVM values bitwise; old outputs survive the second placement.",
+        "evidence": [
+          "test/adaptive_runtime_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M6_RUNTIME_REPORT.md",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/distributed_runtime_test.cpp",
+          "docs/implementation/M7_MODEL_REPORT.md"
+        ]
+      },
+      "profile": {
+        "status": "implemented",
+        "gate": "minimind_prefill_receipt_shape_generation",
+        "reason": "Actual model bundles record export receipt, stage, B/S and static generation association; runtime submissions/completions and prefill-to-state handoff have model-specific evidence. Static CUDA B1/S16 also validates all 1300 CUPTI kernel-to-launch-to-run joins, including receipt and shape metadata, with separate host_submit, host_observed_complete and device_execute timing domains. Distributed static prefill additionally records 2650 completed model/plan/node/worker spans for 1300 kernels and 23 synchronous CCL copies. Parent/run links, worker placement, ABI, copy dependencies and all output ownership are audited; 14 event/plan tampering cases are rejected. Copy bytes are derived from plan metadata, not DMA timing.",
+        "evidence": [
+          "test/adaptive_runtime_test.cpp",
+          "test/minimind_bounded_prefill_llvm_test.cpp",
+          "docs/implementation/M6_RUNTIME_REPORT.md",
+          "docs/implementation/M3_FULL_PREFILL_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_BOUNDED_STATE_REPORT.md",
+          "test/cuda_profile_bundle_test.py",
+          "docs/implementation/M1_CUDA_CORRELATION_REPORT.md",
+          "test/distributed_runtime_test.cpp",
+          "docs/implementation/M7_MODEL_REPORT.md"
+        ]
+      }
+    },
+    "decode_external_kv": {
+      "frontend": {
+        "status": "implemented",
+        "gate": "minimind_decode_shape_source",
+        "reason": "The actual eight-layer MiniMind ONNX decode imports through explicit shape-source mode with int64 shape Add/Sub and a proved P:P+1 position window; all 17 output positions are checked.",
+        "evidence": [
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M3_FULL_DECODE_REPORT.md",
+          "python/tools/make_minimind_bounded_decode_fixture.py",
           "test/onnx_importer_py_test.py"
         ]
       },
       "relay": {
         "status": "implemented",
-        "gate": "exact_static_slice_concat",
-        "reason": "Slice and Concatenate have canonical attrs, static type contracts, and no aliasing contract.",
+        "gate": "bounded_single_token_external_kv",
+        "reason": "The existing operators express token length 1, bounded batch B and past length P, P+1 present tensors, and all eight attention/FFN layers. Ordinary data Sub and unproved shape controls remain rejected.",
         "evidence": [
-          "include/kxc/relay/op.h",
-          "src/relay/type_infer.cc",
-          "test/infer_type_test.cpp"
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M3_FULL_DECODE_REPORT.md",
+          "src/compiler/shape/shape_value_resolver.cc"
         ]
       },
       "lowering": {
         "status": "implemented",
-        "gate": "exact_static_slice_concat",
-        "reason": "Slice and Concatenate lower to fresh exact-static TE computes, including empty outputs.",
+        "gate": "existing_te_decode_window_and_shapes",
+        "reason": "The existing TE and bounded serial schedule lower the actual decode to 774 ordinary kernel units, carrying P offsets into window addresses, tensor shapes and output allocation.",
         "evidence": [
-          "src/relay/op/tensor/transform.cc",
-          "src/te/topi/transform.cc",
-          "test/infer_type_test.cpp"
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M3_FULL_DECODE_REPORT.md",
+          "src/compiler/shape/dynamic_shape_contract.cc",
+          "src/relay/op/tensor/shape_ops.cc"
         ]
       },
       "llvm": {
         "status": "implemented",
-        "gate": "conditional_llvm_slice_concat_numeric_test",
-        "reason": "Conditional LLVM numeric source covers Slice and Concatenate; it is not claimed locally validated.",
+        "gate": "cpu_llvm_full_bounded_decode_executed",
+        "reason": "One CPU/LLVM artifact executed four B/P cases including empty past, then four greedy feedback steps: 6192 model kernel calls. No CUDA or speedup claim follows.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M3_FULL_DECODE_REPORT.md"
         ]
       },
       "cuda": {
         "status": "implemented",
-        "gate": "cuda_slice_concat_1d_nonempty_local_evidence",
-        "reason": "Source implements non-empty 1-D positive-step Slice and binary Concatenate Compiler/RuntimeSession fixtures, but no committed GPU-CI/local-run artifact exists, so they are not validated; multidimensional and empty-output CUDA are not claimed.",
+        "gate": "cuda_minimind_capacity_decode_b1_c32_local_evidence",
+        "reason": "Full eight-layer MiniMind executes static-capacity and bounded CUDA decode paths. The bounded consumer covers four B/P cases, fresh and owned state, four greedy steps, 16 stable caches, 12384 correlated kernels, extent/state copies and zero-submit rejection checks; static-capacity prefill/decode evidence remains separately recorded. This is a bounded contract, not arbitrary ragged decode or hot swap.",
         "evidence": [
+          "src/runtime/executable_plan.cc",
+          "src/runtime/session.cc",
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "test/codegen_cuda_test.cpp",
+          "test/cuda_state_runtime_test.cpp",
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "python/tools/make_minimind_decode_loop_fixture.py",
+          "docs/implementation/GPU_KV_STATE_REPORT.md",
+          "docs/implementation/GPU_BOUNDED_STATE_REPORT.md"
+        ]
+      },
+      "runtime": {
+        "status": "implemented",
+        "gate": "bounded_decode_external_fresh_outputs",
+        "reason": "One RuntimeSession serves B=1..3 and P=0..8 with current length 1. Actual LLVM present tensors feed four subsequent steps; external arrays own the cache and the fresh-output plan does not acquire persistent KV state. Nine invalid model inputs allocate and launch nothing.",
+        "evidence": [
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M3_FULL_DECODE_REPORT.md",
+          "src/runtime/session.cc"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "full_decode_and_greedy_onnx_cpu",
+        "reason": "All 17 outputs match dynamic ONNX ReferenceEvaluator: max absolute error 1.56164e-5 across four B/P cases and 6.61612e-6 across four greedy steps; all past prefixes are exact. The loop starts from ONNX prefill reference outputs.",
+        "evidence": [
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M3_FULL_DECODE_REPORT.md",
+          "python/tools/make_minimind_bounded_decode_fixture.py",
+          "test/nlp_validation/deterministic_fixtures.json"
+        ]
+      },
+      "profile": {
+        "status": "implemented",
+        "gate": "minimind_bounded_decode_shape_bundle",
+        "reason": "Executed decode events associate stage, batch, past length, greedy step, export receipt, plan ABI, run_id and kernel. The model workload records 6192 submit/exec pairs; this is execution evidence, not a performance benchmark.",
+        "evidence": [
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M3_FULL_DECODE_REPORT.md",
+          "include/kxc/profiling/runtime_observer.h"
+        ]
+      }
+    },
+    "kv_cache": {
+      "frontend": {
+        "status": "implemented",
+        "gate": "minimind_static_and_bounded_onnx",
+        "reason": "Both the locked static capacity graph and actual bounded MiniMind ONNX decode import with explicit past/present order. Bounded mode retains the shape-source graph and proves P:P+1 windows.",
+        "evidence": [
+          "python/kxc_onnx/importer.py",
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "docs/implementation/M2_MINIMIND_STATE_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_BOUNDED_STATE_REPORT.md"
+        ]
+      },
+      "relay": {
+        "status": "implemented",
+        "gate": "static_capacity_and_bounded_past_present",
+        "reason": "The existing static and bounded concatenate graphs preserve past/present layout. ExecutablePlan attaches state through BindStateOutputs or BindBoundedStateOutputs; no model-specific state engine is introduced.",
+        "evidence": [
+          "include/kxc/runtime/executable_plan.h",
+          "src/relay/op/tensor/transform.cc",
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "docs/implementation/M2_MINIMIND_STATE_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_BOUNDED_STATE_REPORT.md"
+        ]
+      },
+      "lowering": {
+        "status": "implemented",
+        "gate": "ordinary_static_and_bounded_kv_kernels",
+        "reason": "Ordinary LLVM kernels remain unchanged. Bounded state bindings retarget logical input values, preserve graph guards and prove the producer output extent equals committed P plus the declared append count before session allocation.",
+        "evidence": [
+          "src/compiler/lowering/lowered_graph.cc",
+          "src/runtime/executable_plan.cc",
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "docs/implementation/M2_MINIMIND_STATE_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_BOUNDED_STATE_REPORT.md"
+        ]
+      },
+      "llvm": {
+        "status": "implemented",
+        "gate": "cpu_llvm_capacity_and_bounded_state_executed",
+        "reason": "Executed full eight-layer bounded state decode for four B/P cases (3096 calls), plus actual LLVM prefill (742 calls) and four owned-state greedy steps (3096 calls). Earlier static capacity evidence remains recorded separately. Static capacity LLVM additionally executes four real decode steps across generations 1/2/1/1 without runtime compilation. Bounded CPU hot swap additionally executes the complete 742-kernel prefill and four 774-kernel decode steps across generations 1/2/1/1. CPU request hot swap preserves the same queue and KV owner across five full-model batches and generations 1/2/2/1/1 (3870 kernel calls).",
+        "evidence": [
+          "test/codegen_llvm_test.cpp",
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "docs/implementation/M2_MINIMIND_STATE_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_BOUNDED_STATE_REPORT.md",
+          "test/adaptive_runtime_test.cpp",
+          "docs/implementation/M6_STATEFUL_REPORT.md",
+          "docs/implementation/M6_BOUNDED_REPORT.md",
+          "docs/implementation/M6_REQUEST_BATCHING_REPORT.md"
+        ]
+      },
+      "cuda": {
+        "status": "implemented",
+        "gate": "cuda_static_external_state_commit_local_evidence",
+        "reason": "External float32 state and sources may share one CUDA device. RunAsync waits for all kernels and synchronous D2D appends before committing extents and returning ready. Static and bounded full MiniMind consumers verify every KV value, stable cache addresses, capacity rejection and 336 state copies with CUPTI ordering; the bounded CUDA admission is verified on the RTX 4070 Ti SUPER. State-sourced in-place dynamic ABI, cross-device migration and hot swap remain unsupported by this gate.",
+        "evidence": [
+          "src/runtime/executable_plan.cc",
+          "src/runtime/session.cc",
+          "src/tir/transforms/bind_cuda_threads.cc",
+          "test/codegen_cuda_test.cpp",
+          "test/cuda_state_runtime_test.cpp",
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "python/tools/make_minimind_decode_loop_fixture.py",
+          "docs/implementation/GPU_KV_STATE_REPORT.md",
+          "docs/implementation/GPU_BOUNDED_STATE_REPORT.md",
+          "docs/implementation/GPU_REQUEST_BATCHING_REPORT.md"
+        ]
+      },
+      "runtime": {
+        "status": "implemented",
+        "gate": "session_owned_static_and_bounded_state_v1",
+        "reason": "The session owns fixed-capacity state, reusable compact-prefix buffers and committed extents. CPU bounded prefix packing preserves batch strides. Bounded external CUDA admission reuses the same packing/commit owner and is verified on the RTX 4070 Ti SUPER; static external CUDA retains its prior hardware evidence. Successful external-state RunAsync copies the append and commits lengths before returning. Request batching uses its separate same-device CPU/CUDA contract and is verified on the RTX 4070 Ti SUPER; state migration remains unsupported. Static external and matching-profile bounded CPU state can stay in the same per-request RuntimeSession across validated module replacement and rollback. Static no-state CUDA replacement now executes generation 1→2→1 on two explicit streams with CUPTI health/rollback; bounded KV/request CUDA replacement and cross-ABI state migration remain unverified.",
+        "evidence": [
+          "src/runtime/session.cc",
+          "test/runtime_session_test.cpp",
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "docs/implementation/M2_MINIMIND_STATE_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_BOUNDED_STATE_REPORT.md",
+          "docs/implementation/GPU_BOUNDED_STATE_REPORT.md",
+          "docs/implementation/GPU_REQUEST_BATCHING_REPORT.md",
+          "test/adaptive_runtime_test.cpp",
+          "docs/implementation/M6_STATEFUL_REPORT.md",
+          "docs/implementation/M6_BOUNDED_REPORT.md",
+          "docs/implementation/M6_REQUEST_BATCHING_REPORT.md",
+          "docs/implementation/M6_CUDA_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "python/tools/check_cuda_adaptive_hot_swap.py",
+          "include/kxc/compiler/compiler.h",
+          "src/compiler/compiler.cc",
+          "include/kxc/compiler/adaptive_hot_swap.h",
+          "src/compiler/adaptive/adaptive_hot_swap.cc"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "minimind_compiled_state_handoff_cpu",
+        "reason": "Four B/P owned-state cases bitwise match fresh-output LLVM for logits and all 16 caches. Actual bounded LLVM prefill seeds four greedy steps, with max absolute error 8.9407e-6 including seed comparisons; state addresses stay fixed, extents grow 4 to 8, and invalid capacity remains 1e20. Static capacity CPU hot swap compares 1,012,736 prefill/logit/KV values across generations 1/2/1/1; 16 addresses remain stable, extent grows 16 to 20, and maximum absolute error is 1.0252e-5. Matching-profile bounded hot swap compares 216,320 independent ONNX values, with maximum absolute error 8.9407e-6, 16 stable KV addresses and extent 4 to 8 across the same generation sequence. Request hot swap checks 99,328 independent ONNX values (max absolute error 1.12504e-5, tolerance 5e-5) and 179,968 values against independent per-request LLVM, bitwise equal across seven request steps.",
+        "evidence": [
+          "test/codegen_llvm_test.cpp",
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "docs/implementation/M2_MINIMIND_STATE_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_BOUNDED_STATE_REPORT.md",
+          "test/adaptive_runtime_test.cpp",
+          "docs/implementation/M6_STATEFUL_REPORT.md",
+          "docs/implementation/M6_BOUNDED_REPORT.md",
+          "docs/implementation/M6_REQUEST_BATCHING_REPORT.md"
+        ]
+      },
+      "profile": {
+        "status": "implemented",
+        "gate": "minimind_capacity_and_bounded_state_bundles",
+        "reason": "Recorded owned-state CPU events associate stage, B/P, committed extent, export receipt, plan ABI, run_id and kernel. Four bounded cases contain 3096 submit/exec pairs and 208 copies; the four-step greedy stage contains another 3096 pairs and 128 copies. These are execution receipts, not performance benchmarks. Static stateful CPU decode additionally records the actual generation/route/ABI/validation receipt for 2732 submit/exec pairs; completed generation-2 evidence drives one-shot quarantine and rollback. Bounded hot swap records 3096 decode kernel pairs, 64 prefix copies before kernels and 64 append copies after kernels. The replacement allocates no new state buffers; nine event tampering cases are rejected. Request hot swap records 3870 kernel pairs with actual generations and request ids; 80 prefix copies precede kernels and 112 append copies follow them. Static CUDA hot swap records 9 CUPTI kernel activities across generations 1→2→1, one-shot health rollback and six independent tamper rejections. The replacement allocates no new state buffers; 13 event tampering cases are rejected.",
+        "evidence": [
+          "include/kxc/profiling/runtime_observer.h",
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "docs/implementation/M2_MINIMIND_STATE_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_BOUNDED_STATE_REPORT.md",
+          "test/adaptive_runtime_test.cpp",
+          "docs/implementation/M6_STATEFUL_REPORT.md",
+          "docs/implementation/M6_BOUNDED_REPORT.md",
+          "docs/implementation/M6_REQUEST_BATCHING_REPORT.md"
+        ]
+      }
+    },
+    "dynamic_batching": {
+      "frontend": {
+        "status": "implemented",
+        "gate": "minimind_bounded_decode_shape_source",
+        "reason": "The explicit bounded ONNX shape-source importer preserves the real eight-layer MiniMind decoder. Request batching is separately declared on its compiled state plan; the ordinary static loader remains strict.",
+        "evidence": [
+          "src/frontend/onnx_importer.cc",
+          "test/request_batching_llvm_test.cpp",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_REQUEST_BATCHING_REPORT.md"
+        ]
+      },
+      "relay": {
+        "status": "implemented",
+        "gate": "restricted_leading_batch_and_past_axes",
+        "reason": "Existing restricted symbols and guards describe fixed-rank B/P axes. A producer-declared leading-axis independent-request ABI groups only equal P and equal non-batch shapes; arbitrary ragged shapes are not inferred.",
+        "evidence": [
+          "include/kxc/compiler/restricted_symbolic_shape.h",
+          "test/request_batching_llvm_test.cpp",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_REQUEST_BATCHING_REPORT.md"
+        ]
+      },
+      "lowering": {
+        "status": "implemented",
+        "gate": "bounded_independent_request_kernels",
+        "reason": "One explicitly compiled bounded decoder retains all 774 ordinary units and receives gathered compact prefixes. Serving performs no lowering, padding or compilation.",
+        "evidence": [
+          "src/compiler/lowering/te_to_tir.cc",
+          "test/request_batching_llvm_test.cpp",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_REQUEST_BATCHING_REPORT.md"
+        ]
+      },
+      "llvm": {
+        "status": "implemented",
+        "gate": "cpu_llvm_request_batches_executed",
+        "reason": "Local CPU/LLVM evidence: 7 real eight-layer request steps execute as 5 graph runs (3870 submits versus 5418 independently), with all logits and 16 KV states bitwise equal. This is a scoped local execution receipt, not a generic backend certification. The same full decoder also executes five request batches across published generations 1/2/2/1/1, retaining all 774 ordinary units and the existing batching behavior.",
+        "evidence": [
+          "test/request_batching_llvm_test.cpp",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_REQUEST_BATCHING_REPORT.md",
+          "test/adaptive_runtime_test.cpp",
+          "docs/implementation/M6_REQUEST_BATCHING_REPORT.md"
+        ]
+      },
+      "cuda": {
+        "status": "implemented",
+        "gate": "cuda_request_batching_hardware_evidence",
+        "reason": "The same RuntimeSession request slots, snapshots, prefix packing and synchronous append commit execute on one CUDA device with explicit same-device streams. RTX 4070 Ti SUPER evidence covers five full-model batches, 9288 correlated kernels, extent/state/management copies and all 17 bundle corruption checks; this remains a bounded hardware gate, not arbitrary ragged batching or a throughput claim.",
+        "evidence": [
+          "src/runtime/executable_plan.cc",
+          "src/runtime/session.cc",
+          "test/request_batching_llvm_test.cpp",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "test/support/request_batching_graph.h",
+          "docs/implementation/GPU_REQUEST_BATCHING_REPORT.md",
           "src/tir/transforms/bind_cuda_threads.cc",
           "test/codegen_cuda_test.cpp"
         ]
       },
       "runtime": {
         "status": "implemented",
-        "gate": "conditional_llvm_runtime_session_slice_concat",
-        "reason": "Slice and Concat are wired through the conditional LLVM RuntimeSession path.",
+        "gate": "session_owned_request_slots_v1",
+        "reason": "RuntimeSession owns finite state slots, snapshots one queued step per request, chooses oldest compatible peers, gathers prefixes, commits successful appends, cancels departed requests and rejects stale ids. CPU/LLVM execution and bounded CUDA execution use the same synchronous contract and explicit stream overload; the RTX 4070 Ti SUPER request bundle verifies five batches, 9288 kernels, state/management copies and all negative checks. No background scheduler or mixed-P batch is introduced. CPU hot swap additionally retains queued requests and KV slots through publication, departure/reuse and one-shot rollback. RunNextBatchWithModule validates a replacement before packing; controller RunNextBatch retains its lease through state commit. Invalid modules leave queued work intact, and a post-submit failure keeps the session poisoned even if old code is selected.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp",
-          "test/infer_type_test.cpp"
-        ]
-      },
-      "numeric": {
-        "status": "implemented",
-        "gate": "conditional_llvm_slice_concat_numeric_test",
-        "reason": "Conditional LLVM numeric source covers normal, identity, and empty Slice plus Concat.",
-        "evidence": [
-          "test/op_numeric_llvm_test.cpp",
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
-      "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No Slice+Concat profiling was run.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      }
-    },
-    "prefill_exact": {
-      "frontend": {
-        "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Only the exact-static Relay slice is implemented; this is not a general Transformer frontend claim.",
-        "evidence": [
-          "test/op_numeric_llvm_test.cpp"
-        ]
-      },
-      "relay": {
-        "status": "implemented",
-        "gate": "exact_static_causal_attention",
-        "reason": "The exact slice composes batched matmul, finite additive causal mask, and stable softmax.",
-        "evidence": [
-          "test/op_numeric_llvm_test.cpp"
-        ]
-      },
-      "lowering": {
-        "status": "implemented",
-        "gate": "exact_static_causal_attention",
-        "reason": "Each exact-static attention operator lowers to TIR.",
-        "evidence": [
-          "test/infer_type_test.cpp",
-          "test/op_numeric_llvm_test.cpp"
-        ]
-      },
-      "llvm": {
-        "status": "implemented",
-        "gate": "llvm_numeric_test_not_run_local",
-        "reason": "An exact-static prefill LLVM/runtime numeric test exists but local LLVM is unavailable.",
-        "evidence": [
-          "test/op_numeric_llvm_test.cpp"
-        ]
-      },
-      "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_reduction_unsupported",
-        "reason": "CUDA Compiler integration validates fail-closed rejection of reduction graphs; no device numeric support is claimed.",
-        "evidence": [
-          "test/codegen_cuda_test.cpp",
-          "test/cuda_schedule_test.cpp"
-        ]
-      },
-      "runtime": {
-        "status": "implemented",
-        "gate": "exact_static_runtime_slice",
-        "reason": "Compiler and RuntimeSession are wired into the exact-static prefill LLVM numeric test; no dynamic attention runtime claim is made.",
-        "evidence": [
-          "test/op_numeric_llvm_test.cpp"
+          "include/kxc/runtime/session.h",
+          "src/runtime/session.cc",
+          "include/kxc/runtime/executable_plan.h",
+          "test/request_batching_llvm_test.cpp",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_REQUEST_BATCHING_REPORT.md",
+          "docs/implementation/GPU_REQUEST_BATCHING_REPORT.md",
+          "test/adaptive_runtime_test.cpp",
+          "docs/implementation/M6_REQUEST_BATCHING_REPORT.md",
+          "docs/implementation/M6_CUDA_REPORT.md",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "python/tools/check_cuda_adaptive_hot_swap.py",
+          "include/kxc/compiler/compiler.h",
+          "src/compiler/compiler.cc",
+          "include/kxc/compiler/adaptive_hot_swap.h",
+          "src/compiler/adaptive/adaptive_hot_swap.cc"
         ]
       },
       "numeric": {
         "status": "validated",
-        "gate": "cpu_reference",
-        "reason": "Deterministic finite-logit exact-static causal-attention reference fixture passes; no compiler/runtime or full-Transformer execution is claimed.",
+        "gate": "minimind_request_batches_match_independent_llvm",
+        "reason": "Real MiniMind admission, merging, departure and slot reuse: logits plus all 16 valid KV prefixes are bitwise equal to independent LLVM. Initial ONNX fixtures have max absolute error 1.12504e-05 within the existing 1e-3 limit. Synthetic axis-2 two-token and scalar-reference checks also pass. CPU request hot swap additionally compares 99,328 ONNX values within 5e-5 (maximum 1.12504e-5) and 179,968 independent LLVM values bitwise across seven steps, including queued rollback; later three steps use independent LLVM rather than new ONNX runs.",
         "evidence": [
-          "test/nlp_validation/deterministic_fixtures.json",
-          "python/tools/check_nlp_gpu_validation.py"
+          "test/request_batching_llvm_test.cpp",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_REQUEST_BATCHING_REPORT.md",
+          "test/adaptive_runtime_test.cpp",
+          "docs/implementation/M6_REQUEST_BATCHING_REPORT.md"
         ]
       },
       "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      }
-    },
-    "decode_external_kv": {
-      "frontend": {
-        "status": "contracted",
-        "gate": "external_kv_static_inputs_only",
-        "reason": "Only the exact-static Relay slice with externally supplied K/V is implemented; this is not a KV-cache frontend claim.",
-        "evidence": [
-          "test/op_numeric_llvm_test.cpp"
-        ]
-      },
-      "relay": {
         "status": "implemented",
-        "gate": "exact_static_external_kv",
-        "reason": "The decode slice accepts query token=1 and externally supplied static K/V tensors.",
+        "gate": "request_batch_ids_and_kernel_receipts",
+        "reason": "M1 bundles record request ids, selected batch size and committed P; five full-model graph receipts each record 774 submissions, versus seven independent receipts. Queue and merge copies are observed outside the graph span; no throughput claim follows from graph duration alone. Hot-swap bundles additionally associate generation, route, ABI and validation receipt with each request batch; 80 prefix and 112 append copies have verified ordering, zero replacement state allocations and 13 rejected tampering cases. The 3870 versus 5418 kernel counts preserve prior batching and do not demonstrate a new hot-swap speedup.",
         "evidence": [
-          "test/op_numeric_llvm_test.cpp"
-        ]
-      },
-      "lowering": {
-        "status": "implemented",
-        "gate": "exact_static_external_kv",
-        "reason": "The external-K/V attention composition lowers through batched matmul and stable softmax.",
-        "evidence": [
-          "test/infer_type_test.cpp",
-          "test/op_numeric_llvm_test.cpp"
-        ]
-      },
-      "llvm": {
-        "status": "implemented",
-        "gate": "llvm_numeric_test_not_run_local",
-        "reason": "An exact-static external-K/V LLVM/runtime numeric test exists but local LLVM is unavailable.",
-        "evidence": [
-          "test/op_numeric_llvm_test.cpp"
-        ]
-      },
-      "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_reduction_unsupported",
-        "reason": "CUDA Compiler integration validates fail-closed rejection of reduction graphs; no device numeric support is claimed.",
-        "evidence": [
-          "test/codegen_cuda_test.cpp",
-          "test/cuda_schedule_test.cpp"
-        ]
-      },
-      "runtime": {
-        "status": "implemented",
-        "gate": "exact_static_external_kv_runtime",
-        "reason": "Compiler and RuntimeSession are wired into the exact-static external-K/V LLVM numeric test; no cache update or lifetime semantics are claimed.",
-        "evidence": [
-          "test/op_numeric_llvm_test.cpp"
-        ]
-      },
-      "numeric": {
-        "status": "validated",
-        "gate": "external_kv_reference",
-        "reason": "Deterministic finite-logit external-KV reference fixture passes; no KV-cache, compiler/runtime, or full-Transformer execution is claimed.",
-        "evidence": [
-          "test/nlp_validation/deterministic_fixtures.json",
-          "python/tools/check_nlp_gpu_validation.py"
-        ]
-      },
-      "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      }
-    },
-    "kv_cache": {
-      "frontend": {
-        "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
-        "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
-        ]
-      },
-      "relay": {
-        "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
-      "lowering": {
-        "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
-      "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
-      "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
-      "runtime": {
-        "status": "contracted",
-        "gate": "valid_extent_only",
-        "reason": "Phase A validation contract only; only the CPU reference is exercised, not a runtime implementation.",
-        "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
-        ]
-      },
-      "numeric": {
-        "status": "validated",
-        "gate": "valid_extent_only",
-        "reason": "Deterministic reference/mock append-page-capacity trace passes; no compiler/runtime KV-cache capability is claimed.",
-        "evidence": [
-          "test/nlp_validation/deterministic_fixtures.json",
-          "python/tools/check_nlp_gpu_validation.py"
-        ]
-      },
-      "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      }
-    },
-    "dynamic_batching": {
-      "frontend": {
-        "status": "unsupported",
-        "gate": "unresolved_onnx_rank_or_dims_rejected",
-        "reason": "The frontend rejects unknown ONNX rank and unresolved dimensions, except an explicitly bound axis-0 default batch.",
-        "evidence": [
-          "python/kxc_onnx/importer.py",
-          "test/onnx_importer_py_test.py"
-        ]
-      },
-      "relay": {
-        "status": "unsupported",
-        "gate": "unknown_extents_representable_not_executable",
-        "reason": "Relay TensorType may represent unresolved extents, but no dynamic execution contract is provided.",
-        "evidence": [
-          "src/relay/type_infer.cc",
-          "test/infer_type_test.cpp"
-        ]
-      },
-      "lowering": {
-        "status": "unsupported",
-        "gate": "static_lowering_size_contract",
-        "reason": "Shared whole-graph and production per-unit lowering rejects negative or >INT32_MAX iteration extents and checked row-major element/flatten/byte overflow against int64 and size_t, while preserving zero-element tensors.",
-        "evidence": [
-          "src/compiler/lowering/te_to_tir.cc",
-          "src/compiler/lowering/lowered_graph.cc",
-          "test/infer_type_test.cpp"
-        ]
-      },
-      "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
-      "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
-      "runtime": {
-        "status": "unsupported",
-        "gate": "no_dynamic_execution_plan",
-        "reason": "Runtime has no dynamic execution-plan or allocation contract.",
-        "evidence": [
-          "src/runtime/executable_plan.cc",
-          "src/runtime/memory_plan.cc"
-        ]
-      },
-      "numeric": {
-        "status": "unsupported",
-        "gate": "no_numeric_gate",
-        "reason": "No numeric fixture in Phase A.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
-        ]
-      },
-      "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
-        "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/runtime/session.cc",
+          "test/request_batching_llvm_test.cpp",
+          "test/minimind_bounded_decode_llvm_test.cpp",
+          "docs/implementation/M2_REQUEST_BATCHING_REPORT.md",
+          "test/adaptive_runtime_test.cpp",
+          "docs/implementation/M6_REQUEST_BATCHING_REPORT.md"
         ]
       }
     },
     "copy_event": {
       "frontend": {
         "status": "contracted",
-        "gate": "static_shapes_only",
-        "reason": "Phase A validation contract only; not an implementation claim.",
+        "gate": "runtime_api_not_frontend_operator",
+        "reason": "This capability is an explicit Storage/NDArray runtime API, not an ONNX frontend operator; no copy importer is claimed.",
         "evidence": [
-          "python/tools/check_nlp_gpu_validation.py"
+          "include/kxc/runtime/ndarray.h",
+          "test/runtime_profiling_test.cpp",
+          "test/diagnosis_engine_test.py",
+          "docs/implementation/M1_COPY_EVENT_REPORT.md"
         ]
       },
       "relay": {
         "status": "contracted",
-        "gate": "phase_a_contract_only",
-        "reason": "Phase A validation contract only; no Relay implementation claim.",
+        "gate": "runtime_api_not_relay_operator",
+        "reason": "Copies and completion handles are owned by the runtime; there is no separate Relay copy operator or new IR contract.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "include/kxc/runtime/device_stream.h",
+          "test/runtime_profiling_test.cpp",
+          "test/diagnosis_engine_test.py",
+          "docs/implementation/M1_COPY_EVENT_REPORT.md"
         ]
       },
       "lowering": {
         "status": "contracted",
-        "gate": "no_codegen_gate",
-        "reason": "Phase A validation contract only; no lowering implementation claim.",
+        "gate": "runtime_copy_not_tir_lowering",
+        "reason": "The existing DeviceAPI performs transfers. LLVM consumes copied tensors; no copy TIR primitive lowering is claimed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/runtime/device_stream.cc",
+          "test/runtime_profiling_test.cpp",
+          "test/diagnosis_engine_test.py",
+          "docs/implementation/M1_COPY_EVENT_REPORT.md"
         ]
       },
       "llvm": {
-        "status": "unsupported",
-        "gate": "llvm_not_validated",
-        "reason": "No local LLVM validation is claimed.",
+        "status": "implemented",
+        "gate": "cpu_copy_llvm_copy_executed",
+        "reason": "A real CPU copy -> compiled LLVM ReLU -> CPU copy chain executes through RuntimeSession; this validates the LLVM consumer, not an LLVM memcpy intrinsic.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/device_runtime_test.cpp",
+          "test/runtime_profiling_test.cpp",
+          "test/diagnosis_engine_test.py",
+          "docs/implementation/M1_COPY_EVENT_REPORT.md"
         ]
       },
       "cuda": {
-        "status": "unsupported",
-        "gate": "cuda_not_validated",
-        "reason": "No local CUDA validation is claimed.",
+        "status": "implemented",
+        "gate": "cuda_copy_cupti_pending_lifetime_local_evidence",
+        "reason": "Windows RTX 4070 Ti SUPER / CUDA 12.9 executes offset H2D -> D2D -> compiled ReLU -> D2H plus synchronous readback. Three controlled pending D2D cases validate Wait/query/last-handle destruction on another thread/profile, retained Storage/context, exactly-once callbacks and numeric output. Seven CUPTI DMA records join exact copy_id/submit/completion facts; local correctness evidence only, without automatic cross-stream dependencies or sanitizer claims.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/runtime/device_stream.cc",
+          "include/kxc/profiling/runtime_observer.h",
+          "test/cuda_copy_profiling_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "docs/implementation/M1_CUDA_COPY_REPORT.md"
         ]
       },
       "runtime": {
-        "status": "unsupported",
-        "gate": "copy_event_not_enabled",
-        "reason": "No runtime copy/event implementation claim.",
+        "status": "implemented",
+        "gate": "storage_async_completion_ownership",
+        "reason": "Existing AsyncOperation retains both Storage endpoints and settles each callback once. CPU and real controlled pending CUDA D2D tests cover early release, Wait/query/destruction and captured ProfileContext lifetime; completion retains Storage until the last handle is destroyed.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "src/runtime/device_stream.cc",
+          "include/kxc/profiling/runtime_observer.h",
+          "test/runtime_profiling_test.cpp",
+          "test/diagnosis_engine_test.py",
+          "docs/implementation/M1_COPY_EVENT_REPORT.md",
+          "test/cuda_copy_profiling_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "docs/implementation/M1_CUDA_COPY_REPORT.md"
         ]
       },
       "numeric": {
-        "status": "unsupported",
-        "gate": "no_numeric_gate",
-        "reason": "No numeric fixture in Phase A.",
+        "status": "validated",
+        "gate": "copy_offset_llvm_cuda_exact",
+        "reason": "CPU offset/LLVM ReLU/copy returns exact [0,3,0,5]. Windows CUDA copy/ReLU/copy and three pending D2D cases compare 1028 float32 elements exactly, preserve offset guards and reject invalid requests before extra copy launch/DMA.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "test/device_runtime_test.cpp",
+          "test/runtime_profiling_test.cpp",
+          "test/diagnosis_engine_test.py",
+          "docs/implementation/M1_COPY_EVENT_REPORT.md",
+          "test/cuda_copy_profiling_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "docs/implementation/M1_CUDA_COPY_REPORT.md"
         ]
       },
       "profile": {
-        "status": "unsupported",
-        "gate": "not_profiled",
-        "reason": "No profiling was run.",
+        "status": "implemented",
+        "gate": "paired_copy_completion_and_timing_domains",
+        "reason": "Storage copy_launch span_id is copy_id; CUPTI DMA parents to that launch and host submit/completion retain the original caller. CPU measured duration, host submit/observation and device_execute stay separate. Four real CUDA bundles pass pairing/byte/device/clock/stream checks and 36 deliberately corrupted variants are rejected.",
         "evidence": [
-          "test/nlp_validation/transformer_capability_matrix.json"
+          "include/kxc/profiling/runtime_observer.h",
+          "python/kxc_agent/services/diagnosis_engine.py",
+          "test/runtime_profiling_test.cpp",
+          "test/diagnosis_engine_test.py",
+          "docs/implementation/M1_COPY_EVENT_REPORT.md",
+          "test/cuda_copy_profiling_test.cpp",
+          "test/cuda_profile_bundle_test.py",
+          "docs/implementation/M1_CUDA_COPY_REPORT.md"
         ]
       }
     }

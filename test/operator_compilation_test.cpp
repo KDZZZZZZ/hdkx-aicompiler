@@ -605,6 +605,34 @@ bool TestMultiOutputExecutesNumerically() {
     return true;
 }
 
+bool TestProductionSplitExecutesNumerically() {
+    using namespace kxc;
+    Var input("split_input", TensorType({4}, "float32"));
+    Call split(relay::Op::Get("split"), {input},
+              relay::SplitAttrs::Create(0, {1, 1, 2}));
+    Function function({input}, Tuple({TupleGetItem(split, 0), TupleGetItem(split, 1),
+                                      TupleGetItem(split, 2)}));
+    const auto artifacts = api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    runtime::RuntimeSession session(artifacts.module(), artifacts.plan());
+    const Array<runtime::NDArray> outputs = session.Run({FilledTensor(5.0f)});
+    TEST_CHECK(outputs.size() == 3 && outputs[0].shape().size() == 1 &&
+                   outputs[0].shape()[0] == 1 && outputs[1].shape()[0] == 1 &&
+                   outputs[2].shape()[0] == 2,
+               "production split must preserve all output shapes");
+    std::vector<float> first(outputs[0].NBytes() / sizeof(float));
+    std::vector<float> second(outputs[1].NBytes() / sizeof(float));
+    std::vector<float> third(outputs[2].NBytes() / sizeof(float));
+    outputs[0].CopyToBytes(first.data(), outputs[0].NBytes());
+    outputs[1].CopyToBytes(second.data(), outputs[1].NBytes());
+    outputs[2].CopyToBytes(third.data(), outputs[2].NBytes());
+    TEST_CHECK(first == std::vector<float>{5.0f} &&
+                   second == std::vector<float>({5.0f}) &&
+                   third == std::vector<float>({5.0f, 5.0f}),
+               "production split must preserve numeric output order");
+    return true;
+}
+
 bool TestPrimitiveCacheUsesFullStableIdentity() {
     using namespace kxc;
     api::internal::ClearPrimitiveCacheForTesting();
@@ -746,6 +774,8 @@ int main() {
          TestPrimitiveCacheRelocatesDistinctConstantKeys},
         {"multi_output_executes_numerically",
          TestMultiOutputExecutesNumerically},
+        {"production_split_executes_numerically",
+         TestProductionSplitExecutesNumerically},
         {"primitive_cache_uses_full_stable_identity",
          TestPrimitiveCacheUsesFullStableIdentity},
         {"requested_primitive_units_are_strict_and_cache_scoped",

@@ -1,10 +1,10 @@
 # M8：te::Program 与第一个跨算子融合
 
-第一波已经接通 MiniMind 所需的一部分静态导入和执行观测，但没有产生跨算子融合候选。MiniMind 的 attention、RMSNorm 和 SwiGLU 仍应先以独立算子获得真实 L1a 数值和 profile；没有 profile 证据时，直接宣称融合只会掩盖哪个边界是瓶颈。
+M8 已接通静态 TE Program 与首个跨算子融合候选，方法、数值、缓存及运行观测见 [技术报告](M8_TE_PROGRAM_REPORT.md)。MiniMind 的 attention、RMSNorm 和 SwiGLU 扩展继续以真实模型 profile 为依据。
 
 本模块保留一个最小、可验证的性能切片：静态精确、同设备、纯逐元素 sqrt(add(x,y))。L1a 稳定后，再用 M1 bundle 判断是否值得扩展到 MiniMind attention/FFN。te::Program 不是新的 agent IR，也不支持动态形状、KV state 或自动候选搜索。
 
-> 状态：待实施，依赖 M1 已完成的观测基础和 M9 L1a 的真实模型 profile。当前安排见 [WAVE_2](WAVE_2.md)，完整边界见 [TE_PROGRAM_IR.md](../TE_PROGRAM_IR.md)。
+> 状态：T1–T7 已完成，默认/adaptive/bounded 三套完整门禁通过（2026-09-09）。CPU:0、优化等级 3 选择相邻静态同形 float32/float64 `add → sqrt`；默认等级 2 保留独立单元。当前安排见 [WAVE_2](WAVE_2.md)，完整边界见 [TE_PROGRAM_IR.md](../TE_PROGRAM_IR.md)。
 
 ## 必须保持的 owner
 
@@ -52,10 +52,10 @@ ctest --test-dir out/build/dev-ninja-cpu --output-on-failure --no-tests=error \
 
 实际测试目标名称以 `ctest -N` 为准；新增测试必须注册。随后执行公共契约、include、public header、docs 和 LLVM 检查。
 
-- [ ] 非法 Program、非规范顺序、无法证明的依赖和目标不匹配在 TIR/cache 前拒绝。
-- [ ] 融合前后 `sqrt(add(x,y))` 数值一致，输出 ABI 不变；内部 kernel 数量和边界有实际证据。
-- [ ] 单 Call 路径回归；cache 对 Program contract 正确隔离并保活 artifact。
-- [ ] 重复构造的 TIR/身份稳定，图编号、对象地址和链接符号不参与等价性。
-- [ ] 不声称已实现任意多 Call fusion、broadcast/reduction/dynamic/CUDA 并行或 autotuning。
+- [x] 非法 Program、非规范顺序、无法证明的依赖和目标不匹配在 TIR/cache 前拒绝。
+- [x] 融合前后 `sqrt(add(x,y))` 数值一致，输出 ABI 不变；内部 kernel 数量和边界有实际证据。
+- [x] 单 Call 路径回归；cache 对 Program contract 正确隔离并保活 artifact。
+- [x] 重复构造的 TIR/身份稳定，图编号、对象地址和链接符号不参与等价性。
+- [x] 不声称已实现任意多 Call fusion、broadcast/reduction/dynamic/CUDA 并行或 autotuning。
 
 M8 后续是否扩展到归约、布局或任务级调度，取决于 M1 的真实执行数据和实际性能问题。没有 profile 证据时不扩大融合范围。

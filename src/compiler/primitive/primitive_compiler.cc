@@ -60,7 +60,7 @@ struct PrimitiveWork final {
 
 std::string Context(const PrimitiveUnit& unit) {
     return "primitive unit " + std::to_string(unit.id) + " ('" +
-           std::string(unit.symbol) + "', " + unit.call.spec.name + ")";
+           std::string(unit.symbol) + "', " + PrimitiveUnitOperatorIdentity(unit) + ")";
 }
 
 template <typename Fn>
@@ -314,11 +314,11 @@ static CompiledPrimitiveBatch CompilePrimitiveUnitsImpl(
             throw std::invalid_argument(
                 "bounded CompilePrimitiveUnits requires one shape contract per unit");
         }
-        if (config->target->kind != "llvm" ||
-            config->target->device_type != kCPU ||
-            config->target->device_id != 0) {
+        if (!((config->target->kind == "llvm" && config->target->device_type == kCPU &&
+               config->target->device_id == 0) ||
+              (config->target->kind == "cuda" && config->target->device_type == kCUDA))) {
             throw std::invalid_argument(
-                "bounded CompilePrimitiveUnits supports CPU/LLVM only");
+                "bounded CompilePrimitiveUnits requires CPU:0/LLVM or CUDA");
         }
         for (const DynamicUnitShapeContract& shape_contract :
              *shape_contracts) {
@@ -349,7 +349,8 @@ static CompiledPrimitiveBatch CompilePrimitiveUnitsImpl(
                         shape_contracts->at(static_cast<std::size_t>(id)));
                 }
 #endif
-                return LowerPrimitiveUnit(values, unit, config->target);
+                return LowerPrimitiveUnit(values, unit, config->target,
+                    std::string(contract.tir_pipeline.canonical_bytes));
             });
         for (const auto& binding : lowered.constants()) {
             if (constants.count(binding->key) &&
@@ -487,6 +488,17 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
     const PartitionedGraph& partitioned_graph,
     const CompileConfig& config,
     const CompilerExecutionContract& contract) {
+    std::vector<PrimitiveUnitId> ids(partitioned_graph.units.size());
+    std::iota(ids.begin(), ids.end(), 0);
+    return CompilePrimitiveUnits(preparation, partitioned_graph, config, contract, ids);
+}
+
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const BoundedCompilePreparation& preparation,
+    const PartitionedGraph& partitioned_graph,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract,
+    const std::vector<PrimitiveUnitId>& requested_unit_ids) {
     const PartitionedGraph& authoritative =
         preparation.partitioned_graph();
     if (partitioned_graph.units.size() != authoritative.units.size() ||
@@ -515,9 +527,6 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
                 "bounded CompilePrimitiveUnits value differs from its preparation");
         }
     }
-    std::vector<PrimitiveUnitId> requested_unit_ids(
-        partitioned_graph.units.size());
-    std::iota(requested_unit_ids.begin(), requested_unit_ids.end(), 0);
     return CompilePrimitiveUnitsImpl(
         partitioned_graph.units, partitioned_graph.value_graph.values,
         config, contract, requested_unit_ids,

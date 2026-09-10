@@ -28,6 +28,9 @@ public:
 
     const TargetNode* operator->() const;
     std::string ToString() const;
+    // Canonical capability snapshot, shared by compiler identity and placement.
+    // Volatile available memory is excluded.
+    std::string CanonicalBytes() const;
 };
 
 Target BuildTarget(const Device& device);

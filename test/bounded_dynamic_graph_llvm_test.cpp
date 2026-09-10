@@ -213,7 +213,7 @@ bool TestCompileOnceRunTwoShapes() {
         const std::string identity = pin.record().artifact_key.canonical_bytes();
         CHECK(identity.find("bounded_dynamic_graph_version") !=
                   std::string::npos &&
-                  identity.find("bounded-dynamic-serial-v1") !=
+                  identity.find("bounded-dynamic-serial-v3") !=
                   std::string::npos,
               "bounded gate/schedule version is absent from primitive identity");
     }
@@ -294,15 +294,14 @@ bool TestUnsupportedGraphsFailBeforeBackend() {
                       kxc::Function({x}, kxc::If(x, x, x)), CpuConfig(),
                       {{0, 0, "N", 2, 8, 2}});
               }) &&
-              Throws([&] {
-                  const auto cuda = PrepareBoundedChain(
-                      SyntheticCudaConfig());
-                  (void)restricted::RestrictedSymbolicShapeAdapter::
-                      MintBoundedCompileRequest(cuda);
-              }) &&
               SameStats(before,
                         compiler_internal::GetPrimitiveCacheStats()),
-          "unsupported op, control, or CUDA reached primitive backend/cache");
+          "unsupported op or control reached primitive backend/cache");
+    const auto cuda = restricted::RestrictedSymbolicShapeAdapter::MintBoundedCompileRequest(
+        PrepareBoundedChain(SyntheticCudaConfig()));
+    CHECK(cuda.target()->device_type == kxc::kCUDA &&
+          SameStats(before, compiler_internal::GetPrimitiveCacheStats()),
+          "CUDA bounded admission must not compile or change targets");
     return true;
 #endif
 }

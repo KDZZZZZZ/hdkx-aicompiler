@@ -20,6 +20,9 @@ public:
     virtual int num_workers() const = 0;
     virtual int num_groups() const = 0;
     virtual int AllocateRegister() = 0;
+    // DRef nodes retain the register; its last reference releases worker values.
+    virtual void RetainRegister(int reg_id) = 0;
+    virtual void ReleaseRegister(int reg_id) noexcept = 0;
     virtual runtime::NDArray GetRegister(int worker_id, int reg_id) const = 0;
     virtual void SetRegister(int worker_id, int reg_id, runtime::NDArray value) = 0;
     virtual void SyncWorker(int worker_id) = 0;

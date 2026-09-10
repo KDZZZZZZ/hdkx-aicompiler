@@ -55,6 +55,14 @@ Call MakeSigmoid(Expr data) {
     return Call(GetOp("sigmoid"), {data});
 }
 
+Call MakeTanh(Expr data) {
+    return Call(GetOp("tanh"), {data});
+}
+
+Call MakeErf(Expr data) {
+    return Call(GetOp("erf"), {data});
+}
+
 // 构造二元逐元素幂调用。
 Call MakePow(Expr lhs, Expr rhs) {
     return Call(GetOp("pow"), {lhs, rhs});
@@ -127,6 +135,10 @@ Call MakeConstantOfShape(Expr shape, Array<int64_t> target, int dtype_code,
                 ConstantOfShapeAttrs::Create(std::move(target), dtype_code, value));
 }
 
+Call MakeTrilu(Expr data, int upper, int64_t k) {
+    return Call(GetOp("trilu"), {data}, TriluAttrs::Create(upper, k));
+}
+
 // 构造 squeeze 调用，axes 静态已知。
 Call MakeSqueeze(Expr data, Array<int64_t> axes) {
     return Call(GetOp("squeeze"), {data}, SqueezeAttrs::Create(std::move(axes)));
@@ -145,6 +157,10 @@ Call MakeExpand(Expr data, Array<int64_t> target_shape) {
 // 构造 softmax 调用。
 Call MakeSoftmax(Expr data, int axis) {
     return Call(GetOp("softmax"), {data}, SoftmaxAttrs::Create(axis));
+}
+
+Call MakeMaskedSoftmax(Expr data, Expr mask, int axis) {
+    return Call(GetOp("masked_softmax"), {data, mask}, SoftmaxAttrs::Create(axis));
 }
 
 // 构造 transpose 调用。
@@ -167,6 +183,11 @@ Call MakeSlice(Expr data, Array<int64_t> starts, Array<int64_t> ends,
 // 构造 exact-static binary concatenate 调用。
 Call MakeConcatenate(Expr lhs, Expr rhs, int axis) {
     return Call(GetOp("concatenate"), {lhs, rhs}, ConcatenateAttrs::Create(axis));
+}
+
+// 构造静态多路 Split 调用，并把分段长度保留在 canonical attrs 中。
+Call MakeSplit(Expr data, int axis, Array<int64_t> sections) {
+    return Call(GetOp("split"), {data}, SplitAttrs::Create(axis, std::move(sections)));
 }
 
 // 构造二维卷积调用及完整布局属性。
@@ -244,6 +265,8 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.divide").set_body(ToPackedFunc(MakeDivid
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.equal").set_body(ToPackedFunc(MakeEqual));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.neg").set_body(ToPackedFunc(MakeNeg));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sigmoid").set_body(ToPackedFunc(MakeSigmoid));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.tanh").set_body(ToPackedFunc(MakeTanh));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.erf").set_body(ToPackedFunc(MakeErf));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.pow").set_body(ToPackedFunc(MakePow));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.expand").set_body(ToPackedFunc(MakeExpand));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.where").set_body(ToPackedFunc(MakeWhere));
@@ -260,14 +283,17 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape_dynamic")
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.expand_dynamic").set_body(ToPackedFunc(MakeExpandDynamic));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.constant_of_shape")
     .set_body(ToPackedFunc(MakeConstantOfShape));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.trilu").set_body(ToPackedFunc(MakeTrilu));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.squeeze").set_body(ToPackedFunc(MakeSqueeze));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.unsqueeze")
     .set_body(ToPackedFunc(MakeUnsqueeze));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.softmax").set_body(ToPackedFunc(MakeSoftmax));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.masked_softmax").set_body(ToPackedFunc(MakeMaskedSoftmax));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.transpose").set_body(ToPackedFunc(MakeTranspose));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.gather").set_body(ToPackedFunc(MakeGather));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.slice").set_body(ToPackedFunc(MakeSlice));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.concatenate").set_body(ToPackedFunc(MakeConcatenate));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.split").set_body(ToPackedFunc(MakeSplit));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_conv2d").set_body(ToPackedFunc(MakeNNConv2D));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_dense").set_body(ToPackedFunc(MakeNNDense));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.nn_layer_norm")

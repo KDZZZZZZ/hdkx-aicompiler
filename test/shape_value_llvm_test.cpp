@@ -279,7 +279,7 @@ bool TestBoundedShapeValueMaterialization() {
     // M2 的 state-sourced extent 把调用合同编码升到 V3；形状值单元沿用
     // 同一个版本化编码，不另立一套。
     CHECK(invocation.CanonicalBytes().find(
-              "KXC_MODULE_INVOKE_V3") != std::string::npos,
+              "KXC_MODULE_INVOKE_V4") != std::string::npos,
           "the invocation contract keeps its versioned canonical encoding");
 
     const kxc::runtime::RuntimeSession session(compiled.module(),
@@ -949,22 +949,34 @@ bool TestBoundedS2Failures() {
         {shape_value, kxc::Constant(Int64Tensor({3}, {0, 1, 2}))},
         kxc::relay::GatherAttrs::Create(0));
     const std::vector<kxc::Expr> bad_targets = {
-        // 元素总数不可证明相等：目标多了一个轴。
+        // 元素总数不等：额外长度 2 的轴使目标元素数翻倍。
+        // 长度 1 的附加轴合法，不能用来测试元素数拒绝。
         kxc::Call(kxc::relay::Op::Get("concatenate"),
                   {control,
-                   kxc::Constant(Int64Tensor({1}, {1}))},
+                   kxc::Constant(Int64Tensor({1}, {2}))},
                   kxc::relay::ConcatenateAttrs::Create(0)),
-        // -1 推断不在受限子集。
+        // B/S cancellation leaves 3/2, not a positive integral inferred axis.
         kxc::Call(kxc::relay::Op::Get("concatenate"),
                   {kxc::Call(kxc::relay::Op::Get("gather"),
                              {shape_value,
                               kxc::Constant(Int64Tensor({2}, {0, 1}))},
                              kxc::relay::GatherAttrs::Create(0)),
-                   kxc::Constant(Int64Tensor({2}, {-1, 3}))},
+                   kxc::Constant(Int64Tensor({2}, {-1, 2}))},
                   kxc::relay::ConcatenateAttrs::Create(0)),
     };
     const compiler_internal::PrimitiveCacheStats before =
         compiler_internal::GetPrimitiveCacheStats();
+    const kxc::Expr unit_axis_target = kxc::Call(
+        kxc::relay::Op::Get("concatenate"),
+        {control, kxc::Constant(Int64Tensor({1}, {1}))},
+        kxc::relay::ConcatenateAttrs::Create(0));
+    CHECK(!Throws([&] {
+              (void)restricted::RestrictedSymbolicShapeAdapter::Prepare(
+                  kxc::Function({x}, kxc::Call(kxc::relay::Op::Get("reshape_dynamic"),
+                                               {x, unit_axis_target})),
+                  CpuConfig(), {{0, 0, "B", 2, 8, 1}, {0, 1, "S", 1, 8, 1}});
+          }),
+          "an appended unit axis preserves the reshape element count");
     // 这些负例必须由受限准备（链式证明）拒绝，因此和正例一样不预先跑
     // InferTypePass —— 否则 Throws 来自 attrs 缺失的类型推导，测不到
     // bounded admission 本身。

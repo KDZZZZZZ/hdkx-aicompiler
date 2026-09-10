@@ -22,15 +22,22 @@
     layout.txt                "batch kv_heads head_dim layers"
     decode_capacity.json      导入规范
     decode_capacity.params    参数负载
+    prefill.json/.params       静态 prefill 的导入规范和参数
+    prefill_input_ids.bin      固定 prefill 输入
+    prefill_reference_logits.bin  完整 prefill logits 参考
+    export_receipt.txt        定容 decode ONNX 的 sha256 回执
     seed_<name>.bin           prefill 产出的初始 cache（extent 条有效）
     seed_extent.txt           初始 extent
     steps.txt                 每行 "step token_id extent_before"
+    prefill_logits.bin        prefill 最后一个位置的 logits（greedy 初始采样）
+    sampling.txt              采样策略（当前为 greedy_argmax）
     ref_step<i>_logits.bin    该步的 logits 参考
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 
@@ -70,16 +77,32 @@ def main() -> int:
     decode = onnx.load(str(args.onnx / "minimind_decode_capacity.onnx"))
     prefill = onnx.load(str(args.onnx / "minimind_prefill_static.onnx"))
     args.out.mkdir(parents=True, exist_ok=True)
+    export_digest = hashlib.sha256(
+        (args.onnx / "minimind_decode_capacity.onnx").read_bytes()
+    ).hexdigest()
+    (args.out / "export_receipt.txt").write_text(
+        f"sha256:minimind_decode_capacity.onnx:{export_digest}\n"
+    )
+    prefill_digest = hashlib.sha256(
+        (args.onnx / "minimind_prefill_static.onnx").read_bytes()
+    ).hexdigest()
+    (args.out / "prefill_export_receipt.txt").write_text(
+        f"sha256:minimind_prefill_static.onnx:{prefill_digest}\n"
+    )
 
     shapes = {value.name: [int(d.dim_value) for d in value.type.tensor_type.shape.dim]
               for value in decode.graph.input}
     capacity = shapes["past_k_0"][1]
     batch = shapes["input_ids"][0]
+    if batch != 1:
+        raise SystemExit("G2 greedy fixture currently requires batch=1")
     vocab = int([int(d.dim_value) for d in decode.graph.output[0].type.tensor_type.shape.dim][-1])
 
     imported = import_onnx_model(decode)
     save_imported_model(imported, args.out / "decode_capacity.json",
                         args.out / "decode_capacity.params")
+    save_imported_model(import_onnx_model(prefill), args.out / "prefill.json",
+                        args.out / "prefill.params")
     (args.out / "graph.txt").write_text("decode_capacity\n")
     (args.out / "capacity.txt").write_text(f"{capacity}\n")
     (args.out / "sentinel.txt").write_text(f"{args.sentinel!r}\n")
@@ -91,10 +114,20 @@ def main() -> int:
     # 1) prefill 产出初始 cache
     rng = np.random.default_rng(args.seed)
     prefill_len = [int(d.dim_value) for d in prefill.graph.input[0].type.tensor_type.shape.dim][1]
-    names, values, _ = _evaluate(
-        prefill, {"input_ids": rng.integers(0, vocab, size=(batch, prefill_len), dtype=np.int64)})
+    prefill_input = rng.integers(0, vocab, size=(batch, prefill_len), dtype=np.int64)
+    (args.out / "prefill_input_ids.bin").write_bytes(prefill_input.tobytes())
+    names, values, _ = _evaluate(prefill, {"input_ids": prefill_input})
     seed_cache = {name: np.ascontiguousarray(np.asarray(value, np.float32))
                   for name, value in zip(names, values) if name.startswith("present_")}
+    prefill_logits = np.ascontiguousarray(np.asarray(dict(zip(names, values))["logits"],
+                                                        np.float32))
+    if prefill_logits.ndim != 3 or prefill_logits.shape[0] != batch:
+        raise SystemExit("prefill logits 必须是 [batch, seq, vocab]")
+    (args.out / "prefill_reference_logits.bin").write_bytes(prefill_logits.tobytes())
+    (args.out / "prefill_logits.bin").write_bytes(
+        np.ascontiguousarray(prefill_logits[:, -1, :]).tobytes()
+    )
+    (args.out / "sampling.txt").write_text("greedy_argmax\n")
     extent = seed_cache["present_k_0"].shape[1]
     if extent + args.steps > capacity:
         raise SystemExit(f"capacity {capacity} 容不下 prefill {extent} + {args.steps} 步")
@@ -110,10 +143,12 @@ def main() -> int:
         past[:, :extent] = value
         cache["past_" + name[len("present_"):]] = past
 
-    # 3) 逐步 decode：同一张图、同一份 past 形状，只有 position/mask 随 extent 变
+    # 3) 逐步 decode：同一张图、同一份 past 形状，只有 position/mask 随 extent 变。
+    #    token 由上一步 logits 的最后位置做确定性 argmax，形成可复验的 host greedy loop。
     step_lines = []
+    next_token = int(np.argmax(prefill_logits[:, -1, :], axis=-1)[0])
     for step in range(args.steps):
-        token = int(rng.integers(0, vocab))
+        token = next_token
         mask = np.zeros((batch, capacity + 1), dtype=np.float32)
         mask[:, :extent] = 1.0
         mask[:, capacity] = 1.0          # 新 token 恒在下标 capacity
@@ -126,6 +161,7 @@ def main() -> int:
         logits = np.ascontiguousarray(np.asarray(outputs["logits"], np.float32))
         (args.out / f"ref_step{step}_logits.bin").write_bytes(logits.tobytes())
         step_lines.append(f"{step} {token} {extent}")
+        next_token = int(np.argmax(logits[:, -1, :], axis=-1)[0])
 
         # 新 K/V 恒在 present 的下标 capacity；写回 cache 的 extent 槽位
         for name, value in outputs.items():
@@ -133,6 +169,12 @@ def main() -> int:
                 continue
             fresh = np.asarray(value, np.float32)[:, capacity:capacity + 1]
             cache["past_" + name[len("present_"):]][:, extent:extent + 1] = fresh
+        # Independent full-capacity state evidence, in the locked interleaved
+        # K/V order. Includes the untouched invalid region after every append.
+        for layer in range(layers):
+            for kind_index, kind in enumerate(("k", "v")):
+                state = np.ascontiguousarray(cache[f"past_{kind}_{layer}"])
+                (args.out / f"ref_step{step}_state_{2 * layer + kind_index}.bin").write_bytes(state.tobytes())
         extent += 1
 
     (args.out / "steps.txt").write_text("\n".join(step_lines) + "\n")

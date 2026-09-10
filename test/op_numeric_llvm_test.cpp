@@ -767,6 +767,39 @@ void TestSigmoid() {
           "sigmoid saturation behavior mismatch");
 }
 
+// Full runtime/JIT path: tails, IEEE boundaries, scalar and empty tensors.
+void TestVisionUnaryMath() {
+    for (const std::string name : {"tanh", "erf"}) {
+        const float infinity = std::numeric_limits<float>::infinity();
+        const std::vector<float> input = {-infinity, -100.0f, -3.0f, -0.75f, -0.0f,
+            0.0f, 0.125f, 0.75f, 3.0f, 100.0f, infinity,
+            std::numeric_limits<float>::quiet_NaN(), 1e-30f};
+        kxc::Var x("x", kxc::TensorType({13}, "float32"));
+        std::vector<float> output(input.size());
+        CompileAndRun(name, kxc::Function({x}, kxc::Call(kxc::relay::Op::Get(name), {x})),
+                      {Input(input), Output(output)});
+        for (size_t i = 0; i < input.size(); ++i) {
+            const double expected = name == "tanh" ? std::tanh(double(input[i])) : std::erf(double(input[i]));
+            if (std::isnan(expected)) {
+                Check(std::isnan(output[i]), name + " must propagate NaN");
+            } else {
+                Check(std::isfinite(output[i]) && std::abs(double(output[i]) - expected) <= 1e-7,
+                      name + " libm numeric mismatch");
+                if (input[i] == 0) Check(std::signbit(output[i]) == std::signbit(input[i]),
+                                        name + " must preserve signed zero");
+            }
+        }
+        for (const kxc::Array<int64_t>& shape : {kxc::Array<int64_t>{}, kxc::Array<int64_t>{0, 3}}) {
+            kxc::Var value("value", kxc::TensorType(shape, "float32"));
+            const std::vector<float> data(shape.empty() ? 1 : 0, 0.0f);
+            std::vector<float> result(data.size());
+            CompileAndRun(name, kxc::Function({value}, kxc::Call(kxc::relay::Op::Get(name), {value})),
+                          {Input(data), Output(result)});
+            ExpectNear(result, data, 0);
+        }
+    }
+}
+
 // 验证 Pow 在 float32 上的 LLVM 数值结果（M5 S2 的 backend 调用核实）：
 // TIR "pow" 调用在 codegen 分派处绑定 llvm.pow 声明，libm powf 在 JIT 链接期
 // 由 host 进程符号表解析——下面的真实执行本身就是核实方式：若声明 ABI、
@@ -1240,6 +1273,7 @@ int main() {
         {"equal", TestEqual},
         {"neg", TestNeg},
         {"sigmoid", TestSigmoid},
+        {"tanh_erf", TestVisionUnaryMath},
         {"pow", TestPow},
         {"expand", TestExpand},
         {"equal_where_composition", TestEqualWhereComposition},

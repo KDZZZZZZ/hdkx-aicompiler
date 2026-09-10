@@ -429,7 +429,7 @@ bool TestBoundedCompileFailsClosedStructurally() {
     const kxc::Var x("x", vector4), y("y", vector4);
     CHECK(Throws([&] {
               (void)RestrictedSymbolicShapeAdapter::Prepare(
-                  kxc::Function({x}, kxc::Call(kxc::relay::Op::Get("softmax"), {x})),
+                  kxc::Function({x}, kxc::Call(kxc::relay::Op::Get("erf"), {x})),
                   Config(), {{0, 0, "n", 1, 8, 1}});
           }),
           "unknown bounded operators must fail before request minting");
@@ -454,7 +454,7 @@ bool TestBoundedCompileFailsClosedStructurally() {
                                                {x, kxc::Constant(data)})),
                   Config(), {{0, 0, "n", 1, 8, 1}});
           }),
-          "constants must fail before bounded request minting");
+          "a fixed non-singleton constant cannot stand in for a varying input axis");
     CHECK(Throws([&] {
               (void)RestrictedSymbolicShapeAdapter::Prepare(
                   kxc::Function({x}, kxc::If(x, x, x)), Config(),
@@ -469,9 +469,9 @@ bool TestBoundedCompileFailsClosedStructurally() {
                   kxc::Function({bx, by},
                       kxc::Call(kxc::relay::Op::Get("add"), {bx, by})),
                   Config(), {{0, 0, "n", 1, 8, 1},
-                             {1, 0, "n", 1, 8, 1}});
+                             {1, 0, "independent_n", 1, 8, 1}});
           }),
-          "broadcast must fail before bounded request minting");
+          "independent symbols cannot be proved broadcast-compatible from one sample");
 
     const kxc::Var missing_rank("missing_rank", kxc::Type());
     CHECK(Throws([&] {
@@ -498,15 +498,13 @@ bool TestBoundedCompileFailsClosedStructurally() {
           }),
           "complex output shape arithmetic must fail closed");
 
-    CHECK(Throws([&] {
-              const auto cuda_prepared =
-                  RestrictedSymbolicShapeAdapter::Prepare(
-                      UnaryGraph("nn_relu"), SyntheticCudaConfig(),
-                      {{0, 0, "n", 1, 8, 1}});
-              (void)RestrictedSymbolicShapeAdapter::MintBoundedCompileRequest(
-                  cuda_prepared);
-          }),
-          "bounded admission must reject synthetic CUDA without CPU fallback");
+    const auto cuda_prepared = RestrictedSymbolicShapeAdapter::Prepare(
+        UnaryGraph("nn_relu"), SyntheticCudaConfig(), {{0, 0, "n", 1, 8, 1}});
+    const auto cuda_request = RestrictedSymbolicShapeAdapter::MintBoundedCompileRequest(cuda_prepared);
+    CHECK(cuda_request.target()->kind == "cuda" &&
+          cuda_request.target()->device_type == kxc::kCUDA &&
+          cuda_request.compile_config()->target->kind == "cuda",
+          "bounded admission must preserve its CUDA target without CPU fallback");
 
     const shape::GraphTemplate broadcast_constraint_graph(
         kxc::api::Compiler::BuildGraphSemanticKey(UnaryGraph("nn_relu")),

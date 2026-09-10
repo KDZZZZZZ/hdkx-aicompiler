@@ -126,8 +126,7 @@ void AddPrimitiveBatchFields(
         const internal::CachedPrimitive& artifact = primitive.pin.artifact();
         span->AddField(prefix + "symbol", std::string(unit.symbol));
         span->AddField(
-            prefix + "operator", std::string(unit.call.spec.name) + "@v" +
-                std::to_string(unit.call.spec.schema_version));
+            prefix + "operator", internal::PrimitiveUnitOperatorIdentity(unit));
         span->AddField(prefix + "ir_hash", support::HashText(text));
         span->AddMetric(prefix + "ir_bytes",
                         static_cast<double>(text.size()));
@@ -172,7 +171,11 @@ shape::GraphTemplate BuildTemplate(
     const auto& graph = partitioned.value_graph;
     std::vector<shape::NamedTensorContract> inputs;
     std::vector<shape::NamedTensorContract> outputs;
-    for (const auto& value : graph.values) {
+    // Program-internal values have no runtime ABI. Use the same plan owner as
+    // normal assembly to choose the exact profile's observable value boundary.
+    const auto runtime_values = internal::BuildStaticExecutablePlan(prepared.graph).values();
+    for (const auto& runtime_value : runtime_values) {
+        const auto& value = graph.values.at(static_cast<size_t>(runtime_value->value_id));
         shape::NamedTensorContract named{ValueName(value.id),
                                          ValueContract(value)};
         if (value.origin == internal::ValueOrigin::kParameter ||
@@ -287,16 +290,18 @@ void VerifyVariant(
     // 本地持有的数组，否则悬垂。
     const Array<runtime::ValueSpec> plan_values = compiled.plan().values();
     const Array<runtime::KernelCall> plan_calls = compiled.plan().calls();
+    const auto expected_values = internal::BuildStaticExecutablePlan(prepared.graph).values();
     if (requests.size() != partitioned.units.size() ||
         plan_calls.size() != requests.size() ||
         compiled.artifact_pins().size() != requests.size() ||
         compiled.module().entry_count() != requests.size() ||
-        plan_values.size() != partitioned.value_graph.values.size()) {
+        plan_values.size() != expected_values.size()) {
         Reject("compiled module/plan/pin cardinality does not match exact requests");
     }
     for (size_t i = 0; i < plan_values.size(); ++i) {
         const runtime::ValueSpec& value = plan_values[i];
-        const auto& source = partitioned.value_graph.values[i];
+        const auto& source = partitioned.value_graph.values.at(
+            static_cast<size_t>(expected_values[i]->value_id));
         const auto& exact = ProfileValue(oracle, ValueName(source.id));
         const auto* expected_type = source.checked_type.As<TensorTypeNode>();
         if (!expected_type) Reject("compiled plan source is not a tensor");
@@ -398,7 +403,8 @@ void VerifyVariant(
         }
         const relay::LoweredFunction expected_lowered =
             internal::LowerPrimitiveUnit(
-                partitioned.value_graph.values, unit, config->target);
+                partitioned.value_graph.values, unit, config->target,
+                std::string(contract.tir_pipeline.canonical_bytes));
         const std::string expected_schedule =
             relay::internal::GetTEScheduleContract(
                 expected_lowered->prim_func);

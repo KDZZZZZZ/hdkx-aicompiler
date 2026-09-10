@@ -1,14 +1,16 @@
 # M1：执行侧观测
 
-第一波 A 线已经把执行观测接入真实路径：RuntimeSession 能产生 runtime_session_run、kernel_submit、kernel_exec、alloc、copy 等事件，AsyncOperation 有完成观测回调，LLVM Where 组合图有真实 bundle 证据。观测关闭时输出和原路径一致，分层检查、schema 和负例也已通过；完整证据见 G1_RECORD.md。现在的缺口是模型语义关联：bundle 还需要稳定地关联 MiniMind 的导出 receipt、prefill/decode 阶段、KV extent 和后续 generation/hot-swap 代际，且异步设备活动时间仍未覆盖。
+2026-09-09 后续：完整静态 MiniMind GPU prefill 的 1,300 条 CUPTI kernel 已与实际模型 run、唯一 kernel_launch、call_index 和 receipt 连接，时钟原点已对齐；并发多 profile 也已完成局部硬件验证，见 [CUDA 关联报告](M1_CUDA_CORRELATION_REPORT.md)。以下第一波范围与历史限制保留为实施记录；GPU copy/event 配对、受控 pending 与跨线程完成已有后续 [复制报告](M1_CUDA_COPY_REPORT.md)；静态 GPU decode/state 的 kernel、追加复制与模型 extent 关联见 [GPU 状态报告](GPU_KV_STATE_REPORT.md)，GPU 性能决策继续推进。
 
-本模块的后续工作是把第一波的观测设施用于 MiniMind-L1 验收和 M6 决策：不改变 kernel ABI，不把 profile 字段塞进 identity，不用主机提交时间冒充 GPU 活动时间。MiniMind-O 的 80 ms Talker/Mimi 实时预算要等 L3 的状态和服务合同确定后再扩展。
+第一波 A 线已经把执行观测接入真实路径：RuntimeSession 能产生 runtime_session_run、kernel_submit、kernel_exec、alloc、copy 等事件，AsyncOperation 有完成观测回调，LLVM Where 组合图有真实 bundle 证据。观测关闭时输出和原路径一致，分层检查、schema 和负例也已通过；完整证据见 G1_RECORD.md。M1/M2 后续已接通 MiniMind receipt、prefill/decode、KV extent；M6 已消费带实际 lease 代际与 ABI 的完成 Bundle，见 [热替换报告](M6_RUNTIME_REPORT.md)。异步 GPU 活动时间仍未覆盖。
 
-> 状态：第一波已完成，模型关联待实施。A 线交付与 [G1](G1_RECORD.md) 组合证据见 [G1](G1_RECORD.md)；下一波安排见 [WAVE_2](WAVE_2.md)。当前目标模型以 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.2 为准。
+本模块后续继续扩展模型诊断与设备活动证据：不改变 kernel ABI，不把 profile 字段塞进 identity，不用主机提交时间冒充 GPU 活动时间。MiniMind-O 的 80 ms Talker/Mimi 实时预算要等 L3 的状态和服务合同确定后再扩展。
+
+> 状态：第一波、模型关联与 M6 一次性健康消费切片已完成。运行 metadata API 见 [M1 关联报告](M1_MODEL_ASSOCIATION_REPORT.md)，真实 MiniMind prefill/decode、状态 copy 与 ABI digest 关联见 [M2 报告](M2_MINIMIND_STATE_REPORT.md) 和 [G2 greedy 报告](G2_GREEDY_REPORT.md)，controller 生成保留 metadata 与回滚见 [M6 报告](M6_RUNTIME_REPORT.md)。当前目标模型以 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.2 为准。
 
 ## 第一波已交付
 
-实现已经落在 runtime 的 `ExecutionObserver`、profiling 的 `RuntimeExecutionObserver`、`AsyncOperation` completion callback、RuntimeSession 接线和 `runtime_profiling_test`/`g1_combined_profiling_test`。下面的“拟新增/实施步骤”保留为设计与边界记录；新的工作只处理 MiniMind receipt/stage/extent/generation 关联，以及后续异步设备活动证据。
+实现已经落在 runtime 的 `ExecutionObserver`、profiling 的 `RuntimeExecutionObserver`、`AsyncOperation` completion callback、RuntimeSession 接线和 `runtime_profiling_test`/`g1_combined_profiling_test`。下面的“拟新增/实施步骤”保留为设计与边界记录；模型与代际关联的实际结果以上述报告为准，异步设备活动证据继续后续实施。
 
 ## 第一波前基线（历史记录）
 
@@ -20,7 +22,7 @@
 | 执行路径 | 第一波前 Run/RunAsync 从校验、绑定、ValueTable 分配到 InvokeOrderedModuleEntry 全程无事件 | 已在这些落点接入钩子，不改校验顺序和拒绝行为；MiniMind 只补 receipt/stage/extent 关联 |
 | 完成句柄 | 第一波前 AsyncOperation 只有 Wait/IsReady/RetainDependencies，没有完成回调 | 第一波已增加 completion callback，在 Wait/IsReady/析构之间恰好结算一次；真实异步设备活动仍留待后续 CUDA 证据 |
 | 分配与拷贝落点 | 运行期分配集中在 [value_table.h](../../src/runtime/internal/value_table.h) 的 Allocate（命中兼容存储则复用，否则 NDArray::Empty）与 Alias；拷贝公共入口是 [device_stream.cc](../../src/runtime/device_stream.cc) 的 StorageCopySync/StorageCopyAsync；会话构造用 NDArray::Zeros 初始化 state；模块构建期有常量快照复制（[compiled_module.cc](../../src/runtime/compiled_module.cc) 第 33-52 行） | 分配/复用/别名经会话观测器记账；拷贝经 runtime 线程本地观测器记账；常量快照复制在 runtime_executable 层直接记录 |
-| 事件消费方 | [contract.ts](../../tools/workbench/src/kxc/contract.ts) 的 EVENT_TYPE 已定义 runtime_session_run/kernel_exec/alloc/copy 词表；[诊断引擎](../../python/kxc_agent/services/diagnosis_engine.py) 的 copy_dominance、sync_overhead、shape_fragmentation 规则已在消费 device_api/runtime_session 事件，但当前没有真实生产者 | 事件命名对齐既有词表；与诊断引擎期待值的差异写入交接 |
+| 事件消费方 | [contract.ts](../../tools/workbench/src/kxc/contract.ts) 的 EVENT_TYPE 已定义 runtime_session_run/kernel_exec/alloc/copy 词表；[诊断引擎](../../python/kxc_agent/services/diagnosis_engine.py) 的 copy_dominance、sync_overhead、shape_fragmentation 规则已在消费 device_api/runtime_session 事件，已有真实生产者，复制与短 kernel 规则已按明确计时域对齐 | 事件命名对齐既有词表；与诊断引擎期待值的差异写入交接 |
 | bundle 结构校验 | [schema.py](../../python/kxc_agent/services/schema.py) 要求每个事件带 20 个固定字段；序列化器固定全量写出 | 不增删字段，schema_version 保持 1；新增的只是 event_type/phase 取值 |
 
 ## 边界设计（已实现）：runtime 暴露钩子，profiling 装配记录器
@@ -74,6 +76,8 @@
 
 ## M1 验收
 
+2026-09-09 补充：复制提交/完成现有同一 copy_id 与捕获的区间关联；CPU 异步接口使用 runtime 的实测复制耗时，无 run 的复制也安装完成回调。诊断器消费真实 kernel_exec，并把 host_observed_complete 与实际主机执行耗时分开。实现、真实 LLVM 数据链、设备验证边界和回归见 [复制完成观测报告](M1_COPY_EVENT_REPORT.md)。
+
 - [x] 真实 Compiler::Compile 加 RuntimeSession 的 LLVM 运行产出 bundle，events.jsonl 中 runtime_session_run、kernel_submit、kernel_exec、alloc 事件带有相同 run_id，内核与分配事件的 parent_span_id 指向 run span；重复运行和独立 session 不串数据。
 - [x] submit/complete/error 三种语义区分明确：kernel_submit 只表示主机完成提交动作；kernel_exec 终点是主机观测到完成的时刻，timing 字段区分 host_execute 与 host_observed_complete；完成回调在 Wait/IsReady/析构之间恰好结算一次有单测，延迟 completion 不会提前报完成。
 - [x] 输入校验失败仍抛出原异常，bundle 中该 run 只有 status="error" 的 run span 且实际 launch 次数为零；launcher 注入失败产生 error 事件且异常类型与文本不变。
@@ -88,4 +92,4 @@
 
 一个已知限制要如实交接：CPU 上构造不出能穿过模块启动边界的 pending 完成句柄——[compiled_module.cc](../../src/runtime/compiled_module.cc) 第 394 行会把"未完成且无后端 event"的句柄判为非法完成。因此异步的"提交后尚未观测完成"语义由 AsyncOperation 回调的单测钉住，真实异步证据留给后续 CUDA 波次，不能用 CPU 结果冒充。
 
-交接给集成负责人三点：诊断引擎的 kernel_launch_overhead 规则期待 `compiled_module_run` 事件名，本波采用工作台词表 `runtime_session_run`/`kernel_exec`，分析器侧的对齐不属于本模块；新测试的 CMake 登记属共享文件协调区；bundle 产物只放 `out/` 或 CI artifact，本文不粘贴会过期的样例。M6 的替换决策将以本模块的事件语义表为输入；字段含义变更必须先升级 schema_version 并同步 schema.py 与 contract.ts。
+交接给集成负责人三点：诊断引擎的 kernel_launch_overhead 已对齐 `kernel_exec` 与 `host_execute`；复制诊断也排除 submit/error/host_observed_complete，见 [复制完成观测报告](M1_COPY_EVENT_REPORT.md)；新测试的 CMake 登记属共享文件协调区；bundle 产物只放 `out/` 或 CI artifact，本文不粘贴会过期的样例。M6 的替换决策将以本模块的事件语义表为输入；字段含义变更必须先升级 schema_version 并同步 schema.py 与 contract.ts。

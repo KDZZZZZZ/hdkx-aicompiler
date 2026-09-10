@@ -4,15 +4,15 @@
 
 这条代码不是可以直接宣称“已支持 MiniMind”的死代码。它目前只接受固定 rank/shape、CPU 标量布尔谓词、静态 kernel 签名和非负 `max_trip_count`；fresh-output kernel effect 也明确拒绝 state、alias、donation、storage reuse 和 runtime extent。CUDA、非默认设备、异步流、KV cache、持久会话状态和任意数据相关形状都不在合同内。MiniMind L1a 静态 prefill 不依赖它，L1b 的第一版生成循环先由 host driver 编排；本模块负责给出控制流的当前生产证据，以及它何时、如何与 M2/M3 的状态和 extent 合同交接。
 
-> **状态：** 待实施，第二波 E 线。它可以在 M9 E0 之后独立做 gate-on 证据，不阻塞 L1a；若要用于真实 decode，必须等待 M2 的 KV state owner 与 M3 的 shape/extent ABI。目标边界以 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.2 的“结构化控制流能力边界”为准，当前架构事实以 [ARCHITECTURE.md](../ARCHITECTURE.md) §2 为准。
+> **状态（2026-09-10）：** C0/C1/C2 已完成。gate-on LLVM 的 If/While 生产 receipt、gate-off 拒绝和 L1b host-loop 选择见 [控制流 receipt](M10_CONTROL_RECEIPT.md)。C3 的 state/extent 接入未启用：L1b 继续由 host loop 驱动，避免在 `ControlRuntimeSession` 旁新增状态 owner；C4 的 MiniMind-O 需求仍待单独立项。
 
 ## 当前情况与要做的模块
 
 | 模块 | 当前情况 | 要做的事 | 首个交付物 |
 |---|---|---|---|
-| C0 合同和代码审计 | control plan、Relay lowering、runtime executor、feature gate 和测试均已存在 | 固定唯一 owner、schema 版本、支持/拒绝矩阵，确认没有第二套控制流注册表或执行器 | 控制流能力矩阵和代码审计记录 |
-| C1 gate-on 生产证明 | gate-off 有拒绝测试；当前文档没有同一基线下的真实 LLVM receipt | 在 LLVM + control runtime 构建中编译并执行 `If` 两分支、`While` 0/1/多次迭代和上限拒绝 | 可复现的 CTest/数值 receipt |
-| C2 MiniMind 生成循环评估 | `generate()` 的采样与停止条件在 host 侧，导出的静态图没有控制节点 | 先维持 host loop；评估固定步数/导出 `While` 是否有收益和可验证 ABI，禁止把 host 循环写成图已支持 | L1b generation-loop 选择记录 |
+| C0 合同和代码审计 | control plan、Relay lowering、runtime executor、feature gate 和测试均已存在 | 唯一 owner、schema 版本、支持/拒绝矩阵已审计 | 控制流能力矩阵和代码审计记录，已完成 |
+| C1 gate-on 生产证明 | gate-on LLVM receipt 与 gate-off 拒绝均已完成 | `If` 两分支、`While` 0/1/多次迭代、上限拒绝和非法 plan 零 launch | 可复现的 CTest/数值 receipt，已完成 |
+| C2 MiniMind 生成循环评估 | `generate()` 的采样与停止条件在 host 侧，导出的静态图没有控制节点 | 维持 host loop；不把 host 循环写成图已支持 | L1b generation-loop 选择记录，已完成 |
 | C3 state/extent 交接 | `ControlRuntimeSession` 只绑定静态值，显式拒绝 runtime extent 和持久 state | 若决定接入 decode，把 state/extent 挂到既有 `ExecutablePlan`/`RuntimeSession` owner，并版本化 ABI/identity；不在控制流 runtime 旁再造状态权威 | 交接设计与负例 |
 | C4 MiniMind-O 边界 | Thinker–Talker、Mimi ring buffer、80 ms 帧预算和多流会话尚未接入 | 单独盘点双自回归调度、流式状态和实时观测需求；判断哪些是新 runtime/service 合同 | L3 预研清单，不扩大 L1 合同 |
 

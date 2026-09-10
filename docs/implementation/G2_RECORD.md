@@ -1,7 +1,7 @@
 # G2 第二波整体验收记录
 
-> 状态：**部分通过（2026-09-08）**。本文按[第二波并行计划](WAVE_2.md)第 4 节逐项记录实测证据。代码集成点：`dev` @ `975429e`。
-> WAVE_2 §4 允许在 L1 端到端未打通时只宣布已达成的部分，并写明阻塞项，不得改写目标；本文按此执行。
+> 状态：**部分通过（2026-09-09）**。本文按[第二波并行计划](WAVE_2.md)第 4 节逐项记录实测证据。代码集成点：`dev` @ `975429e`。
+> WAVE_2 §4 允许只宣布已达成的部分，并写明剩余项，不得改写目标；当前真实静态模型与容量状态链已打通，完整变长 prefill/decode 的 fresh-output 路径也已执行；与持久状态的显式交接也已通过；单计划的 C=1/2/3 当前长度与外部 K/V prefill→decode 交接已完成（见 [M3 多 token 报告](M3_MULTITOKEN_REPORT.md)）；可变 P 的 state 交接、CUDA 和全部矩阵审计仍在进行。
 
 ## 1. 五条线的合入状态
 
@@ -21,11 +21,11 @@
 | # | 验收项 | 结果 | 证据 / 阻塞 |
 |---|---|---|---|
 | 1 | 真实 ONNX prefill → importer → Relay → LLVM → RuntimeSession，数值对齐参考 | **通过** | E0 锁定的完整 8 层图：650 kernel 调用，全部输出与 ONNX 参考逐元素对齐，最坏差 8.82e-06。见 §3 |
-| 2 | 同一 session prefill 后 ≥3 步 decode，地址不变、extent 递增、哨兵不污染 | **通过（机制待归并到 M2）** | 定容 KV 路径下一个产物跑 4 步，六条性质全部拿到证据；但 cache 由调用方持有的 NDArray 管理，M2 的 `RuntimeSession` state 未参与。见 §3.5 |
-| 3 | 两个合法 bounded shape 同产物执行，无隐式编译；非法输入零 launch | **通过** | `shape_value_llvm_test::bounded_shape_to_reshape_production`：同一产物在 `[4,5,3]`/`[6,7,3]` 上执行，前后 primitive cache 统计不变；越界 extent 与整除 guard 违规均在 launch 前拒绝且 cache 统计不变。另有 `bounded_dynamic_graph_llvm_test` |
-| 4 | 最小 greedy token 序列；bundle 按 export receipt / run_id / kernel / state extent 关联 | **未通过** | 仓库中无 greedy 采样或 token 序列测试；bundle 与 export receipt 的关联字段未接入。依赖第 1 项 |
+| 2 | 同一 session prefill 后 ≥3 步 decode，地址不变、extent 递增、哨兵不污染 | **通过（M2 显式初始化交接）** | LLVM prefill 实际输出经 `InitializeState` 进入 decode session；后者持有 K/V，四步地址稳定、extent 16→20、最大 logits 差 5.42402e-06。两个静态计划之间采用前缀复制交接，见 [M2 报告](M2_MINIMIND_STATE_REPORT.md)。两份 bounded 计划也已通过实际 LLVM prefill 交接和四步 greedy，extent 4→8、16 个地址稳定，见 [bounded 状态报告](M2_BOUNDED_STATE_REPORT.md) |
+| 3 | 两个合法 bounded shape 同产物执行，无隐式编译；非法输入零 launch | **通过（含完整八层变长 prefill/decode）** | [注意力报告](M3_BOUNDED_ATTENTION_REPORT.md)：四组 B/Q/T、20 次 LLVM 调用、最坏误差 5.43662e-7、九组非法输入零 launch/分配；[图结构报告](M3_GRAPH_STRUCTURE_REPORT.md)：四种长度保留共享计算和四个明确输出，七组非法输入零 launch/分配。[加权投影报告](M3_WEIGHTED_PROJECTION_REPORT.md)：实际 MiniMind RMSNorm/QKV 子图四组 B/S、44 次 LLVM 调用、最坏误差 2.74181e-6。[拆头报告](M3_ONNX_HEADS_REPORT.md)：实际 Q/K/V 拆头和 Q/K RMSNorm 四组 B/S、132 次 LLVM 调用、最坏误差 4.29153e-6；source 小图另覆盖四次零启动反例。[GQA 报告](M3_GQA_REPORT.md)：实际 K/V 重复四组 B/S、40 次 LLVM 调用、最大误差 0，八组非法输入零启动/分配。[RoPE 报告](M3_ROPE_REPORT.md)：实际投影/分头/位置旋转组合链四组 B/S、204 次 LLVM 调用、最大误差 4.05312e-6，十组非法输入零启动/分配。[因果 attention 报告](M3_CAUSAL_ATTENTION_REPORT.md)：实际第一层 RoPE/GQA/mask/Softmax/输出投影四组 B/S、308 次 LLVM 调用，最大误差 3.69549e-6；额外 77 次调用验证未来激活不改变前缀。[完整 prefill 报告](M3_FULL_PREFILL_REPORT.md)：八层从 token 至 logits/16 KV，四组 B/S 和未来 token 扰动共 3710 次调用，最大误差 8.46386e-6，六个非法模型输入零启动/分配。[KV 追加报告](M3_KV_APPEND_REPORT.md)：有界 P+C、前插、空片段和连续 P+2 共 48 次 LLVM 调用，数值精确，18 次非法输入零启动/分配。[完整 decode 报告](M3_FULL_DECODE_REPORT.md)：四组 B/P 和四步 greedy 共 6192 次模型调用，全部 17 个输出最大误差 1.56164e-5，九次非法模型输入零启动/分配；与持久状态联合见 [bounded 状态报告](M2_BOUNDED_STATE_REPORT.md)：四组 B/P 的状态结果逐位一致，实际 LLVM prefill 后四步 greedy 最大误差 8.9407e-6、16 个缓存地址稳定 |
+| 4 | 最小 greedy token 序列；bundle 按 export receipt / run_id / kernel / state extent 关联 | **通过** | [G2 greedy 报告](G2_GREEDY_REPORT.md)：真实 prefill logits 驱动 4 步 host argmax；decode bundle 6 runs、4098 对 submit/exec、96 次状态 copy，属于这些 runtime run 的事件均有模型/状态关联字段 |
 | 5 | M10 控制流 gate-on 证据独立完成 | **通过** | [M10 receipt](M10_CONTROL_RECEIPT.md) C1：`If` 双分支 launch 计数 1/0 与 0/1；`While` 0/1/3 次迭代 carried value 正确；越 `max_trip_count` 抛错；gate-off 拒绝路径保留 |
-| 6 | 完整回归 + 全部检查器 + 能力矩阵 | **通过（回归与检查器）** | 见 §4。能力矩阵逐格更新尚未随本波结果刷新，随第 1 项一并处理 |
+| 6 | 完整回归 + 全部检查器 + 能力矩阵 | **CPU 回归与当前矩阵审计通过；CUDA 基础专项通过** | L2 图文联合回归（2026-09-09）：默认 55/55、adaptive 55/55、bounded 70/70、Python 332/332，实际执行三组固定单图联合模型、完整视觉及原有文本/state fixture，见 [联合报告](M9_MINIMIND_V_JOINT_REPORT.md)。随后 Windows GPU 基础专项 5/5；多维输出与线程内归约专项进一步通过 6/6，配套默认 55/55、adaptive 55/55、bounded 70/70，见 [归约报告](GPU_OWNED_REDUCTION_REPORT.md)。真实复制、设备活动及未通过的 sanitizer 见 [环境实测报告](GPU_WINDOWS_VALIDATION_REPORT.md)。此前本地 CUDA 4/5 的设备失败保留为历史证据，当前局部 GPU 成功不解锁 12 行完整 NLP CUDA 门禁 |
 
 ## 3. 第 1 项：已达成与仍受限的部分（2026-09-08 实测）
 
@@ -84,7 +84,9 @@ E0 锁定的真实图（prefill 1141 节点 / decode 1173 节点）现在完整�
 
 > 记账口径：3.3 的四处修复由并行会话 `hdkx-aicompiler-bb` 提交（`8a27ef7`），不在本线的提交里；本文记录是因为它们直接决定第 1 项能否达成。§3.2 的全部数字由本线独立复测确认。
 
-### 3.5 第 2 项：性质已验证，机制待归并到 M2
+### 3.5 第 2 项的早期证据：外部 KV
+
+> 本节保留早期外部 NDArray 路径的推导过程。2026-09-08 后续已完成 M2 会话状态绑定，当前结果以 [M2 报告](M2_MINIMIND_STATE_REPORT.md)为准；下述“机制待归并”是当时的限制。
 
 #### 3.5.1 走不通的一条：静态导出每步换产物
 
@@ -156,6 +158,8 @@ cache 由**调用方持有的 NDArray** 管理，不是 M2 的 `RuntimeSession` 
 | `check_include_layers` / `check_public_headers --compile` / `check_docs` | PASS |
 | `git diff --check` | PASS |
 
+2026-09-08 的 M2/M1 后续回归：默认 CPU/LLVM 48 项完成（两处测试/文档索引收尾后复跑通过），bounded gate-on **52/52**，Python **233/233**。公共检查与 NLP 检查器通过，`kv_cache` 行已按真实模型状态证据刷新；其余矩阵格子的独立审计仍需继续，不能由本项整体升级。
+
 ## 5. 本波解决的跨线冲突（记录以免重复踩）
 
 - **`expand` 算子名碰撞**：D 线的静态 `expand`（单输入，目标折进 attrs，承载 ONNX `Expand`）与 C 线的受限形状值 `expand`（双输入，目标由 shape 表达式控制）语义与元数都不同。按 C 线已建立的 `reshape` / `reshape_dynamic` 先例，后者改名 `expand_dynamic`，两者并存。静态目标是动态形态在全部元素均为常量时的特例，是否统一由后续立项。
@@ -178,15 +182,21 @@ cache 由**调用方持有的 NDArray** 管理，不是 M2 的 `RuntimeSession` 
 
 仍待办：
 
-9. **把 cache 机制归并到 M2**（见 §3.5.4）。第 2 项的性质已验证，但 cache 由调用方持有的 NDArray 管理，M2 的 `StateExtent` 与原址 append 这套 S1 合同没有参与。要给 M2 增加一条消费真实图的绑定路径。**动手前先读 §3.5.3**：M2 现用的 `-1.5e30` 哨兵在这张图上会泄漏，且误差是 2–3 量级而非 NaN，容差检查抓不到。
-10. **G2 第 4 项**：host greedy 生成循环 + bundle 与 export receipt / run_id 的关联字段。定容路径已提供可复用的多步产物，前置条件具备。
-11. **补 int64 索引算术**（见 §3.5.5）。定容 prefill 需要 `position + arange`，当前导入子集的算术只收 float32。这是把定容路径推广到 prefill 的前提。
+9. ~~**把 cache 机制归并到 M2**~~。真实 LLVM prefill/decode、session-owned K/V、`InitializeState` 与 `StateExtent` 已验证，见 [M2 技术报告](M2_MINIMIND_STATE_REPORT.md)。容量 attention 的哨兵幅度约束仍按 §3.5.3 保留。
+10. ~~**G2 第 4 项**：host greedy 生成循环 + bundle 与 export receipt / run_id 的关联字段~~（见 [G2 greedy 报告](G2_GREEDY_REPORT.md)）。
+11. ~~**补 int64 索引算术**~~（见 [M3 int64 索引报告](M3_INT64_INDEX_REPORT.md)）。定容 prefill 的 `position + arange` 已能通过 Python importer 的精确 Add 边界；真实 prefill 端到端仍需继续绑定生产 state/extent。
 12. **根因收口（建议单独立项）**：给 `RelayPassFunctor` 遍历基类提供默认记忆化，见 §3.3。本波修的四处是同一模式的四个实例；不收口的话，每新增一个按树遍历就重新引入一次指数缺陷。**独立于 L1，不阻塞任何人。**
 13. **插桩惰性化**：`RunInstrumentedPass` 无条件渲染两次全图 IR 文本（Relay/TIR 两处同构），见 §3.4。优先级低于第 12 项。
-14. 能力矩阵在第 9、10 项完成后统一刷新逐格证据。
+14. 能力矩阵 12 行已按当前代码与实际执行逐格刷新；prefill_exact 和 copy/event 的最终审计见 [报告](M1_COPY_EVENT_REPORT.md)。这包括明确的 runtime-only 合同与 CUDA 未验证格，不能解释为 96 格均已实现或全部 PROJECT_GOAL 已完成。
+15. Windows CUDA 后续专项 6/6 已通过静态 MatMul/Dense、多维逐元素输出和线程内归约，见 [报告](GPU_OWNED_REDUCTION_REPORT.md)。矩阵的 batched_matmul、mask_select、slice_concat CUDA 三格记录限定形状的局部实测，后续 Softmax/MaskedSoftmax、LayerNorm、ReduceMean 多阶段静态执行见 [新报告](GPU_MULTISTAGE_REDUCTION_REPORT.md)；Gather、GPU 状态与完整模型仍关闭。
+16. 多阶段归一化最终 CUDA 专项 6/6、额外编译契约 1/1，新增 60 组数值、25,460 个输出；完整 CPU 回归默认 55/55、adaptive 55/55、bounded 70/70。矩阵另三格只开放静态归一化的局部实测，方法及全部回执见 [报告](GPU_MULTISTAGE_REDUCTION_REPORT.md)。同步复制/清零的跨 stream 完成语义与 96 次精确数据核对见 [修复报告](GPU_SYNC_MEMORY_REPORT.md)。
 
 > 方法论提醒（本波四次踩到）：
 > - §3.1 的四个原始缺口是静态审计一次列全的，但其余四处（`Gather` 运行时索引、三个缺失的推导链、恒等 `Cast`）是逐个跑出来的——审计能列出结构性缺口，列不全语义缺口。
 > - §3.3 的第 3、4 处不多占任何内存，在所有 RSS 曲线里隐身，只有在标准流水线下按耗时才暴露；早期用 `KXC_MINIMIND_RELAY_PASSES=""` 绕过流水线的测量根本没走到 mutator。**测量条件必须与验收条件一致。**
 > - §3.5.1 的 decode 三步链单看数值全部通过，只有追问「同一产物吗」才发现不满足第 2 项。**通过的数值不等于通过的验收项。**
 > - §3.5.3 的哨兵泄漏误差是 2–3 量级而非 NaN，落在「看起来正常」的范围内。**只有和独立参考比对才能发现的错误，容差阈值永远抓不到。**
+
+## CUDA 静态文本模型后续验收（2026-09-09）
+
+[Gather/Pow](GPU_GATHER_POW_REPORT.md) 补齐完整模型最后 34 个 CUDA 原语；[静态 prefill 报告](GPU_MINIMIND_PREFILL_REPORT.md) 记录八层 B1/S16 的 650 个实际 kernel、两次全部 logits/16 KV 比较，最大绝对误差 1.001358032e-5，Windows 专项 8/8。该证据只更新 Gather 与固定 prefill 两个局部门禁；GPU decode/state、bounded CUDA 和 CUPTI 模型 run 关联仍待完成。

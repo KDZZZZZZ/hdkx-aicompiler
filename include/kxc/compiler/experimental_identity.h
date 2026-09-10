@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,7 +51,9 @@ private:
                     std::string canonical_bytes);
 
     GraphSemanticKey graph_semantic_key_;
-    std::string canonical_bytes_;
+    // Exact requests copy this key once per unit; retain a single immutable
+    // canonical profile, with bytewise equality unchanged.
+    std::shared_ptr<const std::string> canonical_bytes_;
     std::string digest_;
 
     friend ShapeProfileKey BuildShapeProfileKey(
@@ -73,6 +76,12 @@ ShapeProfileKey BuildStaticExactShapeProfileKey(
     const GraphSemanticKey& graph_semantic_key,
     const runtime::ExecutablePlan& plan);
 
+/*! \brief Finite input bounds, divisibility and equality from a bounded plan.
+ *  State capacity and append bindings remain part of the separate Plan ABI. */
+ShapeProfileKey BuildBoundedShapeProfileKey(
+    const GraphSemanticKey& graph_semantic_key,
+    const runtime::ExecutablePlan& plan);
+
 /*! \brief Shape/layout applicability identity, separate from primitive semantics. */
 class DispatchKey final {
 public:
@@ -89,7 +98,8 @@ public:
     bool operator<(const DispatchKey& other) const noexcept;
 
 private:
-    std::string canonical_bytes_;
+    // Route/request/lease copies share immutable model-sized canonical bytes.
+    std::shared_ptr<const std::string> canonical_bytes_;
     std::string digest_;
 };
 
@@ -107,7 +117,7 @@ public:
 private:
     explicit PlanAbiFingerprint(std::string canonical_bytes);
 
-    std::string canonical_bytes_;
+    std::shared_ptr<const std::string> canonical_bytes_;
     std::string digest_;
 
     friend PlanAbiFingerprint BuildPlanAbiFingerprint(
@@ -127,6 +137,11 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(const CompiledGraph& graph);
 
 /*! \brief Builds exact input applicability from a graph artifact family and plan. */
 DispatchKey BuildStaticExactDispatchKey(
+    const GraphSemanticKey& graph_semantic_key,
+    const ShapeProfileKey& shape_profile_key);
+
+/*! \brief Explicit bounded-profile lookup; never an overlapping-range search. */
+DispatchKey BuildBoundedDispatchKey(
     const GraphSemanticKey& graph_semantic_key,
     const ShapeProfileKey& shape_profile_key);
 
@@ -161,7 +176,7 @@ private:
 
     GraphSemanticKey graph_semantic_key_;
     ShapeProfileKey shape_profile_key_;
-    std::string canonical_bytes_;
+    std::shared_ptr<const std::string> canonical_bytes_;
     std::string digest_;
 
     friend PlanVariantKey BuildPlanVariantKey(

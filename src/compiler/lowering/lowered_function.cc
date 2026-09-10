@@ -204,7 +204,7 @@ void LoweredFunction::Validate() const {
           throw std::invalid_argument(
               "LoweredFunction tensor Buffer has a negative extent");
         }
-      } else if (!internal::MatchRuntimeExtentLoad(
+      } else if (!internal::MatchRuntimeExtentOffset(
                      extent, runtime_extent_buffers, nullptr)) {
         throw std::invalid_argument(
             "LoweredFunction tensor Buffer has an uncontrolled dynamic extent");

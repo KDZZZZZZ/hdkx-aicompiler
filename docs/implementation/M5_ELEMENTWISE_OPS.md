@@ -4,16 +4,18 @@
 
 本模块的后续工作按 M9 的真实 prefill/decode inventory 排序：先补 L1a 实际用到的逐元素/静态变形算子，再独立处理 Pow/Erf；不为了凑算子数量放开任意 dtype、广播或外部函数。MiniMind-O 的音频算子不属于本模块。
 
-> 状态：Equal 第一波已完成；Pow/Erf 和 MiniMind 实际缺口待实施。第一波证据见 [G1](G1_RECORD.md)，当前分派见 [WAVE_2](WAVE_2.md)。现有能力以 [OP_SUPPORT_MATRIX.md](../OP_SUPPORT_MATRIX.md) 和 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.2 为准。
+> 状态（2026-09-10）：Equal 与 Pow 的静态 CPU/LLVM/ONNX 闭环已完成；Neg、Sigmoid、Expand、Unsqueeze 等 L1a 实际缺口也已接入并有联合模型证据。Erf 已在 MiniMind-V 视觉链中完成 CPU/LLVM 验证，但不作为纯文本 L1 必需项。完整范围和限制见 [支持矩阵](../OP_SUPPORT_MATRIX.md) 及对应技术报告。
 
 ## 本模块要做的模块
+
+显式 `masked_softmax` 已完成注册、类型/广播、FFI、生产 TE 与静态/有界 LLVM 执行。全 mask 行的零输出方法、数值效果、缓存身份及拒绝边界见 [技术报告](M5_MASKED_SOFTMAX_REPORT.md)；没有改写普通 Softmax 或增加 ONNX Attention 导入。
 
 | 模块 | 当前情况 | 计划结果 |
 |---|---|---|
 | Equal | Relay/LLVM/ONNX/Where 闭环已验收 | 只维护回归和能力矩阵，不重复注册 |
-| L1a 算子 | OP_TODO 的静态折叠口径列出 Expand、Neg、Pow、Sigmoid、Unsqueeze 等缺口 | 每个实际节点有 dtype/广播/attrs/LLVM/负例证据 |
-| Pow | LLVM 数学调用和边界仍未闭环 | float32 受限指数子集，独立数值误差合同 |
-| Erf | 主要服务后续 GELU/视觉链，MiniMind 当前未必使用 | 只有真实 inventory 命中后才进入 L1；否则保持 deferred |
+| L1a 算子 | 实际静态折叠所需的 Expand、Neg、Pow、Sigmoid、Unsqueeze 等均已接入 | 维护 dtype/广播/attrs/LLVM/负例回归 |
+| Pow | float32 同 dtype 二元广播子集已闭环 | 维护独立数值误差合同；更广 dtype 仍关闭 |
+| Erf | 已在 MiniMind-V 视觉链中验证，纯文本 L1 不依赖 | 作为视觉链能力维护，不扩展为任意 dtype |
 | shape/control | dynamic_axes 下的 Shape/ConstantOfShape 等不是纯逐元素 | 交给 M3/M4，不在此模块偷做 shape VM |
 
 ## S1：Equal 的具体行为（已完成）
@@ -76,7 +78,7 @@ ctest --test-dir out/build/dev-ninja-cpu --output-on-failure --no-tests=error \
 - [x] bool 结果能够直接被 Where 消费；空张量和物理 buffer 表示正确。
 - [x] 非法元数、类型、广播在 backend launch 前拒绝。
 - [x] ONNX 接线与合同一致，C/B 两线的联合 fixture 通过。
-- [ ] Pow/Erf 各自独立标记实现、编译和数值层结果，不能用 Equal 验证替代。
+- [x] Pow 独立完成实现、编译和数值验证；Erf 已在视觉链完成 CPU/LLVM 验证，纯文本 L1 不依赖。
 
 ## 身份和风险
 

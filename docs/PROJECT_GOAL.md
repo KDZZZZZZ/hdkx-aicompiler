@@ -1,7 +1,7 @@
 # 项目目标
 
 > **状态：** 唯一目标权威文档
-> **更新时间：** 2026-09-07
+> **更新时间：** 2026-09-10
 > **规则：** 本文定义仓库"要成为什么"。[架构总览](ARCHITECTURE.md) 定义"当前是什么"。
 > 某项能力被本文列为目标，**不等于它已经实现**；当前事实一律以架构总览、机器可读契约和可复现测试为准。
 
@@ -44,8 +44,8 @@
 
 **包含**：
 - 变长序列输入 —— 以固定秩、有界、带整除约束的动态形状实现，不是任意动态；
-- KV cache —— 需要运行时状态，是当前端到端链路的硬阻塞；
-- 批处理 —— 含动态批处理方向。
+- KV cache —— 由运行时持有容量与有效长度；真实 CPU/LLVM 状态绑定和交接已有 [证据](implementation/M2_BOUNDED_STATE_REPORT.md)，静态容量 CUDA prefill 交接与四步 decode 也已有 [证据](implementation/GPU_KV_STATE_REPORT.md)，bounded CUDA prefill/decode/state 已在 RTX 4070 Ti SUPER 上通过 [证据](implementation/GPU_BOUNDED_STATE_REPORT.md)；
+- 批处理 —— 含动态批处理方向；请求进入/退出、等长合批与 KV 槽位的 CPU/LLVM 首版已有 [真实模型证据](implementation/M2_REQUEST_BATCHING_REPORT.md)，同一队列和状态跨代际执行及回滚已有 [请求热替换证据](implementation/M6_REQUEST_BATCHING_REPORT.md)。
 
 #### 目标模型阶梯（2026-09-07 决定）
 
@@ -56,7 +56,7 @@
 | 级别 | 模型 | 新增基座需求 | 状态 |
 |---|---|---|---|
 | **L1** | [MiniMind](https://github.com/jingyaogong/minimind)（纯文本 decoder，约 64M） | KV cache（§6.2）、shape-as-value（§6.3）、采样与生成循环驱动 | **当前验收目标** |
-| **L2** | [MiniMind-V](https://github.com/jingyaogong/minimind-v)（+ SigLIP2 视觉编码） | 接近于零：SigLIP2 为 256×256 固定输入 → 64 patch token 的静态图，复用现有 `nn_conv2d` / `nn_layer_norm` / `softmax` / `matmul` 路径 | 后续 |
+| **L2** | [MiniMind-V](https://github.com/jingyaogong/minimind-v)（+ SigLIP2 视觉编码） | SigLIP2 为 256×256 固定输入 → 64 patch token 的静态图，复用现有 `nn_conv2d` / `nn_layer_norm` / `softmax` / `matmul` 路径，补齐 GELU 和实际 Concat 导出结构 | 固定单图和固定双图 CPU/LLVM 联合链已有 [证据](implementation/M9_MINIMIND_V_JOINT_REPORT.md)、[双图报告](implementation/M9_MINIMIND_V_MULTI_IMAGE_REPORT.md)；任意多图、图文变长与 GPU 继续推进 |
 | **L3** | [MiniMind-O](https://github.com/jingyaogong/minimind-o)（+ 语音输入输出，Thinker–Talker） | Conv1d / ConvTranspose1d、流式卷积状态、双自回归调度、实时帧预算、多流会话 | **北极星** |
 
 **为什么 L1 就是通往 L3 的第一段**：MiniMind-O 的 Thinker 即 MiniMind backbone，同作者、同 block 定义。选 L1 作为当前验收目标不是放弃 L3，而是走它的第一段；这条路径上没有一段工作会被废弃。
@@ -66,7 +66,24 @@
 - 标题的 0.1B 仅指可训练主干（Thinker 63.9M + Talker 47.1M）。端到端部署面还包含冻结的 SenseVoice-Small（234M）、SigLIP2（94.6M）、Mimi 编解码器（96.2M）与 CAM++，合计约 540M 参数、5 种异构架构。**编译器覆盖面按后者计。**
 - Mimi 的增量解码需要每个卷积层维护流式 ring buffer。这是**比 KV cache 更强的一类运行时状态**，不在当前动态执行合同内。
 - Talker 以 12.5 Hz 帧率输出，即每 80 ms 必须完成一次 Talker 前向加 Mimi 增量解码。这是**实时预算**，其验证依赖执行侧观测（§2.5）。
-- barge-in 与近双工要求会话级中断与输入输出并发。当前 `RuntimeSession` 是单会话顺序执行。**这部分属于服务系统工程，尚未纳入五根支柱**；进入 L3 前必须先决定它是新增支柱还是移出范围（§7）。
+- barge-in 与近双工要求会话级中断与输入输出并发。当前 `RuntimeSession` 是单会话顺序执行。**麦克风/VAD/网络驱动的服务交互不纳入本次 L3-C1 完成合同**；运行时自身的会话隔离、取消后的停止提交、reset 和资源回收仍属于验收范围。
+
+#### MiniMind-O 的完成合同（L3-C1）
+
+本项目把“MiniMind-O 完全成功”定义为**可复现的编译器/运行时闭环**，不是“某个 demo 能输出一段音频”。必须同时满足以下条件，缺一项只能称为部分完成：
+
+验收以锁定的 dense `minimind-3o` 发布权重、当前 RTX 4070 Ti SUPER 16 GB 单机 CUDA 目标为基线。CPU/LLVM 用于组件数值与语义回归，不要求 CPU 达到语音实时预算。必须覆盖文本输入、图文输入、语音输入到文本与流式语音输出，以及参考音色条件；MoE 变体、训练与自动微分不属于该模型验收。输入长度使用导出前冻结的有限 profile 文件，验收必须覆盖其最小值、中间值、最大值和越界值，不能在看到失败后缩小范围。
+
+1. **真实模型锁定**：记录上游源码 commit、六类组件（Thinker、Talker、SenseVoice、SigLIP2、Mimi、CAM++）的配置、依赖、opset/导出参数、输入输出签名和 SHA256；所有生产图来自这份 receipt，不能用手写等价图替代。
+2. **异构图覆盖**：Thinker/Talker（含 projector、bridge、MTP codebook head）的自回归 prefill/decode、SenseVoice/SigLIP2/CAM++ 的模型计算，以及 Mimi 的参考音色编码和增量 Conv1d/ConvTranspose1d 解码都经过现有 importer → Relay → TIR → backend → RuntimeSession 链路；每类图都有独立数值和负例证据。Tokenizer、重采样与文件解码可由明确的 host 工具承担，运行时不得调用 PyTorch/ONNX Runtime 执行缺失模型计算。
+3. **持久状态唯一归属**：同一会话的 KV、Mimi 每层 ring buffer、有效长度、读写游标、reset 和容量上限由 RuntimeSession/ExecutablePlan 的明确 state ABI 持有。环回、容量耗尽、会话结束和错误执行都必须有测试；不得在模型专用代码旁边再造第二套状态 owner。
+4. **双自回归调度**：Thinker 与 Talker 的帧间依赖、固定采样率/帧率和 token 交接由显式 host/scheduler 合同编排；接受的形状、音频帧长度和批次必须是有限、可验证的 bounded profile，任何 miss 在 launch 前拒绝，不得隐式编译或静默回退。
+5. **端到端数值**：至少一个锁定的 steady-state profile 和边界 profile 连续运行，Thinker logits、Talker token、Mimi 声码器状态及最终音频与独立 PyTorch/ONNX 参考逐项对齐；比较阈值、样本数、随机种子和误差统计写入 receipt。
+6. **实时预算**：在 receipt 指定的硬件、驱动和功耗配置上，预热后连续至少 1,000 个 80 ms 帧窗口，端到端 steady-state p99 ≤ 80 ms，音频生成时间/音频时长（RTF）≤ 1，调度积压不得持续增长；同时记录 p50/p95/p99/max、超时帧数、首音频延迟和峰值显存。编译时间不计入窗口，所有 kernel、复制、状态提交和调度等待必须能从 bundle 还原。这是单机软实时门禁，不能声称操作系统级硬实时。达不到预算仍是功能通过，不能写成 L3 完全成功。
+7. **有状态热替换**：至少一个 Thinker/Talker 或 Mimi stateful plan 在帧边界完成 `generation 1→2→1` 换代；替换前后 route/Plan ABI 合法、ring/KV 地址与 extent 连续，CUPTI/运行观测驱动 one-shot health、quarantine、rollback，错误设备、过期 lease 和 ABI 不匹配均零提交拒绝。
+8. **证据闭环**：每个组件的 bundle 都能按 export receipt、frame id、stage、generation、state extent、kernel/copy、stream 和 validation receipt 关联；独立审计器对缺字段、篡改、丢事件和超预算 fail-closed。
+
+以下不计入本合同：麦克风/扬声器驱动、网络协议、服务部署、VAD 驱动的 barge-in、近双工交互 UI。这些属于服务系统工程；若要纳入 MiniMind-O 完全成功，必须先新增支柱和验收合同。运行时 cancel/reset/会话隔离仍须通过。Thinker-only、静态音频图、单帧 demo、合成 fixture 或没有 ring buffer/80 ms 证据，都不能宣称 L3 完全成功。完整边界和证据表见 [L3 边界报告](implementation/M9_MINIMIND_O_BOUNDARY_REPORT.md)。本合同只定义 L3，其他支柱的分布式和通用热替换目标继续独立验收。
 
 **目标模型算子清单的证据规则**：[模型算子清单](OP_TODO.md)必须来自**对目标模型的实际 ONNX 导出**，标注模型版本、导出参数与 opset，不得使用来源不明的快照。导出本身的可行性（decoder 带 `past_key_values` 的 dynamic axes 导出）是 L1 的第一个待验证项，未验证前 M2 / M3 的方案均建立在假设上。
 
@@ -88,7 +105,7 @@ Transformer 图中可能出现条件分支和生成循环，仓库已有一条�
 
 **边界**：分布式不改变单目标编译的语义与身份；已编译产物在分布式下的行为必须与单机一致。
 
-**当前风险**：该方向已投入约 2,487 行，但**测试覆盖为零**。按本仓库的证据标准，它当前不构成任何能力证据。补齐证据或明确降级，二者必居其一。
+**当前证据（2026-09-10）**：M7 已接通进程内两个 worker 的已编译 CPU/LLVM 内核执行，含放置、分组 CCL、完整预检、引用保活与 profile，首版见 [技术报告](implementation/M7_DISTRIBUTED_REPORT.md)。后续整图绑定与 JSON v3 多输出已接入：完整八层 B1/S16 MiniMind prefill 在两套显式放置下执行 1,300 次 kernel 和 23 次复制，logits/16 KV 与单机逐位相等，见 [整图技术报告](implementation/M7_MODEL_REPORT.md)。这项静态 prefill 证据不代表分布式 decode/KV 一致性、CUDA、跨机器服务或自动分区已支持。
 
 ### 2.4 agent 与调度友好的中间表达
 
@@ -124,7 +141,19 @@ Transformer 图中可能出现条件分支和生成循环，仓库已有一条�
 
 **已具备的形态**：Profile Bundle（`manifest.json` + `events.jsonl` + `summary.json` + `trace.json`），schema 版本化，`span_id` / `parent_span_id` 构成调用树，`event_type` 分类；配套离线诊断引擎与性能工作台。
 
-**当前缺口**：第一波已把 RuntimeSession 的运行、内核提交/完成、分配和拷贝接入 Span，并用 LLVM 组合图验证；但这些事件还没有与 MiniMind 的导出 receipt、prefill/decode、KV extent 和 generation 稳定关联，能力矩阵中 12 项能力的 `profile` 列也不能因此整体改为已验证。
+**当前状态**：RuntimeSession 的运行、内核提交/完成、分配和拷贝已接入 Span，MiniMind 的导出 receipt、prefill/decode、KV extent 与 generation 关联已有 [模型证据](implementation/M1_MODEL_ASSOCIATION_REPORT.md)。复制完成配对、上下文保活和诊断计时域已有 [报告](implementation/M1_COPY_EVENT_REPORT.md)。能力矩阵 12 行已逐格刷新，仍必须连同各格的 gate/reason 阅读；CPU 模型证据不能替代 CUDA 设备计时或 L3 实时预算验证。
+
+Windows GPU 已完成基础 CUDA 专项 5/5，实际 kernel、拷贝和 CUPTI 设备活动关联见 [实测报告](implementation/GPU_WINDOWS_VALIDATION_REPORT.md)。该结果提供后续 GPU 实现的验证环境，尚不代表模型级 GPU profiling、完整 NLP CUDA 门禁或内存插桩已经通过。
+
+同日后续 CUDA 专项已执行静态 MatMul/Dense、批次广播、多维 Where/Slice/Concatenate，以及线程内 sum/max，见 [归约报告](implementation/GPU_OWNED_REDUCTION_REPORT.md)。静态归一化与三头注意力组合见 [多阶段报告](implementation/GPU_MULTISTAGE_REDUCTION_REPORT.md)，同步内存完成语义见 [修复报告](implementation/GPU_SYNC_MEMORY_REPORT.md)。最新专项 8/8 已补齐 [Gather/Pow](implementation/GPU_GATHER_POW_REPORT.md)，并完成 [完整八层 B1/S16 prefill](implementation/GPU_MINIMIND_PREFILL_REPORT.md)：650 个 kernel、两次运行的全部 logits/16 KV 对齐独立参考。后续 [M1 CUDA 关联报告](implementation/M1_CUDA_CORRELATION_REPORT.md) 已验证完整 prefill 的 1,300 条设备活动与模型 run/call_index 一一关联，并对齐主机/设备时钟；该阶段尚未覆盖 GPU decode/state。
+
+后续 [CUDA 复制报告](implementation/M1_CUDA_COPY_REPORT.md)已补齐 copy_event：7 条 DMA 与 copy_id/提交/完成逐条配对，偏移数据链和三种真实未完成句柄的保活/跨线程完成均有硬件证据。静态容量 GPU 状态与完整四步 decode 已有后续 [报告](implementation/GPU_KV_STATE_REPORT.md)，4,092 条 decode/replay kernel 与 144 次状态 D2D 均已关联并核验提交顺序；bounded CUDA 与协作调度优化继续推进。
+
+CUDA 有界单阶段输出、形状值与 rank-2 MatMul 已取得 [基础执行证据](implementation/GPU_BOUNDED_CORE_REPORT.md)。后续有界 Softmax/MaskedSoftmax、RMS 与三头注意力已通过 [GPU 数值与设备活动验证](implementation/GPU_BOUNDED_REDUCTION_REPORT.md)。这些是完整变长 GPU 模型的前置模块。后续索引和形状重排已通过完整模型 742 个原语的 CUDA 证明，见 [接入报告](implementation/GPU_BOUNDED_PREFILL_REPORT.md)；完整模型设备数值、状态与批处理也已完成 Windows GPU 验收。
+
+完整 bounded decode 的动态拼接证明也已接通，774/774 个原语通过源码/PTX 编译，并完成 GPU 数值、bounded 会话状态和 CUPTI 验收，见 [技术报告](implementation/GPU_BOUNDED_DECODE_REPORT.md)。
+
+后续 bounded KV 的 CUDA 状态准入、完整模型 consumer 和设备复制顺序门禁已接入并通过，见 [状态报告](implementation/GPU_BOUNDED_STATE_REPORT.md)；GPU 请求批处理也已完成同设备准入、显式 stream、完整模型数值和 CUPTI 验收，见 [批处理报告](implementation/GPU_REQUEST_BATCHING_REPORT.md)。静态容量 CPU/LLVM 状态热替换后续已通过完整八层模型验证，见 [技术报告](implementation/M6_STATEFUL_REPORT.md)。随后相同有界 profile/状态 ABI 的 CPU 热替换也已通过完整八层模型，保持 16 份 KV 地址并完成换代与回滚，见 [有界报告](implementation/M6_BOUNDED_REPORT.md)。请求批处理热替换已有完整八层 CPU 模型证据：四个请求、五个批次保留原队列和 KV，代际 1→2→2→1→1，见 [请求热替换报告](implementation/M6_REQUEST_BATCHING_REPORT.md)；静态 CUDA 热替换已通过 [CUDA 报告](implementation/M6_CUDA_REPORT.md)，bounded KV/请求 CUDA 换代继续推进。
 
 **为什么它是支柱而不是配套设施**：热替换和 MiniMind-O 的实时预算都必须依据执行结果决策。第一波已经打通基础事件，后续要把事件与模型阶段、状态和代际关联，才能形成可消费的决策依据。
 
@@ -157,15 +186,17 @@ Transformer 图中可能出现条件分支和生成循环，仓库已有一条�
 
 ---
 
-## 5. 当前状态快照（2026-09-07）
+## 5. 当前状态快照（2026-09-10）
+
+下表保留目标制定时的基线。逐模块最新实现、技术报告和仍未完成的部分见 [实施总览](implementation/README.md)。
 
 | 支柱 | 当前状态 | 最大缺口 |
 |---|---|---|
-| 2.1 动静兼备（热替换） | 约 868 行，门禁默认 OFF，仅 preparation 有测试 | 替换动作本身缺运行时证据 |
-| 2.2 Transformer 推理 | 目标已明确为 MiniMind 阶梯；第一波有静态 Transformer/ONNX 组合证据，LLVM 层 8 项 `implemented`、4 项 `unsupported` 仍只是矩阵状态；控制流源码与测试已具备但 gate 默认 OFF | MiniMind L1a 真实 prefill 尚未端到端通过；L1b 仍缺 KV 更新、动态有效长度和 host 生成循环；控制流尚缺当前 gate-on LLVM receipt，且不能直接承载 state/extent |
-| 2.3 分布式 | 约 2,487 行 | 零测试、零证据 |
+| 2.1 动静兼备（热替换） | 静态无状态、容量状态、有界 profile 和请求批处理的 CPU/LLVM 热替换，以及静态 CUDA 热替换、CUPTI health/rollback 已有证据 | bounded KV/请求 CUDA 换代、更广动态和跨设备变体仍待验收 |
+| 2.2 Transformer 推理 | MiniMind L1 的真实 prefill/decode、KV state/extent、host greedy、CPU/GPU 请求批处理以及单 LLVM 计划的 C=1/2/3 多 token 外部 K/V 交接已通过；L2 固定单图和固定双图图文链已通过；ONNX Split 静态常量两路以上多输出也已闭环 | GPU decode 热替换、可变 P 的多 token state 交接、任意多图/图文变长和 L3 音频/流式链路仍未完成 |
+| 2.3 分布式 | 进程内静态 CPU/LLVM 双 worker、显式放置、CCL、整图多输出和完整 MiniMind prefill 已有两套放置的端到端证据 | 分布式 decode/KV 一致性、CUDA、跨机器服务和自动分区仍未实现 |
 | 2.4 agent / 调度友好 IR | 契约与 canonical bytes 已具备并在用；agent 经**契约**写入 | 新 IR 设计与 parser **已延后**（§2.4）；当前无阻塞项 |
-| 2.5 agent 友好观测层 | Bundle 格式与诊断引擎已具备；第一波已接通 RuntimeSession 的 run/kernel/alloc/copy 事件并有 LLVM 组合证据 | MiniMind 的导出 receipt、prefill/decode、KV extent 和 generation 关联尚未完成；能力矩阵 profile 列仍不能整体升级 |
+| 2.5 agent 友好观测层 | Bundle、诊断引擎、RuntimeSession run/kernel/alloc/copy 事件，以及 MiniMind receipt、stage、KV extent、generation 和静态/bounded GPU prefill/decode/request CUPTI 关联均已有证据 | 由观测驱动的性能决策和 L3 实时预算仍未完成 |
 
 ---
 
@@ -176,8 +207,8 @@ Transformer 图中可能出现条件分支和生成循环，仓库已有一条�
 3. **KV cache 的运行时状态支持** —— 支柱 2.2 L1b 端到端链路的硬阻塞；要证明同一 session 的追加、有效长度和多步 decode，并决定控制流是否能复用同一状态 owner。
 4. **shape-as-value 基座** —— 解锁 MiniMind 变长所需的 Shape/Reshape/Expand/Unsqueeze 等受限控制值，并扩展有界 attention；若控制流使用 shape 值，必须共用这份 extent 合同。
 5. **用第一波 profiling 支撑模型验收和热替换** —— 补导出 receipt、stage、extent、generation 关联，使支柱 2.5/2.1 从基础设施变成可消费证据。
-6. **分布式补齐证据或明确降级** —— 消除支柱 2.3 的零 compiled-kernel 证据状态。
-7. **跨算子融合（`te::Program`）** —— 用真实 MiniMind profile 选择首个性能切片，排在 L1 能力打通之后。
+6. **分布式补齐证据或明确降级** —— 进程内静态 CPU 首切片已完成，见 [M7 报告](implementation/M7_DISTRIBUTED_REPORT.md)；后续扩展继续沿用显式 artifact/placement 边界。
+7. **跨算子融合（`te::Program`）** —— 静态 Program 和 CPU/LLVM `add → sqrt` 首切片已接通，见 [M8 报告](implementation/M8_TE_PROGRAM_REPORT.md)。模型级 attention/FFN 等扩展继续依据真实 MiniMind profile 选择；本切片不声称模型加速。
 
 **已移出本序列**：IR parser / round-trip、Python 编译入口暴露、新 agent 友好 IR 的设计。理由见 §2.4。
 
@@ -205,7 +236,7 @@ Transformer 图中可能出现条件分支和生成循环，仓库已有一条�
 | 既有工作 | 定位 |
 |---|---|
 | Bounded 动态图（5 个未合入提交） | 服务支柱 2.2 的变长输入，方向正确，应合入主线 |
-| [TE Program IR 设计提案](TE_PROGRAM_IR.md) | 服务支柱 2.1 与 2.2 的**性能**手段（跨算子融合），动机不是 agent 友好，**不在 §2.4 的延后范围内**；优先级见 §6 第 6 条 |
+| [TE Program 设计与实现边界](TE_PROGRAM_IR.md) | 服务支柱 2.1 与 2.2 的**性能**手段（跨算子融合），动机不是 agent 友好，**不在 §2.4 的延后范围内**；优先级见 §6 第 7 条 |
 | 新 agent / 调度友好 IR 的设计 | **已延后**，见 §2.4 |
 | IR parser / round-trip、Python 编译入口暴露 | **已延后**，与上一项绑定 |
 | 受限符号形状 / 精确 profile 路由 | 服务支柱 2.2；与 bounded 动态图存在职责重叠，需合并 |

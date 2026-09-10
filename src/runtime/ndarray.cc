@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "kxc/runtime/device_api.h"
@@ -126,17 +127,24 @@ NDArray MakeArray(std::vector<int64_t> shape, DLDataType dtype, Storage storage,
 }  // namespace
 
 // 将受支持的文本 dtype 解析为 DLPack 描述。
+namespace {
+constexpr std::pair<const char*, DLDataType> kNamedDataTypes[] = {
+    {"float16", {kDLFloat, 16, 1}}, {"float32", {kDLFloat, 32, 1}},
+    {"float64", {kDLFloat, 64, 1}}, {"int8", {kDLInt, 8, 1}},
+    {"int16", {kDLInt, 16, 1}}, {"int32", {kDLInt, 32, 1}},
+    {"int64", {kDLInt, 64, 1}}, {"uint8", {kDLUInt, 8, 1}},
+    {"bool", {kDLBool, 8, 1}},
+};
+}  // namespace
+
 DLDataType DataTypeFromString(const std::string& dtype) {
-    if (dtype == "float16") return {kDLFloat, 16, 1};
-    if (dtype == "float32") return {kDLFloat, 32, 1};
-    if (dtype == "float64") return {kDLFloat, 64, 1};
-    if (dtype == "int8") return {kDLInt, 8, 1};
-    if (dtype == "int16") return {kDLInt, 16, 1};
-    if (dtype == "int32") return {kDLInt, 32, 1};
-    if (dtype == "int64") return {kDLInt, 64, 1};
-    if (dtype == "uint8") return {kDLUInt, 8, 1};
-    if (dtype == "bool") return {kDLBool, 8, 1};
+    for (const auto& entry : kNamedDataTypes) if (dtype == entry.first) return entry.second;
     throw std::invalid_argument("unsupported dtype string: " + dtype);
+}
+
+std::string DataTypeToString(DLDataType dtype) {
+    for (const auto& entry : kNamedDataTypes) if (SameDType(dtype, entry.second)) return entry.first;
+    throw std::invalid_argument("unsupported named scalar dtype");
 }
 
 // 从通用对象引用恢复 NDArray，并执行运行时类型检查。

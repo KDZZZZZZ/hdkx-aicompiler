@@ -117,6 +117,24 @@ bool SameIds(const Array<ValueId>& left, const Array<ValueId>& right) {
     return true;
 }
 
+UnitSemanticKey RegionSemanticKey(const PrimitiveUnit& unit,
+                                  const std::vector<LogicalValueContract>& values) {
+    const auto& producer = *unit.producer;
+    support::CanonicalBytesEncoder bytes("unit-static-add-sqrt-v1");
+    bytes.Field("producer", BuildSemanticKey(producer.call, producer.argument_value_ids,
+        unit.boundary_input_value_ids, producer.output_value_ids, values).canonical_bytes());
+    bytes.Field("consumer", BuildSemanticKey(unit.call, unit.argument_value_ids,
+        producer.output_value_ids, unit.output_value_ids, values).canonical_bytes());
+    return UnitSemanticKey(std::move(bytes).Take());
+}
+
+bool PlainPure(const ResolvedRelayCall& call, const char* name) {
+    return call.spec.name == name && call.spec.effect == relay::OperatorEffectKind::kPure &&
+        call.spec.deterministic && call.spec.alias_contract == "none" &&
+        call.spec.lowering_kind == relay::OperatorLoweringKind::kSingleTE &&
+        call.spec.output_arity == 1 && !call.attrs.defined();
+}
+
 }  // namespace
 
 PrimitiveUnit BuildPrimitiveUnit(
@@ -148,6 +166,45 @@ PrimitiveUnit BuildPrimitiveUnit(
     return unit;
 }
 
+bool CanFuseAddSqrt(const PrimitiveUnit& producer, const PrimitiveUnit& consumer,
+                   const std::vector<LogicalValueContract>& values) {
+    if (producer.producer || consumer.producer || !PlainPure(producer.call, "add") ||
+        !PlainPure(consumer.call, "sqrt") || producer.argument_value_ids.size() != 2 ||
+        producer.output_value_ids.size() != 1 || consumer.argument_value_ids.size() != 1 ||
+        consumer.output_value_ids.size() != 1 ||
+        consumer.argument_value_ids[0] != producer.output_value_ids[0] ||
+        producer.device != consumer.device || producer.device != Device::CPU()) return false;
+    const auto& output = Value(consumer.output_value_ids[0], values, "fusion output");
+    const auto* type = output.checked_type.As<TensorTypeNode>();
+    if (!type || (type->dtype != "float32" && type->dtype != "float64")) return false;
+    for (const auto dim : type->shape) if (dim < 0) return false;
+    Array<ValueId> required;
+    for (const ValueId id : producer.argument_value_ids) required.push_back(id);
+    required.push_back(producer.output_value_ids[0]);
+    for (const ValueId id : required) {
+        const auto& value = Value(id, values, "fusion input");
+        if (value.device != output.device || !TypeEqual(value.checked_type, output.checked_type)) return false;
+    }
+    return true;
+}
+
+PrimitiveUnit FuseAddSqrt(const PrimitiveUnit& producer, const PrimitiveUnit& consumer,
+                         const std::vector<LogicalValueContract>& values) {
+    ValidatePrimitiveUnit(producer, values);
+    ValidatePrimitiveUnit(consumer, values);
+    if (!CanFuseAddSqrt(producer, consumer, values)) {
+        throw std::invalid_argument("PrimitiveUnit fusion requires static pure CPU add -> sqrt with identical tensor types");
+    }
+    PrimitiveUnit region = consumer;
+    region.id = producer.id;
+    region.symbol = String("kxc_unit_" + std::to_string(region.id) + "_add_sqrt");
+    region.boundary_input_value_ids = producer.boundary_input_value_ids;
+    region.producer = PrimitiveUnitProducer{producer.call, producer.argument_value_ids, producer.output_value_ids};
+    region.semantic_key = RegionSemanticKey(region, values);
+    ValidatePrimitiveUnit(region, values);
+    return region;
+}
+
 void ValidatePrimitiveUnit(
     const PrimitiveUnit& unit,
     const std::vector<LogicalValueContract>& values) {
@@ -156,8 +213,19 @@ void ValidatePrimitiveUnit(
         unit.output_value_ids.empty() || !unit.device.defined()) {
         throw std::invalid_argument("PrimitiveUnit has an incomplete contract");
     }
-    const Array<ValueId> expected_inputs =
-        OrderBoundaryInputs(unit.argument_value_ids, values);
+    if (unit.producer) {
+        const auto& first = *unit.producer;
+        const PrimitiveUnit producer = BuildPrimitiveUnit(unit.id, first.call,
+            first.argument_value_ids, first.output_value_ids, values);
+        const PrimitiveUnit consumer = BuildPrimitiveUnit(unit.id, unit.call,
+            unit.argument_value_ids, unit.output_value_ids, values);
+        if (!CanFuseAddSqrt(producer, consumer, values) ||
+            unit.semantic_key != RegionSemanticKey(unit, values)) {
+            throw std::invalid_argument("PrimitiveUnit region contract or semantic key drifted");
+        }
+    }
+    const Array<ValueId> expected_inputs = OrderBoundaryInputs(
+        unit.producer ? unit.producer->argument_value_ids : unit.argument_value_ids, values);
     if (!SameIds(expected_inputs, unit.boundary_input_value_ids)) {
         throw std::invalid_argument(
             "PrimitiveUnit boundary input ordering is not canonical");
@@ -181,6 +249,13 @@ void ValidatePrimitiveUnit(
                 "PrimitiveUnit requires one explicit input/output device");
         }
     }
+}
+
+std::string PrimitiveUnitOperatorIdentity(const PrimitiveUnit& unit) {
+    const auto identity = [](const ResolvedRelayCall& call) {
+        return call.spec.name + "@v" + std::to_string(call.spec.schema_version);
+    };
+    return unit.producer ? identity(unit.producer->call) + "+" + identity(unit.call) : identity(unit.call);
 }
 
 }  // namespace kxc::api::internal

@@ -29,7 +29,10 @@
 //   auto d = RestrictedSymbolicShapeAdapter::MintExact(prep, bindings);
 //   // d.exact_requests() → 交给后续 compiler/cache（本 API 不调用它们）
 // CMake：KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE（且依赖 exact gate）
-// 子集：固定 rank relu/sqrt、等形 add/mul；广播/控制流/常量等 fail closed
+// 子集：固定 rank relu/sqrt/cast、可证明广播的 add/mul/divide/pow 与
+// rank >= 2 matmul、transpose、静态归约轴 reduce_mean、正归约域 softmax/masked_softmax
+// 和受限 shape 值链；静态常量、共享 DAG、重复实参及非空 tuple 结果。
+// 无法证明的广播、控制流、动态常量轴及直接返回常量/重复输出 fail closed。
 // =============================================================================
 namespace kxc::api::experimental::restricted_symbolic_shape::v1 {
 
@@ -42,7 +45,7 @@ struct EncodedExpr;
 }
 
 inline constexpr uint32_t kRestrictedSymbolicShapeVersion = 1;
-inline constexpr uint32_t kBoundedCompileApplicabilityVersion = 2;
+inline constexpr uint32_t kBoundedCompileApplicabilityVersion = 14;
 
 struct InputAxisSymbol final {
     size_t parameter_index{0};
@@ -129,7 +132,10 @@ public:
 
     static PreparedRestrictedSymbolicTemplate Prepare(
         Function representative, CompileConfig config,
-        std::vector<InputAxisSymbol> input_axis_symbols);
+        std::vector<InputAxisSymbol> input_axis_symbols,
+        // Optional declared outputs from an imported representative. Checked
+        // after shape-chain resolution and before compiler/cache preparation.
+        std::vector<TensorType> representative_outputs = {});
 
     static RestrictedDispatchDecision MintExact(
         const PreparedRestrictedSymbolicTemplate& prepared,
@@ -147,8 +153,9 @@ public:
         const RestrictedDispatchDecision& next);
 
     // 按决策把 representative 物化为可编译的 concrete Function。
-    // 从模板 ordered unit 数据流重放受限调用序列；参数类型携带决策求值后
-    // 的 concrete shape 与 representative dtype。不编译、不缓存、不执行；
+    // 重注类型到 detached representative 快照，保留共享调用、实参与
+    // tuple 输出顺序；参数类型携带决策求值后的 concrete shape 与原 dtype。
+    // 不编译、不缓存、不执行；
     // 编译意图必须由调用方显式调用 Compiler::Compile。决策不属于该模板时
     // fail closed。
     static Function MaterializeExactFunction(
@@ -165,8 +172,8 @@ public:
 
     // 验证编译产物与决策边界契约一致（plan I/O shape/dtype、unit 数量）。
     // 决策授权 route identity，编译产物提供 artifact，两者由本函数绑定。
-    // 比较的是边界，不是 semantic key（物化图有自己的 concrete semantic
-    // key，与 family key 有意不同）。不匹配抛出。
+    // 同时绑定物化 Function 的 concrete semantic key（与 family key 不同），
+    // 拒绝相同边界但算子、接线或结果顺序不同的产物。不匹配抛出。
     static void VerifyCompiledExactVariant(
         const PreparedRestrictedSymbolicTemplate& prepared,
         const RestrictedDispatchDecision& decision,

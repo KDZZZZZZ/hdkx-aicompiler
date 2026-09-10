@@ -430,6 +430,45 @@ kxc::api::CompiledModule MakeModule(
         constants);
 }
 
+bool TestCapacityStatePreflightZeroLaunch() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    KernelSignature signature(
+        "capacity_state_preflight",
+        {KernelArgSpec("past", KernelArgRole::kInput, Float32(), {2, 4, 2}, cpu),
+         KernelArgSpec("token", KernelArgRole::kInput, Float32(), {2, 1, 2}, cpu),
+         KernelArgSpec("logits", KernelArgRole::kOutput, Float32(), {2, 1, 2}, cpu, 1, true),
+         KernelArgSpec("present", KernelArgRole::kOutput, Float32(), {2, 5, 2}, cpu, 1, true)});
+    auto launcher = std::make_shared<RecordingLauncher>();
+    const auto module = MakeModule(signature, {}, launcher);
+    const auto plan = MakePlan(signature).BindStateOutputs({{0, 3, 1, 4, 1}}, 7.0);
+    runtime::RuntimeSession session(module, plan);
+    const auto seed = runtime::NDArray::Zeros({2, 4, 2}, Float32(), cpu);
+    std::string message;
+    TEST_CHECK(Throws([&] { session.InitializeState(0, seed, 5); }, &message) &&
+                   message.find("extent or layout") != std::string::npos &&
+                   session.StateExtent(0) == 0 && launcher->calls == 0,
+               "invalid initial extent must leave the state empty with zero launches");
+    session.InitializeState(0, seed, 4);
+    const auto token = runtime::NDArray::Zeros({2, 1, 2}, Float32(), cpu);
+    TEST_CHECK(Throws([&] { session.Run({token}); }, &message) &&
+                   message.find("capacity before launch") != std::string::npos &&
+                   launcher->calls == 0 && session.StateExtent(0) == 4,
+               "full capacity must reject before any backend launch or cursor change");
+    std::vector<float> stored(16, 1.0f);
+    session.StateValue(0).CopyToBytes(stored.data(), stored.size() * sizeof(float));
+    TEST_CHECK(stored == std::vector<float>(16, 0.0f),
+               "capacity rejection must preserve every stored value");
+    TEST_CHECK(Throws([&] {
+                   (void)KernelArgSpec("past", KernelArgRole::kInput,
+                       Float32(), {2, 4, 2}, cpu, 1, true);
+               }, &message) && message.find("must be immutable") != std::string::npos &&
+                   launcher->calls == 0,
+               "the existing kernel ABI must reject mutable state inputs before launch");
+    return true;
+}
+
 /*! \brief 构造 input -> constant -> output 的静态 session fixture。 */
 SessionFixture MakeStaticFixture() {
     using namespace kxc;
@@ -661,6 +700,49 @@ bool TestModuleOwnedConstantExecution() {
 }
 
 /*! \brief RunAsync 必须返回 outputs 和可独立保活全部参数的 completion。 */
+bool TestExplicitModuleExecution() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    auto baseline = MakeStaticFixture();
+    runtime::RuntimeSession session(baseline.module, baseline.plan);
+    const auto input = runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
+    const auto stream = DeviceStream::Default(Device::CPU());
+    runtime::RunAsyncResult result;
+    std::weak_ptr<RecordingLauncher> retained;
+    {
+        auto candidate = MakeStaticFixture();
+        retained = candidate.launcher;
+        runtime::RuntimeSession::Validate(candidate.module, baseline.plan);
+        TEST_CHECK(candidate.launcher->calls == 0, "validation must not execute");
+        result = session.RunAsyncWithModule(candidate.module, {input}, stream);
+        TEST_CHECK(candidate.launcher->calls == 1 && baseline.launcher->calls == 0,
+                   "explicit execution must use the supplied module");
+    }
+    TEST_CHECK(!retained.expired(), "completion must retain the supplied executable");
+    (void)session.Run({input});
+    TEST_CHECK(baseline.launcher->calls == 1, "explicit execution must preserve the default module");
+    result = {};
+    TEST_CHECK(retained.expired(), "completed replacement must release after its final handle");
+
+    auto launcher = std::make_shared<RecordingLauncher>();
+    const KernelSignature changed(
+        "session_fixture",
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {2, 3}, Device::CPU()),
+         KernelArgSpec("weight", KernelArgRole::kConstant, Float32(), {3}, Device::CPU(),
+                       1, false, "other.constant"),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {2, 3}, Device::CPU(), 64, true)});
+    Map<String, runtime::NDArray> constants;
+    constants.Set("other.constant", baseline.constant);
+    const auto incompatible = MakeModule(changed, constants, launcher);
+    // This module is valid for a fresh session, but cannot replace an existing
+    // session's constant mapping. Reject before its launcher sees any arguments.
+    runtime::RuntimeSession::Validate(incompatible, baseline.plan);
+    TEST_CHECK(Throws([&] { (void)session.RunAsyncWithModule(incompatible, {input}, stream); }) &&
+                   launcher->calls == 0 && baseline.launcher->calls == 1,
+               "replacement must preserve the stored constant mapping");
+    return true;
+}
+
 bool TestAsyncResultLifetime() {
     using namespace kxc;
     SessionFixture fixture = MakeStaticFixture();
@@ -1165,8 +1247,8 @@ bool TestDynamicFreshOutputConstructionRejections() {
     TEST_CHECK(Throws([&] {
                    (void)RuntimeSession(static_module,
                                         static_values_dynamic_mode);
-               }) && static_launcher->calls == 0,
-               "dynamic mode must reject an entry without a dynamic invocation contract");
+               }) == !KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI && static_launcher->calls == 0,
+               "fresh-output mode admits static entries only when its dynamic ABI gate is enabled");
 
 #if KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
     DynamicSessionFixture rank = MakeDynamicSessionFixture();
@@ -1222,9 +1304,9 @@ bool TestDynamicFreshOutputConstructionRejections() {
         {KernelCall("dynamic_cuda", {0}, {1})}, {0}, {}, {1}, {},
         ExecutablePlanMode::kDynamicFreshOutputV1,
         {{0, 0, 2, 8, 2, std::nullopt}});
-    TEST_CHECK(Throws([&] { (void)RuntimeSession(cuda_module, cuda_plan); }) &&
+    TEST_CHECK(!Throws([&] { (void)RuntimeSession(cuda_module, cuda_plan); }) &&
                    cuda_launcher->calls == 0,
-               "dynamic mode must reject CUDA at construction without fallback");
+               "fresh-output construction must admit CUDA without launching or allocating GPU outputs");
 #endif
     return true;
 }
@@ -1471,12 +1553,14 @@ bool TestPlannedIntermediateStorageReuse() {
 /*! \brief 顺序执行 RuntimeSession 契约用例，并将任一失败转换为非零退出码。 */
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
+        {"capacity_state_preflight_zero_launch", TestCapacityStatePreflightZeroLaunch},
         {"construction_and_type_checks", TestConstructionAndTypeChecks},
         {"constant_realignment_at_module_construction",
          TestConstantRealignmentAtModuleConstruction},
         {"synchronous_assembly", TestSynchronousAssembly},
         {"module_owned_constant_execution", TestModuleOwnedConstantExecution},
         {"async_result_lifetime", TestAsyncResultLifetime},
+        {"explicit_module_execution", TestExplicitModuleExecution},
         {"state_alias_persistence_and_lifetime",
          TestStateAliasPersistenceAndLifetime},
         {"state_run_async_serialization", TestStateRunAsyncSerialization},

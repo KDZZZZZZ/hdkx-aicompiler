@@ -187,7 +187,7 @@ bool ContractAssemblyAndExpressionLimits() {
     ModuleInputContract second{{{0,1,8,1,std::nullopt,ModuleAxisReference{0,0}}}};
     ModuleTensorContract out; out.max_bytes=64; out.logical={ModuleShapeExpr::Const(1)}; out.physical=out.logical; out.valid=out.logical;
     const auto canonical=ModuleInvocationContract({first,second},{out},{}).CanonicalBytes();
-    CHECK(ModuleInvocationContract({first,second},{out},{}).abi_version()==3 && canonical.rfind("KXC_MODULE_INVOKE_V3;",0)==0);
+    CHECK(ModuleInvocationContract({first,second},{out},{}).abi_version()==4 && canonical.rfind("KXC_MODULE_INVOKE_V4;",0)==0);
     CHECK(canonical==ModuleInvocationContract({first,second},{out},{}).CanonicalBytes());
     auto altered=out; altered.logical={ModuleShapeExpr::Const(2)}; altered.physical=altered.logical; altered.valid=altered.logical;
     CHECK(canonical!=ModuleInvocationContract({first,second},{altered},{}).CanonicalBytes());
@@ -207,6 +207,16 @@ bool ContractAssemblyAndExpressionLimits() {
     }));
     auto unordered=first; unordered.axis_guards.push_back({0,1,8,1,std::nullopt,std::nullopt}); CHECK(Throws([&]{ModuleInvocationContract({unordered},{out},{},0).Validate(KernelSignature("guards",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)}));}));
     auto forward=first; forward.axis_guards[0].equal_to=ModuleAxisReference{0,0}; CHECK(Throws([&]{ModuleInvocationContract({forward},{out},{},0).Validate(KernelSignature("forward",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)}));}));
+    const KernelSignature square_signature("square", {
+        KernelArgSpec("x",KernelArgRole::kInput,F32(),{2,2},Device::CPU()),
+        KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)});
+    ModuleInputContract square{{{0,2,2,1,2,std::nullopt}, {1,2,2,1,2,ModuleAxisReference{0,0}}}};
+    CHECK(!Throws([&]{ModuleInvocationContract({square},{out},{},0).Validate(square_signature);}));
+    for (const auto reference : std::vector<ModuleAxisReference>{{0,1},{0,2},{1,0}}) {
+        auto malformed = square;
+        malformed.axis_guards[1].equal_to = reference;
+        CHECK(Throws([&]{ModuleInvocationContract({malformed},{out},{},0).Validate(square_signature);}));
+    }
     auto expr=ModuleShapeExpr::Const(1); for(size_t i=0;i<=ModuleShapeExpr::kMaxDepth;++i) expr=ModuleShapeExpr::Add(expr,ModuleShapeExpr::Const(1)); out.logical={expr}; out.physical={expr}; out.valid={expr}; CHECK(Throws([&]{ModuleInvocationContract({first},{out},{},0).Validate(KernelSignature("depth",{KernelArgSpec("x",KernelArgRole::kInput,F32(),{2},Device::CPU()),KernelArgSpec("y",KernelArgRole::kOutput,F32(),{1},Device::CPU(),1,true)}));}));
     CHECK(Throws([&]{ModuleShapeExpr::FloorDiv(ModuleShapeExpr::Const(1),ModuleShapeExpr::Const(0)).Evaluate({});}));
     ModuleInputContract unbounded{{{0,0,64,1,std::nullopt,std::nullopt}}}; ModuleTensorContract dynamic_output; dynamic_output.max_bytes=4096;

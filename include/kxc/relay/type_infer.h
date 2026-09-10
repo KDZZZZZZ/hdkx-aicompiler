@@ -17,6 +17,8 @@ Type EqualInferType(const Attrs& attrs, const Array<Type>& input_types);
 bool IsEqualInputDType(const std::string& dtype);
 Type NegInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SigmoidInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type TanhInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type ErfInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type PowInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ExpandInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type WhereInferType(const Attrs& attrs, const Array<Type>& input_types);
@@ -35,14 +37,17 @@ Type ShapeOfInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ShapeExprInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ExpandDynamicInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ConstantOfShapeInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type TriluInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SqueezeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type UnsqueezeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type TransposeInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type GatherInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ConcatenateInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type SplitInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SliceInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type MaskedSoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type LayerNormInferType(const Attrs& attrs, const Array<Type>& input_types);
 }  // namespace relay
 }  // namespace kxc

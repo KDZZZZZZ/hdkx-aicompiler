@@ -34,6 +34,45 @@ enum class ExecutablePlanMode : uint8_t {
      *  state-sourced runtime extents injected by the session. This mode never
      *  relaxes the fresh-output rejection contract. */
     kDynamicStatefulV1 = 2,
+    /*! \brief Session-owned capacity state whose append is copied from a
+     *  statically-shaped producer into the next valid slot.
+     *
+     *  This mode is the bridge for capacity-padded Transformer decode graphs:
+     *  the compiled graph keeps a fixed past/present shape, while the session
+     *  owns the past buffers and valid cursor.  The cursor is runtime data and
+     *  is never part of the kernel ABI. CPU/LLVM and CUDA finish the state
+     *  copy before RunAsync returns; valid extent commits only after it. */
+    kStaticStatefulExternalV1 = 3,
+    /*! \brief Bounded kernels read compact prefixes of session-owned capacity
+     *  state. CPU/LLVM and CUDA pack valid prefixes into reusable session
+     *  storage before launch, then finish kernels and copy each produced
+     *  append before RunAsync returns and the extent is committed. */
+    kBoundedStatefulExternalV1 = 4,
+};
+
+/*! \brief One produced tensor segment appended to session-owned state.
+ *  Static mode reads source_slot == capacity from a capacity-padded source.
+ *  Bounded mode reads the committed cursor from a valid-prefix source whose
+ *  length is cursor + append_count. Both commit extent only after copying. */
+struct StateOutputBinding final {
+    int64_t state_value_id{-1};
+    int64_t source_value_id{-1};
+    int64_t source_extent_axis{-1};
+    int64_t source_slot{-1};
+    int64_t append_count{1};
+    /*! \brief Bounded mode's logical graph input, supplied by the session.
+     *  -1 in the static mode. Bounded source_slot is -1 and means the
+     *  committed extent; input_value_id is assigned by BindBoundedStateOutputs. */
+    int64_t input_value_id{-1};
+};
+
+/*! \brief Explicit serving ABI for independent requests along leading axis 0.
+ *  All graph inputs/outputs carry that axis; non-batch shapes and committed
+ *  state extents must agree within a batch. Physical state axis 0 is the
+ *  finite request-slot capacity. The model producer asserts row independence;
+ *  shape guards alone do not prove it. CPU/LLVM or CUDA bounded state v1. */
+struct RequestBatchingContract final {
+    int64_t max_batch_size{1};
 };
 
 /*! \brief One graph-input axis referenced by a shared-shape guard. */
@@ -151,6 +190,8 @@ private:
     /*! \brief Graph input value id carrying the uint64[1] append count;
      *  required (>= 0) in the dynamic stateful mode. */
     int64_t state_count_input_value_id_{-1};
+    std::vector<StateOutputBinding> state_output_bindings_;
+    std::optional<RequestBatchingContract> request_batching_;
 };
 
 /*! \brief Validated immutable graph ABI and kernel call order. */
@@ -165,7 +206,9 @@ public:
                    ExecutablePlanMode mode = ExecutablePlanMode::kStatic,
                    std::vector<GraphInputAxisGuard> graph_input_guards = {},
                    std::vector<std::vector<int64_t>> state_extent_bindings = {},
-                   int64_t state_count_input_value_id = -1);
+                   int64_t state_count_input_value_id = -1,
+                   std::vector<StateOutputBinding> state_output_bindings = {},
+                   std::optional<RequestBatchingContract> request_batching = std::nullopt);
     explicit ExecutablePlan(const ObjectRef& ref);
 
     Array<ValueSpec> values() const;
@@ -178,6 +221,28 @@ public:
     std::vector<GraphInputAxisGuard> graph_input_guards() const;
     std::vector<std::vector<int64_t>> state_extent_bindings() const;
     int64_t state_count_input_value_id() const;
+    std::vector<StateOutputBinding> state_output_bindings() const;
+    std::optional<RequestBatchingContract> request_batching() const;
+    /*! \brief Declare the leading-axis independent-request ABI on an already
+     *  bound bounded-state plan. Physical slot capacity may exceed max_batch_size
+     *  but must fit the compiled batch bounds. No compilation occurs here. */
+    ExecutablePlan BindRequestBatching(int64_t max_batch_size) const;
+    /*! \brief Attach session-owned capacity state to a compiled static plan.
+     *  Selected graph inputs become state sources; selected graph outputs
+     *  become private append sources retained through the state commit. */
+    ExecutablePlan BindStateOutputs(std::vector<StateOutputBinding> bindings,
+                                    double state_fill = 0.0) const;
+    /*! \brief Attach fixed-capacity state to a bounded fresh-output plan.
+     *  Each binding names an original graph input as state_value_id and its
+     *  present output as source_value_id; source_slot and input_value_id must
+     *  be -1. Physical shapes follow binding order and fix all dimensions,
+     *  including batch. The returned plan retains logical graph input order;
+     *  RuntimeSession supplies the bound prefixes and accepts only the other
+     *  inputs. Kernel contracts and graph guards remain unchanged. */
+    ExecutablePlan BindBoundedStateOutputs(
+        std::vector<StateOutputBinding> bindings,
+        std::vector<Array<int64_t>> physical_shapes,
+        double state_fill = 0.0) const;
     void Validate() const;
     const ExecutablePlanNode* operator->() const;
 };

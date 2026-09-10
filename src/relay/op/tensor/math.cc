@@ -132,6 +132,31 @@ te::Tensor SigmoidCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     return RequireDefined("sigmoid", te::topi::sigmoid(inputs[0], "T_sigmoid"));
 }
 
+namespace {
+te::Tensor UnaryLibmCompute(const char* name, const Attrs& attrs,
+                           const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
+    if (attrs.defined()) throw std::runtime_error(std::string(name) + " does not accept attrs");
+    RequireInputCount(name, inputs, 1);
+    const auto* output = RequireTensorOutput(name, out_type);
+    if (inputs[0]->dtype != tir::DataType::Float(32) || output->dtype != "float32") {
+        throw std::runtime_error(std::string(name) + " requires float32 input and output");
+    }
+    return te::compute(inputs[0]->shape, [&](const Array<tir::Var>& axes) {
+        return tir::Call(inputs[0]->dtype, name, {inputs[0](axes)});
+    }, std::string("T_") + name, te::topi::kElementWise);
+}
+}  // namespace
+
+te::Tensor TanhCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                       const kxc::Type& out_type) {
+    return UnaryLibmCompute("tanh", attrs, inputs, out_type);
+}
+
+te::Tensor ErfCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                      const kxc::Type& out_type) {
+    return UnaryLibmCompute("erf", attrs, inputs, out_type);
+}
+
 te::Tensor WhereCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                         const kxc::Type& out_type) {
     if (attrs.defined()) {

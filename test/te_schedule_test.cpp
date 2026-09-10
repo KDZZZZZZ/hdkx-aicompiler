@@ -67,6 +67,9 @@ kxc::Target SyntheticCudaTarget() {
     node->device_type = kxc::kCUDA;
     node->device_id = 0;
     node->attrs.exists = 1;
+    node->attrs.device_name = "contract-cuda";
+    node->attrs.arch = "sm_75";
+    node->attrs.multi_processor_count = 1;
     node->attrs.max_threads_per_block = 128;
     node->attrs.max_shared_memory_per_block = 0;
     node->attrs.warp_size = 32;
@@ -412,6 +415,39 @@ bool ExecuteScheduledLLVM(const kxc::te::Tensor& input,
 }
 #endif
 
+bool TestShapeOnlyBoundaryExtentContract() {
+    using namespace kxc;
+    const auto target=BuildTarget(Device::CPU());
+    const tir::Var batch("batch",tir::DataType::UInt(64)), sequence("sequence",tir::DataType::UInt(64)),
+        orphan("orphan",tir::DataType::UInt(64));
+    const Array<tir::Var> extents{batch,sequence};
+    const auto input=te::placeholder({relay::internal::LoadRuntimeExtent(batch),
+        relay::internal::LoadRuntimeExtent(sequence)},tir::DataType::Float(32),"shape_source");
+    const auto output=te::compute({tir::IntImm(1)},[sequence](const Array<tir::Var>&) {
+        return relay::internal::LoadRuntimeExtent(sequence);
+    },"shape_value");
+    const auto schedule=relay::internal::BuildBoundedDynamicTESchedule({output},target,extents);
+    const relay::internal::PrimFuncIdentity identity{String("shape_metadata"),-1,String("shape_expr")};
+    const auto lowered=relay::internal::LowerTensorGraphToTIR({input},{},{output},schedule,target,identity,extents,{},{},{input});
+    CHECK(ReadIntAttr(lowered->prim_func,"kxc.runtime_extent_count")==2 &&
+        relay::internal::GetTEScheduleContract(lowered->prim_func).find("boundary_shape_extent")!=std::string::npos,
+        "shape-only boundary extent must remain explicit in the ABI and schedule identity");
+    CHECK(Throws([&]{(void)relay::internal::LowerTensorGraphToTIR({input},{},{output},schedule,target,
+        identity,{batch,sequence,orphan},{},{},{input});}),"unconsumed extent was admitted by the shape-only exception");
+    CHECK(Throws([&]{(void)relay::internal::LowerTensorGraphToTIR({input},{},{output},schedule,target,
+        identity,extents);}),"unconsumed input extent needs an explicit metadata-use contract");
+    const auto foreign = te::placeholder({tir::IntImm(1)}, tir::DataType::Float(32), "foreign_metadata");
+    CHECK(Throws([&]{(void)relay::internal::LowerTensorGraphToTIR({input},{},{output},schedule,target,
+        identity,extents,{},{},{foreign});}),"metadata-only tensor outside the input ABI was admitted");
+    const auto payload=te::compute({tir::IntImm(1)},[input](const Array<tir::Var>&) {
+        return input(Array<tir::PrimExpr>{tir::IntImm(0),tir::IntImm(0)});
+    },"illegal_shape_payload");
+    const auto payload_schedule=relay::internal::BuildBoundedDynamicTESchedule({payload},target,extents);
+    CHECK(Throws([&]{(void)relay::internal::LowerTensorGraphToTIR({input},{},{payload},payload_schedule,target,
+        identity,extents,{},{},{input});}),"shape-only operator read an input tensor payload");
+    return true;
+}
+
 bool TestBoundedDynamicScheduleTIRABIAndLLVM() {
     using namespace kxc;
     using namespace kxc::api;
@@ -539,12 +575,33 @@ bool TestBoundedDynamicScheduleTIRABIAndLLVM() {
                   {input}, {}, {output}, wrong_policy, cpu,
                   relay::internal::PrimFuncIdentity{String("wrong_policy")},
                   runtime_extents);
-          }) &&
-              Throws([&] {
-                  (void)relay::internal::BuildBoundedDynamicTESchedule(
-                      {output}, SyntheticCudaTarget());
-              }),
-          "dynamic schedule policy or synthetic CUDA did not fail closed");
+          }), "dynamic schedule policy did not fail closed");
+    const Target cuda = SyntheticCudaTarget();
+    const auto cuda_schedule = relay::internal::BuildBoundedDynamicTESchedule({output}, cuda);
+    const auto cuda_lower = [&](const std::vector<int64_t>& upper) {
+        return relay::internal::LowerTensorGraphToTIR({input},
+            {relay::internal::ConstantTensor{bias, String("dynamic.bias"), bias_value}},
+            {output}, cuda_schedule, cuda,
+            relay::internal::PrimFuncIdentity{String("bounded_dynamic_add")},
+            runtime_extents, {}, upper);
+    };
+    CHECK(Throws([&] { (void)cuda_lower({}); }) &&
+          Throws([&] { (void)cuda_lower({19}); }),
+          "bounded CUDA lowering accepted absent or incomplete upper bounds");
+    const auto cuda_lowered = cuda_lower({19, 17});
+    const auto cuda_larger = cuda_lower({35, 31});
+    CHECK(relay::internal::GetTEScheduleContract(cuda_lowered->prim_func) !=
+          relay::internal::GetTEScheduleContract(cuda_larger->prim_func),
+          "CUDA launch upper bounds are missing from the actual schedule identity");
+    const auto cuda_contract = api::internal::ResolveCompilerExecutionContract(CompileConfig::Create(cuda, 3));
+    const auto cuda_function = PipelineExecutor::ExecuteTIR(cuda_contract.tir_pipeline,
+        cuda_lowered->prim_func, cuda);
+    const auto cuda_signature = codegen::BuildKernelSignature(cuda_function, constants, cuda,
+        "bounded_dynamic_add");
+    CHECK(tir::GetCudaLaunchConfig(cuda_function).grid_x == 3 &&
+          cuda_signature.arguments()[1]->role == codegen::KernelArgRole::kRuntimeExtent &&
+          cuda_signature.arguments()[1]->device == Device::CUDA(),
+          "bounded TE, CUDA launch and uint64 device scalar ABI did not share the production path");
 
     const tir::Var rogue("rogue_extent", u64);
     const Array<tir::PrimExpr> rogue_shape{
@@ -713,7 +770,7 @@ bool TestCpuDefaultScheduleAndLLVMNumerics() {
           "production schedule test expected one primitive artifact");
     const std::string artifact_identity =
         compiled.artifact_pins()[0].record().artifact_key.canonical_bytes();
-    CHECK(artifact_identity.find("kxc.te.schedule.v1") !=
+    CHECK(artifact_identity.find("kxc.te.program.v1") !=
                   std::string::npos &&
               artifact_identity.find(
                   relay::internal::kDefaultTESchedulePolicy) !=
@@ -742,6 +799,7 @@ int main() {
         {"cuda_single_binding_authority", TestCudaKeepsSingleBindingAuthority},
         {"bounded_dynamic_schedule_tir_abi_llvm",
          TestBoundedDynamicScheduleTIRABIAndLLVM},
+        {"shape_only_boundary_extent_contract",TestShapeOnlyBoundaryExtentContract},
         {"cpu_default_schedule_llvm_numeric", TestCpuDefaultScheduleAndLLVMNumerics},
     };
     for (const auto& [name, test] : tests) {

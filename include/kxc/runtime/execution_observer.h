@@ -16,12 +16,21 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 #include "kxc/runtime/device.h"
 
 namespace kxc {
 namespace runtime {
+
+/*! \brief 调用方给一次运行附加的结构化关联字段。
+ *
+ * Runtime 只透传这些字段，既不解释其含义，也不把它们放进 kernel ABI
+ * 或编译产物 identity。profiling 等观测适配器可以将它们复制到同一 run
+ * 的事件上，用于模型阶段、导出回执和状态 extent 的关联。
+ */
+using ExecutionMetadata = std::unordered_map<std::string, std::string>;
 
 /*! \brief 一次运行的观测关联；runtime 原样保存并返回，不解释内容。 */
 struct ExecutionRunCorrelation {
@@ -39,6 +48,8 @@ struct ExecutionRunStart {
     std::size_t input_count{0};
     /*! \brief 执行计划声明的内核调用个数。 */
     std::size_t kernel_count{0};
+    /*! \brief 本次运行的调用方关联字段；空表示未提供。 */
+    ExecutionMetadata metadata;
 };
 
 /*! \brief 运行结束时上报的纯数据事实。 */
@@ -69,6 +80,10 @@ struct KernelSubmitInfo {
 
 /*! \brief 完成观测回调；at_registration 表示注册时句柄已经完成。 */
 using ExecutionCompletionCallback = std::function<void(bool at_registration)>;
+
+// A synchronous observation activation returns same-thread cleanup. It never
+// survives its lexical scope or becomes an asynchronous completion callback.
+using ExecutionScopeExit = std::function<void()>;
 
 /*! \brief 分配记账的形态：新分配、复用既有兼容存储、或就地别名绑定。 */
 enum class AllocationKind {
@@ -103,7 +118,8 @@ struct CopyInfo {
     std::uint64_t bytes{0};
     /*! \brief 是否经异步拷贝接口提交；同步拷贝恒为 false。 */
     bool submitted_async{false};
-    /*! \brief 主机执行同步拷贝的耗时；异步提交路径为 0，单位为纳秒。 */
+    /*! \brief 主机实际执行拷贝的耗时（含同步完成的 CPU 异步接口）；
+     *  设备异步提交路径为 0，单位为纳秒。 */
     std::int64_t duration_ns{0};
     /*! \brief 拷贝失败时的原始异常文本；成功时为空。 */
     std::string error_message;
@@ -114,6 +130,19 @@ struct CopyInfo {
 class ExecutionObserver {
 public:
     virtual ~ExecutionObserver() = default;
+
+    // Optional backend/tool activation around the actual runtime work. The
+    // kernel pointer is borrowed only during this call; implementations copy
+    // any facts they retain. The returned cleanup must be safe during unwind.
+    virtual ExecutionScopeExit OnScopeEnter(
+        const ExecutionRunCorrelation&, const KernelSubmitInfo*) { return {}; }
+
+    // A validated copy uses the same lexical activation contract. Existing
+    // observers can keep the generic hook; adapters may use the copy facts.
+    virtual ExecutionScopeExit OnCopyScopeEnter(
+        const ExecutionRunCorrelation& correlation, const CopyInfo&) {
+        return OnScopeEnter(correlation, nullptr);
+    }
 
     /*! \brief 运行开始；返回本次运行的观测关联（可为空关联）。 */
     virtual ExecutionRunCorrelation OnRunStart(const ExecutionRunStart& run) = 0;
@@ -207,14 +236,26 @@ class ExecutionObservationScope {
 public:
     /*! \brief 保存旧线程状态并安装新观测器与关联。 */
     ExecutionObservationScope(ExecutionObserver* observer,
-                              ExecutionRunCorrelation correlation)
+                              ExecutionRunCorrelation correlation,
+                              const KernelSubmitInfo* kernel = nullptr,
+                              const CopyInfo* copy = nullptr)
         : previous_observer_(CurrentExecutionObserver()),
           previous_correlation_(CurrentExecutionRunCorrelation()) {
         CurrentExecutionObserverSlot() = observer;
         CurrentExecutionRunCorrelationSlot() = std::move(correlation);
+        DispatchExecutionObservation(observer, [&](ExecutionObserver& sink) {
+            exit_ = copy ? sink.OnCopyScopeEnter(CurrentExecutionRunCorrelation(), *copy)
+                         : sink.OnScopeEnter(CurrentExecutionRunCorrelation(), kernel);
+        });
     }
     /*! \brief 恢复旧的观测器与运行关联。 */
     ~ExecutionObservationScope() {
+        if (exit_) {
+            const ExecutionObservationHold hold;
+            try { exit_(); } catch (...) {
+                // An observer cannot replace an execution exception.
+            }
+        }
         CurrentExecutionObserverSlot() = previous_observer_;
         CurrentExecutionRunCorrelationSlot() = std::move(previous_correlation_);
     }
@@ -225,6 +266,7 @@ public:
 private:
     ExecutionObserver* previous_observer_;
     ExecutionRunCorrelation previous_correlation_;
+    ExecutionScopeExit exit_;
 };
 
 }  // namespace runtime

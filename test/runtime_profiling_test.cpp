@@ -18,6 +18,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -26,6 +27,7 @@
 
 #include "kxc/compiler/compiler.h"
 #include "kxc/profiling/profiling.h"
+#include "kxc/profiling/runtime_observer.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/session.h"
@@ -68,6 +70,7 @@ public:
         const kxc::Array<kxc::runtime::NDArray>& arguments,
         const kxc::DeviceStream& stream,
         const kxc::ObjectRef&) const override {
+        if (on_launch) on_launch();
         if (arguments.size() != 3) {
             throw std::invalid_argument("add launcher expects two inputs and one output");
         }
@@ -85,6 +88,7 @@ public:
     }
 
     mutable std::atomic<int> calls{0};
+    std::function<void()> on_launch;
 };
 
 /*! \brief 记录提交次数并原样保留参数的 launcher，用于校验失败路径。 */
@@ -423,6 +427,135 @@ bool TestBundleCorrelationAcrossRunsAndSessions() {
     return true;
 }
 
+/*! \brief 实际 launcher 中激活对应 profile，嵌套运行和异常均恢复外层作用域。 */
+bool TestRuntimeScopeActivationAndUnwind() {
+    using namespace kxc;
+    auto outer = MakeBundleFixture("scope_outer"), inner = MakeBundleFixture("scope_inner");
+    runtime::RuntimeSession outer_session(outer.module, outer.plan), inner_session(inner.module, inner.plan);
+    bool inner_called = false;
+    inner.launcher->on_launch = [&] {
+        if (profiling::CurrentContext() != inner.context || profiling::CurrentRunId().empty() ||
+            profiling::CurrentSpanId().empty()) throw std::runtime_error("inner scope not activated");
+        inner_called = true;
+    };
+    std::string observed_run, observed_span;
+    outer.launcher->on_launch = [&] {
+        observed_run = profiling::CurrentRunId();
+        observed_span = profiling::CurrentSpanId();
+        if (profiling::CurrentContext() != outer.context || observed_run.empty() || observed_span.empty() ||
+            observed_span == runtime::CurrentExecutionRunCorrelation().span_id) {
+            throw std::runtime_error("actual launcher lacks its own call scope");
+        }
+        (void)inner_session.Run({FilledInput({4}, {2, 2, 2, 2})});
+        if (profiling::CurrentContext() != outer.context ||
+            profiling::CurrentRunId() != observed_run || profiling::CurrentSpanId() != observed_span) {
+            throw std::runtime_error("nested runtime failed to restore caller scope");
+        }
+    };
+    profiling::ProfileOptions foreign_options;
+    foreign_options.enabled = true;
+    foreign_options.bundle_dir = (std::filesystem::current_path() /
+        "runtime_profiling_output" / "scope_foreign").string();
+    auto foreign = profiling::ProfileContext::Create(foreign_options);
+    {
+        const profiling::ActivationScope caller(foreign, "foreign_run", "foreign_parent");
+        TEST_CHECK(ReadOutput(outer_session.Run({FilledInput({4}, {1, 1, 1, 1})})[0]) ==
+                       std::vector<float>({1, 1, 1, 1}) && inner_called,
+                   "nested observed sessions must preserve output");
+        TEST_CHECK(profiling::CurrentContext() == foreign &&
+                       profiling::CurrentRunId() == "foreign_run" &&
+                       profiling::CurrentSpanId() == "foreign_parent",
+                   "runtime scope must restore the foreign caller");
+        outer.launcher->on_launch = [] { throw std::runtime_error("scope launcher failure"); };
+        std::string error;
+        TEST_CHECK(Throws([&] { outer_session.Run({FilledInput({4}, {1, 1, 1, 1})}); }, &error) &&
+                       error == "scope launcher failure",
+                   "unwind must preserve the launcher exception");
+        TEST_CHECK(profiling::CurrentContext() == foreign &&
+                       profiling::CurrentRunId() == "foreign_run" &&
+                       profiling::CurrentSpanId() == "foreign_parent" &&
+                       runtime::CurrentExecutionObserver() == nullptr,
+                   "failed runtime must restore both TLS stacks");
+    }
+    TEST_CHECK(!profiling::CurrentContext() && profiling::CurrentRunId().empty() &&
+                   profiling::CurrentSpanId().empty(), "caller scope must restore the empty context");
+    outer.context->Flush();
+    const auto events = LoadEvents(outer.context->bundle_dir());
+    const auto launches = Filter(events, "kernel_launch");
+    TEST_CHECK(launches.size() == 2 && launches[0]->StringValue("span_id") == observed_span &&
+                   launches[0]->StringValue("run_id") == observed_run &&
+                   launches[0]->StringValue("status") == "ok" &&
+                   launches[1]->StringValue("status") == "error",
+                   "each launch scope must have a unique identity and preserve failure status");
+    return true;
+}
+
+bool TestBrokenBundleDoesNotInterruptRun() {
+    using namespace kxc;
+    const auto file = std::filesystem::current_path() / "runtime_profiling_output" / "blocked_bundle";
+    std::filesystem::create_directories(file.parent_path());
+    std::ofstream(file).put('x');
+    {
+        auto fixture = MakeBundleFixture("blocked_bundle/child");
+        runtime::RuntimeSession session(fixture.module, fixture.plan);
+        auto result = session.Run({FilledInput({4}, {1, 2, 3, 4})});
+        TEST_CHECK(ReadOutput(result[0]) == std::vector<float>({1, 2, 3, 4}),
+                   "failed bundle write must preserve numerical results");
+        bool rejected = false;
+        try { fixture.context->Flush(); }
+        catch (const std::filesystem::filesystem_error&) { rejected = true; }
+        TEST_CHECK(rejected, "explicit Flush must report an unusable bundle path");
+    }
+    TEST_CHECK(!profiling::CurrentContext() && profiling::CurrentSpanId().empty(),
+               "failed report must restore TLS and safely destroy the profile");
+    std::filesystem::remove(file);
+    return true;
+}
+
+/*! \brief 调用方 metadata 透传到同一 run 的 runtime 事件，供模型 receipt、
+ * stage、generation 和 state extent 关联；这些字段不进入 kernel ABI。 */
+bool TestRunMetadataAssociation() {
+    using namespace kxc;
+    BundleFixture fixture = MakeBundleFixture("run_metadata");
+    runtime::RuntimeSession session(fixture.module, fixture.plan);
+    runtime::ExecutionMetadata metadata{
+        {"export_receipt", "minimind-e0-sha256:abc123"},
+        {"stage", "decode"},
+        {"generation", "7"},
+        {"plan_abi", "plan-v3:deadbeef"},
+        {"state_extent", "16"},
+        {"state_version", "4"},
+        {"token_index", "0"},
+    };
+    session.Run({FilledInput({4}, {1, 2, 3, 4})}, metadata);
+
+    fixture.context->Flush();
+    const std::vector<EventLine> events = LoadEvents(fixture.context->bundle_dir());
+    const std::vector<const EventLine*> runs = Filter(events, "runtime_session_run");
+    TEST_CHECK(runs.size() == 1, "metadata run should produce one run span");
+    const std::string run_id = runs[0]->StringValue("run_id");
+    TEST_CHECK(!run_id.empty(), "metadata run must have a run id");
+
+    const std::vector<const EventLine*> correlated = {
+        runs[0], Filter(events, "kernel_submit").front(),
+        Filter(events, "kernel_exec").front(), Filter(events, "alloc").front(),
+    };
+    for (const EventLine* event : correlated) {
+        TEST_CHECK(event->StringValue("run_id") == run_id,
+                   "metadata events must stay within one run id");
+        TEST_CHECK(event->StringValue("export_receipt") ==
+                       "minimind-e0-sha256:abc123" &&
+                       event->StringValue("stage") == "decode" &&
+                       event->StringValue("generation") == "7" &&
+                       event->StringValue("plan_abi") == "plan-v3:deadbeef" &&
+                       event->StringValue("state_extent") == "16" &&
+                       event->StringValue("state_version") == "4" &&
+                       event->StringValue("token_index") == "0",
+                   "runtime events must inherit model and state association fields");
+    }
+    return true;
+}
+
 /*! \brief profiling 关闭时没有 runtime 事件，输出与开启时逐位一致。 */
 bool TestDisabledProfilingKeepsOutputIdentical() {
     using namespace kxc;
@@ -480,6 +613,13 @@ bool TestDisabledProfilingKeepsOutputIdentical() {
 /*! \brief 每个钩子都抛异常的观测器不能改变执行结果。 */
 class ThrowingObserver final : public kxc::runtime::ExecutionObserver {
 public:
+    bool throw_on_exit{false};
+    kxc::runtime::ExecutionScopeExit OnScopeEnter(
+        const kxc::runtime::ExecutionRunCorrelation&,
+        const kxc::runtime::KernelSubmitInfo*) override {
+        if (!throw_on_exit) throw std::runtime_error("scope enter failure");
+        return [] { throw std::runtime_error("scope exit failure"); };
+    }
     kxc::runtime::ExecutionRunCorrelation OnRunStart(
         const kxc::runtime::ExecutionRunStart&) override {
         throw std::runtime_error("observer failure");
@@ -527,15 +667,19 @@ bool TestThrowingObserverDoesNotChangeExecution() {
     constants.Set(String("relay.constant.0"),
                   runtime::NDArray::Zeros({4}, Float32(), cpu));
     auto launcher = std::make_shared<AddLauncher>();
-    api::CompiledModule module = MakeModule(
-        signature, constants, launcher, nullptr,
-        std::make_shared<ThrowingObserver>());
+    auto observer = std::make_shared<ThrowingObserver>();
+    api::CompiledModule module = MakeModule(signature, constants, launcher, nullptr, observer);
     runtime::RuntimeSession session(module, MakePlan(signature));
     const Array<runtime::NDArray> outputs =
         session.Run({FilledInput({4}, {3, 3, 3, 3})});
     TEST_CHECK(ReadOutput(outputs[0]) == std::vector<float>({3, 3, 3, 3}) &&
                    launcher->calls.load() == 1,
                "a throwing observer must not alter execution results");
+    observer->throw_on_exit = true;
+    TEST_CHECK(ReadOutput(session.Run({FilledInput({4}, {5, 5, 5, 5})})[0]) ==
+                   std::vector<float>({5, 5, 5, 5}) &&
+                   runtime::CurrentExecutionObserver() == nullptr,
+               "throwing scope cleanup must preserve execution and restore the prior observer");
     return true;
 }
 
@@ -700,6 +844,59 @@ bool TestCopyAccountingOnRunPath() {
     }
     TEST_CHECK(submits == 1 && completes == 1,
                "exactly one submit point and one completion point");
+    return true;
+}
+
+bool TestCopyCompletionOutsideRun() {
+    using namespace kxc;
+    profiling::ProfileOptions options; options.enabled = true;
+    options.bundle_dir = (std::filesystem::current_path()/"runtime_profiling_output"/"copy_completion").string();
+    auto context = profiling::ProfileContext::Create(options);
+    auto observer = profiling::MakeRuntimeExecutionObserver(context);
+    runtime::CopyInfo info;
+    info.from_device = Device::CPU(); info.to_device = Device::CPU();
+    info.bytes = 16; info.submitted_async = true; info.duration_ns = 1;
+    auto completed = AsyncOperation::Completed(DeviceStream::Default(Device::CPU()));
+    completed.ObserveCompletion(observer->OnCopySubmitted(info,{}));
+    completed.Wait(); TEST_CHECK(completed.IsReady(),"completed copy remains ready");
+    info.duration_ns = 0;
+    auto pending = AsyncOperation::Pending(DeviceStream::Default(Device::CPU()),nullptr,{});
+    auto foreign_options = options; foreign_options.bundle_dir += "_foreign";
+    const auto foreign = profiling::ProfileContext::Create(foreign_options);
+    {
+        const profiling::ActivationScope active(foreign,"unrelated_run");
+        auto callback = observer->OnCopySubmitted(info,{});
+        TEST_CHECK(bool(callback),"copies outside a run require a completion callback");
+        pending.ObserveCompletion(std::move(callback));
+        TEST_CHECK(profiling::CurrentContext() == foreign && profiling::CurrentRunId() == "unrelated_run",
+            "copy observation must restore the caller's active profile");
+    }
+    context->Flush();
+    TEST_CHECK(Filter(LoadEvents(options.bundle_dir),"copy").size() == 3,
+        "pending copy must have only a submit event");
+    const std::weak_ptr<profiling::ProfileContext> retained = context;
+    observer.reset(); context.reset();
+    TEST_CHECK(!retained.expired(),"pending callback must retain its profile context");
+    pending.Wait(); TEST_CHECK(pending.IsReady(),"observed pending copy becomes ready");
+    pending = {}; completed = {};
+    TEST_CHECK(retained.expired(),"settled callbacks must release their profile context");
+    const auto events = LoadEvents(options.bundle_dir);
+    const auto copies = Filter(events,"copy");
+    TEST_CHECK(copies.size() == 4,"two copies must produce exactly two submit/completion pairs");
+    std::map<std::string,int> pairs;
+    bool measured = false, observed = false;
+    for (const auto* copy : copies) {
+        TEST_CHECK(copy->StringValue("run_id").empty(),"external copy must not invent a run");
+        const auto id = copy->StringValue("copy_id");
+        TEST_CHECK(!id.empty(),"copy identity must be present"); ++pairs[id];
+        if (copy->StringValue("timing") == "host_execute") {
+            TEST_CHECK(copy->NumberValue("duration_ns") == 1,
+                "immediate CPU completion must use the measured copy duration"); measured = true;
+        }
+        observed |= copy->StringValue("timing") == "host_observed_complete";
+    }
+    TEST_CHECK(pairs.size() == 2 && pairs.begin()->second == 2 && pairs.rbegin()->second == 2 &&
+        measured && observed,"copy pairs or timing domains are incorrect");
     return true;
 }
 
@@ -1206,6 +1403,62 @@ bool TestWhereRuntimeBundleEvidence() {
                "the module constant snapshot copy must appear in the bundle");
     return true;
 }
+bool TestCopyLLVMEndToEnd() {
+    using namespace kxc;
+    profiling::ProfileOptions options; options.enabled = true;
+    options.ir_capture_mode = profiling::IRCaptureMode::kDisabled;
+    options.bundle_dir = (std::filesystem::current_path()/"runtime_profiling_output"/"copy_event_llvm").string();
+    const auto context = profiling::ProfileContext::Create(options);
+    const profiling::ActivationScope activation(context,"copy_event_llvm","copy_event_parent");
+    const auto observer = profiling::MakeRuntimeExecutionObserver(context);
+    const Var data("data",TensorType({4},"float32"));
+    const auto graph = api::Compiler::Compile(Function({data},Call(relay::Op::Get("nn_relu"),{data})),
+        api::CompileConfig::Create(BuildTarget(Device::CPU()),2,options));
+    const runtime::RuntimeSession session(graph.module(),graph.plan());
+    auto source = FilledInput({6},{99,-2,3,-4,5,99});
+    auto view = source.CreateView({4},{1},sizeof(float));
+    const auto input = runtime::NDArray::Empty({4},Float32(),Device::CPU());
+    const auto stream = DeviceStream::Default(Device::CPU());
+    {
+        const runtime::ExecutionObservationScope scope(observer.get(),{});
+        auto copied = input.CopyFromAsync(view,stream);
+        source = {}; view = {};
+        copied.Wait(); TEST_CHECK(copied.IsReady(),"input copy must complete");
+        TEST_CHECK(Throws([&] { input.CopyFromAsync(FilledInput({3},{1,2,3}),stream); }),
+            "mismatched copy shape must reject before an event");
+    }
+    auto output = session.Run({input},{{"stage","copy_event_llvm"}});
+    const auto result = runtime::NDArray::Empty({4},Float32(),Device::CPU());
+    {
+        const runtime::ExecutionObservationScope scope(observer.get(),{});
+        auto copied = result.CopyFromAsync(output[0],stream);
+        output = {}; copied.Wait();
+    }
+    TEST_CHECK(ReadOutput(result) == std::vector<float>({0,3,0,5}),"copy/LLVM/copy numeric mismatch");
+    context->Flush();
+    const auto events = LoadEvents(options.bundle_dir);
+    const auto all_copies = Filter(events,"copy");
+    std::vector<const EventLine*> copies;
+    for (const auto* copy : all_copies) if (!copy->StringValue("copy_id").empty()) copies.push_back(copy);
+    TEST_CHECK(copies.size() == 4 && Filter(events,"kernel_submit").size() == 1 &&
+        Filter(events,"kernel_exec").size() == 1,"real copy/LLVM/copy receipts missing");
+    const auto launches = Filter(events,"copy_launch");
+    TEST_CHECK(launches.size() == 2,"copies need two real launch scopes");
+    std::map<std::string,int> pairs;
+    for (const auto* copy : copies) {
+        TEST_CHECK(copy->NumberValue("bytes") == 16 && copy->StringValue("run_id") == "copy_event_llvm" &&
+            copy->StringValue("parent_span_id") == "copy_event_parent" &&
+            !copy->StringValue("copy_id").empty(),"outside-run copy identity/bytes/parent drift");
+        ++pairs[copy->StringValue("copy_id")];
+    }
+    for (const auto* launch : launches) {
+        TEST_CHECK(pairs[launch->StringValue("span_id")] == 2 &&
+            launch->StringValue("parent_span_id") == "copy_event_parent",
+            "copy submit/completion must share their launch ID and preserve caller parent");
+    }
+    std::cout << "actual CPU copy -> LLVM ReLU -> CPU copy: offset view, 32 completed bytes, exact output\n";
+    return true;
+}
 #endif  // KXC_USE_LLVM
 
 /*! \brief LLVM 构建下真实 Where fixture 的运行证据；无 LLVM 时显式跳过。 */
@@ -1225,6 +1478,9 @@ int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"bundle_correlation_across_runs_and_sessions",
          TestBundleCorrelationAcrossRunsAndSessions},
+        {"run_metadata_association", TestRunMetadataAssociation},
+        {"runtime_scope_activation_and_unwind", TestRuntimeScopeActivationAndUnwind},
+        {"broken_bundle_does_not_interrupt_run", TestBrokenBundleDoesNotInterruptRun},
         {"disabled_profiling_keeps_output_identical",
          TestDisabledProfilingKeepsOutputIdentical},
         {"throwing_observer_does_not_change_execution",
@@ -1232,6 +1488,10 @@ int main() {
         {"validation_error_records_error_run", TestValidationErrorRecordsErrorRun},
         {"launcher_failure_records_error_run", TestLauncherFailureRecordsErrorRun},
         {"copy_accounting_on_run_path", TestCopyAccountingOnRunPath},
+        {"copy_completion_outside_run", TestCopyCompletionOutsideRun},
+#if KXC_USE_LLVM
+        {"copy_llvm_end_to_end", TestCopyLLVMEndToEnd},
+#endif
         {"state_alias_and_construction_accounting",
          TestStateAliasAndConstructionAccounting},
         {"planned_reuse_accounting", TestPlannedReuseAccounting},

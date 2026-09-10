@@ -172,7 +172,7 @@ bool ModuleInvocationContract::IsConstantShape(const codegen::KernelSignature& s
     } catch (...) { return false; }
 }
 std::string ModuleInvocationContract::CanonicalBytes() const {
-    std::string b="KXC_MODULE_INVOKE_V3;"; Put(b,abi_version_);Put(b,inputs_.size());Put(b,outputs_.size());Put(b,runtime_extent_scalars_.size());Put(b,run_byte_budget_);
+    std::string b="KXC_MODULE_INVOKE_V4;"; Put(b,abi_version_);Put(b,inputs_.size());Put(b,outputs_.size());Put(b,runtime_extent_scalars_.size());Put(b,run_byte_budget_);
     for(const auto& i:inputs_){Put(b,i.axis_guards.size());for(const auto& g:i.axis_guards){Put(b,g.axis);Put(b,g.lower);Put(b,g.upper);Put(b,g.divisible_by);Put(b,g.exact?1:0);if(g.exact)Put(b,*g.exact);Put(b,g.equal_to?1:0);if(g.equal_to){Put(b,g.equal_to->input_index);Put(b,g.equal_to->axis);}}}
     for(const auto&o:outputs_){Put(b,o.max_bytes);for(const auto* v:{&o.logical,&o.physical,&o.valid}){Put(b,v->size());for(const auto&e:*v)e.AppendCanonical(b);}}
     for(const auto& scalar:runtime_extent_scalars_){Put(b,static_cast<ModuleExtent>(scalar.source));if(scalar.source==ModuleRuntimeExtentScalar::Source::kInputAxis)scalar.expression->AppendCanonical(b);} return b;
@@ -189,7 +189,11 @@ void ModuleInvocationContract::Validate(const codegen::KernelSignature& signatur
                 std::size_t prior=0; bool first=true;
                 for(const auto& guard:contract_input.axis_guards) {
                     if((!first && guard.axis<=prior) || guard.axis>=shape.size() || guard.lower>guard.upper || !guard.divisible_by || (guard.exact && (*guard.exact<guard.lower || *guard.exact>guard.upper || *guard.exact%guard.divisible_by))) throw std::invalid_argument("module invocation guards must be sorted, unique, and internally consistent");
-                    if(guard.equal_to && (guard.equal_to->input_index>=input || guard.equal_to->axis>=input_ranks[guard.equal_to->input_index])) throw std::invalid_argument("module invocation equality guard must target a strictly prior physical input axis");
+                    if (guard.equal_to && (guard.equal_to->input_index > input ||
+                        (guard.equal_to->input_index == input && guard.equal_to->axis >= guard.axis) ||
+                        guard.equal_to->axis >= input_ranks[guard.equal_to->input_index])) {
+                        throw std::invalid_argument("module invocation equality guard must target a prior physical input axis");
+                    }
                     input_lowers.back()[guard.axis]=guard.exact ? *guard.exact : guard.lower;
                     input_uppers.back()[guard.axis]=guard.exact ? *guard.exact : guard.upper;
                     prior=guard.axis; first=false;

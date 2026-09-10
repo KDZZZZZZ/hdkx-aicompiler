@@ -41,6 +41,15 @@ def _events_by_type(events: list[dict[str, Any]], event_type: str) -> list[dict[
     return [event for event in events if event.get("event_type") == event_type]
 
 
+def _host_device_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Only measured successful host work; completion-observation delay is not execution time."""
+
+    return [event for event in events
+            if event.get("component") == "device_api"
+            and event.get("phase") == "complete" and event.get("status") == "ok"
+            and event.get("fields", {}).get("timing") == "host_execute"]
+
+
 def _make_diagnostic(category: str, severity: str, component: str, summary: str,
                      evidence: dict[str, Any], next_steps: list[str]) -> dict[str, Any]:
     """构造统一结构的诊断项。"""
@@ -230,17 +239,21 @@ def _analyze_valid_bundle(bundle: Bundle) -> list[dict[str, Any]]:
             )
         )
 
-    copy_duration = _duration(events, component="device_api", event_type="copy")
-    device_duration = _duration(events, component="device_api")
+    host_device_events = _host_device_events(events)
+    host_copies = _events_by_type(host_device_events, "copy")
+    copy_duration = _duration(host_copies)
+    device_duration = _duration(host_device_events)
     if device_duration > 0 and copy_duration / device_duration >= COPY_DOMINANCE_RATIO:
         diagnostics.append(
             _make_diagnostic(
                 "copy_dominance",
                 "warn",
                 "device_api",
-                "Device copy time dominates device API activity.",
-                {"copy_duration_ns": copy_duration, "device_duration_ns": device_duration},
-                ["Reduce host-device transfers.", "Investigate execution plan placement."],
+                "Copy work dominates measured host device-API activity.",
+                {"copy_duration_ns": copy_duration, "device_duration_ns": device_duration,
+                 "measurement_domain": "host_execute", "copy_count": len(host_copies),
+                 "copy_bytes": sum(event.get("metrics", {}).get("bytes", 0) for event in host_copies)},
+                ["Inspect redundant copies and copied values.", "Investigate execution plan placement."],
             )
         )
 
@@ -282,8 +295,10 @@ def _analyze_valid_bundle(bundle: Bundle) -> list[dict[str, Any]]:
     tiny_kernel_runs = [
         event
         for event in events
-        if event.get("event_type") in {"compiled_module_run", "adaptive_module_run"}
-        and int(event.get("duration_ns", 0) or 0) < SMALL_KERNEL_RUN_NS
+        if event.get("event_type") == "kernel_exec"
+        and event.get("phase") == "complete" and event.get("status") == "ok"
+        and event.get("fields", {}).get("timing") == "host_execute"
+        and 0 < int(event.get("duration_ns", 0) or 0) < SMALL_KERNEL_RUN_NS
     ]
     if len(tiny_kernel_runs) >= 5:
         diagnostics.append(
@@ -291,9 +306,10 @@ def _analyze_valid_bundle(bundle: Bundle) -> list[dict[str, Any]]:
                 "kernel_launch_overhead",
                 "info",
                 "runtime",
-                "Many very short module runs suggest launch overhead may dominate.",
-                {"tiny_run_count": len(tiny_kernel_runs), "threshold_ns": SMALL_KERNEL_RUN_NS},
-                ["Batch small kernels.", "Inspect kernel fusion opportunities."],
+                "Many short host kernel executions warrant checking invocation overhead.",
+                {"tiny_kernel_count": len(tiny_kernel_runs), "threshold_ns": SMALL_KERNEL_RUN_NS,
+                 "measurement_domain": "host_execute", "event_type": "kernel_exec"},
+                ["Measure invocation overhead before changing the plan.", "Inspect batching and kernel fusion opportunities."],
             )
         )
 
@@ -397,17 +413,22 @@ def _compare_device_overheads(base_events: list[dict[str, Any]],
     """比较设备拷贝和同步开销是否退化。"""
 
     results: list[dict[str, Any]] = []
-    base_copy = _duration(base_events, component="device_api", event_type="copy")
-    new_copy = _duration(new_events, component="device_api", event_type="copy")
+    base_copies = _events_by_type(_host_device_events(base_events), "copy")
+    new_copies = _events_by_type(_host_device_events(new_events), "copy")
+    base_copy = _duration(base_copies)
+    new_copy = _duration(new_copies)
     if base_copy > 0 and new_copy > base_copy * 1.2:
         results.append(
             {
                 "category": "copy_dominance",
                 "component": "device_api",
-                "summary": "Device copy time regressed.",
+                "summary": "Measured host copy time increased.",
                 "evidence": {
                     "base_copy_duration_ns": base_copy,
                     "new_copy_duration_ns": new_copy,
+                    "measurement_domain": "host_execute",
+                    "base_copy_bytes": sum(event.get("metrics", {}).get("bytes", 0) for event in base_copies),
+                    "new_copy_bytes": sum(event.get("metrics", {}).get("bytes", 0) for event in new_copies),
                 },
             }
         )

@@ -14,6 +14,7 @@
 #include "kxc/te/te.h"
 #include "kxc/tir/expr.h"
 
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -117,8 +118,8 @@ std::vector<ShapeExprElement> ReadShapeExpr(const std::string& op_name,
     std::vector<ShapeExprElement> elements;
     elements.reserve(kinds.size());
     for (size_t i = 0; i < kinds.size(); ++i) {
-        if (kinds[i] != kShapeExprKindConst && kinds[i] != kShapeExprKindInputAxis) {
-            throw std::runtime_error(op_name + " shape expression kind must be 0 or 1");
+        if (kinds[i] != kShapeExprKindConst && kinds[i] != kShapeExprKindInputAxis && kinds[i] != kShapeExprKindInputAxisOffset) {
+            throw std::runtime_error(op_name + " shape expression kind must be 0, 1 or 2");
         }
         elements.push_back(ShapeExprElement{kinds[i], values[i], axes[i]});
     }
@@ -140,15 +141,23 @@ Array<kxc::tir::PrimExpr> ShapeExprToTEShape(const std::string& op_name,
             shape.push_back(kxc::tir::IntImm(element.value, kxc::tir::DataType::Int(64)));
             continue;
         }
-        if (element.value != 0) {
-            throw std::runtime_error(
-                op_name + " shape expression axis references must target input 0 (data)");
+        if ((element.kind == kShapeExprKindInputAxis && element.value != 0) || element.value < 0) {
+            throw std::runtime_error(op_name + " shape expression axis/offset metadata is invalid");
         }
         const int64_t data_rank = static_cast<int64_t>(data->shape.size());
         if (element.axis < 0 || element.axis >= data_rank) {
             throw std::runtime_error(op_name + " shape expression axis out of range");
         }
-        shape.push_back(data->shape[static_cast<size_t>(element.axis)]);
+        const auto extent = data->shape[static_cast<size_t>(element.axis)];
+        if (const auto* fixed = extent.As<kxc::tir::IntImmNode>()) {
+            if (fixed->value < 0 || fixed->value > std::numeric_limits<int64_t>::max() - element.value) {
+                throw std::runtime_error(op_name + " shape expression extent overflows int64");
+            }
+            shape.push_back(kxc::tir::IntImm(fixed->value + element.value,kxc::tir::DataType::Int(64)));
+        } else {
+            shape.push_back(element.value == 0 ? extent
+                : extent + kxc::tir::IntImm(element.value,kxc::tir::DataType::Int(64)));
+        }
     }
     if (shape.empty()) {
         throw std::runtime_error(op_name + " requires a rank >= 1 target");
@@ -249,22 +258,7 @@ te::Tensor ShapeExprCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     const kxc::tir::DataType index_dtype = kxc::tir::DataType::Int(32);
     const kxc::tir::DataType value_dtype = kxc::tir::DataType::Int(64);
     const int64_t length = static_cast<int64_t>(elements.size());
-    std::vector<kxc::tir::PrimExpr> element_values;
-    element_values.reserve(elements.size());
-    for (const ShapeExprElement& element : elements) {
-        if (element.kind == kShapeExprKindConst) {
-            element_values.push_back(
-                kxc::tir::IntImm(element.value, kxc::tir::DataType::Int(64)));
-        } else {
-            const int64_t source_rank = static_cast<int64_t>(source->shape.size());
-            if (element.value != 0 || element.axis < 0 ||
-                element.axis >= source_rank) {
-                throw std::runtime_error(
-                    "shape_expr axis references must target input 0 within range");
-            }
-            element_values.push_back(source->shape[static_cast<size_t>(element.axis)]);
-        }
-    }
+    const auto element_values = ShapeExprToTEShape("shape_expr",elements,source);
     return RequireDefined("shape_expr", te::compute(
         {kxc::tir::IntImm(length, kxc::tir::DataType::Int(64))},
         [element_values, length, index_dtype, value_dtype](
@@ -344,19 +338,20 @@ te::Tensor ExpandDynamicCompute(const Attrs& attrs, const Array<te::Tensor>& inp
 // 常量目标 constant_of_shape：输出形状来自显式常量目标，逐元素写填充值。
 te::Tensor ConstantOfShapeCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                                   const kxc::Type& out_type) {
-    (void)inputs;
+    if (inputs.size() != 1 && inputs.size() != 2) {
+        throw std::runtime_error("constant_of_shape expects shape or data+shape");
+    }
     const auto* constant_attrs = attrs.As<ConstantOfShapeAttrsNode>();
     if (!constant_attrs) {
         throw std::runtime_error("constant_of_shape expects ConstantOfShapeAttrs");
     }
     const auto* tensor_type = RequireTensorOutput("constant_of_shape", out_type);
     Array<kxc::tir::PrimExpr> shape;
-    for (int64_t dim : tensor_type->shape) {
-        if (dim < 0) {
-            throw std::runtime_error(
-                "constant_of_shape lowering requires a static target shape");
-        }
-        shape.push_back(kxc::tir::IntImm(dim, kxc::tir::DataType::Int(64)));
+    if (inputs.size() == 2) {
+        shape = ShapeExprToTEShape("constant_of_shape", ReadShapeExpr("constant_of_shape",
+            constant_attrs->expr_kinds, constant_attrs->expr_values, constant_attrs->expr_axes), inputs[0]);
+    } else {
+        shape = ShapeFromTensorType(tensor_type, "constant_of_shape");
     }
     const kxc::tir::DataType dtype =
         DTypeFromCastCodeForShape(constant_attrs->dtype_code);
@@ -367,14 +362,80 @@ te::Tensor ConstantOfShapeCompute(const Attrs& attrs, const Array<te::Tensor>& i
         "T_constant_of_shape"));
 }
 
+te::Tensor TriluCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                        const kxc::Type& out_type) {
+    RequireInputCount("trilu", inputs, 1);
+    RequireTensorOutput("trilu", out_type);
+    const auto* triangle = attrs.As<TriluAttrsNode>();
+    const te::Tensor data = inputs[0];
+    if (!triangle || (triangle->upper != 0 && triangle->upper != 1) ||
+        data->shape.size() < 2 || data->dtype != kxc::tir::DataType::Float(32)) {
+        throw std::runtime_error("trilu lowering requires float32 rank >= 2 and valid attrs");
+    }
+    const bool upper = triangle->upper != 0;
+    const int64_t k = triangle->k;
+    return RequireDefined("trilu", te::compute(data->shape,
+        [data, upper, k](const Array<kxc::tir::Var>& indices) {
+            Array<kxc::tir::PrimExpr> source;
+            for (const auto& index : indices) source.push_back(index);
+            const auto diagonal = source[source.size() - 1] - source[source.size() - 2];
+            const auto offset = kxc::tir::IntImm(k, kxc::tir::DataType::Int(64));
+            const auto discard = upper ? kxc::tir::LT(diagonal, offset) : kxc::tir::LT(offset, diagonal);
+            return kxc::tir::Select(discard, kxc::tir::FloatImm(0.0f), data(source));
+        }, "T_trilu"));
+}
+
+// For bounded axis edits, preserve TE input extents instead of reconstructing
+// them from TensorType's unknown (-1) dimensions. Static lowering stays unchanged.
+Array<kxc::tir::PrimExpr> AxisEditedShape(const char* name, const te::Tensor& input,
+                                        const TensorTypeNode* output,
+                                        const Array<int64_t>& axes, bool insert) {
+    if (!input.defined() || axes.empty()) throw std::runtime_error(std::string(name) + " requires input and axes");
+    bool dynamic = false;
+    for (int64_t dim : output->shape) dynamic = dynamic || dim < 0;
+    if (!dynamic) return ShapeFromTensorType(output, name);
+    const size_t rank = input->shape.size() + (insert ? axes.size() : 0);
+    std::vector<bool> edited(rank, false);
+    for (int64_t raw : axes) {
+        const int64_t axis = raw < 0 ? raw + static_cast<int64_t>(rank) : raw;
+        if (axis < 0 || axis >= static_cast<int64_t>(rank) || edited[static_cast<size_t>(axis)]) {
+            throw std::runtime_error(std::string(name) + " requires distinct in-range axes");
+        }
+        edited[static_cast<size_t>(axis)] = true;
+    }
+    Array<kxc::tir::PrimExpr> shape;
+    size_t source = 0;
+    for (size_t axis = 0; axis < rank; ++axis) {
+        if (insert && edited[axis]) {
+            shape.push_back(kxc::tir::IntImm(1, kxc::tir::DataType::Int(64)));
+            continue;
+        }
+        const auto extent = input->shape[source++];
+        if (!insert && edited[axis]) {
+            const auto* value = extent.As<kxc::tir::IntImmNode>();
+            if (!value || value->value != 1) throw std::runtime_error("squeeze removed axis must be constant one");
+        } else shape.push_back(extent);
+    }
+    if (shape.size() != output->shape.size()) throw std::runtime_error(std::string(name) + " output rank mismatch");
+    for (size_t axis = 0; axis < shape.size(); ++axis) {
+        if (output->shape[axis] < 0) continue;
+        const auto* value = shape[axis].As<kxc::tir::IntImmNode>();
+        if (!value || value->value != output->shape[axis]) {
+            throw std::runtime_error(std::string(name) + " output extent mismatch");
+        }
+    }
+    return shape;
+}
+
 // squeeze/unsqueeze：被移除/插入维恒为 1，线性索引一一对应。
 te::Tensor SqueezeCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                           const kxc::Type& out_type) {
-    (void)attrs;
     RequireInputCount("squeeze", inputs, 1);
     const auto* tensor_type = RequireTensorOutput("squeeze", out_type);
+    const auto* control = attrs.As<SqueezeAttrsNode>();
+    if (!control) throw std::runtime_error("squeeze requires SqueezeAttrs");
     const Array<kxc::tir::PrimExpr> out_shape =
-        ShapeFromTensorType(tensor_type, "squeeze");
+        AxisEditedShape("squeeze", inputs[0], tensor_type, control->axes, false);
     return RequireDefined("squeeze", te::compute(
         out_shape,
         [input = inputs[0], out_shape](const Array<kxc::tir::Var>& indices) {
@@ -385,11 +446,12 @@ te::Tensor SqueezeCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
 
 te::Tensor UnsqueezeCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                             const kxc::Type& out_type) {
-    (void)attrs;
     RequireInputCount("unsqueeze", inputs, 1);
     const auto* tensor_type = RequireTensorOutput("unsqueeze", out_type);
+    const auto* control = attrs.As<UnsqueezeAttrsNode>();
+    if (!control) throw std::runtime_error("unsqueeze requires UnsqueezeAttrs");
     const Array<kxc::tir::PrimExpr> out_shape =
-        ShapeFromTensorType(tensor_type, "unsqueeze");
+        AxisEditedShape("unsqueeze", inputs[0], tensor_type, control->axes, true);
     return RequireDefined("unsqueeze", te::compute(
         out_shape,
         [input = inputs[0], out_shape](const Array<kxc::tir::Var>& indices) {
@@ -426,11 +488,19 @@ KXC_REGISTER_OP(expand_dynamic)
 
 KXC_REGISTER_OP(constant_of_shape)
     .describe(R"doc(Fill a constant target shape with an explicit scalar value.)doc")
-    .set_num_inputs(1)
+    .set_input_arity_range(1, 2)
     .add_argument("shape", "Tensor", "int64 control shape tensor.")
     .set_attr<std::string>("TAttrs", "ConstantOfShapeAttrs")
     .set_attr<FInferType>("FInferType", ConstantOfShapeInferType)
     .set_attr<FRelayToTE>("FRelayToTE", ConstantOfShapeCompute);
+
+KXC_REGISTER_OP(trilu)
+    .describe(R"doc(Retain an upper or lower triangle at a constant diagonal offset.)doc")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "Float32 tensor of rank at least two.")
+    .set_attr<std::string>("TAttrs", "TriluAttrs")
+    .set_attr<FInferType>("FInferType", TriluInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", TriluCompute);
 
 KXC_REGISTER_OP(squeeze)
     .describe(R"doc(Remove provably unit dimensions along explicit axes.)doc")

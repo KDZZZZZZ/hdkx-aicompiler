@@ -648,11 +648,19 @@ bool TestBuildDynamicKernelSignature() {
     cuda_node->device_type = kCUDA;
     cuda_node->device_id = 0;
     const Target cuda{ObjectRef(cuda_node)};
+    const auto cuda_signature = BuildKernelSignature(function, {}, cuda, "dynamic_cuda");
+    TEST_CHECK(cuda_signature.arguments()[1]->role == KernelArgRole::kRuntimeExtent &&
+                   cuda_signature.arguments()[1]->dtype.code == kDLUInt &&
+                   cuda_signature.arguments()[1]->dtype.bits == 64 &&
+                   cuda_signature.arguments()[1]->device == Device::CUDA() &&
+                   cuda_signature.arguments()[0].shape()[0] == kDynamicDimension &&
+                   cuda_signature.arguments()[2].shape()[0] == kDynamicDimension,
+               "CUDA lost the canonical extent role, dtype, device or dynamic boundary");
     TEST_CHECK(Throws([&] {
-                   (void)BuildKernelSignature(function, {}, cuda,
-                                              "dynamic_cuda");
+                   (void)BuildKernelSignature(uncontrolled_function, {}, cuda,
+                                              "uncontrolled_cuda");
                }),
-               "synthetic CUDA target accepted the runtime extent ABI");
+               "CUDA accepted a dimension outside the canonical extent ABI");
     return true;
 }
 

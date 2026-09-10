@@ -15,7 +15,8 @@ class DynamicUnitShapeContract;
 
 relay::LoweredFunction LowerPrimitiveUnit(
     const std::vector<LogicalValueContract>& values,
-    const PrimitiveUnit& unit, const Target& target);
+    const PrimitiveUnit& unit, const Target& target,
+    const std::string& tir_pipeline_canonical = "kxc.tir.unoptimized.v1");
 relay::LoweredFunction LowerPrimitiveUnit(
     const std::vector<LogicalValueContract>& values,
     const PrimitiveUnit& unit, const Target& target,
@@ -24,6 +25,7 @@ runtime::ExecutablePlan BuildStaticExecutablePlan(
     const PreparedStaticGraph& prepared);
 PreparedStaticGraph PrepareStaticGraph(Function function, Device device,
                                        Target target,
-                                       String pipeline_fingerprint);
+                                       String pipeline_fingerprint,
+                                       bool fuse_static_add_sqrt = false);
 
 }  // namespace kxc::api::internal

@@ -493,10 +493,135 @@ def test_concat_rejects_rank_zero_and_out_of_range_axis():
         import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], axis=2))
 
 
-@pytest.mark.parametrize("node_inputs", [("lhs",), ("lhs", "rhs", "extra"), ("lhs", "")])
-def test_concat_requires_exactly_two_nonempty_inputs(node_inputs):
+@pytest.mark.parametrize("node_inputs", [(), ("lhs", ""), ("",)])
+def test_concat_rejects_missing_inputs(node_inputs):
     with pytest.raises(ValueError, match="exactly two non-empty inputs"):
         import_onnx_model(_concat_model([2, 2], [2, 3], [2, 5], node_inputs=node_inputs))
+
+
+@pytest.mark.parametrize("shape, axis", [([1, 68, 768], 0), ([2, 3], -1), ([2, 0], 1)])
+def test_singleton_concat_uses_existing_binary_copy_semantics(shape, axis):
+    model = _concat_model(shape, shape, shape, axis=axis, node_inputs=("lhs",))
+    original = model.SerializeToString()
+    imported = import_onnx_model(model, fold_constants=False)
+    node, = imported.function.nodes
+    assert node.op_name == "concatenate" and node.inputs[0] == "lhs"
+    empty = imported.params[node.inputs[1]]
+    expected_shape = list(shape)
+    expected_shape[axis] = 0
+    assert empty.shape == expected_shape and empty.dtype == "float32" and empty.data == b""
+    assert imported.function.outputs[0].shape == shape
+    assert model.SerializeToString() == original
+    with pytest.raises(UnsupportedONNXOpError, match="Singleton Concat.*static"):
+        import_onnx_model(model, fold_constants=False, preserve_shape_values=True)
+
+
+@pytest.mark.parametrize("axis", [2, -3, 1.5])
+def test_singleton_concat_does_not_erase_invalid_axis(axis):
+    with pytest.raises(ValueError, match="axis"):
+        import_onnx_model(_concat_model([2, 3], [2, 3], [2, 3], axis=axis,
+                                       node_inputs=("lhs",)), fold_constants=False)
+
+
+@pytest.mark.parametrize("preserve_shape_values", [False, True])
+@pytest.mark.parametrize("axis", [1, -1])
+def test_variadic_concat_preserves_order_and_source(axis, preserve_shape_values):
+    import numpy as np
+    from onnx.reference import ReferenceEvaluator
+    from kxc_onnx.importer import _binary_concats
+
+    model = _concat_model([2, 2], [2, 3], [2, 7], axis=axis,
+                          node_inputs=("lhs", "rhs", "extra"))
+    original = model.SerializeToString()
+    feeds = {"lhs": np.arange(4, dtype=np.float32).reshape(2, 2),
+             "rhs": np.arange(6, dtype=np.float32).reshape(2, 3) + 20,
+             "extra": np.arange(4, dtype=np.float32).reshape(2, 2) + 100}
+    expected = ReferenceEvaluator(model).run(None, feeds)[0]
+    normalized = _binary_concats(model)
+    actual = ReferenceEvaluator(normalized).run(None, feeds)[0]
+    np.testing.assert_array_equal(actual, expected)
+    assert model.SerializeToString() == original
+    imported = import_onnx_model(model, preserve_shape_values=preserve_shape_values)
+    assert [node.inputs for node in imported.function.nodes] == [
+        ["lhs", "rhs"], ["out__kxc_concat_0", "extra"]]
+    assert all(node.op_name == "concatenate" and node.attrs == {"axis": axis}
+               for node in imported.function.nodes)
+    assert imported.function.outputs[0].shape == [2, 7]
+    assert to_json_dict(imported) == to_json_dict(import_onnx_model(
+        model, preserve_shape_values=preserve_shape_values))
+
+
+def test_variadic_concat_keeps_empty_operands_and_checks_final_declaration():
+    model = _concat_model([2, 0], [2, 3], [2, 3], axis=1,
+                          node_inputs=("lhs", "rhs", "extra", "lhs"))
+    imported = import_onnx_model(model)
+    assert len(imported.function.nodes) == 3
+    assert imported.function.outputs[0].shape == [2, 3]
+    model.graph.output[0].type.tensor_type.shape.dim[1].dim_value = 4
+    with pytest.raises(ValueError, match="does not match inferred"):
+        import_onnx_model(model)
+
+
+@pytest.mark.parametrize("failure", ["dtype", "rank", "nonaxis", "missing", "empty", "attrs"])
+def test_variadic_concat_validates_late_operands(failure):
+    model = _concat_model([2, 2], [2, 3], [2, 7], axis=1,
+                          node_inputs=("lhs", "rhs", "extra"))
+    if failure == "dtype":
+        model.graph.input[2].type.tensor_type.elem_type = TensorProto.INT64
+    elif failure == "rank":
+        model.graph.input[2].CopyFrom(helper.make_tensor_value_info("extra", TensorProto.FLOAT, [4]))
+    elif failure == "nonaxis":
+        model.graph.input[2].type.tensor_type.shape.dim[0].dim_value = 3
+    elif failure == "missing":
+        # This invalid input used to collide with the first generated temporary.
+        model.graph.node[0].input[2] = "out__kxc_concat_0"
+    elif failure == "empty":
+        model.graph.node[0].input[2] = ""
+    else:
+        model.graph.node[0].attribute.append(helper.make_attribute("unexpected", 1))
+    message = {"dtype": "matching input dtypes", "rank": "input ranks must match",
+               "nonaxis": "non-axis dimensions", "missing": "unresolved prior input",
+               "empty": "Concat requires nonempty", "attrs": "exactly the axis"}[failure]
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(model, fold_constants=False)
+
+
+def test_variadic_concat_reserves_original_value_metadata_and_node_names():
+    from kxc_onnx.importer import _binary_concats
+
+    model = _concat_model([2, 2], [2, 3], [2, 7], axis=1,
+                          node_inputs=("lhs", "rhs", "extra"))
+    model.graph.value_info.append(helper.make_tensor_value_info(
+        "out__kxc_concat_0", TensorProto.FLOAT, [99]))
+    model.graph.node.append(helper.make_node("Relu", ["out"], ["positive"], name="concat_part0"))
+    normalized = _binary_concats(model)
+    assert normalized.graph.node[0].output[0] == "out__kxc_concat_0_"
+    assert normalized.graph.node[0].name == "concat_part0_"
+    imported = import_onnx_model(model, fold_constants=False)
+    assert imported.function.outputs[0].shape == [2, 7]
+
+
+def test_variadic_concat_checks_overflow_in_late_operand():
+    model = _concat_model([1, (1 << 63) - 2], [1, 1], [1, 1], axis=1,
+                          node_inputs=("lhs", "rhs", "extra"))
+    with pytest.raises(ValueError, match="axis extent sum overflows int64"):
+        import_onnx_model(model, fold_constants=False)
+
+
+@pytest.mark.parametrize("fold_constants", [False, True])
+@pytest.mark.parametrize("op", ["Concat", "Add", "Constant"])
+def test_custom_domain_cannot_be_reinterpreted_as_standard_onnx(op, fold_constants):
+    initializers = [helper.make_tensor(name, TensorProto.FLOAT, [1], [1.0])
+                    for name in ["a", "b", "c"]]
+    inputs = {"Concat": ["a", "b", "c"], "Add": ["a", "b"], "Constant": []}[op]
+    attrs = {"axis": 0} if op == "Concat" else ({"value": initializers[0]} if op == "Constant" else {})
+    model = helper.make_model(helper.make_graph(
+        [helper.make_node(op, inputs, ["out"], domain="vendor.private", **attrs)],
+        "custom_domain", [], [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1])],
+        initializer=initializers),
+        opset_imports=[helper.make_opsetid("", 13), helper.make_opsetid("vendor.private", 1)])
+    with pytest.raises(UnsupportedONNXOpError, match="Unsupported ONNX domain 'vendor.private'"):
+        import_onnx_model(model, fold_constants=fold_constants)
 
 
 @pytest.mark.parametrize(
@@ -528,6 +653,102 @@ def test_concat_rejects_unsupported_dtype():
                 [2, 2], [2, 3], [2, 5], axis=1, lhs_dtype=TensorProto.FLOAT16
             )
         )
+
+
+def _split_model(
+    data_shape,
+    output_shapes,
+    *,
+    axis=0,
+    sections=(1, 1),
+    use_input=False,
+    output_names=("left", "right"),
+    data_dtype=TensorProto.FLOAT,
+):
+    inputs = [helper.make_tensor_value_info("data", data_dtype, data_shape)]
+    initializers = []
+    node_inputs = ["data"]
+    attrs = {"axis": axis}
+    if use_input:
+        node_inputs.append("sections")
+        initializers.append(
+            helper.make_tensor("sections", TensorProto.INT64, [len(sections)], list(sections))
+        )
+    else:
+        attrs["split"] = list(sections)
+    graph = helper.make_graph(
+        [helper.make_node("Split", node_inputs, list(output_names), name="split", **attrs)],
+        "split_test",
+        inputs,
+        [
+            helper.make_tensor_value_info(name, data_dtype, shape)
+            for name, shape in zip(output_names, output_shapes)
+        ],
+        initializer=initializers,
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=6
+    )
+
+
+def test_split_maps_two_outputs_and_preserves_order():
+    imported = import_onnx_model(
+        _split_model([2, 6], [[2, 2], [2, 4]], axis=1, sections=(2, 4))
+    )
+
+    assert [(node.op_name, node.inputs, node.attrs) for node in imported.function.nodes] == [
+        ("split", ["data"], {"axis": 1, "sections": [2, 4]}),
+    ]
+    assert [output.name for output in imported.function.outputs] == ["left", "right"]
+    assert [output.shape for output in imported.function.outputs] == [[2, 2], [2, 4]]
+
+
+def test_split_accepts_constant_sections_input():
+    imported = import_onnx_model(
+        _split_model([6], [[2], [4]], sections=(2, 4), use_input=True)
+    )
+
+    assert imported.function.nodes[0].op_name == "split"
+    assert imported.function.nodes[0].inputs == ["data"]
+    assert imported.function.nodes[0].attrs == {"axis": 0, "sections": [2, 4]}
+
+
+def test_split_maps_three_outputs_and_preserves_order():
+    imported = import_onnx_model(
+        _split_model([2, 6], [[2, 1], [2, 3], [2, 2]], axis=1,
+                     sections=(1, 3, 2), output_names=("first", "middle", "last"))
+    )
+
+    assert imported.function.nodes[0].attrs == {"axis": 1, "sections": [1, 3, 2]}
+    assert [output.name for output in imported.function.outputs] == [
+        "first", "middle", "last"
+    ]
+    assert [output.shape for output in imported.function.outputs] == [
+        [2, 1], [2, 3], [2, 2]
+    ]
+
+
+@pytest.mark.parametrize("failure", ["outputs", "sum", "dynamic", "dtype"])
+def test_split_rejects_unsupported_contracts(failure):
+    if failure == "outputs":
+        model = _split_model([4], [[1], [1], [2]], sections=(1, 1),
+                             output_names=("a", "b", "c"))
+        message = "output count must equal the number of sections"
+    elif failure == "sum":
+        model = _split_model([4], [[1], [2]], sections=(1, 2))
+        message = "sections must sum to the input axis extent"
+    elif failure == "dynamic":
+        model = _split_model([4], [[1], [3]], sections=(1, 3), use_input=True)
+        model.graph.initializer.clear()
+        model.graph.input.append(
+            helper.make_tensor_value_info("sections", TensorProto.INT64, [2])
+        )
+        message = "must be a static initializer or Constant node output"
+    else:
+        model = _split_model([4], [[1], [3]], sections=(1, 3), data_dtype=TensorProto.FLOAT16)
+        message = "Unsupported ONNX tensor dtype"
+    with pytest.raises(ValueError, match=message):
+        import_onnx_model(model)
 
 
 def _where_model(condition_shape, x_shape, y_shape, *, condition_dtype=TensorProto.BOOL,
@@ -1310,6 +1531,32 @@ def test_arithmetic_maps_with_trailing_broadcast(op):
     assert imported.function.outputs[0].dtype == "float32"
 
 
+def test_add_accepts_int64_index_arithmetic():
+    imported = import_onnx_model(
+        _arith_model(
+            "Add", [1, 3], [3], a_dtype=TensorProto.INT64,
+            b_dtype=TensorProto.INT64, out_shape=[1, 3],
+            out_dtype=TensorProto.INT64,
+        )
+    )
+
+    assert [(node.op_name, node.attrs, node.inputs) for node in imported.function.nodes] == [
+        ("add", {}, ["a", "b"]),
+    ]
+    assert imported.function.outputs[0].shape == [1, 3]
+    assert imported.function.outputs[0].dtype == "int64"
+
+
+def test_add_rejects_unverified_integer_dtypes():
+    with pytest.raises(ValueError, match="requires float32 or int64 inputs"):
+        import_onnx_model(
+            _arith_model(
+                "Add", [2, 2], [2, 2], a_dtype=TensorProto.INT32,
+                b_dtype=TensorProto.INT32, out_dtype=TensorProto.INT32,
+            )
+        )
+
+
 @pytest.mark.parametrize("op", ["Mul", "Sub", "Div"])
 def test_arithmetic_rejects_attributes(op):
     with pytest.raises(ValueError, match="does not support attributes"):
@@ -1711,7 +1958,7 @@ def _unary_math_model(op, shape, *, dtype=TensorProto.FLOAT,
     )
 
 
-@pytest.mark.parametrize("op,relay_op", [("Neg", "neg"), ("Sigmoid", "sigmoid")])
+@pytest.mark.parametrize("op,relay_op", [("Neg", "neg"), ("Sigmoid", "sigmoid"), ("Tanh", "tanh"), ("Erf", "erf")])
 def test_unary_math_maps_and_preserves_shape(op, relay_op):
     imported = import_onnx_model(_unary_math_model(op, [2, 3]))
 
@@ -1722,19 +1969,19 @@ def test_unary_math_maps_and_preserves_shape(op, relay_op):
     assert imported.function.outputs[0].dtype == "float32"
 
 
-@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid", "Tanh", "Erf"])
 def test_unary_math_rejects_pre_opset13(op):
     with pytest.raises(UnsupportedONNXOpError, match="opset >= 13 form is required"):
         import_onnx_model(_unary_math_model(op, [2], opset=12))
 
 
-@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid", "Tanh", "Erf"])
 def test_unary_math_rejects_non_float32(op):
     with pytest.raises(ValueError, match="requires float32 input in the M4/M5 static subset"):
         import_onnx_model(_unary_math_model(op, [2], dtype=TensorProto.INT64))
 
 
-@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid", "Tanh", "Erf"])
 def test_unary_math_rejects_attributes(op):
     model = _unary_math_model(op, [2])
     model.graph.node[0].attribute.extend([helper.make_attribute("axis", 0)])
@@ -1742,10 +1989,37 @@ def test_unary_math_rejects_attributes(op):
         import_onnx_model(model)
 
 
-@pytest.mark.parametrize("op", ["Neg", "Sigmoid"])
+@pytest.mark.parametrize("op", ["Neg", "Sigmoid", "Tanh", "Erf"])
 def test_unary_math_rejects_declared_output_mismatch(op):
     with pytest.raises(ValueError, match=r"output 'out' declaration.*does not match inferred"):
         import_onnx_model(_unary_math_model(op, [2, 3], output_shape=[2, 4]))
+
+
+@pytest.mark.parametrize("op", ["Tanh", "Erf"])
+def test_vision_math_does_not_admit_unproven_shape_source_mode(op):
+    with pytest.raises(UnsupportedONNXOpError, match="static import contract"):
+        import_onnx_model(_unary_math_model(op, [2, 3]), preserve_shape_values=True)
+
+
+@pytest.mark.parametrize("padding", ["VALID", "NOTSET", "SAME_UPPER", "SAME_LOWER"])
+def test_conv_auto_padding_is_explicit_or_rejected(padding):
+    import numpy as np
+    model = helper.make_model(helper.make_graph([
+        helper.make_node("Conv", ["x", "w"], ["y"], auto_pad=padding, strides=[2, 2]),
+    ], "conv_padding", [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 5, 5])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 1, 2, 2])],
+        initializer=[numpy_helper.from_array(np.ones((1, 1, 2, 2), np.float32), name="w")]),
+        opset_imports=[helper.make_opsetid("", 17)])
+    if padding.startswith("SAME"):
+        with pytest.raises(UnsupportedONNXOpError, match="requires explicit pads"):
+            import_onnx_model(model)
+    else:
+        imported = import_onnx_model(model)
+        assert imported.function.nodes[0].attrs["pads"] == [0, 0, 0, 0]
+        if padding == "VALID":
+            model.graph.node[0].attribute.append(helper.make_attribute("pads", [0, 0, 0, 0]))
+            with pytest.raises(ValueError, match="cannot be combined"):
+                import_onnx_model(model)
 
 
 # ---------------------------------------------------------------------------
@@ -2116,3 +2390,440 @@ def test_folding_only_materializes_the_frontier():
     names = {i.name for i in folded.graph.initializer}
     assert "mid" not in names and "c" not in names
 
+
+def _head_shape_source_model():
+    return _s1_model([
+        helper.make_node("Constant", [], ["ib"], value=helper.make_tensor("v", TensorProto.INT64, [], [-3])),
+        helper.make_node("Shape", ["x"], ["shape"], name="shape"),
+        helper.make_node("Gather", ["shape", "ib"], ["b"], axis=0),
+        helper.make_node("Gather", ["shape", "is"], ["s"], axis=0),
+        helper.make_node("Unsqueeze", ["b", "axes"], ["bv"]),
+        helper.make_node("Unsqueeze", ["s", "axes"], ["sv"]),
+        helper.make_node("Concat", ["bv", "sv", "h", "d"], ["target"], axis=0),
+        helper.make_node("Reshape", ["x", "target"], ["heads"]),
+    ], [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4, 8])],
+       [helper.make_tensor_value_info("heads", TensorProto.FLOAT, [1, 4, 2, 4])],
+       initializers=[helper.make_tensor("is", TensorProto.INT32, [], [-2]),
+                     helper.make_tensor("axes", TensorProto.INT64, [1], [0]),
+                     helper.make_tensor("h", TensorProto.INT64, [1], [2]),
+                     helper.make_tensor("d", TensorProto.INT64, [1], [4])])
+
+
+def test_shape_source_preserves_scalar_ranks_and_original_shape_dependencies():
+    import numpy as np
+    from onnx.reference import ReferenceEvaluator
+
+    model = _head_shape_source_model()
+    folded, _ = fold_static_subgraph(model)
+    assert next(list(t.dims) for t in folded.graph.initializer if t.name == "ib") == []
+    data = np.arange(32, dtype=np.float32).reshape(1, 4, 8)
+    original = ReferenceEvaluator(model).run(None, {"x": data})[0]
+    actual = ReferenceEvaluator(folded).run(None, {"x": data})[0]
+    np.testing.assert_array_equal(original, actual)
+    assert actual.shape == (1, 4, 2, 4)
+
+    imported = import_onnx_model(model, preserve_shape_values=True)
+    assert to_json_dict(imported)["format"] == "kxc.onnx_shape_source.v1"
+    assert imported.params["ib"].shape == imported.params["is"].shape == []
+    assert imported.params["is"].dtype == "int32"
+    assert len(imported.function.nodes) == 9
+    assert sum(n.op_name == "concatenate" for n in imported.function.nodes) == 3
+    assert sum(n.op_name == "unsqueeze" for n in imported.function.nodes) == 2
+    target = imported.function.nodes[-1]
+    assert (target.op_name, target.inputs, target.attrs) == ("reshape_dynamic", ["x", "target"], {})
+    assert imported.function.outputs[0].shape == [1, 4, 2, 4]
+    # The default static import does not silently opt into source semantics.
+    with pytest.raises(ValueError, match="must be a static initializer or Constant"):
+        import_onnx_model(model)
+
+
+def _gqa_shape_source_model():
+    initializers = [helper.make_tensor(f"i{axis}", TensorProto.INT64, [], [axis]) for axis in range(4)]
+    initializers += [helper.make_tensor("axis0", TensorProto.INT64, [1], [0]),
+                     helper.make_tensor("axis3", TensorProto.INT64, [1], [3]),
+                     helper.make_tensor("repeat_vector", TensorProto.INT64, [1], [2]),
+                     helper.make_tensor("repeat", TensorProto.INT64, [], [2]),
+                     helper.make_tensor("flat", TensorProto.INT64, [1], [-1]),
+                     helper.make_tensor("negative", TensorProto.INT64, [], [-1])]
+    nodes = [helper.make_node("Shape", ["x"], ["shape"])]
+    for axis in range(4):
+        nodes += [helper.make_node("Gather", ["shape", f"i{axis}"], [f"d{axis}"], axis=0),
+                  helper.make_node("Unsqueeze", [f"d{axis}", "axis0"], [f"v{axis}"])]
+    nodes += [
+        helper.make_node("Concat", ["v0", "v1", "v2", "repeat_vector", "v3"], ["target"], axis=0),
+        helper.make_node("Reshape", ["target", "flat"], ["flat_target"]),
+        helper.make_node("Shape", ["flat_target"], ["length"]),
+        helper.make_node("ConstantOfShape", ["length"], ["ones"], name="fill",
+                         value=helper.make_tensor("fill", TensorProto.INT64, [1], [1])),
+        helper.make_node("Mul", ["ones", "negative"], ["marker"]),
+        helper.make_node("Equal", ["flat_target", "marker"], ["condition"]),
+        helper.make_node("Where", ["condition", "ones", "flat_target"], ["selected"]),
+        helper.make_node("Unsqueeze", ["x", "axis3"], ["input5"]),
+        helper.make_node("Expand", ["input5", "selected"], ["expanded"], name="expand"),
+        helper.make_node("Mul", ["d2", "repeat"], ["heads"]),
+        helper.make_node("Unsqueeze", ["heads", "axis0"], ["head_vector"]),
+        helper.make_node("Concat", ["v0", "v1", "head_vector", "v3"], ["output_shape"], axis=0),
+        helper.make_node("Reshape", ["expanded", "output_shape"], ["out"]),
+    ]
+    return _s1_model(nodes, [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4, 2, 3])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 4, 4, 3])], initializers=initializers)
+
+
+def test_gqa_shape_source_retains_controls_and_unresolved_intermediate_extents():
+    import numpy as np
+    from onnx.reference import ReferenceEvaluator
+
+    model = _gqa_shape_source_model()
+    data = np.arange(24, dtype=np.float32).reshape(1, 4, 2, 3)
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, {"x": data})[0],
+                                  np.repeat(data, 2, axis=2))
+    source = import_onnx_model(model, preserve_shape_values=True, fold_constants=False)
+    assert to_json_dict(source)["format"] == "kxc.onnx_shape_source.v1"
+    fill = next(node for node in source.function.nodes if node.name == "fill")
+    assert fill.op_name == "constant_of_shape" and fill.attrs == {"dtype_code": 2, "value": 1}
+    expand = next(node for node in source.function.nodes if node.name == "expand")
+    assert (expand.op_name, expand.inputs, expand.attrs) == ("expand_dynamic", ["input5", "selected"], {})
+    assert sum(node.op_name == "where" for node in source.function.nodes) == 1
+    assert sum(node.op_name == "reshape_dynamic" for node in source.function.nodes) == 2
+    assert source.function.outputs[0].shape == [1, 4, 4, 3]
+
+
+@pytest.mark.parametrize("dtype,shape,value", [
+    (TensorProto.DOUBLE, [1], 1.0), (TensorProto.INT64, [], 1),
+    (TensorProto.INT64, [1], 2**53 + 1),
+])
+def test_gqa_source_rejects_unrepresentable_or_wrong_fill(dtype, shape, value):
+    model = _gqa_shape_source_model()
+    fill = next(node for node in model.graph.node if node.name == "fill")
+    fill.attribute[0].t.CopyFrom(helper.make_tensor("bad", dtype, shape, [value]))
+    # Test the importer boundary directly; ONNX's strict inference may reject
+    # a changed fill dtype even before this boundary is reached.
+    from kxc_onnx.importer import _shape_source_fill_attrs
+    with pytest.raises(ValueError, match="exactly representable int64"):
+        _shape_source_fill_attrs(fill)
+
+
+def test_gqa_source_rejects_fill_attrs_and_expand_attrs():
+    from kxc_onnx.importer import _shape_source_fill_attrs
+    model = _gqa_shape_source_model()
+    fill = next(node for node in model.graph.node if node.name == "fill")
+    fill.attribute.add().CopyFrom(fill.attribute[0])
+    with pytest.raises(ValueError, match="explicit tensor value"):
+        _shape_source_fill_attrs(fill)
+    model = _gqa_shape_source_model()
+    expand = next(node for node in model.graph.node if node.name == "expand")
+    expand.attribute.append(helper.make_attribute("unexpected", 1))
+    with pytest.raises(ValueError, match="Expand requires"):
+        import_onnx_model(model, preserve_shape_values=True)
+
+
+def test_shape_source_concat_generated_names_cannot_shadow_initializers():
+    model = _head_shape_source_model()
+    model.graph.initializer.append(helper.make_tensor("target__kxc_concat_0", TensorProto.INT64, [], [7]))
+    imported = import_onnx_model(model, preserve_shape_values=True)
+    outputs = [v for node in imported.function.nodes for v in node.outputs]
+    assert "target__kxc_concat_0" not in outputs
+    assert len(outputs) == len(set(outputs))
+    assert imported.function.nodes[-1].inputs == ["x", "target"]
+
+
+@pytest.mark.parametrize("attribute", ["shape_slice", "allowzero"])
+def test_shape_source_rejects_control_attributes_outside_its_subset(attribute):
+    model = _head_shape_source_model()
+    if attribute == "shape_slice":
+        model.graph.node[1].attribute.append(helper.make_attribute("start", 0))
+    else:
+        model.graph.node[-1].attribute.append(helper.make_attribute("allowzero", 1))
+    with pytest.raises(ValueError, match="Shape"):
+        import_onnx_model(model, preserve_shape_values=True)
+
+
+def test_shape_source_requires_an_explicit_concrete_representative():
+    model = _head_shape_source_model()
+    dim = model.graph.input[0].type.tensor_type.shape.dim[0]
+    dim.ClearField("dim_value")
+    dim.dim_param = "B"
+    with pytest.raises(ValueError, match="Unresolved ONNX dimension"):
+        import_onnx_model(model, preserve_shape_values=True)
+
+
+def test_shape_import_full_dimensions_keeps_static_format():
+    model = _s1_model([helper.make_node("Shape", ["x"], ["shape"])],
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 0, 3])],
+        [helper.make_tensor_value_info("shape", TensorProto.INT64, [3])])
+    imported = import_onnx_model(model)
+    assert to_json_dict(imported)["format"] == "kxc.onnx_import.v1"
+    assert imported.function.nodes[0].op_name == "shape_of"
+    assert imported.function.outputs[0].shape == [3]
+
+
+def test_shape_source_flag_must_be_explicit_bool():
+    with pytest.raises(ValueError, match="preserve_shape_values must be bool"):
+        import_onnx_model(_head_shape_source_model(), preserve_shape_values=1)
+
+
+def _rope_shape_source_model():
+    constants = [helper.make_tensor(name, TensorProto.INT64, shape, [value])
+        for name, shape, value in [("last", [], -1), ("two", [], 2), ("axis0", [1], 0),
+                                  ("axis3", [1], -1), ("zero", [1], 0),
+                                  ("end", [1], 2**63-1), ("step", [1], 1)]]
+    nodes = [
+        helper.make_node("Shape", ["x"], ["shape"]),
+        helper.make_node("Gather", ["shape", "last"], ["width"], axis=0),
+        helper.make_node("Div", ["width", "two"], ["half"]),
+        helper.make_node("Cast", ["half"], ["cast"], to=TensorProto.INT64),
+        helper.make_node("Unsqueeze", ["cast", "axis0"], ["halfv"]),
+        helper.make_node("Slice", ["x", "halfv", "end", "axis3", "step"], ["tail"], name="tail"),
+        helper.make_node("Neg", ["tail"], ["negative"]),
+        helper.make_node("Slice", ["x", "zero", "halfv", "axis3", "step"], ["head"], name="head"),
+        helper.make_node("Concat", ["negative", "head"], ["rotated"], axis=-1),
+        helper.make_node("Mul", ["x", "cos"], ["xc"]),
+        helper.make_node("Mul", ["rotated", "sin"], ["rs"]),
+        helper.make_node("Add", ["xc", "rs"], ["out"]),
+    ]
+    return _s1_model(nodes,
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1,4,2,6]),
+         helper.make_tensor_value_info("cos", TensorProto.FLOAT, [4,1,6]),
+         helper.make_tensor_value_info("sin", TensorProto.FLOAT, [4,1,6])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1,4,2,6])], constants)
+
+
+def test_rope_source_preserves_proved_slice_controls_and_int64_cast():
+    import numpy as np
+    from onnx.reference import ReferenceEvaluator
+    model = _rope_shape_source_model()
+    x = np.arange(48, dtype=np.float32).reshape(1,4,2,6) / 17
+    c = np.cos(np.arange(24, dtype=np.float32)).reshape(4,1,6)
+    s = np.sin(np.arange(24, dtype=np.float32)).reshape(4,1,6)
+    expected = x*c + np.concatenate((-x[...,3:], x[...,:3]), axis=-1)*s
+    np.testing.assert_array_equal(ReferenceEvaluator(model).run(None, {"x":x,"cos":c,"sin":s})[0], expected)
+    source = import_onnx_model(model, preserve_shape_values=True, fold_constants=False)
+    assert to_json_dict(source)["format"] == "kxc.onnx_shape_source.v1"
+    slices = [node for node in source.function.nodes if node.op_name == "slice"]
+    assert len(slices) == 2 and all(len(node.inputs) == 5 and node.attrs == {} for node in slices)
+    assert slices[0].inputs[1] == slices[1].inputs[2] == "halfv"
+    assert next(node for node in source.function.nodes if node.op_name == "cast").attrs == {"to":2}
+    assert "halfv" not in source.params
+    assert source.function.outputs[0].shape == [1,4,2,6]
+    with pytest.raises(ValueError, match="float32"):
+        import_onnx_model(model, fold_constants=False)
+
+
+@pytest.mark.parametrize("change", ["attrs", "missing_step", "int32", "scalar"])
+def test_rope_source_rejects_invalid_slice_source_controls(change):
+    model = _rope_shape_source_model()
+    node = next(node for node in model.graph.node if node.name == "tail")
+    if change == "attrs":
+        node.attribute.append(helper.make_attribute("unexpected", 1))
+    elif change == "missing_step":
+        del node.input[-1]
+    else:
+        tensor = next(tensor for tensor in model.graph.initializer if tensor.name == "step")
+        tensor.CopyFrom(helper.make_tensor("step", TensorProto.INT32 if change == "int32" else TensorProto.INT64,
+                                          [1] if change == "int32" else [], [1]))
+    with pytest.raises((ValueError, onnx.shape_inference.InferenceError), match="Slice|slice"):
+        import_onnx_model(model, preserve_shape_values=True, fold_constants=False)
+
+
+def test_unresolved_slice_does_not_bypass_source_cast_dtype_boundary():
+    model = _rope_shape_source_model()
+    del model.graph.node[6:]
+    model.graph.node.append(helper.make_node("Cast", ["tail"], ["out"], to=TensorProto.INT64))
+    model.graph.output[0].CopyFrom(helper.make_tensor_value_info("out", TensorProto.INT64, [1,4,2,3]))
+    with pytest.raises(ValueError, match="Shape-source Cast"):
+        import_onnx_model(model, preserve_shape_values=True, fold_constants=False)
+
+
+def _causal_mask_source_model():
+    nodes = [
+        helper.make_node("Shape", ["x"], ["shape"]),
+        helper.make_node("Gather", ["shape", "axis"], ["sequence"], axis=0),
+        helper.make_node("Concat", ["sequence", "sequence"], ["target"], axis=0),
+        helper.make_node("ConstantOfShape", ["target"], ["fill"],
+            value=helper.make_tensor("value", TensorProto.FLOAT, [1], [-float("inf")])),
+        helper.make_node("Trilu", ["fill", "k"], ["mask"], upper=1),
+    ]
+    graph = helper.make_graph(nodes, "dynamic_causal_mask",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4, 6])],
+        [helper.make_tensor_value_info("mask", TensorProto.FLOAT, [4, 4])],
+        initializer=[helper.make_tensor("axis", TensorProto.INT64, [1], [1]),
+                     helper.make_tensor("k", TensorProto.INT64, [], [1])])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+
+
+def test_causal_mask_source_preserves_infinity_and_unresolved_shape():
+    import json
+    from kxc_onnx.spec import to_json_dict
+    source = import_onnx_model(_causal_mask_source_model(), preserve_shape_values=True)
+    fill = next(node for node in source.function.nodes if node.op_name == "constant_of_shape")
+    triangle = next(node for node in source.function.nodes if node.op_name == "trilu")
+    assert fill.attrs == {"dtype_code": 0, "value_bits": 0xff800000}
+    assert triangle.inputs == ["fill"] and triangle.attrs == {"upper": 1, "k": 1}
+    encoded = json.dumps(to_json_dict(source), allow_nan=False)
+    assert "Infinity" not in encoded and "NaN" not in encoded
+
+
+def _prefill_entry_source_model():
+    nodes = [
+        helper.make_node("Shape", ["ids"], ["dimensions"]),
+        helper.make_node("Gather", ["dimensions", "one"], ["length"], axis=0),
+        helper.make_node("Slice", ["positions", "zero", "length", "zero", "one"], ["prefix"]),
+        helper.make_node("Unsqueeze", ["prefix", "zero"], ["position"]),
+        helper.make_node("Gather", ["vocabulary", "ids"], ["embedding"], axis=0),
+        helper.make_node("Add", ["position", "embedding"], ["hidden"]),
+        helper.make_node("Sigmoid", ["hidden"], ["activation"]),
+        helper.make_node("Pow", ["activation", "power"], ["square"]),
+        helper.make_node("ReduceMean", ["square"], ["mean"], axes=[-1], keepdims=1),
+        helper.make_node("Sqrt", ["mean"], ["output"]),
+        helper.make_node("Shape", ["output"], ["output_shape"]),
+    ]
+    graph = helper.make_graph(nodes, "prefill_entry",
+        [helper.make_tensor_value_info("ids", TensorProto.INT64, [1, 4])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4, 1]),
+         helper.make_tensor_value_info("output_shape", TensorProto.INT64, [3])],
+        initializer=[helper.make_tensor("zero", TensorProto.INT64, [1], [0]),
+                     helper.make_tensor("one", TensorProto.INT64, [1], [1]),
+                     helper.make_tensor("power", TensorProto.FLOAT, [], [2.0]),
+                     helper.make_tensor("positions", TensorProto.FLOAT, [8, 4], list(range(32))),
+                     helper.make_tensor("vocabulary", TensorProto.FLOAT, [7, 4], list(range(28)))])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+
+
+def test_prefill_entry_keeps_prefix_and_downstream_unknown_extents():
+    model = _prefill_entry_source_model()
+    source = import_onnx_model(model, preserve_shape_values=True, fold_constants=False)
+    nodes = {node.outputs[0]: node for node in source.function.nodes}
+    assert nodes["prefix"].op_name == "slice"
+    assert nodes["prefix"].inputs == ["positions", "zero", "length", "zero", "one"]
+    assert nodes["prefix"].attrs == {} and "length" not in source.params
+    assert nodes["position"].op_name == "unsqueeze" and nodes["position"].attrs == {"axes": [0]}
+    assert nodes["activation"].op_name == "sigmoid" and nodes["square"].op_name == "pow"
+    assert nodes["mean"].op_name == "reduce_mean" and nodes["output"].op_name == "sqrt"
+    assert nodes["output_shape"].op_name == "shape_of"
+    assert nodes["embedding"].inputs == ["vocabulary", "ids"]
+
+
+def _decode_window_source_model():
+    nodes = [
+        helper.make_node("Shape", ["past"], ["past_shape"]),
+        helper.make_node("Gather", ["past_shape", "one"], ["length"], axis=0),
+        helper.make_node("Add", ["length", "one"], ["total"]),
+        helper.make_node("Slice", ["positions", "length", "total", "zero", "one"], ["window"]),
+        helper.make_node("Concat", ["past", "token"], ["present"], axis=1),
+        helper.make_node("Shape", ["present"], ["present_shape"]),
+        helper.make_node("Gather", ["present_shape", "one"], ["present_length"], axis=0),
+        helper.make_node("Sub", ["present_length", "one"], ["previous"]),
+    ]
+    graph = helper.make_graph(nodes, "decode_window",
+        [helper.make_tensor_value_info("past", TensorProto.FLOAT, [1, 4, 4]),
+         helper.make_tensor_value_info("token", TensorProto.FLOAT, [1, 1, 4])],
+        [helper.make_tensor_value_info("window", TensorProto.FLOAT, [1, 4]),
+         helper.make_tensor_value_info("present", TensorProto.FLOAT, [1, 5, 4]),
+         helper.make_tensor_value_info("previous", TensorProto.INT64, [1])],
+        initializer=[helper.make_tensor("zero", TensorProto.INT64, [1], [0]),
+                     helper.make_tensor("one", TensorProto.INT64, [1], [1]),
+                     helper.make_tensor("positions", TensorProto.FLOAT, [9, 4], list(range(36)))])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+
+
+def test_decode_window_keeps_add_sub_and_actual_shape_sources():
+    source = import_onnx_model(_decode_window_source_model(), preserve_shape_values=True, fold_constants=False)
+    nodes = {node.outputs[0]: node for node in source.function.nodes}
+    assert nodes["window"].inputs == ["positions", "length", "total", "zero", "one"]
+    assert nodes["total"].op_name == "add" and nodes["previous"].op_name == "subtract"
+    assert nodes["previous"].inputs == ["present_length", "one"] and nodes["previous"].attrs == {}
+    assert nodes["present_shape"].op_name == "shape_of"
+    assert not {"length", "total", "previous", "present_length"} & source.params.keys()
+
+
+@pytest.mark.parametrize("op_type", ["Add", "Sub"])
+def test_decode_shape_arithmetic_still_rejects_unknown_attrs(op_type):
+    model = _decode_window_source_model()
+    node = next(node for node in model.graph.node if node.op_type == op_type)
+    node.attribute.append(helper.make_attribute("extra", 1))
+    with pytest.raises((ValueError, onnx.shape_inference.InferenceError), match="attribute|Attribute"):
+        import_onnx_model(model, preserve_shape_values=True, fold_constants=False)
+
+
+def test_int64_subtract_still_requires_explicit_shape_source_mode():
+    graph = helper.make_graph([helper.make_node("Sub", ["a", "b"], ["out"])], "integer_subtract",
+        [helper.make_tensor_value_info(name, TensorProto.INT64, [1]) for name in ("a", "b")],
+        [helper.make_tensor_value_info("out", TensorProto.INT64, [1])])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    with pytest.raises(ValueError, match="float32"):
+        import_onnx_model(model, fold_constants=False)
+
+
+@pytest.mark.parametrize("op_type", ["Sigmoid", "Pow", "Sqrt", "ReduceMean", "Unsqueeze"])
+def test_deferred_prefill_math_still_rejects_unknown_attrs(op_type):
+    model = _prefill_entry_source_model()
+    node = next(node for node in model.graph.node if node.op_type == op_type)
+    node.attribute.append(helper.make_attribute("extra", 1))
+    with pytest.raises((ValueError, onnx.shape_inference.InferenceError), match="attribute|Attribute"):
+        import_onnx_model(model, preserve_shape_values=True, fold_constants=False)
+
+
+@pytest.mark.parametrize("value,bits", [(0.0, 0), (-0.0, 0x80000000),
+    (float("inf"), 0x7f800000), (-float("inf"), 0xff800000), (1.25, 0x3fa00000)])
+def test_float_shape_fill_uses_exact_ieee_json_payload(value, bits):
+    from kxc_onnx.importer import _shape_source_fill_attrs
+    node = helper.make_node("ConstantOfShape", ["shape"], ["fill"],
+        value=helper.make_tensor("value", TensorProto.FLOAT, [1], [value]))
+    assert _shape_source_fill_attrs(node) == {"dtype_code": 0, "value_bits": bits}
+
+
+def test_float_shape_fill_rejects_nan():
+    from kxc_onnx.importer import _shape_source_fill_attrs
+    node = helper.make_node("ConstantOfShape", ["shape"], ["fill"],
+        value=helper.make_tensor("value", TensorProto.FLOAT, [1], [float("nan")]))
+    with pytest.raises(ValueError):
+        _shape_source_fill_attrs(node)
+
+
+@pytest.mark.parametrize("upper,k", [(0, -2), (1, 1), (1, -(2**63)), (0, 2**63-1)])
+def test_trilu_static_scalar_diagonal(upper, k):
+    model = _causal_mask_source_model()
+    model.graph.node[-1].attribute[0].i = upper
+    model.graph.initializer[-1].CopyFrom(helper.make_tensor("k", TensorProto.INT64, [], [k]))
+    imported = import_onnx_model(model, preserve_shape_values=True)
+    assert imported.function.nodes[-1].attrs == {"upper": upper, "k": k}
+
+
+@pytest.mark.parametrize("mode", ["vector", "int32", "runtime", "upper", "attrs"])
+def test_trilu_rejects_unproved_diagonal_or_attrs(mode):
+    from kxc_onnx.importer import _trilu_attrs
+    model = _causal_mask_source_model()
+    imported = import_onnx_model(model, preserve_shape_values=True)
+    node = model.graph.node[-1]
+    params = dict(imported.params)
+    if mode in {"vector", "int32"}:
+        from kxc_onnx.spec import ParamTensor
+        old = params["k"]
+        params["k"] = ParamTensor("k", [1] if mode == "vector" else [],
+            "int32" if mode == "int32" else "int64", old.data)
+    elif mode == "runtime":
+        params.pop("k")
+    elif mode == "upper":
+        node.attribute[0].i = 2
+    else:
+        node.attribute.append(helper.make_attribute("extra", 1))
+    with pytest.raises(ValueError, match="Trilu"):
+        _trilu_attrs(node, params, 17)
+
+
+@pytest.mark.parametrize("constant_data,k", [(False, None), (False, -2), (True, 1)])
+def test_trilu_static_import_input_and_initializer_metadata(constant_data, k):
+    inputs = [] if constant_data else [helper.make_tensor_value_info("data", TensorProto.FLOAT, [2, 3])]
+    initializers = ([helper.make_tensor("data", TensorProto.FLOAT, [2, 3], list(range(6)))]
+                    if constant_data else [])
+    arguments = ["data"]
+    if k is not None:
+        arguments.append("k")
+        initializers.append(helper.make_tensor("k", TensorProto.INT64, [], [k]))
+    graph = helper.make_graph([helper.make_node("Trilu", arguments, ["output"])], "static_triangle", inputs,
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [2, 3])], initializer=initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    imported = import_onnx_model(model)
+    assert imported.function.nodes[0].op_name == "trilu"
+    assert imported.function.nodes[0].inputs == ["data"]
+    assert imported.function.nodes[0].attrs == {"upper": 1, "k": 0 if k is None else k}

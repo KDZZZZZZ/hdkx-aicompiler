@@ -75,6 +75,69 @@ bool TestValidPlan() {
     return true;
 }
 
+bool TestCapacityStateBinding() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    for (const auto device : {Device::CPU(), Device::CUDA()}) {
+        const ExecutablePlan source(
+            {ValueSpec(0, 0, {2, 4, 2}, Float32(), device, true),
+             ValueSpec(1, 1, {2, 1, 2}, Float32(), device, true),
+             ValueSpec(2, 2, {2, 5, 2}, Float32(), device, false, false, true),
+             ValueSpec(3, 3, {2, 4, 2}, Float32(), device, false, false, true)},
+            {KernelCall("present", {0, 1}, {2}), KernelCall("read", {0}, {3})},
+            {0, 1}, {}, {3, 2});
+        const ExecutablePlan bound = source.BindStateOutputs({{0, 2, 1, 4, 1}}, 7.0);
+        TEST_CHECK(bound.mode() == ExecutablePlanMode::kStaticStatefulExternalV1 &&
+                       bound.input_value_ids().size() == 1 &&
+                       bound.input_value_ids()[0] == 1 &&
+                       bound.state_value_ids().size() == 1 &&
+                       bound.state_value_ids()[0] == 0 &&
+                       bound.output_value_ids().size() == 1 &&
+                       bound.output_value_ids()[0] == 3,
+                   "capacity binding must move past/present behind the state interface");
+        TEST_CHECK(bound.values()[0]->state_capacity == 4 &&
+                       bound.values()[0]->state_extent_axis == 1 &&
+                       bound.values()[0]->state_fill == 7.0 &&
+                       !bound.values()[0]->is_input &&
+                       bound.values()[2]->is_async_live &&
+                       !bound.values()[2]->is_output,
+                   "state capacity and retained private append source must be explicit");
+        TEST_CHECK(source.input_value_ids().size() == 2 &&
+                       source.output_value_ids().size() == 2 &&
+                       source.state_value_ids().empty(),
+                   "binding must not mutate the compiled static plan");
+        TEST_CHECK(Throws([&] { source.BindStateOutputs({{0, 2, 1, 3, 1}}); }),
+                   "source slot must equal the physical past capacity");
+        TEST_CHECK(Throws([&] { source.BindStateOutputs({{0, 2, 1, 4, 2}}); }),
+                   "append count must match the present tail");
+        TEST_CHECK(Throws([&] { source.BindStateOutputs({{0, 2, 0, 2, 1}}); }),
+                   "binding axis must match a valid capacity append shape");
+        TEST_CHECK(Throws([&] { source.BindStateOutputs({{0, 1, 1, 4, 1}}); }),
+                   "an input cannot supply the private append output");
+        TEST_CHECK(Throws([&] {
+                       source.BindStateOutputs({{0, 2, 1, 4, 1}, {0, 3, 1, 4, 1}});
+                   }),
+                   "a state cannot have two append sources");
+        TEST_CHECK(Throws([&] { bound.BindStateOutputs({{0, 2, 1, 4, 1}}); }),
+                   "state binding must not reinterpret an existing stateful plan");
+        TEST_CHECK(Throws([&] { internal::PlanMemory(bound); }),
+                   "static memory reuse must not erase the external state contract");
+        TEST_CHECK(Throws([&] {
+                       Array<ValueSpec> mixed;
+                       for (const auto& value : source.values()) {
+                           mixed.push_back(value->value_id == 2
+                               ? ValueSpec(2, 2, {2, 5, 2}, Float32(), Device::CUDA(1),
+                                           false, false, true)
+                               : value);
+                       }
+                       ExecutablePlan(mixed, source.calls(), source.input_value_ids(),
+                                      {}, source.output_value_ids())
+                           .BindStateOutputs({{0, 2, 1, 4, 1}});
+                   }), "state and append source must share one physical device");
+    }
+    return true;
+}
+
 bool TestInvalidValueIdsAndMetadata() {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -433,6 +496,58 @@ bool TestDynamicFreshOutputPlanMode() {
     return true;
 }
 
+bool TestBoundedStateDeviceContract() {
+    using namespace kxc;
+    using namespace kxc::runtime;
+    const auto make = [](Device device, Device source_device) {
+        const ExecutablePlan base(
+            {ValueSpec(0, 0, {-1, -1, 4}, Float32(), device, true),
+             ValueSpec(1, 1, {-1, 1, 4}, Float32(), device, true),
+             ValueSpec(2, 2, {-1, -1, 4}, Float32(), source_device, false, false, true),
+             ValueSpec(3, 3, {-1, -1, 4}, Float32(), device, false, false, true)},
+            {KernelCall("append", {0, 1}, {2}), KernelCall("relu", {2}, {3})},
+            {0, 1}, {}, {3, 2}, {}, ExecutablePlanMode::kDynamicFreshOutputV1,
+            {{0, 0, 1, 3, 1, std::nullopt}, {0, 1, 0, 5, 1, std::nullopt},
+             {1, 0, 1, 3, 1, GraphInputAxisReference{0, 0}}});
+        return base.BindBoundedStateOutputs({{0, 2, 1, -1, 1}}, {{2, 6, 4}});
+    };
+    for (const Device device : {Device::CPU(), Device::CUDA(), Device::CUDA(1)}) {
+        const auto plan = make(device, device);
+        TEST_CHECK(plan.mode() == ExecutablePlanMode::kBoundedStatefulExternalV1 &&
+                       plan.state_value_ids().size() == 1 && plan.output_value_ids().size() == 1,
+                   "bounded state must retain a private prefix/source on the selected device");
+        plan.BindRequestBatching(2).Validate();
+        if (device != Device::CPU()) {
+            auto values = plan.values();
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (values[i]->value_id == plan.state_output_bindings()[0].input_value_id) {
+                    values[i] = ValueSpec(values[i]->value_id, values[i]->storage_id,
+                        values[i].shape(), Float32(), Device::CPU(), true);
+                }
+            }
+            TEST_CHECK(Throws([&] {
+                ExecutablePlan invalid(values, plan.calls(), plan.input_value_ids(), {},
+                    plan.output_value_ids(), plan.state_value_ids(), plan.mode(),
+                    plan.graph_input_guards(), {}, -1, plan.state_output_bindings());
+            }), "a CPU prefix cannot bind to CUDA capacity state");
+        }
+        auto mixed = plan.values();
+        mixed[1] = ValueSpec(1, 1, {-1, 1, 4}, Float32(),
+                            device == Device::CPU() ? Device::CUDA() : Device::CPU(), true);
+        TEST_CHECK(Throws([&] {
+            ExecutablePlan invalid(mixed, plan.calls(), plan.input_value_ids(), {},
+                plan.output_value_ids(), plan.state_value_ids(), plan.mode(),
+                plan.graph_input_guards(), {}, -1, plan.state_output_bindings(),
+                RequestBatchingContract{2});
+        }), "request input must share the state's device");
+    }
+    TEST_CHECK(Throws([&] { (void)make(Device::CPU(), Device::CUDA()); }) &&
+                   Throws([&] { (void)make(Device::CUDA(), Device::CPU()); }) &&
+                   Throws([&] { (void)make(Device::CUDA(), Device::CUDA(1)); }),
+               "bounded state and produced append must share one device");
+    return true;
+}
+
 bool TestDuplicateProducerAndUndefinedInput() {
     using namespace kxc;
     using namespace kxc::runtime;
@@ -520,6 +635,7 @@ bool TestRoleListsAndObjectTypeChecks() {
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"valid_plan", TestValidPlan},
+        {"capacity_state_binding", TestCapacityStateBinding},
         {"invalid_value_ids_and_metadata", TestInvalidValueIdsAndMetadata},
         {"duplicate_producer_and_undefined_input",
          TestDuplicateProducerAndUndefinedInput},
@@ -527,6 +643,7 @@ int main() {
         {"role_lists_and_object_type_checks", TestRoleListsAndObjectTypeChecks},
         {"state_alias_and_extent_contracts", TestStateAliasAndExtentContracts},
         {"dynamic_fresh_output_plan_mode", TestDynamicFreshOutputPlanMode},
+        {"bounded_state_device_contract", TestBoundedStateDeviceContract},
         {"invalid_state_alias_and_extent_contracts",
          TestInvalidStateAliasAndExtentContracts},
         {"memory_reuse_and_sharing_guards", TestMemoryReuseAndSharingGuards},

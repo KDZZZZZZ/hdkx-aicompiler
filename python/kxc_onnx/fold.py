@@ -8,7 +8,10 @@
 求值用 ONNX 自己的 `ReferenceEvaluator`，因此折叠语义就是 ONNX 语义，不在这里
 另写一套算子解释器。
 
-折叠边界（fail-closed）：
+`fold_fixed_shape_queries` 是另行显式调用的固定输入导出适配，使用 ONNX
+推导证明 Shape 的结果；默认导入和 shape-source 导入均不调用它。
+
+`fold_static_subgraph` 的折叠边界（fail-closed）：
 - 只折叠**每个输入都静态**的节点；图输入的任何下游都不静态。
 - 产出图输出的节点不折叠——图输出必须由节点产出，不能变成 initializer。
 - 只物化**折叠前沿**：被保留节点消费的那些静态值；纯中间值不进 initializer。
@@ -37,6 +40,59 @@ class FoldReport:
     materialized_bytes: int = 0
     remaining_nodes: int = 0
     folded_op_types: dict[str, int] = field(default_factory=dict)
+
+
+def fold_fixed_shape_queries(model: ModelProto) -> tuple[ModelProto, list[dict]]:
+    """Explicit fixed-input export adaptation; never used by shape-source import.
+
+    Discard caller intermediate/output shape annotations and ask ONNX to infer
+    them from the actual fixed input contract. Evaluate only proven Shape nodes
+    with ONNX's ReferenceEvaluator, using zero-stride views (no activation or
+    model execution). The existing constant folder handles downstream controls.
+    Unknown intermediate extents remain unresolved; no example data is a proof.
+    """
+    from onnx.reference import ReferenceEvaluator
+
+    for value in model.graph.input:
+        tensor = value.type.tensor_type
+        if not tensor.HasField("shape") or any(not d.HasField("dim_value") or d.dim_value < 0
+                                               for d in tensor.shape.dim):
+            raise ConstantFoldingError("fixed Shape folding requires concrete non-negative input dimensions")
+    if any(a.type in {onnx.AttributeProto.GRAPH, onnx.AttributeProto.GRAPHS}
+           for node in model.graph.node for a in node.attribute):
+        raise ConstantFoldingError("fixed Shape folding does not accept control-flow subgraphs")
+    normalized = ModelProto()
+    normalized.CopyFrom(model)
+    del normalized.graph.value_info[:]
+    for output in normalized.graph.output:
+        output.type.tensor_type.ClearField("shape")
+    inferred = onnx.shape_inference.infer_shapes(normalized, strict_mode=True, data_prop=True)
+    known = {v.name: v.type.tensor_type for v in
+             [*inferred.graph.input, *inferred.graph.value_info, *inferred.graph.output]}
+    normalized.CopyFrom(model)
+    proof = []
+    for node in normalized.graph.node:
+        if node.op_type != "Shape" or node.domain not in {"", "ai.onnx"}:
+            continue
+        if len(node.input) != 1 or len(node.output) != 1:
+            raise ConstantFoldingError("fixed Shape folding requires one input and output")
+        tensor = known.get(node.input[0])
+        if tensor is None or not tensor.HasField("shape") or any(
+                not d.HasField("dim_value") or d.dim_value < 0 for d in tensor.shape.dim):
+            continue
+        shape = tuple(d.dim_value for d in tensor.shape.dim)
+        reference_graph = helper.make_model(helper.make_graph(
+            [node], "fixed_shape_query",
+            [helper.make_tensor_value_info(node.input[0], onnx.TensorProto.UINT8, shape)],
+            [helper.make_empty_tensor_value_info(node.output[0])]),
+            opset_imports=list(model.opset_import), ir_version=model.ir_version)
+        view = np.broadcast_to(np.zeros((), dtype=np.uint8), shape)
+        value, = ReferenceEvaluator(reference_graph).run(None, {node.input[0]: view})
+        proof.append({"node": node.name, "input": node.input[0], "shape": list(shape),
+                      "value": value.tolist()})
+        node.CopyFrom(helper.make_node("Constant", [], list(node.output), name=node.name,
+                                      value=numpy_helper.from_array(value)))
+    return normalized, proof
 
 
 def _static_values(graph: onnx.GraphProto) -> tuple[set[str], list[onnx.NodeProto]]:
@@ -110,7 +166,11 @@ def fold_static_subgraph(
     del folded_graph.node[:]
     folded_graph.node.extend(kept)
     for name, value in zip(frontier, values):
-        array = np.ascontiguousarray(np.asarray(value))
+        # ascontiguousarray promotes a scalar to rank 1; Gather indices and
+        # subsequent Unsqueeze/Concat must retain their ONNX ranks.
+        array = np.asarray(value)
+        if array.ndim > 0:
+            array = np.ascontiguousarray(array)
         folded_graph.initializer.append(numpy_helper.from_array(array, name=name))
     # 折叠掉的中间值留下的 value_info 会指向不存在的产出，一并剪掉。
     stale = produced_by_fold - set(frontier)

@@ -24,6 +24,12 @@ struct StatefulLengthBook final {
     bool poisoned{false};
 };
 
+struct RequestSlot final {
+    uint64_t request_id{0};
+    int64_t extent{0};
+    Array<NDArray> queued_inputs;
+};
+
 class RuntimeSessionNode final : public Object {
 public:
     RuntimeSessionNode(
@@ -47,6 +53,8 @@ public:
     std::unordered_map<int64_t, String> constant_keys_by_value;
     std::unordered_map<int64_t, size_t> required_alignment_by_storage;
     std::unordered_map<int64_t, NDArray> states_by_value;
+    // Reusable compact-prefix storage, owned by the same session as the state.
+    std::unordered_map<int64_t, NDArray> state_prefixes_by_value;
     /*! \brief 从模块继承的执行观测器；模块未启用观测时为空，
      *  Run/RunAsync 行为与未装配时完全一致。 */
     std::shared_ptr<ExecutionObserver> observer;
@@ -55,6 +63,13 @@ public:
     /*! \brief 动态有状态合同的已提交长度与失败标记；completion 句柄经由
      *  shared_ptr 保活，会话销毁后待提交仍可安全落地。 */
     std::shared_ptr<StatefulLengthBook> length_book;
+    // Metadata only: states_by_value remains the sole persistent storage owner.
+    // ponytail: bounded linear scans; replace only if measured slot counts warrant it.
+    mutable std::recursive_mutex request_mutex;
+    mutable bool request_in_progress{false};
+    mutable std::vector<RequestSlot> request_slots;
+    mutable std::vector<uint64_t> request_queue;
+    mutable uint64_t next_request_id{1};
     KXC_OBJECT_DECLARE
 };
 
