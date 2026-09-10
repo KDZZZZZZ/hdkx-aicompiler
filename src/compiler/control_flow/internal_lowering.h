@@ -36,4 +36,21 @@ runtime::ControlExecutionPlan BindControlPlanForRuntime(
     const ControlPlan& plan,
     const std::vector<ControlKernelBinding>& bindings);
 
+/*! \brief Convert ControlPlan v2 into a normal ExecutablePlan with an optional
+ *  structured schedule.
+ *
+ *  Unlike BindControlPlanForRuntime this does not embed kernel launch bindings:
+ *  kernel tasks reference the plan's own `calls()` by PrimitiveUnitId, so the
+ *  runtime executes them through the ordinary module/ValueTable machinery. The
+ *  returned plan uses ExecutablePlanMode::kStatic. */
+runtime::ExecutablePlan BuildStructuredExecutablePlan(
+    const ControlPlan& plan, const std::vector<PrimitiveUnit>& units);
+
+/*! \brief Compile a Relay function with residual control topology into an
+ *  ordinary CompiledGraph carrying an optional structured schedule.
+ *
+ *  Reuses the production primitive compiler and module assembly; only the
+ *  published plan differs from the linear static path. LLVM CPU:0 only. */
+CompiledGraph CompileStructuredPipeline(Function function, CompileConfig config);
+
 }  // namespace kxc::api::internal

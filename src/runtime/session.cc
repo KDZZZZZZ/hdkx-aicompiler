@@ -871,8 +871,208 @@ AsyncOperation InvokeDynamicCall(
 
 namespace {
 
-// 构造会话持有的 state 张量；声明了 state_fill 的动态有状态合同把
-// 无效容量区填充为哨兵值，其余路径保持零初始化不变。
+bool StructuredPredicate(const NDArray& value) {
+    std::uint8_t byte{0};
+    value.CopyToBytes(&byte, sizeof(byte));
+    return byte != 0;
+}
+
+const StructuredRegion& FindStructuredRegion(
+    const std::unordered_map<int64_t, const StructuredRegion*>& regions,
+    int64_t region_id) {
+    const auto found = regions.find(region_id);
+    if (found == regions.end()) {
+        throw std::logic_error("RuntimeSession structured region is undefined");
+    }
+    return *found->second;
+}
+
+/*! \brief Walk a structured schedule on the main session machinery.
+ *
+ *  Each kernel task reuses the plan's own KernelCall, argument preparation and
+ *  module invocation; only call selection and ordering differ from the linear
+ *  path. Loop activations push a value frame so a static id may be re-bound per
+ *  iteration while staying single-bound within a frame. */
+class StructuredWalker final {
+public:
+    StructuredWalker(const api::CompiledModule& module,
+                     const ExecutablePlan& plan,
+                     const StructuredSchedule& schedule,
+                     const std::unordered_map<int64_t, ValueSpec>& values,
+                     const std::unordered_map<int64_t, size_t>& alignments,
+                     const std::shared_ptr<internal::ValueTable>& table,
+                     const DeviceStream& stream,
+                     Array<AsyncOperation>* operations,
+                     ExecutionObserver* observer,
+                     const ExecutionRunCorrelation& correlation)
+        : module_(module), schedule_(schedule), values_(values),
+          alignments_(alignments), table_(table), stream_(stream),
+          operations_(operations), observer_(observer), correlation_(correlation),
+          device_(stream.device()) {
+        const Array<KernelCall> calls = plan.calls();
+        for (const auto& region : schedule_.regions) {
+            regions_.emplace(region.id, &region);
+        }
+        calls_.assign(calls.begin(), calls.end());
+    }
+
+    void Run() {
+        ExecuteRegion(FindStructuredRegion(regions_, schedule_.entry_region));
+    }
+
+    std::size_t submit_count() const { return submit_count_; }
+
+private:
+    void WaitLast() {
+        if (operations_ != nullptr && operations_->size() != 0) {
+            (*operations_)[operations_->size() - 1].Wait();
+        }
+    }
+
+    void ExecuteKernelTask(const StructuredTask& task) {
+        if (task.call_index < 0 ||
+            static_cast<std::size_t>(task.call_index) >= calls_.size()) {
+            throw std::logic_error("structured kernel task call index is invalid");
+        }
+        const KernelCall& call = calls_[static_cast<std::size_t>(task.call_index)];
+        const std::size_t call_index = static_cast<std::size_t>(task.call_index);
+        std::optional<ExecutionObservationScope> kernel_observation;
+        if (observer_) {
+            const KernelSubmitInfo kernel{device_, call_index,
+                                          std::string(call->symbol)};
+            kernel_observation.emplace(observer_, correlation_, &kernel);
+            DispatchExecutionObservation(observer_, [&](ExecutionObserver& sink) {
+                sink.OnKernelBegin(kernel, correlation_);
+            });
+        }
+        Array<NDArray> arguments =
+            PrepareCallArguments(module_, call, values_, alignments_, table_);
+        operations_->push_back(
+            InvokeOrderedModuleEntry(module_, call->symbol, arguments, stream_));
+        ++submit_count_;
+        if (observer_) {
+            ExecutionCompletionCallback completion;
+            DispatchExecutionObservation(observer_, [&](ExecutionObserver& sink) {
+                completion = sink.OnKernelSubmitted(
+                    KernelSubmitInfo{device_, call_index,
+                                     std::string(call->symbol)},
+                    correlation_);
+            });
+            if (completion && (*operations_)[operations_->size() - 1].defined()) {
+                (*operations_)[operations_->size() - 1].ObserveCompletion(
+                    std::move(completion));
+            }
+        }
+    }
+
+    void ExecuteBranchTask(const StructuredTask& task) {
+        WaitLast();
+        const bool selected_then =
+            StructuredPredicate(table_->Get(task.branch.predicate));
+        ExecuteRegion(FindStructuredRegion(
+            regions_, selected_then ? task.branch.then_region
+                                    : task.branch.else_region));
+        for (const auto& phi : task.branch.phis) {
+            const int64_t source =
+                selected_then ? phi.then_value : phi.else_value;
+            InstallResult(phi.result, table_->Get(source));
+        }
+    }
+
+    void ExecuteLoopTask(const StructuredTask& task) {
+        std::unordered_map<int64_t, NDArray> current;
+        for (const auto& carried : task.loop.carried) {
+            current.emplace(carried.body_argument, table_->Get(carried.initial));
+        }
+        int64_t iterations = 0;
+        while (true) {
+            table_->PushFrame();
+            for (const auto& item : current) {
+                table_->Bind(FindValue(values_, item.first,
+                                       "structured loop argument"),
+                             item.second);
+            }
+            ExecuteRegion(FindStructuredRegion(regions_, task.loop.condition_region));
+            WaitLast();
+            const bool keep_going =
+                StructuredPredicate(table_->Get(task.loop.condition_value));
+            table_->PopFrame();
+            if (!keep_going) break;
+            if (iterations >= task.loop.max_trip_count) {
+                throw std::runtime_error(
+                    "RuntimeSession structured loop exceeded max_trip_count");
+            }
+            table_->PushFrame();
+            for (const auto& item : current) {
+                table_->Bind(FindValue(values_, item.first,
+                                       "structured loop argument"),
+                             item.second);
+            }
+            ExecuteRegion(FindStructuredRegion(regions_, task.loop.body_region));
+            WaitLast();
+            // Collect every backedge before installing any, so a tuple swap
+            // such as (a,b) <- (b,a) is not corrupted by ordered overwrite.
+            std::vector<std::pair<int64_t, NDArray>> next;
+            next.reserve(task.loop.carried.size());
+            for (const auto& carried : task.loop.carried) {
+                next.emplace_back(carried.body_argument,
+                                  table_->Get(carried.backedge));
+            }
+            table_->PopFrame();
+            for (auto& item : next) {
+                current.insert_or_assign(item.first, std::move(item.second));
+            }
+            ++iterations;
+        }
+        for (const auto& carried : task.loop.carried) {
+            InstallResult(carried.result, current.at(carried.body_argument));
+        }
+    }
+
+    void ExecuteRegion(const StructuredRegion& region) {
+        for (const auto& task : region.tasks) {
+            switch (task.kind) {
+                case StructuredTaskKind::kKernel:
+                    ExecuteKernelTask(task);
+                    break;
+                case StructuredTaskKind::kBranch:
+                    ExecuteBranchTask(task);
+                    break;
+                case StructuredTaskKind::kLoop:
+                    ExecuteLoopTask(task);
+                    break;
+            }
+        }
+    }
+
+    /*! \brief Materialize a topology-produced value (Phi result or loop result)
+     *  in the current frame so later tasks and graph outputs can read it. */
+    void InstallResult(int64_t value_id, NDArray value) {
+        if (value_id < 0) {
+            throw std::logic_error("structured result value id is invalid");
+        }
+        if (table_->ContainsInCurrentFrame(value_id)) return;
+        table_->Bind(FindValue(values_, value_id, "structured result"), value);
+    }
+
+    const api::CompiledModule& module_;
+    const StructuredSchedule& schedule_;
+    const std::unordered_map<int64_t, ValueSpec>& values_;
+    const std::unordered_map<int64_t, size_t>& alignments_;
+    const std::shared_ptr<internal::ValueTable>& table_;
+    const DeviceStream& stream_;
+    Array<AsyncOperation>* operations_;
+    ExecutionObserver* observer_{nullptr};
+    ExecutionRunCorrelation correlation_;
+    Device device_{};
+    std::vector<KernelCall> calls_;
+    std::unordered_map<int64_t, const StructuredRegion*> regions_;
+    std::size_t submit_count_{0};
+};
+
+}  // namespace
+
+namespace {
 NDArray AllocateSessionState(const ValueSpec& spec, size_t alignment) {
     if (spec->state_fill == 0.0) {
         return NDArray::Zeros(spec.shape(), spec->dtype, spec->device, alignment);
@@ -1185,6 +1385,8 @@ RunAsyncResult RuntimeSession::RunAsyncImpl(const api::CompiledModule& module,
             auto table = std::make_shared<internal::ValueTable>();
             if (observer) table->ObserveAllocations(observer, correlation);
             const Array<KernelCall> calls = node->plan.calls();
+            const std::optional<StructuredSchedule> structured =
+                node->plan.structured_schedule();
             Array<AsyncOperation> operations;
             std::unique_lock<std::mutex> state_lock;
             std::unordered_map<int64_t, int64_t> staged_state_lengths;
@@ -1223,7 +1425,32 @@ RunAsyncResult RuntimeSession::RunAsyncImpl(const api::CompiledModule& module,
                 table->Bind(spec, value);
                 graph_inputs.push_back(value);
             }
-            if (dynamic) {
+            if (structured) {
+                if (dynamic || stateful) {
+                    throw std::invalid_argument(
+                        "RuntimeSession structured schedule requires a static plan");
+                }
+                const Map<String, NDArray>& constants =
+                    api::internal::BorrowCompiledModuleConstants(module);
+                for (int64_t value_id : node->plan.constant_value_ids()) {
+                    const auto key = node->constant_keys_by_value.find(value_id);
+                    if (key == node->constant_keys_by_value.end() ||
+                        !constants.count(key->second)) {
+                        throw std::logic_error(
+                            "RuntimeSession validated constant binding disappeared");
+                    }
+                    const ValueSpec& spec =
+                        FindValue(values, value_id, "RuntimeSession constant");
+                    table->Bind(spec, constants.at(key->second));
+                }
+                ValidateBoundSourceArguments(module, node->plan, values, table);
+                StructuredWalker walker(module, node->plan, *structured, values,
+                                        node->required_alignment_by_storage,
+                                        table, stream, &operations, observer,
+                                        correlation);
+                walker.Run();
+                submit_count += walker.submit_count();
+            } else if (dynamic) {
                 PreflightDynamicGraphInputs(node->plan, graph_inputs);
                 // All caller shapes, shared B/P guards and capacities pass
                 // before packing. Physical [B,C,...] rows become compact

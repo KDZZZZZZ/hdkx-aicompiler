@@ -1063,6 +1063,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
   kxc_add_runtime_exe(control_runtime_integration_test test/control_runtime_integration_test.cpp)
   kxc_add_runtime_exe(control_llvm_receipt_test test/control_llvm_receipt_test.cpp)
+  kxc_add_runtime_exe(m10_unified_control_llvm_test test/m10_unified_control_llvm_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
@@ -1128,6 +1129,8 @@ if(KXC_BUILD_PASS_TESTS)
       test/minimind_bounded_decode_llvm_test.cpp)
     kxc_add_runtime_exe(minimind_vlm_bounded_llvm_test
       test/minimind_vlm_bounded_llvm_test.cpp)
+    # Chat API engine: bounded prefill + session-owned capacity decode.
+    kxc_add_runtime_exe(kxc_chat_server tools/chat/kxc_chat_server.cpp)
     kxc_add_runtime_exe(request_batching_llvm_test
       test/request_batching_llvm_test.cpp)
     kxc_add_runtime_exe(kv_state_llvm_test
@@ -1155,6 +1158,11 @@ if(KXC_BUILD_PASS_TESTS)
   add_test(NAME control_llvm_receipt_test
     COMMAND "$<TARGET_FILE:control_llvm_receipt_test>")
   set_tests_properties(control_llvm_receipt_test PROPERTIES
+    LABELS "control-flow;control-runtime;cpu"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+  add_test(NAME m10_unified_control_llvm_test
+    COMMAND "$<TARGET_FILE:m10_unified_control_llvm_test>")
+  set_tests_properties(m10_unified_control_llvm_test PROPERTIES
     LABELS "control-flow;control-runtime;cpu"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   add_custom_target(run_control_flow_tests

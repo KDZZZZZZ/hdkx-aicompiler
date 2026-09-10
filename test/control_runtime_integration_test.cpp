@@ -522,15 +522,23 @@ bool TestCompilerDefaultStillRejectsIf() {
     kxc::Var predicate("predicate", boolean);
     kxc::Var lhs("lhs", integer);
     kxc::Var rhs("rhs", integer);
+    // A pure passthrough If has no branch kernel, so it is rejected on the
+    // unified path regardless of the gate; a gate-off build additionally
+    // rejects any residual If through the static policy.
     const kxc::Function function({predicate, lhs, rhs},
                                  kxc::If(predicate, lhs, rhs));
+    const auto config =
+        kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
+#if KXC_ENABLE_CONTROL_RUNTIME
+    CHECK(Throws([&] { (void)kxc::api::Compiler::Compile(function, config); }),
+          "passthrough If must be rejected for lack of a real branch kernel");
+#else
     const std::string error = ErrorText([&] {
-        (void)kxc::api::Compiler::Compile(
-            function,
-            kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU())));
+        (void)kxc::api::Compiler::Compile(function, config);
     });
     CHECK(error.find("conditional_branch") != std::string::npos,
-          "Compiler::Compile must keep the default residual If rejection");
+          "gate-off Compiler::Compile must keep the default residual If rejection");
+#endif
     return true;
 }
 
@@ -547,11 +555,19 @@ bool TestRelayWhileCompileGates() {
                    kxc::Call(kxc::relay::Op::Get("add"), {state, increment}), 1));
     const auto config =
         kxc::api::CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
+#if KXC_ENABLE_CONTROL_RUNTIME
+    // Gate-on: the ordinary entry publishes a structured plan for this While.
+    const auto unified = kxc::api::Compiler::Compile(function, config);
+    CHECK(unified.defined() && unified.plan().defined() &&
+              unified.plan().structured_schedule().has_value(),
+          "gate-on Compiler::Compile must publish residual Relay While");
+#else
     const std::string default_error = ErrorText([&] {
         (void)kxc::api::Compiler::Compile(function, config);
     });
     CHECK(default_error.find("bounded_pre_test_loop") != std::string::npos,
-          "Compiler::Compile must reject residual Relay While before ValueGraph");
+          "gate-off Compiler::Compile must reject residual Relay While before ValueGraph");
+#endif
     const std::string control_error = ErrorText([&] {
         (void)kxc::api::Compiler::CompileControlFlowExact(function, config);
     });

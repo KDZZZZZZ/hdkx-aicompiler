@@ -326,7 +326,8 @@ ExecutablePlan::ExecutablePlan(
     std::vector<std::vector<int64_t>> state_extent_bindings,
     int64_t state_count_input_value_id,
     std::vector<StateOutputBinding> state_output_bindings,
-    std::optional<RequestBatchingContract> request_batching) {
+    std::optional<RequestBatchingContract> request_batching,
+    std::optional<StructuredSchedule> structured_schedule) {
     auto* node = new ExecutablePlanNode();
     node->values_ = CopyArray(values);
     node->calls_ = CopyArray(calls);
@@ -340,6 +341,7 @@ ExecutablePlan::ExecutablePlan(
     node->state_count_input_value_id_ = state_count_input_value_id;
     node->state_output_bindings_ = std::move(state_output_bindings);
     node->request_batching_ = request_batching;
+    node->structured_schedule_ = std::move(structured_schedule);
     SetData(node);
     Validate();
 }
@@ -398,6 +400,10 @@ std::vector<StateOutputBinding> ExecutablePlan::state_output_bindings() const {
 
 std::optional<RequestBatchingContract> ExecutablePlan::request_batching() const {
     return operator->()->request_batching_;
+}
+
+std::optional<StructuredSchedule> ExecutablePlan::structured_schedule() const {
+    return operator->()->structured_schedule_;
 }
 
 ExecutablePlan ExecutablePlan::BindRequestBatching(int64_t max_batch_size) const {
@@ -570,6 +576,142 @@ const ExecutablePlanNode* ExecutablePlan::operator->() const {
 }
 
 namespace internal {
+
+/*! \brief Validate the optional structured topology layered on one plan.
+ *
+ *  Kernel tasks reference calls by index; each call point is executed by
+ *  exactly one kernel task. Branch/loop tasks reference regions by id. Phi and
+ *  loop-carried results are produced by the topology, so they are collected
+ *  into `structured_produced`. Region reachability is checked from the entry
+ *  region so no region can be silently unreachable. */
+void ValidateStructuredSchedule(
+    const StructuredSchedule& schedule, size_t call_count,
+    const Array<int64_t>& input_ids, const Array<int64_t>& constant_ids,
+    const Array<int64_t>& state_ids, const Array<int64_t>& output_ids,
+    const std::unordered_map<int64_t, ValueSpec>& values_by_id,
+    std::unordered_set<int64_t>* structured_produced) {
+    if (schedule.schema_version != StructuredSchedule::kSchemaVersion) {
+        throw std::invalid_argument(
+            "ExecutablePlan structured schedule version is unsupported");
+    }
+    if (schedule.regions.empty() || schedule.region_order.empty()) {
+        throw std::invalid_argument(
+            "ExecutablePlan structured schedule requires regions");
+    }
+    std::unordered_map<int64_t, const StructuredRegion*> region_by_id;
+    for (const auto& region : schedule.regions) {
+        if (!region_by_id.emplace(region.id, &region).second) {
+            throw std::invalid_argument(
+                "ExecutablePlan structured region ids must be unique");
+        }
+    }
+    if (region_by_id.count(schedule.entry_region) == 0) {
+        throw std::invalid_argument(
+            "ExecutablePlan structured entry region is undefined");
+    }
+    if (schedule.region_order.size() != schedule.regions.size()) {
+        throw std::invalid_argument(
+            "ExecutablePlan structured region order must list every region once");
+    }
+    std::unordered_set<int64_t> ordered;
+    for (int64_t region_id : schedule.region_order) {
+        if (region_by_id.count(region_id) == 0 ||
+            !ordered.insert(region_id).second) {
+            throw std::invalid_argument(
+                "ExecutablePlan structured region order is not a permutation");
+        }
+    }
+    const auto require_value = [&](int64_t value_id, const char* context) {
+        if (values_by_id.count(value_id) == 0) {
+            throw std::invalid_argument(
+                std::string("ExecutablePlan structured ") + context +
+                " references an undefined value");
+        }
+    };
+    const auto require_region = [&](int64_t region_id, const char* context) {
+        if (region_by_id.count(region_id) == 0) {
+            throw std::invalid_argument(
+                std::string("ExecutablePlan structured ") + context +
+                " references an undefined region");
+        }
+    };
+
+    std::unordered_set<int64_t> referenced_calls;
+    std::unordered_set<int64_t> reachable;
+    reachable.insert(schedule.entry_region);
+    for (const auto& region : schedule.regions) {
+        for (int64_t value_id : region.live_ins) require_value(value_id, "live-in");
+        for (int64_t value_id : region.live_outs) require_value(value_id, "live-out");
+        std::unordered_set<int64_t> task_ids;
+        for (const auto& task : region.tasks) {
+            if (!task_ids.insert(task.id).second) {
+                throw std::invalid_argument(
+                    "ExecutablePlan structured task ids must be unique per region");
+            }
+            for (int64_t value_id : task.inputs) require_value(value_id, "task input");
+            for (int64_t value_id : task.outputs) require_value(value_id, "task output");
+            switch (task.kind) {
+                case StructuredTaskKind::kKernel:
+                    if (task.call_index < 0 ||
+                        static_cast<size_t>(task.call_index) >= call_count) {
+                        throw std::invalid_argument(
+                            "ExecutablePlan structured kernel task references an unknown call");
+                    }
+                    if (!referenced_calls.insert(task.call_index).second) {
+                        throw std::invalid_argument(
+                            "ExecutablePlan structured call point is executed by more than one task");
+                    }
+                    break;
+                case StructuredTaskKind::kBranch:
+                    require_value(task.branch.predicate, "branch predicate");
+                    require_region(task.branch.then_region, "branch then region");
+                    require_region(task.branch.else_region, "branch else region");
+                    reachable.insert(task.branch.then_region);
+                    reachable.insert(task.branch.else_region);
+                    for (const auto& phi : task.branch.phis) {
+                        require_value(phi.result, "phi result");
+                        require_value(phi.then_value, "phi then value");
+                        require_value(phi.else_value, "phi else value");
+                        structured_produced->insert(phi.result);
+                    }
+                    break;
+                case StructuredTaskKind::kLoop:
+                    require_region(task.loop.condition_region, "loop condition region");
+                    require_region(task.loop.body_region, "loop body region");
+                    require_value(task.loop.condition_value, "loop condition value");
+                    if (task.loop.max_trip_count <= 0) {
+                        throw std::invalid_argument(
+                            "ExecutablePlan structured loop requires a positive trip bound");
+                    }
+                    reachable.insert(task.loop.condition_region);
+                    reachable.insert(task.loop.body_region);
+                    for (const auto& carried : task.loop.carried) {
+                        require_value(carried.result, "loop result");
+                        require_value(carried.initial, "loop initial");
+                        require_value(carried.body_argument, "loop body argument");
+                        require_value(carried.backedge, "loop backedge");
+                        // Both the loop result and the per-iteration body
+                        // argument are produced by the topology, not by a call.
+                        structured_produced->insert(carried.result);
+                        structured_produced->insert(carried.body_argument);
+                    }
+                    break;
+            }
+        }
+    }
+    if (referenced_calls.size() != call_count) {
+        throw std::invalid_argument(
+            "ExecutablePlan structured schedule must execute every call point exactly once");
+    }
+    if (reachable.size() != schedule.regions.size()) {
+        throw std::invalid_argument(
+            "ExecutablePlan structured schedule has an unreachable region");
+    }
+    (void)input_ids;
+    (void)constant_ids;
+    (void)state_ids;
+    (void)output_ids;
+}
 
 void ValidateExecutablePlan(const ExecutablePlan& plan) {
     const Array<ValueSpec> values = plan.values();
@@ -1025,6 +1167,15 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
     for (int64_t id : constant_ids) available.insert(id);
     for (int64_t id : state_ids) available.insert(id);
 
+    const std::optional<StructuredSchedule> structured =
+        plan.structured_schedule();
+    std::unordered_set<int64_t> structured_produced;
+    if (structured) {
+        ValidateStructuredSchedule(*structured, calls.size(), input_ids,
+                                   constant_ids, state_ids, output_ids,
+                                   values_by_id, &structured_produced);
+    }
+
     std::unordered_map<int64_t, int> producer_counts;
     std::unordered_map<int64_t, int64_t> producer_index;
     std::unordered_map<int64_t, int64_t> last_use;
@@ -1041,7 +1192,7 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
                 throw std::invalid_argument(
                     "KernelCall references an undefined input value id");
             }
-            if (available.count(input_id) == 0) {
+            if (!structured && available.count(input_id) == 0) {
                 throw std::invalid_argument(
                     "KernelCall input is not available before the call");
             }
@@ -1066,7 +1217,9 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
     }
 
     for (const auto& entry : values_by_id) {
-        if (!IsSourceValue(entry.second) && producer_counts[entry.first] != 1) {
+        if (!IsSourceValue(entry.second) &&
+            producer_counts[entry.first] != 1 &&
+            structured_produced.count(entry.first) == 0) {
             throw std::invalid_argument(
                 "Every non-source ExecutablePlan value requires exactly one producer");
         }
@@ -1093,7 +1246,7 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
         }
     }
     for (int64_t output_id : output_ids) {
-        if (available.count(output_id) == 0) {
+        if (!structured && available.count(output_id) == 0) {
             throw std::invalid_argument("ExecutablePlan graph output is unavailable");
         }
     }

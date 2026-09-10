@@ -55,6 +55,8 @@ private:
     friend PreparedRelayProgram PrepareRelayProgram(
         Function function, const CompileConfig& config,
         const ControlFlowPolicy& policy);
+    friend RelayProgramProfile ProfileRelayControlCapabilities(
+        const Function& function);
 
     explicit RelayProgramProfile(RelayControlCapabilitySet required);
 
@@ -89,5 +91,11 @@ private:
 PreparedRelayProgram PrepareRelayProgram(
     Function function, const CompileConfig& config,
     const ControlFlowPolicy& policy);
+
+/*! \brief Cheap capability probe over a Function without running any pass.
+ *
+ *  Used by compiler entry points to choose the preparation policy explicitly
+ *  instead of attempting static preparation and retrying on failure. */
+RelayProgramProfile ProfileRelayControlCapabilities(const Function& function);
 
 }  // namespace kxc::api::internal
