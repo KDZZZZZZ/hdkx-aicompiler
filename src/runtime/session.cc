@@ -904,11 +904,12 @@ public:
                      const DeviceStream& stream,
                      Array<AsyncOperation>* operations,
                      ExecutionObserver* observer,
-                     const ExecutionRunCorrelation& correlation)
+                     const ExecutionRunCorrelation& correlation,
+                     bool dynamic)
         : module_(module), schedule_(schedule), values_(values),
           alignments_(alignments), table_(table), stream_(stream),
           operations_(operations), observer_(observer), correlation_(correlation),
-          device_(stream.device()) {
+          device_(stream.device()), dynamic_(dynamic) {
         const Array<KernelCall> calls = plan.calls();
         for (const auto& region : schedule_.regions) {
             regions_.emplace(region.id, &region);
@@ -945,10 +946,18 @@ private:
                 sink.OnKernelBegin(kernel, correlation_);
             });
         }
-        Array<NDArray> arguments =
-            PrepareCallArguments(module_, call, values_, alignments_, table_);
-        operations_->push_back(
-            InvokeOrderedModuleEntry(module_, call->symbol, arguments, stream_));
+        Array<AsyncOperation> submitted;
+        if (dynamic_) {
+            // Dynamic region kernels resolve their own runtime extents through
+            // the module invocation contract, exactly like the linear path.
+            operations_->push_back(
+                InvokeDynamicCall(module_, call, values_, table_, stream_));
+        } else {
+            Array<NDArray> arguments =
+                PrepareCallArguments(module_, call, values_, alignments_, table_);
+            operations_->push_back(
+                InvokeOrderedModuleEntry(module_, call->symbol, arguments, stream_));
+        }
         ++submit_count_;
         if (observer_) {
             ExecutionCompletionCallback completion;
@@ -1068,6 +1077,7 @@ private:
     std::vector<KernelCall> calls_;
     std::unordered_map<int64_t, const StructuredRegion*> regions_;
     std::size_t submit_count_{0};
+    bool dynamic_{false};
 };
 
 }  // namespace
@@ -1426,10 +1436,12 @@ RunAsyncResult RuntimeSession::RunAsyncImpl(const api::CompiledModule& module,
                 graph_inputs.push_back(value);
             }
             if (structured) {
-                if (dynamic || stateful) {
+                if (stateful) {
                     throw std::invalid_argument(
-                        "RuntimeSession structured schedule requires a static plan");
+                        "RuntimeSession structured schedule does not combine with "
+                        "persistent state");
                 }
+                if (dynamic) PreflightDynamicGraphInputs(node->plan, graph_inputs);
                 const Map<String, NDArray>& constants =
                     api::internal::BorrowCompiledModuleConstants(module);
                 for (int64_t value_id : node->plan.constant_value_ids()) {
@@ -1447,7 +1459,7 @@ RunAsyncResult RuntimeSession::RunAsyncImpl(const api::CompiledModule& module,
                 StructuredWalker walker(module, node->plan, *structured, values,
                                         node->required_alignment_by_storage,
                                         table, stream, &operations, observer,
-                                        correlation);
+                                        correlation, dynamic);
                 walker.Run();
                 submit_count += walker.submit_count();
             } else if (dynamic) {

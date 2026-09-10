@@ -1174,6 +1174,9 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
         ValidateStructuredSchedule(*structured, calls.size(), input_ids,
                                    constant_ids, state_ids, output_ids,
                                    values_by_id, &structured_produced);
+        // Topology-produced values (Phi results, loop carried values) are
+        // available to region tasks before any call runs.
+        for (int64_t id : structured_produced) available.insert(id);
     }
 
     std::unordered_map<int64_t, int> producer_counts;

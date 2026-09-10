@@ -1,6 +1,6 @@
 # M10 C3 实施计划：把结构化控制流并入主执行链
 
-> 状态：**部分实施（2026-09-11）**。PR1（统一静态 `If`）、PR2（统一 `While` 与迭代值作用域/生命周期）、plan identity 覆盖与 PR6（清退第二执行权威）已落地并通过验证；PR3–PR5（控制流 × bounded shape × 持久状态组合）未完成，阻塞点见 §7.2。本文的 §1–§6 保留完整设计与分阶段任务；§7 记录实际落地状态。核对基线：源码审查基于 `origin/dev@cc09d06`。相关现状见 [M10 结构化控制流](M10_STRUCTURED_CONTROL.md)；目标阶梯见 [项目目标](../PROJECT_GOAL.md) §2.2，架构分层见 [架构总览](../ARCHITECTURE.md) §3。
+> 状态：**部分实施（2026-09-11）**。PR1（统一静态 `If`）、PR2（统一 `While` 与迭代值作用域/生命周期）、plan identity 覆盖、PR3（region-aware bounded admission）与 PR6（清退第二执行权威）已落地并通过验证；PR4–PR5（控制流 × 持久状态的 region 边界更新、真实 MiniMind 图内循环）未完成，见 §7.2。本文的 §1–§6 保留完整设计与分阶段任务；§7 记录实际落地状态。核对基线：源码审查基于 `origin/dev@cc09d06`。相关现状见 [M10 结构化控制流](M10_STRUCTURED_CONTROL.md)；目标阶梯见 [项目目标](../PROJECT_GOAL.md) §2.2，架构分层见 [架构总览](../ARCHITECTURE.md) §3。
 
 ## 1. 问题定义
 
@@ -431,22 +431,19 @@ git diff --check
 - gate-off 构建（`out/build/bounded-cuda`，`KXC_ENABLE_CONTROL_RUNTIME=OFF`）编译通过，`Compiler::Compile` 仍按静态策略拒绝残余控制，`m10_unified_control_llvm_test` 正确输出 SKIP；
 - `grep` 全仓库已无 `ControlExecutionPlan`/`ControlRuntimeSession`/`CompiledControlFlowGraph`/`BoundControlKernel`/`CompileControlFlowExact` 的残留引用。
 
-### 7.2 未完成：PR3–PR5 与具体阻塞点
+### 7.2 未完成：PR4–PR5 与具体阻塞点
 
-**PR3（region-aware bounded admission）是硬阻塞，且阻塞点在比计划 §2.3-A 更深的层。**
+**PR3（region-aware bounded admission）已完成。** 采用 §PR3 设计定稿的“控制计划直接分区”路线，不改造 `ValueGraph`：
 
-计划 §2.3-A 假设只需定义 region × 分区模型。实际核查发现：bounded 路径的 `PrepareBoundedCompile`（`src/compiler/shape/dynamic_shape_contract.cc`）与 restricted adapter 都基于**扁平、有序、全覆盖**的 unit 模型，且 `BuildValueGraph`（`src/compiler/graph/value_graph.cc:166,170`）本身对 `If`/`While` 直接抛错：
+- 新 `PrepareStructuredBoundedCompile`（`src/compiler/shape/structured_bounded_compile.cc`）在控制能力许可下准备代表图，用受限形状解析器产出符号维（按单位顺序与 `unit_output_dimensions` 对齐），再对解析器重写后的程序调用控制 lowerer 得到稠密 unit 与 region，最后组装 `ShapeProgram`、`GraphTemplate`（拓扑产生的 Phi/loop 值经 `synthesized_value_names` 标记）、逐 unit `DynamicUnitShapeContract`、图输入 guard 与 `StructuredSchedule`。
+- 受限形状解析器新增 `If`/`While`/`Tuple`/`TupleGetItem`/`Let` 的结构化遍历：`If` 两臂逐叶同 kind/同 dims，`While` 循环变量绑定 initial 叶形状且 backedge 必须保持形状不变量（本步不允许 backedge 改形状）；`Resolution` 暴露按 rewritten 节点键控的叶维证明。
+- `shape::GraphTemplate` 增加可选 `synthesized_value_names`，`Verify()` 仅对合成值放宽“每输出有 unit 生产者”一处；线性模板字节不变。
+- 运行时：`ExecutablePlanMode::kDynamicFreshOutputV1` 现可携带 `structured_schedule`；`RuntimeSession` 结构化路径在动态模式下对 region kernel 走 `InvokeDynamicCall`，并使拓扑产生的值在计划校验中可用。
+- `Compiler::CompileBoundedStructured` 发布普通 `CompiledGraph`；`test/bounded_control_flow_llvm_test.cpp` 验证同一 artifact 服务 N=1/3/5/8 的 bounded `If` 与 bounded `While`，以及越界形状在 launch 前拒绝。gate-on CTest 77/77、Python 362/362、检查器通过。
 
-```
-BuildValueGraph: capability=if; static dataflow does not support If
-BuildValueGraph: capability=control_flow.loop; static dataflow does not support While
-```
+**PR4（region 边界状态更新）未完成**：需要 `StateOutputBinding` 增加状态更新 region 字段并随合同版本化（计划 §2.3-C），并让结构化 bounded walker 在 region 边界提交状态；当前结构化路径显式拒绝持久 state。
 
-因此 PR3 不只是“拆开 shape 校验里的 `StaticOnly`”，而是要让 `ValueGraph`、`PartitionValueGraph`、`shape::GraphTemplate`（`BuildTemplate`，`src/compiler/shape/shape_exact.cc:165`）、`BuildBoundedValueGraph` 与逐 unit shape contract 全部理解结构化 region，并证明所有分支/backedge 合法。这是贯穿 shape 子系统的改动，超出本计划 §2.3-A 预估的范围。
-
-**PR4（region 边界状态更新）依赖 PR3**，且需要 `StateOutputBinding` 增加状态更新 region 字段并随合同版本化（计划 §2.3-C）。
-
-**PR5（真实 MiniMind 图内循环）依赖 PR3/PR4**；其独立前置（argmax/EOS 编译链表达）也尚未开始。
+**PR5（真实 MiniMind 图内循环）未完成**，依赖 PR4；其独立前置（argmax/EOS 编译链表达）尚未开始。
 
 **PR6（清退第二执行权威）已完成。** `CompileControlFlowExact` 的消费者是既有控制流测试；随 PR1/PR2 已把这些测试迁移到普通 `Compiler::Compile`/`RuntimeSession`，旧入口与其私有类型、两个旧测试均已删除。
 

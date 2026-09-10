@@ -483,6 +483,24 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
 }
 
 #if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+CompiledPrimitiveBatch CompilePrimitiveUnitsWithShapeContracts(
+    const std::vector<PrimitiveUnit>& units,
+    const std::vector<LogicalValueContract>& values,
+    const std::vector<DynamicUnitShapeContract>& shape_contracts,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract) {
+    std::vector<PrimitiveUnitId> requested_unit_ids(units.size());
+    std::iota(requested_unit_ids.begin(), requested_unit_ids.end(), 0);
+    if (shape_contracts.size() != units.size()) {
+        throw std::invalid_argument(
+            "structured bounded compile requires one shape contract per unit");
+    }
+    return CompilePrimitiveUnitsImpl(units, values, config, contract,
+                                     requested_unit_ids, &shape_contracts);
+}
+#endif  // KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
 CompiledPrimitiveBatch CompilePrimitiveUnits(
     const BoundedCompilePreparation& preparation,
     const PartitionedGraph& partitioned_graph,

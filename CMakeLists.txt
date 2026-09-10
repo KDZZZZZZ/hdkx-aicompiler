@@ -557,7 +557,8 @@ if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
     src/compiler/shape/shape_specialization_controller.cc
     src/compiler/shape/restricted_symbolic_shape.cc
     src/compiler/shape/shape_value_resolver.cc
-    src/compiler/shape/dynamic_shape_contract.cc)
+    src/compiler/shape/dynamic_shape_contract.cc
+    src/compiler/shape/structured_bounded_compile.cc)
 endif()
 
 set(KXC_CODEGEN_LLVM_SOURCES "")
@@ -626,7 +627,8 @@ else()
     src/compiler/shape/shape_specialization_controller.cc
     src/compiler/shape/restricted_symbolic_shape.cc
     src/compiler/shape/shape_value_resolver.cc
-    src/compiler/shape/dynamic_shape_contract.cc)
+    src/compiler/shape/dynamic_shape_contract.cc
+    src/compiler/shape/structured_bounded_compile.cc)
   kxc_configure_module_obj(kxc_shape_experimental_test_obj)
 endif()
 
@@ -1057,6 +1059,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(control_plan_test test/control_plan_test.cpp)
   kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
   kxc_add_runtime_exe(m10_unified_control_llvm_test test/m10_unified_control_llvm_test.cpp)
+  kxc_add_runtime_exe(bounded_control_flow_llvm_test test/bounded_control_flow_llvm_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
@@ -1147,6 +1150,11 @@ if(KXC_BUILD_PASS_TESTS)
     COMMAND "$<TARGET_FILE:m10_unified_control_llvm_test>")
   set_tests_properties(m10_unified_control_llvm_test PROPERTIES
     LABELS "control-flow;control-runtime;cpu"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+  add_test(NAME bounded_control_flow_llvm_test
+    COMMAND "$<TARGET_FILE:bounded_control_flow_llvm_test>")
+  set_tests_properties(bounded_control_flow_llvm_test PROPERTIES
+    LABELS "control-flow;control-runtime;bounded;cpu"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   add_custom_target(run_control_flow_tests
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error

@@ -71,8 +71,8 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
 /*! \brief Compile structured-plan units against explicit per-unit shape
  *  contracts, without a BoundedCompilePreparation or a flat ValueGraph.
  *
- *  Used by the region-aware bounded path where units come from the control
- *  lowerer. Each contract is authoritative for its unit's runtime extents. */
+ *  The region-aware bounded path has units from the control lowerer rather than
+ *  a ValueGraph. Each contract is authoritative for its unit's runtime extents. */
 CompiledPrimitiveBatch CompilePrimitiveUnitsWithShapeContracts(
     const std::vector<PrimitiveUnit>& units,
     const std::vector<LogicalValueContract>& values,

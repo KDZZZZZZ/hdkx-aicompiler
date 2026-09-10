@@ -23,6 +23,7 @@
 #include "internal/kernel_abi_equivalence.h"
 #include "internal/lowered_graph.h"
 #include "internal/primitive_cache.h"
+#include "internal/structured_bounded_compile.h"
 #include "internal/primitive_compiler.h"
 #include "internal/relay_program.h"
 #include "internal/relay_snapshot.h"
@@ -794,6 +795,84 @@ CompiledGraph Compiler::CompileBounded(
     (void)BuildPlanAbiFingerprint(result);
     compile_span.AddMetric(
         "primitive_count", static_cast<double>(batch.primitives.size()));
+    if (profile_context) profile_context->Flush();
+    return result;
+#endif
+}
+
+CompiledGraph Compiler::CompileBoundedStructured(
+    Function representative, CompileConfig config,
+    const std::vector<
+        experimental::restricted_symbolic_shape::v1::InputAxisSymbol>&
+        input_axis_symbols) {
+#if !KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+    (void)representative;
+    (void)config;
+    (void)input_axis_symbols;
+    throw std::runtime_error(
+        "Compiler::CompileBoundedStructured is disabled; configure with "
+        "-DKXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=ON");
+#elif !KXC_ENABLE_CONTROL_RUNTIME
+    (void)representative;
+    (void)config;
+    (void)input_axis_symbols;
+    throw std::runtime_error(
+        "Compiler::CompileBoundedStructured requires KXC_ENABLE_CONTROL_RUNTIME=ON");
+#elif !KXC_USE_LLVM
+    (void)representative;
+    (void)config;
+    (void)input_axis_symbols;
+    throw std::runtime_error(
+        "Compiler::CompileBoundedStructured requires an available LLVM backend");
+#else
+    config.Validate();
+    const internal::CompilerExecutionContract contract =
+        internal::ResolveBoundedExecutionContract(config);
+    internal::StructuredBoundedCompilation compilation =
+        internal::PrepareStructuredBoundedCompile(std::move(representative),
+                                                  config,
+                                                  std::vector<experimental::
+                                                      restricted_symbolic_shape::v1::
+                                                          InputAxisSymbol>(
+                                                      input_axis_symbols.begin(),
+                                                      input_axis_symbols.end()));
+    auto profile_context = MaybeCreateProfileContext(config);
+    const std::string run_id =
+        profile_context ? profile_context->NextRunId("compile_bounded_structured") : "";
+    profiling::ActivationScope activation(profile_context, run_id);
+    profiling::ScopedSpan compile_span(
+        profile_context, MakeStageEvent("compile_bounded_structured", config),
+        run_id);
+
+    const std::vector<internal::PrimitiveUnit>& units =
+        compilation.partitioned_graph().units;
+    internal::CompiledPrimitiveBatch batch;
+    {
+        const PassContext pass_context = PassContext::MergeTarget(
+            relay::PassContextFromRelay(
+                compilation.partitioned_graph().value_graph.function),
+            config->target);
+        PassContext::Scope pass_scope(pass_context);
+        batch = internal::CompilePrimitiveUnitsWithShapeContracts(
+            units, compilation.partitioned_graph().value_graph.values,
+            compilation.unit_shape_contracts(), config, contract);
+        compile_span.AddMetric("primitive_count",
+                               static_cast<double>(batch.primitives.size()));
+    }
+
+    runtime::ExecutablePlan plan =
+        internal::BuildStructuredBoundedExecutablePlan(compilation);
+    CompiledModule module = internal::AssemblePrimitiveModule(
+        batch, units, config->target, profile_context);
+    std::vector<ArtifactPin> pins;
+    pins.reserve(batch.primitives.size());
+    for (const internal::CompiledPrimitive& primitive : batch.primitives) {
+        pins.push_back(internal::ArtifactPinAccess::Wrap(primitive.pin));
+    }
+    CompiledGraph result = internal::CompiledGraphAccess::Create(
+        std::move(module), std::move(plan), std::move(pins),
+        compilation.graph_semantic_key());
+    (void)BuildPlanAbiFingerprint(result);
     if (profile_context) profile_context->Flush();
     return result;
 #endif

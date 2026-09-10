@@ -169,6 +169,21 @@ void GraphTemplate::Verify() const {
     available_values.insert(value.name);
   }
   for (const NamedTensorContract& value : shape_program_.outputs()) declared_values.insert(value.name);
+  // Topology-produced values (Phi results, loop carried values) are materialized
+  // by the structured schedule rather than a unit, so they are available before
+  // the first unit runs. Validate them here so the per-unit routing check below
+  // can accept a body argument that is produced by the loop topology.
+  std::set<std::string> synthesized;
+  for (const std::string& value_name : synthesized_value_names_) {
+    CheckName(value_name, "synthesized value name");
+    if (declared_values.count(value_name) == 0) {
+      Invalid("synthesized value '" + value_name + "' has no shape contract");
+    }
+    if (!synthesized.insert(value_name).second) {
+      Invalid("synthesized value '" + value_name + "' is declared twice");
+    }
+    available_values.insert(value_name);
+  }
 
   std::set<std::string> locators;
   std::set<std::string> produced_values;
@@ -201,21 +216,14 @@ void GraphTemplate::Verify() const {
     }
     available_values.insert(unit.output_value_names.begin(), unit.output_value_names.end());
   }
-  std::set<std::string> synthesized;
-  for (const std::string& value_name : synthesized_value_names_) {
-    CheckName(value_name, "synthesized value name");
-    if (declared_values.count(value_name) == 0) {
-      Invalid("synthesized value '" + value_name + "' has no shape contract");
-    }
-    if (!synthesized.insert(value_name).second ||
-        produced_values.count(value_name) != 0 ||
-        available_values.count(value_name) != 0) {
+  // A synthesized value must not also be produced by a unit.
+  for (const std::string& value_name : synthesized) {
+    if (produced_values.count(value_name) != 0) {
       Invalid("synthesized value '" + value_name + "' conflicts with a produced value");
     }
   }
   for (const NamedTensorContract& value : shape_program_.outputs()) {
-    if (available_values.count(value.name) == 0 &&
-        synthesized.count(value.name) == 0) {
+    if (available_values.count(value.name) == 0) {
       Invalid("shape-program output '" + value.name + "' has no producer");
     }
   }

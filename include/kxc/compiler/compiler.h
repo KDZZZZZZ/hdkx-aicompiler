@@ -18,7 +18,8 @@
 
 namespace kxc::api::experimental::restricted_symbolic_shape::v1 {
 class BoundedCompileRequest;
-}
+struct InputAxisSymbol;
+}  // namespace kxc::api::experimental::restricted_symbolic_shape::v1
 
 namespace kxc {
 namespace api {
@@ -82,6 +83,18 @@ public:
     static CompiledGraph CompileBounded(
         const experimental::restricted_symbolic_shape::v1::BoundedCompileRequest&
             request);
+
+    /*! \brief Compiles a bounded graph that contains structured control flow.
+     *
+     * Same one-artifact-serves-many-shapes contract as CompileBounded, but the
+     * representative may contain Relay If / bounded While. The result is a
+     * normal CompiledGraph whose ExecutablePlan is a dynamic fresh-output plan
+     * carrying an optional structured_schedule. CPU:0/LLVM only. */
+    static CompiledGraph CompileBoundedStructured(
+        Function representative, CompileConfig config,
+        const std::vector<
+            experimental::restricted_symbolic_shape::v1::InputAxisSymbol>&
+            input_axis_symbols);
 
     /*! \brief Builds whole-graph Relay semantics without target/compiler policy. */
     static GraphSemanticKey BuildGraphSemanticKey(const Function& func);

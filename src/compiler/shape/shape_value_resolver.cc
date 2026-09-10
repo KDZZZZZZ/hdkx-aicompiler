@@ -60,6 +60,9 @@ struct NodeInfo final {
     const Object* source{nullptr};  // kShapeValue：根数据节点（原树）
 };
 
+/*! \brief One tensor leaf: its resolved proof plus the rewritten reference. */
+using Leaf = std::pair<NodeInfo, Expr>;
+
 // Read scalar/rank-1 integer control payloads without changing their rank or
 // reading an int32 buffer as int64. Constants remain data in other contexts.
 std::vector<int64_t> ReadConstantVector(const kxc::ConstantNode* constant,
@@ -191,6 +194,7 @@ public:
             Function(snapshot_->params, RewriteResult(snapshot_->body));
         std::set<const Object*> visited;
         WalkRewritten(result.rewritten->body, &visited, &result);
+        result.node_leaf_dims = node_leaf_dims_;
         return result;
     }
 
@@ -205,6 +209,225 @@ private:
     std::map<const Object*, Expr> rewritten_;
     std::map<const Object*, EncodedExpr> value_expr_overrides_;
     std::set<const Object*> result_tensors_;
+    /*! \brief Per rewritten node, the symbolic dims of each tensor leaf. Keyed
+     *  by the rewritten Expr pointer so a control-plan value built from the
+     *  same node finds its proof without a second traversal. */
+    std::map<const Object*, std::vector<std::vector<DimExpr>>> node_leaf_dims_;
+    /*! \brief Structural leaf proofs for tuples and control nodes. */
+    std::map<const Object*, std::vector<Leaf>> leaf_memo_;
+    /*! \brief Bound tuple/loop variables (leaf proofs plus rewritten refs). */
+    std::map<const Object*, std::vector<Leaf>> leaf_bindings_;
+
+    static size_t LeafCount(const Type& type) {
+        if (type.As<TensorTypeNode>()) return 1;
+        if (const auto* tuple = type.As<TupleTypeNode>()) {
+            size_t count = 0;
+            for (const Type& field : tuple->fields) count += LeafCount(field);
+            return count;
+        }
+        Reject("control leaves must be tensors or tuples of tensors");
+    }
+
+    static Type CheckedType(const Expr& expr, const char* context) {
+        const Type type = expr.checked_type();
+        if (!type.defined()) {
+            Reject(std::string(context) + " has no checked type");
+        }
+        return type;
+    }
+
+    /*! \brief Resolve an expression into its ordered tensor leaves.
+     *
+     *  Tuple/TupleGetItem/Let/If/While traverse structurally so a proof exists
+     *  for every leaf that becomes a PrimitiveUnit boundary. If branches must
+     *  agree leaf-wise on kind and dims; While binds its loop variable to the
+     *  initial leaf shapes (loop-invariant tensor shapes in this step). */
+    std::vector<Leaf> ResolveLeaves(const Expr& expr) {
+        if (!expr.defined()) Reject("expression is undefined");
+        const Object* node = expr.get();
+        const auto memo = leaf_memo_.find(node);
+        if (memo != leaf_memo_.end()) return memo->second;
+        if (const auto* var = expr.As<kxc::VarNode>()) {
+            const auto bound = leaf_bindings_.find(node);
+            if (bound != leaf_bindings_.end()) {
+                std::vector<std::vector<DimExpr>> dims;
+                dims.reserve(bound->second.size());
+                for (const Leaf& leaf : bound->second) {
+                    dims.push_back(ValueTensorDims(leaf.first));
+                }
+                node_leaf_dims_[node] = std::move(dims);
+                return leaf_memo_[node] = bound->second;
+            }
+        }
+
+        std::vector<Leaf> result;
+        if (const auto* tuple = expr.As<kxc::TupleNode>()) {
+            for (const Expr& field : tuple->fields) {
+                std::vector<Leaf> leaves = ResolveLeaves(field);
+                result.insert(result.end(), leaves.begin(), leaves.end());
+            }
+        } else if (const auto* get_item = expr.As<kxc::TupleGetItemNode>()) {
+            const std::vector<Leaf> tuple_leaves = ResolveLeaves(get_item->tuple);
+            const auto* tuple_type =
+                CheckedType(get_item->tuple, "TupleGetItem tuple")
+                    .As<TupleTypeNode>();
+            if (!tuple_type || get_item->index < 0 ||
+                static_cast<size_t>(get_item->index) >= tuple_type->fields.size()) {
+                Reject("control TupleGetItem index is outside its checked type");
+            }
+            size_t begin = 0;
+            for (int index = 0; index < get_item->index; ++index) {
+                begin += LeafCount(tuple_type->fields[static_cast<size_t>(index)]);
+            }
+            const size_t count =
+                LeafCount(tuple_type->fields[static_cast<size_t>(get_item->index)]);
+            if (begin + count > tuple_leaves.size()) {
+                Reject("control TupleGetItem exceeds its tuple leaves");
+            }
+            result.assign(tuple_leaves.begin() + static_cast<std::ptrdiff_t>(begin),
+                          tuple_leaves.begin() +
+                              static_cast<std::ptrdiff_t>(begin + count));
+            if (result.size() == 1) {
+                rewritten_[node] = result.front().second;
+                rewritten_info_[result.front().second.get()] = result.front().first;
+            }
+        } else if (const auto* conditional = expr.As<kxc::IfNode>()) {
+            const std::vector<Leaf> predicate = ResolveLeaves(conditional->cond);
+            if (predicate.size() != 1 ||
+                predicate.front().first.kind != ValueKind::kData) {
+                Reject("If requires a single data predicate");
+            }
+            const std::vector<Leaf> then_leaves =
+                ResolveLeaves(conditional->true_branch);
+            const std::vector<Leaf> else_leaves =
+                ResolveLeaves(conditional->false_branch);
+            if (then_leaves.size() != else_leaves.size() || then_leaves.empty()) {
+                Reject("If branches must produce the same nonempty leaf arity");
+            }
+            for (size_t index = 0; index < then_leaves.size(); ++index) {
+                if (then_leaves[index].first.kind != else_leaves[index].first.kind ||
+                    then_leaves[index].first.dims != else_leaves[index].first.dims ||
+                    then_leaves[index].first.elements !=
+                        else_leaves[index].first.elements) {
+                    Reject("If branch leaves must agree on kind, dims and elements");
+                }
+            }
+            const Expr rewritten = kxc::If(
+                predicate.front().second, then_leaves.front().second,
+                else_leaves.front().second);
+            rewritten_[node] = rewritten;
+            if (then_leaves.size() == 1) {
+                rewritten_info_[rewritten.get()] = then_leaves.front().first;
+            }
+            result = then_leaves;
+        } else if (const auto* loop = expr.As<kxc::WhileNode>()) {
+            const std::vector<Leaf> initial = ResolveLeaves(loop->initial_state);
+            const auto* initial_type =
+                CheckedType(loop->initial_state, "While initial state")
+                    .As<TupleTypeNode>();
+            if (!initial_type || initial_type->fields.size() != initial.size() ||
+                initial.empty()) {
+                Reject("While initial state must bind one leaf per tuple field");
+            }
+            Array<Expr> initial_rewrites;
+            for (const Leaf& leaf : initial) initial_rewrites.push_back(leaf.second);
+            std::vector<Leaf> loop_binding;
+            loop_binding.reserve(initial.size());
+            for (size_t index = 0; index < initial.size(); ++index) {
+                loop_binding.push_back(
+                    {initial[index].first,
+                     kxc::TupleGetItem(loop->loop_var, static_cast<int>(index))});
+            }
+            const auto saved = leaf_bindings_.find(loop->loop_var.get());
+            const auto previous = saved == leaf_bindings_.end()
+                                      ? std::nullopt
+                                      : std::optional<std::vector<Leaf>>(saved->second);
+            leaf_bindings_[loop->loop_var.get()] = loop_binding;
+            std::vector<Leaf> condition;
+            std::vector<Leaf> body;
+            try {
+                condition = ResolveLeaves(loop->condition);
+                body = ResolveLeaves(loop->body);
+            } catch (...) {
+                if (previous) {
+                    leaf_bindings_[loop->loop_var.get()] = *previous;
+                } else {
+                    leaf_bindings_.erase(loop->loop_var.get());
+                }
+                throw;
+            }
+            if (previous) {
+                leaf_bindings_[loop->loop_var.get()] = *previous;
+            } else {
+                leaf_bindings_.erase(loop->loop_var.get());
+            }
+            if (body.size() != initial.size()) {
+                Reject("While body must return one leaf per initial field");
+            }
+            for (size_t index = 0; index < body.size(); ++index) {
+                if (body[index].first.kind != initial[index].first.kind ||
+                    body[index].first.dims != initial[index].first.dims ||
+                    body[index].first.elements != initial[index].first.elements) {
+                    Reject("While carried leaves must preserve their shape invariant");
+                }
+            }
+            Array<Expr> condition_rewrites;
+            for (const Leaf& leaf : condition) condition_rewrites.push_back(leaf.second);
+            Array<Expr> body_rewrites;
+            for (const Leaf& leaf : body) body_rewrites.push_back(leaf.second);
+            // A While condition is a single scalar, not a tuple of values.
+            if (condition_rewrites.size() != 1) {
+                Reject("While condition must be exactly one scalar tensor");
+            }
+            const Expr rewritten = kxc::While(
+                kxc::Tuple(std::move(initial_rewrites)), loop->loop_var,
+                condition_rewrites[0],
+                kxc::Tuple(std::move(body_rewrites)), loop->max_trip_count);
+            rewritten_[node] = rewritten;
+            // The loop variable carries the initial leaf proofs.
+            std::vector<Leaf> loop_leaves;
+            loop_leaves.reserve(initial.size());
+            for (size_t index = 0; index < initial.size(); ++index) {
+                loop_leaves.push_back(
+                    {initial[index].first,
+                     kxc::TupleGetItem(loop->loop_var, static_cast<int>(index))});
+            }
+            leaf_memo_[loop->loop_var.get()] = loop_leaves;
+            result = initial;
+        } else if (const auto* let = expr.As<kxc::LetNode>()) {
+            const std::vector<Leaf> value_leaves = ResolveLeaves(let->value);
+            const auto saved = leaf_bindings_.find(let->var.get());
+            const auto previous = saved == leaf_bindings_.end()
+                                      ? std::nullopt
+                                      : std::optional<std::vector<Leaf>>(saved->second);
+            leaf_bindings_[let->var.get()] = value_leaves;
+            std::vector<Leaf> body;
+            try {
+                body = ResolveLeaves(let->body);
+            } catch (...) {
+                if (previous) {
+                    leaf_bindings_[let->var.get()] = *previous;
+                } else {
+                    leaf_bindings_.erase(let->var.get());
+                }
+                throw;
+            }
+            if (previous) {
+                leaf_bindings_[let->var.get()] = *previous;
+            } else {
+                leaf_bindings_.erase(let->var.get());
+            }
+            result = body;
+        } else {
+            const NodeInfo info = Resolve(expr);
+            result.push_back({info, rewritten_.at(node)});
+        }
+        std::vector<std::vector<DimExpr>> dims;
+        dims.reserve(result.size());
+        for (const Leaf& leaf : result) dims.push_back(ValueTensorDims(leaf.first));
+        node_leaf_dims_[node] = std::move(dims);
+        return leaf_memo_[node] = result;
+    }
 
     // Tuple is the existing Relay result structure. It introduces no tensor
     // value or compute unit; field order and nesting survive materialization.
@@ -220,6 +443,19 @@ private:
             }
             return Tuple(std::move(fields));
         }
+        if (expr.As<IfNode>() || expr.As<WhileNode>()) {
+            (void)ResolveLeaves(expr);
+            const auto found = rewritten_.find(expr.get());
+            if (found == rewritten_.end()) Reject("control result has no rewrite");
+            return found->second;
+        }
+        if (const auto* let = expr.As<LetNode>()) {
+            // ANF wraps non-atomic values in Let bindings; thread them through
+            // so a Let-chained control body still has a rewritten result.
+            const Expr value = RewriteResult(let->value);
+            const Expr body = RewriteResult(let->body);
+            return Let(let->var, value, body);
+        }
         if (!result_tensors_.insert(expr.get()).second) {
             Reject("duplicate result tensors are unsupported by ExecutablePlan");
         }
@@ -227,10 +463,14 @@ private:
         if (result.scalar_shape_value) {
             Reject("scalar shape results must be made into a vector by Unsqueeze");
         }
-        if (rewritten_.at(expr.get()).As<ConstantNode>()) {
+        const auto rewritten = rewritten_.find(expr.get());
+        if (rewritten == rewritten_.end()) {
+            Reject("bounded result has no rewrite");
+        }
+        if (rewritten->second.As<ConstantNode>()) {
             Reject("constant results must be materialized by a compute call into fresh storage");
         }
-        return rewritten_.at(expr.get());
+        return rewritten->second;
     }
 
     std::vector<DimExpr> ParameterDims(const kxc::VarNode* parameter) const {
@@ -294,6 +534,20 @@ private:
         const Object* node = expr.get();
         const auto memo = info_.find(node);
         if (memo != info_.end()) return memo->second;
+
+        // Aggregate and control nodes carry no single tensor leaf of their own;
+        // they resolve through the leaf model. A caller that reaches here means
+        // the node is used as one tensor, which the leaf resolver rejects.
+        if (expr.As<kxc::TupleNode>() || expr.As<kxc::TupleGetItemNode>() ||
+            expr.As<kxc::IfNode>() || expr.As<kxc::WhileNode>() ||
+            expr.As<kxc::LetNode>()) {
+            const std::vector<Leaf> leaves = ResolveLeaves(expr);
+            if (leaves.size() != 1) {
+                Reject("a multi-leaf control expression cannot be one tensor");
+            }
+            info_[node] = leaves.front().first;
+            return leaves.front().first;
+        }
 
         if (const auto* var = expr.As<kxc::VarNode>()) {
             if (param_index_.find(node) == param_index_.end()) {
@@ -1507,6 +1761,29 @@ private:
             for (const Expr& field : tuple->fields) {
                 WalkRewritten(field, visited, result);
             }
+            return;
+        }
+        if (const auto* get_item = expr.As<kxc::TupleGetItemNode>()) {
+            WalkRewritten(get_item->tuple, visited, result);
+            return;
+        }
+        if (const auto* conditional = expr.As<IfNode>()) {
+            // Order matches control lowering: predicate, then, else.
+            WalkRewritten(conditional->cond, visited, result);
+            WalkRewritten(conditional->true_branch, visited, result);
+            WalkRewritten(conditional->false_branch, visited, result);
+            return;
+        }
+        if (const auto* loop = expr.As<WhileNode>()) {
+            // Order matches control lowering: initial, condition, body.
+            WalkRewritten(loop->initial_state, visited, result);
+            WalkRewritten(loop->condition, visited, result);
+            WalkRewritten(loop->body, visited, result);
+            return;
+        }
+        if (const auto* let = expr.As<LetNode>()) {
+            WalkRewritten(let->value, visited, result);
+            WalkRewritten(let->body, visited, result);
             return;
         }
         if (expr.As<kxc::ConstantNode>()) return;
