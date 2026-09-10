@@ -51,20 +51,22 @@ Relay Function + 不可变 CompileConfig
 
 静态单 Call 与首个融合 region 均经 `te::Program` 冻结完整 DAG、调度、边界、Target 和规范 TIR pipeline。优化等级 3 在 CPU:0 对相邻、纯、同形 float32/float64 的 `add → sqrt` 选择一个 PrimitiveUnit；内部 add 结果必须没有外部消费者。默认等级 2 保留独立单元。Program v1 字节替代静态 schedule-only 候选身份并进入 artifact key v4，compiler execution contract 为 v5；TE→TIR、cache、后端与 RuntimeSession owner 保持原路径。metadata-only 形状控制输入仍保留 ABI；exact-profile 与普通编译共用同一可见计划边界。实际 kernel 数从 2 到 1、数值、缓存和寿命证据见 [M8 报告](implementation/M8_TE_PROGRAM_REPORT.md)。现有内部 Allocate 仍可能存在，尚未证明模型级加速。
 
-可选的结构化控制流路径复用准备、原语编译、签名、编译产物与所有权逻辑：
+结构化控制流已并入主编译/执行链，不再有独立的产物与执行权威。同一入口按输入图选择拓扑：
 
 ```text
-PrepareRelayProgram
-  -> LowerPreparedRelayToControlPlanWithSidecar
-  -> CompilePrimitiveUnits
-  -> BindControlPlanForRuntime
-  -> CompiledControlFlowGraph
-  -> ControlRuntimeSession
+Compiler::Compile
+  -> PrepareRelayProgram（按残余控制能力选择 StaticOnly / NativeExact）
+     ├─ 无控制拓扑 -> PrepareCompilerGraph -> AssembleCompiledGraph（线性 ExecutablePlan）
+     └─ 有控制拓扑 -> LowerPreparedRelayToControlPlanWithSidecar
+                       -> CompilePrimitiveUnits -> AssemblePrimitiveModule
+                       -> BuildStructuredExecutablePlan（ExecutablePlan + structured_schedule）
+  -> CompiledGraph（两条路径共用产物/执行权威）
+  -> RuntimeSession（线性 walker 或 structured region walker）
 ```
 
-`Compiler::Compile` 会拒绝残留控制拓扑。独立的
-`Compiler::CompileControlFlowExact` 入口仅在 `KXC_ENABLE_CONTROL_RUNTIME=ON` 时可用，
-当前要求使用受支持的精确 CPU 控制子集和真实 LLVM 编译产物。
+`Compiler::Compile` 在 `KXC_ENABLE_CONTROL_RUNTIME=ON` 时发布携带
+`structured_schedule` 的普通 `CompiledGraph`；关闭时按静态策略在准备阶段拒绝控制流。
+不存在第二个 compiler 入口、plan 类型或执行会话。
 
 受限 bounded 生产路径为：
 

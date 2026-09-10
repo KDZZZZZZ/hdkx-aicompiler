@@ -8,7 +8,7 @@
 
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/compiled_module.h"
-#include "kxc/runtime/control_execution_plan.h"
+#include "kxc/runtime/executable_plan.h"
 #include "../internal/relay_program.h"
 #include "control_plan.h"
 
@@ -24,23 +24,10 @@ ControlPlanLowering LowerRelayToControlPlanWithSidecar(Function function);
 ControlPlanLowering LowerPreparedRelayToControlPlanWithSidecar(
     const PreparedRelayProgram& program);
 
-struct ControlKernelBinding final {
-    PrimitiveUnitId primitive_unit_id{-1};
-    CompiledModule module;
-    String entry_symbol;
-    std::vector<ValueId> abi_non_output_value_ids;
-    std::shared_ptr<const void> retention_owner;
-};
-
-runtime::ControlExecutionPlan BindControlPlanForRuntime(
-    const ControlPlan& plan,
-    const std::vector<ControlKernelBinding>& bindings);
-
 /*! \brief Convert ControlPlan v2 into a normal ExecutablePlan with an optional
  *  structured schedule.
  *
- *  Unlike BindControlPlanForRuntime this does not embed kernel launch bindings:
- *  kernel tasks reference the plan's own `calls()` by PrimitiveUnitId, so the
+ *  Kernel tasks reference the plan's own `calls()` by PrimitiveUnitId, so the
  *  runtime executes them through the ordinary module/ValueTable machinery. The
  *  returned plan uses ExecutablePlanMode::kStatic. */
 runtime::ExecutablePlan BuildStructuredExecutablePlan(

@@ -1,10 +1,12 @@
 # M10：结构化控制流（If / 有界 While）
 
-仓库里已经有一条完整但默认关闭的控制流路径：`KXC_ENABLE_CONTROL_RUNTIME=OFF` 时，普通 `Compiler::Compile` 会在准备阶段拒绝残留的 Relay `If`/`While`；打开门禁后，`Compiler::CompileControlFlowExact` 能把静态精确的 `If` 和有界、条件先于循环体的 `While` 编译成真实 LLVM 原语，再由 `ControlRuntimeSession` 在 CPU:0、默认流上执行。`ControlPlan` v2、runtime schema v1、Relay lowering、Phi/循环携带值、执行前校验和 control-flow CTest 都已经存在。
+仓库里已经有一条完整但默认关闭的控制流路径：`KXC_ENABLE_CONTROL_RUNTIME=OFF` 时，普通 `Compiler::Compile` 会在准备阶段拒绝残留的 Relay `If`/`While`；打开门禁后，同一个 `Compiler::Compile` 能把静态精确的 `If` 和有界、条件先于循环体的 `While` 编译成携带 `structured_schedule` 的普通 `CompiledGraph`，由普通 `RuntimeSession` 在 CPU:0、默认流上执行。`ControlPlan` v2、Relay lowering、Phi/循环携带值、执行前校验和 control-flow CTest 都已经存在。
+
+结构化控制流现在是唯一 `ExecutablePlan`/`RuntimeSession` 上的一个正交拓扑，不再是独立子系统：此前发布独立 `CompiledControlFlowGraph`/`ControlExecutionPlan` 并自行分配输出的 `CompileControlFlowExact` + `ControlRuntimeSession` 已删除。设计与分阶段改造见 [M10 C3 计划](M10_C3_UNIFIED_CONTROL_PLAN.md)。
 
 这条代码不是可以直接宣称“已支持 MiniMind”的死代码。它目前只接受固定 rank/shape、CPU 标量布尔谓词、静态 kernel 签名和非负 `max_trip_count`；fresh-output kernel effect 也明确拒绝 state、alias、donation、storage reuse 和 runtime extent。CUDA、非默认设备、异步流、KV cache、持久会话状态和任意数据相关形状都不在合同内。MiniMind L1a 静态 prefill 不依赖它，L1b 的第一版生成循环先由 host driver 编排；本模块负责给出控制流的当前生产证据，以及它何时、如何与 M2/M3 的状态和 extent 合同交接。
 
-> **状态（2026-09-10）：** C0/C1/C2 已完成。gate-on LLVM 的 If/While 生产 receipt、gate-off 拒绝和 L1b host-loop 选择见 [控制流 receipt](M10_CONTROL_RECEIPT.md)。C3 的 state/extent 接入未启用：L1b 继续由 host loop 驱动，避免在 `ControlRuntimeSession` 旁新增状态 owner；C4 的 MiniMind-O 需求仍待单独立项。
+> **状态（2026-09-11）：** C0/C1/C2 已完成，C3 的“统一执行权威”部分已完成：`If`/有界 `While` 经普通 `Compiler::Compile` 发布普通 `CompiledGraph` 并由普通 `RuntimeSession` 执行，第二套产物与执行权威已删除。gate-on LLVM 的 If/While 生产证据见 [M10 C3 计划](M10_C3_UNIFIED_CONTROL_PLAN.md) §7 与 `test/m10_unified_control_llvm_test.cpp`；L1b 仍由 host loop 驱动。**仍未完成**：控制流与 bounded shape / 持久状态的组合（region-aware shape 证明、region 边界的状态更新、真实 MiniMind 图内循环），见 [M10 C3 计划](M10_C3_UNIFIED_CONTROL_PLAN.md) §7.2；C4 的 MiniMind-O 需求仍待单独立项。
 
 ## 当前情况与要做的模块
 

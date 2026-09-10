@@ -290,7 +290,7 @@ private:
                         CloneExpr(node->false_branch));
             expressions_.emplace(source.get(), result);
         } else if (source.As<WhileNode>()) {
-            Reject("While is rejected by the static preparation snapshot; use CompileControlFlowExact");
+            Reject("While is rejected by the static preparation snapshot; use the control-capable preparation policy");
         } else {
             Reject("unsupported Relay node in preparation snapshot: " +
                    std::string(source->GetTypeKey()));

@@ -1,6 +1,6 @@
 # M10 C3 实施计划：把结构化控制流并入主执行链
 
-> 状态：**部分实施（2026-09-10）**。PR1（统一静态 `If`）、PR2（统一 `While` 与迭代值作用域/生命周期）与 plan identity 覆盖已落地并通过验证；PR3–PR6 未完成，阻塞点见 §7。本文的 §1–§6 保留完整设计与分阶段任务；§7 记录实际落地状态。核对基线：源码审查基于 `origin/dev@cc09d06`。相关现状见 [M10 结构化控制流](M10_STRUCTURED_CONTROL.md) 与 [M10 receipt](M10_CONTROL_RECEIPT.md)；目标阶梯见 [项目目标](../PROJECT_GOAL.md) §2.2，架构分层见 [架构总览](../ARCHITECTURE.md) §3。
+> 状态：**部分实施（2026-09-11）**。PR1（统一静态 `If`）、PR2（统一 `While` 与迭代值作用域/生命周期）、plan identity 覆盖与 PR6（清退第二执行权威）已落地并通过验证；PR3–PR5（控制流 × bounded shape × 持久状态组合）未完成，阻塞点见 §7.2。本文的 §1–§6 保留完整设计与分阶段任务；§7 记录实际落地状态。核对基线：源码审查基于 `origin/dev@cc09d06`。相关现状见 [M10 结构化控制流](M10_STRUCTURED_CONTROL.md)；目标阶梯见 [项目目标](../PROJECT_GOAL.md) §2.2，架构分层见 [架构总览](../ARCHITECTURE.md) §3。
 
 ## 1. 问题定义
 
@@ -401,14 +401,16 @@ git diff --check
 | `RuntimeSession` region walker | 复用 `PrepareCallArguments` 与 `InvokeOrderedModuleEntry`；无第二 allocator / launch 通道 / 状态 owner；backedge 先收集全部 carried 再安装 |
 | `Compiler::Compile` 显式选择策略 | 用 `ProfileRelayControlCapabilities` 廉价探测残余控制拓扑，再决定 `StaticOnly`/`NativeExact`；先在准备阶段失败，不“先静态编译再重试” |
 | plan ABI identity | 结构化拓扑（region 形状、Phi/backedge 接线、循环上限、调用点选择）进入 `BuildPlanAbiFingerprint`；region/task id 为本地定位符按首现重编号，实际谓词值与迭代次数仍是运行时数据 |
+| PR6 清退第二执行权威 | 删除 `CompiledControlFlowGraph`、`Compiler::CompileControlFlowExact`、`ControlExecutionPlan`、`ControlRuntimeSession`、`BoundControlKernel` 与其私有 access/spec、`production_control_flow.cc` 及两个旧控制流测试；include-layer 检查器移除专用数据面例外 |
 
 验证命令与结果（gate-on `out/build/adaptive-bounded-llvm`）：
 
 - `m10_unified_control_llvm_test`：嵌套 `If`（三条路径各一次、每 run 恰好一次 kernel submit）、`While` 0/1/3 次迭代（body 每迭代一次提交）、carried tuple 交换、超 `max_trip_count` 经普通 session 失败、与独立 reference 一致、拓扑 identity 区分；
-- 全量 CTest **78/78**；Python **362/362**；Relay/Pass/include-layer 检查通过；
-- gate-off 构建（`out/build/bounded-cuda`，`KXC_ENABLE_CONTROL_RUNTIME=OFF`）编译通过，`Compiler::Compile` 仍按静态策略拒绝残余控制，`m10_unified_control_llvm_test` 正确输出 SKIP。
+- 全量 CTest **76/76**（删除两个旧控制流测试后）；Python **362/362**；Relay/Pass/include-layer/文档检查通过；
+- gate-off 构建（`out/build/bounded-cuda`，`KXC_ENABLE_CONTROL_RUNTIME=OFF`）编译通过，`Compiler::Compile` 仍按静态策略拒绝残余控制，`m10_unified_control_llvm_test` 正确输出 SKIP；
+- `grep` 全仓库已无 `ControlExecutionPlan`/`ControlRuntimeSession`/`CompiledControlFlowGraph`/`BoundControlKernel`/`CompileControlFlowExact` 的残留引用。
 
-### 7.2 未完成：PR3–PR6 与具体阻塞点
+### 7.2 未完成：PR3–PR5 与具体阻塞点
 
 **PR3（region-aware bounded admission）是硬阻塞，且阻塞点在比计划 §2.3-A 更深的层。**
 
@@ -425,10 +427,10 @@ BuildValueGraph: capability=control_flow.loop; static dataflow does not support 
 
 **PR5（真实 MiniMind 图内循环）依赖 PR3/PR4**；其独立前置（argmax/EOS 编译链表达）也尚未开始。
 
-**PR6（清退第二执行权威）依赖全部消费者迁移。** 当前 `Compiler::CompileControlFlowExact`、`CompiledControlFlowGraph`、`ControlRuntimeSession`、`BoundControlKernel` 仍被既有控制流测试使用，尚未迁移与删除；按计划顺序，这是最后一步。
+**PR6（清退第二执行权威）已完成。** `CompileControlFlowExact` 的消费者是既有控制流测试；随 PR1/PR2 已把这些测试迁移到普通 `Compiler::Compile`/`RuntimeSession`，旧入口与其私有类型、两个旧测试均已删除。
 
 ### 7.3 结论
 
-唯一执行权威的统一在**静态控制流范围内已成立**：`Compiler::Compile` 现在能把带 `If`/有界 `While` 的图发布成普通 `CompiledGraph`，由普通 `RuntimeSession` 执行，无第二 allocator/launch/state owner，且拓扑进入 identity。计划 §3 的决策门（PR2 后确认统一路线成立）已通过。
+唯一执行权威的统一**已完成**：`Compiler::Compile` 现在把带 `If`/有界 `While` 的图发布成普通 `CompiledGraph`，由普通 `RuntimeSession` 执行，无第二 allocator/launch/state owner，拓扑进入 identity，且第二套产物与执行权威（PR6）已删除。计划 §3 的决策门（PR2 后确认统一路线成立）已通过。
 
-PR3–PR6 未完成。计划恢复推进时，应先做 §2.3-A 的 region × 分区设计定稿，并据本次核查把范围上调为“region 感知的 ValueGraph/GraphTemplate”，而非仅拆分 shape 校验分支。
+PR3–PR5 未完成，即控制流尚未与 bounded shape 和持久状态组合。计划恢复推进时，应先做 §2.3-A 的 region × 分区设计定稿，并据本次核查把范围上调为“region 感知的 ValueGraph/GraphTemplate”，而非仅拆分 shape 校验分支。

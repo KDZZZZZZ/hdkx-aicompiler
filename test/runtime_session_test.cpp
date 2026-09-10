@@ -18,17 +18,11 @@
 #include <vector>
 
 #include "kxc/runtime/compiled_module.h"
-#include "kxc/runtime/control_execution_plan.h"
 #include "kxc/runtime/session.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 #include "../src/runtime/internal/memory_plan.h"
 
 namespace {
-
-static_assert(!std::is_constructible_v<
-              kxc::runtime::RuntimeSession, kxc::api::CompiledModule,
-              kxc::runtime::ControlExecutionPlan>,
-              "RuntimeSession must not accept a control execution plan");
 
 #define TEST_CHECK(condition, message)                                           \
     do {                                                                          \
