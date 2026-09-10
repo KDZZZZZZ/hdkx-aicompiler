@@ -186,17 +186,38 @@ PR4 给状态绑定增加“所属状态更新 region”。该字段**必须在 
 
 **目标**：同一份带控制流的产物服务多个合法 shape，不引入第二套 shape evaluator。
 
+> **区域 × 分区设计定稿（2026-09-11，实现前置）**
+>
+> 本节固定 PR3 的模型与类型改动。核查结论：`GraphTemplate::Verify()`（`src/compiler/shape/shape_specialization.cc`）强制线性“生产者先于消费者”，而互斥分支的 unit 在扁平顺序上无法表达；`BuildValueGraph`（`src/compiler/graph/value_graph.cc:166,170`）直接拒绝 `If`/`While`；`BuildTemplate`（`src/compiler/shape/shape_exact.cc:165`）用 `BuildStaticExecutablePlan` 取输出边界，对控制图失败。
+>
+> **1. unit 顺序与分区。** 控制 lowering（`LowerPreparedRelayToControlPlanWithSidecar`）已经产出**稠密、按 lowering 顺序**的 `PrimitiveUnit` 列表和 region 结构。PR3 以该列表作为 `ordered_units` 的规范顺序，不再为控制图重建 `ValueGraph`；`PartitionedGraph` 直接从 control plan 构造：`units = primitive_units`，`calls[i] = KernelCall(unit.symbol, unit.boundary_input_value_ids, unit.output_value_ids)`，`input/constant/output ids` 取 `plan.graph_inputs` / `plan.constant_values` / `plan.graph_outputs`。每个 unit 恰好一个调用点，与运行时 `structured_schedule.call_index` 一致。
+>
+> **2. GraphTemplate 的最小结构化扩展。** 给 `shape::GraphTemplate` 增加**可选** `synthesized_value_names`（由控制拓扑而非某个单元产出的值：Phi 结果、loop result/body argument）。默认空，线性行为逐字节不变。`Verify()` 仅在此基础上放宽一处：允许 shape-program output 由 synthesized 值满足，不要求 unit 生产者。**不改**任何线性规则。
+>
+> **3. 区域感知的形状证明。** 扩展受限形状解析器（`shape_value_resolver.cc`）遍历 `If`/`While`/`Tuple`/`TupleGetItem`/`Let`，规则：
+>   - `If`：两分支逐叶必须同 kind/同 rank/同符号维表达式，结果取合并后的证明；两支各自的调用都进入证明序列（都要编译，不能只证明走到的分支）。
+>   - `While`：loop var 以 initial 的叶形状绑定（循环不变量）；condition 必须是单一 data 叶（CPU 标量 bool）；body 逐叶必须与 initial 同 dims（本步不允许 backedge 改变 tensor shape）。
+>   - `Let`/`Tuple`/`TupleGetItem`：结构透明，只做叶对齐。
+>   - 解析器额外产出**按值/调用可查的符号维**，供 ShapeProgram 的每个命名值使用；命名沿用 `ValueName(id)`，与 control plan 的 value id 对齐。
+>
+> **4. 证明序列与 unit 对齐。** 解析器的遍历顺序与 control lowering 的 unit 顺序必须一致，或改为**按值 id 查表**而非按位置对齐。定稿选择后者：解析器输出 `value_id -> dims`，`PrepareBoundedCompile` 按 control plan 的 value id 组装 ShapeProgram 与逐 unit 合同，消除两条遍历顺序耦合的风险。
+>
+> **5. 运行时 extent。** 结构化 bounded plan 携带 `structured_schedule`；walker 对每个 kernel task 沿用线性路径的 `ModuleInvocationContract` 求值：region 内 kernel 的 runtime extent 只引用图输入轴（fresh-output 范围），不引用持久状态（PR4）。
+>
+> **6. 本步不放开**：持久 state、region 边界的状态更新、CUDA、请求批处理；`ValueGraph` 本身仍只服务线性静态路径，控制图走 control plan 的独立分区入口。
+
 **主要修改位置**
 
 | 文件 | 修改内容 |
 |---|---|
-| `include/kxc/compiler/restricted_symbolic_shape.h` | 扩展现有受限 admission 合同及版本，不新建控制流专用请求体系 |
-| `src/compiler/shape/restricted_symbolic_shape.cc` | 处理 region 中的参数、调用与结果映射 |
-| `src/compiler/internal/dynamic_shape_contract.h`、`src/compiler/shape/dynamic_shape_contract.cc` | 将 unit shape contract 与结构化拓扑关联，保留局部输入与 extent ABI 顺序 |
-| `src/compiler/control_flow/control_plan.*`、`relay_control_plan.cc` | 拆开“结构正确”与“所有 shape 必须 static exact”的校验 |
-| `src/runtime/session.cc` | 在选中的 region/调用点上求值已 lower 的 invocation contract |
+| `include/kxc/compiler/shape_specialization.h` | `GraphTemplate` 增加可选 `synthesized_value_names`；`Verify()` 只放宽合成值一处 |
+| `src/compiler/shape/shape_value_resolver.{h,cc}` | 遍历 region（If/While/Tuple/TupleGetItem/Let），产出按 value id 可查的符号维与结构化拓扑 |
+| `src/compiler/shape/restricted_symbolic_shape.cc` | 接受控制 representative；用 value-id 查表组装 ShapeProgram |
+| `src/compiler/shape/dynamic_shape_contract.{h,cc}` | `PrepareBoundedCompile` 结构化入口：从 control plan 构造 PartitionedGraph + 逐 unit 合同 + 结构化 schedule |
+| `src/compiler/compiler.cc` | `CompileBounded` 在结构化时把 schedule 装进 plan |
+| `src/compiler/control_flow/control_plan.*` | 拆开“结构正确”与“必须 static exact”校验 |
 
-**不是删两个 `StaticOnly()` 就完成**：`PrepareBoundedCompile` 对 representative 与 logical boundary 都走静态准备，再构造**平面** `PartitionedGraph`，unit 数量/顺序/`GraphTemplate` 校验均建立于此（`dynamic_shape_contract.cc:357,410-418`）；公开 symbolic adapter 也明确排斥控制流。region 感知分区（§2.3-A）是本 PR 的前提。
+**不是删两个 `StaticOnly()` 就完成**：`PrepareBoundedCompile` 对 representative 与 logical boundary 都走静态准备，再构造**平面** `PartitionedGraph`，unit 数量/顺序/`GraphTemplate` 校验均建立于此（`dynamic_shape_contract.cc:357,410-418`）；公开 symbolic adapter 也明确排斥控制流。region 感知分区（上节定稿）是本 PR 的前提。
 
 **第一版允许范围**
 

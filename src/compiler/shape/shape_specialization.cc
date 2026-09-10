@@ -125,6 +125,17 @@ GraphTemplate::GraphTemplate(GraphSemanticKey key, ShapeProgram shape_program,
     : key_(std::move(key)), shape_program_(std::move(shape_program)), ordered_units_(std::move(ordered_units)) {
   Verify();
 }
+GraphTemplate::GraphTemplate(GraphSemanticKey key, ShapeProgram shape_program,
+                             std::vector<UnitSkeleton> ordered_units,
+                             std::vector<std::string> synthesized_value_names)
+    : key_(std::move(key)), shape_program_(std::move(shape_program)),
+      ordered_units_(std::move(ordered_units)),
+      synthesized_value_names_(std::move(synthesized_value_names)) {
+  Verify();
+}
+const std::vector<std::string>& GraphTemplate::synthesized_value_names() const noexcept {
+  return synthesized_value_names_;
+}
 const GraphSemanticKey& GraphTemplate::key() const noexcept { return key_; }
 const ShapeProgram& GraphTemplate::shape_program() const noexcept { return shape_program_; }
 const std::vector<UnitSkeleton>& GraphTemplate::ordered_units() const noexcept { return ordered_units_; }
@@ -140,6 +151,11 @@ std::string GraphTemplate::CanonicalBytes() const {
     for (const std::string& name : unit.input_value_names) AppendField(&bytes, name);
     AppendU64(&bytes, unit.output_value_names.size());
     for (const std::string& name : unit.output_value_names) AppendField(&bytes, name);
+  }
+  // Appended only when non-empty so linear templates keep v2 bytes exactly.
+  if (!synthesized_value_names_.empty()) {
+    AppendU64(&bytes, synthesized_value_names_.size());
+    for (const std::string& name : synthesized_value_names_) AppendField(&bytes, name);
   }
   return bytes;
 }
@@ -185,8 +201,21 @@ void GraphTemplate::Verify() const {
     }
     available_values.insert(unit.output_value_names.begin(), unit.output_value_names.end());
   }
+  std::set<std::string> synthesized;
+  for (const std::string& value_name : synthesized_value_names_) {
+    CheckName(value_name, "synthesized value name");
+    if (declared_values.count(value_name) == 0) {
+      Invalid("synthesized value '" + value_name + "' has no shape contract");
+    }
+    if (!synthesized.insert(value_name).second ||
+        produced_values.count(value_name) != 0 ||
+        available_values.count(value_name) != 0) {
+      Invalid("synthesized value '" + value_name + "' conflicts with a produced value");
+    }
+  }
   for (const NamedTensorContract& value : shape_program_.outputs()) {
-    if (available_values.count(value.name) == 0) {
+    if (available_values.count(value.name) == 0 &&
+        synthesized.count(value.name) == 0) {
       Invalid("shape-program output '" + value.name + "' has no producer");
     }
   }

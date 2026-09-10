@@ -24,6 +24,7 @@ class ModuleInvocationContract;
 namespace kxc::api::internal {
 
 class BoundedCompilePreparation;
+class DynamicUnitShapeContract;
 
 struct CompiledPrimitive final {
     PrimitiveUnitId unit_id{-1};
@@ -66,6 +67,18 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
     const CompileConfig& config,
     const CompilerExecutionContract& contract,
     const std::vector<PrimitiveUnitId>& requested_unit_ids);
+
+/*! \brief Compile structured-plan units against explicit per-unit shape
+ *  contracts, without a BoundedCompilePreparation or a flat ValueGraph.
+ *
+ *  Used by the region-aware bounded path where units come from the control
+ *  lowerer. Each contract is authoritative for its unit's runtime extents. */
+CompiledPrimitiveBatch CompilePrimitiveUnitsWithShapeContracts(
+    const std::vector<PrimitiveUnit>& units,
+    const std::vector<LogicalValueContract>& values,
+    const std::vector<DynamicUnitShapeContract>& shape_contracts,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract);
 
 CompiledModule AssemblePrimitiveModule(
     const CompiledPrimitiveBatch& batch,
