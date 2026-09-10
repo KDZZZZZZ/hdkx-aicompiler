@@ -270,6 +270,10 @@ MatMul 基础见 [输出归约报告](implementation/GPU_OWNED_REDUCTION_REPORT.
 `ExecutablePlan` 与具体运行时实现无关。其 `ValueSpec` 条目描述逻辑值 ID、物理存储 ID、形状、数据类型、设备、输入/常量/输出角色、别名、状态、写模式、活跃区间和 `valid_bytes`；
 `KernelCall` 条目描述符号及有序的逻辑输入输出。
 
+`ExecutablePlan` 还可选携带 `structured_schedule`：一组结构化 region，其 task 只能是 kernel（按 `call_index` 引用本计划的调用点）、branch（CPU 标量 bool 谓词 + 独立 then/else region + Phi 绑定）或 loop（condition-before-body、carried 绑定、`max_trip_count`）。它是**正交方面**而非新的 `ExecutablePlanMode`：`mode` 仍决定分配与状态合同，`calls()` 仍是每个调用点恰好一个模块入口和一个 artifact pin，拓扑只决定“执行哪些调用点、以什么顺序”。没有 schedule 时按线性路径执行；有 schedule 时由同一 `RuntimeSession` 遍历 region，复用同一参数准备、模块调用和完成管理，不新增 allocator、launch 通道或 state owner。结构化拓扑进入 plan ABI identity；region/task id 是本地定位符，实际谓词值与迭代次数是运行时数据，不进身份。
+
+结构化计划当前仍限定静态模式：与 bounded/state 的组合（region 边界的状态更新、region-aware shape 证明）尚未实现，见 [M10 C3 计划](implementation/M10_C3_UNIFIED_CONTROL_PLAN.md) §7。
+
 `RuntimeSession` 在执行前校验模块与计划的边界：
 
 - 模块入口与计划调用一一匹配；
