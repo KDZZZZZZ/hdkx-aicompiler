@@ -461,7 +461,13 @@ git diff --check
 
 验证：`test/bounded_control_flow_llvm_test.cpp` 的 `bounded_state_append_at_loop_region` 证明一次循环迭代恰好提交一行（extent 1→2），且追加行落在推进后的 extent；gate-on CTest 77/77、Python 362/362、全部检查器通过。
 
-**PR5（真实 MiniMind 图内循环）未完成**，依赖 PR4（已完成）；其独立前置（argmax/EOS 编译链表达）尚未开始。
+**PR5（真实 MiniMind 图内循环）未完成**，依赖 PR4（已完成）。已推进的前置：
+
+- 新增 canonical `reduce_max` / `reduce_min` 算子（契约、生成注册、Attrs、InferType、生产 RelayToTE lowering、FFI、ONNX 导入 ReduceMax/ReduceMin，数值与 lowering 测试）。这是图内 argmax 的第一步。
+- 仍需补齐：图内 argmax 的索引选择半部——TE 的 `comm_reduce` 只产生值表达式，不带归约索引；仓库也没有 `arange`/`range` 算子可供 `where(equal(x,max), index, +inf) → reduce_min` 组合。因此需要新增一个索引跟踪归约（或先挂载 `arange` 再组合）并明确 tie-breaking 语义。
+- 仍需接入：把真实 bounded decode 计算体（`out/fx_minimind_bounded_decode`，683 Relay 节点）作为图内 While 的 body；受限形状解析器需覆盖该图，且循环不变量成立（容量型 KV 的 tensor shape 固定，仅 extent 随 PR4 推进）。这一步是主机调度合同 + 真实模型数值验收，尚未开始。
+
+PR5 是独立的大切片（真实模型图内循环 + 图内 token 选择），不属于已完成的“统一执行权威 / region-aware bounded admission / region 边界状态提交”重构范围。
 
 **PR6（清退第二执行权威）已完成。** `CompileControlFlowExact` 的消费者是既有控制流测试；随 PR1/PR2 已把这些测试迁移到普通 `Compiler::Compile`/`RuntimeSession`，旧入口与其私有类型、两个旧测试均已删除。
 
