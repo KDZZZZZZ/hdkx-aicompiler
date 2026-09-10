@@ -493,8 +493,6 @@ void TestSlice() {
     CompileAndRun("slice_empty", empty_function, {Input(source), Output(empty_output)});
 }
 
-// 验证 ReduceMean 的轴和 keepdims 语义。
-// 三维用例统一使用 data[i][j][k] = i*100 + j*10 + k 的 [2,3,4] 输入。
 // 验证 ReduceMax / ReduceMin 的轴和 keepdims 语义。
 // 复用 data[i][j][k] = i*100 + j*10 + k 的 [2,3,4] 输入。
 void TestReduceMaxMin() {
@@ -555,6 +553,8 @@ void TestReduceMaxMin() {
     }
 }
 
+// 验证 ReduceMean 的轴和 keepdims 语义。
+// 三维用例统一使用 data[i][j][k] = i*100 + j*10 + k 的 [2,3,4] 输入。
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("reduce_mean"), {data},
