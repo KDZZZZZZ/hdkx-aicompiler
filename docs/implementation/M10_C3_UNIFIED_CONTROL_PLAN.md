@@ -461,13 +461,14 @@ git diff --check
 
 验证：`test/bounded_control_flow_llvm_test.cpp` 的 `bounded_state_append_at_loop_region` 证明一次循环迭代恰好提交一行（extent 1→2），且追加行落在推进后的 extent；gate-on CTest 77/77、Python 362/362、全部检查器通过。
 
-**PR5（真实 MiniMind 图内循环）未完成**，依赖 PR4（已完成）。已推进的前置：
+**PR5（真实 MiniMind 图内循环）未完成**，依赖 PR4（已完成）。已完成的前置与剩余阻塞：
 
-- 新增 canonical `reduce_max` / `reduce_min` 算子（契约、生成注册、Attrs、InferType、生产 RelayToTE lowering、FFI、ONNX 导入 ReduceMax/ReduceMin，数值与 lowering 测试）。这是图内 argmax 的第一步。
-- 仍需补齐：图内 argmax 的索引选择半部——TE 的 `comm_reduce` 只产生值表达式，不带归约索引；仓库也没有 `arange`/`range` 算子可供 `where(equal(x,max), index, +inf) → reduce_min` 组合。因此需要新增一个索引跟踪归约（或先挂载 `arange` 再组合）并明确 tie-breaking 语义。
-- 仍需接入：把真实 bounded decode 计算体（`out/fx_minimind_bounded_decode`，683 Relay 节点）作为图内 While 的 body；受限形状解析器需覆盖该图，且循环不变量成立（容量型 KV 的 tensor shape 固定，仅 extent 随 PR4 推进）。这一步是主机调度合同 + 真实模型数值验收，尚未开始。
+- **已完成**：图内 token 选择的两个算子已挂载：`reduce_max`/`reduce_min`（值半部）与 `argmax`（索引选择半部，索引跟踪归约 + 显式 tie-breaking：默认 first-occurrence，`select_last_index=1` 为 last-occurrence；int64 输出；ONNX ArgMax 映射）。契约 44/44，数值与生产 lowering 测试通过。
+- **剩余阻塞一：循环内的动态 KV 写入。** 容量型 decode（`out/fx_decode_stateful`，past `[1,32,4,96]` 固定）要在循环体内把新 token 的 KV 写到递增的 `position` 槽位。仓库没有 scatter / 动态 in-place 写入原语（算子集里只有 `gather` 读），而 PR4 的 region 提交是**在循环体外**由会话把 append source 复制到 state——它无法把"写到 body 内部第 `position` 槽"表达成一个 Relay 计算体。紧凑型 decode（`out/fx_minimind_bounded_decode`，past `[1,P,4,96]` → present `[1,P+1,...]`）则每次迭代改变 tensor shape，被 PR3 的循环形状不变量拒绝。因此需要新增一个动态写入原语（或把导出改成直接输出"追加的 KV token"）。
+- **剩余阻塞二：把导入图内联进 While body。** 真实 decode 是独立导入的 Function（1559 节点 / 446 参数），Relay 没有函数内联/参数替换工具，While body 必须是同一 Function 内的表达式。需要新增参数替换（param → loop-carried var）或按导入图直接生成 loop body。
+- **尚未开始**：主机调度合同（position/mask/停止条件）与真实模型图内循环的数值验收。
 
-PR5 是独立的大切片（真实模型图内循环 + 图内 token 选择），不属于已完成的“统一执行权威 / region-aware bounded admission / region 边界状态提交”重构范围。
+这两个阻塞都是新的编译器能力（动态写入原语 + 函数内联），不是已完成的“统一执行权威 / region-aware bounded admission / region 边界状态提交”重构的一部分。
 
 **PR6（清退第二执行权威）已完成。** `CompileControlFlowExact` 的消费者是既有控制流测试；随 PR1/PR2 已把这些测试迁移到普通 `Compiler::Compile`/`RuntimeSession`，旧入口与其私有类型、两个旧测试均已删除。
 
