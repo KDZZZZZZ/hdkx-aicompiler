@@ -272,6 +272,20 @@ Type EqualInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(BroadcastShape("equal", ShapeVector(lhs), ShapeVector(rhs)), "bool");
 }
 
+// 推导 less 的广播结果类型；数值小于输出 bool。
+Type LessInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    RequireArity("less", input_types, 2);
+    const auto* lhs = RequireTensor("less", input_types[0], "lhs");
+    const auto* rhs = RequireTensor("less", input_types[1], "rhs");
+    RequireSameDType("less", lhs, rhs);
+    if (!IsEqualInputDType(lhs->dtype)) {
+        throw std::runtime_error(
+            "less supports same-dtype int32, int64, or float32 inputs, got " + lhs->dtype);
+    }
+    return MakeTensorType(BroadcastShape("less", ShapeVector(lhs), ShapeVector(rhs)), "bool");
+}
+
 // M4/M5 静态子集共享：Neg/Sigmoid 是 float32-only 的 fieldless 一元算子，
 // shape 与 dtype 原样保持；其余 dtype 必须在类型推导处立即失败。
 Type UnaryFloat32InferType(const std::string& op_name, const Array<Type>& input_types) {

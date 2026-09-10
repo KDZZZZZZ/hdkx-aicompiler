@@ -15,7 +15,7 @@ Type MultiplyInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type DivideInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type EqualInferType(const Attrs& attrs, const Array<Type>& input_types);
 bool IsEqualInputDType(const std::string& dtype);
-Type NegInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type LessInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SigmoidInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type TanhInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ErfInferType(const Attrs& attrs, const Array<Type>& input_types);

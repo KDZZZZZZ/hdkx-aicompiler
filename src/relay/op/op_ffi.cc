@@ -45,6 +45,10 @@ Call MakeEqual(Expr lhs, Expr rhs) {
     return Call(GetOp("equal"), {lhs, rhs});
 }
 
+Call MakeLess(Expr lhs, Expr rhs) {
+    return Call(GetOp("less"), {lhs, rhs});
+}
+
 // 构造一元逐元素取负调用。
 Call MakeNeg(Expr data) {
     return Call(GetOp("neg"), {data});
@@ -279,6 +283,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.subtract").set_body(ToPackedFunc(MakeSub
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.mul").set_body(ToPackedFunc(MakeMul));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.divide").set_body(ToPackedFunc(MakeDivide));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.equal").set_body(ToPackedFunc(MakeEqual));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.less").set_body(ToPackedFunc(MakeLess));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.neg").set_body(ToPackedFunc(MakeNeg));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sigmoid").set_body(ToPackedFunc(MakeSigmoid));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.tanh").set_body(ToPackedFunc(MakeTanh));

@@ -97,6 +97,7 @@ ONNX_TO_RELAY = {
     "Gather": "gather",
     "Where": "where",
     "Equal": "equal",
+    "Less": "less",
     "LayerNormalization": "nn_layer_norm",
     "Slice": "slice",
     "Split": "split",
@@ -529,10 +530,10 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
-        if node.op_type == "Equal":
+        if node.op_type in {"Equal", "Less"}:
             inferred_static_specs[node.output[0]] = _infer_equal_spec(
-                node, input_specs, params, inferred_static_specs, value_info_by_name,
-                output_declarations, default_batch,
+                node.op_type, node, input_specs, params, inferred_static_specs,
+                value_info_by_name, output_declarations, default_batch,
             )
         if node.op_type in {"Neg", "Sigmoid", "Tanh", "Erf"} and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_unary_math_spec(
@@ -1951,6 +1952,7 @@ def _infer_where_spec(
 
 
 def _infer_equal_spec(
+    op_type: str,
     node: onnx.NodeProto,
     input_specs: dict[str, TensorSpec],
     params: dict[str, ParamTensor],
@@ -1959,39 +1961,39 @@ def _infer_equal_spec(
     output_declarations: dict[str, list[onnx.ValueInfoProto]],
     default_batch: int | None,
 ) -> TensorSpec:
-    """Infer the static bool output of an opset-17 Equal node.
+    """Infer the static bool output of an opset-17 Equal/Less node.
 
-    ONNX Equal is fieldless: two inputs, one output, no attributes. Both inputs
-    must carry the same dtype from the C-line verified subset (int32, int64,
+    Both operators are fieldless: two inputs, one output, no attributes. Both
+    inputs must carry the same dtype from the verified subset (int32, int64,
     float32); the NumPy multidirectional broadcast shape is proven here so the
     result can feed Where as a condition.
     """
     node_name = node.name or "<unnamed>"
     if len(node.input) != 2 or not all(node.input):
         raise ValueError(
-            f"Equal node '{node_name}' requires exactly two non-empty inputs"
+            f"{op_type} node '{node_name}' requires exactly two non-empty inputs"
         )
     lhs, rhs = (
-        _resolve_static_input("Equal", node_name, name, input_specs, params,
+        _resolve_static_input(op_type, node_name, name, input_specs, params,
                               inferred_specs, value_info_by_name, default_batch)
         for name in node.input
     )
     if lhs.dtype not in EQUAL_DTYPES or rhs.dtype not in EQUAL_DTYPES:
         raise ValueError(
-            f"Equal node '{node_name}' requires same-dtype int32, int64, or "
+            f"{op_type} node '{node_name}' requires same-dtype int32, int64, or "
             f"float32 inputs; got {lhs.dtype} and {rhs.dtype}"
         )
     if lhs.dtype != rhs.dtype:
         raise ValueError(
-            f"Equal node '{node_name}' requires matching input dtypes; "
+            f"{op_type} node '{node_name}' requires matching input dtypes; "
             f"got {lhs.dtype} and {rhs.dtype}"
         )
     result = TensorSpec(
         name=node.output[0],
-        shape=_broadcast_shapes("Equal", node_name, lhs.shape, rhs.shape),
+        shape=_broadcast_shapes(op_type, node_name, lhs.shape, rhs.shape),
         dtype="bool",
     )
-    _validate_declared_output("Equal", node_name, result, output_declarations, default_batch)
+    _validate_declared_output(op_type, node_name, result, output_declarations, default_batch)
     return result
 
 
@@ -2456,10 +2458,10 @@ def _convert_attrs(
                 f"Where node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
-    if node.op_type == "Equal":
+    if node.op_type in {"Equal", "Less"}:
         if attrs:
             raise ValueError(
-                f"Equal node '{node.name or '<unnamed>'}' does not support attributes"
+                f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
     if node.op_type in {"Add", "Mul", "Sub", "Div", "Sqrt"}:

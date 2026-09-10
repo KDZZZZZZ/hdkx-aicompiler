@@ -157,6 +157,23 @@ Tensor equal(const Tensor& A, const Tensor& B, std::string name, std::string tag
         std::move(name), std::move(tag));
 }
 
+Tensor less(const Tensor& A, const Tensor& B, std::string name, std::string tag) {
+    if (!A.defined() || !B.defined()) {
+        throw std::runtime_error("less requires defined tensors");
+    }
+    if (A->dtype != B->dtype) {
+        throw std::runtime_error("less input dtypes must match");
+    }
+    const auto output_shape = detail::InferBroadcastShape(A->shape, B->shape);
+    return compute(
+        output_shape,
+        [A, B, output_shape](const Array<tir::Var>& indices) {
+            return A(detail::GetBroadcastIndices(indices, A->shape, output_shape)) <
+                   B(detail::GetBroadcastIndices(indices, B->shape, output_shape));
+        },
+        std::move(name), std::move(tag));
+}
+
 }  // namespace topi
 }  // namespace te
 }  // namespace kxc

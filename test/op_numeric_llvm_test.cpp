@@ -594,6 +594,39 @@ void TestArgMax() {
     }
 }
 
+void TestLess() {
+    // int32: a < b; strict, so equal elements are false.
+    kxc::Var a("a", kxc::TensorType({3}, "int32"));
+    kxc::Var b("b", kxc::TensorType({3}, "int32"));
+    kxc::Call call(kxc::relay::Op::Get("less"), {a, b});
+    kxc::Function func({a, b}, call);
+    const std::vector<int32_t> a_data = {1, 2, 3};
+    const std::vector<int32_t> b_data = {1, 0, 5};
+    std::vector<uint8_t> out(3, 1);
+    CompileAndRun("less", func, {Input(a_data), Input(b_data), Output(out)});
+    Check(out == std::vector<uint8_t>({0, 0, 1}), "less int32 mismatch");
+
+    // int64 trailing-axis broadcast, matching the attention-mask use.
+    kxc::Var lhs("lhs", kxc::TensorType({2, 3}, "int64"));
+    kxc::Var rhs("rhs", kxc::TensorType({3}, "int64"));
+    kxc::Call broadcast_call(kxc::relay::Op::Get("less"), {lhs, rhs});
+    kxc::Function broadcast_func({lhs, rhs}, broadcast_call);
+    const std::vector<int64_t> lhs_data = {0, 1, 2, 3, 4, 5};
+    const std::vector<int64_t> rhs_data = {3, 3, 3};
+    std::vector<uint8_t> broadcast_out(6, 0);
+    CompileAndRun("less_int64_broadcast", broadcast_func,
+                  {Input(lhs_data), Input(rhs_data), Output(broadcast_out)});
+    Check(broadcast_out == std::vector<uint8_t>({1, 1, 1, 0, 0, 0}),
+          "less int64 broadcast mismatch");
+
+    // Production per-primitive lowering must accept the op.
+    const auto units = kxc::test_support::LowerPrimitiveUnits(
+        kxc::Function({a, b}, call));
+    if (units.size() != 1) {
+        throw std::runtime_error("less lowering arity mismatch");
+    }
+}
+
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("reduce_mean"), {data},
@@ -1373,6 +1406,7 @@ int main() {
         {"gather", TestGather},
         {"where", TestWhere},
         {"equal", TestEqual},
+        {"less", TestLess},
         {"neg", TestNeg},
         {"sigmoid", TestSigmoid},
         {"tanh_erf", TestVisionUnaryMath},

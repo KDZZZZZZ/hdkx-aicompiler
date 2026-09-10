@@ -282,6 +282,41 @@
         "Gather"
       ]
     },
+    "less": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Less"
+      ],
+      "registration": {
+        "description": "Element-wise less-than comparison with broadcast.",
+        "arguments": [
+          {
+            "name": "lhs",
+            "type": "Tensor",
+            "description": "The left hand side input tensor."
+          },
+          {
+            "name": "rhs",
+            "type": "Tensor",
+            "description": "The right hand side input tensor."
+          }
+        ],
+        "type_infer_symbol": "LessInferType",
+        "relay_to_te_symbol": "LessCompute"
+      }
+    },
     "masked_softmax": {
       "schema_version": 1,
       "category": "nn",

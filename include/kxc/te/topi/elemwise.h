@@ -57,6 +57,10 @@ Tensor cast(const Tensor& x, DataType dtype, std::string name = "cast", std::str
 Tensor equal(const Tensor& A, const Tensor& B, std::string name = "equal",
              std::string tag = kBroadcast);
 
+// Broadcast numeric less-than; produces a Bool tensor via the TIR LT expression.
+Tensor less(const Tensor& A, const Tensor& B, std::string name = "less",
+            std::string tag = kBroadcast);
+
 } // namespace topi
 } // namespace te
 } // namespace kxc

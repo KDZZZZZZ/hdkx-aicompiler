@@ -107,6 +107,24 @@ te::Tensor EqualCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     return RequireDefined("equal", te::topi::equal(inputs[0], inputs[1], "T_equal"));
 }
 
+te::Tensor LessCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                       const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("less", inputs, 2);
+    const auto* output = RequireTensorOutput("less", out_type);
+    if (inputs[0]->dtype != inputs[1]->dtype) {
+        throw std::runtime_error("less input dtypes must match");
+    }
+    if (!MatchesEqualInputDType(inputs[0]->dtype)) {
+        throw std::runtime_error(
+            "less supports same-dtype int32, int64, or float32 inputs before lowering");
+    }
+    if (output->dtype != "bool") {
+        throw std::runtime_error("less output dtype must be bool");
+    }
+    return RequireDefined("less", te::topi::less(inputs[0], inputs[1], "T_less"));
+}
+
 te::Tensor NegCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                       const kxc::Type& out_type) {
     (void)attrs;
