@@ -1160,8 +1160,9 @@ if(KXC_BUILD_PASS_TESTS)
   add_test(NAME m10_control_loop_llvm_test
     COMMAND "$<TARGET_FILE:m10_control_loop_llvm_test>")
   set_tests_properties(m10_control_loop_llvm_test PROPERTIES
-    LABELS "control-flow;control-runtime;bounded;cpu"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+    LABELS "control-flow;control-runtime;bounded;cpu;minimind"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test"
+    ENVIRONMENT "KXC_MINIMIND_CONTROL_LOOP_DIR=$ENV{KXC_MINIMIND_CONTROL_LOOP_DIR};KXC_MINIMIND_BOUNDED_DECODE_DIR=$ENV{KXC_MINIMIND_BOUNDED_DECODE_DIR}")
   add_custom_target(run_control_flow_tests
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
             -L control-flow
