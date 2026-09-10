@@ -714,8 +714,12 @@ CompiledGraph CompileStructuredPipeline(Function function, CompileConfig config)
     assemble_span.AddMetric("primitive_count",
                             static_cast<double>(primitive_count));
     if (profile_context) profile_context->Flush();
-    return CompiledGraphAccess::Create(std::move(module), std::move(plan),
-                                       std::move(pins), graph_semantic_key);
+    CompiledGraph result = CompiledGraphAccess::Create(
+        std::move(module), std::move(plan), std::move(pins),
+        graph_semantic_key);
+    // Force the plan ABI to include the structured topology before publication.
+    (void)BuildPlanAbiFingerprint(result);
+    return result;
 }
 
 }  // namespace internal

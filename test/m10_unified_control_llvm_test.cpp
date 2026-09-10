@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "kxc/compiler/compiler.h"
+#include "kxc/compiler/experimental_identity.h"
 #include "kxc/profiling/profiling.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/session.h"
@@ -368,6 +369,35 @@ bool TestUnifiedCarriedTupleSwap() {
     return true;
 }
 
+bool TestUnifiedTopologyIdentity() {
+#if KXC_ENABLE_CONTROL_RUNTIME && KXC_USE_LLVM
+    const std::string bundle = BundleDir("identity");
+    std::shared_ptr<kxc::profiling::ProfileContext> context;
+    const CompiledGraph if_graph =
+        CompileProfiled(NestedIfFunction(), bundle, &context);
+    const CompiledGraph while_graph =
+        CompileProfiled(WhileFunction(3), bundle, &context);
+    const CompiledGraph while_graph_other =
+        CompileProfiled(WhileFunction(2), bundle, &context);
+    const auto if_fingerprint =
+        kxc::api::BuildPlanAbiFingerprint(if_graph);
+    const auto while_fingerprint =
+        kxc::api::BuildPlanAbiFingerprint(while_graph);
+    const auto while_other_fingerprint =
+        kxc::api::BuildPlanAbiFingerprint(while_graph_other);
+    CHECK(if_fingerprint.defined() && while_fingerprint.defined() &&
+              while_other_fingerprint.defined(),
+          "structured plans must have a defined plan ABI fingerprint");
+    CHECK(if_fingerprint != while_fingerprint,
+          "distinct structured topologies must have distinct plan ABI identity");
+    CHECK(while_fingerprint != while_other_fingerprint,
+          "a different loop bound must change plan ABI identity");
+    CHECK(while_fingerprint == kxc::api::BuildPlanAbiFingerprint(while_graph),
+          "the same structured plan must have stable identity");
+#endif
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -381,6 +411,7 @@ int main() {
         {"unified_carried_tuple_swap", TestUnifiedCarriedTupleSwap},
         {"unified_while_bound_rejected", TestUnifiedWhileBoundRejected},
         {"unified_reference_agreement", TestUnifiedReferenceAgreement},
+        {"unified_topology_identity", TestUnifiedTopologyIdentity},
     };
     int failures = 0;
     for (const Test& test : tests) {
