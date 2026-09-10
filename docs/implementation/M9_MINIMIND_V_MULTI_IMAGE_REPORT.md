@@ -44,4 +44,4 @@ Python profile 正/负例、导出完整性、ONNX shape inference 和 fixture �
 
 ## 边界
 
-本模块验收的是固定两图、固定 64-token 图像槽位、固定 2-token 分隔符和固定文本前后缀布局。profile helper 只接受能放入语言模型 2048 位置上限的固定图像数，但除单图/双图外的数量没有本次端到端证据；任意图像位置、变长图文、跨请求多图状态、GPU、多机分布式 decode 和新 IR 仍未完成。
+本模块验收的是固定两图、固定 64-token 图像槽位、固定 2-token 分隔符和固定文本前后缀布局。profile helper 只接受能放入语言模型 2048 位置上限的固定图像数，但除单图/双图外的数量没有本次端到端证据；任意图像位置和变长图文随后在 0～3 张图、S≤224 的范围内由 [有界报告](M9_MINIMIND_V_BOUNDED_REPORT.md) 覆盖；跨请求多图状态、GPU、多机分布式 decode 和新 IR 仍未完成。

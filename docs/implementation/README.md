@@ -4,7 +4,7 @@
 
 这组文档现在分成 M0–M10 十一个模块。M0/M1/M4/M5 的第一波切片已经完成；M9 负责先锁定 MiniMind 导出合同，随后 M2/M3/M4/M5 的后续切片并行推进 L1a 静态 prefill 和 L1b 多步 decode。M10 单独承接已经存在但默认关闭的结构化控制流：先补 gate-on LLVM 证据，再决定它是否适合真实生成循环。M6–M8 以真实模型运行证据为输入，M7 的进程内 CPU/LLVM 静态整图分发和完整 MiniMind prefill 已在限定范围内完成。每篇文档开头都先说明现状和要做的模块，再给出步骤、代码落点和验收条件。
 
-> 状态：第一波已完成，第二波结果见 [G2 记录](G2_RECORD.md)。M2 的真实容量/变长模型状态绑定、M1 模型关联、host greedy 和 M6 静态热替换执行切片已完成；M6 后续保留会话 KV 的静态 CPU 热替换也已通过完整模型、三套 CPU 回归及集成审计，见 [状态报告](M6_STATEFUL_REPORT.md)。相同有界 profile/状态 ABI 的 CPU 热替换随后通过完整八层模型及四配置回归，见 [有界报告](M6_BOUNDED_REPORT.md)。请求批处理热替换也已完成，四个请求的五个批次保留队列与 KV，代际 1→2→2→1→1；最终四配置回归 55/55、56/56、70/70、75/75 及集成审计通过，见 [请求报告](M6_REQUEST_BATCHING_REPORT.md)。M7 进程内 CPU/LLVM 静态整图分发和完整 MiniMind prefill 已在限定范围内完成，见 [整图报告](M7_MODEL_REPORT.md)；M8 静态 Program 与首个融合切片已完成并通过三套门禁；请求批处理首版已有真实模型证据；显式全 mask 注意力已通过 CPU 数值验证；矩阵 12 行已刷新，未验证格继续关闭。核对日期：2026-09-10。原始分阶段目标仍以 [WAVE_2](WAVE_2.md) 和各模块计划为准。
+> 状态：第一波已完成，第二波结果见 [G2 记录](G2_RECORD.md)。M2 的真实容量/变长模型状态绑定、M1 模型关联、host greedy 和 M6 静态热替换执行切片已完成；M6 后续保留会话 KV 的静态 CPU 热替换也已通过完整模型、三套 CPU 回归及集成审计，见 [状态报告](M6_STATEFUL_REPORT.md)。相同有界 profile/状态 ABI 的 CPU 热替换随后通过完整八层模型及四配置回归，见 [有界报告](M6_BOUNDED_REPORT.md)。请求批处理热替换也已完成，四个请求的五个批次保留队列与 KV，代际 1→2→2→1→1；最终四配置回归 55/55、56/56、70/70、75/75 及集成审计通过，见 [请求报告](M6_REQUEST_BATCHING_REPORT.md)。M7 进程内 CPU/LLVM 静态整图分发和完整 MiniMind prefill 已在限定范围内完成，见 [整图报告](M7_MODEL_REPORT.md)；M8 静态 Program 与首个融合切片已完成并通过三套门禁；请求批处理首版已有真实模型证据；显式全 mask 注意力已通过 CPU 数值验证；矩阵 12 行已刷新，并新增 `vision_encoder`、`vlm_joint` 两行（仅 CPU/LLVM，CUDA 格为 unsupported），未验证格继续关闭。核对日期：2026-09-10。原始分阶段目标仍以 [WAVE_2](WAVE_2.md) 和各模块计划为准。
 > 目标以[项目目标](../PROJECT_GOAL.md)为准，已实现行为以[架构总览](../ARCHITECTURE.md)、代码、机器契约和实际测试为准。本文不新增能力声明。
 
 ## 先读哪一篇
@@ -22,7 +22,7 @@
 | [M6 热替换执行与决策](M6_HOT_SWAP.md) | 需要把执行 profile 变成真实的候选切换证据 | 静态无状态、容量状态及相同有界 profile 的 MiniMind CPU 换代、lease 保活、one-shot health 与回滚已通过；见 [状态报告](M6_STATEFUL_REPORT.md)和[有界报告](M6_BOUNDED_REPORT.md)。请求队列与 KV 跨代际的完整模型证据见 [请求热替换报告](M6_REQUEST_BATCHING_REPORT.md)；静态 CUDA 热替换已通过 [CUDA 报告](M6_CUDA_REPORT.md)，bounded KV/请求 CUDA 换代仍需独立 consumer | [技术报告](M6_RUNTIME_REPORT.md)；M1；M2 |
 | [M7 分布式证据与执行桥接](M7_DISTRIBUTED.md) | 进程内多 worker 的已编译 CPU 执行 | S1–S4 已验证双 worker LLVM、分组 CCL、完整预检与生命周期；整图绑定、多输出及完整 MiniMind 静态 prefill 两套放置已完成，边界见报告 | [首版报告](M7_DISTRIBUTED_REPORT.md)；[整图报告](M7_MODEL_REPORT.md) |
 | [M8 TE Program 与首个融合](M8_TE_PROGRAM.md) | MiniMind attention/FFN 还没有 profile 驱动的融合候选 | 静态 Program、优化等级 3 的 add→sqrt 融合与 LLVM/profile 验收已接通，见 [报告](M8_TE_PROGRAM_REPORT.md) | M1；M9 L1a |
-| [M9 MiniMind 模型与导出验收](M9_MINIMIND_TARGET.md) | 模型目标、导出参数、past/present 轴和生成入口需要一个唯一门禁 | L1 已有真实模型/state/greedy 证据；L2 完整静态视觉链见 [报告](M9_MINIMIND_V_VISION_REPORT.md)，固定单图和固定双图 prefill/decode 见 [联合报告](M9_MINIMIND_V_JOINT_REPORT.md)、[双图报告](M9_MINIMIND_V_MULTI_IMAGE_REPORT.md) | G1；Python/ONNX 依赖 |
+| [M9 MiniMind 模型与导出验收](M9_MINIMIND_TARGET.md) | 模型目标、导出参数、past/present 轴和生成入口需要一个唯一门禁 | L1 已有真实模型/state/greedy 证据；L2 完整静态视觉链见 [报告](M9_MINIMIND_V_VISION_REPORT.md)，固定单图和固定双图 prefill/decode 见 [联合报告](M9_MINIMIND_V_JOINT_REPORT.md)、[双图报告](M9_MINIMIND_V_MULTI_IMAGE_REPORT.md)；运行时图像位置与一份 bounded prefill 覆盖 0～3 张图见 [有界报告](M9_MINIMIND_V_BOUNDED_REPORT.md) | G1；Python/ONNX 依赖 |
 | [M10 结构化控制流](M10_STRUCTURED_CONTROL.md) | 已有 `If`/有界 `While` 编译和运行代码默认未启用 | C0/C1 审计与 gate-on LLVM、C2 host loop 决策已完成；真实 greedy 证据见 [G2 报告](G2_GREEDY_REPORT.md)，C3 仍待 M2/M3 交接 | C1 独立于 L1a；真实 decode state 依赖 M2/M3 |
 
 ## 当前事实与原快照的差异
@@ -31,7 +31,7 @@
 
 - [模型清单](../OP_TODO.md)来自 MiniMindForCausalLM 的实际导出，区分原始图和常量折叠后的实算图；它不是支持矩阵。静态 prefill 与容量 decode 的导入缺口现已闭合，证据和剩余动态限制见 [G2](G2_RECORD.md)。
 - 运行时索引 Gather、int64 Add 和导入前常量折叠都有显式语义边界；真实模型通过不能推广为任意 ONNX 图已支持。
-- [能力矩阵](../../test/nlp_validation/transformer_capability_matrix.json)的 12 行已逐格刷新当前证据，包含实际 prefill、decode、状态、请求批处理、全 mask 和 copy/event 的 CPU 路径。`implemented`、`validated` 必须连同 gate/reason 阅读；runtime-only 的复制不虚构 Relay/lowering，CUDA 记录按每个局部 gate 限定形状与执行模式；GPU bounded 状态和请求批处理的设备验收已通过，CUDA 热替换仍按静态无状态与 bounded KV/请求分别限定。最后两行的核对与复制观测修复见 [报告](M1_COPY_EVENT_REPORT.md)。后续 [CUDA 复制报告](M1_CUDA_COPY_REPORT.md)已补齐 copy_event 的 DMA 配对、受控 pending 与跨线程完成证据。
+- [能力矩阵](../../test/nlp_validation/transformer_capability_matrix.json)的 14 行已逐格刷新当前证据（其中 L2 两行只含 CPU/LLVM 证据），包含实际 prefill、decode、状态、请求批处理、全 mask 和 copy/event 的 CPU 路径。`implemented`、`validated` 必须连同 gate/reason 阅读；runtime-only 的复制不虚构 Relay/lowering，CUDA 记录按每个局部 gate 限定形状与执行模式；GPU bounded 状态和请求批处理的设备验收已通过，CUDA 热替换仍按静态无状态与 bounded KV/请求分别限定。最后两行的核对与复制观测修复见 [报告](M1_COPY_EVENT_REPORT.md)。后续 [CUDA 复制报告](M1_CUDA_COPY_REPORT.md)已补齐 copy_event 的 DMA 配对、受控 pending 与跨线程完成证据。
 - `RuntimeSession` 已通过版本化输出绑定持有和追加 MiniMind 容量型 K/V，并公开有效长度。bounded 的 fresh-output 模式仍拒绝 state；独立 bounded stateful 模式通过 prefix/append 绑定复用同一状态 owner，真实 prefill 交接与四步 decode 已通过。
 - `experimental_identity` 在形状路由、自适应准备等开关启用的路径中被调用，不能直接删除。分布式执行器已绑定外部 CompiledModule；静态 CPU 小图和完整 MiniMind prefill 的显式跨 worker 执行均已有报告，分布式 decode/持久 KV 仍未验收。
 - `runtime` 的普通代码目前不能直接 include `profiling`；观测接入需要维持依赖方向。M1 已把这个约束纳入实现方案。

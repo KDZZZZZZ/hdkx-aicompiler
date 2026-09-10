@@ -1258,6 +1258,201 @@
           "docs/implementation/M1_CUDA_COPY_REPORT.md"
         ]
       }
+    },
+    "vision_encoder": {
+      "frontend": {
+        "status": "implemented",
+        "gate": "static_siglip2_fixed_shape_import",
+        "reason": "Actual 12-layer SigLIP2 plus MiniMind-V projector ONNX (703 nodes) imports through the production importer after the explicit fixed-input Shape proof and static folding (484 nodes). Conv auto_pad NOTSET/VALID is accepted; SAME and VALID-with-pads are rejected. The fixed-shape proof is an explicit export adapter, never called by the default or shape-source importer; shape-source import rejects Tanh/Erf.",
+        "evidence": [
+          "test/minimind_vision_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md",
+          "python/kxc_onnx/fold.py",
+          "python/kxc_onnx/importer.py",
+          "test/onnx_fixed_shape_fold_test.py",
+          "python/tools/make_minimind_vision_fixture.py",
+          "python/tools/make_minimind_v_bounded_fixture.py"
+        ]
+      },
+      "relay": {
+        "status": "implemented",
+        "gate": "static_conv_layernorm_gelu_contracts",
+        "reason": "Static float32 nn_conv2d, nn_layer_norm, tanh and erf contracts carry the vision chain. Bounded nn_layer_norm, bounded convolution and shape-source Tanh/Erf are not admitted; the vision stage is deliberately a fixed per-image [1,3,256,256] contract.",
+        "evidence": [
+          "test/minimind_vision_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md",
+          "src/relay/type_infer.cc",
+          "src/relay/op/nn/layer_norm.cc"
+        ]
+      },
+      "lowering": {
+        "status": "implemented",
+        "gate": "ordinary_static_vision_primitives",
+        "reason": "The full vision graph reaches ordinary TE/TIR primitive lowering and LLVM (472 primitive calls), not a reference executor or handwritten model kernel.",
+        "evidence": [
+          "test/minimind_vision_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      },
+      "llvm": {
+        "status": "implemented",
+        "gate": "cpu_llvm_vision_executed",
+        "reason": "LLVM executes 472 calls per image. The standalone vision test runs two inputs; the slot-prefill test reuses one vision artifact for six images across four image counts.",
+        "evidence": [
+          "test/minimind_vision_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "gpu_validation_deferred",
+        "reason": "No CUDA numeric evidence for Conv/LayerNorm/Tanh/Erf or the vision chain; GPU validation of L2 is deferred.",
+        "evidence": [
+          "test/minimind_vision_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      },
+      "runtime": {
+        "status": "implemented",
+        "gate": "static_vision_fresh_outputs",
+        "reason": "One RuntimeSession runs the fixed vision plan repeatedly with fresh outputs; wrong pixel shape or dtype is rejected before submission with submit_count=0.",
+        "evidence": [
+          "test/minimind_vision_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "vision_independent_and_upstream_cpu",
+        "reason": "Standalone vision: two inputs, max abs error 7.15256e-6 against an independent reference. Slot-prefill fixture: six per-image LLVM runs against unmodified upstream visual tokens, max abs error 1.75461e-6; ONNX reference vs upstream at most 1.16e-6.",
+        "evidence": [
+          "test/minimind_vision_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      },
+      "profile": {
+        "status": "implemented",
+        "gate": "vision_run_receipt_bundle",
+        "reason": "Vision runs record model, stage, image count, sequence and export receipt metadata with 472 kernel submissions per run in the bounded VLM bundle (six vision runs, 2832 submissions).",
+        "evidence": [
+          "test/minimind_vision_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      }
+    },
+    "vlm_joint": {
+      "frontend": {
+        "status": "implemented",
+        "gate": "minimind_v_fixed_and_slot_prefill_import",
+        "reason": "Fixed one/two-image joint exports import statically. The slot prefill export (2075 nodes, 1339 after folding) imports as a shape-source graph whose token table is Concat(embed_tokens [6400,768], visual_slots [192,768]); input_ids [1,S] is the only symbolic axis.",
+        "evidence": [
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md",
+          "python/tools/export_minimind_v_bounded_onnx.py",
+          "python/tools/make_minimind_v_bounded_fixture.py",
+          "python/tools/minimind_v_slots.py",
+          "test/minimind_v_slot_ids_test.py",
+          "python/kxc_onnx/importer.py"
+        ]
+      },
+      "relay": {
+        "status": "implemented",
+        "gate": "fixed_layout_and_bounded_slot_prefill",
+        "reason": "Fixed layouts use existing static operators. The slot prefill is proved by the restricted adapter for 1 <= S <= 224; the slot table has the static shape [6592,768], so the bounded Gather admission is unchanged. Image count is a value-level placement (0..3 slots), not a shape axis.",
+        "evidence": [
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md",
+          "src/compiler/shape/shape_value_resolver.cc"
+        ]
+      },
+      "lowering": {
+        "status": "implemented",
+        "gate": "ordinary_static_and_bounded_vlm_primitives",
+        "reason": "Fixed joint prefill/decode use ordinary static primitives; the slot prefill compiles to 743 bounded-plan calls, 742 with runtime extents.",
+        "evidence": [
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      },
+      "llvm": {
+        "status": "implemented",
+        "gate": "cpu_llvm_vlm_prefill_decode_executed",
+        "reason": "Fixed single/two-image cases execute through LLVM. One bounded slot-prefill artifact executes seven runs (N=0..3, S=9/68/143/207 plus three unused-slot replays) and one capacity decode artifact executes 16 steps.",
+        "evidence": [
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      },
+      "cuda": {
+        "status": "unsupported",
+        "gate": "gpu_validation_deferred",
+        "reason": "No CUDA numeric evidence for the joint VLM prefill or decode; GPU validation of L2 is deferred.",
+        "evidence": [
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      },
+      "runtime": {
+        "status": "implemented",
+        "gate": "vlm_prefill_to_session_owned_state",
+        "reason": "Compiled prefill K/V initialize the existing capacity decode state owner (capacity 240) for every image count; cache addresses stay fixed and extents advance by one per step. Host placement rejects bad marker runs, more than three images, out-of-vocabulary ids and S beyond the bound before any tensor exists; seven invalid runtime inputs cause zero launches and allocations.",
+        "evidence": [
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md",
+          "src/runtime/session.cc",
+          "src/runtime/executable_plan.cc"
+        ]
+      },
+      "numeric": {
+        "status": "validated",
+        "gate": "vlm_upstream_references_cpu",
+        "reason": "Fixed layouts: three single-image and three two-image cases match independent references (max 1.12057e-5). Slot prefill: four image counts on one artifact, all 17 outputs vs unmodified upstream max abs error 1.27554e-5; 16 decode steps logits 5.21541e-6 and full caches 1.18762e-5; replaying unused slots with another fill is bitwise identical over 2759680 values.",
+        "evidence": [
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      },
+      "profile": {
+        "status": "implemented",
+        "gate": "vlm_images_sequence_receipt_bundle",
+        "reason": "Bounded VLM runs record model, stage, images, sequence, shape_case, state_extent and the slot-prefill export receipt; 18961 kernel submissions equal 6x472 vision + 7x743 prefill + 16x683 decode.",
+        "evidence": [
+          "test/minimind_decode_loop_llvm_test.cpp",
+          "test/minimind_vlm_bounded_llvm_test.cpp",
+          "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+          "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"
+        ]
+      }
     }
   }
 }

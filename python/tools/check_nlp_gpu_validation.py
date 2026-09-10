@@ -12,6 +12,7 @@ CAPABILITIES = (
     "stable_softmax", "masked_softmax_all_masked", "batched_matmul",
     "embedding_gather", "mask_select", "normalization", "slice_concat", "prefill_exact",
     "decode_external_kv", "kv_cache", "dynamic_batching", "copy_event",
+    "vision_encoder", "vlm_joint",
 )
 LAYERS = ("frontend", "relay", "lowering", "llvm", "cuda", "runtime", "numeric", "profile")
 STATUSES = {"unsupported", "contracted", "implemented", "validated"}
@@ -28,6 +29,8 @@ VALIDATED = {
     ("decode_external_kv", "numeric"),
     ("kv_cache", "numeric"),
     ("dynamic_batching", "numeric"),
+    ("vision_encoder", "numeric"),
+    ("vlm_joint", "numeric"),
 }
 CUDA_LOCAL_EVIDENCE_GATES = {
     "stable_softmax": "cuda_softmax_static_and_bounded_multistage_local_evidence",
@@ -143,6 +146,25 @@ CAUSAL_MASK_EVIDENCE_GATES = {
     "numeric": "causal_attention_independent_and_actual_onnx",
     "profile": "minimind_causal_attention_shape_bundle"
 }
+# L2 rows: CPU/LLVM only. Their CUDA cells stay unsupported until GPU evidence exists.
+VISION_ENCODER_GATES = {
+    "frontend": "static_siglip2_fixed_shape_import",
+    "relay": "static_conv_layernorm_gelu_contracts",
+    "lowering": "ordinary_static_vision_primitives",
+    "llvm": "cpu_llvm_vision_executed",
+    "runtime": "static_vision_fresh_outputs",
+    "numeric": "vision_independent_and_upstream_cpu",
+    "profile": "vision_run_receipt_bundle",
+}
+VLM_JOINT_GATES = {
+    "frontend": "minimind_v_fixed_and_slot_prefill_import",
+    "relay": "fixed_layout_and_bounded_slot_prefill",
+    "lowering": "ordinary_static_and_bounded_vlm_primitives",
+    "llvm": "cpu_llvm_vlm_prefill_decode_executed",
+    "runtime": "vlm_prefill_to_session_owned_state",
+    "numeric": "vlm_upstream_references_cpu",
+    "profile": "vlm_images_sequence_receipt_bundle",
+}
 IMPLEMENTED = {
     ("decode_external_kv", "cuda"),
     ("kv_cache", "cuda"),
@@ -225,6 +247,18 @@ IMPLEMENTED = {
     ("kv_cache", "llvm"),
     ("kv_cache", "runtime"),
     ("kv_cache", "profile"),
+    ("vision_encoder", "frontend"),
+    ("vision_encoder", "relay"),
+    ("vision_encoder", "lowering"),
+    ("vision_encoder", "llvm"),
+    ("vision_encoder", "runtime"),
+    ("vision_encoder", "profile"),
+    ("vlm_joint", "frontend"),
+    ("vlm_joint", "relay"),
+    ("vlm_joint", "lowering"),
+    ("vlm_joint", "llvm"),
+    ("vlm_joint", "runtime"),
+    ("vlm_joint", "profile"),
 }
 WORKLOAD_KEYS = {
     "id", "fixture", "kind", "logical_extent", "physical_extent", "valid_extent",
@@ -512,6 +546,21 @@ def validate_matrix(root, matrix):
         required = {"test/minimind_bounded_decode_llvm_test.cpp", "docs/implementation/M3_FULL_DECODE_REPORT.md"}
         if record["gate"] != gate or not required.issubset(record["evidence"]):
             raise ValidationError("decode record lacks its CPU evidence at {}".format(layer))
+
+    for layer, gate in VISION_ENCODER_GATES.items():
+        record = matrix["capabilities"]["vision_encoder"][layer]
+        required = {"test/minimind_vision_llvm_test.cpp", "test/minimind_vlm_bounded_llvm_test.cpp",
+                    "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+                    "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("vision encoder record lacks its CPU evidence at {}".format(layer))
+    for layer, gate in VLM_JOINT_GATES.items():
+        record = matrix["capabilities"]["vlm_joint"][layer]
+        required = {"test/minimind_decode_loop_llvm_test.cpp", "test/minimind_vlm_bounded_llvm_test.cpp",
+                    "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+                    "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("VLM joint record lacks its CPU evidence at {}".format(layer))
 
     for layer, gate in CAUSAL_MASK_EVIDENCE_GATES.items():
         record = matrix["capabilities"]["mask_select"][layer]

@@ -1126,6 +1126,8 @@ if(KXC_BUILD_PASS_TESTS)
       test/bounded_kv_append_llvm_test.cpp)
     kxc_add_runtime_exe(minimind_bounded_decode_llvm_test
       test/minimind_bounded_decode_llvm_test.cpp)
+    kxc_add_runtime_exe(minimind_vlm_bounded_llvm_test
+      test/minimind_vlm_bounded_llvm_test.cpp)
     kxc_add_runtime_exe(request_batching_llvm_test
       test/request_batching_llvm_test.cpp)
     kxc_add_runtime_exe(kv_state_llvm_test
@@ -1556,6 +1558,12 @@ kxc_add_ctest_if_target(bounded_kv_append_llvm_test
   "shape;bounded-kv-append;cpu;llvm;e2e;numeric")
 kxc_add_ctest_if_target(minimind_bounded_decode_llvm_test
   "shape;bounded-decode;onnx;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(minimind_vlm_bounded_llvm_test
+  "minimind;l2;vision;shape;bounded-prefill;kv-state;onnx;cpu;llvm;e2e;numeric")
+if(TARGET minimind_vlm_bounded_llvm_test)
+  set_tests_properties(minimind_vlm_bounded_llvm_test PROPERTIES
+    RESOURCE_LOCK "minimind_vlm_model" SKIP_RETURN_CODE 77)
+endif()
 kxc_add_ctest_if_target(request_batching_llvm_test
   "request-batching;kv-state;cpu;llvm;e2e;numeric")
 kxc_add_ctest_if_target(kv_state_llvm_test

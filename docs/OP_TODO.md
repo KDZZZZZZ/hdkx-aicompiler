@@ -12,7 +12,7 @@
 
 完整 12 层 SigLIP2（256×256 / patch 32 / hidden 768）与上游投影层已通过 CPU/LLVM。固定 Shape 证明和常量折叠后有 484 个 ONNX 节点：Add 124、Cast 25、Conv 1、Div 1、Erf 1、LayerNormalization 26、MatMul 98、Mul 86、Reshape 49、Softmax 12、Tanh 12、Transpose 49。新补齐的 Tanh/Erf 为 float32 静态合同；LLVM 计划每次执行 472 个 kernel，两组输入完整数值通过。导出版本、参考差异处理和复现见 [L2 视觉报告](implementation/M9_MINIMIND_V_VISION_REPORT.md)。
 
-固定单图联合导出为 prefill 1,875 个原始 ONNX 节点、capacity decode 1,167 个；沿既有折叠和导入路径形成 1,146 / 683 个 Relay 节点及 kernel。实际三输入与单输入 Concat 已接入现有二元算子。三组图像/文本组合完成全部 logits、八层 KV 和四步 decode 数值验证，最大误差 `1.06096e-5`、extent `68→72`，见 [图文联合报告](implementation/M9_MINIMIND_V_JOINT_REPORT.md)。随后固定双图 profile 以 prefill `1,909` 个原始节点、`1,154` 个 Relay 节点和容量 `146` 完成同样的三组/四步 LLVM 验证，见[双图报告](implementation/M9_MINIMIND_V_MULTI_IMAGE_REPORT.md)。两者均固定 marker 布局；任意多图、变长 VLM 或 GPU 仍未验收。
+固定单图联合导出为 prefill 1,875 个原始 ONNX 节点、capacity decode 1,167 个；沿既有折叠和导入路径形成 1,146 / 683 个 Relay 节点及 kernel。实际三输入与单输入 Concat 已接入现有二元算子。三组图像/文本组合完成全部 logits、八层 KV 和四步 decode 数值验证，最大误差 `1.06096e-5`、extent `68→72`，见 [图文联合报告](implementation/M9_MINIMIND_V_JOINT_REPORT.md)。随后固定双图 profile 以 prefill `1,909` 个原始节点、`1,154` 个 Relay 节点和容量 `146` 完成同样的三组/四步 LLVM 验证，见[双图报告](implementation/M9_MINIMIND_V_MULTI_IMAGE_REPORT.md)。两者均固定 marker 布局。随后运行时图像位置方案用 `Concat(嵌入表, 定容视觉槽位)` + 既有运行时 Gather，以一份 bounded prefill（1,475 个 Relay 节点）覆盖 0～3 张图与 S≤224，未新增算子，见 [有界报告](implementation/M9_MINIMIND_V_BOUNDED_REPORT.md)；GPU 仍未验收。
 
 下列 L1 清单和缺口数量保留导出当时的历史上下文；当前通过状态应读取模块报告和机器契约。
 

@@ -4,7 +4,7 @@
 
 本模块把“目标模型是什么”和“导出的图是否就是要支持的图”变成可重复的入口。L1 先完成纯文本 MiniMind 的固定形状 prefill，再完成同一会话的多步 decode；L2 的 MiniMind-V 和 L3 的 MiniMind-O 只复用并扩展这条证据链。它不把一份 ONNX 节点统计表当成编译器能力，也不在导出失败时用隐式 Python 推理或临时算子绕过编译器。
 
-> 状态：本文件保留模型入口计划。L1 的实际 prefill、decode、状态和 greedy 已有后续 receipt；L2 完整静态视觉链见 [视觉报告](M9_MINIMIND_V_VISION_REPORT.md)，固定单图的完整图文 prefill 与会话 KV 四步 decode 已通过 CPU/LLVM，见 [联合报告](M9_MINIMIND_V_JOINT_REPORT.md)。纯文本 B1/S16 的完整八层 GPU prefill 已有 [数值证据](GPU_MINIMIND_PREFILL_REPORT.md)；GPU decode/state、多图、图文变长与 L3 仍待验收。第一波证据见 [G0](G0_BASELINE.md) 和 [G1](G1_RECORD.md)，并行安排见 [WAVE_2](WAVE_2.md)。目标阶梯以 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.2 为准，节点统计以 [OP_TODO.md](../OP_TODO.md) 为准。
+> 状态：本文件保留模型入口计划。L1 的实际 prefill、decode、状态和 greedy 已有后续 receipt；L2 完整静态视觉链见 [视觉报告](M9_MINIMIND_V_VISION_REPORT.md)，固定单图的完整图文 prefill 与会话 KV 四步 decode 已通过 CPU/LLVM，见 [联合报告](M9_MINIMIND_V_JOINT_REPORT.md)；运行时图像位置下一份 bounded prefill 覆盖 0～3 张图、任意位置与 S≤224，见 [有界报告](M9_MINIMIND_V_BOUNDED_REPORT.md)。纯文本 B1/S16 的完整八层 GPU prefill 已有 [数值证据](GPU_MINIMIND_PREFILL_REPORT.md)；L2 的 GPU 验证按决定延后，L3 仍待验收。第一波证据见 [G0](G0_BASELINE.md) 和 [G1](G1_RECORD.md)，并行安排见 [WAVE_2](WAVE_2.md)。目标阶梯以 [PROJECT_GOAL.md](../PROJECT_GOAL.md) §2.2 为准，节点统计以 [OP_TODO.md](../OP_TODO.md) 为准。
 
 ## 当前事实与要做的模块
 

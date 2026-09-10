@@ -56,7 +56,7 @@
 | 级别 | 模型 | 新增基座需求 | 状态 |
 |---|---|---|---|
 | **L1** | [MiniMind](https://github.com/jingyaogong/minimind)（纯文本 decoder，约 64M） | KV cache（§6.2）、shape-as-value（§6.3）、采样与生成循环驱动 | **当前验收目标** |
-| **L2** | [MiniMind-V](https://github.com/jingyaogong/minimind-v)（+ SigLIP2 视觉编码） | SigLIP2 为 256×256 固定输入 → 64 patch token 的静态图，复用现有 `nn_conv2d` / `nn_layer_norm` / `softmax` / `matmul` 路径，补齐 GELU 和实际 Concat 导出结构 | 固定单图和固定双图 CPU/LLVM 联合链已有 [证据](implementation/M9_MINIMIND_V_JOINT_REPORT.md)、[双图报告](implementation/M9_MINIMIND_V_MULTI_IMAGE_REPORT.md)；任意多图、图文变长与 GPU 继续推进 |
+| **L2** | [MiniMind-V](https://github.com/jingyaogong/minimind-v)（+ SigLIP2 视觉编码） | SigLIP2 为 256×256 固定输入 → 64 patch token 的静态图，复用现有 `nn_conv2d` / `nn_layer_norm` / `softmax` / `matmul` 路径，补齐 GELU 和实际 Concat 导出结构 | 固定单图和固定双图 CPU/LLVM 联合链已有 [证据](implementation/M9_MINIMIND_V_JOINT_REPORT.md)、[双图报告](implementation/M9_MINIMIND_V_MULTI_IMAGE_REPORT.md)；运行时图像位置下，一份 bounded prefill 覆盖 0～3 张图、任意位置与 S≤224，见 [有界报告](implementation/M9_MINIMIND_V_BOUNDED_REPORT.md)；GPU 验证延后 |
 | **L3** | [MiniMind-O](https://github.com/jingyaogong/minimind-o)（+ 语音输入输出，Thinker–Talker） | Conv1d / ConvTranspose1d、流式卷积状态、双自回归调度、实时帧预算、多流会话 | **北极星** |
 
 **为什么 L1 就是通往 L3 的第一段**：MiniMind-O 的 Thinker 即 MiniMind backbone，同作者、同 block 定义。选 L1 作为当前验收目标不是放弃 L3，而是走它的第一段；这条路径上没有一段工作会被废弃。
@@ -87,7 +87,7 @@
 
 **目标模型算子清单的证据规则**：[模型算子清单](OP_TODO.md)必须来自**对目标模型的实际 ONNX 导出**，标注模型版本、导出参数与 opset，不得使用来源不明的快照。导出本身的可行性（decoder 带 `past_key_values` 的 dynamic axes 导出）是 L1 的第一个待验证项，未验证前 M2 / M3 的方案均建立在假设上。
 
-**验收**：以 `test/nlp_validation/transformer_capability_matrix.json` 为唯一权威，12 项能力 × 8 个层级（frontend / relay / lowering / llvm / cuda / runtime / numeric / profile）逐格标注，不得以整体"支持"替代逐格证据。
+**验收**：以 `test/nlp_validation/transformer_capability_matrix.json` 为唯一权威，14 项能力（含 L2 的 `vision_encoder`、`vlm_joint`）× 8 个层级（frontend / relay / lowering / llvm / cuda / runtime / numeric / profile）逐格标注，不得以整体"支持"替代逐格证据。
 
 #### 结构化控制流能力边界（横向能力）
 
@@ -141,7 +141,7 @@ Transformer 图中可能出现条件分支和生成循环，仓库已有一条�
 
 **已具备的形态**：Profile Bundle（`manifest.json` + `events.jsonl` + `summary.json` + `trace.json`），schema 版本化，`span_id` / `parent_span_id` 构成调用树，`event_type` 分类；配套离线诊断引擎与性能工作台。
 
-**当前状态**：RuntimeSession 的运行、内核提交/完成、分配和拷贝已接入 Span，MiniMind 的导出 receipt、prefill/decode、KV extent 与 generation 关联已有 [模型证据](implementation/M1_MODEL_ASSOCIATION_REPORT.md)。复制完成配对、上下文保活和诊断计时域已有 [报告](implementation/M1_COPY_EVENT_REPORT.md)。能力矩阵 12 行已逐格刷新，仍必须连同各格的 gate/reason 阅读；CPU 模型证据不能替代 CUDA 设备计时或 L3 实时预算验证。
+**当前状态**：RuntimeSession 的运行、内核提交/完成、分配和拷贝已接入 Span，MiniMind 的导出 receipt、prefill/decode、KV extent 与 generation 关联已有 [模型证据](implementation/M1_MODEL_ASSOCIATION_REPORT.md)。复制完成配对、上下文保活和诊断计时域已有 [报告](implementation/M1_COPY_EVENT_REPORT.md)。能力矩阵 14 行已逐格刷新，仍必须连同各格的 gate/reason 阅读；CPU 模型证据不能替代 CUDA 设备计时或 L3 实时预算验证。
 
 Windows GPU 已完成基础 CUDA 专项 5/5，实际 kernel、拷贝和 CUPTI 设备活动关联见 [实测报告](implementation/GPU_WINDOWS_VALIDATION_REPORT.md)。该结果提供后续 GPU 实现的验证环境，尚不代表模型级 GPU profiling、完整 NLP CUDA 门禁或内存插桩已经通过。
 
@@ -193,7 +193,7 @@ CUDA 有界单阶段输出、形状值与 rank-2 MatMul 已取得 [基础执行�
 | 支柱 | 当前状态 | 最大缺口 |
 |---|---|---|
 | 2.1 动静兼备（热替换） | 静态无状态、容量状态、有界 profile 和请求批处理的 CPU/LLVM 热替换，以及静态 CUDA 热替换、CUPTI health/rollback 已有证据 | bounded KV/请求 CUDA 换代、更广动态和跨设备变体仍待验收 |
-| 2.2 Transformer 推理 | MiniMind L1 的真实 prefill/decode、KV state/extent、host greedy、CPU/GPU 请求批处理以及单 LLVM 计划的 C=1/2/3 多 token 外部 K/V 交接已通过；L2 固定单图和固定双图图文链已通过；ONNX Split 静态常量两路以上多输出也已闭环 | GPU decode 热替换、可变 P 的多 token state 交接、任意多图/图文变长和 L3 音频/流式链路仍未完成 |
+| 2.2 Transformer 推理 | MiniMind L1 的真实 prefill/decode、KV state/extent、host greedy、CPU/GPU 请求批处理以及单 LLVM 计划的 C=1/2/3 多 token 外部 K/V 交接已通过；L2 固定单图、固定双图及运行时图像位置的有界图文链（0～3 张图、S≤224）已在 CPU/LLVM 通过；ONNX Split 静态常量两路以上多输出也已闭环 | GPU decode 热替换、可变 P 的多 token state 交接、L2 的 GPU 验证、超过三张图或 S>224 的 profile，以及 L3 音频/流式链路仍未完成 |
 | 2.3 分布式 | 进程内静态 CPU/LLVM 双 worker、显式放置、CCL、整图多输出和完整 MiniMind prefill 已有两套放置的端到端证据 | 分布式 decode/KV 一致性、CUDA、跨机器服务和自动分区仍未实现 |
 | 2.4 agent / 调度友好 IR | 契约与 canonical bytes 已具备并在用；agent 经**契约**写入 | 新 IR 设计与 parser **已延后**（§2.4）；当前无阻塞项 |
 | 2.5 agent 友好观测层 | Bundle、诊断引擎、RuntimeSession run/kernel/alloc/copy 事件，以及 MiniMind receipt、stage、KV extent、generation 和静态/bounded GPU prefill/decode/request CUPTI 关联均已有证据 | 由观测驱动的性能决策和 L3 实时预算仍未完成 |

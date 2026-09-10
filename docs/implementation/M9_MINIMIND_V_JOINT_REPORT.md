@@ -134,6 +134,6 @@ KXC_MINIMIND_VLM_DIR=/home/oops/repo/hdkx-aicompiler/out/fx_minimind_v_joint \
 
 ## 5. 剩余边界
 
-此模块完成固定单图、固定 marker 布局、float32 的完整图文 CPU 链；固定双图的独立 CPU/LLVM 证据见[双图报告](M9_MINIMIND_V_MULTI_IMAGE_REPORT.md)。任意多图与不同文本长度仍需要新的显式输入 profile 和独立数值验证；不能用本次 Python 扫描的固定结果接收任意图像位置。已有 KV owner 可以继续复用，EOS/服务请求生命周期与设备端状态需按各自合同接入。
+此模块完成固定单图、固定 marker 布局、float32 的完整图文 CPU 链；固定双图的独立 CPU/LLVM 证据见[双图报告](M9_MINIMIND_V_MULTI_IMAGE_REPORT.md)。任意多图与不同文本长度仍需要新的显式输入 profile 和独立数值验证（后续 0～3 张图、S≤224 的运行时位置方案见 [有界报告](M9_MINIMIND_V_BOUNDED_REPORT.md)）；不能用本次 Python 扫描的固定结果接收任意图像位置。已有 KV owner 可以继续复用，EOS/服务请求生命周期与设备端状态需按各自合同接入。
 
 用户指定的 Windows GPU 后续已接通并通过基础 CUDA 专项 5/5，见 [Windows 实测报告](GPU_WINDOWS_VALIDATION_REPORT.md)。本联合模块没有新增 GPU 数值证据，其 CUDA 格子保持未验证；也不将固定图文 CPU 结果推广为 MiniMind-O、分布式 Transformer 或完整项目目标已经完成。

@@ -40,6 +40,7 @@
 - [M9 MiniMind-V 完整视觉链技术报告](implementation/M9_MINIMIND_V_VISION_REPORT.md) — 12 层 SigLIP2、GELU 投影、固定 Shape 证明、独立参考和 LLVM 数值。
 - [M9 MiniMind-V 图文联合推理技术报告](implementation/M9_MINIMIND_V_JOINT_REPORT.md) — 固定单图的视觉 token 注入、完整八层 prefill、会话 KV 和四步 decode，三组输入与独立参考对齐。
 - [M9 MiniMind-V 固定双图联合推理技术报告](implementation/M9_MINIMIND_V_MULTI_IMAGE_REPORT.md) — 固定双图 profile、5D 像素输入、完整八层 prefill、会话 KV 和四步 LLVM decode。
+- [M9 MiniMind-V 运行时图像位置与有界图文 prefill 技术报告](implementation/M9_MINIMIND_V_BOUNDED_REPORT.md) — host 槽位扫描、一份 bounded prefill 覆盖 0～3 张图与 S≤224、会话 KV decode 和零启动拒绝。
 - [GPU 驱动一致性修复报告](implementation/GPU_DRIVER_REPAIR_REPORT.md) — 驱动版本、安装核验、启动文件刷新与重启后的硬件门禁。
 - [Windows GPU 与 CUPTI 实测报告](implementation/GPU_WINDOWS_VALIDATION_REPORT.md) — Tailscale/SSH 接入、CUDA 12.9 原生构建、实际 kernel/复制/设备活动，以及内存插桩的未完成项。
 - [CUDA 多维输出与线程内归约报告](implementation/GPU_OWNED_REDUCTION_REPORT.md) — MatMul/Dense、批次广播、多维算子和 sum/max 的真实 GPU 数值，所有权证明与剩余边界。

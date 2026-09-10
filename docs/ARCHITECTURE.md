@@ -96,7 +96,7 @@ ONNX 前端另有显式 `kxc.onnx_shape_source.v1`：Python 保留 Shape/Gather/
 
 MiniMind-V 的固定视觉阶段沿用同一 ONNX/Relay/TE/LLVM/RuntimeSession 路径：新增 float32 Tanh/Erf 接通两种 GELU；固定输入的 Shape 证明仅作为显式导出适配，不进入默认或变长运行时。完整 12 层编码器和投影层已验证，模型边界、参考卷积修正和数值证据见 [视觉链报告](implementation/M9_MINIMIND_V_VISION_REPORT.md)。
 
-固定单图的完整图文 prefill 与会话 decode 也已通过，见 [联合推理报告](implementation/M9_MINIMIND_V_JOINT_REPORT.md)。静态 ONNX Concat 的 1..N 输入归一到已有二元算子；导出时 Python marker 扫描的固定布局由模型调用者显式校验。真实 prefill 的 16 份 KV 经 `InitializeState` 进入既有 RuntimeSession，四步复用容量 decode 产物，不新增状态 owner 或 ABI。此项尚不覆盖多图、图文变长或 GPU。
+固定单图的完整图文 prefill 与会话 decode 也已通过，见 [联合推理报告](implementation/M9_MINIMIND_V_JOINT_REPORT.md)。静态 ONNX Concat 的 1..N 输入归一到已有二元算子；导出时 Python marker 扫描的固定布局由模型调用者显式校验。真实 prefill 的 16 份 KV 经 `InitializeState` 进入既有 RuntimeSession，四步复用容量 decode 产物，不新增状态 owner 或 ABI。此项尚不覆盖多图、图文变长或 GPU。后续 [有界图文报告](implementation/M9_MINIMIND_V_BOUNDED_REPORT.md) 把 marker 扫描移到显式 host 步骤：视觉 token 写入定容 `visual_slots`，与嵌入表拼成静态 `[6592,768]` 的 Gather 表，语言侧以受限形状 S≤224 编译一次，覆盖 0～3 张图与任意位置；视觉编码器仍是固定单图合同，GPU 未验证。
 
 ## 3. 模块与依赖方向
 

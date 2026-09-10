@@ -142,6 +142,55 @@ class JointCapacityDecode(torch.nn.Module):
             use_cache=True, position=position))
 
 
+SOURCE_FILES = ["__init__.py", "model_minimind.py", "model_vlm.py"]
+
+
+def load_locked_inputs(src: Path, vision_config: Path) -> dict:
+    """Require the clean upstream checkout and the full SigLIP2 configuration."""
+    top = subprocess.check_output(["git", "-C", str(src), "rev-parse", "--show-toplevel"], text=True).strip()
+    if Path(top).resolve() != src.resolve():
+        raise ValueError("--src must be the original MiniMind-V checkout root")
+    subprocess.run(["git", "-C", str(src), "diff", "--exit-code", "HEAD", "--", "model"],
+                   check=True, stdout=subprocess.DEVNULL)
+    config_data = json.loads(vision_config.read_text())
+    for key, value in dict(hidden_size=768, image_size=256, intermediate_size=3072,
+                           num_attention_heads=12, num_channels=3, num_hidden_layers=12,
+                           patch_size=32, hidden_act="gelu_pytorch_tanh").items():
+        if config_data.get(key) != value:
+            raise ValueError(f"full MiniMind-V vision requires {key}={value!r}")
+    return config_data
+
+
+def build_vlm_pair(src: Path, config_data: dict, adapted: Path, metadata: dict):
+    """Build the patched export model and the unmodified upstream twin.
+
+    Both share the same seed-0 weights; ``metadata`` records the patches.
+    """
+    shutil.copytree(src / "model", adapted / "model", ignore=shutil.ignore_patterns("__pycache__"))
+    for name in ["minimind_noninplace_mask.patch", "minimind_capacity_kv.patch"]:
+        patch = Path(__file__).parent / name
+        subprocess.run(["patch", "--batch", "--forward", "--fuzz=0", "-p1", "-i", str(patch.resolve())],
+                       cwd=adapted, check=True)
+        metadata["patches"][name] = sha256_file(patch)
+    metadata["adapted_source_files"] = {name: sha256_file(adapted / "model" / name) for name in SOURCE_FILES}
+    upstream_module = _module(src.resolve(), "_kxc_vlm_upstream")
+    adapted_module = _module(adapted, "_kxc_vlm_export")
+    config_kwargs = dict(hidden_size=768, num_hidden_layers=8, use_moe=False,
+                         flash_attn=False, dropout=0.0, max_position_embeddings=2048)
+    torch.manual_seed(0)
+    torch.set_num_threads(1)
+    model = adapted_module.MiniMindVLM(adapted_module.VLMConfig(**config_kwargs),
+               vision_model_path=str(adapted / "no_pretrained_weights")).float().eval()
+    vision_config = SiglipVisionConfig.from_dict(config_data)
+    vision_config._attn_implementation = "eager"
+    model.vision_encoder = SiglipVisionModel(vision_config).float().eval()
+    upstream = upstream_module.MiniMindVLM(upstream_module.VLMConfig(**config_kwargs),
+                   vision_model_path=str(adapted / "no_pretrained_weights")).float().eval()
+    upstream.vision_encoder = model.vision_encoder
+    upstream.load_state_dict(model.state_dict(), strict=True)
+    return model, upstream, adapted_module
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--src", type=Path, required=True, help="clean MiniMind-V source checkout")
@@ -155,22 +204,11 @@ def main() -> None:
     profile = profile_for_image_count(args.image_count)
     if not 3 <= args.steps <= 12:
         raise ValueError(f"the fixed capacity must hold the {profile['sequence_length']}-token prefill and 3..12 decode steps")
-    top = subprocess.check_output(["git", "-C", str(args.src), "rev-parse", "--show-toplevel"], text=True).strip()
-    if Path(top).resolve() != args.src.resolve():
-        raise ValueError("--src must be the original MiniMind-V checkout root")
-    subprocess.run(["git", "-C", str(args.src), "diff", "--exit-code", "HEAD", "--", "model"],
-                   check=True, stdout=subprocess.DEVNULL)
-    config_data = json.loads(args.vision_config.read_text())
-    for key, value in dict(hidden_size=768, image_size=256, intermediate_size=3072,
-                           num_attention_heads=12, num_channels=3, num_hidden_layers=12,
-                           patch_size=32, hidden_act="gelu_pytorch_tanh").items():
-        if config_data.get(key) != value:
-            raise ValueError(f"full MiniMind-V vision requires {key}={value!r}")
+    config_data = load_locked_inputs(args.src, args.vision_config)
     args.out.mkdir(parents=True, exist_ok=True)
-    source_files = ["__init__.py", "model_minimind.py", "model_vlm.py"]
     metadata = {"source_url": "https://github.com/jingyaogong/minimind-v",
                 "source_commit": minimind_commit(args.src),
-                "source_files": {name: sha256_file(args.src / "model" / name) for name in source_files},
+                "source_files": {name: sha256_file(args.src / "model" / name) for name in SOURCE_FILES},
                 "vision_config_revision": args.config_revision,
                 "vision_config_sha256": sha256_file(args.vision_config), "vision_config": config_data,
                 "packages": {name: version(name) for name in ["torch", "transformers", "onnx", "numpy"]},
@@ -179,28 +217,7 @@ def main() -> None:
                 "decode_steps": args.steps, "sentinel": 7.0, "patches": {}, "cases": []}
     with tempfile.TemporaryDirectory(prefix="kxc_minimind_v_export_") as temporary:
         adapted = Path(temporary)
-        shutil.copytree(args.src / "model", adapted / "model", ignore=shutil.ignore_patterns("__pycache__"))
-        for name in ["minimind_noninplace_mask.patch", "minimind_capacity_kv.patch"]:
-            patch = Path(__file__).parent / name
-            subprocess.run(["patch", "--batch", "--forward", "--fuzz=0", "-p1", "-i", str(patch.resolve())],
-                           cwd=adapted, check=True)
-            metadata["patches"][name] = sha256_file(patch)
-        metadata["adapted_source_files"] = {name: sha256_file(adapted / "model" / name) for name in source_files}
-        upstream_module = _module(args.src.resolve(), "_kxc_vlm_upstream")
-        adapted_module = _module(adapted, "_kxc_vlm_export")
-        config_kwargs = dict(hidden_size=768, num_hidden_layers=8, use_moe=False,
-                             flash_attn=False, dropout=0.0, max_position_embeddings=2048)
-        torch.manual_seed(0)
-        torch.set_num_threads(1)
-        model = adapted_module.MiniMindVLM(adapted_module.VLMConfig(**config_kwargs),
-                   vision_model_path=str(adapted / "no_pretrained_weights")).float().eval()
-        vision_config = SiglipVisionConfig.from_dict(config_data)
-        vision_config._attn_implementation = "eager"
-        model.vision_encoder = SiglipVisionModel(vision_config).float().eval()
-        upstream = upstream_module.MiniMindVLM(upstream_module.VLMConfig(**config_kwargs),
-                       vision_model_path=str(adapted / "no_pretrained_weights")).float().eval()
-        upstream.vision_encoder = model.vision_encoder
-        upstream.load_state_dict(model.state_dict(), strict=True)
+        model, upstream, adapted_module = build_vlm_pair(args.src, config_data, adapted, metadata)
         metadata["parameter_count"] = sum(value.numel() for value in model.parameters())
         metadata["language_config"] = {name: getattr(model.config, name) for name in
             ["hidden_size", "num_hidden_layers", "num_attention_heads", "num_key_value_heads",
