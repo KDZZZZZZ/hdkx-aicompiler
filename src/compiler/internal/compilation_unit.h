@@ -1,5 +1,5 @@
 /*! \file src/compiler/internal/compilation_unit.h
- * \brief Internal one-operator compilation unit and plan draft contracts.
+ * \brief Internal compilation unit and plan draft contracts.
  */
 
 #pragma once
@@ -22,7 +22,7 @@ struct PartitionedGraph {
     Array<int64_t> output_value_ids;
 };
 
-PartitionedGraph PartitionValueGraph(ValueGraph value_graph);
+PartitionedGraph PartitionValueGraph(ValueGraph value_graph, bool fuse_static_add_sqrt = false);
 void ValidatePartition(const PartitionedGraph& partitioned);
 
 }  // namespace kxc::api::internal

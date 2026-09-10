@@ -42,6 +42,19 @@ if(KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE AND NOT KXC_ENABLE_SHAPE_PRODUCTION_EXAC
   set(KXC_ENABLE_SHAPE_PRODUCTION_EXACT ON CACHE BOOL
     "Enable the production exact Relay/compiler/shape adapter" FORCE)
 endif()
+option(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH
+  "Enable bounded shape-polymorphic LLVM or CUDA graph compilation" OFF)
+if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH AND
+   (NOT KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI OR
+    NOT KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE OR
+    NOT KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR
+    (NOT KXC_ENABLE_LLVM AND NOT KXC_ENABLE_CUDA)))
+  message(FATAL_ERROR
+    "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH requires "
+    "KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=ON, "
+    "KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=ON, "
+    "KXC_ENABLE_SHAPE_PRODUCTION_EXACT=ON, and LLVM or CUDA enabled")
+endif()
 
 option(KXC_ENABLE_ADAPTIVE_HOT_SWAP
   "Enable default-off bounded whole-plan adaptive control plane" OFF)
@@ -95,6 +108,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/pass/context.h
   include/kxc/pass/pass.h
   include/kxc/profiling/profiling.h
+  include/kxc/profiling/runtime_observer.h
   include/kxc/relay/op.h
   include/kxc/relay/op_attr_types.h
   include/kxc/relay/op_macros.h
@@ -123,6 +137,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/runtime/device_info.h
   include/kxc/runtime/device_stream.h
   include/kxc/runtime/executable_plan.h
+  include/kxc/runtime/execution_observer.h
   include/kxc/runtime/kernel_abi.h
   include/kxc/runtime/ndarray.h
   include/kxc/runtime/module_invocation.h
@@ -137,6 +152,7 @@ set(KXC_PUBLIC_HEADERS
   include/kxc/target/target.h
   include/kxc/target/virtual_device.h
   include/kxc/te/te.h
+  include/kxc/te/program.h
   include/kxc/te/topi.h
   include/kxc/te/topi/broadcast.h
   include/kxc/te/topi/elemwise.h
@@ -166,11 +182,13 @@ set(KXC_PUBLIC_HEADERS
 set(KXC_EXPERIMENTAL_HEADERS
   include/kxc/compiler/adaptive_hot_swap.h
   include/kxc/compiler/experimental_identity.h
+  include/kxc/compiler/kv_state_plan.h
   include/kxc/compiler/adaptive_hot_swap_preparation.h
   include/kxc/compiler/restricted_symbolic_shape.h
   include/kxc/compiler/shape_control.h
   include/kxc/compiler/shape_exact.h
   include/kxc/compiler/shape_specialization.h
+  include/kxc/compiler/shape_specialization_controller.h
   include/kxc/shape/shape.h
 )
 
@@ -225,6 +243,8 @@ foreach(_kxc_public_module IN ITEMS
 endforeach()
 target_compile_definitions(kxc_runtime_api INTERFACE
   KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>)
+target_compile_definitions(kxc_compiler_api INTERFACE
+  KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=$<BOOL:${KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH}>)
 
 if(KXC_ENABLE_CUDA)
   find_package(CUDAToolkit QUIET)
@@ -339,6 +359,10 @@ else()
   set(KXC_USE_LLVM 0)
   message(STATUS "LLVM support: disabled by KXC_ENABLE_LLVM=OFF")
 endif()
+if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH AND NOT KXC_USE_LLVM AND NOT KXC_USE_CUDA)
+  message(FATAL_ERROR
+    "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH requires an available LLVM >= 20 or CUDA backend")
+endif()
 
 # ---------------------------------------------------------------------------
 # Module object targets. Each source group owns one architectural layer;
@@ -418,6 +442,7 @@ set(KXC_RELAY_IR_SOURCES
   src/relay/op/tensor/math.cc
   src/relay/op/tensor/reduce.cc
   src/relay/op/tensor/transform.cc
+  src/relay/op/tensor/shape_ops.cc
   src/relay/op/nn/activation.cc
   src/relay/op/nn/convolution.cc
   src/relay/op/nn/pooling.cc
@@ -448,6 +473,7 @@ set(KXC_RELAY_DISTRIBUTED_SOURCES
 set(KXC_TIR_IR_SOURCES
   src/tir/visitor.cc
   src/tir/expr.cc
+  src/tir/static_integer.cc
   src/tir/stmt.cc
   src/tir/printer/print_ir.cc)
 
@@ -467,6 +493,7 @@ set(KXC_TIR_PASS_SOURCES
 
 set(KXC_TE_SOURCES
   src/te/te.cc
+  src/te/program.cc
   src/te/topi/broadcast.cc
   src/te/topi/elemwise.cc
   src/te/topi/nn.cc
@@ -511,6 +538,7 @@ set(KXC_COMPILER_SOURCES
   src/compiler/lowering/lowered_function.cc
   src/compiler/lowering/lowered_graph.cc
   src/compiler/lowering/te_to_tir.cc
+  src/compiler/kv_state/kv_state_plan.cc
 )
 
 set(KXC_RUNTIME_SESSION_SOURCES
@@ -531,7 +559,10 @@ if(KXC_ENABLE_SHAPE_PRODUCTION_EXACT OR KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE)
     src/compiler/shape/shape_control.cc
     src/compiler/shape/shape_exact.cc
     src/compiler/shape/shape_specialization.cc
-    src/compiler/shape/restricted_symbolic_shape.cc)
+    src/compiler/shape/shape_specialization_controller.cc
+    src/compiler/shape/restricted_symbolic_shape.cc
+    src/compiler/shape/shape_value_resolver.cc
+    src/compiler/shape/dynamic_shape_contract.cc)
 endif()
 
 set(KXC_CODEGEN_LLVM_SOURCES "")
@@ -561,6 +592,7 @@ function(kxc_configure_module_obj target)
     KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
+    KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=$<BOOL:${KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH}>
     KXC_ENABLE_ADAPTIVE_HOT_SWAP=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP}>)
 endfunction()
 
@@ -596,7 +628,10 @@ else()
     src/compiler/shape/shape_control.cc
     src/compiler/shape/shape_exact.cc
     src/compiler/shape/shape_specialization.cc
-    src/compiler/shape/restricted_symbolic_shape.cc)
+    src/compiler/shape/shape_specialization_controller.cc
+    src/compiler/shape/restricted_symbolic_shape.cc
+    src/compiler/shape/shape_value_resolver.cc
+    src/compiler/shape/dynamic_shape_contract.cc)
   kxc_configure_module_obj(kxc_shape_experimental_test_obj)
 endif()
 
@@ -617,6 +652,12 @@ kxc_enable_cuda(kxc_runtime_cuda_obj)
 add_library(kxc_profiling_obj OBJECT ${KXC_PROFILING_SOURCES})
 kxc_configure_module_obj(kxc_profiling_obj)
 kxc_enable_cuda(kxc_profiling_obj)
+if(KXC_USE_CUDA AND TARGET CUDA::cupti)
+  # CUPTI headers may live in extras/CUPTI/include. Keep the library optional
+  # at runtime: the adapter loads it dynamically rather than linking it here.
+  target_include_directories(kxc_profiling_obj SYSTEM PRIVATE
+    "$<TARGET_PROPERTY:CUDA::cupti,INTERFACE_INCLUDE_DIRECTORIES>")
+endif()
 
 add_library(kxc_target_obj OBJECT ${KXC_TARGET_SOURCES})
 kxc_configure_module_obj(kxc_target_obj)
@@ -759,6 +800,7 @@ function(kxc_add_runtime_exe target source_file)
     KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI=$<BOOL:${KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI}>
     KXC_ENABLE_SHAPE_PRODUCTION_EXACT=$<BOOL:${KXC_ENABLE_SHAPE_PRODUCTION_EXACT}>
     KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE=$<BOOL:${KXC_ENABLE_RESTRICTED_SYMBOLIC_SHAPE}>
+    KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH=$<BOOL:${KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH}>
     KXC_ENABLE_ADAPTIVE_HOT_SWAP=$<BOOL:${KXC_ENABLE_ADAPTIVE_HOT_SWAP}>)
   if(KXC_USE_CUDA)
     target_link_libraries(${target} PRIVATE ${KXC_CUDA_LIBS})
@@ -945,6 +987,8 @@ if(KXC_BUILD_PASS_TESTS)
   if(KXC_ENABLE_ADAPTIVE_HOT_SWAP)
     kxc_add_runtime_exe(adaptive_hot_swap_test
       test/adaptive_preparation_test.cpp)
+    kxc_add_runtime_exe(adaptive_runtime_test
+      test/adaptive_runtime_test.cpp)
   endif()
   if(BUILD_TESTING)
     add_custom_target(run_restricted_symbolic_shape_test
@@ -962,11 +1006,36 @@ if(KXC_BUILD_PASS_TESTS)
         COMMAND "$<TARGET_FILE:adaptive_hot_swap_test>")
       set_tests_properties(adaptive_hot_swap_test PROPERTIES
         LABELS "adaptive;adaptive-hot-swap;cpu" TIMEOUT 60)
+      add_test(NAME adaptive_runtime_test
+        COMMAND "$<TARGET_FILE:adaptive_runtime_test>")
+      # The optional full-model fixture retains several large canonical identities
+      # (about 12 GiB peak RSS); do not overlap it with other model/JIT tests.
+      set_tests_properties(adaptive_runtime_test PROPERTIES
+        LABELS "adaptive;adaptive-hot-swap;cpu;llvm;profiling" TIMEOUT 180 RUN_SERIAL TRUE)
+      if(KXC_USE_LLVM)
+        add_test(NAME adaptive_state_model_test
+          COMMAND "$<TARGET_FILE:adaptive_runtime_test>" --state-model)
+        set_tests_properties(adaptive_state_model_test PROPERTIES
+          LABELS "adaptive;adaptive-hot-swap;kv-state;minimind;cpu;llvm;profiling"
+          TIMEOUT 240 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+        if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH)
+          add_test(NAME adaptive_bounded_state_model_test
+            COMMAND "$<TARGET_FILE:adaptive_runtime_test>" --bounded-state-model)
+          set_tests_properties(adaptive_bounded_state_model_test PROPERTIES
+            LABELS "adaptive;adaptive-hot-swap;bounded-dynamic;kv-state;minimind;cpu;llvm;profiling"
+            TIMEOUT 300 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+          add_test(NAME adaptive_request_batch_model_test
+            COMMAND "$<TARGET_FILE:adaptive_runtime_test>" --request-model)
+          set_tests_properties(adaptive_request_batch_model_test PROPERTIES
+            LABELS "adaptive;adaptive-hot-swap;request-batching;kv-state;minimind;cpu;llvm;profiling"
+            TIMEOUT 300 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+        endif()
+      endif()
       add_custom_target(run_adaptive_hot_swap_tests
         COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
                 -L adaptive-hot-swap -L cpu
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-        DEPENDS adaptive_hot_swap_test
+        DEPENDS adaptive_hot_swap_test adaptive_runtime_test
         USES_TERMINAL
         COMMENT "Run bounded adaptive hot-swap CPU CTest suite")
     endif()
@@ -976,7 +1045,7 @@ if(KXC_BUILD_PASS_TESTS)
         COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
                 -L adaptive -L cpu
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-        DEPENDS adaptive_hot_swap_test
+        DEPENDS adaptive_hot_swap_test adaptive_runtime_test
         USES_TERMINAL
         COMMENT "Run adaptive hot-swap CPU CTest suite")
     endif()
@@ -993,6 +1062,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(control_plan_test test/control_plan_test.cpp)
   kxc_add_runtime_exe(control_plan_reference_executor_test test/control_plan_reference_executor_test.cpp)
   kxc_add_runtime_exe(control_runtime_integration_test test/control_runtime_integration_test.cpp)
+  kxc_add_runtime_exe(control_llvm_receipt_test test/control_llvm_receipt_test.cpp)
   kxc_add_runtime_exe(graph_partition_test test/graph_partition_test.cpp)
   kxc_add_runtime_exe(relay_anf_test test/relay_anf_test.cpp)
   kxc_add_runtime_exe(executable_capability_test test/executable_capability_test.cpp)
@@ -1001,6 +1071,7 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(onnx_import_spec_contract_test test/onnx_import_spec_contract_test.cpp)
   kxc_add_runtime_exe(profile_bundle_test test/profile_bundle_test.cpp)
   kxc_add_runtime_exe(compiler_contract_test test/compiler_contract_test.cpp)
+  kxc_add_runtime_exe(distributed_runtime_test test/distributed_runtime_test.cpp)
   kxc_add_runtime_exe(compiler_identity_test test/compiler_identity_test.cpp)
   if(TARGET kxc_experimental_identity_test_obj)
     target_sources(compiler_identity_test PRIVATE
@@ -1013,8 +1084,55 @@ if(KXC_BUILD_PASS_TESTS)
   kxc_add_runtime_exe(kernel_signature_test test/kernel_signature_test.cpp)
   kxc_add_runtime_exe(compiled_module_test test/compiled_module_test.cpp)
   kxc_add_runtime_exe(runtime_session_test test/runtime_session_test.cpp)
+  kxc_add_runtime_exe(runtime_profiling_test test/runtime_profiling_test.cpp)
   kxc_add_runtime_exe(cuda_schedule_test test/cuda_schedule_test.cpp)
   kxc_add_runtime_exe(te_schedule_test test/te_schedule_test.cpp)
+  kxc_add_runtime_exe(te_program_test test/te_program_test.cpp)
+  kxc_add_runtime_exe(masked_softmax_llvm_test test/masked_softmax_llvm_test.cpp)
+  # L1a 验收：真实 MiniMind prefill 图。产物 275 MB 不入库，运行时由
+  # KXC_MINIMIND_IMPORT_DIR 指向；未设置则跳过，不做构建硬依赖。
+  kxc_add_runtime_exe(minimind_l1a_llvm_test test/minimind_l1a_llvm_test.cpp)
+  kxc_add_runtime_exe(minimind_vision_llvm_test test/minimind_vision_llvm_test.cpp)
+  # G2 第 2 项：定容 KV 的多步 decode，同样由环境变量指向 fixture，未设置则跳过。
+  kxc_add_runtime_exe(minimind_decode_loop_llvm_test
+    test/minimind_decode_loop_llvm_test.cpp)
+  if(TARGET kxc_experimental_identity_test_obj)
+    target_sources(minimind_decode_loop_llvm_test PRIVATE
+      $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>)
+    add_dependencies(minimind_decode_loop_llvm_test kxc_experimental_identity_test_obj)
+  endif()
+  if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH AND KXC_USE_LLVM)
+    kxc_add_runtime_exe(bounded_dynamic_graph_llvm_test
+      test/bounded_dynamic_graph_llvm_test.cpp)
+    kxc_add_runtime_exe(shape_value_llvm_test
+      test/shape_value_llvm_test.cpp)
+    kxc_add_runtime_exe(bounded_attention_llvm_test
+      test/bounded_attention_llvm_test.cpp)
+    kxc_add_runtime_exe(bounded_graph_structure_llvm_test
+      test/bounded_graph_structure_llvm_test.cpp)
+    kxc_add_runtime_exe(bounded_projection_llvm_test
+      test/bounded_projection_llvm_test.cpp)
+    kxc_add_runtime_exe(onnx_shape_source_llvm_test
+      test/onnx_shape_source_llvm_test.cpp)
+    kxc_add_runtime_exe(bounded_gqa_llvm_test
+      test/bounded_gqa_llvm_test.cpp)
+    kxc_add_runtime_exe(bounded_rope_llvm_test
+      test/bounded_rope_llvm_test.cpp)
+    kxc_add_runtime_exe(bounded_causal_attention_llvm_test
+      test/bounded_causal_attention_llvm_test.cpp)
+    kxc_add_runtime_exe(minimind_bounded_prefill_llvm_test
+      test/minimind_bounded_prefill_llvm_test.cpp)
+    kxc_add_runtime_exe(bounded_kv_append_llvm_test
+      test/bounded_kv_append_llvm_test.cpp)
+    kxc_add_runtime_exe(minimind_bounded_decode_llvm_test
+      test/minimind_bounded_decode_llvm_test.cpp)
+    kxc_add_runtime_exe(minimind_vlm_bounded_llvm_test
+      test/minimind_vlm_bounded_llvm_test.cpp)
+    kxc_add_runtime_exe(request_batching_llvm_test
+      test/request_batching_llvm_test.cpp)
+    kxc_add_runtime_exe(kv_state_llvm_test
+      test/kv_state_llvm_test.cpp)
+  endif()
 
   set(KXC_CONTROL_FLOW_TESTS
     relay_anf_test
@@ -1034,11 +1152,17 @@ if(KXC_BUILD_PASS_TESTS)
   set_tests_properties(control_runtime_integration_test PROPERTIES
     LABELS "control-flow;control-runtime;runtime-plan;cpu"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
+  add_test(NAME control_llvm_receipt_test
+    COMMAND "$<TARGET_FILE:control_llvm_receipt_test>")
+  set_tests_properties(control_llvm_receipt_test PROPERTIES
+    LABELS "control-flow;control-runtime;cpu"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   add_custom_target(run_control_flow_tests
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure --no-tests=error
             -L control-flow
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     DEPENDS ${KXC_CONTROL_FLOW_TESTS} control_runtime_integration_test
+            control_llvm_receipt_test
     USES_TERMINAL
     COMMENT "Run control-flow CTest suite")
   add_custom_target(run_control_runtime_tests
@@ -1063,6 +1187,12 @@ if(KXC_BUILD_PASS_TESTS)
     set(KXC_ONNX_TRANSFORMER_PROTO "${CMAKE_CURRENT_BINARY_DIR}/onnx/exact_transformer.onnx")
     set(KXC_ONNX_TRANSFORMER_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/exact_transformer.import.json")
     set(KXC_ONNX_TRANSFORMER_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/exact_transformer.params.bin")
+    set(KXC_ONNX_STATIC_S1_PROTO "${CMAKE_CURRENT_BINARY_DIR}/onnx/static_s1.onnx")
+    set(KXC_ONNX_STATIC_S1_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/static_s1.import.json")
+    set(KXC_ONNX_STATIC_S1_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/static_s1.params.bin")
+    set(KXC_ONNX_EQUAL_WHERE_PROTO "${CMAKE_CURRENT_BINARY_DIR}/onnx/equal_where.onnx")
+    set(KXC_ONNX_EQUAL_WHERE_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/equal_where.import.json")
+    set(KXC_ONNX_EQUAL_WHERE_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/equal_where.params.bin")
     add_custom_command(
       OUTPUT "${KXC_ONNX_IMPORT_JSON}" "${KXC_ONNX_IMPORT_PARAMS}"
       COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/onnx"
@@ -1099,23 +1229,132 @@ if(KXC_BUILD_PASS_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/spec.py"
       VERBATIM
       COMMENT "Generate exact Transformer protobuf/import fixtures")
+    add_custom_command(
+      OUTPUT
+        "${KXC_ONNX_STATIC_S1_PROTO}"
+        "${KXC_ONNX_STATIC_S1_JSON}"
+        "${KXC_ONNX_STATIC_S1_PARAMS}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/onnx"
+      COMMAND "${CMAKE_COMMAND}" -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
+              "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_static_s1_fixture.py"
+              --onnx "${KXC_ONNX_STATIC_S1_PROTO}"
+              --json "${KXC_ONNX_STATIC_S1_JSON}"
+              --params "${KXC_ONNX_STATIC_S1_PARAMS}"
+      DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_static_s1_fixture.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/__init__.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/importer.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/spec.py"
+      VERBATIM
+      COMMENT "Generate static S1 protobuf/import fixtures")
+    add_custom_command(
+      OUTPUT
+        "${KXC_ONNX_EQUAL_WHERE_PROTO}"
+        "${KXC_ONNX_EQUAL_WHERE_JSON}"
+        "${KXC_ONNX_EQUAL_WHERE_PARAMS}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/onnx"
+      COMMAND "${CMAKE_COMMAND}" -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
+              "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_equal_where_fixture.py"
+              --onnx "${KXC_ONNX_EQUAL_WHERE_PROTO}"
+              --json "${KXC_ONNX_EQUAL_WHERE_JSON}"
+              --params "${KXC_ONNX_EQUAL_WHERE_PARAMS}"
+      DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_equal_where_fixture.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/__init__.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/importer.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/spec.py"
+      VERBATIM
+      COMMENT "Generate Equal-Where protobuf/import fixtures")
+    set(KXC_ONNX_M4M5_OPS_PROTO "${CMAKE_CURRENT_BINARY_DIR}/onnx/m4m5_ops.onnx")
+    set(KXC_ONNX_M4M5_OPS_JSON "${CMAKE_CURRENT_BINARY_DIR}/onnx/m4m5_ops.import.json")
+    set(KXC_ONNX_M4M5_OPS_PARAMS "${CMAKE_CURRENT_BINARY_DIR}/onnx/m4m5_ops.params.bin")
+    add_custom_command(
+      OUTPUT
+        "${KXC_ONNX_M4M5_OPS_PROTO}"
+        "${KXC_ONNX_M4M5_OPS_JSON}"
+        "${KXC_ONNX_M4M5_OPS_PARAMS}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/onnx"
+      COMMAND "${CMAKE_COMMAND}" -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
+              "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_m4m5_ops_fixture.py"
+              --onnx "${KXC_ONNX_M4M5_OPS_PROTO}"
+              --json "${KXC_ONNX_M4M5_OPS_JSON}"
+              --params "${KXC_ONNX_M4M5_OPS_PARAMS}"
+      DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/generate_onnx_m4m5_ops_fixture.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/__init__.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/importer.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/kxc_onnx/spec.py"
+      VERBATIM
+      COMMENT "Generate M4/M5 five-operator protobuf/import fixtures")
     add_custom_target(onnx_importer_fixture DEPENDS
       "${KXC_ONNX_IMPORT_JSON}" "${KXC_ONNX_IMPORT_PARAMS}"
       "${KXC_ONNX_TRANSFORMER_PROTO}" "${KXC_ONNX_TRANSFORMER_JSON}"
-      "${KXC_ONNX_TRANSFORMER_PARAMS}")
+      "${KXC_ONNX_TRANSFORMER_PARAMS}"
+      "${KXC_ONNX_STATIC_S1_PROTO}" "${KXC_ONNX_STATIC_S1_JSON}"
+      "${KXC_ONNX_STATIC_S1_PARAMS}"
+      "${KXC_ONNX_EQUAL_WHERE_PROTO}" "${KXC_ONNX_EQUAL_WHERE_JSON}"
+      "${KXC_ONNX_EQUAL_WHERE_PARAMS}"
+      "${KXC_ONNX_M4M5_OPS_PROTO}" "${KXC_ONNX_M4M5_OPS_JSON}"
+      "${KXC_ONNX_M4M5_OPS_PARAMS}")
     kxc_add_runtime_exe(onnx_importer_test test/onnx_importer_test.cpp)
     add_dependencies(onnx_importer_test onnx_importer_fixture)
     target_compile_definitions(onnx_importer_test PRIVATE
       KXC_ONNX_IMPORT_JSON_PATH="${KXC_ONNX_IMPORT_JSON}"
       KXC_ONNX_IMPORT_PARAMS_PATH="${KXC_ONNX_IMPORT_PARAMS}"
       KXC_ONNX_TRANSFORMER_JSON_PATH="${KXC_ONNX_TRANSFORMER_JSON}"
-      KXC_ONNX_TRANSFORMER_PARAMS_PATH="${KXC_ONNX_TRANSFORMER_PARAMS}")
+      KXC_ONNX_TRANSFORMER_PARAMS_PATH="${KXC_ONNX_TRANSFORMER_PARAMS}"
+      KXC_ONNX_STATIC_S1_JSON_PATH="${KXC_ONNX_STATIC_S1_JSON}"
+      KXC_ONNX_STATIC_S1_PARAMS_PATH="${KXC_ONNX_STATIC_S1_PARAMS}"
+      KXC_ONNX_EQUAL_WHERE_JSON_PATH="${KXC_ONNX_EQUAL_WHERE_JSON}"
+      KXC_ONNX_EQUAL_WHERE_PARAMS_PATH="${KXC_ONNX_EQUAL_WHERE_PARAMS}"
+      KXC_ONNX_M4M5_OPS_JSON_PATH="${KXC_ONNX_M4M5_OPS_JSON}"
+      KXC_ONNX_M4M5_OPS_PARAMS_PATH="${KXC_ONNX_M4M5_OPS_PARAMS}")
+    kxc_add_runtime_exe(g1_combined_profiling_test test/g1_combined_profiling_test.cpp)
+    add_dependencies(g1_combined_profiling_test onnx_importer_fixture)
+    target_compile_definitions(g1_combined_profiling_test PRIVATE
+      KXC_ONNX_EQUAL_WHERE_JSON_PATH="${KXC_ONNX_EQUAL_WHERE_JSON}"
+      KXC_ONNX_EQUAL_WHERE_PARAMS_PATH="${KXC_ONNX_EQUAL_WHERE_PARAMS}"
+      KXC_G1_BUNDLE_ROOT="${CMAKE_CURRENT_BINARY_DIR}/g1_bundles")
   else()
     message(WARNING "Python3 with onnx and numpy was not found; skipping onnx_importer_test target.")
   endif()
   if(KXC_USE_CUDA)
     kxc_add_runtime_exe(cupti_smoke_test test/cupti_smoke_test.cpp)
+    kxc_add_runtime_exe(cuda_runtime_profiling_test test/cuda_runtime_profiling_test.cpp)
+    kxc_add_runtime_exe(cuda_copy_profiling_test test/cuda_copy_profiling_test.cpp)
+    kxc_add_runtime_exe(cuda_state_runtime_test test/cuda_state_runtime_test.cpp)
+    if(KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH)
+      kxc_add_runtime_exe(bounded_cuda_test test/bounded_cuda_test.cpp)
+      kxc_add_runtime_exe(minimind_bounded_prefill_cuda_test test/minimind_bounded_prefill_llvm_test.cpp)
+      kxc_add_runtime_exe(minimind_bounded_decode_cuda_test test/minimind_bounded_decode_llvm_test.cpp)
+      kxc_add_runtime_exe(request_batching_cuda_test test/request_batching_llvm_test.cpp)
+      kxc_add_runtime_exe(adaptive_cuda_test test/minimind_bounded_decode_llvm_test.cpp)
+      target_compile_definitions(adaptive_cuda_test PRIVATE KXC_ADAPTIVE_CUDA_TEST=1
+        KXC_ENABLE_ADAPTIVE_HOT_SWAP=1)
+      kxc_add_runtime_exe(minimind_bounded_cuda_codegen_test test/minimind_bounded_cuda_codegen_test.cpp)
+      if(MSVC)
+        target_link_options(minimind_bounded_prefill_cuda_test PRIVATE /STACK:8388608)
+        target_link_options(minimind_bounded_decode_cuda_test PRIVATE /STACK:8388608)
+        target_link_options(minimind_bounded_cuda_codegen_test PRIVATE /STACK:8388608)
+      endif()
+    endif()
+    target_link_libraries(cuda_copy_profiling_test PRIVATE CUDA::cudart)
     kxc_add_runtime_exe(codegen_cuda_test test/codegen_cuda_test.cpp)
+    kxc_add_runtime_exe(minimind_prefill_cuda_test test/minimind_prefill_cuda_test.cpp)
+    kxc_add_runtime_exe(minimind_decode_loop_cuda_test test/minimind_decode_loop_llvm_test.cpp)
+    if(TARGET kxc_experimental_identity_test_obj)
+      target_sources(minimind_decode_loop_cuda_test PRIVATE
+        $<TARGET_OBJECTS:kxc_experimental_identity_test_obj>)
+      add_dependencies(minimind_decode_loop_cuda_test kxc_experimental_identity_test_obj)
+    endif()
+    if(MSVC)
+      # Full model traversal needs more than the Windows default 1 MiB stack.
+      target_link_options(minimind_prefill_cuda_test PRIVATE /STACK:8388608)
+      target_link_options(minimind_decode_loop_cuda_test PRIVATE /STACK:8388608)
+    endif()
     if(TARGET CUDA::cuda_driver)
       target_link_libraries(cupti_smoke_test PRIVATE CUDA::cuda_driver)
     endif()
@@ -1295,6 +1534,55 @@ kxc_add_ctest_if_target(shape_control_test "shape;shape-control;cpu")
 kxc_add_ctest_if_target(shape_production_exact_test "shape;shape-production;cpu")
 kxc_add_ctest_if_target(restricted_symbolic_shape_test "shape;shape-restricted-symbolic;cpu")
 kxc_add_ctest_if_target(shape_exact_dispatch_test "shape;shape-dispatch;cpu")
+kxc_add_ctest_if_target(bounded_dynamic_graph_llvm_test
+  "shape;bounded-dynamic;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(shape_value_llvm_test
+  "shape;shape-value;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(bounded_attention_llvm_test
+  "shape;bounded-attention;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(bounded_graph_structure_llvm_test
+  "shape;bounded-graph-structure;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(bounded_projection_llvm_test
+  "shape;bounded-projection;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(onnx_shape_source_llvm_test
+  "shape;onnx;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(bounded_gqa_llvm_test
+  "shape;bounded-gqa;onnx;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(bounded_rope_llvm_test
+  "shape;bounded-rope;onnx;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(bounded_causal_attention_llvm_test
+  "shape;bounded-causal-attention;onnx;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(minimind_bounded_prefill_llvm_test
+  "shape;bounded-prefill;onnx;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(bounded_kv_append_llvm_test
+  "shape;bounded-kv-append;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(minimind_bounded_decode_llvm_test
+  "shape;bounded-decode;onnx;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(minimind_vlm_bounded_llvm_test
+  "minimind;l2;vision;shape;bounded-prefill;kv-state;onnx;cpu;llvm;e2e;numeric")
+if(TARGET minimind_vlm_bounded_llvm_test)
+  set_tests_properties(minimind_vlm_bounded_llvm_test PROPERTIES
+    RESOURCE_LOCK "minimind_vlm_model" SKIP_RETURN_CODE 77)
+endif()
+kxc_add_ctest_if_target(request_batching_llvm_test
+  "request-batching;kv-state;cpu;llvm;e2e;numeric")
+kxc_add_ctest_if_target(kv_state_llvm_test
+  "kv-state;llvm;dynamic-module;e2e;numeric")
+kxc_add_ctest_if_target(minimind_l1a_llvm_test
+  "minimind;l1a;onnx;llvm;cpu;e2e;numeric")
+kxc_add_ctest_if_target(minimind_vision_llvm_test
+  "minimind;l2;vision;onnx;llvm;cpu;e2e;numeric")
+kxc_add_ctest_if_target(minimind_decode_loop_llvm_test
+  "minimind;l1b;kv-state;onnx;llvm;cpu;e2e;numeric")
+if(TARGET minimind_decode_loop_llvm_test)
+  foreach(_kxc_vlm_case RANGE 0 2)
+    add_test(NAME minimind_vlm_case${_kxc_vlm_case}_llvm_test
+      COMMAND "$<TARGET_FILE:minimind_decode_loop_llvm_test>" --vlm ${_kxc_vlm_case})
+    set_tests_properties(minimind_vlm_case${_kxc_vlm_case}_llvm_test PROPERTIES
+      LABELS "minimind;l2;vision;kv-state;onnx;llvm;cpu;e2e;numeric"
+      RESOURCE_LOCK "minimind_vlm_model")
+  endforeach()
+endif()
 
 foreach(_kxc_cpu_core_test IN ITEMS
     object_test packed_func_test registry_test type_registration_test
@@ -1304,11 +1592,24 @@ foreach(_kxc_cpu_core_test IN ITEMS
     compiler_contract_test compiler_identity_test
     operator_compilation_test primitive_cache_test
     compiler_extension_contract_test kernel_signature_test compiled_module_test
-    cuda_schedule_test te_schedule_test)
+    cuda_schedule_test te_schedule_test te_program_test masked_softmax_llvm_test)
   # cuda_schedule_test exercises CPU-only scheduling contracts with synthetic
   # Target snapshots; it neither requires nor launches CUDA hardware.
   kxc_add_ctest_if_target(${_kxc_cpu_core_test} "cpu;core")
 endforeach()
+
+# Runtime profiling covers execution observation contracts on CPU/LLVM.
+kxc_add_ctest_if_target(runtime_profiling_test "cpu;core;profiling")
+kxc_add_ctest_if_target(distributed_runtime_test "cpu;distributed;numeric")
+if(TARGET distributed_runtime_test)
+  set_tests_properties(distributed_runtime_test PROPERTIES TIMEOUT 30)
+  if(KXC_USE_LLVM)
+    add_test(NAME distributed_minimind_model_test COMMAND distributed_runtime_test --model)
+    set_tests_properties(distributed_minimind_model_test PROPERTIES
+      LABELS "cpu;llvm;distributed;minimind;numeric;profiling"
+      TIMEOUT 180 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+  endif()
+endif()
 
 kxc_add_ctest_if_target(codegen_llvm_test "llvm;codegen")
 kxc_add_ctest_if_target(op_numeric_llvm_test "llvm;numeric")
@@ -1318,8 +1619,142 @@ if(KXC_USE_LLVM)
 else()
   kxc_add_ctest_if_target(onnx_importer_test "onnx;integration")
 endif()
+kxc_add_ctest_if_target(g1_combined_profiling_test "g1;llvm;onnx;profiling;e2e;integration")
 kxc_add_ctest_if_target(codegen_cuda_test "cuda;hardware;codegen;local-evidence")
+kxc_add_ctest_if_target(minimind_prefill_cuda_test "cuda;hardware;minimind;numeric;local-evidence")
+if(TARGET minimind_decode_loop_cuda_test AND Python3_Interpreter_FOUND)
+  add_test(NAME minimind_decode_loop_cuda_test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/cuda_profile_bundle_test.py"
+      --executable "$<TARGET_FILE:minimind_decode_loop_cuda_test>"
+      --mode decode --bundle-root "${CMAKE_CURRENT_BINARY_DIR}/cuda-state-evidence")
+  set_tests_properties(minimind_decode_loop_cuda_test PROPERTIES
+    LABELS "cuda;hardware;minimind;kv-state;numeric;local-evidence"
+    SKIP_RETURN_CODE 77 TIMEOUT 180
+    PASS_REGULAR_EXPRESSION "cuda_state_profile_verified")
+endif()
+if(TARGET cuda_state_runtime_test AND Python3_Interpreter_FOUND)
+  add_test(NAME cuda_state_runtime_test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/cuda_profile_bundle_test.py"
+      --executable "$<TARGET_FILE:cuda_state_runtime_test>"
+      --mode state --bundle-root "${CMAKE_CURRENT_BINARY_DIR}/cuda-state-evidence")
+  set_tests_properties(cuda_state_runtime_test PROPERTIES
+    LABELS "cuda;hardware;kv-state;numeric;local-evidence" SKIP_RETURN_CODE 77 TIMEOUT 60
+    PASS_REGULAR_EXPRESSION "cuda_state_profile_verified")
+endif()
+if(TARGET bounded_cuda_test AND Python3_Interpreter_FOUND)
+  add_test(NAME bounded_cuda_test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/cuda_profile_bundle_test.py"
+      --executable "$<TARGET_FILE:bounded_cuda_test>"
+      --mode bounded --bundle-root "${CMAKE_CURRENT_BINARY_DIR}/bounded-cuda-evidence")
+  set_tests_properties(bounded_cuda_test PROPERTIES
+    LABELS "cuda;hardware;bounded-dynamic;numeric;local-evidence" SKIP_RETURN_CODE 77 TIMEOUT 180
+    PASS_REGULAR_EXPRESSION "bounded_cuda_profile_verified")
+endif()
+if(TARGET minimind_bounded_prefill_cuda_test AND Python3_Interpreter_FOUND)
+  add_test(NAME minimind_bounded_prefill_cuda_test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/cuda_profile_bundle_test.py"
+      --executable "$<TARGET_FILE:minimind_bounded_prefill_cuda_test>"
+      --mode bounded-prefill --bundle-root "${CMAKE_CURRENT_BINARY_DIR}/bounded-prefill-evidence")
+  set_tests_properties(minimind_bounded_prefill_cuda_test PROPERTIES
+    LABELS "cuda;hardware;bounded-dynamic;minimind;numeric;local-evidence"
+    SKIP_RETURN_CODE 77 TIMEOUT 300
+    PASS_REGULAR_EXPRESSION "bounded_minimind_prefill_profile_verified")
+endif()
+if(TARGET minimind_bounded_decode_cuda_test AND Python3_Interpreter_FOUND)
+  add_test(NAME minimind_bounded_decode_cuda_test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/cuda_profile_bundle_test.py"
+      --executable "$<TARGET_FILE:minimind_bounded_decode_cuda_test>"
+      --mode bounded-decode --bundle-root "${CMAKE_CURRENT_BINARY_DIR}/bounded-decode-evidence")
+  set_tests_properties(minimind_bounded_decode_cuda_test PROPERTIES
+    LABELS "cuda;hardware;bounded-dynamic;minimind;numeric;runtime-plan;local-evidence"
+    SKIP_RETURN_CODE 77 TIMEOUT 600
+    PASS_REGULAR_EXPRESSION "bounded_minimind_decode_profile_verified")
+  add_test(NAME minimind_request_batching_cuda_test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/cuda_profile_bundle_test.py"
+      --executable "$<TARGET_FILE:minimind_bounded_decode_cuda_test>"
+      --mode bounded-requests --bundle-root "${CMAKE_CURRENT_BINARY_DIR}/bounded-request-evidence")
+  set_tests_properties(minimind_request_batching_cuda_test PROPERTIES
+    LABELS "cuda;hardware;bounded-dynamic;minimind;request-batching;numeric;local-evidence"
+    SKIP_RETURN_CODE 77 TIMEOUT 600
+    PASS_REGULAR_EXPRESSION "bounded_minimind_requests_profile_verified")
+endif()
+if(TARGET request_batching_cuda_test)
+  add_test(NAME request_batching_cuda_test COMMAND request_batching_cuda_test --cuda)
+  set_tests_properties(request_batching_cuda_test PROPERTIES
+    LABELS "cuda;hardware;request-batching;kv-state;numeric;local-evidence"
+    SKIP_RETURN_CODE 77 TIMEOUT 180
+    PASS_REGULAR_EXPRESSION "cuda_request_batching_queue_state_streams_lifetime_and_failure")
+endif()
+if(TARGET adaptive_cuda_test AND Python3_Interpreter_FOUND)
+  add_test(NAME adaptive_cuda_test
+    COMMAND "$<TARGET_FILE:adaptive_cuda_test>"
+      "${CMAKE_CURRENT_BINARY_DIR}/adaptive-cuda-evidence")
+  set_tests_properties(adaptive_cuda_test PROPERTIES
+    LABELS "cuda;hardware;adaptive-hot-swap;kv-state;numeric;local-evidence"
+    SKIP_RETURN_CODE 77 TIMEOUT 900
+    ENVIRONMENT "KXC_MINIMIND_BOUNDED_DECODE_DIR=$ENV{KXC_MINIMIND_BOUNDED_DECODE_DIR}")
+endif()
+
+if(TARGET minimind_bounded_cuda_codegen_test AND Python3_Interpreter_FOUND AND EXISTS "${CUDAToolkit_NVCC_EXECUTABLE}")
+  add_test(NAME minimind_bounded_cuda_codegen_test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/minimind_cuda_codegen_test.py"
+      --executable "$<TARGET_FILE:minimind_bounded_cuda_codegen_test>"
+      --nvcc "${CUDAToolkit_NVCC_EXECUTABLE}"
+      --output-root "${CMAKE_CURRENT_BINARY_DIR}/bounded-cuda-codegen-evidence")
+  set_tests_properties(minimind_bounded_cuda_codegen_test PROPERTIES
+    LABELS "cuda;codegen;bounded-dynamic;minimind;local-evidence"
+    SKIP_RETURN_CODE 77 TIMEOUT 180
+    PASS_REGULAR_EXPRESSION "full_minimind_bounded_cuda_ptx_verified")
+  add_test(NAME minimind_bounded_decode_cuda_codegen_test
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/minimind_cuda_codegen_test.py"
+      --executable "$<TARGET_FILE:minimind_bounded_cuda_codegen_test>"
+      --nvcc "${CUDAToolkit_NVCC_EXECUTABLE}" --model decode
+      --output-root "${CMAKE_CURRENT_BINARY_DIR}/bounded-cuda-codegen-evidence")
+  set_tests_properties(minimind_bounded_decode_cuda_codegen_test PROPERTIES
+    LABELS "cuda;codegen;bounded-dynamic;minimind;local-evidence"
+    SKIP_RETURN_CODE 77 TIMEOUT 180
+    PASS_REGULAR_EXPRESSION "full_minimind_bounded_cuda_ptx_verified")
+  foreach(_kxc_request_axis RANGE 1 2)
+    add_test(NAME request_batching_axis${_kxc_request_axis}_cuda_codegen_test
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/minimind_cuda_codegen_test.py"
+        --executable "$<TARGET_FILE:minimind_bounded_cuda_codegen_test>"
+        --nvcc "${CUDAToolkit_NVCC_EXECUTABLE}" --model requests-axis${_kxc_request_axis}
+        --output-root "${CMAKE_CURRENT_BINARY_DIR}/bounded-request-codegen-evidence")
+    set_tests_properties(request_batching_axis${_kxc_request_axis}_cuda_codegen_test PROPERTIES
+      LABELS "cuda;codegen;bounded-dynamic;request-batching;local-evidence" TIMEOUT 60
+      PASS_REGULAR_EXPRESSION "full_minimind_bounded_cuda_ptx_verified")
+  endforeach()
+endif()
+if(TARGET minimind_prefill_cuda_test)
+  # Some Windows JIT debugger failures return zero after a native exception.
+  # Require completed numerical evidence; a missing optional fixture is skipped.
+  set_tests_properties(minimind_prefill_cuda_test PROPERTIES
+    SKIP_RETURN_CODE 77
+    PASS_REGULAR_EXPRESSION "full_minimind_static_cuda_prefill_and_all_kv_no_runtime_compile")
+endif()
+if(TARGET codegen_cuda_test)
+  set_tests_properties(codegen_cuda_test PROPERTIES
+    PASS_REGULAR_EXPRESSION "compiler_rejects_oversized_scratch")
+endif()
 kxc_add_ctest_if_target(cupti_smoke_test "cuda;hardware")
+if(TARGET cuda_runtime_profiling_test AND Python3_Interpreter_FOUND)
+  foreach(_kxc_profile_mode IN ITEMS concurrent prefill copy)
+    if(_kxc_profile_mode STREQUAL "concurrent")
+      set(_kxc_profile_executable cuda_runtime_profiling_test)
+    elseif(_kxc_profile_mode STREQUAL "copy")
+      set(_kxc_profile_executable cuda_copy_profiling_test)
+    else()
+      set(_kxc_profile_executable minimind_prefill_cuda_test)
+    endif()
+    add_test(NAME cuda_profile_${_kxc_profile_mode}_test
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/cuda_profile_bundle_test.py"
+        --executable "$<TARGET_FILE:${_kxc_profile_executable}>"
+        --mode "${_kxc_profile_mode}" --bundle-root "${CMAKE_CURRENT_BINARY_DIR}/cuda-profile-evidence")
+    set_tests_properties(cuda_profile_${_kxc_profile_mode}_test PROPERTIES
+      LABELS "cuda;hardware;profiling;numeric;local-evidence" SKIP_RETURN_CODE 77 TIMEOUT 120
+      PASS_REGULAR_EXPRESSION "cuda_profile_correlation_verified")
+  endforeach()
+endif()
 
 if(Python3_Interpreter_FOUND)
   add_test(NAME relay_op_contract

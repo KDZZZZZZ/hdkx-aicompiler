@@ -18,6 +18,8 @@ namespace kxc::runtime {
 
 /*! \brief 将受支持的 dtype 名称解析为 DLPack 数据类型。 */
 DLDataType DataTypeFromString(const std::string& dtype);
+/*! \brief Canonical name for one of the same supported scalar DLPack types. */
+std::string DataTypeToString(DLDataType dtype);
 
 /*! \brief 保存张量元数据，并维护指向同一 Storage 的 DLTensor 借用视图。 */
 class NDArrayNode final : public Object {

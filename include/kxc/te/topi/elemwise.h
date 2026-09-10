@@ -53,6 +53,10 @@ Tensor clip(const Tensor& x, PrimExpr a_min, PrimExpr a_max, std::string name = 
 // Cast
 Tensor cast(const Tensor& x, DataType dtype, std::string name = "cast", std::string tag = kElementWise);
 
+// Broadcast numeric equality; produces a Bool tensor via the TIR EQ expression.
+Tensor equal(const Tensor& A, const Tensor& B, std::string name = "equal",
+             std::string tag = kBroadcast);
+
 } // namespace topi
 } // namespace te
 } // namespace kxc

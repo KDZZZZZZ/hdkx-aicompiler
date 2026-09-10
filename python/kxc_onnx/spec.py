@@ -42,6 +42,7 @@ class ImportedONNXModel:
     function: RelayFunctionSpec
     params: dict[str, ParamTensor]
     param_order: list[str]
+    preserve_shape_values: bool = False
 
 
 def _tensor_spec_to_dict(spec: TensorSpec) -> dict[str, Any]:
@@ -76,7 +77,8 @@ def to_json_dict(imported: ImportedONNXModel) -> dict[str, Any]:
         offset += nbytes
 
     return {
-        "format": "kxc.onnx_import.v1",
+        "format": ("kxc.onnx_shape_source.v1" if imported.preserve_shape_values
+                   else "kxc.onnx_import.v1"),
         "function": {
             "inputs": [_tensor_spec_to_dict(x) for x in imported.function.inputs],
             "outputs": [_tensor_spec_to_dict(x) for x in imported.function.outputs],

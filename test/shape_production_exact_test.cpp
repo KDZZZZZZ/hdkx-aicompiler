@@ -551,14 +551,35 @@ bool TestLLVMNormalAndExactShareStaticAssembly() {
             normal.artifact_pins()[index].record().artifact_key ==
                 exact.artifact_pins()[index].record().artifact_key;
     }
-    const bool same_plan_abi = PlanAbi(
-        normal.module(), normal.plan(), normal.artifact_pins()) == PlanAbi(
-            exact.module(), exact.plan(), exact.artifact_pins());
+    const bool same_plan_abi =
+        kxc::api::BuildPlanAbiFingerprint(normal) ==
+        PlanAbi(exact.module(), exact.plan(), exact.artifact_pins());
     kxc::api::internal::ClearPrimitiveCacheForTesting();
     CHECK(normal.graph_semantic_key() ==
               exact.plan_variant_key().graph_semantic_key() &&
               same_ordered_keys && same_plan_abi,
           "normal and exact paths must publish the same static graph ABI");
+    const kxc::TensorType type({4}, "float32");
+    const kxc::Var x("x", type), y("y", type);
+    const kxc::Function region({x, y}, kxc::Call(kxc::relay::Op::Get("sqrt"),
+        {kxc::Call(kxc::relay::Op::Get("add"), {x, y})}));
+    const auto fused_config = kxc::api::CompileConfig::Create(kxc::BuildTarget(kxc::Device::CPU()), 3);
+    const auto fused_normal = kxc::api::Compiler::Compile(region, fused_config);
+    const auto fused_prepared = ProductionExactShapeAdapter::PrepareGraphTemplate(region, fused_config);
+    const auto fused_oracle = ProductionExactShapeAdapter::InstantiateExactProfile(
+        fused_prepared, kxc::shape::experimental::v1::BindingSet());
+    const auto fused_exact = ProductionExactShapeAdapter::AssembleExactPlan(fused_prepared, fused_oracle);
+    CHECK(fused_exact.plan().calls().size() == 1 && fused_exact.plan().values().size() == 3 &&
+          fused_exact.artifact_pins()[0].record().artifact_key == fused_normal.artifact_pins()[0].record().artifact_key &&
+          PlanAbi(fused_exact.module(), fused_exact.plan(), fused_exact.artifact_pins()) ==
+              kxc::api::BuildPlanAbiFingerprint(fused_normal),
+          "exact profile must retain the same fused Program and external ABI as normal compilation");
+    kxc::api::internal::ClearPrimitiveCacheForTesting();
+    kxc::runtime::RuntimeSession fused_session(fused_exact.module(), fused_exact.plan());
+    const auto result = fused_session.Run({FloatArray({1, 4, 9, 16}), FloatArray({0, 0, 0, 0})});
+    std::vector<float> values(4);
+    result[0].CopyToBytes(values.data(), 4 * sizeof(float));
+    CHECK(values == std::vector<float>({1, 2, 3, 4}), "exact-profile fused LLVM execution changed results");
     return true;
 }
 

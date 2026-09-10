@@ -130,40 +130,45 @@ Tensor concatenate(const Array<Tensor>& inputs, int axis, std::string name, std:
         throw std::runtime_error("topi::concatenate axis out of range");
     }
 
-    Array<int64_t> axis_extents;
+    Array<PrimExpr> axis_extents;
     Array<PrimExpr> output_shape;
     for (const PrimExpr& extent : inputs[0]->shape) output_shape.push_back(extent);
-    int64_t axis_total = 0;
+    int64_t static_total = 0;
+    PrimExpr dynamic_extent;
     for (const Tensor& input : inputs) {
-        if (!input.defined()) {
-            throw std::runtime_error("topi::concatenate input tensor is undefined");
-        }
-        if (input->shape.size() != rank) {
-            throw std::runtime_error("topi::concatenate input rank mismatch");
-        }
-        if (input->dtype != inputs[0]->dtype) {
-            throw std::runtime_error("topi::concatenate input dtype mismatch");
+        if (!input.defined() || input->shape.size() != rank || input->dtype != inputs[0]->dtype) {
+            throw std::runtime_error("topi::concatenate input rank or dtype mismatch");
         }
         for (size_t index = 0; index < rank; ++index) {
             const auto* extent = input->shape[index].As<tir::IntImmNode>();
             const auto* reference = inputs[0]->shape[index].As<tir::IntImmNode>();
-            if (!extent || !reference || extent->value < 0 || reference->value < 0) {
-                throw std::runtime_error("topi::concatenate requires static non-negative input dimensions");
+            if (extent && extent->value < 0) {
+                throw std::runtime_error("topi::concatenate requires non-negative input dimensions");
             }
-            if (static_cast<int>(index) != axis && extent->value != reference->value) {
-                throw std::runtime_error("topi::concatenate non-axis dimensions must exactly match");
+            if (static_cast<int>(index) != axis) {
+                if ((extent != nullptr) != (reference != nullptr) ||
+                    (extent && extent->value != reference->value)) {
+                    throw std::runtime_error("topi::concatenate non-axis dimensions must exactly match");
+                }
+                continue;  // Symbolic equality is proved by the bounded producer.
             }
-            if (static_cast<int>(index) == axis) {
-                if (axis_total > std::numeric_limits<int64_t>::max() - extent->value) {
+            if (extent) {
+                if (static_total > std::numeric_limits<int64_t>::max() - extent->value) {
                     throw std::runtime_error("topi::concatenate axis extent sum overflows int64");
                 }
-                axis_total += extent->value;
-                axis_extents.push_back(extent->value);
+                static_total += extent->value;
+            } else {
+                if (dynamic_extent.defined()) {
+                    throw std::runtime_error("topi::concatenate admits only one dynamic concatenation axis");
+                }
+                dynamic_extent = input->shape[index];
             }
+            axis_extents.push_back(input->shape[index]);
         }
     }
-    output_shape[static_cast<size_t>(axis)] =
-        tir::IntImm(axis_total, tir::DataType::Int(64));
+    const PrimExpr constant = tir::IntImm(static_total, tir::DataType::Int(64));
+    output_shape[static_cast<size_t>(axis)] = !dynamic_extent.defined() ? constant
+        : (static_total == 0 ? dynamic_extent : dynamic_extent + constant);
 
     return compute(
         output_shape,
@@ -172,7 +177,7 @@ Tensor concatenate(const Array<Tensor>& inputs, int axis, std::string name, std:
             offsets.push_back(tir::IntImm(0, tir::DataType::Int(64)));
             for (size_t i = 1; i < inputs.size(); ++i) {
                 offsets.push_back(offsets[i - 1] +
-                                  tir::IntImm(axis_extents[i - 1], tir::DataType::Int(64)));
+                                  axis_extents[i - 1]);
             }
             Array<PrimExpr> last_indices;
             for (const tir::Var& value : indices) last_indices.push_back(value);
@@ -185,7 +190,7 @@ Tensor concatenate(const Array<Tensor>& inputs, int axis, std::string name, std:
                 input_indices[static_cast<size_t>(axis)] =
                     input_indices[static_cast<size_t>(axis)] - offsets[static_cast<size_t>(i)];
                 const PrimExpr limit = offsets[static_cast<size_t>(i)] +
-                    tir::IntImm(axis_extents[static_cast<size_t>(i)], tir::DataType::Int(64));
+                    axis_extents[static_cast<size_t>(i)];
                 // Select is lowered lazily, so a zero-extent branch never evaluates its Load.
                 result = Select(indices[static_cast<size_t>(axis)] < limit,
                                 inputs[static_cast<size_t>(i)](input_indices), result);

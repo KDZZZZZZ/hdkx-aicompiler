@@ -1,0 +1,17 @@
+diff --git a/model/model_minimind.py b/model/model_minimind.py
+index dc080e5..ed32b9b 100755
+--- a/model/model_minimind.py
++++ b/model/model_minimind.py
+@@ -126,7 +126,11 @@ class Attention(nn.Module):
+             output = F.scaled_dot_product_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
+         else:
+             scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
+-            if self.is_causal: scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
++            if self.is_causal:
++                _m = torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
++                _pad = scores.shape[-1] - seq_len
++                if _pad > 0: _m = torch.cat([torch.zeros(seq_len, _pad, device=scores.device), _m], dim=-1)
++                scores = scores + _m
+             if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
+             output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
+         output = output.transpose(1, 2).reshape(bsz, seq_len, -1)

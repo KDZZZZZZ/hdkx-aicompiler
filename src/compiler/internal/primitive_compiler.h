@@ -17,7 +17,13 @@ namespace kxc::profiling {
 class ProfileContext;
 }
 
+namespace kxc::api {
+class ModuleInvocationContract;
+}
+
 namespace kxc::api::internal {
+
+class BoundedCompilePreparation;
 
 struct CompiledPrimitive final {
     PrimitiveUnitId unit_id{-1};
@@ -25,6 +31,9 @@ struct CompiledPrimitive final {
     codegen::KernelSignature current_signature;
     PrimitiveArtifactPin pin;
     bool cache_hit{false};
+    // Graph/profile applicability belongs to this compilation and module
+    // entry; reusable CachedPrimitive owns only code and its physical ABI.
+    std::shared_ptr<const ModuleInvocationContract> invocation_contract;
 };
 
 struct CompiledPrimitiveBatch final {
@@ -41,6 +50,19 @@ CompiledPrimitiveBatch CompilePrimitiveUnits(
 CompiledPrimitiveBatch CompilePrimitiveUnits(
     const std::vector<PrimitiveUnit>& units,
     const std::vector<LogicalValueContract>& values,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract,
+    const std::vector<PrimitiveUnitId>& requested_unit_ids);
+
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const BoundedCompilePreparation& preparation,
+    const PartitionedGraph& partitioned_graph,
+    const CompileConfig& config,
+    const CompilerExecutionContract& contract);
+
+CompiledPrimitiveBatch CompilePrimitiveUnits(
+    const BoundedCompilePreparation& preparation,
+    const PartitionedGraph& partitioned_graph,
     const CompileConfig& config,
     const CompilerExecutionContract& contract,
     const std::vector<PrimitiveUnitId>& requested_unit_ids);

@@ -18,6 +18,7 @@ class ProfileContext;
 namespace kxc::api::internal {
 
 struct CompiledPrimitiveBatch;
+class BoundedCompilePreparation;
 
 /*! \brief One immutable description of the production plan actually executed. */
 struct PreparedCompilerGraph final {
@@ -47,13 +48,22 @@ CompilerExecutionContract ResolveCompilerExecutionContract(
 CompilerExecutionContract ResolveCompilerExecutionContract(
     const CompileConfig& config,
     const Array<String>& required_relay_control_capabilities);
+CompilerExecutionContract ResolveBoundedExecutionContract(
+    const CompileConfig& config);
 std::string CanonicalTargetSnapshot(const Target& target);
 
 PreparedCompilerGraph PrepareCompilerGraph(
     Function function, CompileConfig config,
     const CompilerExecutionContract& contract);
+PreparedCompilerGraph PrepareCompilerGraph(
+    const BoundedCompilePreparation& preparation,
+    const CompilerExecutionContract& contract);
 CompiledGraph AssembleCompiledGraph(
     const PreparedCompilerGraph& prepared,
     const CompiledPrimitiveBatch& batch);
+CompiledGraph AssembleCompiledGraph(
+    const PreparedCompilerGraph& prepared,
+    const CompiledPrimitiveBatch& batch,
+    runtime::ExecutablePlan plan);
 
 }  // namespace kxc::api::internal

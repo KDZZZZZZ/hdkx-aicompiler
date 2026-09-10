@@ -6,6 +6,8 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -24,6 +26,8 @@
 #include "../src/compiler/internal/primitive_compiler.h"
 #include "../src/compiler/internal/kernel_abi_builder.h"
 #include "../src/compiler/internal/primitive_cache.h"
+#include "../src/runtime/internal/compiled_module_node.h"
+#include "../src/runtime/internal/module_invocation_contract.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
 #include "support/primitive_lowering.h"
@@ -36,6 +40,20 @@ struct HasPublicCreate : std::false_type {};
 template <typename T>
 struct HasPublicCreate<T, std::void_t<decltype(&T::Create)>> : std::true_type {};
 
+template <typename T, typename = void>
+struct HasInvocationContract : std::false_type {};
+
+template <typename T>
+struct HasInvocationContract<
+    T, std::void_t<decltype(std::declval<T&>().invocation_contract)>>
+    : std::true_type {};
+
+static_assert(HasInvocationContract<
+                  kxc::api::internal::CompiledPrimitive>::value,
+              "CompiledPrimitive must carry per-compilation applicability");
+static_assert(!HasInvocationContract<
+                  kxc::api::internal::CachedPrimitive>::value,
+              "CachedPrimitive must not cache invocation applicability");
 static_assert(!HasPublicCreate<kxc::api::CompiledGraph>::value,
               "CompiledGraph must not expose a public factory");
 static_assert(std::is_same_v<
@@ -521,8 +539,12 @@ bool TestExecutionPlanKernelFailsClosed() {
     Map<int, std::string> dtypes;
     dtypes.Set(0, "float32");
     dtypes.Set(1, "float32");
-    ExecutionPlan plan({ObjectRef(kernel)}, {}, {0}, {}, shapes, dtypes, 2,
-                       pass_ctx, DiscoPlacement(), 1);
+    const VirtualDevice vd(Device::CPU(), BuildTarget(Device::CPU()), "global", 0);
+    Map<int, VirtualDevice> devices;
+    devices.Set(0, vd);
+    devices.Set(1, vd);
+    ExecutionPlan plan({ObjectRef(kernel)}, devices, {0}, {}, shapes, dtypes, 2,
+                       pass_ctx, BuildDiscoPlacement({vd}), 1);
 
     disco::DiscoSession session = disco::DiscoSession::ThreadedSession(1, 1);
     disco::DRef input = session.Empty({1}, "float32", false, false);
@@ -531,12 +553,12 @@ bool TestExecutionPlanKernelFailsClosed() {
     disco::ExecutionPlanExecutor executor(session);
     TEST_CHECK(ThrowsWithMessage(
                    [&] { (void)executor.Execute(plan, initial_values); },
-                   "CompiledModule launch is not implemented"),
+                   "requires a ready bound CompiledModule"),
                "ExecutionPlan kernel path should fail before producing an output");
 
     TEST_CHECK(!Registry::Global().Get("kxc.disco.execute_plan").defined() &&
                    !Registry::Global().Get("kxc.disco.execute_plan_json").defined(),
-               "incomplete ExecutionPlan execution should not be exposed through FFI");
+               "ExecutionPlan must require explicit typed module binding instead of an unsafe FFI entry");
     return true;
 }
 
@@ -606,11 +628,32 @@ bool TestAssembleCompiledGraphFromOrderedPins() {
     ClearPrimitiveCacheForTesting();
     const PreparedCompilerGraph prepared =
         PrepareCompilerGraph(function, config, contract);
-    const CompiledPrimitiveBatch batch = CompilePrimitiveUnits(
+    CompiledPrimitiveBatch batch = CompilePrimitiveUnits(
         prepared.graph.partitioned.units,
         prepared.graph.partitioned.value_graph.values, config, contract);
+    api::ModuleInputContract invocation_input;
+    invocation_input.axis_guards = {
+        api::ModuleAxisGuard{0, 4, 4, 1, api::ModuleExtent{4},
+                             std::nullopt}};
+    const api::ModuleShapeExpr four = api::ModuleShapeExpr::Const(4);
+    api::ModuleTensorContract invocation_output;
+    invocation_output.logical = {four};
+    invocation_output.physical = {four};
+    invocation_output.valid = {four};
+    invocation_output.max_bytes = 4 * sizeof(float);
+    const auto invocation =
+        std::make_shared<const api::ModuleInvocationContract>(
+            std::vector<api::ModuleInputContract>{invocation_input,
+                                                  invocation_input},
+            std::vector<api::ModuleTensorContract>{invocation_output},
+            std::vector<api::ModuleRuntimeExtentScalar>{},
+            invocation_output.max_bytes);
+    batch.primitives[0].invocation_contract = invocation;
     const api::CompiledGraph compiled = AssembleCompiledGraph(
         prepared, batch);
+    const CompiledPrimitiveBatch cache_hit_batch = CompilePrimitiveUnits(
+        prepared.graph.partitioned.units,
+        prepared.graph.partitioned.value_graph.values, config, contract);
     CompiledPrimitiveBatch missing = batch;
     missing.primitives.pop_back();
     CompiledPrimitiveBatch swapped = batch;
@@ -632,6 +675,13 @@ bool TestAssembleCompiledGraphFromOrderedPins() {
 
     TEST_CHECK(compiled.plan().calls().size() == batch.primitives.size() &&
                    compiled.artifact_pins().size() == batch.primitives.size() &&
+                   api::internal::BorrowCompiledModuleInvocationContract(
+                       compiled.module(),
+                       prepared.graph.partitioned.units[0].symbol)
+                           .CanonicalBytes() == invocation->CanonicalBytes() &&
+                   cache_hit_batch.primitives.size() == batch.primitives.size() &&
+                   !cache_hit_batch.primitives[0].invocation_contract &&
+                   !cache_hit_batch.primitives[1].invocation_contract &&
                    outputs.size() == 1 && values == std::vector<float>(4, 9.0f) &&
                    Throws([&] {
                        (void)AssembleCompiledGraph(prepared, missing);
@@ -639,7 +689,7 @@ bool TestAssembleCompiledGraphFromOrderedPins() {
                    Throws([&] {
                        (void)AssembleCompiledGraph(prepared, swapped);
                    }),
-               "ordered pins must assemble one executable graph and reject drift");
+               "ordered pins must assemble invocation contracts without caching applicability");
     return true;
 }
 

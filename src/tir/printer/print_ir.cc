@@ -6,6 +6,8 @@
 
 #include "kxc/tir/visitor.h"
 
+#include <algorithm>
+#include <vector>
 #include <sstream>
 #include <string>
 
@@ -65,20 +67,29 @@ public:
             os_ << "  [" << i << "] " << p->name_hint << " : " << DTypeToString(p->dtype) << "\n";
         }
         os_ << "buffer_map(" << f->buffer_map.size() << "):\n";
+        std::vector<std::string> buffer_lines;
         for (const auto& kv : f->buffer_map) {
             const auto& v = kv.first;
             const auto& b = kv.second;
-            os_ << "  " << v->name_hint << " -> " << b->name << " shape=[";
+            std::ostringstream line;
+            line << "  " << v->name_hint << " -> " << b->name << " shape=[";
             for (size_t i = 0; i < b->shape.size(); ++i) {
-                if (i) os_ << ", ";
-                os_ << PrintExpr(b->shape[i]);
+                if (i) line << ", ";
+                line << PrintExpr(b->shape[i]);
             }
-            os_ << "] dtype=" << DTypeToString(b->dtype) << "\n";
+            line << "] dtype=" << DTypeToString(b->dtype) << "\n";
+            buffer_lines.push_back(line.str());
         }
+        // Object-address hashes must not perturb reproducible TIR diagnostics.
+        std::sort(buffer_lines.begin(), buffer_lines.end());
+        for (const auto& line : buffer_lines) os_ << line;
         os_ << "attrs(" << f->attrs.size() << "):\n";
+        std::vector<std::string> attr_names;
         for (const auto& kv : f->attrs) {
-            os_ << "  " << std::string(kv.first) << "\n";
+            attr_names.push_back(std::string(kv.first));
         }
+        std::sort(attr_names.begin(), attr_names.end());
+        for (const auto& name : attr_names) os_ << "  " << name << "\n";
         os_ << "body:\n";
         PrintStmt(f->body, indent_spaces_);
     }

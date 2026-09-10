@@ -7,6 +7,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -124,6 +125,65 @@ bool TestDigestCollisionUsesCanonicalEquality() {
     TEST_CHECK(first_artifact.digest() == second_artifact.digest() &&
                    first_artifact != second_artifact,
                "artifact lookup must compare complete canonical keys");
+    return true;
+}
+
+bool TestLargeIdentityCopiesShareImmutableStorage() {
+    using namespace kxc::api;
+    std::vector<ShapeProfileKey> requests;
+    const std::string bytes(1 << 20, 'w');
+    const auto expected_graph = internal::IdentityAccess::Graph(bytes);
+    const auto expected_profile = BuildShapeProfileKey(expected_graph, "shape", "S=4", "exact", 1);
+    {
+        auto graph = internal::IdentityAccess::Graph(bytes);
+        const auto graph_copy = graph;
+        TEST_CHECK(graph_copy.canonical_bytes().data() == graph.canonical_bytes().data(),
+                   "copying a graph identity must not duplicate its constant payloads");
+        auto profile = BuildShapeProfileKey(graph, "shape", "S=4", "exact", 1);
+        const auto profile_copy = profile;
+        TEST_CHECK(profile_copy.canonical_bytes().data() == profile.canonical_bytes().data(),
+                   "per-unit requests must share immutable profile bytes");
+        auto moved = std::move(profile);
+        TEST_CHECK(!profile.defined() && moved == profile_copy, "moving an identity must retain its immutable payload");
+        requests.assign(1024, moved);
+        graph = GraphSemanticKey();
+        profile = ShapeProfileKey();
+        TEST_CHECK(!graph.defined() && graph.canonical_bytes().empty() && !profile.defined() &&
+                       profile.canonical_bytes().empty(), "default/reset key must remain undefined");
+    }
+    for (const auto& request : requests) {
+        TEST_CHECK(request.defined() && request == expected_profile &&
+                       !(request < expected_profile) && !(expected_profile < request) &&
+                       request.digest() == expected_profile.digest() && request.graph_semantic_key() == expected_graph &&
+                       request.canonical_bytes().data() == requests[0].canonical_bytes().data(),
+                   "shared identity lost bytewise equality, storage sharing, or lifetime");
+    }
+    auto changed = bytes;
+    changed.back() = 'x';
+    const auto changed_graph = internal::IdentityAccess::Graph(changed);
+    TEST_CHECK(changed_graph != expected_graph && expected_graph < changed_graph &&
+                   BuildShapeProfileKey(changed_graph, "shape", "S=4", "exact", 1) != expected_profile,
+               "sharing must preserve full canonical byte comparison");
+    auto dispatch = BuildStaticExactDispatchKey(expected_graph, expected_profile);
+    const auto independent_dispatch = BuildStaticExactDispatchKey(expected_graph, expected_profile);
+    const std::vector<DispatchKey> route_copies(128, dispatch);
+    TEST_CHECK(route_copies[0].canonical_bytes().data() == dispatch.canonical_bytes().data(),
+               "route copies must share model-sized canonical bytes");
+    dispatch = DispatchKey();
+    TEST_CHECK(!dispatch.defined() && dispatch.canonical_bytes().empty() &&
+                   route_copies[0] == independent_dispatch && !(route_copies[0] < independent_dispatch),
+               "shared routes must retain bytewise equality and survive the original handle");
+    const PrimitiveArtifactKey artifact(UnitSemanticKey("unit"), "cpu", "pipeline", 1, "schedule", "llvm");
+    const std::vector<OrderedArtifactSelectionIdentity> selections{{0, "kernel", artifact, 1}};
+    auto variant = BuildPlanVariantKey(expected_graph, expected_profile, selections, "memory-v1");
+    const auto independent_variant = BuildPlanVariantKey(expected_graph, expected_profile, selections, "memory-v1");
+    const std::vector<PlanVariantKey> lease_copies(128, variant);
+    TEST_CHECK(lease_copies[0].canonical_bytes().data() == variant.canonical_bytes().data(),
+               "lease copies must share variant canonical bytes");
+    auto moved_variant = std::move(variant);
+    TEST_CHECK(!variant.defined() && variant.canonical_bytes().empty() && moved_variant == independent_variant &&
+                   lease_copies[0] == independent_variant && !(lease_copies[0] < independent_variant),
+               "shared variant must preserve move and independently built equality");
     return true;
 }
 
@@ -254,13 +314,121 @@ kxc::api::PlanAbiFingerprint PlanAbiForAlignment(
     return BuildPlanAbiFingerprint(module, plan, {{0, "entry", artifact}});
 }
 
+kxc::api::PlanAbiFingerprint CapacityStatePlanAbi(bool swap_sources, double fill) {
+    using namespace kxc;
+    using namespace kxc::api;
+    using namespace kxc::codegen;
+    const DLDataType dtype{kDLFloat, 32, 1};
+    const Device cpu = Device::CPU();
+    const KernelSignature signature(
+        "capacity_identity",
+        {KernelArgSpec("past_a", KernelArgRole::kInput, dtype, {2}, cpu),
+         KernelArgSpec("past_b", KernelArgRole::kInput, dtype, {2}, cpu),
+         KernelArgSpec("logits", KernelArgRole::kOutput, dtype, {1}, cpu, 1, true),
+         KernelArgSpec("present_a", KernelArgRole::kOutput, dtype, {3}, cpu, 1, true),
+         KernelArgSpec("present_b", KernelArgRole::kOutput, dtype, {3}, cpu, 1, true)});
+    const KernelLaunchMetadata metadata(cpu, CodeGenBackend::kLLVM);
+    const auto launcher = std::make_shared<IdentityLauncher>();
+    const CompiledModule module = internal::BuildCompiledModule(
+        BuildTarget(cpu),
+        {{signature, metadata, CompiledKernel(signature, metadata, launcher)}}, {});
+    const runtime::ExecutablePlan source(
+        {runtime::ValueSpec(0, 0, {2}, dtype, cpu, true),
+         runtime::ValueSpec(1, 1, {2}, dtype, cpu, true),
+         runtime::ValueSpec(2, 2, {1}, dtype, cpu, false, false, true),
+         runtime::ValueSpec(3, 3, {3}, dtype, cpu, false, false, true),
+         runtime::ValueSpec(4, 4, {3}, dtype, cpu, false, false, true)},
+        {runtime::KernelCall("capacity_identity", {0, 1}, {2, 3, 4})},
+        {0, 1}, {}, {2, 3, 4});
+    const auto plan = source.BindStateOutputs(
+        {{0, swap_sources ? 4 : 3, 0, 2, 1},
+         {1, swap_sources ? 3 : 4, 0, 2, 1}}, fill);
+    const PrimitiveArtifactKey artifact(
+        UnitSemanticKey("capacity-identity-unit"), "cpu", "pipeline", 1,
+        "schedule", "backend");
+    return BuildPlanAbiFingerprint(
+        module, plan, {{0, "capacity_identity", artifact}});
+}
+
+bool TestCapacityStateIdentity() {
+    const auto first = CapacityStatePlanAbi(false, 7.0);
+    TEST_CHECK(first == CapacityStatePlanAbi(false, 7.0),
+               "the same state binding must have deterministic identity");
+    TEST_CHECK(first != CapacityStatePlanAbi(true, 7.0),
+               "changing which output updates a state must change plan ABI");
+    TEST_CHECK(first != CapacityStatePlanAbi(false, 0.0),
+               "invalid-region initialization is part of the state contract");
+    TEST_CHECK(first.canonical_bytes().find("static-external-stateful-v1") !=
+                   std::string::npos,
+               "capacity state identity must name its independently versioned contract");
+    return true;
+}
+
+kxc::api::PlanAbiFingerprint DynamicPlanAbi(
+    int64_t graph_upper, kxc::api::ModuleExtent invocation_upper) {
+    using namespace kxc;
+    using namespace kxc::api;
+    using namespace kxc::codegen;
+    const DLDataType dtype{kDLFloat, 32, 1};
+    const KernelSignature signature(
+        "dynamic_identity",
+        {KernelArgSpec("input", KernelArgRole::kInput, dtype, {-1},
+                       Device::CPU(), 8),
+         KernelArgSpec("output", KernelArgRole::kOutput, dtype, {-1},
+                       Device::CPU(), 16, true)});
+    const KernelLaunchMetadata metadata(Device::CPU(),
+                                        CodeGenBackend::kLLVM);
+    ModuleInputContract input{{{0, 1, invocation_upper, 1, std::nullopt,
+                                std::nullopt}}};
+    const ModuleShapeExpr extent = ModuleShapeExpr::InputAxis(0, 0);
+    ModuleTensorContract output;
+    output.logical = {extent};
+    output.physical = {extent};
+    output.valid = {extent};
+    output.max_bytes = 16 * sizeof(float);
+    auto contract = std::make_shared<ModuleInvocationContract>(
+        std::vector<ModuleInputContract>{input},
+        std::vector<ModuleTensorContract>{output},
+        std::vector<ModuleRuntimeExtentScalar>{});
+    const auto launcher = std::make_shared<IdentityLauncher>();
+    const CompiledModule module = internal::BuildCompiledModule(
+        BuildTarget(Device::CPU()),
+        {{signature, metadata,
+          CompiledKernel(signature, metadata, launcher), std::move(contract)}},
+        {});
+    const runtime::ExecutablePlan plan(
+        {runtime::ValueSpec(0, 0, {-1}, dtype, Device::CPU(), true),
+         runtime::ValueSpec(1, 1, {-1}, dtype, Device::CPU(), false, false,
+                            true)},
+        {runtime::KernelCall("dynamic_identity", {0}, {1})}, {0}, {}, {1},
+        {}, runtime::ExecutablePlanMode::kDynamicFreshOutputV1,
+        {{0, 0, 1, graph_upper, 1, std::nullopt}});
+    const PrimitiveArtifactKey artifact(
+        UnitSemanticKey("dynamic-identity-unit"), "cpu", "pipeline", 1,
+        "schedule", "backend");
+    return BuildPlanAbiFingerprint(
+        module, plan, {{0, "dynamic_identity", artifact}});
+}
+
 bool TestPlanAbiUsesKernelCanonicalBytes() {
     const kxc::api::PlanAbiFingerprint first = PlanAbiForAlignment(4);
     const kxc::api::PlanAbiFingerprint changed = PlanAbiForAlignment(8);
+    auto copy = first;
+    TEST_CHECK(copy.canonical_bytes().data() == first.canonical_bytes().data(),
+               "ABI request copies must share immutable canonical bytes");
+    auto moved = std::move(copy);
+    TEST_CHECK(!copy.defined() && copy.canonical_bytes().empty() && moved == PlanAbiForAlignment(4),
+               "ABI move must preserve independently constructed bytewise equality");
     TEST_CHECK(first.defined() && first != changed &&
-                   first.canonical_bytes().find("kxc.kernel-signature.v2") !=
+                   first.canonical_bytes().find("kxc.kernel-signature.v3") !=
                        std::string::npos &&
                    first.canonical_bytes().find("kxc.kernel-launch-metadata.v1") !=
+                       std::string::npos &&
+                   first.canonical_bytes().find(
+                       "executable-plan-abi-v7-dynamic-fresh-output") !=
+                       std::string::npos &&
+                   first.canonical_bytes().find(
+                       "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH") ==
                        std::string::npos &&
                    first.canonical_bytes().find("KernelSignature(") ==
                        std::string::npos,
@@ -280,6 +448,30 @@ bool TestPlanAbiIncludesStateAliasAndExtent() {
                    state_alias.canonical_bytes().find("states_end") !=
                        std::string::npos,
                "Plan ABI identity must include state, alias topology, and valid bytes");
+    return true;
+}
+
+bool TestPlanAbiIncludesDynamicModeGuardsAndInvocationContract() {
+    const kxc::api::PlanAbiFingerprint baseline = DynamicPlanAbi(8, 8);
+    const kxc::api::PlanAbiFingerprint graph_guard_changed =
+        DynamicPlanAbi(7, 8);
+    const kxc::api::PlanAbiFingerprint invocation_changed =
+        DynamicPlanAbi(8, 7);
+    TEST_CHECK(
+        baseline != graph_guard_changed && baseline != invocation_changed &&
+            baseline.canonical_bytes().find(
+                "executable-plan-abi-v8-bounded-dynamic-graph") !=
+                std::string::npos &&
+            baseline.canonical_bytes().find("plan_mode") !=
+                std::string::npos &&
+            baseline.canonical_bytes().find(
+                "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH.v1") !=
+                std::string::npos &&
+            baseline.canonical_bytes().find("graph_guard_upper") !=
+                std::string::npos &&
+            baseline.canonical_bytes().find("KXC_MODULE_INVOKE_V4") !=
+                std::string::npos,
+        "Plan ABI must version dynamic mode, wildcard guards, and invocation bytes");
     return true;
 }
 
@@ -398,9 +590,13 @@ int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"digest_collision_full_equality", TestDigestCollisionUsesCanonicalEquality},
         {"artifact_field_safe_miss", TestEveryArtifactSemanticFieldCausesSafeMiss},
+        {"large_identity_shared_storage", TestLargeIdentityCopiesShareImmutableStorage},
         {"dispatch_and_plan_are_separate", TestDispatchAndPlanVariantRemainSeparate},
         {"plan_abi_kernel_canonical", TestPlanAbiUsesKernelCanonicalBytes},
         {"plan_abi_state_alias_extent", TestPlanAbiIncludesStateAliasAndExtent},
+        {"plan_abi_capacity_state", TestCapacityStateIdentity},
+        {"plan_abi_dynamic_mode_guards_invocation",
+         TestPlanAbiIncludesDynamicModeGuardsAndInvocationContract},
         {"graph_identity_logical_placement",
          TestGraphSemanticIdentityCanonicalizesLogicalPlacement},
         {"graph_identity_rejects_undefined_exprs",

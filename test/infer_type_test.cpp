@@ -695,6 +695,68 @@ bool TestConcatenateInferAndLoweringContract() {
     return true;
 }
 
+bool TestSplitInferAndLoweringContract() {
+    kxc::Var data("split_data", kxc::TensorType({2, 6}, "float32"));
+    kxc::Call split(kxc::relay::Op::Get("split"), {data},
+                    kxc::relay::SplitAttrs::Create(-1, {2, 4}));
+    kxc::Tuple result({kxc::TupleGetItem(split, 0), kxc::TupleGetItem(split, 1)});
+    kxc::Function function({data}, result);
+    kxc::relay::InferTypePass(function);
+    const auto* tuple_type = split.checked_type().As<kxc::TupleTypeNode>();
+    TEST_CHECK(tuple_type && tuple_type->fields.size() == 2 &&
+                   CheckTensor(tuple_type->fields[0], {2, 2}, "float32") &&
+                   CheckTensor(tuple_type->fields[1], {2, 4}, "float32"),
+               "split must normalize axis and infer both output shapes");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(function)->prim_func.defined() &&
+                   LowerUnits(function).size() == 1,
+               "one split call must lower to one multi-output primitive unit");
+    const std::string attrs = kxc::relay::SerializeAttrs(
+        kxc::relay::SplitAttrs::Create(-1, {2, 4}));
+    TEST_CHECK(attrs.find("SplitAttrsNode") != std::string::npos &&
+                   attrs.find("sections") != std::string::npos,
+               "split attrs must canonically preserve sections");
+    const kxc::PackedFunc make_split =
+        kxc::Registry::Global().Get("kxc.relay.op._make.split");
+    TEST_CHECK(make_split.defined(), "canonical split FFI entry must be registered");
+    const kxc::Call ffi_split =
+        kxc::CastTo<kxc::Call>(make_split(data, -1, kxc::Array<int64_t>{2, 4}));
+    const auto* ffi_split_attrs = ffi_split->attrs.As<kxc::relay::SplitAttrsNode>();
+    TEST_CHECK(ffi_split->args.size() == 1 && ffi_split_attrs &&
+                   ffi_split_attrs->axis == -1 && ffi_split_attrs->sections.size() == 2 &&
+                   ffi_split_attrs->sections[0] == 2 && ffi_split_attrs->sections[1] == 4,
+               "split FFI invocation must preserve data, axis and sections");
+
+    kxc::Call wrong_sum(kxc::relay::Op::Get("split"), {data},
+                        kxc::relay::SplitAttrs::Create(1, {1, 4}));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data}, wrong_sum));
+               }),
+               "split must reject sections whose sum differs from the input extent");
+    kxc::Call three_way(kxc::relay::Op::Get("split"), {data},
+                        kxc::relay::SplitAttrs::Create(1, {1, 2, 3}));
+    kxc::relay::InferTypePass(kxc::Function({data}, three_way));
+    const auto* three_type = three_way.checked_type().As<kxc::TupleTypeNode>();
+    TEST_CHECK(three_type && three_type->fields.size() == 3 &&
+                   CheckTensor(three_type->fields[0], {2, 1}, "float32") &&
+                   CheckTensor(three_type->fields[1], {2, 2}, "float32") &&
+                   CheckTensor(three_type->fields[2], {2, 3}, "float32"),
+               "split must infer all statically declared output sections");
+    kxc::Call one_way(kxc::relay::Op::Get("split"), {data},
+                      kxc::relay::SplitAttrs::Create(1, {6}));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data}, one_way));
+               }),
+               "split must reject fewer than two output sections");
+    kxc::Var dynamic("split_dynamic", kxc::TensorType({2, -1}, "float32"));
+    kxc::Call dynamic_axis(kxc::relay::Op::Get("split"), {dynamic},
+                           kxc::relay::SplitAttrs::Create(1, {1, 1}));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({dynamic}, dynamic_axis));
+               }),
+               "split must reject a dynamic partition axis");
+    return true;
+}
+
 bool TestSliceInferAndLoweringContract() {
     kxc::Var data("data", kxc::TensorType({2, 3, 4}, "float32"));
     kxc::Call slice(kxc::relay::Op::Get("slice"), {data},
@@ -745,8 +807,19 @@ bool TestSliceInferAndLoweringContract() {
                    bad(data, kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {-1})) &&
                    bad(data, kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {2})) &&
                    bad(kxc::Var("dynamic", kxc::TensorType({2, -1}, "float32")),
-                       kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1})),
+                       kxc::relay::SliceAttrs::Create({0}, {1}, {1}, {1})),
                "slice must reject rank/dtype/vector/axis/step/dynamic-shape violations");
+    kxc::Var symbolic("symbolic", kxc::TensorType({2, -1}, "float32"));
+    kxc::Call fixed_axis(kxc::relay::Op::Get("slice"), {symbolic},
+                        kxc::relay::SliceAttrs::Create({0}, {1}, {0}, {1}));
+    kxc::relay::InferTypePass(kxc::Function({symbolic}, fixed_axis));
+    TEST_CHECK(CheckTensor(fixed_axis.checked_type(), {1, -1}, "float32"),
+               "Slice must retain symbolic non-operated axes without freezing them");
+    kxc::Var control("control", kxc::TensorType({1}, "int64"));
+    kxc::Call unresolved(kxc::relay::Op::Get("slice"), {data, control, control, control, control});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({data, control}, unresolved));
+               }), "five-input Slice must require source preparation even with valid input types");
     kxc::Call minimum(kxc::relay::Op::Get("slice"), {data},
                       kxc::relay::SliceAttrs::Create({std::numeric_limits<int64_t>::min()},
                                                       {std::numeric_limits<int64_t>::max()},
@@ -828,6 +901,287 @@ bool TestWhereInferAndLoweringContract() {
                                       incompatible));
                }),
                "where incompatibility in any input should fail");
+    return true;
+}
+
+bool TestEqualInferAndLoweringContract() {
+    // ONNX Equal 语义：同 dtype 输入、多向广播、bool 输出、数值相等（非位相等）。
+    kxc::Var a("a", kxc::TensorType({3}, "int32"));
+    kxc::Var b("b", kxc::TensorType({3}, "int32"));
+    const kxc::relay::Op& equal_op = kxc::relay::Op::Get("equal");
+    kxc::Call equal(equal_op, {a, b});
+    kxc::Function func({a, b}, equal);
+    kxc::relay::InferTypePass(func);
+    TEST_CHECK(equal_op->description == "Element-wise equality comparison with broadcast." &&
+                   equal_op->arguments.size() == 2 &&
+                   equal_op->arguments[0].name == "lhs" &&
+                   equal_op->arguments[1].name == "rhs",
+               "generated equal schema must be retained by builtin anchoring");
+    const kxc::PackedFunc make_equal =
+        kxc::Registry::Global().Get("kxc.relay.op._make.equal");
+    TEST_CHECK(make_equal.defined(), "equal must retain its canonical FFI binding");
+    const kxc::Call ffi_equal = kxc::CastTo<kxc::Call>(make_equal(a, b));
+    TEST_CHECK(ffi_equal->args.size() == 2 && ffi_equal->args[0].get() == a.get() &&
+                   ffi_equal->args[1].get() == b.get() && !ffi_equal->attrs.defined(),
+               "equal FFI behavior must preserve argument order and fieldless attrs");
+    TEST_CHECK(CheckTensor(equal.checked_type(), {3}, "bool"),
+               "equal must infer a bool output for the doc example A=[1,2,3] vs B=[1,0,3]");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
+               "generated equal registration must lower through FRelayToTE");
+    TEST_CHECK(LowerUnits(func).size() == 1,
+               "one equal Relay Call must produce one lowering unit");
+
+    kxc::Var lhs("lhs", kxc::TensorType({2, 3}, "int64"));
+    kxc::Var rhs("rhs", kxc::TensorType({3}, "int64"));
+    kxc::Call broadcast_equal(kxc::relay::Op::Get("equal"), {lhs, rhs});
+    kxc::Function broadcast_func({lhs, rhs}, broadcast_equal);
+    kxc::relay::InferTypePass(broadcast_func);
+    TEST_CHECK(CheckTensor(broadcast_equal.checked_type(), {2, 3}, "bool"),
+               "equal should broadcast int64 inputs like the other binary math ops");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(broadcast_func)->prim_func.defined(),
+               "broadcast equal should lower to TIR");
+
+    kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
+    kxc::Var row("row", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call scalar_equal(kxc::relay::Op::Get("equal"), {scalar, row});
+    kxc::Function scalar_func({scalar, row}, scalar_equal);
+    kxc::relay::InferTypePass(scalar_func);
+    TEST_CHECK(CheckTensor(scalar_equal.checked_type(), {1, 3}, "bool"),
+               "equal should broadcast a rank-0 scalar against a rank-2 input");
+
+    kxc::Var empty_lhs("empty_lhs", kxc::TensorType({0, 3}, "float32"));
+    kxc::Var empty_rhs("empty_rhs", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call empty_equal(kxc::relay::Op::Get("equal"), {empty_lhs, empty_rhs});
+    kxc::Function empty_func({empty_lhs, empty_rhs}, empty_equal);
+    kxc::relay::InferTypePass(empty_func);
+    TEST_CHECK(CheckTensor(empty_equal.checked_type(), {0, 3}, "bool") &&
+                   kxc::test_support::LowerFirstPrimitive(empty_func)->prim_func.defined(),
+               "equal must preserve zero-extent broadcasts and lower to TIR");
+
+    kxc::Var mismatch("mismatch", kxc::TensorType({3}, "int64"));
+    kxc::Call dtype_mismatch(kxc::relay::Op::Get("equal"), {a, mismatch});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({a, mismatch}, dtype_mismatch));
+               }),
+               "equal with mismatched dtypes should fail type inference");
+
+    kxc::Var float64_data("float64_data", kxc::TensorType({3}, "float64"));
+    kxc::Var float64_other("float64_other", kxc::TensorType({3}, "float64"));
+    kxc::Call unsupported_dtype(kxc::relay::Op::Get("equal"),
+                                {float64_data, float64_other});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({float64_data, float64_other}, unsupported_dtype));
+               }),
+               "equal outside the verified int32/int64/float32 subset should fail closed");
+
+    kxc::Var bool_data("bool_data", kxc::TensorType({3}, "bool"));
+    kxc::Var bool_other("bool_other", kxc::TensorType({3}, "bool"));
+    kxc::Call bool_input(kxc::relay::Op::Get("equal"), {bool_data, bool_other});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({bool_data, bool_other}, bool_input));
+               }),
+               "equal bool inputs are not yet part of the verified subset and must be rejected");
+
+    kxc::Var incompatible("incompatible", kxc::TensorType({4}, "int32"));
+    kxc::Call invalid_broadcast(kxc::relay::Op::Get("equal"), {a, incompatible});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({a, incompatible}, invalid_broadcast));
+               }),
+               "equal with non-broadcastable shapes should fail type inference");
+
+    kxc::Var lone("lone", kxc::TensorType({3}, "int32"));
+    kxc::Call wrong_arity(kxc::relay::Op::Get("equal"), {lone});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({lone}, wrong_arity));
+               }),
+               "equal with one input should fail type inference before lowering");
+    kxc::Var extra("extra", kxc::TensorType({3}, "int32"));
+    kxc::Call too_many_inputs(kxc::relay::Op::Get("equal"), {a, b, extra});
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({a, b, extra}, too_many_inputs));
+               }),
+               "equal with three inputs should fail type inference before lowering");
+    return true;
+}
+
+// M4/M5 fieldless float32 一元算子（Neg/Sigmoid）的类型、FFI 与 lowering 合同：
+// shape/dtype 保持、float32-only、错误 arity 与 lowering 前拒绝。
+bool TestUnaryFloat32InferAndLoweringContract() {
+    for (const std::string& op_name : {"neg", "sigmoid", "tanh", "erf"}) {
+        const kxc::relay::Op& op = kxc::relay::Op::Get(op_name);
+        kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
+        kxc::Call call(op, {data});
+        kxc::Function func({data}, call);
+        if (op_name == "tanh" || op_name == "erf") {
+            TEST_CHECK(ExpectThrow([&] {
+                kxc::relay::InferTypePass(kxc::Function({data}, kxc::Call(op, {data},
+                    kxc::relay::SoftmaxAttrs::Create(-1))));
+            }), op_name + " must reject attributes");
+        }
+        kxc::relay::InferTypePass(func);
+        TEST_CHECK(call.checked_type().As<kxc::TensorTypeNode>() &&
+                       CheckTensor(call.checked_type(), {2, 3}, "float32"),
+                   op_name + " must preserve the input shape and float32 dtype");
+        TEST_CHECK(op.spec().lowering_key == "FRelayToTE" &&
+                       op->arguments.size() == 1 && op->arguments[0].name == "data",
+                   op_name + " generated schema must expose the data argument");
+
+        const kxc::PackedFunc make_op =
+            kxc::Registry::Global().Get("kxc.relay.op._make." + op_name);
+        TEST_CHECK(make_op.defined(), op_name + " must retain its canonical FFI binding");
+        const kxc::Call ffi_call = kxc::CastTo<kxc::Call>(make_op(data));
+        TEST_CHECK(ffi_call->args.size() == 1 && ffi_call->args[0].get() == data.get() &&
+                       !ffi_call->attrs.defined(),
+                   op_name + " FFI must preserve the argument and fieldless attrs");
+        TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
+                   op_name + " must lower through FRelayToTE");
+        TEST_CHECK(LowerUnits(func).size() == 1,
+                   "one " + op_name + " Relay Call must produce one lowering unit");
+
+        kxc::Var int64_data("int64_data", kxc::TensorType({2, 3}, "int64"));
+        kxc::Var float64_data("float64_data", kxc::TensorType({2, 3}, "float64"));
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(
+                           kxc::Function({int64_data},
+                                         kxc::Call(op, {int64_data})));
+                   }),
+                   op_name + " must reject int64 outside the M4/M5 float32 subset");
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(
+                           kxc::Function({float64_data},
+                                         kxc::Call(op, {float64_data})));
+                   }),
+                   op_name + " must reject float64 outside the M4/M5 float32 subset");
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(kxc::Function({}, kxc::Call(op, {})));
+                   }),
+                   op_name + " must reject a missing input before lowering");
+        TEST_CHECK(ExpectThrow([&] {
+                       kxc::relay::InferTypePass(kxc::Function(
+                           {data, int64_data}, kxc::Call(op, {data, int64_data})));
+                   }),
+                   op_name + " must reject two inputs before lowering");
+    }
+    return true;
+}
+
+// M5 S2 Pow 的类型、FFI 与 lowering 合同：同 dtype float32 二元广播，
+// dtype 越界/失配、非广播 shape 与错误 arity 必须在类型推导处失败。
+bool TestPowInferAndLoweringContract() {
+    const kxc::relay::Op& pow_op = kxc::relay::Op::Get("pow");
+    kxc::Var a("a", kxc::TensorType({2, 1}, "float32"));
+    kxc::Var b("b", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call pow_call(pow_op, {a, b});
+    kxc::Function func({a, b}, pow_call);
+    kxc::relay::InferTypePass(func);
+    TEST_CHECK(pow_op->description.find("llvm.pow") != std::string::npos &&
+                   pow_op->arguments.size() == 2 &&
+                   pow_op->arguments[0].name == "lhs" &&
+                   pow_op->arguments[1].name == "rhs",
+               "generated pow schema must be retained by builtin anchoring");
+    TEST_CHECK(CheckTensor(pow_call.checked_type(), {2, 3}, "float32"),
+               "pow must infer the trailing-axis broadcast shape");
+    const kxc::PackedFunc make_pow =
+        kxc::Registry::Global().Get("kxc.relay.op._make.pow");
+    TEST_CHECK(make_pow.defined(), "pow must retain its canonical FFI binding");
+    const kxc::Call ffi_pow = kxc::CastTo<kxc::Call>(make_pow(a, b));
+    TEST_CHECK(ffi_pow->args.size() == 2 && ffi_pow->args[0].get() == a.get() &&
+                   ffi_pow->args[1].get() == b.get() && !ffi_pow->attrs.defined(),
+               "pow FFI behavior must preserve argument order and fieldless attrs");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
+               "pow must lower through FRelayToTE");
+    TEST_CHECK(LowerUnits(func).size() == 1,
+               "one pow Relay Call must produce one lowering unit");
+
+    kxc::Var int64_b("int64_b", kxc::TensorType({3}, "int64"));
+    kxc::Var float64_b("float64_b", kxc::TensorType({3}, "float64"));
+    kxc::Var row("row", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var four("four", kxc::TensorType({4}, "float32"));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({a, int64_b},
+                                                           kxc::Call(pow_op, {a, int64_b})));
+               }),
+               "pow with mismatched dtypes should fail type inference");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(
+                       kxc::Function({a, float64_b}, kxc::Call(pow_op, {a, float64_b})));
+               }),
+               "pow outside the M4/M5 float32 subset should fail closed");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({row, four},
+                                                           kxc::Call(pow_op, {row, four})));
+               }),
+               "pow with non-broadcastable shapes should fail type inference");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function({a}, kxc::Call(pow_op, {a})));
+               }),
+               "pow with one input should fail type inference before lowering");
+    return true;
+}
+
+// M4/M5 Expand 的类型、FFI 与 lowering 合同：单输入 + 已解析 ExpandAttrs，
+// numpy broadcast_to 规则（data 维度 1 或相等；rank 不超过目标 rank）。
+bool TestExpandInferAndLoweringContract() {
+    const kxc::relay::Op& expand_op = kxc::relay::Op::Get("expand");
+    kxc::Var data("data", kxc::TensorType({2, 1}, "float32"));
+    kxc::Call expand_call(expand_op, {data},
+                          kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function func({data}, expand_call);
+    kxc::relay::InferTypePass(func);
+    TEST_CHECK(expand_op->arguments.size() == 1 && expand_op->arguments[0].name == "data",
+               "generated expand schema must expose the data argument");
+    TEST_CHECK(CheckTensor(expand_call.checked_type(), {2, 3}, "float32"),
+               "expand must infer the target shape with the data dtype");
+    const kxc::PackedFunc make_expand =
+        kxc::Registry::Global().Get("kxc.relay.op._make.expand");
+    TEST_CHECK(make_expand.defined(), "expand must retain its canonical FFI binding");
+    const kxc::Call ffi_expand = kxc::CastTo<kxc::Call>(make_expand(data, kxc::Array<int64_t>{2, 3}));
+    TEST_CHECK(ffi_expand->args.size() == 1 && ffi_expand->args[0].get() == data.get() &&
+                   ffi_expand->attrs.defined(),
+               "expand FFI must carry the resolved target shape attrs");
+    TEST_CHECK(kxc::test_support::LowerFirstPrimitive(func)->prim_func.defined(),
+               "expand must lower through FRelayToTE");
+    TEST_CHECK(LowerUnits(func).size() == 1,
+               "one expand Relay Call must produce one lowering unit");
+
+    // rank 提升：[3] → [2, 3]（前导轴隐式 1）。
+    kxc::Var vector("vector", kxc::TensorType({3}, "float32"));
+    kxc::Call rank_raise(expand_op, {vector},
+                         kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function rank_func({vector}, rank_raise);
+    kxc::relay::InferTypePass(rank_func);
+    TEST_CHECK(CheckTensor(rank_raise.checked_type(), {2, 3}, "float32"),
+               "expand must raise rank with implicit leading singleton axes");
+
+    kxc::Var missing_attrs_data("missing_attrs_data", kxc::TensorType({2, 1}, "float32"));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function(
+                       {missing_attrs_data},
+                       kxc::Call(expand_op, {missing_attrs_data})));
+               }),
+               "expand without ExpandAttrs should fail type inference");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function(
+                       {data}, kxc::Call(expand_op, {data},
+                                         kxc::relay::ExpandAttrs::Create({-2, 3}))));
+               }),
+               "expand with negative target dimensions should fail");
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::Var triple("triple", kxc::TensorType({2, 3}, "float32"));
+                   kxc::relay::InferTypePass(kxc::Function(
+                       {triple}, kxc::Call(expand_op, {triple},
+                                           kxc::relay::ExpandAttrs::Create({2, 4}))));
+               }),
+               "expand with an incompatible data dimension should fail");
+    kxc::Var cubed("cubed", kxc::TensorType({2, 3, 4}, "float32"));
+    TEST_CHECK(ExpectThrow([&] {
+                   kxc::relay::InferTypePass(kxc::Function(
+                       {cubed}, kxc::Call(expand_op, {cubed},
+                                          kxc::relay::ExpandAttrs::Create({3, 4}))));
+               }),
+               "expand with data rank above the target rank should fail");
     return true;
 }
 
@@ -1207,8 +1561,14 @@ int main() {
         {"flatten_and_reshape_product_arithmetic", TestFlattenAndReshapeProductArithmetic},
         {"gather_infer_and_lowering_contract", TestGatherInferAndLoweringContract},
         {"concatenate_infer_and_lowering_contract", TestConcatenateInferAndLoweringContract},
+        {"split_infer_and_lowering_contract", TestSplitInferAndLoweringContract},
         {"slice_infer_and_lowering_contract", TestSliceInferAndLoweringContract},
         {"where_infer_and_lowering_contract", TestWhereInferAndLoweringContract},
+        {"equal_infer_and_lowering_contract", TestEqualInferAndLoweringContract},
+        {"unary_float32_infer_and_lowering_contract",
+         TestUnaryFloat32InferAndLoweringContract},
+        {"pow_infer_and_lowering_contract", TestPowInferAndLoweringContract},
+        {"expand_infer_and_lowering_contract", TestExpandInferAndLoweringContract},
         {"layer_norm_infer_and_lowering_contract", TestLayerNormInferAndLoweringContract},
         {"exact_transformer_operator_slice", TestExactTransformerOperatorSliceComposition},
         {"softmax_infer_type_contract", TestSoftmaxInferTypeContract},

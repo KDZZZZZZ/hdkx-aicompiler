@@ -57,12 +57,28 @@ struct ModuleTensorContract {
     std::size_t max_bytes{0};
 };
 
-/*! A one-element uint64 input buffer generated from its KernelArgSpec. */
-struct ModuleRuntimeExtentScalar { ModuleShapeExpr expression; };
+/*! A one-element uint64 input buffer generated from its KernelArgSpec.
+ *  Input-axis-sourced scalars are evaluated from caller input shapes at
+ *  invocation time; state-sourced scalars are injected by the invoker from
+ *  validated session state metadata (the M2 dynamic-stateful extent ABI). */
+struct ModuleRuntimeExtentScalar {
+    enum class Source : std::uint8_t { kInputAxis = 0, kStateExtent = 1 };
+    Source source = Source::kInputAxis;
+    /*! \brief Defined only for kInputAxis scalars. */
+    std::optional<ModuleShapeExpr> expression;
+    ModuleRuntimeExtentScalar() = default;
+    ModuleRuntimeExtentScalar(ModuleShapeExpr input_expression)
+        : source(Source::kInputAxis), expression(std::move(input_expression)) {}
+    static ModuleRuntimeExtentScalar StateExtent() {
+        ModuleRuntimeExtentScalar scalar;
+        scalar.source = Source::kStateExtent;
+        return scalar;
+    }
+};
 
 class ModuleInvocationContract final {
 public:
-    static constexpr std::uint32_t kAbiVersion = 2;
+    static constexpr std::uint32_t kAbiVersion = 4;
     static constexpr std::size_t kMaxExpressions = 4096;
     ModuleInvocationContract(std::vector<ModuleInputContract> inputs,
                              std::vector<ModuleTensorContract> outputs,

@@ -65,23 +65,27 @@ uint64_t NaturalAlignment(DLDataType dtype) {
   return bytes & (~bytes + 1);
 }
 
-Array<int64_t> ShapeFromBuffer(const tir::Buffer& buffer, KernelArgRole role) {
+Array<int64_t> ShapeFromBuffer(
+    const tir::Buffer& buffer, KernelArgRole role,
+    const Array<tir::Var>& runtime_extent_buffers) {
   Array<int64_t> shape;
   for (const auto& extent : buffer->shape) {
     int64_t static_extent = 0;
     if (relay::internal::EvaluateStaticLoweringInt64(extent,
                                                      &static_extent)) {
       if (static_extent < 0) {
-        throw std::invalid_argument("PrimFunc Buffer shape contains a negative extent");
+        throw std::invalid_argument(
+            "PrimFunc Buffer shape contains a negative extent");
       }
       shape.push_back(static_extent);
       continue;
     }
-    const auto* variable = extent.As<tir::VarNode>();
-    if (role != KernelArgRole::kInput || !variable || variable->dtype.lanes != 1 ||
-        (variable->dtype.code != 0 && variable->dtype.code != 1)) {
+    if ((role != KernelArgRole::kInput &&
+         role != KernelArgRole::kOutput) ||
+        !relay::internal::MatchRuntimeExtentOffset(
+            extent, runtime_extent_buffers, nullptr)) {
       throw std::invalid_argument(
-          "Only an integer symbolic input extent may be dynamic");
+          "Dynamic input/output Buffer extents must load a generated runtime extent");
     }
     shape.push_back(kDynamicDimension);
   }
@@ -112,16 +116,36 @@ KernelSignature BuildKernelSignature(const tir::PrimFunc& function,
     throw std::overflow_error("PrimFunc parameter count exceeds int64 range");
   }
 
+  const int64_t kernel_abi_version =
+      ReadIntAttr(function, "kxc.kernel_abi_version");
   const int64_t input_count = ReadIntAttr(function, "kxc.input_count");
+  const int64_t runtime_extent_count =
+      ReadIntAttr(function, "kxc.runtime_extent_count");
+  const int64_t runtime_extent_start =
+      ReadIntAttr(function, "kxc.runtime_extent_param_start");
   const int64_t constant_count = ReadIntAttr(function, "kxc.constant_count");
   const int64_t output_count = ReadIntAttr(function, "kxc.output_count");
   const int64_t output_start = ReadIntAttr(function, "kxc.output_param_start");
-  if (input_count < 0 || constant_count < 0 || output_count <= 0 ||
-      input_count > std::numeric_limits<int64_t>::max() - constant_count ||
-      output_start != input_count + constant_count ||
+  if (kernel_abi_version != kKernelAbiVersion || input_count < 0 ||
+      runtime_extent_count < 0 || constant_count < 0 || output_count <= 0 ||
+      runtime_extent_start != input_count ||
+      input_count > std::numeric_limits<int64_t>::max() -
+                        runtime_extent_count ||
+      input_count + runtime_extent_count >
+          std::numeric_limits<int64_t>::max() - constant_count ||
+      output_start != input_count + runtime_extent_count + constant_count ||
       output_start > std::numeric_limits<int64_t>::max() - output_count ||
-      output_start + output_count != static_cast<int64_t>(function->params.size())) {
-    throw std::invalid_argument("PrimFunc parameter count attrs are inconsistent");
+      output_start + output_count !=
+          static_cast<int64_t>(function->params.size())) {
+    throw std::invalid_argument(
+        "PrimFunc version or parameter count attrs are inconsistent");
+  }
+  const int64_t constant_start =
+      input_count + runtime_extent_count;
+  Array<tir::Var> runtime_extent_buffers;
+  for (int64_t offset = 0; offset < runtime_extent_count; ++offset) {
+    runtime_extent_buffers.push_back(function->params[static_cast<size_t>(
+        runtime_extent_start + offset)]);
   }
 
   const String constant_keys_attr("kxc.constant_keys");
@@ -164,10 +188,13 @@ KernelSignature BuildKernelSignature(const tir::PrimFunc& function,
     if (i < static_cast<size_t>(input_count)) {
       role = KernelArgRole::kInput;
       mutable_data = false;
+    } else if (i < static_cast<size_t>(constant_start)) {
+      role = KernelArgRole::kRuntimeExtent;
+      mutable_data = false;
     } else if (i < static_cast<size_t>(output_start)) {
       role = KernelArgRole::kConstant;
       mutable_data = false;
-      constant_key = constant_keys[i - static_cast<size_t>(input_count)];
+      constant_key = constant_keys[i - static_cast<size_t>(constant_start)];
     }
 
     DLDataType dtype = DTypeFromTIR(buffer->dtype);
@@ -180,7 +207,8 @@ KernelSignature BuildKernelSignature(const tir::PrimFunc& function,
         throw std::invalid_argument(
             "Constant payload dtype does not match its TIR Buffer");
       }
-      const Array<int64_t> buffer_shape = ShapeFromBuffer(buffer, role);
+      const Array<int64_t> buffer_shape =
+          ShapeFromBuffer(buffer, role, runtime_extent_buffers);
       const Array<int64_t> payload_shape = payload.shape();
       if (buffer_shape.size() != payload_shape.size()) {
         throw std::invalid_argument(
@@ -199,8 +227,10 @@ KernelSignature BuildKernelSignature(const tir::PrimFunc& function,
             ? static_cast<uint64_t>(buffer->data_alignment)
             : NaturalAlignment(dtype);
     String name(buffer->name.empty() ? parameter->name_hint : buffer->name);
-    arguments.push_back(KernelArgSpec(name, role, dtype, ShapeFromBuffer(buffer, role),
-                                      device, alignment, mutable_data, constant_key));
+    arguments.push_back(KernelArgSpec(
+        name, role, dtype,
+        ShapeFromBuffer(buffer, role, runtime_extent_buffers), device,
+        alignment, mutable_data, constant_key));
   }
   return KernelSignature(std::move(symbol), std::move(arguments));
 }

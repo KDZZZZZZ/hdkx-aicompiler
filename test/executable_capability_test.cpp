@@ -335,9 +335,9 @@ bool TestCompilerRejectsUnsupportedCudaSchedules() {
     const api::CompileConfig config =
         api::CompileConfig::Create(FakeCudaTarget(), 3);
 
-    Var data("data", TensorType({2, 4}, "float32"));
-    Var scale("scale", TensorType({4}, "float32"));
-    Var bias("bias", TensorType({4}, "float32"));
+    Var data("data", TensorType({2, 10000}, "float32"));
+    Var scale("scale", TensorType({10000}, "float32"));
+    Var bias("bias", TensorType({10000}, "float32"));
     Function layer_norm(
         {data, scale, bias},
         Call(relay::Op::Get("nn_layer_norm"), {data, scale, bias},
@@ -345,22 +345,13 @@ bool TestCompilerRejectsUnsupportedCudaSchedules() {
     const std::string layer_norm_error = ErrorText([&] {
         (void)api::Compiler::Compile(layer_norm, config);
     });
-    TEST_CHECK(layer_norm_error.find("BindCudaThreads") != std::string::npos,
-               "LayerNorm must fail at the CUDA schedule boundary: " +
+    TEST_CHECK(layer_norm_error.find("BindCudaThreads") != std::string::npos &&
+                   layer_norm_error.find("64 KiB") != std::string::npos,
+               "Oversized LayerNorm scratch must fail at the CUDA schedule boundary: " +
                    layer_norm_error);
 
-    Var gather_data("gather_data", TensorType({4}, "float32"));
-    Var indices("indices", TensorType({3}, "int64"));
-    Function gather(
-        {gather_data, indices},
-        Call(relay::Op::Get("gather"), {gather_data, indices},
-             relay::GatherAttrs::Create(0)));
-    const std::string gather_error = ErrorText([&] {
-        (void)api::Compiler::Compile(gather, config);
-    });
-    TEST_CHECK(gather_error.find("indirect Load") != std::string::npos,
-               "Gather must fail at the CUDA schedule boundary: " +
-                   gather_error);
+    // Valid Gather has moved to production positives in cuda_schedule_test and
+    // codegen_cuda_test; unguarded/overflowing TIR reads remain schedule negatives.
     return true;
 }
 

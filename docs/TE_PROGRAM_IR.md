@@ -1,8 +1,10 @@
-# TE Program IR 设计提案
+# TE Program 设计与实现边界
 
-> **状态：设计提案，尚未实现。**
+> **当前状态（2026-09-09）：M8 静态 v1 首切片已实现并通过三套完整门禁。**
 >
-> 本文定义拟议的 `te::Program` 边界与验收条件，不改变当前实现描述。当前生产路径、能力边界和唯一架构权威仍是 [架构总览](ARCHITECTURE.md)；若实现、机器可读契约或可复现测试与本文不一致，以它们为准。
+> 不可变 Program、静态单 Call 生产接入、完整候选缓存身份，以及 CPU:0 优化等级 3 的 `sqrt(add(x,y))` 融合已接通。方法与实际 LLVM/Profile Bundle 证据见 [M8 技术报告](implementation/M8_TE_PROGRAM_REPORT.md)。Program v1 不承载动态 extent、KV state 或自动候选选择；现有 bounded/stateful 路径继续使用其显式合同。
+>
+> 下文保留原始设计约束与验收计划；其中“拟议”“当前缺口”等描述属于提案时的历史背景。已实现范围与最新证据以技术报告、[架构总览](ARCHITECTURE.md)、代码和测试为准。新 agent IR 的设计仍按项目目标延后。
 
 ## 目标与非目标
 
@@ -37,7 +39,7 @@ Relay 是数学语义层；TE Compute DAG 显式暴露某个候选中的 produce
 - `src/compiler/lowering/lowered_graph.cc` 的 `LowerPrimitiveUnit` 只调用一个已解析 Call 的 TE callback，不能直接形成跨 Call DAG；
 - 当前 TE→TIR 入口消费输出 Tensor 与独立 `Schedule`，尚无完整、不可变且可 canonicalize 的 Program 候选；
 - `src/codegen/llvm/codegen_llvm_stmt.cc` 的 `GenFor` 尚未消费 `ForType::Parallel`、`Vectorized` 或 `Unrolled` 的性能含义，`GenAllocate` 当前主要发射 `malloc/free`；因此 TIR 标注不能被报告为已实现的 CPU SIMD、并行或寄存器放置；
-- `tir::BindCudaThreads` 当前只证明保守的一维外层串行、逐元素独占写映射，并拒绝归约、间接 Load、内部 `Allocate` 和写后读；
+- `tir::BindCudaThreads` v4 已支持静态多维独占输出、线程内串行归约、可证明的多阶段私有存储及有 guard 的单阶段只读 Gather；仍拒绝未证明的间接 Load、跨线程/未初始化读取及超限临时存储，见 [归一化报告](implementation/GPU_MULTISTAGE_REDUCTION_REPORT.md) 与 [Gather/Pow 报告](implementation/GPU_GATHER_POW_REPORT.md)；
 - 通用 `RuntimeSession` 的 kernel、分配和拷贝路径尚未形成完整 profiling/correlation 闭环。
 
 这些限制决定首切片只能声称减少 runtime kernel 边界，不能声称已消除所有内部物化、已实现 CPU 向量/并行或已支持 CUDA fusion。
@@ -53,7 +55,7 @@ Relay 是数学语义层；TE Compute DAG 显式暴露某个候选中的 produce
 5. **证明输入**：目标能力快照、适用的规范化 TIR pipeline、需要满足的不变量和该候选的版本化 schema；
 6. **可序列化身份**：完整 canonical bytes 与 digest。摘要只用于索引，完整规范内容决定相等性。
 
-候选只能使用已实现并经目标验证的调度含义。当前可用的 TE 调度原语仍仅为 `split`、`reorder`、`vectorize`、`unroll`、`parallel`；`fuse`、`tile`、`bind`、`thread_axis`、`compute_at`、tensorization 和 autotuning 不因本提案而成为已实现能力。CUDA 线程绑定仍只能由现有 `tir::BindCudaThreads` 在其受支持的一维独占写映射子集内证明与生成启动元数据。
+候选只能使用已实现并经目标验证的调度含义。当前可用的 TE 调度原语仍仅为 `split`、`reorder`、`vectorize`、`unroll`、`parallel`；`fuse`、`tile`、`bind`、`thread_axis`、`compute_at`、tensorization 和 autotuning 不因本提案而成为已实现能力。CUDA 线程绑定仍只能由现有 `tir::BindCudaThreads` 在其静态独占输出及线程内归约子集内证明与生成启动元数据。
 
 ## 确定性 `te::Program` → TIR
 

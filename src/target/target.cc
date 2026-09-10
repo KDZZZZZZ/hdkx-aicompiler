@@ -5,9 +5,11 @@
 #include "kxc/target/target.h"
 #include "kxc/support/object_registration.h"
 #include "kxc/runtime/device_api.h"
+#include "support/canonical.h"
 
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace kxc {
 
@@ -35,6 +37,63 @@ std::string Target::ToString() const {
        << ", shared_mem=" << node->attrs.max_shared_memory_per_block
        << ")";
     return ss.str();
+}
+
+namespace {
+void AppendPipelineIdentityField(std::string* canonical,
+                                 const std::string& name,
+                                 const std::string& value) {
+    support::CanonicalBytesEncoder field;
+    field.Field(name, value);
+    *canonical += std::move(field).Take();
+}
+}  // namespace
+
+std::string Target::CanonicalBytes() const {
+    const auto* node = As<TargetNode>();
+    if (!node) {
+        throw std::invalid_argument(
+            "CanonicalTargetSnapshot requires a defined TargetNode");
+    }
+    std::string canonical;
+    AppendPipelineIdentityField(&canonical, "kind", "target-snapshot-v1");
+    AppendPipelineIdentityField(&canonical, "target_kind", node->kind);
+    AppendPipelineIdentityField(
+        &canonical, "device_type",
+        std::to_string(static_cast<int>(node->device_type)));
+    AppendPipelineIdentityField(&canonical, "device_id",
+                                std::to_string(node->device_id));
+    const DeviceAttributes& attrs = node->attrs;
+    const auto append_integer = [&canonical](const char* name, int64_t value) {
+        AppendPipelineIdentityField(&canonical, name, std::to_string(value));
+    };
+    append_integer("exists", attrs.exists);
+    append_integer("max_threads_per_block", attrs.max_threads_per_block);
+    append_integer("warp_size", attrs.warp_size);
+    append_integer("max_shared_memory_per_block",
+                   attrs.max_shared_memory_per_block);
+    AppendPipelineIdentityField(&canonical, "compute_version",
+                                attrs.compute_version);
+    AppendPipelineIdentityField(&canonical, "device_name", attrs.device_name);
+    append_integer("max_clock_rate_khz", attrs.max_clock_rate_khz);
+    append_integer("max_registers_per_block", attrs.max_registers_per_block);
+    append_integer("api_version", attrs.api_version);
+    append_integer("driver_version", attrs.driver_version);
+    append_integer("l2_cache_size_bytes", attrs.l2_cache_size_bytes);
+    append_integer("total_global_memory", attrs.total_global_memory);
+    // available_global_memory is a volatile observation, not a codegen
+    // capability. It is deliberately excluded from reusable identity.
+    append_integer("max_shared_memory_per_multiprocessor",
+                   attrs.max_shared_memory_per_multiprocessor);
+    append_integer("max_registers_per_multiprocessor",
+                   attrs.max_registers_per_multiprocessor);
+    append_integer("max_threads_per_multiprocessor",
+                   attrs.max_threads_per_multiprocessor);
+    append_integer("compute_version_major", attrs.compute_version_major);
+    append_integer("compute_version_minor", attrs.compute_version_minor);
+    append_integer("multi_processor_count", attrs.multi_processor_count);
+    AppendPipelineIdentityField(&canonical, "arch", attrs.arch);
+    return canonical;
 }
 
 // 从物理设备后端构造用于编译决策的 Target 能力快照。

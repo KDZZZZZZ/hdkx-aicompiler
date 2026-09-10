@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -12,6 +13,9 @@
 #include "kxc/runtime/storage.h"
 
 namespace kxc {
+
+/*! \brief 完成观测回调；at_registration 表示注册时操作已经完成。 */
+using AsyncCompletionCallback = std::function<void(bool at_registration)>;
 
 /*! \brief 包装后端 stream 句柄，并记录其所属 Device 和所有权。 */
 class DeviceStreamNode final : public Object {
@@ -66,6 +70,10 @@ public:
     void* backend_event{nullptr};
     /*! \brief event 已完成且资源已回收时为 true。 */
     mutable bool completed{false};
+    /*! \brief 已注册但尚未结算的完成观测；结算时恰好各触发一次。 */
+    mutable std::vector<AsyncCompletionCallback> completion_callbacks;
+    /*! \brief 完成观测是否已全部结算；保证恰好结算一次。 */
+    mutable bool completion_settled{false};
     /*! \brief 串行化完成查询、等待和 event 释放。 */
     mutable std::mutex mutex;
 
@@ -98,6 +106,11 @@ public:
     void Wait() const;
     /*! \brief 非阻塞查询；就绪后释放 event 并转入 completed 状态。 */
     bool IsReady() const;
+    /*! \brief 注册一次性完成观测。观测点为 Wait、IsReady 和析构：注册时
+     *  已完成则本次注册立即触发；未完成时存储，首次观测到完成时对每个
+     *  已注册回调恰好触发一次。回调内部不得再等待同一句柄（此时
+     *  completed 已为 true，嵌套等待会直接返回），也不得抛出异常。 */
+    void ObserveCompletion(AsyncCompletionCallback callback) const;
     /*! \brief 返回执行该异步操作的物理设备。 */
     Device device() const;
     /*! \brief 返回由当前句柄共享持有的只读节点。 */

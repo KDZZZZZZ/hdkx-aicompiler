@@ -9,6 +9,7 @@
 #include "kxc/te/topi/elemwise.h"
 #include "kxc/te/topi/reduction.h"
 
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -72,6 +73,58 @@ te::Tensor SoftmaxCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
             return exp_out(indices) / sum_out(denom_indices);
         },
         "T_softmax");
+}
+
+te::Tensor MaskedSoftmaxCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                                const kxc::Type& out_type) {
+    RequireInputCount("masked_softmax", inputs, 2);
+    RequireTensorOutput("masked_softmax", out_type);
+    const auto dtype = inputs[0]->dtype;
+    if (dtype.code != kDLFloat || (dtype.bits != 32 && dtype.bits != 64) || dtype.lanes != 1 ||
+        inputs[1]->dtype.code != kDLUInt || inputs[1]->dtype.bits != 1 || inputs[1]->dtype.lanes != 1) {
+        throw std::runtime_error("masked_softmax lowering requires floating data and bool mask");
+    }
+    const auto* axis_attrs = attrs.As<SoftmaxAttrsNode>();
+    if (attrs.defined() && !axis_attrs) throw std::runtime_error("masked_softmax requires SoftmaxAttrs");
+    const int axis = NormalizeAxis("masked_softmax", axis_attrs ? axis_attrs->axis : -1,
+                                   static_cast<int>(inputs[0]->shape.size()));
+    const auto type = tir::DataType::Float(dtype.bits);
+    const tir::PrimExpr zero = tir::FloatImm(0.0, type), one = tir::FloatImm(1.0, type);
+    const tir::PrimExpr lowest = tir::FloatImm(dtype.bits == 32
+        ? -static_cast<double>(std::numeric_limits<float>::max())
+        : -std::numeric_limits<double>::max(), type);
+    const auto mask = te::topi::broadcast_to(inputs[1], inputs[0]->shape, "T_masked_softmax_mask");
+    const auto masked = te::compute(inputs[0]->shape,
+        [data = inputs[0], mask, lowest](const Array<tir::Var>& indices) {
+            return tir::Select(mask(indices), data(indices), lowest);
+        }, "T_masked_softmax_logits");
+    const auto maximum = te::topi::max(masked, {axis}, true, "T_masked_softmax_max");
+    const auto reduced_indices = [axis](const Array<tir::Var>& indices) {
+        Array<tir::PrimExpr> result;
+        for (size_t i = 0; i < indices.size(); ++i) {
+            result.push_back(i == static_cast<size_t>(axis)
+                ? tir::IntImm(0, tir::DataType::Int(64)) : indices[i]);
+        }
+        return result;
+    };
+    const auto shifted = te::compute(inputs[0]->shape,
+        [masked, mask, maximum, reduced_indices](const Array<tir::Var>& indices) {
+            const auto max_value = maximum(reduced_indices(indices));
+            // Masked payloads (including NaN/Inf) cannot enter arithmetic.
+            // A finite sentinel also gives an empty row a finite maximum.
+            return tir::Select(mask(indices), masked(indices), max_value) - max_value;
+        }, "T_masked_softmax_shifted");
+    const auto exp = te::topi::exp(shifted, "T_masked_softmax_exp");
+    const auto weights = te::compute(inputs[0]->shape,
+        [mask, exp, zero](const Array<tir::Var>& indices) {
+            return tir::Select(mask(indices), exp(indices), zero);
+        }, "T_masked_softmax_weights");
+    const auto sum = te::topi::sum(weights, {axis}, true, "T_masked_softmax_sum");
+    return te::compute(inputs[0]->shape,
+        [weights, sum, zero, one, reduced_indices](const Array<tir::Var>& indices) {
+            const auto denominator = sum(reduced_indices(indices));
+            return weights(indices) / tir::Select(denominator == zero, one, denominator);
+        }, "T_masked_softmax");
 }
 
 KXC_REGISTER_OP(softmax)

@@ -13,15 +13,22 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "kxc/runtime/compiled_module.h"
+#include "kxc/runtime/control_execution_plan.h"
 #include "kxc/runtime/session.h"
 #include "../src/runtime/internal/compiled_module_node.h"
 #include "../src/runtime/internal/memory_plan.h"
 
 namespace {
+
+static_assert(!std::is_constructible_v<
+              kxc::runtime::RuntimeSession, kxc::api::CompiledModule,
+              kxc::runtime::ControlExecutionPlan>,
+              "RuntimeSession must not accept a control execution plan");
 
 #define TEST_CHECK(condition, message)                                           \
     do {                                                                          \
@@ -217,6 +224,150 @@ private:
     bool multiply_{false};
 };
 
+struct DynamicLaunchLog final {
+    std::mutex mutex;
+    std::vector<std::string> symbols;
+};
+
+class DynamicRecordingLauncher final : public kxc::codegen::KernelLauncher {
+public:
+    DynamicRecordingLauncher(std::string symbol,
+                             std::shared_ptr<DynamicLaunchLog> log)
+        : symbol_(std::move(symbol)), log_(std::move(log)) {}
+
+    bool IsReady() const noexcept override { return true; }
+
+    kxc::AsyncOperation Launch(
+        const kxc::Array<kxc::runtime::NDArray>& arguments,
+        const kxc::DeviceStream& stream,
+        const kxc::ObjectRef&) const override {
+        ++calls;
+        last_arguments = arguments;
+        {
+            std::lock_guard<std::mutex> lock(log_->mutex);
+            log_->symbols.push_back(symbol_);
+        }
+        auto token = std::make_shared<int>(calls);
+        last_operation_token = token;
+        kxc::Array<kxc::Storage> retained;
+        for (const auto& argument : arguments) {
+            retained.push_back(argument.storage());
+        }
+        kxc::AsyncOperation operation =
+            kxc::AsyncOperation::Completed(stream, std::move(retained));
+        operation.RetainDependencies({}, std::move(token));
+        return operation;
+    }
+
+    mutable int calls{0};
+    mutable kxc::Array<kxc::runtime::NDArray> last_arguments;
+    mutable std::weak_ptr<int> last_operation_token;
+
+private:
+    std::string symbol_;
+    std::shared_ptr<DynamicLaunchLog> log_;
+};
+
+std::shared_ptr<const kxc::api::ModuleInvocationContract> Dynamic2DContract(
+    size_t input_count, bool shared_inputs = false,
+    bool logical_valid_match = true) {
+    using namespace kxc::api;
+    std::vector<ModuleInputContract> inputs;
+    inputs.reserve(input_count);
+    for (size_t input_index = 0; input_index < input_count; ++input_index) {
+        ModuleInputContract input;
+        input.axis_guards.push_back(ModuleAxisGuard{
+            0, 2, 8, 2, std::nullopt,
+            shared_inputs && input_index == 1
+                ? std::optional<ModuleAxisReference>(
+                      ModuleAxisReference{0, 0})
+                : std::nullopt});
+        input.axis_guards.push_back(
+            ModuleAxisGuard{1, 4, 4, 1, ModuleExtent{4}, std::nullopt});
+        inputs.push_back(std::move(input));
+    }
+    const ModuleShapeExpr rows = ModuleShapeExpr::InputAxis(0, 0);
+    const ModuleShapeExpr columns = ModuleShapeExpr::Const(4);
+    ModuleTensorContract output;
+    output.logical = {rows, columns};
+    output.physical = output.logical;
+    output.valid = logical_valid_match
+                       ? output.logical
+                       : std::vector<ModuleShapeExpr>{
+                             ModuleShapeExpr::Const(1), columns};
+    output.max_bytes = 8 * 4 * sizeof(float);
+    return std::make_shared<ModuleInvocationContract>(
+        std::move(inputs), std::vector<ModuleTensorContract>{output},
+        std::vector<ModuleRuntimeExtentScalar>{});
+}
+
+struct DynamicSessionFixture final {
+    kxc::api::CompiledModule module;
+    kxc::runtime::ExecutablePlan plan;
+    std::shared_ptr<DynamicRecordingLauncher> first;
+    std::shared_ptr<DynamicRecordingLauncher> second;
+    std::shared_ptr<DynamicLaunchLog> log;
+};
+
+DynamicSessionFixture MakeDynamicSessionFixture(
+    bool logical_valid_match = true) {
+    using namespace kxc;
+    using namespace kxc::api;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    const DLDataType dtype = Float32();
+    const KernelSignature first_signature(
+        "dynamic_add",
+        {KernelArgSpec("lhs", KernelArgRole::kInput, dtype, {-1, 4}, cpu, 8),
+         KernelArgSpec("rhs", KernelArgRole::kInput, dtype, {-1, 4}, cpu, 8),
+         KernelArgSpec("bias", KernelArgRole::kConstant, dtype, {4}, cpu, 8,
+                       false, "dynamic.bias"),
+         KernelArgSpec("sum", KernelArgRole::kOutput, dtype, {-1, 4}, cpu,
+                       64, true)});
+    const KernelSignature second_signature(
+        "dynamic_relu",
+        {KernelArgSpec("input", KernelArgRole::kInput, dtype, {-1, 4}, cpu, 8),
+         KernelArgSpec("output", KernelArgRole::kOutput, dtype, {-1, 4}, cpu,
+                       32, true)});
+    const KernelLaunchMetadata metadata(cpu, CodeGenBackend::kLLVM);
+    auto log = std::make_shared<DynamicLaunchLog>();
+    auto first =
+        std::make_shared<DynamicRecordingLauncher>("dynamic_add", log);
+    auto second =
+        std::make_shared<DynamicRecordingLauncher>("dynamic_relu", log);
+    Map<String, runtime::NDArray> constants;
+    constants.Set("dynamic.bias",
+                  runtime::NDArray::Zeros({4}, dtype, cpu, 8));
+    api::CompiledModule module = api::internal::BuildCompiledModule(
+        BuildTarget(cpu),
+        {{first_signature, metadata,
+          CompiledKernel(first_signature, metadata, first),
+          Dynamic2DContract(2, true, logical_valid_match)},
+         {second_signature, metadata,
+          CompiledKernel(second_signature, metadata, second),
+          Dynamic2DContract(1)}},
+        std::move(constants));
+    runtime::ExecutablePlan plan(
+        {runtime::ValueSpec(0, 0, {-1, 4}, dtype, cpu, true),
+         runtime::ValueSpec(1, 1, {-1, 4}, dtype, cpu, true),
+         runtime::ValueSpec(2, 2, {4}, dtype, cpu, false, true),
+         runtime::ValueSpec(3, 3, {-1, 4}, dtype, cpu),
+         runtime::ValueSpec(4, 4, {-1, 4}, dtype, cpu, false, false, true)},
+        {runtime::KernelCall("dynamic_add", {0, 1, 2}, {3}),
+         runtime::KernelCall("dynamic_relu", {3}, {4})},
+        {0, 1}, {2}, {4}, {},
+        runtime::ExecutablePlanMode::kDynamicFreshOutputV1,
+        {{0, 0, 2, 8, 2, std::nullopt},
+         {1, 0, 2, 8, 2, runtime::GraphInputAxisReference{0, 0}}});
+    return {std::move(module), std::move(plan), std::move(first),
+            std::move(second), std::move(log)};
+}
+
+kxc::runtime::NDArray DynamicTensor(int64_t rows) {
+    return kxc::runtime::NDArray::Zeros(
+        {rows, 4}, Float32(), kxc::Device::CPU(), 8);
+}
+
 kxc::runtime::ExecutablePlan MakePlan(
     const kxc::codegen::KernelSignature& signature) {
     using namespace kxc;
@@ -277,6 +428,45 @@ kxc::api::CompiledModule MakeModule(
         BuildTarget(Device::CPU()),
         {api::internal::CompiledModuleEntry{signature, metadata, executable}},
         constants);
+}
+
+bool TestCapacityStatePreflightZeroLaunch() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    const Device cpu = Device::CPU();
+    KernelSignature signature(
+        "capacity_state_preflight",
+        {KernelArgSpec("past", KernelArgRole::kInput, Float32(), {2, 4, 2}, cpu),
+         KernelArgSpec("token", KernelArgRole::kInput, Float32(), {2, 1, 2}, cpu),
+         KernelArgSpec("logits", KernelArgRole::kOutput, Float32(), {2, 1, 2}, cpu, 1, true),
+         KernelArgSpec("present", KernelArgRole::kOutput, Float32(), {2, 5, 2}, cpu, 1, true)});
+    auto launcher = std::make_shared<RecordingLauncher>();
+    const auto module = MakeModule(signature, {}, launcher);
+    const auto plan = MakePlan(signature).BindStateOutputs({{0, 3, 1, 4, 1}}, 7.0);
+    runtime::RuntimeSession session(module, plan);
+    const auto seed = runtime::NDArray::Zeros({2, 4, 2}, Float32(), cpu);
+    std::string message;
+    TEST_CHECK(Throws([&] { session.InitializeState(0, seed, 5); }, &message) &&
+                   message.find("extent or layout") != std::string::npos &&
+                   session.StateExtent(0) == 0 && launcher->calls == 0,
+               "invalid initial extent must leave the state empty with zero launches");
+    session.InitializeState(0, seed, 4);
+    const auto token = runtime::NDArray::Zeros({2, 1, 2}, Float32(), cpu);
+    TEST_CHECK(Throws([&] { session.Run({token}); }, &message) &&
+                   message.find("capacity before launch") != std::string::npos &&
+                   launcher->calls == 0 && session.StateExtent(0) == 4,
+               "full capacity must reject before any backend launch or cursor change");
+    std::vector<float> stored(16, 1.0f);
+    session.StateValue(0).CopyToBytes(stored.data(), stored.size() * sizeof(float));
+    TEST_CHECK(stored == std::vector<float>(16, 0.0f),
+               "capacity rejection must preserve every stored value");
+    TEST_CHECK(Throws([&] {
+                   (void)KernelArgSpec("past", KernelArgRole::kInput,
+                       Float32(), {2, 4, 2}, cpu, 1, true);
+               }, &message) && message.find("must be immutable") != std::string::npos &&
+                   launcher->calls == 0,
+               "the existing kernel ABI must reject mutable state inputs before launch");
+    return true;
 }
 
 /*! \brief 构造 input -> constant -> output 的静态 session fixture。 */
@@ -510,6 +700,49 @@ bool TestModuleOwnedConstantExecution() {
 }
 
 /*! \brief RunAsync 必须返回 outputs 和可独立保活全部参数的 completion。 */
+bool TestExplicitModuleExecution() {
+    using namespace kxc;
+    using namespace kxc::codegen;
+    auto baseline = MakeStaticFixture();
+    runtime::RuntimeSession session(baseline.module, baseline.plan);
+    const auto input = runtime::NDArray::Zeros({2, 3}, Float32(), Device::CPU());
+    const auto stream = DeviceStream::Default(Device::CPU());
+    runtime::RunAsyncResult result;
+    std::weak_ptr<RecordingLauncher> retained;
+    {
+        auto candidate = MakeStaticFixture();
+        retained = candidate.launcher;
+        runtime::RuntimeSession::Validate(candidate.module, baseline.plan);
+        TEST_CHECK(candidate.launcher->calls == 0, "validation must not execute");
+        result = session.RunAsyncWithModule(candidate.module, {input}, stream);
+        TEST_CHECK(candidate.launcher->calls == 1 && baseline.launcher->calls == 0,
+                   "explicit execution must use the supplied module");
+    }
+    TEST_CHECK(!retained.expired(), "completion must retain the supplied executable");
+    (void)session.Run({input});
+    TEST_CHECK(baseline.launcher->calls == 1, "explicit execution must preserve the default module");
+    result = {};
+    TEST_CHECK(retained.expired(), "completed replacement must release after its final handle");
+
+    auto launcher = std::make_shared<RecordingLauncher>();
+    const KernelSignature changed(
+        "session_fixture",
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {2, 3}, Device::CPU()),
+         KernelArgSpec("weight", KernelArgRole::kConstant, Float32(), {3}, Device::CPU(),
+                       1, false, "other.constant"),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {2, 3}, Device::CPU(), 64, true)});
+    Map<String, runtime::NDArray> constants;
+    constants.Set("other.constant", baseline.constant);
+    const auto incompatible = MakeModule(changed, constants, launcher);
+    // This module is valid for a fresh session, but cannot replace an existing
+    // session's constant mapping. Reject before its launcher sees any arguments.
+    runtime::RuntimeSession::Validate(incompatible, baseline.plan);
+    TEST_CHECK(Throws([&] { (void)session.RunAsyncWithModule(incompatible, {input}, stream); }) &&
+                   launcher->calls == 0 && baseline.launcher->calls == 1,
+               "replacement must preserve the stored constant mapping");
+    return true;
+}
+
 bool TestAsyncResultLifetime() {
     using namespace kxc;
     SessionFixture fixture = MakeStaticFixture();
@@ -532,6 +765,9 @@ bool TestAsyncResultLifetime() {
 bool TestStateAliasPersistenceAndLifetime() {
     using namespace kxc;
     StateFixture fixture = MakeStateFixture();
+    TEST_CHECK(fixture.plan.mode() ==
+                   runtime::ExecutablePlanMode::kStatic,
+               "state/alias plans must retain the compatible static mode");
     AsyncOperation escaped_completion;
     const Object* state_storage = nullptr;
     {
@@ -877,6 +1113,204 @@ bool TestNonstaticAndScalarContractsRejectedAtConstruction() {
     return true;
 }
 
+bool TestDynamicFreshOutputExecutionAndLifetime() {
+    using namespace kxc;
+    DynamicSessionFixture fixture = MakeDynamicSessionFixture();
+#if !KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
+    TEST_CHECK(Throws([&] {
+                   (void)runtime::RuntimeSession(fixture.module, fixture.plan);
+               }) && fixture.first->calls == 0 && fixture.second->calls == 0,
+               "the existing dynamic module ABI gate must fail closed at session construction");
+    return true;
+#else
+    runtime::RuntimeSession session(fixture.module, fixture.plan);
+    const DeviceStream stream = DeviceStream::Create(Device::CPU());
+    const auto rejected_before_launch = [&](const Array<runtime::NDArray>& inputs) {
+        return Throws([&] { (void)session.RunAsync(inputs, stream); }) &&
+               fixture.first->calls == 0 && fixture.second->calls == 0;
+    };
+    TEST_CHECK(rejected_before_launch(
+                   {DynamicTensor(10), DynamicTensor(10)}),
+               "out-of-bound graph inputs must fail before the first launch");
+    TEST_CHECK(rejected_before_launch(
+                   {DynamicTensor(3), DynamicTensor(3)}),
+               "non-divisible graph inputs must fail before the first launch");
+    TEST_CHECK(rejected_before_launch(
+                   {DynamicTensor(4), DynamicTensor(6)}),
+               "shared-symbol disagreement must fail before the first launch");
+    TEST_CHECK(rejected_before_launch(
+                   {runtime::NDArray::Zeros({4}, Float32(), Device::CPU()),
+                    DynamicTensor(4)}),
+               "dynamic rank mismatch must fail before the first launch");
+
+    runtime::RunAsyncResult first =
+        session.RunAsync({DynamicTensor(2), DynamicTensor(2)}, stream);
+    first.completion.Wait();
+    TEST_CHECK(first.outputs.size() == 1 &&
+                   SameShape(first.outputs[0].shape(), {2, 4}) &&
+                   fixture.first->calls == 1 && fixture.second->calls == 1 &&
+                   fixture.first->last_arguments.size() == 4 &&
+                   fixture.second->last_arguments.size() == 2,
+               "dynamic calls must inject constants and bind fresh resolved outputs");
+    runtime::RunAsyncResult second =
+        session.RunAsync({DynamicTensor(6), DynamicTensor(6)}, stream);
+    second.completion.Wait();
+    TEST_CHECK(second.outputs.size() == 1 &&
+                   SameShape(second.outputs[0].shape(), {6, 4}) &&
+                   first.outputs[0].storage().get() !=
+                       second.outputs[0].storage().get() &&
+                   fixture.first->last_arguments[3].storage().get() !=
+                       fixture.second->last_arguments[1].storage().get() &&
+                   fixture.first->calls == 2 && fixture.second->calls == 2 &&
+                   fixture.log->symbols ==
+                       std::vector<std::string>({"dynamic_add", "dynamic_relu",
+                                                 "dynamic_add", "dynamic_relu"}),
+               "one dynamic module/plan must run multiple shapes with fresh outputs in call order");
+
+    runtime::RunAsyncResult escaped;
+    std::weak_ptr<DynamicRecordingLauncher> first_launcher;
+    std::weak_ptr<DynamicRecordingLauncher> final_launcher;
+    std::weak_ptr<int> prior_token;
+    std::weak_ptr<int> final_token;
+    const Object* intermediate_storage = nullptr;
+    {
+        DynamicSessionFixture lifetime = MakeDynamicSessionFixture();
+        first_launcher = lifetime.first;
+        final_launcher = lifetime.second;
+        runtime::RuntimeSession retained_session(lifetime.module,
+                                                  lifetime.plan);
+        escaped = retained_session.RunAsync(
+            {DynamicTensor(4), DynamicTensor(4)}, stream);
+        prior_token = lifetime.first->last_operation_token;
+        final_token = lifetime.second->last_operation_token;
+        intermediate_storage =
+            lifetime.first->last_arguments[3].storage().get();
+    }
+    bool retains_intermediate = false;
+    for (const auto& storage : escaped.completion->retained_storage) {
+        retains_intermediate =
+            retains_intermediate || storage.get() == intermediate_storage;
+    }
+    TEST_CHECK(!first_launcher.expired() && !final_launcher.expired() &&
+                   !prior_token.expired() && !final_token.expired() &&
+                   retains_intermediate,
+               "final completion must retain module, intermediates, and prior operations");
+    escaped.completion.Wait();
+    escaped.completion = AsyncOperation();
+    TEST_CHECK(first_launcher.expired() && final_launcher.expired() &&
+                   prior_token.expired() && final_token.expired(),
+               "dynamic execution owners must release with the final completion");
+    return true;
+#endif
+}
+
+bool TestDynamicFreshOutputConstructionRejections() {
+    using namespace kxc;
+    using namespace kxc::api;
+    using namespace kxc::codegen;
+    using namespace kxc::runtime;
+
+    const ExecutablePlan state = MakeStatePlan();
+    TEST_CHECK(Throws([&] {
+                   (void)ExecutablePlan(
+                       state.values(), state.calls(), state.input_value_ids(),
+                       state.constant_value_ids(), state.output_value_ids(),
+                       state.state_value_ids(),
+                       ExecutablePlanMode::kDynamicFreshOutputV1);
+               }),
+               "dynamic plan construction must reject state and in-place aliasing");
+    const ExecutablePlan donation = MakeDonationPlan();
+    TEST_CHECK(Throws([&] {
+                   (void)ExecutablePlan(
+                       donation.values(), donation.calls(),
+                       donation.input_value_ids(),
+                       donation.constant_value_ids(),
+                       donation.output_value_ids(), {},
+                       ExecutablePlanMode::kDynamicFreshOutputV1);
+               }),
+               "dynamic plan construction must reject input donation");
+
+    const Device cpu = Device::CPU();
+    const KernelSignature static_signature(
+        "static_in_dynamic_mode",
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {4}, cpu),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {4}, cpu,
+                       1, true)});
+    auto static_launcher = std::make_shared<RecordingLauncher>();
+    const CompiledModule static_module =
+        MakeModule(static_signature, {}, static_launcher);
+    const ExecutablePlan static_values_dynamic_mode(
+        {ValueSpec(0, 0, {4}, Float32(), cpu, true),
+         ValueSpec(1, 1, {4}, Float32(), cpu, false, false, true)},
+        {KernelCall("static_in_dynamic_mode", {0}, {1})}, {0}, {}, {1}, {},
+        ExecutablePlanMode::kDynamicFreshOutputV1);
+    TEST_CHECK(Throws([&] {
+                   (void)RuntimeSession(static_module,
+                                        static_values_dynamic_mode);
+               }) == !KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI && static_launcher->calls == 0,
+               "fresh-output mode admits static entries only when its dynamic ABI gate is enabled");
+
+#if KXC_ENABLE_DYNAMIC_COMPILED_MODULE_ABI
+    DynamicSessionFixture rank = MakeDynamicSessionFixture();
+    const ExecutablePlan wrong_rank(
+        {ValueSpec(0, 0, {-1}, Float32(), cpu, true),
+         ValueSpec(1, 1, {-1}, Float32(), cpu, true),
+         ValueSpec(2, 2, {4}, Float32(), cpu, false, true),
+         ValueSpec(3, 3, {-1}, Float32(), cpu),
+         ValueSpec(4, 4, {-1}, Float32(), cpu, false, false, true)},
+        {KernelCall("dynamic_add", {0, 1, 2}, {3}),
+         KernelCall("dynamic_relu", {3}, {4})},
+        {0, 1}, {2}, {4}, {},
+        ExecutablePlanMode::kDynamicFreshOutputV1,
+        {{0, 0, 2, 8, 2, std::nullopt},
+         {1, 0, 2, 8, 2, GraphInputAxisReference{0, 0}}});
+    TEST_CHECK(Throws([&] { (void)RuntimeSession(rank.module, wrong_rank); }) &&
+                   rank.first->calls == 0 && rank.second->calls == 0,
+               "dynamic mode must reject rank drift at construction");
+
+    DynamicSessionFixture valid_mismatch = MakeDynamicSessionFixture(false);
+    TEST_CHECK(Throws([&] {
+                   (void)RuntimeSession(valid_mismatch.module,
+                                        valid_mismatch.plan);
+               }) && valid_mismatch.first->calls == 0,
+               "dynamic mode must reject valid extents that differ from logical extents");
+    const Device cuda = Device::CUDA(0);
+    const KernelSignature cuda_signature(
+        "dynamic_cuda",
+        {KernelArgSpec("input", KernelArgRole::kInput, Float32(), {-1, 4},
+                       cuda, 8),
+         KernelArgSpec("output", KernelArgRole::kOutput, Float32(), {-1, 4},
+                       cuda, 8, true)});
+    const KernelLaunchMetadata cuda_metadata(
+        cuda, CodeGenBackend::kCUDA, {1, 1, 1}, {1, 1, 1});
+    auto cuda_log = std::make_shared<DynamicLaunchLog>();
+    auto cuda_launcher = std::make_shared<DynamicRecordingLauncher>(
+        "dynamic_cuda", cuda_log);
+    auto* target_node = new TargetNode();
+    target_node->kind = "cuda";
+    target_node->device_type = kCUDA;
+    target_node->device_id = 0;
+    target_node->attrs.exists = 1;
+    const CompiledModule cuda_module =
+        kxc::api::internal::BuildCompiledModule(
+            Target(ObjectRef(target_node)),
+            {{cuda_signature, cuda_metadata,
+              CompiledKernel(cuda_signature, cuda_metadata, cuda_launcher),
+              Dynamic2DContract(1)}},
+            {});
+    const ExecutablePlan cuda_plan(
+        {ValueSpec(0, 0, {-1, 4}, Float32(), cuda, true),
+         ValueSpec(1, 1, {-1, 4}, Float32(), cuda, false, false, true)},
+        {KernelCall("dynamic_cuda", {0}, {1})}, {0}, {}, {1}, {},
+        ExecutablePlanMode::kDynamicFreshOutputV1,
+        {{0, 0, 2, 8, 2, std::nullopt}});
+    TEST_CHECK(!Throws([&] { (void)RuntimeSession(cuda_module, cuda_plan); }) &&
+                   cuda_launcher->calls == 0,
+               "fresh-output construction must admit CUDA without launching or allocating GPU outputs");
+#endif
+    return true;
+}
+
 /*!
  * \brief 零输入调用仍应绑定常量，并按签名返回标量及零尺寸多个输出。
  */
@@ -1119,12 +1553,14 @@ bool TestPlannedIntermediateStorageReuse() {
 /*! \brief 顺序执行 RuntimeSession 契约用例，并将任一失败转换为非零退出码。 */
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
+        {"capacity_state_preflight_zero_launch", TestCapacityStatePreflightZeroLaunch},
         {"construction_and_type_checks", TestConstructionAndTypeChecks},
         {"constant_realignment_at_module_construction",
          TestConstantRealignmentAtModuleConstruction},
         {"synchronous_assembly", TestSynchronousAssembly},
         {"module_owned_constant_execution", TestModuleOwnedConstantExecution},
         {"async_result_lifetime", TestAsyncResultLifetime},
+        {"explicit_module_execution", TestExplicitModuleExecution},
         {"state_alias_persistence_and_lifetime",
          TestStateAliasPersistenceAndLifetime},
         {"state_run_async_serialization", TestStateRunAsyncSerialization},
@@ -1138,6 +1574,10 @@ int main() {
          TestInputDeviceValidationBeforeAllocation},
         {"nonstatic_and_scalar_contracts_rejected_at_construction",
          TestNonstaticAndScalarContractsRejectedAtConstruction},
+        {"dynamic_fresh_output_execution_and_lifetime",
+         TestDynamicFreshOutputExecutionAndLifetime},
+        {"dynamic_fresh_output_construction_rejections",
+         TestDynamicFreshOutputConstructionRejections},
         {"zero_input_and_multiple_outputs", TestZeroInputAndMultipleOutputs},
         {"concurrent_argument_assembly", TestConcurrentArgumentAssembly},
         {"multi_entry_plan_execution", TestMultiEntryPlanExecution},

@@ -8,6 +8,7 @@
 #include "kxc/te/topi/broadcast.h"
 #include "kxc/te/topi/elemwise.h"
 #include "kxc/te/topi/nn.h"
+#include "kxc/te/topi/utils.h"
 
 #include <stdexcept>
 
@@ -39,6 +40,12 @@ bool MatchesRelayDType(kxc::tir::DataType dtype, const std::string& relay_dtype)
            (relay_dtype == "int8" && dtype == kxc::tir::DataType::Int(8)) ||
            (relay_dtype == "uint8" && dtype == kxc::tir::DataType::UInt(8)) ||
            (relay_dtype == "bool" && dtype == kxc::tir::DataType::Bool());
+}
+
+// equal 内核层已验证的同类型输入 dtype 集合，与 IsEqualInputDType 的字符串集合一致。
+bool MatchesEqualInputDType(kxc::tir::DataType dtype) {
+    return dtype == kxc::tir::DataType::Int(32) || dtype == kxc::tir::DataType::Int(64) ||
+           dtype == kxc::tir::DataType::Float(32);
 }
 
 te::Tensor RequireDefined(const char* op_name, const te::Tensor& tensor) {
@@ -82,6 +89,74 @@ te::Tensor DivideCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     return RequireDefined("divide", te::topi::divide(inputs[0], inputs[1], "T_divide"));
 }
 
+te::Tensor EqualCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                        const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("equal", inputs, 2);
+    const auto* output = RequireTensorOutput("equal", out_type);
+    if (inputs[0]->dtype != inputs[1]->dtype) {
+        throw std::runtime_error("equal input dtypes must match");
+    }
+    if (!MatchesEqualInputDType(inputs[0]->dtype)) {
+        throw std::runtime_error(
+            "equal supports same-dtype int32, int64, or float32 inputs before lowering");
+    }
+    if (output->dtype != "bool") {
+        throw std::runtime_error("equal output dtype must be bool");
+    }
+    return RequireDefined("equal", te::topi::equal(inputs[0], inputs[1], "T_equal"));
+}
+
+te::Tensor NegCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                      const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("neg", inputs, 1);
+    const auto* output = RequireTensorOutput("neg", out_type);
+    if (inputs[0]->dtype != kxc::tir::DataType::Float(32) ||
+        output->dtype != "float32") {
+        throw std::runtime_error("neg supports only float32 input and output before lowering");
+    }
+    return RequireDefined("neg", te::topi::negative(inputs[0], "T_neg"));
+}
+
+te::Tensor SigmoidCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                          const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("sigmoid", inputs, 1);
+    const auto* output = RequireTensorOutput("sigmoid", out_type);
+    if (inputs[0]->dtype != kxc::tir::DataType::Float(32) ||
+        output->dtype != "float32") {
+        throw std::runtime_error(
+            "sigmoid supports only float32 input and output before lowering");
+    }
+    return RequireDefined("sigmoid", te::topi::sigmoid(inputs[0], "T_sigmoid"));
+}
+
+namespace {
+te::Tensor UnaryLibmCompute(const char* name, const Attrs& attrs,
+                           const Array<te::Tensor>& inputs, const kxc::Type& out_type) {
+    if (attrs.defined()) throw std::runtime_error(std::string(name) + " does not accept attrs");
+    RequireInputCount(name, inputs, 1);
+    const auto* output = RequireTensorOutput(name, out_type);
+    if (inputs[0]->dtype != tir::DataType::Float(32) || output->dtype != "float32") {
+        throw std::runtime_error(std::string(name) + " requires float32 input and output");
+    }
+    return te::compute(inputs[0]->shape, [&](const Array<tir::Var>& axes) {
+        return tir::Call(inputs[0]->dtype, name, {inputs[0](axes)});
+    }, std::string("T_") + name, te::topi::kElementWise);
+}
+}  // namespace
+
+te::Tensor TanhCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                       const kxc::Type& out_type) {
+    return UnaryLibmCompute("tanh", attrs, inputs, out_type);
+}
+
+te::Tensor ErfCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                      const kxc::Type& out_type) {
+    return UnaryLibmCompute("erf", attrs, inputs, out_type);
+}
+
 te::Tensor WhereCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
                         const kxc::Type& out_type) {
     if (attrs.defined()) {
@@ -105,6 +180,20 @@ te::Tensor SqrtCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
     RequireInputCount("sqrt", inputs, 1);
     RequireTensorOutput("sqrt", out_type);
     return RequireDefined("sqrt", te::topi::sqrt(inputs[0], "T_sqrt"));
+}
+
+te::Tensor PowCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                      const kxc::Type& out_type) {
+    (void)attrs;
+    RequireInputCount("pow", inputs, 2);
+    const auto* output = RequireTensorOutput("pow", out_type);
+    if (inputs[0]->dtype != inputs[1]->dtype ||
+        inputs[0]->dtype != kxc::tir::DataType::Float(32) ||
+        output->dtype != "float32") {
+        throw std::runtime_error(
+            "pow supports only same-dtype float32 base/exponent before lowering");
+    }
+    return RequireDefined("pow", te::topi::power(inputs[0], inputs[1], "T_pow"));
 }
 
 te::Tensor MatMulCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,

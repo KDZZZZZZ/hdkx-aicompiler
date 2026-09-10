@@ -9,6 +9,10 @@
 #include <cstdio>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <initializer_list>
+#include <iterator>
+#include <utility>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -50,6 +54,7 @@ public:
 private:
     const std::string& t_;
     size_t p_{0};
+    size_t depth_{0};
 
     // 抛出包含当前字节位置的统一解析错误。
     [[noreturn]] void Err(const std::string& m) const {
@@ -67,7 +72,7 @@ private:
     }
     // 跳过 JSON 允许的空白字符。
     void WS() {
-        while (p_ < t_.size() && std::isspace(static_cast<unsigned char>(t_[p_])) != 0) ++p_;
+        while (p_ < t_.size() && (t_[p_] == ' ' || t_[p_] == '\t' || t_[p_] == '\r' || t_[p_] == '\n')) ++p_;
     }
     // 消费指定结构字符，否则报告当前位置。
     void Expect(char c) {
@@ -87,6 +92,8 @@ private:
 
     // 根据首字符分派具体 JSON 值解析器。
     J V() {
+        if (++depth_ > 128) Err("nesting depth exceeds 128");
+        struct DepthScope { size_t& depth; ~DepthScope() { --depth; } } scope{depth_};
         WS();
         char c = Peek();
         if (c == '{') return Obj();
@@ -147,7 +154,20 @@ private:
         return v;
     }
 
-    // 解析字符串转义；非 ASCII unicode 暂以问号保持单字节契约。
+    uint32_t Hex4() {
+        uint32_t value = 0;
+        for (int i = 0; i < 4; ++i) {
+            const char h = Get(); value <<= 4;
+            if (h >= '0' && h <= '9') value += h - '0';
+            else if (h >= 'a' && h <= 'f') value += h - 'a' + 10;
+            else if (h >= 'A' && h <= 'F') value += h - 'A' + 10;
+            else Err("invalid unicode escape");
+        }
+        return value;
+    }
+
+    // Decode JSON Unicode escapes without losing identity bytes.
+
     J Str() {
         J v;
         v.k = J::S;
@@ -167,22 +187,26 @@ private:
                     case 'r': v.s.push_back('\r'); break;
                     case 't': v.s.push_back('\t'); break;
                     case 'u': {
-                        int cp = 0;
-                        for (int i = 0; i < 4; ++i) {
-                            char h = Get();
-                            cp <<= 4;
-                            if (h >= '0' && h <= '9') cp += (h - '0');
-                            else if (h >= 'a' && h <= 'f') cp += (h - 'a' + 10);
-                            else if (h >= 'A' && h <= 'F') cp += (h - 'A' + 10);
-                            else Err("invalid unicode escape");
+                        uint32_t cp = Hex4();
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            if (Get() != '\\' || Get() != 'u') Err("missing low surrogate");
+                            const uint32_t low = Hex4();
+                            if (low < 0xDC00 || low > 0xDFFF) Err("invalid low surrogate");
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + low - 0xDC00;
+                        } else if (cp >= 0xDC00 && cp <= 0xDFFF) Err("unpaired low surrogate");
+                        if (cp <= 0x7F) v.s.push_back(static_cast<char>(cp));
+                        else {
+                            const int continuation = cp <= 0x7FF ? 1 : cp <= 0xFFFF ? 2 : 3;
+                            v.s.push_back(static_cast<char>((continuation == 1 ? 0xC0 : continuation == 2 ? 0xE0 : 0xF0) | (cp >> (6 * continuation))));
+                            for (int i = continuation - 1; i >= 0; --i) v.s.push_back(static_cast<char>(0x80 | ((cp >> (6 * i)) & 0x3F)));
                         }
-                        v.s.push_back(cp <= 0x7F ? static_cast<char>(cp) : '?');
                         break;
                     }
                     default:
                         Err("invalid escape");
                 }
             } else {
+                if (static_cast<unsigned char>(c) < 0x20) Err("unescaped control character");
                 v.s.push_back(c);
             }
         }
@@ -317,6 +341,16 @@ std::string RS(const J& v, const std::string& ctx) {
     return v.s;
 }
 
+// Unknown fields are not silently erased during a JSON round trip.
+void Fields(const J& object, std::initializer_list<const char*> known, const std::string& ctx) {
+    RK(object, J::O, ctx);
+    for (const auto& item : object.o) {
+        if (std::find(known.begin(), known.end(), item.first) == known.end()) {
+            throw std::invalid_argument("unknown field " + ctx + "." + item.first);
+        }
+    }
+}
+
 // 读取带默认值的可选 int 字段。
 int OI(const J& obj, const std::string& key, int d, const std::string& ctx) {
     const J* v = FF(obj, key);
@@ -378,38 +412,63 @@ void WI64(std::ostream& os, const Array<int64_t>& arr) {
 Device ParseDeviceObj(const J& j, const std::string& ctx) {
     if (j.k == J::N) return Device();
     RK(j, J::O, ctx);
+    Fields(j, {"device_type", "device_id"}, ctx);
     int t = RI(RF(j, "device_type", ctx), ctx + ".device_type");
     int id = RI(RF(j, "device_id", ctx), ctx + ".device_id");
     // 反序列化统一回到 DeviceManager 的驻留对象，保持同一物理设备的对象身份稳定。
     return DeviceManager::Global()->Get(static_cast<DeviceTypeCode>(t), id);
 }
 
-// 从 JSON 恢复 Target 能力快照。
+// Stable Target fields shared by the reader and writer; volatile free memory is excluded.
+constexpr std::pair<const char*, int64_t DeviceAttributes::*> kTargetIntegers[] = {
+    {"max_threads_per_block", &DeviceAttributes::max_threads_per_block},
+    {"warp_size", &DeviceAttributes::warp_size},
+    {"max_shared_memory_per_block", &DeviceAttributes::max_shared_memory_per_block},
+    {"max_clock_rate_khz", &DeviceAttributes::max_clock_rate_khz},
+    {"max_registers_per_block", &DeviceAttributes::max_registers_per_block},
+    {"api_version", &DeviceAttributes::api_version},
+    {"driver_version", &DeviceAttributes::driver_version},
+    {"l2_cache_size_bytes", &DeviceAttributes::l2_cache_size_bytes},
+    {"total_global_memory", &DeviceAttributes::total_global_memory},
+    {"max_shared_memory_per_multiprocessor", &DeviceAttributes::max_shared_memory_per_multiprocessor},
+    {"max_registers_per_multiprocessor", &DeviceAttributes::max_registers_per_multiprocessor},
+    {"max_threads_per_multiprocessor", &DeviceAttributes::max_threads_per_multiprocessor},
+    {"compute_version_major", &DeviceAttributes::compute_version_major},
+    {"compute_version_minor", &DeviceAttributes::compute_version_minor},
+    {"multi_processor_count", &DeviceAttributes::multi_processor_count},
+};
+
 Target ParseTargetObj(const J& j, const std::string& ctx) {
     if (j.k == J::N) return Target();
     RK(j, J::O, ctx);
-    auto* n = new TargetNode();
-    n->kind = OS(j, "kind", "", ctx);
-    n->device_type = static_cast<DeviceTypeCode>(OI(j, "device_type", static_cast<int>(kUnknown), ctx));
-    n->device_id = OI(j, "device_id", -1, ctx);
-    if (const J* a = FF(j, "attrs")) {
-        if (a->k != J::N) {
-            RK(*a, J::O, ctx + ".attrs");
-            n->attrs.arch = OS(*a, "arch", "", ctx + ".attrs");
-            n->attrs.compute_version = OS(*a, "compute_version", "0.0", ctx + ".attrs");
-            n->attrs.max_threads_per_block = OI(*a, "max_threads_per_block", 1, ctx + ".attrs");
-            n->attrs.warp_size = OI(*a, "warp_size", 1, ctx + ".attrs");
-            n->attrs.max_shared_memory_per_block =
-                OI(*a, "max_shared_memory_per_block", 0, ctx + ".attrs");
+    Fields(j, {"kind", "device_type", "device_id", "attrs"}, ctx);
+    auto n = std::make_unique<TargetNode>();
+    n->kind = RS(RF(j, "kind", ctx), ctx + ".kind");
+    n->device_type = static_cast<DeviceTypeCode>(RI(RF(j, "device_type", ctx), ctx));
+    n->device_id = RI(RF(j, "device_id", ctx), ctx);
+    const J& attrs = RF(j, "attrs", ctx);
+    RK(attrs, J::O, ctx + ".attrs");
+    for (const auto& item : attrs.o) {
+        if (item.first == "exists" || item.first == "arch" || item.first == "device_name" || item.first == "compute_version") continue;
+        if (std::none_of(std::begin(kTargetIntegers), std::end(kTargetIntegers), [&](const auto& field) { return item.first == field.first; })) {
+            throw std::invalid_argument("unknown Target attribute: " + item.first);
         }
     }
-    return Target(ObjectRef(n));
+    n->attrs.exists = RI(RF(attrs, "exists", ctx), ctx);
+    n->attrs.arch = RS(RF(attrs, "arch", ctx), ctx);
+    n->attrs.device_name = RS(RF(attrs, "device_name", ctx), ctx);
+    n->attrs.compute_version = RS(RF(attrs, "compute_version", ctx), ctx);
+    for (const auto& field : kTargetIntegers) {
+        n->attrs.*(field.second) = RI64(RF(attrs, field.first, ctx), ctx + ".attrs." + field.first);
+    }
+    return Target(ObjectRef(n.release()));
 }
 
 // 从 JSON 恢复逻辑设备的物理、目标、内存域和逻辑编号约束。
 VirtualDevice ParseVD(const J& j, const std::string& ctx) {
     if (j.k == J::N) return VirtualDevice();
     RK(j, J::O, ctx);
+    Fields(j, {"memory_scope", "virtual_device_id", "device", "target"}, ctx);
     std::string scope = OS(j, "memory_scope", "", ctx);
     int vid = OI(j, "virtual_device_id", kInvalidVirtualDeviceId, ctx);
     Device dev;
@@ -442,11 +501,13 @@ void WriteTargetObj(std::ostream& os, const Target& t) {
     os << "\"device_type\":" << static_cast<int>(t->device_type) << ",";
     os << "\"device_id\":" << t->device_id << ",";
     os << "\"attrs\":{";
+    os << "\"exists\":" << t->attrs.exists << ",";
     os << "\"arch\":\"" << Esc(t->attrs.arch) << "\",";
-    os << "\"compute_version\":\"" << Esc(t->attrs.compute_version) << "\",";
-    os << "\"max_threads_per_block\":" << t->attrs.max_threads_per_block << ",";
-    os << "\"warp_size\":" << t->attrs.warp_size << ",";
-    os << "\"max_shared_memory_per_block\":" << t->attrs.max_shared_memory_per_block;
+    os << "\"device_name\":\"" << Esc(t->attrs.device_name) << "\",";
+    os << "\"compute_version\":\"" << Esc(t->attrs.compute_version) << "\"";
+    for (const auto& field : kTargetIntegers) {
+        os << ",\"" << field.first << "\":" << t->attrs.*(field.second);
+    }
     os << "}}";
 }
 
@@ -471,6 +532,7 @@ void WriteVD(std::ostream& os, const VirtualDevice& vd) {
 DiscoPlacement ParsePlacement(const J& j, const std::string& ctx) {
     if (j.k == J::N) return DiscoPlacement();
     RK(j, J::O, ctx);
+    Fields(j, {"num_groups", "workers"}, ctx);
     int num_groups = OI(j, "num_groups", 1, ctx);
     const J& workers = RF(j, "workers", ctx);
     RK(workers, J::A, ctx + ".workers");
@@ -479,7 +541,7 @@ DiscoPlacement ParsePlacement(const J& j, const std::string& ctx) {
     for (size_t i = 0; i < workers.a.size(); ++i) {
         const J& item = workers.a[i];
         std::string wctx = ctx + ".workers[" + std::to_string(i) + "]";
-        RK(item, J::O, wctx);
+        Fields(item, {"worker_id", "group_id", "local_rank", "device", "target", "virtual_device"}, wctx);
         int worker_id = RI(RF(item, "worker_id", wctx), wctx + ".worker_id");
         int group_id = OI(item, "group_id", 0, wctx);
         int local_rank = OI(item, "local_rank", worker_id, wctx);
@@ -543,62 +605,32 @@ void WritePlacement(std::ostream& os, const DiscoPlacement& p) {
     os << "]}";
 }
 
-// 按已知通信 attrs 类型序列化结构化参数。
-void WriteCommAttrs(std::ostream& os, const std::string& op_name,
-                    const CommExecAttrs& attrs) {
-    if (op_name == "device.copy") {
-        os << "{";
-        os << "\"src_virtual_device\":";
-        WriteVD(os, attrs.src_virtual_device);
-        os << ",";
-        os << "\"dst_virtual_device\":";
-        WriteVD(os, attrs.dst_virtual_device);
-        os << ",";
-        os << "\"async\":" << (attrs.async ? "true" : "false") << ",";
-        os << "\"in_group\":" << (attrs.in_group ? "true" : "false");
-        os << "}";
-        return;
-    }
-    os << "{";
-    os << "\"kind\":\"" << Esc(attrs.kind) << "\",";
+// Preserve every communication attribute, including unsupported ones that admission must reject.
+void WriteCommAttrs(std::ostream& os, const CommExecAttrs& attrs) {
+    os << "{\"src_virtual_device\":";
+    WriteVD(os, attrs.src_virtual_device);
+    os << ",\"dst_virtual_device\":";
+    WriteVD(os, attrs.dst_virtual_device);
+    os << ",\"kind\":\"" << Esc(attrs.kind) << "\",";
     os << "\"reduce_kind\":\"" << Esc(attrs.reduce_kind) << "\",";
+    os << "\"async\":" << (attrs.async ? "true" : "false") << ",";
     os << "\"in_group\":" << (attrs.in_group ? "true" : "false") << ",";
     os << "\"group_id\":" << attrs.group_id << ",";
-    os << "\"root_worker\":" << attrs.root_worker;
-    os << "}";
+    os << "\"root_worker\":" << attrs.root_worker << "}";
 }
 
-// 根据通信算子名恢复对应 attrs 对象，未知字段不转为裸指针或弱类型数据。
-CommExecAttrs ParseCommAttrs(const std::string& op_name, const J* attrs,
-                             const std::string& ctx) {
+CommExecAttrs ParseCommAttrs(const J& attrs, const std::string& ctx) {
+    RK(attrs, J::O, ctx);
+    Fields(attrs, {"src_virtual_device", "dst_virtual_device", "kind", "reduce_kind", "async", "in_group", "group_id", "root_worker"}, ctx);
     CommExecAttrs result;
-    result.kind = op_name;
-    if (op_name == "device.copy") {
-        if (!attrs || attrs->k == J::N) {
-            return result;
-        }
-        RK(*attrs, J::O, ctx);
-        if (const J* src = FF(*attrs, "src_virtual_device")) {
-            result.src_virtual_device =
-                ParseVD(*src, ctx + ".src_virtual_device");
-        }
-        if (const J* dst = FF(*attrs, "dst_virtual_device")) {
-            result.dst_virtual_device =
-                ParseVD(*dst, ctx + ".dst_virtual_device");
-        }
-        result.async = OB(*attrs, "async", false, ctx);
-        result.in_group = OB(*attrs, "in_group", true, ctx);
-        return result;
-    }
-    if (!attrs || attrs->k == J::N) {
-        return result;
-    }
-    RK(*attrs, J::O, ctx);
-    result.kind = OS(*attrs, "kind", op_name, ctx);
-    result.reduce_kind = OS(*attrs, "reduce_kind", "sum", ctx);
-    result.in_group = OB(*attrs, "in_group", true, ctx);
-    result.group_id = OI(*attrs, "group_id", 0, ctx);
-    result.root_worker = OI(*attrs, "root_worker", 0, ctx);
+    result.src_virtual_device = ParseVD(RF(attrs, "src_virtual_device", ctx), ctx);
+    result.dst_virtual_device = ParseVD(RF(attrs, "dst_virtual_device", ctx), ctx);
+    result.kind = RS(RF(attrs, "kind", ctx), ctx);
+    result.reduce_kind = RS(RF(attrs, "reduce_kind", ctx), ctx);
+    result.async = RB(RF(attrs, "async", ctx), ctx);
+    result.in_group = RB(RF(attrs, "in_group", ctx), ctx);
+    result.group_id = RI(RF(attrs, "group_id", ctx), ctx);
+    result.root_worker = RI(RF(attrs, "root_worker", ctx), ctx);
     return result;
 }
 
@@ -625,21 +657,17 @@ std::vector<int> SortedInfoIds(const Map<int, Array<int64_t>>& shapes,
 }  // namespace
 
 // 按 device. 命名空间识别执行计划通信算子。
-bool IsCommunicationOpName(const std::string& op_name) {
-    return op_name.rfind("device.", 0) == 0;
-}
-
 // 将完整执行计划序列化为可复现、可跨进程传输的 JSON。
 std::string SerializeExecutionPlanToJson(const ExecutionPlan& plan) {
-    if (!plan.defined()) {
-        throw std::runtime_error("SerializeExecutionPlanToJson requires a defined ExecutionPlan");
-    }
+    plan.Validate();
 
     std::stringstream os;
     os << "{";
-    os << "\"schema_version\":1,";
+    os << "\"schema_version\":" << kDistributedExecutionContractVersion << ",";
     os << "\"num_values\":" << plan->num_values << ",";
-    os << "\"output_value\":" << plan->output_value << ",";
+    os << "\"output_value_ids\":";
+    WI(os, plan->output_value_ids);
+    os << ",";
 
     os << "\"nodes\":[";
     for (size_t i = 0; i < plan->nodes.size(); ++i) {
@@ -664,7 +692,8 @@ std::string SerializeExecutionPlanToJson(const ExecutionPlan& plan) {
             WI(os, n->worker_set);
             os << ",";
             os << "\"op_name\":\"" << Esc(n->op_name) << "\",";
-            os << "\"kernel_symbol\":\"" << Esc(n->kernel_symbol) << "\"";
+            os << "\"kernel_symbol\":\"" << Esc(n->kernel_symbol) << "\",";
+            os << "\"kernel_abi\":\"" << Esc(n->kernel_abi) << "\"";
         } else if (raw->GetTypeId() == CommExecNode::_type_index) {
             const auto* n = static_cast<const CommExecNode*>(raw);
             os << "\"kind\":\"comm\",";
@@ -679,7 +708,7 @@ std::string SerializeExecutionPlanToJson(const ExecutionPlan& plan) {
             os << ",";
             os << "\"op_name\":\"" << Esc(n->op_name) << "\",";
             os << "\"attrs\":";
-            WriteCommAttrs(os, n->op_name, n->attrs);
+            WriteCommAttrs(os, n->attrs);
         } else if (raw->GetTypeId() == BarrierExecNode::_type_index) {
             const auto* n = static_cast<const BarrierExecNode*>(raw);
             os << "\"kind\":\"barrier\",";
@@ -738,22 +767,25 @@ std::string SerializeExecutionPlanToJson(const ExecutionPlan& plan) {
 // 严格校验 JSON 契约并重建强类型执行计划对象。
 ExecutionPlan DeserializeExecutionPlanFromJson(const std::string& json_text) {
     J root = P(json_text).Parse();
-    RK(root, J::O, "root");
     int schema_version = RI(RF(root, "schema_version", "root"), "root.schema_version");
-    if (schema_version != 1) {
+    if (schema_version != 2 && schema_version != kDistributedExecutionContractVersion) {
         throw std::runtime_error("Unsupported ExecutionPlan JSON schema_version: " +
                                  std::to_string(schema_version));
     }
+    Fields(root, {"schema_version", "num_values", schema_version == 2 ? "output_value" : "output_value_ids",
+                  "nodes", "value_virtual_devices", "input_value_ids", "constant_value_ids",
+                  "value_info", "disco_placement", "reserved"}, "root");
 
     int num_values = RI(RF(root, "num_values", "root"), "root.num_values");
-    int output_value = RI(RF(root, "output_value", "root"), "root.output_value");
+    Array<int> output_values = schema_version == 2
+        ? Array<int>{RI(RF(root, "output_value", "root"), "root.output_value")}
+        : AI(RF(root, "output_value_ids", "root"), "root.output_value_ids");
 
     const J& nodes_j = RF(root, "nodes", "root");
     RK(nodes_j, J::A, "root.nodes");
     Array<ObjectRef> nodes;
     for (size_t i = 0; i < nodes_j.a.size(); ++i) {
         const J& n = nodes_j.a[i];
-        if (n.k == J::N) continue;
         std::string ctx = "root.nodes[" + std::to_string(i) + "]";
         RK(n, J::O, ctx);
         std::string kind = RS(RF(n, "kind", ctx), ctx + ".kind");
@@ -761,15 +793,19 @@ ExecutionPlan DeserializeExecutionPlanFromJson(const std::string& json_text) {
         Array<int> out = AI(RF(n, "output_values", ctx), ctx + ".output_values");
         Array<int> workers = AI(RF(n, "worker_set", ctx), ctx + ".worker_set");
         if (kind == "kernel") {
+            Fields(n, {"kind", "input_values", "output_values", "worker_set", "op_name", "kernel_symbol", "kernel_abi"}, ctx);
             std::string op_name = RS(RF(n, "op_name", ctx), ctx + ".op_name");
             std::string kernel_symbol = OS(n, "kernel_symbol", "", ctx);
-            nodes.push_back(ObjectRef(KernelExec(op_name, in, out, workers, kernel_symbol)));
+            nodes.push_back(ObjectRef(KernelExec(op_name, in, out, workers, kernel_symbol,
+                RS(RF(n, "kernel_abi", ctx), ctx + ".kernel_abi"))));
         } else if (kind == "comm") {
+            Fields(n, {"kind", "input_values", "output_values", "worker_set", "op_name", "attrs"}, ctx);
             std::string op_name = RS(RF(n, "op_name", ctx), ctx + ".op_name");
-            const J* attrs = FF(n, "attrs");
-            nodes.push_back(ObjectRef(CommExec(op_name, ParseCommAttrs(op_name, attrs, ctx + ".attrs"),
+            nodes.push_back(ObjectRef(CommExec(op_name, ParseCommAttrs(RF(n, "attrs", ctx), ctx + ".attrs"),
                                                in, out, workers)));
         } else if (kind == "barrier") {
+            Fields(n, {"kind", "input_values", "output_values", "worker_set", "tag"}, ctx);
+            if (!in.empty() || !out.empty()) throw std::invalid_argument("barrier cannot define or consume values");
             std::string tag = RS(RF(n, "tag", ctx), ctx + ".tag");
             nodes.push_back(ObjectRef(BarrierExec(tag, workers)));
         } else {
@@ -785,8 +821,10 @@ ExecutionPlan DeserializeExecutionPlanFromJson(const std::string& json_text) {
         std::string ctx = "root.value_virtual_devices[" + std::to_string(i) + "]";
         RK(item, J::O, ctx);
         int id = RI(RF(item, "value_id", ctx), ctx + ".value_id");
+        Fields(item, {"value_id", "virtual_device"}, ctx);
         VirtualDevice vd = ParseVD(RF(item, "virtual_device", ctx), ctx + ".virtual_device");
-        if (vd.defined()) value_virtual_devices.Set(id, vd);
+        if (value_virtual_devices.count(id)) throw std::invalid_argument("duplicate value_virtual_devices id");
+        value_virtual_devices.Set(id, vd);
     }
 
     Array<int> input_value_ids = AI(RF(root, "input_value_ids", "root"), "root.input_value_ids");
@@ -802,6 +840,8 @@ ExecutionPlan DeserializeExecutionPlanFromJson(const std::string& json_text) {
         std::string ctx = "root.value_info[" + std::to_string(i) + "]";
         RK(item, J::O, ctx);
         int id = RI(RF(item, "value_id", ctx), ctx + ".value_id");
+        Fields(item, {"value_id", "shape", "dtype"}, ctx);
+        if (value_shapes.count(id)) throw std::invalid_argument("duplicate value_info id");
         value_shapes.Set(id, AI64(RF(item, "shape", ctx), ctx + ".shape"));
         value_dtypes.Set(id, RS(RF(item, "dtype", ctx), ctx + ".dtype"));
     }
@@ -819,11 +859,12 @@ ExecutionPlan DeserializeExecutionPlanFromJson(const std::string& json_text) {
     PassContext pass_ctx =
         PassContext::FromVirtualDevices(placement_virtual_devices);
 
-    RK(RF(root, "reserved", "root"), J::O, "root.reserved");
+    Fields(RF(root, "reserved", "root"), {}, "root.reserved");
 
-    return ExecutionPlan(nodes, value_virtual_devices, input_value_ids, constant_value_ids,
-                          value_shapes, value_dtypes, num_values, pass_ctx,
-                          placement, output_value);
+    ExecutionPlan plan(nodes, value_virtual_devices, input_value_ids, constant_value_ids,
+                       value_shapes, value_dtypes, num_values, pass_ctx, placement, output_values);
+    plan.Validate();
+    return plan;
 }
 
 // 从文件读取并反序列化执行计划。
@@ -839,11 +880,14 @@ ExecutionPlan LoadExecutionPlanFromJsonFile(const std::string& path) {
 
 // 将执行计划 JSON 完整写入文件并检查 I/O 失败。
 void SaveExecutionPlanToJsonFile(const ExecutionPlan& plan, const std::string& path) {
+    const std::string json = SerializeExecutionPlanToJson(plan);
     std::ofstream ofs(path, std::ios::out | std::ios::trunc);
     if (!ofs) {
         throw std::runtime_error("Failed to open ExecutionPlan JSON file for writing: " + path);
     }
-    ofs << SerializeExecutionPlanToJson(plan);
+    ofs << json;
+    ofs.close();
+    if (!ofs) throw std::runtime_error("Failed to write ExecutionPlan JSON file: " + path);
 }
 
 }  // namespace kxc

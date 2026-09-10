@@ -18,11 +18,12 @@ struct PrimitiveLoweringFixture final {
     std::vector<relay::LoweredFunction> lowered;
 };
 
-inline PrimitiveLoweringFixture LowerPrimitivesForTest(Function function) {
+inline PrimitiveLoweringFixture LowerPrimitivesForTest(
+    Function function, Target target = BuildTarget(Device::CPU())) {
     function = relay::InferTypePass(std::move(function));
     PrimitiveLoweringFixture result{
         api::internal::PrepareStaticGraph(
-            std::move(function), Device::CPU(), BuildTarget(Device::CPU()),
+            std::move(function), Device(target->device_type, target->device_id), target,
             String()),
         {}};
     result.lowered.reserve(result.prepared.partitioned.units.size());

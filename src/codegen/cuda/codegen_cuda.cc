@@ -44,12 +44,23 @@ std::string SanitizeIdentifier(const std::string& hint) {
 
 /*! \brief 返回浮点 intrinsic 在当前精度下对应的 CUDA C 函数名。 */
 std::string MathFunction(const tir::CallNode* call) {
-    const bool single = call->dtype.code == 2 && call->dtype.bits == 32;
-    if (call->name == "tir.exp") return single ? "expf" : "exp";
-    if (call->name == "tir.log") return single ? "logf" : "log";
-    if (call->name == "tir.sqrt") return single ? "sqrtf" : "sqrt";
-    if (call->name == "tir.tanh") return single ? "tanhf" : "tanh";
-    if (call->name == "tir.fabs") return single ? "fabsf" : "fabs";
+    const std::string name = call->name.rfind("tir.", 0) == 0 ? call->name.substr(4) : call->name;
+    const size_t arity = name == "pow" ? 2 : 1;
+    if (call->dtype.code != 2 || call->dtype.lanes != 1 ||
+        (call->dtype.bits != 32 && call->dtype.bits != 64) ||
+        call->args.size() != arity) {
+        throw std::runtime_error("CodeGenCUDA: math call has invalid float32/64 dtype or arity");
+    }
+    for (const auto& argument : call->args) {
+        if (argument.dtype() != call->dtype) throw std::runtime_error("CodeGenCUDA: math argument dtype mismatch");
+    }
+    const bool single = call->dtype.bits == 32;
+    if (name == "pow") return single ? "powf" : "pow";
+    if (name == "exp") return single ? "expf" : "exp";
+    if (name == "log") return single ? "logf" : "log";
+    if (name == "sqrt") return single ? "sqrtf" : "sqrt";
+    if (name == "tanh") return single ? "tanhf" : "tanh";
+    if (name == "fabs") return single ? "fabsf" : "fabs";
     throw std::runtime_error("CodeGenCUDA: unsupported call '" + call->name + "'");
 }
 
@@ -176,8 +187,20 @@ std::string CodeGenCUDA::GenExpr(const tir::PrimExpr& expression) {
                (node->dtype.bits == 64 ? "LL" : "");
     }
     if (const auto* node = expression.As<tir::FloatImmNode>()) {
-        if (std::isnan(node->value)) return "NAN";
-        if (std::isinf(node->value)) return node->value > 0 ? "INFINITY" : "(-INFINITY)";
+        if (!std::isfinite(node->value)) {
+            const bool nan = std::isnan(node->value);
+            std::string literal;
+            if (node->dtype.bits == 32) {
+                literal = nan ? "__int_as_float(0x7fc00000)" : "__int_as_float(0x7f800000)";
+            } else if (node->dtype.bits == 64) {
+                literal = nan ? "__longlong_as_double(0x7ff8000000000000LL)"
+                              : "__longlong_as_double(0x7ff0000000000000LL)";
+            } else {
+                throw std::runtime_error("CodeGenCUDA: nonfinite literal requires float32/64");
+            }
+            // These CUDA intrinsics need no host/system header search path.
+            return !nan && std::signbit(node->value) ? "(-" + literal + ")" : literal;
+        }
         char buffer[64];
         std::snprintf(buffer, sizeof(buffer),
                       node->dtype.bits == 32 ? "%.9ef" : "%.17e", node->value);

@@ -4,6 +4,8 @@
 
 #include "kxc/runtime/executable_plan.h"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -133,7 +135,8 @@ ValueSpec::ValueSpec(int64_t value_id, int64_t storage_id, Array<int64_t> shape,
                      bool is_constant, bool is_output, bool is_alias,
                      bool is_async_live, bool is_state,
                      int64_t alias_source_value_id, ValueWriteMode write_mode,
-                     int64_t valid_bytes) {
+                     int64_t valid_bytes, int64_t state_capacity,
+                     int64_t state_extent_axis, double state_fill) {
     auto* node = new ValueSpecNode();
     node->value_id = value_id;
     node->storage_id = storage_id;
@@ -150,6 +153,9 @@ ValueSpec::ValueSpec(int64_t value_id, int64_t storage_id, Array<int64_t> shape,
     node->alias_source_value_id = alias_source_value_id;
     node->write_mode = write_mode;
     node->valid_bytes = valid_bytes;
+    node->state_capacity = state_capacity;
+    node->state_extent_axis = state_extent_axis;
+    node->state_fill = state_fill;
     SetData(node);
     Validate();
 }
@@ -213,10 +219,6 @@ void ValueSpec::Validate() const {
         if (dimension < kDynamicDimension) {
             throw std::invalid_argument("ValueSpec shape contains an invalid dimension");
         }
-        if (dimension == kDynamicDimension && !node->is_input) {
-            throw std::invalid_argument(
-                "Only input ValueSpecs may contain dynamic dimensions");
-        }
     }
     if (node->valid_bytes < -1) {
         throw std::invalid_argument("ValueSpec valid bytes is invalid");
@@ -224,6 +226,34 @@ void ValueSpec::Validate() const {
     if (node->valid_bytes != -1 &&
         static_cast<uint64_t>(node->valid_bytes) > StaticNBytes(*this)) {
         throw std::invalid_argument("ValueSpec valid bytes exceeds tensor capacity");
+    }
+    if ((node->state_capacity == -1) != (node->state_extent_axis == -1)) {
+        throw std::invalid_argument(
+            "ValueSpec state capacity and extent axis must be declared together");
+    }
+    if (node->state_extent_axis != -1) {
+        if (!node->is_state) {
+            throw std::invalid_argument(
+                "ValueSpec state extent metadata requires a state value");
+        }
+        if (node->state_capacity < 0 ||
+            node->state_extent_axis < 0 ||
+            node->state_extent_axis >= static_cast<int64_t>(node->shape_.size())) {
+            throw std::invalid_argument(
+                "ValueSpec state extent metadata is out of range");
+        }
+        if (node->shape_[node->state_extent_axis] != node->state_capacity) {
+            throw std::invalid_argument(
+                "ValueSpec state capacity must equal the declared extent axis size");
+        }
+    }
+    if (!node->is_state && node->state_fill != 0.0) {
+        throw std::invalid_argument(
+            "ValueSpec fill metadata requires a state value");
+    }
+    if (node->is_state && !std::isfinite(node->state_fill)) {
+        throw std::invalid_argument(
+            "ValueSpec state fill must be a finite value");
     }
 }
 
@@ -287,11 +317,16 @@ const KernelCallNode* KernelCall::operator->() const {
     return node;
 }
 
-ExecutablePlan::ExecutablePlan(Array<ValueSpec> values, Array<KernelCall> calls,
-                               Array<int64_t> input_value_ids,
-                               Array<int64_t> constant_value_ids,
-                               Array<int64_t> output_value_ids,
-                               Array<int64_t> state_value_ids) {
+ExecutablePlan::ExecutablePlan(
+    Array<ValueSpec> values, Array<KernelCall> calls,
+    Array<int64_t> input_value_ids, Array<int64_t> constant_value_ids,
+    Array<int64_t> output_value_ids, Array<int64_t> state_value_ids,
+    ExecutablePlanMode mode,
+    std::vector<GraphInputAxisGuard> graph_input_guards,
+    std::vector<std::vector<int64_t>> state_extent_bindings,
+    int64_t state_count_input_value_id,
+    std::vector<StateOutputBinding> state_output_bindings,
+    std::optional<RequestBatchingContract> request_batching) {
     auto* node = new ExecutablePlanNode();
     node->values_ = CopyArray(values);
     node->calls_ = CopyArray(calls);
@@ -299,6 +334,12 @@ ExecutablePlan::ExecutablePlan(Array<ValueSpec> values, Array<KernelCall> calls,
     node->constant_value_ids_ = CopyArray(constant_value_ids);
     node->output_value_ids_ = CopyArray(output_value_ids);
     node->state_value_ids_ = CopyArray(state_value_ids);
+    node->mode_ = mode;
+    node->graph_input_guards_ = std::move(graph_input_guards);
+    node->state_extent_bindings_ = std::move(state_extent_bindings);
+    node->state_count_input_value_id_ = state_count_input_value_id;
+    node->state_output_bindings_ = std::move(state_output_bindings);
+    node->request_batching_ = request_batching;
     SetData(node);
     Validate();
 }
@@ -333,6 +374,189 @@ Array<int64_t> ExecutablePlan::output_value_ids() const {
 
 Array<int64_t> ExecutablePlan::state_value_ids() const {
     return CopyArray(operator->()->state_value_ids_);
+}
+
+ExecutablePlanMode ExecutablePlan::mode() const {
+    return operator->()->mode_;
+}
+
+std::vector<GraphInputAxisGuard> ExecutablePlan::graph_input_guards() const {
+    return operator->()->graph_input_guards_;
+}
+
+std::vector<std::vector<int64_t>> ExecutablePlan::state_extent_bindings() const {
+    return operator->()->state_extent_bindings_;
+}
+
+int64_t ExecutablePlan::state_count_input_value_id() const {
+    return operator->()->state_count_input_value_id_;
+}
+
+std::vector<StateOutputBinding> ExecutablePlan::state_output_bindings() const {
+    return operator->()->state_output_bindings_;
+}
+
+std::optional<RequestBatchingContract> ExecutablePlan::request_batching() const {
+    return operator->()->request_batching_;
+}
+
+ExecutablePlan ExecutablePlan::BindRequestBatching(int64_t max_batch_size) const {
+    return ExecutablePlan(values(), calls(), input_value_ids(), constant_value_ids(),
+        output_value_ids(), state_value_ids(), mode(), graph_input_guards(),
+        state_extent_bindings(), state_count_input_value_id(), state_output_bindings(),
+        RequestBatchingContract{max_batch_size});
+}
+
+ExecutablePlan ExecutablePlan::BindStateOutputs(
+    std::vector<StateOutputBinding> bindings, double state_fill) const {
+    Validate();
+    if (mode() != ExecutablePlanMode::kStatic || !state_value_ids().empty() ||
+        bindings.empty()) {
+        throw std::invalid_argument(
+            "BindStateOutputs requires a stateless static plan and nonempty bindings");
+    }
+    if (!std::isfinite(state_fill) ||
+        !std::isfinite(static_cast<float>(state_fill))) {
+        throw std::invalid_argument("BindStateOutputs fill must be finite float32");
+    }
+    std::unordered_map<int64_t, ValueSpec> by_id;
+    for (const auto& value : values()) by_id.emplace(value->value_id, value);
+    std::unordered_map<int64_t, StateOutputBinding> state_bindings;
+    std::unordered_set<int64_t> append_sources;
+    for (const auto& binding : bindings) {
+        const auto state = by_id.find(binding.state_value_id);
+        const auto source = by_id.find(binding.source_value_id);
+        if (state == by_id.end() || source == by_id.end() ||
+            !state->second->is_input || state->second->is_output ||
+            !source->second->is_output || source->second->is_input ||
+            binding.input_value_id != -1 || binding.source_extent_axis < 0 ||
+            binding.source_extent_axis >=
+                static_cast<int64_t>(state->second.shape().size()) ||
+            !state_bindings.emplace(binding.state_value_id, binding).second ||
+            !append_sources.insert(binding.source_value_id).second) {
+            throw std::invalid_argument(
+                "BindStateOutputs requires one-to-one graph input/output bindings");
+        }
+    }
+    Array<ValueSpec> bound_values;
+    for (const auto& value : values()) {
+        const auto state = state_bindings.find(value->value_id);
+        const bool is_state = state != state_bindings.end();
+        const bool is_append_source = append_sources.count(value->value_id) != 0;
+        const int64_t axis = is_state ? state->second.source_extent_axis : -1;
+        bound_values.push_back(ValueSpec(
+            value->value_id, value->storage_id, value.shape(), value->dtype,
+            value->device, value->is_input && !is_state, value->is_constant,
+            value->is_output && !is_append_source, value->is_alias,
+            value->is_async_live || is_append_source, is_state,
+            value->alias_source_value_id, value->write_mode, value->valid_bytes,
+            is_state ? value.shape()[axis] : -1, axis,
+            is_state ? state_fill : 0.0));
+    }
+    Array<int64_t> bound_inputs;
+    Array<int64_t> bound_states;
+    for (int64_t id : input_value_ids()) {
+        if (state_bindings.count(id) != 0) {
+            bound_states.push_back(id);
+        } else {
+            bound_inputs.push_back(id);
+        }
+    }
+    Array<int64_t> bound_outputs;
+    for (int64_t id : output_value_ids()) {
+        if (append_sources.count(id) == 0) bound_outputs.push_back(id);
+    }
+    return ExecutablePlan(
+        std::move(bound_values), calls(), std::move(bound_inputs),
+        constant_value_ids(), std::move(bound_outputs), std::move(bound_states),
+        ExecutablePlanMode::kStaticStatefulExternalV1, {}, {}, -1,
+        std::move(bindings));
+}
+
+ExecutablePlan ExecutablePlan::BindBoundedStateOutputs(
+    std::vector<StateOutputBinding> bindings,
+    std::vector<Array<int64_t>> physical_shapes, double state_fill) const {
+    Validate();
+    if (mode() != ExecutablePlanMode::kDynamicFreshOutputV1 ||
+        bindings.empty() || bindings.size() != physical_shapes.size() ||
+        !std::isfinite(state_fill) || !std::isfinite(static_cast<float>(state_fill))) {
+        throw std::invalid_argument(
+            "BindBoundedStateOutputs requires a fresh bounded plan, physical shapes and finite fill");
+    }
+    std::unordered_map<int64_t, ValueSpec> by_id;
+    int64_t next_value = 0, next_storage = 0;
+    for (const auto& value : values()) {
+        by_id.emplace(value->value_id, value);
+        next_value = std::max(next_value, value->value_id);
+        next_storage = std::max(next_storage, value->storage_id);
+    }
+    std::unordered_map<int64_t, size_t> state_indices;
+    std::unordered_set<int64_t> append_sources;
+    Array<ValueSpec> bound_values;
+    Array<int64_t> bound_states;
+    for (size_t index = 0; index < bindings.size(); ++index) {
+        auto& binding = bindings[index];
+        const auto input = by_id.find(binding.state_value_id);
+        const auto source = by_id.find(binding.source_value_id);
+        const int64_t axis = binding.source_extent_axis;
+        if (input == by_id.end() || source == by_id.end() ||
+            !input->second->is_input || input->second->is_output ||
+            !source->second->is_output || source->second->is_input ||
+            binding.input_value_id != -1 || binding.source_slot != -1 ||
+            axis < 0 || axis >= static_cast<int64_t>(physical_shapes[index].size()) ||
+            physical_shapes[index].size() != input->second.shape().size() ||
+            !state_indices.emplace(binding.state_value_id, index).second ||
+            !append_sources.insert(binding.source_value_id).second) {
+            throw std::invalid_argument(
+                "BindBoundedStateOutputs requires one-to-one input/output bindings and physical shapes");
+        }
+        if (next_value == std::numeric_limits<int64_t>::max() ||
+            next_storage == std::numeric_limits<int64_t>::max()) {
+            throw std::overflow_error("BindBoundedStateOutputs value/storage id overflow");
+        }
+        binding.input_value_id = ++next_value;
+        const auto& value = input->second;
+        bound_values.push_back(ValueSpec(binding.input_value_id, ++next_storage,
+            value.shape(), value->dtype, value->device, true));
+        bound_states.push_back(binding.state_value_id);
+    }
+    for (const auto& value : values()) {
+        const auto found = state_indices.find(value->value_id);
+        if (found != state_indices.end()) {
+            const auto& binding = bindings[found->second];
+            const auto& shape = physical_shapes[found->second];
+            bound_values.push_back(ValueSpec(value->value_id, value->storage_id,
+                shape, value->dtype, value->device, false, false, false, false,
+                false, true, -1, ValueWriteMode::kAllocate, -1,
+                shape[binding.source_extent_axis], binding.source_extent_axis, state_fill));
+        } else if (append_sources.count(value->value_id)) {
+            bound_values.push_back(ValueSpec(value->value_id, value->storage_id,
+                value.shape(), value->dtype, value->device, false, false, false,
+                false, true));
+        } else {
+            bound_values.push_back(value);
+        }
+    }
+    const auto read_id = [&](int64_t value_id) {
+        const auto found = state_indices.find(value_id);
+        return found == state_indices.end() ? value_id
+            : bindings[found->second].input_value_id;
+    };
+    Array<int64_t> bound_inputs, bound_outputs;
+    for (int64_t id : input_value_ids()) bound_inputs.push_back(read_id(id));
+    for (int64_t id : output_value_ids()) {
+        if (!append_sources.count(id)) bound_outputs.push_back(id);
+    }
+    Array<KernelCall> bound_calls;
+    for (const auto& call : calls()) {
+        Array<int64_t> inputs;
+        for (int64_t id : call.input_value_ids()) inputs.push_back(read_id(id));
+        bound_calls.push_back(KernelCall(call->symbol, std::move(inputs), call.output_value_ids()));
+    }
+    return ExecutablePlan(std::move(bound_values), std::move(bound_calls),
+        std::move(bound_inputs), constant_value_ids(), std::move(bound_outputs),
+        std::move(bound_states), ExecutablePlanMode::kBoundedStatefulExternalV1,
+        graph_input_guards(), {}, -1, std::move(bindings));
 }
 
 void ExecutablePlan::Validate() const {
@@ -378,6 +602,423 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
                             values_by_id);
     ValidateOrderedRoleList(state_ids, &ValueSpecNode::is_state,
                             "state_value_ids", values_by_id);
+
+    const ExecutablePlanMode mode = plan.mode();
+    const bool bounded_stateful = mode == ExecutablePlanMode::kBoundedStatefulExternalV1;
+    if (plan.request_batching() && !bounded_stateful) {
+        throw std::invalid_argument("Request batching requires a bounded stateful plan");
+    }
+    if (mode != ExecutablePlanMode::kStaticStatefulExternalV1 &&
+        !bounded_stateful &&
+        !plan.state_output_bindings().empty()) {
+        throw std::invalid_argument(
+            "ExecutablePlan output-to-state bindings require static external stateful mode");
+    }
+    const std::vector<GraphInputAxisGuard> graph_guards =
+        plan.graph_input_guards();
+    if (mode == ExecutablePlanMode::kStatic) {
+        if (!graph_guards.empty()) {
+            throw std::invalid_argument(
+                "Static ExecutablePlan cannot declare graph input guards");
+        }
+        for (const auto& value : values) {
+            for (int64_t dimension : value.shape()) {
+                if (dimension == -1 && !value->is_input) {
+                    throw std::invalid_argument(
+                        "Static ExecutablePlan only allows wildcard input values");
+                }
+            }
+        }
+    } else if (mode == ExecutablePlanMode::kDynamicFreshOutputV1 || bounded_stateful) {
+        std::unordered_set<int64_t> storage_ids;
+        for (const auto& value : values) {
+            if ((!bounded_stateful && value->is_state) || value->is_alias ||
+                value->alias_source_value_id != -1 ||
+                value->write_mode != ValueWriteMode::kAllocate) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output ExecutablePlan rejects state, alias, and donation");
+            }
+            if (value->valid_bytes != -1) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output ExecutablePlan requires logical valid extents");
+            }
+            if (!storage_ids.insert(value->storage_id).second) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output ExecutablePlan forbids graph storage reuse");
+            }
+            if (value->is_constant || value->is_state) {
+                for (int64_t dimension : value.shape()) {
+                    if (dimension == -1) {
+                        throw std::invalid_argument(
+                            "Dynamic fresh-output constants require static shapes");
+                    }
+                }
+            }
+        }
+        if (!bounded_stateful && !state_ids.empty()) {
+            throw std::invalid_argument(
+                "Dynamic fresh-output ExecutablePlan rejects persistent state");
+        }
+
+        std::vector<std::pair<size_t, size_t>> wildcard_axes;
+        for (size_t input_index = 0; input_index < input_ids.size();
+             ++input_index) {
+            const Array<int64_t> shape =
+                values_by_id.at(input_ids[input_index]).shape();
+            for (size_t axis = 0; axis < shape.size(); ++axis) {
+                if (shape[axis] == -1) {
+                    wildcard_axes.emplace_back(input_index, axis);
+                }
+            }
+        }
+        if (graph_guards.size() != wildcard_axes.size()) {
+            throw std::invalid_argument(
+                "Dynamic fresh-output graph guards must cover every wildcard input axis");
+        }
+        for (size_t index = 0; index < graph_guards.size(); ++index) {
+            const GraphInputAxisGuard& guard = graph_guards[index];
+            if (guard.input_index != wildcard_axes[index].first ||
+                guard.axis != wildcard_axes[index].second) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output graph guards must follow input-axis order");
+            }
+            if (guard.lower < 0 || guard.upper < guard.lower ||
+                guard.divisible_by <= 0) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output graph guard bounds are invalid");
+            }
+            const int64_t remainder = guard.lower % guard.divisible_by;
+            if (remainder != 0 &&
+                guard.divisible_by - remainder > guard.upper - guard.lower) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output graph guard admits no divisible extent");
+            }
+            if (!guard.equal_to) continue;
+            const GraphInputAxisReference& reference = *guard.equal_to;
+            if (reference.input_index >= input_ids.size()) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output equality guard references an unknown input");
+            }
+            const Array<int64_t> reference_shape =
+                values_by_id.at(input_ids[reference.input_index]).shape();
+            if (reference.axis >= reference_shape.size() ||
+                reference.input_index > guard.input_index ||
+                (reference.input_index == guard.input_index &&
+                 reference.axis >= guard.axis)) {
+                throw std::invalid_argument(
+                    "Dynamic fresh-output equality guards require a prior input axis");
+            }
+        }
+    } else if (mode == ExecutablePlanMode::kDynamicStatefulV1) {
+        if (!graph_guards.empty()) {
+            throw std::invalid_argument(
+                "Dynamic stateful ExecutablePlan cannot declare graph input guards");
+        }
+        if (state_ids.empty()) {
+            throw std::invalid_argument(
+                "Dynamic stateful ExecutablePlan requires persistent state");
+        }
+        std::unordered_set<int64_t> state_id_set;
+        for (int64_t state_id : state_ids) state_id_set.insert(state_id);
+        for (const auto& value : values) {
+            for (int64_t dimension : value.shape()) {
+                if (dimension < 0) {
+                    throw std::invalid_argument(
+                        "Dynamic stateful ExecutablePlan requires fully static shapes");
+                }
+            }
+            if (value->valid_bytes != -1) {
+                throw std::invalid_argument(
+                    "Dynamic stateful ExecutablePlan derives valid extents from "
+                    "session state metadata, not static valid bytes");
+            }
+        }
+        // Append-count input: an explicit uint64[1] graph input describes how
+        // many tokens this run appends to every declared state.
+        if (plan.state_count_input_value_id() < 0) {
+            throw std::invalid_argument(
+                "Dynamic stateful ExecutablePlan requires an append-count input");
+        }
+        {
+            const auto count_it =
+                values_by_id.find(plan.state_count_input_value_id());
+            if (count_it == values_by_id.end() || !count_it->second->is_input ||
+                count_it->second->dtype.code != kDLUInt ||
+                count_it->second->dtype.bits != 64 ||
+                count_it->second->dtype.lanes != 1 ||
+                count_it->second.shape().size() != 1 ||
+                count_it->second.shape()[0] != 1) {
+                throw std::invalid_argument(
+                    "Dynamic stateful append-count input must be a uint64[1] graph input");
+            }
+        }
+        // Every declared state carries capacity/extent metadata, is appended
+        // exactly once through an in-place alias producer, and each call's
+        // state extent bindings reference declared states in ABI order.
+        std::unordered_map<int64_t, int> append_producers;
+        for (const auto& value : values) {
+            if (value->state_extent_axis == -1 && value->is_state) {
+                throw std::invalid_argument(
+                    "Dynamic stateful ExecutablePlan state requires capacity metadata");
+            }
+            if (value->alias_source_value_id != -1 &&
+                state_id_set.count(value->alias_source_value_id) != 0) {
+                ++append_producers[value->alias_source_value_id];
+            }
+        }
+        for (int64_t state_id : state_ids) {
+            if (append_producers[state_id] != 1) {
+                throw std::invalid_argument(
+                    "Dynamic stateful ExecutablePlan state must be appended by "
+                    "exactly one in-place alias producer");
+            }
+        }
+        const std::vector<std::vector<int64_t>> bindings =
+            plan.state_extent_bindings();
+        if (bindings.size() != calls.size()) {
+            throw std::invalid_argument(
+                "Dynamic stateful ExecutablePlan requires one extent binding list per call");
+        }
+        for (const auto& bound : bindings) {
+            for (int64_t state_id : bound) {
+                if (state_id_set.count(state_id) == 0) {
+                    throw std::invalid_argument(
+                        "Dynamic stateful extent binding references a non-state value");
+                }
+            }
+        }
+    } else if (mode == ExecutablePlanMode::kStaticStatefulExternalV1) {
+        if (!graph_guards.empty()) {
+            throw std::invalid_argument(
+                "Static external stateful ExecutablePlan cannot declare graph input guards");
+        }
+        if (state_ids.empty()) {
+            throw std::invalid_argument(
+                "Static external stateful ExecutablePlan requires persistent state");
+        }
+        if (!plan.state_extent_bindings().empty() ||
+            plan.state_count_input_value_id() != -1) {
+            throw std::invalid_argument(
+                "Static external stateful ExecutablePlan does not use runtime extent ABI");
+        }
+        std::unordered_set<int64_t> state_id_set;
+        for (int64_t state_id : state_ids) state_id_set.insert(state_id);
+        std::unordered_set<int64_t> bound_states;
+        std::unordered_set<int64_t> bound_sources;
+        const std::vector<StateOutputBinding> bindings =
+            plan.state_output_bindings();
+        if (bindings.size() != state_ids.size()) {
+            throw std::invalid_argument(
+                "Static external stateful ExecutablePlan requires one output binding per state");
+        }
+        for (const auto& binding : bindings) {
+            if (state_id_set.count(binding.state_value_id) == 0) {
+                throw std::invalid_argument(
+                    "Static external stateful output binding references a non-state value");
+            }
+            if (!bound_states.insert(binding.state_value_id).second ||
+                binding.source_value_id < 0 ||
+                !bound_sources.insert(binding.source_value_id).second) {
+                throw std::invalid_argument(
+                    "Static external stateful output bindings must be one-to-one");
+            }
+            const ValueSpec& state =
+                values_by_id.at(binding.state_value_id);
+            const auto source_it = values_by_id.find(binding.source_value_id);
+            if (source_it == values_by_id.end()) {
+                throw std::invalid_argument(
+                    "Static external stateful output binding references an unknown source");
+            }
+            const ValueSpec& source = source_it->second;
+            if (source->is_input || source->is_constant || source->is_state ||
+                source->is_alias || source->is_output ||
+                !source->is_async_live ||
+                source->alias_source_value_id != -1 ||
+                source->write_mode != ValueWriteMode::kAllocate) {
+                throw std::invalid_argument(
+                    "Static external stateful source must be a private allocated output");
+            }
+            if (state->dtype.code != kDLFloat || state->dtype.bits != 32 ||
+                state->dtype.lanes != 1 || source->dtype.code != kDLFloat ||
+                source->dtype.bits != 32 || source->dtype.lanes != 1 ||
+                !std::isfinite(static_cast<float>(state->state_fill)) ||
+                (state->device != Device::CPU() && state->device.device_type() != kCUDA) ||
+                source->device != state->device) {
+                throw std::invalid_argument(
+                    "Static external stateful v1 requires float32 state and sources on one CPU or CUDA device");
+            }
+            if (state->state_extent_axis < 0 ||
+                binding.source_extent_axis < 0 ||
+                binding.source_extent_axis >=
+                    static_cast<int64_t>(source.shape().size()) ||
+                state->state_extent_axis >=
+                    static_cast<int64_t>(state.shape().size()) ||
+                binding.source_extent_axis != state->state_extent_axis ||
+                source.shape().size() != state.shape().size()) {
+                throw std::invalid_argument(
+                    "Static external stateful source and state extent axes do not match");
+            }
+            const Array<int64_t> state_shape = state.shape();
+            const Array<int64_t> source_shape = source.shape();
+            const int64_t axis = state->state_extent_axis;
+            if (binding.append_count <= 0 ||
+                binding.append_count > state->state_capacity ||
+                source_shape[axis] < 0 || binding.source_slot < 0 || binding.input_value_id != -1 ||
+                binding.source_slot != state->state_capacity ||
+                binding.source_slot > source_shape[axis] ||
+                source_shape[axis] - binding.source_slot != binding.append_count) {
+                throw std::invalid_argument(
+                    "Static external stateful source slot does not describe one capacity append");
+            }
+            for (size_t dim = 0; dim < state_shape.size(); ++dim) {
+                if (dim == static_cast<size_t>(axis)) continue;
+                if (state_shape[dim] != source_shape[dim]) {
+                    throw std::invalid_argument(
+                        "Static external stateful source and state shapes differ");
+                }
+            }
+        }
+        if (bound_states.size() != state_ids.size()) {
+            throw std::invalid_argument(
+                "Static external stateful output bindings omit a state");
+        }
+        for (const auto& value : values) {
+            for (int64_t dimension : value.shape()) {
+                if (dimension < 0) {
+                    throw std::invalid_argument(
+                        "Static external stateful ExecutablePlan requires fully static shapes");
+                }
+            }
+            if (value->is_alias || value->alias_source_value_id != -1 ||
+                value->write_mode != ValueWriteMode::kAllocate) {
+                throw std::invalid_argument(
+                    "Static external stateful ExecutablePlan rejects kernel alias and donation");
+            }
+            if (value->valid_bytes != -1) {
+                throw std::invalid_argument(
+                    "Static external stateful ExecutablePlan derives valid extents from session state");
+            }
+        }
+    } else {
+        throw std::invalid_argument("ExecutablePlan mode is unsupported");
+    }
+
+    if (bounded_stateful) {
+        if (state_ids.empty() || !plan.state_extent_bindings().empty() ||
+            plan.state_count_input_value_id() != -1 ||
+            plan.state_output_bindings().size() != state_ids.size()) {
+            throw std::invalid_argument("Bounded stateful plan requires one prefix/output binding per state");
+        }
+        std::unordered_set<int64_t> bound_states, bound_inputs, bound_sources;
+        for (const auto& binding : plan.state_output_bindings()) {
+            const auto state_it = values_by_id.find(binding.state_value_id);
+            const auto input_it = values_by_id.find(binding.input_value_id);
+            const auto source_it = values_by_id.find(binding.source_value_id);
+            if (state_it == values_by_id.end() || input_it == values_by_id.end() ||
+                source_it == values_by_id.end() ||
+                !bound_states.insert(binding.state_value_id).second ||
+                !bound_inputs.insert(binding.input_value_id).second ||
+                !bound_sources.insert(binding.source_value_id).second) {
+                throw std::invalid_argument("Bounded stateful bindings must be one-to-one declared values");
+            }
+            const ValueSpec& state = state_it->second;
+            const ValueSpec& input = input_it->second;
+            const ValueSpec& source = source_it->second;
+            if (!state->is_state || !std::isfinite(static_cast<float>(state->state_fill)) ||
+                !input->is_input || input->is_output ||
+                source->is_input || source->is_constant || source->is_state ||
+                source->is_output || !source->is_async_live) {
+                throw std::invalid_argument("Bounded stateful binding requires state, graph input and private output");
+            }
+            for (const auto& value : {state, input, source}) {
+                if (value->dtype.code != kDLFloat || value->dtype.bits != 32 ||
+                    value->dtype.lanes != 1 || value->device != state->device ||
+                    (value->device != Device::CPU() && value->device.device_type() != kCUDA)) {
+                    throw std::invalid_argument("Bounded stateful bindings require float32 state, prefix and source on one CPU or CUDA device");
+                }
+            }
+            const int64_t axis = state->state_extent_axis;
+            const auto state_shape = state.shape();
+            const auto input_shape = input.shape();
+            const auto source_shape = source.shape();
+            if (axis < 0 || binding.source_extent_axis != axis ||
+                input_shape.size() != state_shape.size() || source_shape.size() != state_shape.size() ||
+                input_shape[axis] != -1 || source_shape[axis] != -1 ||
+                binding.source_slot != -1 || binding.append_count <= 0 ||
+                binding.append_count > state->state_capacity) {
+                throw std::invalid_argument("Bounded stateful extent axes or append contract are invalid");
+            }
+            for (size_t dim = 0; dim < state_shape.size(); ++dim) {
+                if (state_shape[dim] <= 0 ||
+                    (static_cast<int64_t>(dim) != axis &&
+                     (input_shape[dim] != source_shape[dim] ||
+                      (input_shape[dim] != -1 && input_shape[dim] != state_shape[dim])))) {
+                    throw std::invalid_argument("Bounded stateful physical and logical layouts differ");
+                }
+            }
+            (void)StaticNBytes(state);
+            for (const auto& guard : graph_guards) {
+                if (input_ids[guard.input_index] != binding.input_value_id ||
+                    guard.axis == static_cast<size_t>(axis)) continue;
+                const int64_t dimension = state_shape[guard.axis];
+                if (dimension < guard.lower || dimension > guard.upper ||
+                    dimension % guard.divisible_by != 0) {
+                    throw std::invalid_argument("Bounded stateful physical shape violates graph input bounds");
+                }
+            }
+        }
+    }
+
+    if (const auto batching = plan.request_batching()) {
+        const auto first_state = values_by_id.at(state_ids[0]);
+        for (const auto& value : values) {
+            if (value->device != first_state->device ||
+                (value->device != Device::CPU() && value->device.device_type() != kCUDA)) {
+                throw std::invalid_argument("Request batching requires one CPU:0 or CUDA device");
+            }
+        }
+        if (input_ids.size() <= state_ids.size()) {
+            throw std::invalid_argument("Request batching requires a caller input per step");
+        }
+        const int64_t slots = first_state.shape()[0];
+        if (batching->max_batch_size <= 0 || batching->max_batch_size > slots) {
+            throw std::invalid_argument("Request batching max batch must fit physical slots");
+        }
+        const int64_t append_count = plan.state_output_bindings()[0].append_count;
+        for (const auto& guard : graph_guards) {
+            if (guard.axis != 0 && guard.equal_to && guard.equal_to->axis == 0) {
+                throw std::invalid_argument("Request batching cannot equate batch and non-batch axes");
+            }
+        }
+        for (const auto& binding : plan.state_output_bindings()) {
+            const auto state = values_by_id.at(binding.state_value_id);
+            if (state->state_extent_axis == 0 || state.shape()[0] != slots ||
+                binding.append_count != append_count) {
+                throw std::invalid_argument("Request batching requires uniform slots and appends with a non-batch state axis");
+            }
+        }
+        for (size_t index = 0; index < input_ids.size(); ++index) {
+            const auto shape = values_by_id.at(input_ids[index]).shape();
+            if (shape.empty() || shape[0] != -1) {
+                throw std::invalid_argument("Request batching requires a bounded leading axis on every input");
+            }
+            for (const auto& guard : graph_guards) {
+                if (guard.input_index != index || guard.axis != 0) continue;
+                if (guard.lower > 1 || guard.upper < slots || guard.divisible_by != 1 ||
+                    (index == 0 && guard.equal_to) ||
+                    (index != 0 && (!guard.equal_to || guard.equal_to->input_index != 0 ||
+                                    guard.equal_to->axis != 0))) {
+                    throw std::invalid_argument("Request batching requires shared leading-axis guards admitting all batch sizes");
+                }
+            }
+        }
+        for (int64_t id : output_ids) {
+            const auto shape = values_by_id.at(id).shape();
+            if (shape.empty() || shape[0] != -1) {
+                throw std::invalid_argument("Request batching requires a bounded leading axis on every output");
+            }
+        }
+    }
 
     std::unordered_set<int64_t> available;
     for (int64_t id : input_ids) available.insert(id);
@@ -430,8 +1071,23 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
                 "Every non-source ExecutablePlan value requires exactly one producer");
         }
     }
+    for (const auto& binding : plan.state_output_bindings()) {
+        const auto& call = calls[static_cast<size_t>(producer_index.at(binding.source_value_id))];
+        bool consumes_state = false;
+        for (int64_t input_id : call.input_value_ids()) {
+            consumes_state = consumes_state || input_id ==
+                (bounded_stateful ? binding.input_value_id : binding.state_value_id);
+        }
+        if (!consumes_state) {
+            throw std::invalid_argument(
+                "Static external stateful source producer must consume its state");
+        }
+    }
     for (int64_t state_id : state_ids) {
-        if (last_use.count(state_id) == 0) {
+        if (bounded_stateful && last_use.count(state_id) != 0) {
+            throw std::invalid_argument("Bounded stateful kernels must consume compact prefixes, not capacity state");
+        }
+        if (!bounded_stateful && last_use.count(state_id) == 0) {
             throw std::invalid_argument(
                 "ExecutablePlan state value is never consumed");
         }

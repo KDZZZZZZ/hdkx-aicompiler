@@ -13,6 +13,7 @@
 #include "kxc/relay/printer/print_ir.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/normalize_to_anf.h"
+#include "kxc/relay/visitor.h"
 
 namespace {
 
@@ -160,6 +161,75 @@ bool TestVerifierDiagnostics() {
 
 }  // namespace
 
+
+// Relay 表达式是 DAG。共享子表达式的数量在 Transformer 里随残差线性增长，
+// 但按树遍历会让它们的展开数量指数增长。下面两个用例分别钉住打印器和
+// mutator：把一条每层复用上层两次的链（朴素展开为 2^N 个节点）跑通，
+// 并确认输出规模只与真实节点数成正比。
+constexpr int kSharedChainDepth = 20;
+
+kxc::Expr BuildSharedChain(const kxc::Var& seed, int depth) {
+    kxc::Expr current = seed;
+    for (int level = 0; level < depth; ++level) {
+        current = Add(current, current);  // 同一个子表达式被引用两次
+    }
+    return current;
+}
+
+bool TestPrinterKeepsSharedSubexpressionsLinear() {
+    using namespace kxc;
+    const TensorType type({2, 2}, "float32");
+    const Var x("x", type);
+    const Function function =
+        relay::InferTypePass(Function({x}, BuildSharedChain(x, kSharedChainDepth)));
+
+    const std::string text = relay::printer::ToText(function);
+    // 朴素树展开是 2^20 个 Call；线性输出只有约 20 个。留足余量仍能区分两者。
+    TEST_CHECK(text.size() < 16 * 1024,
+               "printing a shared DAG must stay linear in real node count");
+    TEST_CHECK(text.find("<shared #") != std::string::npos,
+               "a re-referenced interior node must print as a shared back-reference");
+
+    // 只被引用一次的节点不带共享标记，输出与从前一致。
+    const Var y("y", type);
+    const Function tree = relay::InferTypePass(Function({x, y}, Add(x, y)));
+    const std::string tree_text = relay::printer::ToText(tree);
+    TEST_CHECK(tree_text.find("#") == std::string::npos,
+               "a tree-shaped graph must print exactly as before, with no share ids");
+
+    // 结构相同的两个图仍产生相同文本：ToText 还能当结构键用。
+    const Var x2("x", type);
+    const Function same =
+        relay::InferTypePass(Function({x2}, BuildSharedChain(x2, kSharedChainDepth)));
+    TEST_CHECK(relay::printer::ToText(same) == text,
+               "structurally identical shared DAGs must still print identically");
+    return true;
+}
+
+// 恒等 mutator：不改写任何节点，只驱动基类的递归。
+class IdentityRelayPass final : public kxc::RelayPass {};
+
+bool TestMutatorRewritesEachSharedNodeOnce() {
+    using namespace kxc;
+    const TensorType type({2, 2}, "float32");
+    const Var x("x", type);
+    const Function function =
+        relay::InferTypePass(Function({x}, BuildSharedChain(x, kSharedChainDepth)));
+
+    IdentityRelayPass pass;
+    const Function mutated = pass.Mutate(function);
+    TEST_CHECK(mutated.defined(), "mutating a shared DAG must produce a function");
+
+    // 关键性质：输出保留共享。若基类按树重写，两个 arg 会变成两个独立子树，
+    // 膨胀会一路传给下游每个编译阶段。
+    const auto* body = mutated->body.As<CallNode>();
+    TEST_CHECK(body && body->args.size() == 2,
+               "the rewritten body must still be the top-level binary call");
+    TEST_CHECK(body->args[0].get() == body->args[1].get(),
+               "a shared operand must stay one node after mutation, not two subtrees");
+    return true;
+}
+
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"nested_shared_tuple_deterministic_idempotent",
@@ -167,6 +237,10 @@ int main() {
         {"existing_let_and_branch_lexicality", TestExistingLetAndBranchesStayLexical},
         {"while_deterministic_lexical", TestWhileIsDeterministicAndLexical},
         {"verifier_diagnostics", TestVerifierDiagnostics},
+        {"printer_keeps_shared_subexpressions_linear",
+         TestPrinterKeepsSharedSubexpressionsLinear},
+        {"mutator_rewrites_each_shared_node_once",
+         TestMutatorRewritesEachSharedNodeOnce},
     };
     for (const auto& test : tests) {
         try {

@@ -38,17 +38,18 @@ const Node* AsExactExprNode(const Expr& expr) noexcept {
 }  // namespace
 
 GraphSemanticKey::GraphSemanticKey(std::string canonical_bytes)
-    : canonical_bytes_(std::move(canonical_bytes)) {
-    RequireNonEmpty(canonical_bytes_, "graph semantic canonical bytes");
-    digest_ = Digest(canonical_bytes_, {});
+    : canonical_bytes_(std::make_shared<const std::string>(std::move(canonical_bytes))) {
+    RequireNonEmpty(*canonical_bytes_, "graph semantic canonical bytes");
+    digest_ = Digest(*canonical_bytes_, {});
 }
 
 bool GraphSemanticKey::defined() const noexcept {
-    return !canonical_bytes_.empty() && !digest_.empty();
+    return canonical_bytes_ && !canonical_bytes_->empty() && !digest_.empty();
 }
 
 const std::string& GraphSemanticKey::canonical_bytes() const noexcept {
-    return canonical_bytes_;
+    static const std::string empty;
+    return canonical_bytes_ ? *canonical_bytes_ : empty;
 }
 
 const std::string& GraphSemanticKey::digest() const noexcept {
@@ -57,7 +58,7 @@ const std::string& GraphSemanticKey::digest() const noexcept {
 
 bool GraphSemanticKey::operator==(
     const GraphSemanticKey& other) const noexcept {
-    return canonical_bytes_ == other.canonical_bytes_;
+    return canonical_bytes_ == other.canonical_bytes_ || canonical_bytes() == other.canonical_bytes();
 }
 
 bool GraphSemanticKey::operator!=(
@@ -67,7 +68,7 @@ bool GraphSemanticKey::operator!=(
 
 bool GraphSemanticKey::operator<(
     const GraphSemanticKey& other) const noexcept {
-    return canonical_bytes_ < other.canonical_bytes_;
+    return canonical_bytes() < other.canonical_bytes();
 }
 
 GraphSemanticKey internal::IdentityAccess::Graph(
@@ -270,14 +271,14 @@ PrimitiveArtifactKey::PrimitiveArtifactKey(
         throw std::invalid_argument(
             "artifact identity requires a positive ABI version");
     }
-    AppendField(&canonical_bytes_, "kind", "primitive-artifact-key-v3");
+    AppendField(&canonical_bytes_, "kind", "primitive-artifact-key-v4");
     AppendField(&canonical_bytes_, "unit_semantic",
                 unit_semantic_key_.canonical_bytes());
     AppendField(&canonical_bytes_, "target",
                 target_capability_fingerprint_);
     AppendField(&canonical_bytes_, "pipeline", pipeline_fingerprint);
     AppendField(&canonical_bytes_, "abi", std::to_string(abi_version));
-    AppendField(&canonical_bytes_, "schedule", schedule_contract);
+    AppendField(&canonical_bytes_, "te_candidate", schedule_contract);
     AppendField(&canonical_bytes_, "backend", backend_version);
     digest_ = Digest(canonical_bytes_, std::move(index_digest));
 }

@@ -206,10 +206,16 @@ private:
     // lexical: branch normalization snapshots it so branch-local work cannot
     // escape or be hoisted into another branch.
     std::unordered_map<const Object*, Var> atom_cache_;
+    // CollectNames 的访问集合，只在构造期的那一次遍历中使用。
+    std::unordered_set<const Object*> collected_;
     size_t next_name_{0};
 
+    // 与 atom_cache_ 同理，源图是 DAG：不记访问过的节点就会按树展开，遍历次数
+    // 随共享点数量指数增长。这里只是把变量名收进 names_，同一节点重复访问不会
+    // 带来新名字，因此记住访问过的节点是无损的。
     void CollectNames(const Expr& expr) {
         if (!expr.defined()) return;
+        if (!collected_.insert(expr.get()).second) return;
         if (const auto* var = expr.As<VarNode>()) {
             names_.insert(var->vid->name_hint);
         } else if (const auto* call = expr.As<CallNode>()) {
@@ -380,7 +386,13 @@ private:
     }
 };
 
-void RequireTyped(const Expr& expr, const std::string& path) {
+// Relay 表达式是 DAG：Transformer 的每个残差都让同一子表达式被多个消费者引用。
+// 不记访问过的节点就会按树展开，访问次数随共享点数量指数增长；而这里每层还在
+// 拼接 path 字符串，单条 path 长度又与深度成正比，两者相乘足以让 3 层 MiniMind
+// 的校验独占几分钟。每个节点只校验一次即可——校验的是节点自身的性质，重复访问
+// 不会得出不同结论。path 记录首次到达该节点的路径，用于诊断已经足够。
+void RequireTyped(const Expr& expr, const std::string& path,
+                  std::unordered_set<const Object*>* visited) {
     if (!expr.defined()) {
         throw std::invalid_argument("NormalizeToANF requires a defined node at " + path);
     }
@@ -388,9 +400,10 @@ void RequireTyped(const Expr& expr, const std::string& path) {
         throw std::invalid_argument("NormalizeToANF requires checked_type at " + path +
                                     " (" + NodeKind(expr) + ")");
     }
+    if (!visited->insert(expr.get()).second) return;
     if (const auto* call = expr.As<CallNode>()) {
         for (size_t i = 0; i < call->args.size(); ++i) {
-            RequireTyped(call->args[i], path + ".args[" + std::to_string(i) + "]");
+            RequireTyped(call->args[i], path + ".args[" + std::to_string(i) + "]", visited);
         }
     } else if (const auto* function = expr.As<FunctionNode>()) {
         for (size_t i = 0; i < function->params.size(); ++i) {
@@ -399,28 +412,28 @@ void RequireTyped(const Expr& expr, const std::string& path) {
                                             path + ".params[" + std::to_string(i) + "]");
             }
             RequireTyped(Expr(ObjectRef(function->params[i])),
-                         path + ".params[" + std::to_string(i) + "]");
+                         path + ".params[" + std::to_string(i) + "]", visited);
         }
-        RequireTyped(function->body, path + ".body");
+        RequireTyped(function->body, path + ".body", visited);
     } else if (const auto* if_node = expr.As<IfNode>()) {
-        RequireTyped(if_node->cond, path + ".cond");
-        RequireTyped(if_node->true_branch, path + ".true_branch");
-        RequireTyped(if_node->false_branch, path + ".false_branch");
+        RequireTyped(if_node->cond, path + ".cond", visited);
+        RequireTyped(if_node->true_branch, path + ".true_branch", visited);
+        RequireTyped(if_node->false_branch, path + ".false_branch", visited);
     } else if (const auto* while_node = expr.As<WhileNode>()) {
-        RequireTyped(while_node->initial_state, path + ".initial_state");
-        RequireTyped(Expr(ObjectRef(while_node->loop_var)), path + ".loop_var");
-        RequireTyped(while_node->condition, path + ".condition");
-        RequireTyped(while_node->body, path + ".body");
+        RequireTyped(while_node->initial_state, path + ".initial_state", visited);
+        RequireTyped(Expr(ObjectRef(while_node->loop_var)), path + ".loop_var", visited);
+        RequireTyped(while_node->condition, path + ".condition", visited);
+        RequireTyped(while_node->body, path + ".body", visited);
     } else if (const auto* let = expr.As<LetNode>()) {
-        RequireTyped(Expr(ObjectRef(let->var)), path + ".var");
-        RequireTyped(let->value, path + ".value");
-        RequireTyped(let->body, path + ".body");
+        RequireTyped(Expr(ObjectRef(let->var)), path + ".var", visited);
+        RequireTyped(let->value, path + ".value", visited);
+        RequireTyped(let->body, path + ".body", visited);
     } else if (const auto* tuple = expr.As<TupleNode>()) {
         for (size_t i = 0; i < tuple->fields.size(); ++i) {
-            RequireTyped(tuple->fields[i], path + ".fields[" + std::to_string(i) + "]");
+            RequireTyped(tuple->fields[i], path + ".fields[" + std::to_string(i) + "]", visited);
         }
     } else if (const auto* get_item = expr.As<TupleGetItemNode>()) {
-        RequireTyped(get_item->tuple, path + ".tuple");
+        RequireTyped(get_item->tuple, path + ".tuple", visited);
     }
 }
 
@@ -440,7 +453,8 @@ Function NormalizeToANF(const Function& function) {
     if (!function.defined()) {
         throw std::invalid_argument("NormalizeToANF requires a defined Function");
     }
-    RequireTyped(Expr(ObjectRef(function)), "function");
+    std::unordered_set<const Object*> visited;
+    RequireTyped(Expr(ObjectRef(function)), "function", &visited);
     if (IsANF(function)) return function;
     Function normalized = ANFNormalizer(function).Normalize(function);
     VerifyANF(normalized);

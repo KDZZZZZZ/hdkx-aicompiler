@@ -51,7 +51,7 @@ namespace kxc::api::adaptive::hot_swap {
 using ProductionCompileRequest = preparation::ProductionCompileRequest;
 using ProductionExecutionRequest = preparation::ProductionExecutionRequest;
 using PreparedCandidate = preparation::PreparedCandidate;
-inline constexpr uint32_t kAdaptiveHotSwapContractVersion = 3;
+inline constexpr uint32_t kAdaptiveHotSwapContractVersion = 7;
 using Generation = uint64_t;  // 不回绕的代际号
 
 // 协作式取消令牌：cancel 只结束该 waiter，不杀共享 flight。
@@ -151,6 +151,7 @@ public:
     Generation generation() const noexcept;
     const std::shared_ptr<const PreparedCandidate>& candidate() const noexcept;
     const CompiledGraph& compiled_graph() const noexcept;
+    // Null for stateful candidates; use CreateStatefulSession for each request.
     const std::shared_ptr<const runtime::RuntimeSession>& session() const noexcept;
     const DispatchKey& dispatch_key() const noexcept;
     const PlanAbiFingerprint& plan_abi() const noexcept;
@@ -224,6 +225,9 @@ struct Event final {
     std::string plan_abi_digest;
     std::string diagnostic;
 };
+// Invoked outside routing locks and may run concurrently. Same-controller
+// reentry on the callback thread fails fast; other threads may Acquire normally.
+// Observer exceptions do not change publication or health decisions.
 using Observer = std::function<void(const Event&)>;
 
 struct Options final {
@@ -252,11 +256,38 @@ struct RunAsyncResult final {
     std::shared_ptr<const GenerationLease> lease;
 };
 
+struct RunBatchResult final {
+    std::vector<runtime::RequestResult> results;
+    std::shared_ptr<const GenerationLease> lease;
+};
+
 // ---------------------------------------------------------------------------
 // AdaptiveHotSwapController — queue / singleflight / lease / health / quarantine
 // Submit：异步；CompileAndPublish：同步等到发布或失败
 // Acquire/RunAsync：不触发编译；health 仅当 lease 仍是 route head 时可消费
 // ---------------------------------------------------------------------------
+// A persistent state owner for one request or a bounded request queue,
+// bound to an explicit route and Plan ABI.
+// Copies share the same RuntimeSession; separately created handles are isolated.
+class StatefulSession final {
+public:
+    void InitializeState(int64_t value_id, const runtime::NDArray& contents,
+                         int64_t valid_extent) const;
+    int64_t StateExtent(int64_t value_id) const;
+    runtime::NDArray StateValue(int64_t value_id) const;
+    uint64_t AdmitRequest(const Array<runtime::NDArray>& initial_states = {},
+                          int64_t valid_extent = 0) const;
+    void EnqueueRequest(uint64_t request_id, const Array<runtime::NDArray>& inputs) const;
+    void ReleaseRequest(uint64_t request_id) const;
+    int64_t RequestExtent(uint64_t request_id) const;
+    runtime::NDArray CopyRequestState(uint64_t request_id, int64_t state_value_id) const;
+private:
+    StatefulSession(ProductionExecutionRequest request, runtime::RuntimeSession session);
+    const ProductionExecutionRequest request_;
+    const runtime::RuntimeSession session_;
+    friend class AdaptiveHotSwapController;
+};
+
 class AdaptiveHotSwapController final {
 public:
     explicit AdaptiveHotSwapController(Options options = {});
@@ -269,8 +300,30 @@ public:
     std::shared_ptr<const GenerationLease> CompileAndPublish(CompileRequest request);
     // 仅按 DispatchKey+PlanAbi 取当前路由 head
     std::shared_ptr<const GenerationLease> Acquire(const ProductionExecutionRequest& request) const;
+    // Acquire first, then allocate request state outside the routing lock.
+    // Static and bounded external-state plans retain the same state owner,
+    // including the existing queue and slots of a request-batching plan.
+    StatefulSession CreateStatefulSession(const ProductionExecutionRequest& request) const;
     // 冻结 lease 对应 session 并提交；completion 与 lease 一并返回保活
     RunAsyncResult RunAsync(const ProductionExecutionRequest& request, const Array<runtime::NDArray>& inputs, const DeviceStream& stream) const;
+    // Caller metadata supplies model/stage context. The controller adds the
+    // acquired generation, route, variant, ABI and validation receipt; those
+    // fields are reserved and cannot be supplied by the caller.
+    RunAsyncResult RunAsync(const ProductionExecutionRequest& request,
+                            const Array<runtime::NDArray>& inputs,
+                            const DeviceStream& stream,
+                            runtime::ExecutionMetadata metadata) const;
+    // Each step acquires the current validated generation for the stored route.
+    // State stays in the supplied session across publication and rollback.
+    RunAsyncResult RunAsync(const StatefulSession& session,
+                            const Array<runtime::NDArray>& inputs,
+                            const DeviceStream& stream,
+                            runtime::ExecutionMetadata metadata = {}) const;
+    // A batch uses one lease through synchronous execution and state commit.
+    // Queued requests acquire the generation selected when their batch starts.
+    RunBatchResult RunNextBatch(const StatefulSession& session,
+                               const DeviceStream& stream,
+                               runtime::ExecutionMetadata metadata = {}) const;
     // Evaluate + VerifyAndConsume；过时/已消费返回 false
     bool EvaluateHealth(const std::shared_ptr<const GenerationLease>& lease);
 private:

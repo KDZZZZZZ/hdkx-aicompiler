@@ -1,8 +1,10 @@
 /*! \file src/distributed/ccl_cpu.cc
- * \brief 实现 Disco 线程会话、执行计划解释器和 CPU/NCCL 通信后端。
+ * \brief 实现 CPU 集合通信、分组检查与独立张量复制。
  */
 
 #include "kxc/distributed/ccl_backend.h"
+
+#include <utility>
 
 #include <cstdint>
 #include <cstring>
@@ -24,6 +26,7 @@ void RequireCPU(const runtime::NDArray& array) {
     if (!array.defined() || array.device() != Device::CPU() || !array.IsContiguous()) {
         throw std::runtime_error("CpuCCLBackend requires contiguous cpu:0 arrays");
     }
+    array.storage().ValidateRange(array->byte_offset, array.NBytes());
 }
 
 // 返回 CPU 张量视图的首字节；零元素张量合法返回 nullptr。
@@ -49,9 +52,7 @@ bool SameShape(const runtime::NDArray& lhs, const runtime::NDArray& rhs) {
 
 // 分配独立 CPU Storage 并复制张量，避免不同 worker 意外共享可变地址。
 runtime::NDArray CloneArray(const runtime::NDArray& src) {
-    if (!src.defined()) {
-        return runtime::NDArray();
-    }
+    RequireCPU(src);
     Array<int64_t> shape;
     for (int64_t dim : src->shape_storage) {
         shape.push_back(dim);
@@ -59,6 +60,21 @@ runtime::NDArray CloneArray(const runtime::NDArray& src) {
     runtime::NDArray dst = runtime::NDArray::Empty(shape, src.dtype(), Device::CPU());
     dst.CopyFrom(src);
     return dst;
+}
+
+// Byte-wise reads support legal NDArray views with unaligned byte offsets.
+// Integer callers use unsigned T to define fixed-width wraparound.
+template <typename T>
+void SumElements(void* destination, const void* source, size_t count) {
+    auto* out = static_cast<uint8_t*>(destination);
+    const auto* in = static_cast<const uint8_t*>(source);
+    for (size_t i = 0; i < count; ++i) {
+        T a, b;
+        std::memcpy(&a, out + i * sizeof(T), sizeof(T));
+        std::memcpy(&b, in + i * sizeof(T), sizeof(T));
+        a += b;
+        std::memcpy(out + i * sizeof(T), &a, sizeof(T));
+    }
 }
 
 // 对受支持的标量 dtype 执行原地求和，并在解引用前校验完整布局契约。
@@ -81,28 +97,16 @@ void AddInPlace(const runtime::NDArray& acc, const runtime::NDArray& other) {
     const size_t numel = acc.NBytes() / element_bytes;
     if (numel == 0) return;
     if (dtype.code == kDLFloat && dtype.bits == 32) {
-        float* a = static_cast<float*>(RawData(acc));
-        const float* b = static_cast<const float*>(RawData(other));
-        for (size_t i = 0; i < numel; ++i) a[i] += b[i];
-        return;
+        SumElements<float>(RawData(acc), RawData(other), numel); return;
     }
     if (dtype.code == kDLFloat && dtype.bits == 64) {
-        double* a = static_cast<double*>(RawData(acc));
-        const double* b = static_cast<const double*>(RawData(other));
-        for (size_t i = 0; i < numel; ++i) a[i] += b[i];
-        return;
+        SumElements<double>(RawData(acc), RawData(other), numel); return;
     }
     if (dtype.code == kDLInt && dtype.bits == 32) {
-        int32_t* a = static_cast<int32_t*>(RawData(acc));
-        const int32_t* b = static_cast<const int32_t*>(RawData(other));
-        for (size_t i = 0; i < numel; ++i) a[i] += b[i];
-        return;
+        SumElements<uint32_t>(RawData(acc), RawData(other), numel); return;
     }
     if (dtype.code == kDLInt && dtype.bits == 64) {
-        int64_t* a = static_cast<int64_t*>(RawData(acc));
-        const int64_t* b = static_cast<const int64_t*>(RawData(other));
-        for (size_t i = 0; i < numel; ++i) a[i] += b[i];
-        return;
+        SumElements<uint64_t>(RawData(acc), RawData(other), numel); return;
     }
     throw std::runtime_error("Unsupported dtype for sum allreduce");
 }
@@ -179,11 +183,7 @@ runtime::NDArray ConcatFirstDim(const std::vector<runtime::NDArray>& arrays) {
             !SameDType(arr.dtype(), first.dtype())) {
             throw std::runtime_error("Gather requires equal rank and dtype");
         }
-        for (size_t i = 1; i < first->shape_storage.size(); ++i) {
-            if (arr->shape_storage[i] != first->shape_storage[i]) {
-                throw std::runtime_error("Gather requires equal trailing dimensions");
-            }
-        }
+        if (!SameShape(arr, first)) throw std::runtime_error("Gather requires equal shard shape and count");
         if (arr->shape_storage[0] >
             std::numeric_limits<int64_t>::max() - total_dim0) {
             throw std::overflow_error("Gather leading dimension overflow");
@@ -212,153 +212,110 @@ runtime::NDArray ConcatFirstDim(const std::vector<runtime::NDArray>& arrays) {
     return dst;
 }
 
-// 使用进程内 CPU NDArray 实现 Disco 的复制与基础 collective 契约。
+// Each group is a contiguous equal-sized range. Validate references before
+// allocating, and stage every output before modifying any destination register.
+int GroupWidth(const DiscoSession& session, const DRef& src, const DRef& dst, bool in_group) {
+    const int workers = session.num_workers(), groups = session.num_groups();
+    if (workers <= 0 || groups <= 0 || workers % groups != 0) {
+        throw std::invalid_argument("CpuCCLBackend requires positive evenly divided worker groups");
+    }
+    (void)session.Get(0, src);
+    (void)session.Get(0, dst);
+    return in_group ? workers / groups : workers;
+}
+using PendingWrites = std::vector<std::pair<int, runtime::NDArray>>;
+void Commit(const DiscoSession& session, const DRef& dst, PendingWrites outputs) {
+    for (auto& output : outputs) session.Set(output.first, dst, std::move(output.second));
+}
+
 class CpuCCLBackend final : public CCLBackend {
 public:
-    // 在两个 worker 槽位之间复制张量，并保持 Storage 相互独立。
-    void Copy(const DiscoSession& session, const DRef& src, const DRef& dst, int src_worker,
-              int dst_worker) override {
-        runtime::NDArray src_array = session.Get(src_worker, src);
-        if (!src_array.defined()) {
-            throw std::runtime_error("kxc.disco.copy source is undefined");
-        }
-        session.Set(dst_worker, dst, CloneArray(src_array));
+    void Copy(const DiscoSession& session, const DRef& src, const DRef& dst,
+              int src_worker, int dst_worker) override {
+        const auto value = session.Get(src_worker, src);
+        (void)session.Get(dst_worker, dst);
+        RequireCPU(value);
+        session.Set(dst_worker, dst, CloneArray(value));
     }
 
-    // 汇总所有 worker 的张量并把 sum 结果复制回每个 worker。
     void AllReduce(const DiscoSession& session, const DRef& src, const DRef& dst,
                    const std::string& reduce_kind, bool in_group) override {
-        (void)in_group;
-        if (reduce_kind != "sum") {
-            throw std::runtime_error("CpuCCLBackend supports only sum allreduce");
-        }
-        runtime::NDArray acc;
-        for (int worker = 0; worker < session.num_workers(); ++worker) {
-            runtime::NDArray value = session.Get(worker, src);
-            if (!value.defined()) continue;
-            if (!acc.defined()) {
-                acc = CloneArray(value);
-            } else {
+        const int width = GroupWidth(session, src, dst, in_group);
+        if (reduce_kind != "sum") throw std::invalid_argument("CpuCCLBackend supports only sum allreduce");
+        PendingWrites outputs;
+        for (int root = 0; root < session.num_workers(); root += width) {
+            const auto first = session.Get(root, src);
+            RequireCPU(first);
+            const auto dtype = first.dtype();
+            if (dtype.lanes != 1 || (dtype.code != kDLFloat && dtype.code != kDLInt) ||
+                (dtype.bits != 32 && dtype.bits != 64)) {
+                throw std::invalid_argument("AllReduce supports float32/float64/int32/int64");
+            }
+            auto acc = CloneArray(first);
+            for (int i = 1; i < width; ++i) {
+                const auto value = session.Get(root + i, src);
+                RequireCPU(value);  // Missing workers are not partial reductions.
                 AddInPlace(acc, value);
             }
+            for (int i = 0; i < width; ++i) outputs.emplace_back(root + i, CloneArray(acc));
         }
-        if (!acc.defined()) {
-            throw std::runtime_error("AllReduce has no source tensors");
-        }
-        for (int worker = 0; worker < session.num_workers(); ++worker) {
-            session.Set(worker, dst, CloneArray(acc));
-        }
+        Commit(session, dst, std::move(outputs));
     }
 
-    // 从全局或各 group 的根 worker 广播独立张量副本。
     void BroadcastFromWorker0(const DiscoSession& session, const DRef& src, const DRef& dst,
                               bool in_group) override {
-        runtime::NDArray root = session.Get(0, src);
-        if (!root.defined()) {
-            throw std::runtime_error("Broadcast source on worker0 is undefined");
+        const int width = GroupWidth(session, src, dst, in_group);
+        PendingWrites outputs;
+        for (int root = 0; root < session.num_workers(); root += width) {
+            const auto value = session.Get(root, src);
+            RequireCPU(value);  // Each group's root is required; no global-root fallback.
+            for (int i = 0; i < width; ++i) outputs.emplace_back(root + i, CloneArray(value));
         }
-        if (!in_group) {
-            for (int worker = 0; worker < session.num_workers(); ++worker) {
-                session.Set(worker, dst, CloneArray(root));
-            }
-            return;
-        }
-        int groups = session.num_groups();
-        int workers = session.num_workers();
-        int workers_per_group = workers / groups;
-        for (int group = 0; group < groups; ++group) {
-            int group_root = group * workers_per_group;
-            runtime::NDArray value = session.Get(group_root, src);
-            if (!value.defined()) {
-                value = root;
-            }
-            for (int i = 0; i < workers_per_group; ++i) {
-                session.Set(group * workers_per_group + i, dst, CloneArray(value));
-            }
-        }
+        Commit(session, dst, std::move(outputs));
     }
 
-    // 将根张量沿首维等分到全局 worker 或各 group 内 worker。
     void ScatterFromWorker0(const DiscoSession& session, const DRef& src, const DRef& dst,
                             bool in_group) override {
-        runtime::NDArray root = session.Get(0, src);
-        if (!root.defined()) {
-            throw std::runtime_error("Scatter source on worker0 is undefined");
-        }
-
-        int receivers = in_group ? (session.num_workers() / session.num_groups())
-                                 : session.num_workers();
-        if (root->shape_storage.empty() || root->shape_storage[0] % receivers != 0) {
-            throw std::runtime_error(
-                "Scatter expects first dimension divisible by receiver count");
-        }
-        int64_t shard = root->shape_storage[0] / receivers;
-
-        if (!in_group) {
-            for (int worker = 0; worker < session.num_workers(); ++worker) {
-                session.Set(worker, dst, SliceFirstDim(root, worker * shard, shard));
+        const int width = GroupWidth(session, src, dst, in_group);
+        PendingWrites outputs;
+        for (int root = 0; root < session.num_workers(); root += width) {
+            const auto value = session.Get(root, src);
+            RequireCPU(value);
+            if (value->shape_storage.empty() || value->shape_storage[0] % width != 0) {
+                throw std::invalid_argument("Scatter expects rank >= 1 and a leading dimension divisible by group width");
             }
-            return;
-        }
-
-        int workers_per_group = session.num_workers() / session.num_groups();
-        for (int group = 0; group < session.num_groups(); ++group) {
-            int root_worker = group * workers_per_group;
-            runtime::NDArray group_src = session.Get(root_worker, src);
-            if (!group_src.defined()) {
-                group_src = root;
-            }
-            for (int i = 0; i < workers_per_group; ++i) {
-                int worker = root_worker + i;
-                session.Set(worker, dst, SliceFirstDim(group_src, i * shard, shard));
+            const int64_t shard = value->shape_storage[0] / width;
+            for (int i = 0; i < width; ++i) {
+                outputs.emplace_back(root + i, SliceFirstDim(value, i * shard, shard));
             }
         }
+        Commit(session, dst, std::move(outputs));
     }
 
-    // 收集 worker 分片并沿首维拼接到全局或各 group 的根 worker。
     void GatherToWorker0(const DiscoSession& session, const DRef& src, const DRef& dst,
                          bool in_group) override {
-        if (!in_group) {
+        const int width = GroupWidth(session, src, dst, in_group);
+        PendingWrites outputs;
+        for (int root = 0; root < session.num_workers(); root += width) {
             std::vector<runtime::NDArray> shards;
-            for (int worker = 0; worker < session.num_workers(); ++worker) {
-                shards.push_back(session.Get(worker, src));
+            for (int i = 0; i < width; ++i) {
+                const auto value = session.Get(root + i, src);
+                RequireCPU(value);
+                shards.push_back(value);
             }
-            session.Set(0, dst, ConcatFirstDim(shards));
-            return;
+            outputs.emplace_back(root, ConcatFirstDim(shards));
         }
-
-        int workers_per_group = session.num_workers() / session.num_groups();
-        for (int group = 0; group < session.num_groups(); ++group) {
-            int root_worker = group * workers_per_group;
-            std::vector<runtime::NDArray> shards;
-            for (int i = 0; i < workers_per_group; ++i) {
-                shards.push_back(session.Get(root_worker + i, src));
-            }
-            session.Set(root_worker, dst, ConcatFirstDim(shards));
-        }
+        Commit(session, dst, std::move(outputs));
     }
 
-    // 把 worker0 的源张量发送为指定 worker 的独立副本。
     void SendToWorker(const DiscoSession& session, const DRef& src, const DRef& dst,
                       int receiver_worker) override {
-        runtime::NDArray value = session.Get(0, src);
-        if (!value.defined()) {
-            throw std::runtime_error("SendToWorker expects source on worker0");
-        }
-        session.Set(receiver_worker, dst, CloneArray(value));
+        Copy(session, src, dst, 0, receiver_worker);
     }
-
-    // 从指定 worker 接收张量并写入 worker0。
     void RecvFromWorker(const DiscoSession& session, const DRef& src, const DRef& dst,
                         int sender_worker) override {
-        runtime::NDArray value = session.Get(sender_worker, src);
-        if (!value.defined()) {
-            throw std::runtime_error("RecvFromWorker source is undefined");
-        }
-        session.Set(0, dst, CloneArray(value));
+        Copy(session, src, dst, sender_worker, 0);
     }
-
-    // 将同步请求转发给会话的真实 worker 队列。
     void SyncWorker(const DiscoSession& session, int worker_id) override {
         session.SyncWorker(worker_id);
     }

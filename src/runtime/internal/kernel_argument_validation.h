@@ -25,4 +25,11 @@ void ValidateKernelArgument(
     const codegen::KernelArgSpec& spec, const runtime::NDArray& argument,
     const Map<String, runtime::NDArray>& constants = {});
 
+/*! Single-argument admission for prepared plans, using a diagnostic owner name
+ * without constructing an artificial whole-kernel signature. */
+void ValidateTensorArgument(
+    const String& owner, size_t index, const codegen::KernelArgSpec& spec,
+    const runtime::NDArray& argument,
+    const Map<String, runtime::NDArray>& constants = {});
+
 }  // namespace kxc::api

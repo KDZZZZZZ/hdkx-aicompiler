@@ -194,6 +194,7 @@ bool TestCudaScheduleIsCanonicalAndVerified() {
         Request(IRDialect::kTIR, 3, BuildTarget(Device::CPU())));
     TEST_CHECK(cuda_plan.execution_steps.size() == 5 &&
                    cuda_plan.execution_steps.back().pass_name == String("bind_cuda_threads") &&
+                   cuda_plan.execution_steps.back().schema_version == 8 &&
                    Contains(cuda_plan.target_requirements, "kind=cuda") &&
                    Contains(cuda_plan.target_requirements, "attr.exists>0") &&
                    Contains(cuda_plan.invariant_transitions.back().invariants_after,
@@ -207,6 +208,11 @@ bool TestCudaScheduleIsCanonicalAndVerified() {
     const tir::CudaLaunchConfig launch = tir::GetCudaLaunchConfig(scheduled);
     TEST_CHECK(launch.grid_x == 1 && launch.block_x == 128,
                "executor must verify and retain CUDA schedule metadata");
+
+    NormalizedPipeline old_schedule = cuda_plan;
+    old_schedule.execution_steps.back().schema_version = 3;
+    TEST_CHECK(Throws([&] { PipelineExecutor::Validate(old_schedule, cuda); }),
+               "the old schedule without guarded indirect reads must not execute new semantics");
 
     NormalizedPipeline target_tamper = cuda_plan;
     target_tamper.target_requirements.erase(
@@ -413,7 +419,7 @@ bool TestCompilerArtifactIdentityUsesExecutedCanonicalPlan() {
                    contract.canonical_bytes.find(tir_bytes) !=
                        std::string::npos &&
                    contract.canonical_bytes.find(
-                       "per-unit-boundary-lowering-v1") !=
+                       "static-te-program-lowering-v1") !=
                        std::string::npos &&
                    contract.relay_pipeline.execution_steps.front().pass_name ==
                        String("infer_type") &&

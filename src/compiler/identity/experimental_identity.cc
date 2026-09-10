@@ -7,6 +7,7 @@
 #include "../internal/identity_canonical.h"
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -14,6 +15,8 @@
 #include <vector>
 
 #include "runtime/internal/compiled_module_node.h"
+#include "runtime/internal/memory_plan.h"
+#include "kxc/compiler/compiler.h"
 #include "kxc/runtime/compiled_module.h"
 #include "kxc/runtime/executable_plan.h"
 
@@ -59,10 +62,11 @@ bool ContainsLegacyDynamicDimension(const std::string& applicability) {
 }
 
 void AppendShape(std::string* out, const Array<int64_t>& shape,
-                 const char* context) {
+                 const char* context, bool allow_wildcards = false) {
     AppendInteger(out, "rank", shape.size());
     for (int64_t dimension : shape) {
-        if (dimension < 0) {
+        if (dimension < 0 &&
+            (!allow_wildcards || dimension != codegen::kDynamicDimension)) {
             throw std::invalid_argument(std::string(context) +
                                         " requires static exact dimensions");
         }
@@ -71,7 +75,9 @@ void AppendShape(std::string* out, const Array<int64_t>& shape,
 }
 
 void AppendValueContract(std::string* out,
-                         const runtime::ValueSpec& value) {
+                         const runtime::ValueSpec& value,
+                         bool allow_wildcards = false,
+                         bool state_contract = false) {
     // Graph-local value/storage ids are locators, not reusable ABI identity.
     AppendInteger(out, "dtype_code", value->dtype.code);
     AppendInteger(out, "dtype_bits", value->dtype.bits);
@@ -86,7 +92,18 @@ void AppendValueContract(std::string* out,
     AppendInteger(out, "is_state", value->is_state);
     AppendInteger(out, "write_mode", static_cast<uint8_t>(value->write_mode));
     AppendInteger(out, "valid_bytes", value->valid_bytes);
-    AppendShape(out, value.shape(), "plan ABI");
+    if (state_contract) {
+        // Dynamic stateful contract: capacity, extent axis, and the sentinel
+        // fill are part of the plan identity; cursor values are not.
+        AppendInteger(out, "state_capacity", value->state_capacity);
+        AppendInteger(out, "state_extent_axis", value->state_extent_axis);
+        uint64_t fill_bits = 0;
+        static_assert(sizeof(fill_bits) == sizeof(value->state_fill),
+                      "state fill must be 64-bit for identity");
+        std::memcpy(&fill_bits, &value->state_fill, sizeof(fill_bits));
+        AppendInteger(out, "state_fill_bits", static_cast<int64_t>(fill_bits));
+    }
+    AppendShape(out, value.shape(), "plan ABI", allow_wildcards);
 }
 
 const Target& ModuleTarget(const CompiledModule& module) {
@@ -208,17 +225,17 @@ bool OrderedArtifactIdentity::operator!=(
 ShapeProfileKey::ShapeProfileKey(GraphSemanticKey graph_semantic_key,
                                  std::string canonical_bytes)
     : graph_semantic_key_(std::move(graph_semantic_key)),
-      canonical_bytes_(std::move(canonical_bytes)) {
+      canonical_bytes_(std::make_shared<const std::string>(std::move(canonical_bytes))) {
     if (!graph_semantic_key_.defined()) {
         throw std::invalid_argument(
             "shape profile identity requires graph semantics");
     }
-    RequireNonEmpty(canonical_bytes_, "shape profile canonical bytes");
-    digest_ = Digest(canonical_bytes_, {});
+    RequireNonEmpty(*canonical_bytes_, "shape profile canonical bytes");
+    digest_ = Digest(*canonical_bytes_, {});
 }
 
 bool ShapeProfileKey::defined() const noexcept {
-    return graph_semantic_key_.defined() && !canonical_bytes_.empty() &&
+    return graph_semantic_key_.defined() && canonical_bytes_ && !canonical_bytes_->empty() &&
            !digest_.empty();
 }
 
@@ -227,7 +244,8 @@ const GraphSemanticKey& ShapeProfileKey::graph_semantic_key() const noexcept {
 }
 
 const std::string& ShapeProfileKey::canonical_bytes() const noexcept {
-    return canonical_bytes_;
+    static const std::string empty;
+    return canonical_bytes_ ? *canonical_bytes_ : empty;
 }
 
 const std::string& ShapeProfileKey::digest() const noexcept {
@@ -236,7 +254,7 @@ const std::string& ShapeProfileKey::digest() const noexcept {
 
 bool ShapeProfileKey::operator==(
     const ShapeProfileKey& other) const noexcept {
-    return canonical_bytes_ == other.canonical_bytes_;
+    return canonical_bytes_ == other.canonical_bytes_ || canonical_bytes() == other.canonical_bytes();
 }
 
 bool ShapeProfileKey::operator!=(
@@ -246,7 +264,7 @@ bool ShapeProfileKey::operator!=(
 
 bool ShapeProfileKey::operator<(
     const ShapeProfileKey& other) const noexcept {
-    return canonical_bytes_ < other.canonical_bytes_;
+    return canonical_bytes() < other.canonical_bytes();
 }
 
 ShapeProfileKey BuildShapeProfileKey(
@@ -286,6 +304,50 @@ ShapeProfileKey BuildStaticExactShapeProfileKey(
         "static-exact-plan-v2", 1);
 }
 
+ShapeProfileKey BuildBoundedShapeProfileKey(
+    const GraphSemanticKey& graph_semantic_key,
+    const runtime::ExecutablePlan& plan) {
+    plan.Validate();
+    if (plan.mode() != runtime::ExecutablePlanMode::kDynamicFreshOutputV1 &&
+        plan.mode() != runtime::ExecutablePlanMode::kBoundedStatefulExternalV1) {
+        throw std::invalid_argument("bounded profile requires a bounded executable plan");
+    }
+    std::unordered_map<int64_t, runtime::ValueSpec> values;
+    for (const auto& value : plan.values()) values.emplace(value->value_id, value);
+    const auto guards = plan.graph_input_guards();
+    size_t guard_index = 0;
+    std::string profile;
+    AppendField(&profile, "kind", "bounded-input-profile-v1");
+    for (int64_t id : plan.input_value_ids()) {
+        const auto& value = values.at(id);
+        AppendInteger(&profile, "dtype_code", value->dtype.code);
+        AppendInteger(&profile, "dtype_bits", value->dtype.bits);
+        AppendInteger(&profile, "dtype_lanes", value->dtype.lanes);
+        AppendField(&profile, "layout", "contiguous");
+        AppendInteger(&profile, "rank", value.shape().size());
+        for (int64_t dimension : value.shape()) {
+            if (dimension >= 0) {
+                AppendField(&profile, "axis_kind", "exact");
+                AppendInteger(&profile, "extent", dimension);
+                continue;
+            }
+            // Plan validation proves complete, ordered wildcard coverage.
+            const auto& guard = guards.at(guard_index++);
+            AppendField(&profile, "axis_kind", "bounded");
+            AppendInteger(&profile, "lower", guard.lower);
+            AppendInteger(&profile, "upper", guard.upper);
+            AppendInteger(&profile, "divisible_by", guard.divisible_by);
+            AppendInteger(&profile, "has_equal_to", bool(guard.equal_to));
+            if (guard.equal_to) {
+                AppendInteger(&profile, "equal_input", guard.equal_to->input_index);
+                AppendInteger(&profile, "equal_axis", guard.equal_to->axis);
+            }
+        }
+    }
+    return BuildShapeProfileKey(graph_semantic_key, profile,
+        "bounded-runtime-inputs", "bounded-explicit-profile-v1", 1);
+}
+
 DispatchKey::DispatchKey(std::string artifact_family,
                          std::string shape_layout_valid_extent,
                          std::string variant_policy_version) {
@@ -297,27 +359,30 @@ DispatchKey::DispatchKey(std::string artifact_family,
             "dispatch identity cannot use legacy -1 as shape applicability");
     }
     RequireNonEmpty(variant_policy_version, "variant policy version");
-    AppendField(&canonical_bytes_, "kind", "dispatch-key-v1");
-    AppendField(&canonical_bytes_, "artifact_family", artifact_family);
-    AppendField(&canonical_bytes_, "applicability",
+    std::string canonical;
+    AppendField(&canonical, "kind", "dispatch-key-v1");
+    AppendField(&canonical, "artifact_family", artifact_family);
+    AppendField(&canonical, "applicability",
                 shape_layout_valid_extent);
-    AppendField(&canonical_bytes_, "variant_policy",
+    AppendField(&canonical, "variant_policy",
                 variant_policy_version);
-    digest_ = Digest(canonical_bytes_, {});
+    canonical_bytes_ = std::make_shared<const std::string>(std::move(canonical));
+    digest_ = Digest(*canonical_bytes_, {});
 }
 
 bool DispatchKey::defined() const noexcept {
-    return !canonical_bytes_.empty() && !digest_.empty();
+    return canonical_bytes_ && !canonical_bytes_->empty() && !digest_.empty();
 }
 
 const std::string& DispatchKey::canonical_bytes() const noexcept {
-    return canonical_bytes_;
+    static const std::string empty;
+    return canonical_bytes_ ? *canonical_bytes_ : empty;
 }
 
 const std::string& DispatchKey::digest() const noexcept { return digest_; }
 
 bool DispatchKey::operator==(const DispatchKey& other) const noexcept {
-    return canonical_bytes_ == other.canonical_bytes_;
+    return canonical_bytes_ == other.canonical_bytes_ || canonical_bytes() == other.canonical_bytes();
 }
 
 bool DispatchKey::operator!=(const DispatchKey& other) const noexcept {
@@ -325,21 +390,22 @@ bool DispatchKey::operator!=(const DispatchKey& other) const noexcept {
 }
 
 bool DispatchKey::operator<(const DispatchKey& other) const noexcept {
-    return canonical_bytes_ < other.canonical_bytes_;
+    return canonical_bytes() < other.canonical_bytes();
 }
 
 PlanAbiFingerprint::PlanAbiFingerprint(std::string canonical_bytes)
-    : canonical_bytes_(std::move(canonical_bytes)) {
-    RequireNonEmpty(canonical_bytes_, "plan ABI canonical bytes");
-    digest_ = Digest(canonical_bytes_, {});
+    : canonical_bytes_(std::make_shared<const std::string>(std::move(canonical_bytes))) {
+    RequireNonEmpty(*canonical_bytes_, "plan ABI canonical bytes");
+    digest_ = Digest(*canonical_bytes_, {});
 }
 
 bool PlanAbiFingerprint::defined() const noexcept {
-    return !canonical_bytes_.empty() && !digest_.empty();
+    return canonical_bytes_ && !canonical_bytes_->empty() && !digest_.empty();
 }
 
 const std::string& PlanAbiFingerprint::canonical_bytes() const noexcept {
-    return canonical_bytes_;
+    static const std::string empty;
+    return canonical_bytes_ ? *canonical_bytes_ : empty;
 }
 
 const std::string& PlanAbiFingerprint::digest() const noexcept {
@@ -348,7 +414,7 @@ const std::string& PlanAbiFingerprint::digest() const noexcept {
 
 bool PlanAbiFingerprint::operator==(
     const PlanAbiFingerprint& other) const noexcept {
-    return canonical_bytes_ == other.canonical_bytes_;
+    return canonical_bytes_ == other.canonical_bytes_ || canonical_bytes() == other.canonical_bytes();
 }
 
 bool PlanAbiFingerprint::operator!=(
@@ -366,10 +432,62 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     plan.Validate();
     std::string canonical;
-    // v6 covers callable/runtime ABI, including state and explicit donation.
-    // Selected artifacts and their generations/receipts are PlanVariant
-    // selection identity and must never affect compatibility.
-    AppendField(&canonical, "kind", "static-exact-plan-abi-v6-state-alias");
+    const bool bounded_stateful =
+        plan.mode() == runtime::ExecutablePlanMode::kBoundedStatefulExternalV1;
+    const bool bounded_dynamic =
+        plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1 || bounded_stateful;
+    const bool external_stateful =
+        plan.mode() == runtime::ExecutablePlanMode::kStaticStatefulExternalV1 || bounded_stateful;
+    const bool stateful =
+        plan.mode() == runtime::ExecutablePlanMode::kDynamicStatefulV1 ||
+        external_stateful;
+    // Preserve static v7 bytes. Dynamic v8 additionally names the production
+    // gate contract; selected generations remain PlanVariant identity.
+    // Dynamic stateful v9 carries the session-owned state contract instead.
+    AppendField(
+        &canonical, "kind",
+        plan.request_batching()
+            ? "executable-plan-abi-v12-request-batching-v1"
+            : bounded_stateful
+            ? "executable-plan-abi-v11-bounded-external-stateful-v1"
+            : external_stateful
+            ? "executable-plan-abi-v10-static-external-stateful-v1"
+            : stateful
+            ? "executable-plan-abi-v9-dynamic-stateful-v1"
+            : bounded_dynamic
+                  ? "executable-plan-abi-v8-bounded-dynamic-graph"
+                  : "executable-plan-abi-v7-dynamic-fresh-output");
+    AppendInteger(&canonical, "plan_mode", static_cast<uint8_t>(plan.mode()));
+    if (const auto batching = plan.request_batching()) {
+        AppendField(&canonical, "request_batching_contract",
+                    "leading-axis-independent-requests-equal-extent-fifo-v1");
+        AppendInteger(&canonical, "max_batch_size", batching->max_batch_size);
+    }
+    if (bounded_dynamic) {
+        AppendField(&canonical, "bounded_dynamic_graph_gate",
+                    "KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH.v1");
+    }
+    if (stateful) {
+        AppendField(&canonical, "stateful_contract",
+                    bounded_stateful
+                        ? "bounded-external-stateful-v1.session-owned-extent"
+                        : external_stateful
+                        ? "static-external-stateful-v1.session-owned-extent"
+                        : "dynamic-stateful-v1.session-owned-extent");
+    }
+    AppendField(
+        &canonical, "memory_plan",
+        plan.request_batching()
+            ? runtime::internal::kRequestBatchingMemoryPlanVersion
+            : bounded_stateful
+            ? runtime::internal::kBoundedExternalStatefulMemoryPlanVersion
+            : external_stateful
+            ? runtime::internal::kStaticExternalStatefulMemoryPlanVersion
+            : stateful
+            ? runtime::internal::kDynamicStatefulMemoryPlanVersion
+            : plan.mode() == runtime::ExecutablePlanMode::kDynamicFreshOutputV1
+                  ? runtime::internal::kDynamicFreshOutputMemoryPlanVersion
+                  : runtime::internal::kStaticMemoryPlanVersion);
     AppendTargetContract(&canonical, ModuleTarget(module));
     const Array<runtime::KernelCall> calls = plan.calls();
     if (ordered_artifacts.size() != calls.size()) {
@@ -384,14 +502,33 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
                 "plan ABI ordered artifact mapping differs from its call");
         }
     }
+    const bool allow_wildcards = bounded_dynamic;
+    const std::vector<runtime::GraphInputAxisGuard> graph_guards =
+        plan.graph_input_guards();    for (const auto& guard : graph_guards) {
+        AppendInteger(&canonical, "graph_guard_input", guard.input_index);
+        AppendInteger(&canonical, "graph_guard_axis", guard.axis);
+        AppendInteger(&canonical, "graph_guard_lower", guard.lower);
+        AppendInteger(&canonical, "graph_guard_upper", guard.upper);
+        AppendInteger(&canonical, "graph_guard_divisible_by",
+                      guard.divisible_by);
+        AppendInteger(&canonical, "graph_guard_has_equality",
+                      guard.equal_to.has_value());
+        if (guard.equal_to) {
+            AppendInteger(&canonical, "graph_guard_equal_input",
+                          guard.equal_to->input_index);
+            AppendInteger(&canonical, "graph_guard_equal_axis",
+                          guard.equal_to->axis);
+        }
+    }
+    AppendField(&canonical, "graph_guards_end", "v1");
     const Array<runtime::ValueSpec> values = plan.values();
     std::unordered_map<int64_t, size_t> value_ordinals;
     for (size_t ordinal = 0; ordinal < values.size(); ++ordinal) {
         value_ordinals.emplace(values[ordinal]->value_id, ordinal);
     }
     for (const auto& value : values) {
-        AppendField(&canonical, "value_begin", "v2");
-        AppendValueContract(&canonical, value);
+        AppendField(&canonical, "value_begin", "v3-wildcard");
+        AppendValueContract(&canonical, value, allow_wildcards, stateful);
         const auto source = value_ordinals.find(value->alias_source_value_id);
         AppendInteger(&canonical, "alias_source_ordinal",
                       source == value_ordinals.end()
@@ -420,6 +557,10 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
         metadata.Validate();
         AppendField(&canonical, "kernel_signature", signature.CanonicalBytes());
         AppendField(&canonical, "launch_metadata", metadata.CanonicalBytes());
+        AppendField(
+            &canonical, "module_invocation_contract",
+            internal::BorrowCompiledModuleInvocationContract(
+                module, call->symbol).CanonicalBytes());
     }
     for (int64_t id : plan.input_value_ids()) {
         AppendInteger(&canonical, "graph_input_ordinal", value_ordinals.at(id));
@@ -437,6 +578,38 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
         AppendInteger(&canonical, "state_ordinal", value_ordinals.at(id));
     }
     AppendField(&canonical, "states_end", "v1");
+    if (external_stateful) {
+        for (const auto& binding : plan.state_output_bindings()) {
+            AppendInteger(&canonical, "state_output_state_ordinal",
+                          value_ordinals.at(binding.state_value_id));
+            AppendInteger(&canonical, "state_output_source_ordinal",
+                          value_ordinals.at(binding.source_value_id));
+            AppendInteger(&canonical, "state_output_axis",
+                          binding.source_extent_axis);
+            AppendInteger(&canonical, "state_output_slot", binding.source_slot);
+            AppendInteger(&canonical, "state_output_append_count", binding.append_count);
+            if (bounded_stateful) {
+                AppendInteger(&canonical, "state_prefix_input_ordinal",
+                              value_ordinals.at(binding.input_value_id));
+            }
+        }
+        AppendField(&canonical, "state_output_bindings_end", "v1");
+    } else if (stateful) {
+        // The append-count input and every per-call state extent binding are
+        // identity; committed cursor values are runtime data, never here.
+        AppendInteger(&canonical, "state_count_input_ordinal",
+                      value_ordinals.at(plan.state_count_input_value_id()));
+        const std::vector<std::vector<int64_t>> bindings =
+            plan.state_extent_bindings();
+        for (size_t call_index = 0; call_index < calls.size(); ++call_index) {
+            AppendInteger(&canonical, "binding_call_index",
+                          static_cast<int64_t>(call_index));
+            for (int64_t bound : bindings[call_index]) {
+                AppendInteger(&canonical, "state_extent_binding_ordinal",
+                              value_ordinals.at(bound));
+            }
+        }
+    }
     std::vector<std::pair<std::string, runtime::NDArray>> constants;
     for (const auto& item : module.constants()) {
         constants.emplace_back(std::string(item.first), item.second);
@@ -451,6 +624,30 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
     }
     AppendField(&canonical, "constants_end", "v1");
     return PlanAbiFingerprint(std::move(canonical));
+}
+
+PlanAbiFingerprint BuildPlanAbiFingerprint(const CompiledGraph& graph) {
+    if (!graph.defined()) {
+        throw std::invalid_argument(
+            "plan ABI requires a defined CompiledGraph");
+    }
+    const Array<runtime::KernelCall> calls = graph.plan().calls();
+    const auto& pins = graph.artifact_pins();
+    if (pins.size() != calls.size()) {
+        throw std::invalid_argument(
+            "plan ABI requires one ordered artifact pin per call");
+    }
+    std::vector<OrderedArtifactIdentity> artifacts;
+    artifacts.reserve(calls.size());
+    for (size_t index = 0; index < calls.size(); ++index) {
+        if (!pins[index].defined()) {
+            throw std::invalid_argument(
+                "plan ABI requires defined ordered artifact pins");
+        }
+        artifacts.push_back({index, std::string(calls[index]->symbol),
+                             pins[index].record().artifact_key});
+    }
+    return BuildPlanAbiFingerprint(graph.module(), graph.plan(), artifacts);
 }
 
 DispatchKey BuildStaticExactDispatchKey(
@@ -468,6 +665,17 @@ DispatchKey BuildStaticExactDispatchKey(
     return DispatchKey(
         graph_semantic_key.canonical_bytes(),
         shape_profile_key.canonical_bytes(), "static-exact-plan-v2");
+}
+
+DispatchKey BuildBoundedDispatchKey(
+    const GraphSemanticKey& graph_semantic_key,
+    const ShapeProfileKey& shape_profile_key) {
+    if (!graph_semantic_key.defined() || !shape_profile_key.defined() ||
+        shape_profile_key.graph_semantic_key() != graph_semantic_key) {
+        throw std::invalid_argument("bounded dispatch requires a profile for its graph");
+    }
+    return DispatchKey(graph_semantic_key.canonical_bytes(),
+        shape_profile_key.canonical_bytes(), "bounded-explicit-profile-v1");
 }
 
 std::string OrderedArtifactSelectionIdentity::CanonicalBytes() const {
@@ -491,14 +699,14 @@ PlanVariantKey::PlanVariantKey(GraphSemanticKey graph_semantic_key,
                                std::string canonical_bytes)
     : graph_semantic_key_(std::move(graph_semantic_key)),
       shape_profile_key_(std::move(shape_profile_key)),
-      canonical_bytes_(std::move(canonical_bytes)) {
+      canonical_bytes_(std::make_shared<const std::string>(std::move(canonical_bytes))) {
     if (!graph_semantic_key_.defined() || !shape_profile_key_.defined() ||
         shape_profile_key_.graph_semantic_key() != graph_semantic_key_) {
         throw std::invalid_argument(
             "plan variant requires matching graph and shape identities");
     }
-    RequireNonEmpty(canonical_bytes_, "plan variant canonical bytes");
-    digest_ = Digest(canonical_bytes_, {});
+    RequireNonEmpty(*canonical_bytes_, "plan variant canonical bytes");
+    digest_ = Digest(*canonical_bytes_, {});
 }
 
 PlanVariantKey BuildPlanVariantKey(
@@ -537,7 +745,7 @@ PlanVariantKey BuildPlanVariantKey(
 
 bool PlanVariantKey::defined() const noexcept {
     return graph_semantic_key_.defined() && shape_profile_key_.defined() &&
-           !canonical_bytes_.empty() && !digest_.empty();
+           canonical_bytes_ && !canonical_bytes_->empty() && !digest_.empty();
 }
 
 const GraphSemanticKey& PlanVariantKey::graph_semantic_key() const noexcept {
@@ -549,13 +757,14 @@ const ShapeProfileKey& PlanVariantKey::shape_profile_key() const noexcept {
 }
 
 const std::string& PlanVariantKey::canonical_bytes() const noexcept {
-    return canonical_bytes_;
+    static const std::string empty;
+    return canonical_bytes_ ? *canonical_bytes_ : empty;
 }
 
 const std::string& PlanVariantKey::digest() const noexcept { return digest_; }
 
 bool PlanVariantKey::operator==(const PlanVariantKey& other) const noexcept {
-    return canonical_bytes_ == other.canonical_bytes_;
+    return canonical_bytes_ == other.canonical_bytes_ || canonical_bytes() == other.canonical_bytes();
 }
 
 bool PlanVariantKey::operator!=(const PlanVariantKey& other) const noexcept {
@@ -563,7 +772,7 @@ bool PlanVariantKey::operator!=(const PlanVariantKey& other) const noexcept {
 }
 
 bool PlanVariantKey::operator<(const PlanVariantKey& other) const noexcept {
-    return canonical_bytes_ < other.canonical_bytes_;
+    return canonical_bytes() < other.canonical_bytes();
 }
 
 }  // namespace kxc::api

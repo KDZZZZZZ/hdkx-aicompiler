@@ -87,10 +87,12 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "Cast"
+      ]
     },
     "concatenate": {
-      "schema_version": 1,
+      "schema_version": 3,
       "category": "tensor.transform",
       "num_inputs": 2,
       "attrs": "ConcatenateAttrs",
@@ -107,6 +109,26 @@
         "Concat"
       ]
     },
+    "constant_of_shape": {
+      "schema_version": 3,
+      "category": "tensor.transform",
+      "num_inputs": -1,
+      "min_inputs": 1,
+      "max_inputs": 2,
+      "attrs": "ConstantOfShapeAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "ConstantOfShape"
+      ]
+    },
     "divide": {
       "schema_version": 1,
       "category": "tensor.math",
@@ -121,10 +143,111 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
+      "onnx_ops": [
+        "Div"
+      ]
+    },
+    "equal": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Equal"
+      ],
+      "registration": {
+        "description": "Element-wise equality comparison with broadcast.",
+        "arguments": [
+          {
+            "name": "lhs",
+            "type": "Tensor",
+            "description": "The left hand side input tensor."
+          },
+          {
+            "name": "rhs",
+            "type": "Tensor",
+            "description": "The right hand side input tensor."
+          }
+        ],
+        "type_infer_symbol": "EqualInferType",
+        "relay_to_te_symbol": "EqualCompute"
+      }
+    },
+    "erf": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Erf"
+      ],
+      "registration": {
+        "description": "Element-wise erf on float32; CPU LLVM uses the C math library.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor."
+          }
+        ],
+        "type_infer_symbol": "ErfInferType",
+        "relay_to_te_symbol": "ErfCompute"
+      }
+    },
+    "expand": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "ExpandAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Expand"
+      ]
+    },
+    "expand_dynamic": {
+      "schema_version": 2,
+      "category": "tensor.transform",
+      "num_inputs": 2,
+      "attrs": "ExpandDynamicAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
       "onnx_ops": []
     },
     "gather": {
-      "schema_version": 1,
+      "schema_version": 2,
       "category": "tensor.transform",
       "num_inputs": 2,
       "attrs": "GatherAttrs",
@@ -141,6 +264,39 @@
         "Gather"
       ]
     },
+    "masked_softmax": {
+      "schema_version": 1,
+      "category": "nn",
+      "num_inputs": 2,
+      "attrs": "SoftmaxAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [],
+      "registration": {
+        "description": "Normalizes finite floating logits over True bool-mask entries; masked entries and all-False rows are exactly zero. The trailing-axis mask may broadcast to, but never expand, the data shape.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "Floating-point logits."
+          },
+          {
+            "name": "mask",
+            "type": "Tensor",
+            "description": "True participates in normalization; False contributes zero."
+          }
+        ],
+        "type_infer_symbol": "MaskedSoftmaxInferType",
+        "relay_to_te_symbol": "MaskedSoftmaxCompute"
+      }
+    },
     "matmul": {
       "schema_version": 1,
       "category": "tensor.math",
@@ -155,7 +311,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["MatMul"]
+      "onnx_ops": [
+        "MatMul"
+      ]
     },
     "mul": {
       "schema_version": 1,
@@ -171,7 +329,39 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "Mul"
+      ]
+    },
+    "neg": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Neg"
+      ],
+      "registration": {
+        "description": "Element-wise negation on float32.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor."
+          }
+        ],
+        "type_infer_symbol": "NegInferType",
+        "relay_to_te_symbol": "NegCompute"
+      }
     },
     "nn_avg_pool2d": {
       "schema_version": 1,
@@ -333,6 +523,41 @@
         "Relu"
       ]
     },
+    "pow": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Pow"
+      ],
+      "registration": {
+        "description": "Element-wise power with broadcast on float32 (llvm.pow dispatch).",
+        "arguments": [
+          {
+            "name": "lhs",
+            "type": "Tensor",
+            "description": "The base tensor."
+          },
+          {
+            "name": "rhs",
+            "type": "Tensor",
+            "description": "The exponent tensor."
+          }
+        ],
+        "type_infer_symbol": "PowInferType",
+        "relay_to_te_symbol": "PowCompute"
+      }
+    },
     "reduce_mean": {
       "schema_version": 1,
       "category": "tensor.reduce",
@@ -347,7 +572,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "ReduceMean"
+      ]
     },
     "reshape": {
       "schema_version": 1,
@@ -363,12 +590,108 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
+      "onnx_ops": [
+        "Reshape"
+      ]
+    },
+    "reshape_dynamic": {
+      "schema_version": 2,
+      "category": "tensor.transform",
+      "num_inputs": 2,
+      "attrs": "ReshapeDynamicAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
       "onnx_ops": []
     },
-    "slice": {
+    "shape_expr": {
+      "schema_version": 2,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "ShapeExprAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
+    },
+    "shape_of": {
       "schema_version": 1,
       "category": "tensor.transform",
       "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Shape"
+      ],
+      "registration": {
+        "description": "Materialize the input tensor dimensions as an int64 rank-1 shape value.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor whose fixed rank becomes the vector length."
+          }
+        ],
+        "type_infer_symbol": "ShapeOfInferType",
+        "relay_to_te_symbol": "ShapeOfCompute"
+      }
+    },
+    "sigmoid": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Sigmoid"
+      ],
+      "registration": {
+        "description": "Element-wise logistic sigmoid 1/(1+exp(-x)) on float32.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor."
+          }
+        ],
+        "type_infer_symbol": "SigmoidInferType",
+        "relay_to_te_symbol": "SigmoidCompute"
+      }
+    },
+    "slice": {
+      "schema_version": 5,
+      "category": "tensor.transform",
+      "num_inputs": -1,
+      "min_inputs": 1,
+      "max_inputs": 5,
       "attrs": "SliceAttrs",
       "output_arity": 1,
       "type_relation_key": "FInferType",
@@ -397,13 +720,51 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Softmax"]
+      "onnx_ops": [
+        "Softmax"
+      ]
+    },
+    "split": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "SplitAttrs",
+      "output_arity": 0,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "multi",
+      "lowering_key": "FRelayToTEMulti",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Split"
+      ]
     },
     "sqrt": {
       "schema_version": 1,
       "category": "tensor.math",
       "num_inputs": 1,
       "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Sqrt"
+      ]
+    },
+    "squeeze": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "SqueezeAttrs",
       "output_arity": 1,
       "type_relation_key": "FInferType",
       "effect": "pure",
@@ -429,7 +790,39 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": []
+      "onnx_ops": [
+        "Sub"
+      ]
+    },
+    "tanh": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 1,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Tanh"
+      ],
+      "registration": {
+        "description": "Element-wise tanh on float32; CPU LLVM uses the C math library.",
+        "arguments": [
+          {
+            "name": "data",
+            "type": "Tensor",
+            "description": "The input tensor."
+          }
+        ],
+        "type_infer_symbol": "TanhInferType",
+        "relay_to_te_symbol": "TanhCompute"
+      }
     },
     "transpose": {
       "schema_version": 1,
@@ -445,7 +838,43 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Transpose"]
+      "onnx_ops": [
+        "Transpose"
+      ]
+    },
+    "trilu": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "TriluAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Trilu"
+      ]
+    },
+    "unsqueeze": {
+      "schema_version": 1,
+      "category": "tensor.transform",
+      "num_inputs": 1,
+      "attrs": "UnsqueezeAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": []
     },
     "where": {
       "schema_version": 1,
@@ -461,7 +890,9 @@
       "lowering_key": "FRelayToTE",
       "ffi": true,
       "tests": true,
-      "onnx_ops": ["Where"]
+      "onnx_ops": [
+        "Where"
+      ]
     }
   },
   "documentation": "docs/OP_SUPPORT_MATRIX.md"

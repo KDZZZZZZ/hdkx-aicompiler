@@ -5,7 +5,14 @@
 #include "kxc/distributed/placement.h"
 #include "kxc/support/object_registration.h"
 
+#include <algorithm>
+#include <map>
+#include <memory>
+#include <utility>
+#include <vector>
 #include <sstream>
+
+#include "support/canonical.h"
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -21,26 +28,19 @@ namespace {
 
 // 生成值语义身份键，使等价但不同 ObjectRef 的逻辑设备可映射到同一 worker。
 std::string VirtualDeviceIdentity(const VirtualDevice& vd) {
-    if (!vd.defined()) {
-        return "virtual_device:undefined";
+    const auto* node = vd.As<VirtualDeviceNode>();
+    if (!node || !node->device.defined()) throw std::invalid_argument("placement requires a physical VirtualDevice");
+    const Target target = node->target.defined() ? node->target : BuildTarget(node->device);
+    if (!target.As<TargetNode>()) throw std::invalid_argument("placement Target has the wrong node type");
+    if (target->device_type != node->device.device_type() || target->device_id != node->device.device_id()) {
+        throw std::invalid_argument("placement VirtualDevice target/device mismatch");
     }
-    std::stringstream ss;
-    ss << "virtual_device:";
-    if (vd->device.defined()) {
-        ss << "dev(" << static_cast<int>(vd->device.device_type()) << ","
-           << vd->device.device_id() << ")";
-    } else {
-        ss << "dev(none)";
-    }
-    if (vd->target.defined()) {
-        ss << "target(" << static_cast<int>(vd->target->device_type) << ","
-           << vd->target->device_id << "," << vd->target->kind << ")";
-    } else {
-        ss << "target(none)";
-    }
-    ss << "scope(" << vd->memory_scope << ")";
-    ss << "vdid(" << vd->virtual_device_id << ")";
-    return ss.str();
+    support::CanonicalBytesEncoder key;
+    key.Field("kind", "disco-virtual-device-v2");
+    key.Field("target", target.CanonicalBytes());
+    key.Field("scope", node->memory_scope);
+    key.Field("logical_id", std::to_string(node->virtual_device_id));
+    return std::move(key).Take();
 }
 
 }  // namespace
@@ -67,11 +67,28 @@ WorkerPlacement::WorkerPlacement(int worker_id, int group_id, int local_rank, De
     node->target = std::move(target);
     node->virtual_device = std::move(virtual_device);
     SetData(node);
+    Validate();
+}
+
+void WorkerPlacement::Validate() const {
+    const auto* worker = As<WorkerPlacementNode>();
+    if (!worker || worker->worker_id < 0 || worker->group_id < 0 || worker->local_rank < 0 ||
+        !worker->device.defined() || !worker->target.As<TargetNode>() || !worker->virtual_device.As<VirtualDeviceNode>()) {
+        throw std::invalid_argument("incomplete WorkerPlacement");
+    }
+    if (worker->target->device_type != worker->device.device_type() || worker->target->device_id != worker->device.device_id() ||
+        worker->virtual_device->device != worker->device ||
+        (worker->virtual_device->target.defined() ? worker->virtual_device->target : BuildTarget(worker->device)).CanonicalBytes() != worker->target.CanonicalBytes()) {
+        throw std::invalid_argument("WorkerPlacement has conflicting device/target constraints");
+    }
+    (void)VirtualDeviceIdentity(worker->virtual_device);
 }
 
 // 返回经过 WorkerPlacement 类型约束的底层节点。
 const WorkerPlacementNode* WorkerPlacement::operator->() const {
-    return static_cast<const WorkerPlacementNode*>(object_);
+    const auto* node = As<WorkerPlacementNode>();
+    if (!node) throw std::invalid_argument("expected WorkerPlacement");
+    return node;
 }
 
 // 输出 worker 身份及其可用放置约束。
@@ -100,20 +117,17 @@ bool DiscoPlacementNode::empty() const {
 
 // 优先按 ObjectRef 映射查找，再按值语义身份匹配等价逻辑设备。
 int DiscoPlacementNode::FindWorker(const VirtualDevice& virtual_device) const {
-    if (!virtual_device.defined()) {
+    if (!virtual_device.defined()) return -1;
+    const auto key = VirtualDeviceIdentity(virtual_device);
+    if (vd_to_worker.count(virtual_device)) {
+        const int id = vd_to_worker.at(virtual_device);
+        for (const auto& worker : workers) {
+            if (worker->worker_id == id && VirtualDeviceIdentity(worker->virtual_device) == key) return id;
+        }
         return -1;
     }
-    if (vd_to_worker.count(virtual_device)) {
-        return vd_to_worker.at(virtual_device);
-    }
-    std::string key = VirtualDeviceIdentity(virtual_device);
     for (const auto& worker : workers) {
-        if (!worker.defined() || !worker->virtual_device.defined()) {
-            continue;
-        }
-        if (VirtualDeviceIdentity(worker->virtual_device) == key) {
-            return worker->worker_id;
-        }
+        if (VirtualDeviceIdentity(worker->virtual_device) == key) return worker->worker_id;
     }
     return -1;
 }
@@ -121,16 +135,45 @@ int DiscoPlacementNode::FindWorker(const VirtualDevice& virtual_device) const {
 // 构造逻辑设备到 worker 的完整放置表，并规范化组数下限。
 DiscoPlacement::DiscoPlacement(Array<WorkerPlacement> workers, Map<VirtualDevice, int> vd_to_worker,
                                int num_groups) {
-    DiscoPlacementNode* node = new DiscoPlacementNode();
-    node->workers = std::move(workers);
+    auto node = std::make_unique<DiscoPlacementNode>();
+    std::vector<WorkerPlacement> ordered(workers.begin(), workers.end());
+    for (const auto& worker : ordered) worker.Validate();
+    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a->worker_id < b->worker_id; });
+    for (const auto& worker : ordered) node->workers.push_back(worker);
     node->vd_to_worker = std::move(vd_to_worker);
-    node->num_groups = num_groups > 0 ? num_groups : 1;
-    SetData(node);
+    node->num_groups = num_groups;
+    SetData(node.release());
+    Validate();
+}
+
+void DiscoPlacement::Validate() const {
+    const auto* placement = As<DiscoPlacementNode>();
+    if (!placement || placement->workers.empty() || placement->num_groups <= 0 ||
+        placement->workers.size() % static_cast<size_t>(placement->num_groups) != 0) {
+        throw std::invalid_argument("placement requires positive evenly divided worker groups");
+    }
+    const auto width = placement->workers.size() / static_cast<size_t>(placement->num_groups);
+    std::unordered_set<std::string> devices;
+    for (size_t i = 0; i < placement->workers.size(); ++i) {
+        const auto& worker = placement->workers[i]; worker.Validate();
+        if (worker->worker_id != static_cast<int>(i) || worker->group_id != static_cast<int>(i / width) ||
+            worker->local_rank != static_cast<int>(i % width) || !devices.insert(VirtualDeviceIdentity(worker->virtual_device)).second) {
+            throw std::invalid_argument("placement requires dense worker ids, consistent groups/ranks and unique logical devices");
+        }
+    }
+    for (const auto& entry : placement->vd_to_worker) {
+        if (entry.second < 0 || static_cast<size_t>(entry.second) >= placement->workers.size() ||
+            VirtualDeviceIdentity(entry.first) != VirtualDeviceIdentity(placement->workers[entry.second]->virtual_device)) {
+            throw std::invalid_argument("placement index does not match its worker contracts");
+        }
+    }
 }
 
 // 返回经过 DiscoPlacement 类型约束的底层节点。
 const DiscoPlacementNode* DiscoPlacement::operator->() const {
-    return static_cast<const DiscoPlacementNode*>(object_);
+    const auto* node = As<DiscoPlacementNode>();
+    if (!node) throw std::invalid_argument("expected DiscoPlacement");
+    return node;
 }
 
 // 未定义放置与无 worker 放置都按空表处理。
@@ -159,38 +202,24 @@ std::string DiscoPlacement::ToString() const {
 
 // 对等价逻辑设备去重，并为每个唯一放置分配稳定 worker 编号。
 DiscoPlacement BuildDiscoPlacement(const Array<VirtualDevice>& virtual_devices, int num_groups) {
-    Array<WorkerPlacement> workers;
-    Map<VirtualDevice, int> vd_to_worker;
-    std::unordered_map<std::string, int> key_to_worker;
-
-    int next_worker_id = 0;
-    for (const auto& vd : virtual_devices) {
-        if (!vd.defined()) {
-            continue;
-        }
-        std::string key = VirtualDeviceIdentity(vd);
-        auto it = key_to_worker.find(key);
-        if (it != key_to_worker.end()) {
-            vd_to_worker.Set(vd, it->second);
-            continue;
-        }
-
-        Target target = vd->target;
-        if (!target.defined() && vd->device.defined()) {
-            // Target 缺失时由物理 Device 的后端能力构造，而不是仅凭类型编号猜测。
-            target = BuildTarget(vd->device);
-        }
-
-        int worker_id = next_worker_id++;
-        int group_id = 0;
-        int local_rank = worker_id;
-        workers.push_back(WorkerPlacement(worker_id, group_id, local_rank, vd->device, target,
-                                          vd));
-        vd_to_worker.Set(vd, worker_id);
-        key_to_worker[key] = worker_id;
+    std::map<std::string, VirtualDevice> unique;
+    for (const auto& vd : virtual_devices) unique.emplace(VirtualDeviceIdentity(vd), vd);
+    if (unique.empty() || num_groups <= 0 || unique.size() % static_cast<size_t>(num_groups) != 0) {
+        throw std::invalid_argument("placement requires positive evenly divided worker groups");
     }
-
-    return DiscoPlacement(workers, vd_to_worker, num_groups);
+    const int width = static_cast<int>(unique.size() / static_cast<size_t>(num_groups));
+    Array<WorkerPlacement> workers;
+    Map<VirtualDevice, int> index;
+    std::unordered_map<std::string, int> ids;
+    for (const auto& item : unique) {
+        const int id = static_cast<int>(workers.size());
+        const auto& vd = item.second;
+        const Target target = vd->target.defined() ? vd->target : BuildTarget(vd->device);
+        workers.push_back(WorkerPlacement(id, id / width, id % width, vd->device, target, vd));
+        ids.emplace(item.first, id);
+    }
+    for (const auto& vd : virtual_devices) index.Set(vd, ids.at(VirtualDeviceIdentity(vd)));
+    return DiscoPlacement(workers, index, num_groups);
 }
 
 // 提供可接受未定义 placement 的安全查询入口。

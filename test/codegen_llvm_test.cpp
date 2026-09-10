@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -369,6 +370,23 @@ void TestLLVMValidationAndLookupErrors() {
     RequireThrowsContaining([&] { invalid_opt(-1); }, "opt_level");
     RequireThrowsContaining([&] { invalid_opt(4); }, "opt_level");
 
+    for (const std::string name : {"tanh", "erf"}) {
+        for (const auto& call : std::vector<tir::PrimExpr>{
+                 tir::Call(tir::DataType::Float(32), name, {}),
+                 tir::Call(tir::DataType::Float(32), name, {tir::FloatImm(1), tir::FloatImm(2)}),
+                 tir::Call(tir::DataType::Float(32), name, {tir::IntImm(1)}),
+                 tir::Call(tir::DataType::Float(64), name, {tir::FloatImm(1, tir::DataType::Float(64))})}) {
+            RequireThrowsContaining([&] {
+                const auto base = MakeAddPrimFunc("invalid_math", 1);
+                const auto function = tir::PrimFunc(base->params,
+                    tir::Store(base->params[2], call, tir::IntImm(0)), base->buffer_map, base->attrs);
+                llvm::LLVMContext context;
+                CodeGenLLVM codegen(context);
+                codegen.AddFunction(function, "invalid_math");
+            }, "requires exactly one float32");
+        }
+    }
+
     const DLDataType f32 = runtime::DataTypeFromString("float32");
     KernelSignature invalid_signature(
         "invalid_module",
@@ -608,6 +626,67 @@ void TestRuntimeSessionLLVMStateAlias() {
         "shape does not match");
 }
 
+void TestRuntimeSessionLLVMCapacityState() {
+    using namespace kxc;
+    Var state("past", TensorType({2, 4, 2}, "float32"));
+    Var token("new", TensorType({2, 1, 2}, "float32"));
+    Call present(relay::Op::Get("concatenate"), {state, token},
+                 relay::ConcatenateAttrs::Create(1));
+    Call observed(relay::Op::Get("add"), {state, state});
+    api::CompiledGraph compiled = api::Compiler::Compile(
+        Function({state, token}, Tuple({observed, present})),
+        api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    const auto inputs = compiled.plan().input_value_ids();
+    const auto outputs = compiled.plan().output_value_ids();
+    const auto plan = compiled.plan().BindStateOutputs(
+        {{inputs[0], outputs[1], 1, 4, 1}}, 7.0);
+    runtime::RuntimeSession session(compiled.module(), plan);
+    const int64_t state_id = inputs[0];
+    const void* address = session.StateValue(state_id).storage().data();
+    runtime::NDArray seed = FloatArray({2, 1, 2}, {10, 20, 30, 40});
+    session.InitializeState(state_id, seed, 1);
+    ExpectNear(ReadFloats(session.StateValue(state_id)),
+               {10, 20, 7, 7, 7, 7, 7, 7, 30, 40, 7, 7, 7, 7, 7, 7});
+    RequireThrowsContaining(
+        [&] { session.InitializeState(state_id, seed, 1); },
+        "before its first append");
+    const std::vector<std::vector<float>> tokens{
+        {1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10, 11, 12}};
+    std::vector<float> expected{
+        10, 20, 7, 7, 7, 7, 7, 7, 30, 40, 7, 7, 7, 7, 7, 7};
+    for (size_t step = 0; step < tokens.size(); ++step) {
+        std::vector<float> expected_read = expected;
+        for (float& value : expected_read) value *= 2.0f;
+        auto result = session.RunAsync(
+            {FloatArray({2, 1, 2}, tokens[step])},
+            DeviceStream::Default(Device::CPU()));
+        Require(result.completion.IsReady() && result.outputs.size() == 1,
+                "CPU capacity state must commit before RunAsync returns");
+        ExpectNear(ReadFloats(result.outputs[0]), expected_read);
+        for (size_t batch = 0; batch < 2; ++batch) {
+            for (size_t element = 0; element < 2; ++element) {
+                expected[batch * 8 + (step + 1) * 2 + element] =
+                    tokens[step][batch * 2 + element];
+            }
+        }
+        ExpectNear(ReadFloats(session.StateValue(state_id)), expected);
+        Require(session.StateExtent(state_id) == static_cast<int64_t>(step + 2) &&
+                    session.StateValue(state_id).storage().data() == address,
+                "state extent must advance without reallocating the cache");
+    }
+    RequireThrowsContaining(
+        [&] { session.Run({FloatArray({2, 1, 2}, tokens[0])}); },
+        "capacity before launch");
+    ExpectNear(ReadFloats(session.StateValue(state_id)), expected);
+    Require(session.StateExtent(state_id) == 4,
+            "capacity rejection must leave committed state unchanged");
+    runtime::RuntimeSession other(compiled.module(), plan);
+    Require(other.StateExtent(state_id) == 0 &&
+                other.StateValue(state_id).storage().data() != address,
+            "independent sessions must not share state or cursor");
+    ExpectNear(ReadFloats(other.StateValue(state_id)), std::vector<float>(16, 7.0f));
+}
+
 /*! \brief RuntimeSession 只接收 inputs，并自动分配 add 输出。 */
 void TestRuntimeSessionLLVM() {
     using namespace kxc;
@@ -653,6 +732,29 @@ void TestRuntimeSessionLLVMConstant() {
             "constant RuntimeSession LLVM should allocate one output");
     ExpectNear(ReadFloats(outputs[0]), {11, 22, 33, 44});
 }
+void TestTriluLLVM() {
+    using namespace kxc;
+    const Var data("data", TensorType({2,3,4}, "float32"));
+    std::vector<float> values(24);
+    for (size_t i=0; i<values.size(); ++i) values[i] = i%3 == 0
+        ? -std::numeric_limits<float>::infinity() : static_cast<float>(i+1);
+    for (int upper : {0,1}) for (int64_t k : std::vector<int64_t>{
+        std::numeric_limits<int64_t>::min(), -2, 0, 1, 4, std::numeric_limits<int64_t>::max()}) {
+        const Function function({data}, Call(relay::Op::Get("trilu"),
+            {data}, relay::TriluAttrs::Create(upper,k)));
+        const auto lowered = test_support::LowerPrimitiveUnits(function);
+        Require(lowered.size()==1 && lowered[0]->prim_func.defined(), "trilu must lower to one production primitive");
+        const auto compiled = api::Compiler::Compile(function,
+            api::CompileConfig::Create(BuildTarget(Device::CPU()),2));
+        const runtime::RuntimeSession session(compiled.module(),compiled.plan());
+        const auto result = ReadFloats(session.Run({FloatArray({2,3,4}, values)})[0]);
+        for (size_t i=0; i<values.size(); ++i) {
+            const int64_t row=(i/4)%3, column=i%4;
+            const bool keep = upper ? column-row >= k : column-row <= k;
+            Require(result[i] == (keep ? values[i] : 0.f), "trilu rectangular/batched/diagonal mismatch");
+        }
+    }
+}
 #endif
 
 // C emitter 仅作为诊断源码工具，测试不把它声明为可执行 backend。
@@ -683,8 +785,10 @@ int main() {
         {"compiler_intermediate_allocate", TestCompilerIntermediateAllocate},
         {"runtime_session_llvm_state_alias",
          TestRuntimeSessionLLVMStateAlias},
+        {"runtime_session_llvm_capacity_state", TestRuntimeSessionLLVMCapacityState},
         {"runtime_session_llvm", TestRuntimeSessionLLVM},
         {"runtime_session_llvm_constant", TestRuntimeSessionLLVMConstant},
+        {"trilu_llvm", TestTriluLLVM},
 #endif
         {"diagnostic_c_source", TestDiagnosticCSource},
     };

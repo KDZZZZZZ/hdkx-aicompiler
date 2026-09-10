@@ -247,6 +247,83 @@ bool TestProductionLoweringRejectsStaticSizeOverflow() {
     return true;
 }
 
+bool TestEqualPreLaunchRejections() {
+    using namespace kxc;
+    // 合法图：一个 equal Call 恰好一个 unit，operator identity 进入既有 semantic key。
+    Var a("a", TensorType({3}, "int32"));
+    Var b("b", TensorType({3}, "int32"));
+    Call equal_call(kxc::relay::Op::Get("equal"), {a, b});
+    Function valid({a, b}, equal_call);
+    const test_support::PrimitiveLoweringFixture lowered = LowerForTest(valid);
+    TEST_CHECK(lowered.lowered.size() == 1 &&
+                   lowered.prepared.partitioned.calls.size() == 1 &&
+                   lowered.prepared.partitioned.output_value_ids.size() == 1,
+               "equal must allocate exactly one lowering unit and one output");
+    std::string identity;
+    TEST_CHECK(ReadStringAttr(lowered.lowered[0]->prim_func, "kxc.operator_identity",
+                              &identity) &&
+                   identity == "equal@v1",
+               "equal PrimFunc identity must use the existing operator@schema key");
+
+    // launch 前拒绝：类型/广播/元数违规必须在 lowering 或 compile 时抛出。
+    Var int64_b("int64_b", TensorType({3}, "int64"));
+    Var bool_b("bool_b", TensorType({3}, "bool"));
+    Var four("four", TensorType({4}, "int32"));
+    Var lone("lone", TensorType({3}, "int32"));
+    const auto rejects = [](const Function& function) {
+        try {
+            (void)LowerForTest(function);
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    TEST_CHECK(rejects(Function({a, int64_b},
+                                Call(kxc::relay::Op::Get("equal"), {a, int64_b}))),
+               "equal dtype mismatch must be rejected before launch");
+    TEST_CHECK(rejects(Function({a, bool_b},
+                                Call(kxc::relay::Op::Get("equal"), {a, bool_b}))),
+               "equal unsupported bool inputs must be rejected before launch");
+    TEST_CHECK(rejects(Function({a, four},
+                                Call(kxc::relay::Op::Get("equal"), {a, four}))),
+               "equal non-broadcastable shapes must be rejected before launch");
+    TEST_CHECK(rejects(Function({lone},
+                                Call(kxc::relay::Op::Get("equal"), {lone}))),
+               "equal wrong input arity must be rejected before launch");
+
+#if KXC_USE_LLVM
+    // 生产 Compiler::Compile 入口同样在产生任何内核前拒绝非法图。
+    Var c("c", TensorType({3}, "int64"));
+    TEST_CHECK([&] {
+        try {
+            (void)api::Compiler::Compile(
+                Function({a, c}, Call(kxc::relay::Op::Get("equal"), {a, c})),
+                api::CompileConfig::Create(BuildTarget(Device::CPU()), 1));
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    }(), "Compiler::Compile must reject equal dtype mismatch before codegen");
+
+    // 合法图的 plan 输出值是物理 byte-backed bool（kDLBool, 8 bits, 1 lane）。
+    const auto artifacts = api::Compiler::Compile(
+        valid, api::CompileConfig::Create(BuildTarget(Device::CPU()), 1));
+    const DLDataType bool_dtype = runtime::DataTypeFromString("bool");
+    bool found_bool_output = false;
+    const int64_t output_value_id = artifacts.plan().output_value_ids()[0];
+    for (const auto& value : artifacts.plan().values()) {
+        if (value->value_id == output_value_id) {
+            found_bool_output = value->dtype.code == bool_dtype.code &&
+                                value->dtype.bits == bool_dtype.bits &&
+                                value->dtype.lanes == bool_dtype.lanes;
+        }
+    }
+    TEST_CHECK(found_bool_output,
+               "equal plan output value must expose the byte-backed bool ABI");
+#endif
+    return true;
+}
+
 bool TestSharedConstantUsesStableGraphValueKey() {
     using namespace kxc;
     TensorType type({4}, "float32");
@@ -528,6 +605,34 @@ bool TestMultiOutputExecutesNumerically() {
     return true;
 }
 
+bool TestProductionSplitExecutesNumerically() {
+    using namespace kxc;
+    Var input("split_input", TensorType({4}, "float32"));
+    Call split(relay::Op::Get("split"), {input},
+              relay::SplitAttrs::Create(0, {1, 1, 2}));
+    Function function({input}, Tuple({TupleGetItem(split, 0), TupleGetItem(split, 1),
+                                      TupleGetItem(split, 2)}));
+    const auto artifacts = api::Compiler::Compile(
+        function, api::CompileConfig::Create(BuildTarget(Device::CPU()), 2));
+    runtime::RuntimeSession session(artifacts.module(), artifacts.plan());
+    const Array<runtime::NDArray> outputs = session.Run({FilledTensor(5.0f)});
+    TEST_CHECK(outputs.size() == 3 && outputs[0].shape().size() == 1 &&
+                   outputs[0].shape()[0] == 1 && outputs[1].shape()[0] == 1 &&
+                   outputs[2].shape()[0] == 2,
+               "production split must preserve all output shapes");
+    std::vector<float> first(outputs[0].NBytes() / sizeof(float));
+    std::vector<float> second(outputs[1].NBytes() / sizeof(float));
+    std::vector<float> third(outputs[2].NBytes() / sizeof(float));
+    outputs[0].CopyToBytes(first.data(), outputs[0].NBytes());
+    outputs[1].CopyToBytes(second.data(), outputs[1].NBytes());
+    outputs[2].CopyToBytes(third.data(), outputs[2].NBytes());
+    TEST_CHECK(first == std::vector<float>{5.0f} &&
+                   second == std::vector<float>({5.0f}) &&
+                   third == std::vector<float>({5.0f, 5.0f}),
+               "production split must preserve numeric output order");
+    return true;
+}
+
 bool TestPrimitiveCacheUsesFullStableIdentity() {
     using namespace kxc;
     api::internal::ClearPrimitiveCacheForTesting();
@@ -655,6 +760,7 @@ int main() {
          TestProducerCallsRemainOutsideConsumerPrimFunc},
         {"production_lowering_rejects_static_size_overflow",
          TestProductionLoweringRejectsStaticSizeOverflow},
+        {"equal_pre_launch_rejections", TestEqualPreLaunchRejections},
         {"shared_constant_uses_stable_key", TestSharedConstantUsesStableGraphValueKey},
         {"single_unit_supports_multiple_outputs", TestSingleUnitSupportsMultipleOutputs},
         {"requested_primitive_units_reject_invalid_ids",
@@ -668,6 +774,8 @@ int main() {
          TestPrimitiveCacheRelocatesDistinctConstantKeys},
         {"multi_output_executes_numerically",
          TestMultiOutputExecutesNumerically},
+        {"production_split_executes_numerically",
+         TestProductionSplitExecutesNumerically},
         {"primitive_cache_uses_full_stable_identity",
          TestPrimitiveCacheUsesFullStableIdentity},
         {"requested_primitive_units_are_strict_and_cache_scoped",

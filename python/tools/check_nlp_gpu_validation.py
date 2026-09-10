@@ -12,71 +12,253 @@ CAPABILITIES = (
     "stable_softmax", "masked_softmax_all_masked", "batched_matmul",
     "embedding_gather", "mask_select", "normalization", "slice_concat", "prefill_exact",
     "decode_external_kv", "kv_cache", "dynamic_batching", "copy_event",
+    "vision_encoder", "vlm_joint",
 )
 LAYERS = ("frontend", "relay", "lowering", "llvm", "cuda", "runtime", "numeric", "profile")
 STATUSES = {"unsupported", "contracted", "implemented", "validated"}
 VALIDATED = {
+    ("copy_event", "numeric"),
+    ("masked_softmax_all_masked", "numeric"),
     ("stable_softmax", "numeric"),
+    ("batched_matmul", "numeric"),
+    ("embedding_gather", "numeric"),
+    ("normalization", "numeric"),
+    ("slice_concat", "numeric"),
+    ("mask_select", "numeric"),
     ("prefill_exact", "numeric"),
     ("decode_external_kv", "numeric"),
     ("kv_cache", "numeric"),
+    ("dynamic_batching", "numeric"),
+    ("vision_encoder", "numeric"),
+    ("vlm_joint", "numeric"),
 }
 CUDA_LOCAL_EVIDENCE_GATES = {
-    "mask_select": "cuda_where_1d_nonempty_local_evidence",
-    "slice_concat": "cuda_slice_concat_1d_nonempty_local_evidence",
+    "stable_softmax": "cuda_softmax_static_and_bounded_multistage_local_evidence",
+    "masked_softmax_all_masked": "cuda_masked_softmax_static_and_bounded_multistage_local_evidence",
+    "normalization": "cuda_normalization_static_and_bounded_rms_local_evidence",
+    "batched_matmul": "cuda_output_owned_matmul_static_and_bounded_attention_local_evidence",
+    "mask_select": "cuda_where_static_nd_local_evidence",
+    "slice_concat": "cuda_slice_concat_static_nd_local_evidence",
+    "embedding_gather": "cuda_guarded_gather_static_local_evidence",
+    "prefill_exact": "cuda_minimind_prefill_b1_s16_local_evidence",
+    "copy_event": "cuda_copy_cupti_pending_lifetime_local_evidence",
+    "decode_external_kv": "cuda_minimind_capacity_decode_b1_c32_local_evidence",
+    "kv_cache": "cuda_static_external_state_commit_local_evidence",
+    "dynamic_batching": "cuda_request_batching_hardware_evidence",
+}
+CUDA_PENDING_EVIDENCE_GATES = {}
+COPY_EVENT_GATES = {
+    "frontend": "runtime_api_not_frontend_operator",
+    "relay": "runtime_api_not_relay_operator",
+    "lowering": "runtime_copy_not_tir_lowering",
+    "llvm": "cpu_copy_llvm_copy_executed",
+    "runtime": "storage_async_completion_ownership",
+    "numeric": "copy_offset_llvm_cuda_exact",
+    "profile": "paired_copy_completion_and_timing_domains",
+}
+PREFILL_EVIDENCE_GATES = {
+    "frontend": "minimind_static_and_bounded_prefill_import",
+    "relay": "minimind_exact_and_bounded_prefill_contracts",
+    "lowering": "ordinary_minimind_prefill_primitives",
+    "llvm": "cpu_llvm_minimind_prefill_executed",
+    "runtime": "minimind_prefill_and_state_handoff",
+    "numeric": "minimind_prefill_logits_and_present_cpu",
+    "profile": "minimind_prefill_receipt_shape_generation",
+}
+MASKED_SOFTMAX_GATES = {
+    "frontend": "explicit_relay_ffi_masked_softmax",
+    "relay": "bool_mask_zero_row_contract_v1",
+    "lowering": "existing_te_masked_reductions",
+    "llvm": "cpu_llvm_masked_softmax_executed",
+    "runtime": "bounded_masked_attention_shared_axes",
+    "numeric": "masked_attention_independent_cpu",
+    "profile": "masked_attention_shape_bundle",
 }
 DYNAMIC_BATCHING_GATES = {
-    "frontend": "unresolved_onnx_rank_or_dims_rejected",
-    "relay": "unknown_extents_representable_not_executable",
-    "lowering": "static_lowering_size_contract",
-    "runtime": "no_dynamic_execution_plan",
+    "frontend": "minimind_bounded_decode_shape_source",
+    "relay": "restricted_leading_batch_and_past_axes",
+    "lowering": "bounded_independent_request_kernels",
+    "llvm": "cpu_llvm_request_batches_executed",
+    "runtime": "session_owned_request_slots_v1",
+    "numeric": "minimind_request_batches_match_independent_llvm",
+    "profile": "request_batch_ids_and_kernel_receipts",
+}
+KV_STATE_EVIDENCE_GATES = {
+    "frontend": "minimind_static_and_bounded_onnx",
+    "relay": "static_capacity_and_bounded_past_present",
+    "lowering": "ordinary_static_and_bounded_kv_kernels",
+    "llvm": "cpu_llvm_capacity_and_bounded_state_executed",
+    "runtime": "session_owned_static_and_bounded_state_v1",
+    "numeric": "minimind_compiled_state_handoff_cpu",
+    "profile": "minimind_capacity_and_bounded_state_bundles"
+}
+
+BOUNDED_ATTENTION_EVIDENCE_GATES = {
+    "relay": "restricted_attention_shapes",
+    "lowering": "bounded_serial_attention_v2",
+    "llvm": "cpu_llvm_bounded_attention_executed",
+    "runtime": "bounded_fresh_output_attention",
+    "numeric": "bounded_attention_independent_cpu",
+    "profile": "bounded_attention_shape_bundle",
+}
+NORMALIZATION_EVIDENCE_GATES = {
+    "frontend": "static_layer_norm_and_minimind_projection_import",
+    "relay": "static_layer_norm_and_fixed_reduction_rmsnorm",
+    "lowering": "existing_te_weighted_bounded_projection",
+    "llvm": "cpu_llvm_normalization_executed",
+    "runtime": "bounded_projection_frozen_weights",
+    "numeric": "normalization_independent_cpu",
+    "profile": "minimind_projection_shape_bundle",
+}
+EMBEDDING_EVIDENCE_GATES = {
+    "frontend": "static_and_bounded_runtime_gather_source",
+    "relay": "static_table_dynamic_index_shape",
+    "lowering": "existing_te_guarded_bounded_gather",
+    "llvm": "cpu_llvm_bounded_embedding_executed",
+    "runtime": "bounded_embedding_fresh_outputs",
+    "numeric": "embedding_independent_and_full_prefill_cpu",
+    "profile": "minimind_bounded_prefill_shape_bundle",
+}
+DECODE_EVIDENCE_GATES = {
+    "frontend": "minimind_decode_shape_source",
+    "relay": "bounded_single_token_external_kv",
+    "lowering": "existing_te_decode_window_and_shapes",
+    "llvm": "cpu_llvm_full_bounded_decode_executed",
+    "runtime": "bounded_decode_external_fresh_outputs",
+    "numeric": "full_decode_and_greedy_onnx_cpu",
+    "profile": "minimind_bounded_decode_shape_bundle",
+}
+SLICE_CONCAT_EVIDENCE_GATES = {
+    "frontend": "static_slice_and_proved_rope_source",
+    "relay": "static_operated_axes_symbolic_other_axes",
+    "lowering": "existing_te_bounded_slice_concat",
+    "llvm": "cpu_llvm_rope_slice_concat_executed",
+    "runtime": "bounded_rope_fresh_outputs",
+    "numeric": "rope_independent_and_actual_onnx_cpu",
+    "profile": "minimind_rope_shape_bundle",
+}
+CAUSAL_MASK_EVIDENCE_GATES = {
+    "frontend": "static_where_and_causal_mask_source",
+    "relay": "where_and_float32_trilu_contract",
+    "lowering": "existing_te_causal_mask_select",
+    "llvm": "cpu_llvm_causal_attention_executed",
+    "runtime": "bounded_causal_attention_repeated_axes",
+    "numeric": "causal_attention_independent_and_actual_onnx",
+    "profile": "minimind_causal_attention_shape_bundle"
+}
+# L2 rows: CPU/LLVM only. Their CUDA cells stay unsupported until GPU evidence exists.
+VISION_ENCODER_GATES = {
+    "frontend": "static_siglip2_fixed_shape_import",
+    "relay": "static_conv_layernorm_gelu_contracts",
+    "lowering": "ordinary_static_vision_primitives",
+    "llvm": "cpu_llvm_vision_executed",
+    "runtime": "static_vision_fresh_outputs",
+    "numeric": "vision_independent_and_upstream_cpu",
+    "profile": "vision_run_receipt_bundle",
+}
+VLM_JOINT_GATES = {
+    "frontend": "minimind_v_fixed_and_slot_prefill_import",
+    "relay": "fixed_layout_and_bounded_slot_prefill",
+    "lowering": "ordinary_static_and_bounded_vlm_primitives",
+    "llvm": "cpu_llvm_vlm_prefill_decode_executed",
+    "runtime": "vlm_prefill_to_session_owned_state",
+    "numeric": "vlm_upstream_references_cpu",
+    "profile": "vlm_images_sequence_receipt_bundle",
 }
 IMPLEMENTED = {
+    ("decode_external_kv", "cuda"),
+    ("kv_cache", "cuda"),
+    ("copy_event", "cuda"),
+    ("embedding_gather", "cuda"),
+    ("prefill_exact", "cuda"),
+    ("stable_softmax", "cuda"),
+    ("masked_softmax_all_masked", "cuda"),
+    ("normalization", "cuda"),
+    ("dynamic_batching", "cuda"),
+    ("copy_event", "llvm"),
+    ("copy_event", "runtime"),
+    ("copy_event", "profile"),
+    ("prefill_exact", "frontend"),
+    ("prefill_exact", "profile"),
+    ("masked_softmax_all_masked", "frontend"),
+    ("masked_softmax_all_masked", "relay"),
+    ("masked_softmax_all_masked", "lowering"),
+    ("masked_softmax_all_masked", "llvm"),
+    ("masked_softmax_all_masked", "runtime"),
+    ("masked_softmax_all_masked", "profile"),
+    ("dynamic_batching", "frontend"),
+    ("dynamic_batching", "relay"),
+    ("dynamic_batching", "lowering"),
+    ("dynamic_batching", "llvm"),
+    ("dynamic_batching", "runtime"),
+    ("dynamic_batching", "profile"),
     ("stable_softmax", "frontend"),
     ("stable_softmax", "relay"),
     ("stable_softmax", "lowering"),
     ("stable_softmax", "llvm"),
     ("stable_softmax", "runtime"),
+    ("stable_softmax", "profile"),
     ("batched_matmul", "frontend"),
     ("batched_matmul", "relay"),
     ("batched_matmul", "lowering"),
     ("batched_matmul", "llvm"),
+    ("batched_matmul", "cuda"),
     ("batched_matmul", "runtime"),
-    ("batched_matmul", "numeric"),
+    ("batched_matmul", "profile"),
     ("embedding_gather", "frontend"),
     ("embedding_gather", "relay"),
     ("embedding_gather", "lowering"),
     ("embedding_gather", "llvm"),
     ("embedding_gather", "runtime"),
-    ("embedding_gather", "numeric"),
+    ("embedding_gather", "profile"),
     ("mask_select", "frontend"),
     ("mask_select", "relay"),
     ("mask_select", "lowering"),
     ("mask_select", "llvm"),
     ("mask_select", "runtime"),
-    ("mask_select", "numeric"),
+    ("mask_select", "profile"),
     ("mask_select", "cuda"),
     ("normalization", "frontend"),
     ("normalization", "relay"),
     ("normalization", "lowering"),
     ("normalization", "llvm"),
     ("normalization", "runtime"),
-    ("normalization", "numeric"),
+    ("normalization", "profile"),
     ("slice_concat", "frontend"),
     ("slice_concat", "relay"),
     ("slice_concat", "lowering"),
     ("slice_concat", "llvm"),
     ("slice_concat", "runtime"),
-    ("slice_concat", "numeric"),
+    ("slice_concat", "profile"),
     ("slice_concat", "cuda"),
     ("prefill_exact", "relay"),
     ("prefill_exact", "lowering"),
     ("prefill_exact", "llvm"),
     ("prefill_exact", "runtime"),
+    ("decode_external_kv", "frontend"),
     ("decode_external_kv", "relay"),
     ("decode_external_kv", "lowering"),
     ("decode_external_kv", "llvm"),
     ("decode_external_kv", "runtime"),
+    ("decode_external_kv", "profile"),
+    ("kv_cache", "frontend"),
+    ("kv_cache", "relay"),
+    ("kv_cache", "lowering"),
+    ("kv_cache", "llvm"),
+    ("kv_cache", "runtime"),
+    ("kv_cache", "profile"),
+    ("vision_encoder", "frontend"),
+    ("vision_encoder", "relay"),
+    ("vision_encoder", "lowering"),
+    ("vision_encoder", "llvm"),
+    ("vision_encoder", "runtime"),
+    ("vision_encoder", "profile"),
+    ("vlm_joint", "frontend"),
+    ("vlm_joint", "relay"),
+    ("vlm_joint", "lowering"),
+    ("vlm_joint", "llvm"),
+    ("vlm_joint", "runtime"),
+    ("vlm_joint", "profile"),
 }
 WORKLOAD_KEYS = {
     "id", "fixture", "kind", "logical_extent", "physical_extent", "valid_extent",
@@ -217,7 +399,7 @@ def validate_matrix(root, matrix):
                 raise ValidationError("matrix.{}.{} has invalid status".format(capability, layer))
             if (capability, layer) in VALIDATED:
                 if record["status"] != "validated":
-                    raise ValidationError("matrix.{}.{} must retain its reference validation".format(capability, layer))
+                    raise ValidationError("matrix.{}.{} must retain its recorded validation".format(capability, layer))
             elif (capability, layer) in IMPLEMENTED:
                 if record["status"] != "implemented":
                     raise ValidationError("matrix.{}.{} must retain its implementation gate".format(capability, layer))
@@ -234,32 +416,157 @@ def validate_matrix(root, matrix):
                         capability
                     )
                 )
-            if (layer == "cuda" and capability not in CUDA_LOCAL_EVIDENCE_GATES and
-                    record["status"] != "unsupported"):
-                raise ValidationError("matrix.{}.cuda must remain closed".format(capability))
+            if layer == "cuda" and capability not in CUDA_LOCAL_EVIDENCE_GATES:
+                expected = "contracted" if capability in CUDA_PENDING_EVIDENCE_GATES else "unsupported"
+                if record["status"] != expected:
+                    raise ValidationError("matrix.{}.cuda lacks local hardware evidence".format(capability))
             if layer == "llvm" and record["status"] == "validated":
                 raise ValidationError("matrix.{}.llvm must not claim unrun local validation".format(capability))
-    for capability in ("stable_softmax", "batched_matmul", "normalization",
-                       "prefill_exact", "decode_external_kv"):
-        cuda = matrix["capabilities"][capability]["cuda"]
-        if cuda["gate"] != "cuda_reduction_unsupported":
-            raise ValidationError("{} CUDA reduction gate is not closed".format(capability))
     for capability, gate in CUDA_LOCAL_EVIDENCE_GATES.items():
         cuda = matrix["capabilities"][capability]["cuda"]
-        if cuda["status"] != "implemented" or cuda["gate"] != gate:
+        required = {"test/codegen_cuda_test.cpp", "src/tir/transforms/bind_cuda_threads.cc"}
+        if capability in ("decode_external_kv", "kv_cache"):
+            required |= {"src/runtime/executable_plan.cc", "src/runtime/session.cc",
+                         "test/cuda_state_runtime_test.cpp", "test/minimind_decode_loop_llvm_test.cpp",
+                         "test/cuda_profile_bundle_test.py", "python/tools/make_minimind_decode_loop_fixture.py",
+                         "docs/implementation/GPU_KV_STATE_REPORT.md"}
+        elif capability == "copy_event":
+            required = {"src/runtime/device_stream.cc", "include/kxc/profiling/runtime_observer.h",
+                        "test/cuda_copy_profiling_test.cpp", "test/cuda_profile_bundle_test.py",
+                        "docs/implementation/M1_CUDA_COPY_REPORT.md"}
+        elif capability == "prefill_exact":
+            required |= {"test/minimind_prefill_cuda_test.cpp",
+                         "test/cuda_profile_bundle_test.py",
+                         "docs/implementation/M1_CUDA_CORRELATION_REPORT.md",
+                         "docs/implementation/GPU_MINIMIND_PREFILL_REPORT.md"}
+        elif capability == "embedding_gather":
+            required.add("docs/implementation/GPU_GATHER_POW_REPORT.md")
+        elif capability == "batched_matmul":
+            required |= {"docs/implementation/GPU_OWNED_REDUCTION_REPORT.md",
+                         "docs/implementation/GPU_BOUNDED_CORE_REPORT.md"}
+        elif capability == "dynamic_batching":
+            required |= {"src/runtime/executable_plan.cc", "src/runtime/session.cc",
+                         "test/minimind_bounded_decode_llvm_test.cpp",
+                         "test/cuda_profile_bundle_test.py",
+                         "docs/implementation/GPU_REQUEST_BATCHING_REPORT.md"}
+        elif capability in ("stable_softmax", "masked_softmax_all_masked", "normalization"):
+            required.add("docs/implementation/GPU_MULTISTAGE_REDUCTION_REPORT.md")
+        else:
+            required.add("docs/implementation/GPU_OWNED_REDUCTION_REPORT.md")
+        if capability in ("stable_softmax", "masked_softmax_all_masked", "normalization", "batched_matmul"):
+            required |= {"docs/implementation/GPU_BOUNDED_REDUCTION_REPORT.md",
+                         "test/bounded_cuda_test.cpp", "test/cuda_profile_bundle_test.py",
+                         "test/cuda_schedule_test.cpp", "contracts/pass_contract.json",
+                         "src/compiler/lowering/te_to_tir.cc", "src/runtime/session.cc"}
+        if (cuda["status"] != "implemented" or cuda["gate"] != gate or
+                not required.issubset(cuda["evidence"])):
             raise ValidationError(
                 "{} CUDA record must remain implemented/local-evidence only".format(
                     capability
                 )
             )
-    gather_cuda = matrix["capabilities"]["embedding_gather"]["cuda"]
-    if (gather_cuda["status"] != "unsupported" or
-            gather_cuda["gate"] != "cuda_indirect_load_schedule_unsupported"):
-        raise ValidationError("embedding_gather CUDA indirect-load gate is open or inaccurate")
+    for capability, gate in CUDA_PENDING_EVIDENCE_GATES.items():
+        record = matrix["capabilities"][capability]["cuda"]
+        required = {"src/runtime/executable_plan.cc", "src/runtime/session.cc",
+                    "test/request_batching_llvm_test.cpp", "test/minimind_bounded_decode_llvm_test.cpp",
+                    "test/cuda_profile_bundle_test.py", "docs/implementation/GPU_REQUEST_BATCHING_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("pending CUDA request contract lacks its implementation/validation entry points")
+    for layer, gate in COPY_EVENT_GATES.items():
+        record = matrix["capabilities"]["copy_event"][layer]
+        required = {"test/runtime_profiling_test.cpp", "test/diagnosis_engine_test.py",
+                    "docs/implementation/M1_COPY_EVENT_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("copy/event record lacks its execution/observation evidence at {}".format(layer))
+    for layer, gate in PREFILL_EVIDENCE_GATES.items():
+        record = matrix["capabilities"]["prefill_exact"][layer]
+        required = {"test/adaptive_runtime_test.cpp", "test/minimind_bounded_prefill_llvm_test.cpp",
+                    "docs/implementation/M6_RUNTIME_REPORT.md", "docs/implementation/M3_FULL_PREFILL_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("prefill record lacks its actual model evidence at {}".format(layer))
+    for layer, gate in MASKED_SOFTMAX_GATES.items():
+        record = matrix["capabilities"]["masked_softmax_all_masked"][layer]
+        required = {
+            "test/masked_softmax_llvm_test.cpp",
+            "docs/implementation/M5_MASKED_SOFTMAX_REPORT.md",
+        }
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("masked softmax record lacks its CPU evidence at {}".format(layer))
     for layer, gate in DYNAMIC_BATCHING_GATES.items():
         dynamic = matrix["capabilities"]["dynamic_batching"][layer]
-        if dynamic["status"] != "unsupported" or dynamic["gate"] != gate:
-            raise ValidationError("dynamic batching gate is open or inaccurate at {}".format(layer))
+        required = {
+            "test/request_batching_llvm_test.cpp",
+            "test/minimind_bounded_decode_llvm_test.cpp",
+            "docs/implementation/M2_REQUEST_BATCHING_REPORT.md",
+        }
+        if dynamic["gate"] != gate or not required.issubset(dynamic["evidence"]):
+            raise ValidationError("request batching record lacks its CPU evidence at {}".format(layer))
+    for layer, gate in KV_STATE_EVIDENCE_GATES.items():
+        state = matrix["capabilities"]["kv_cache"][layer]
+        required = {
+            "test/minimind_decode_loop_llvm_test.cpp",
+            "docs/implementation/M2_MINIMIND_STATE_REPORT.md",
+            "test/minimind_bounded_decode_llvm_test.cpp",
+            "docs/implementation/M2_BOUNDED_STATE_REPORT.md",
+        }
+        if state["gate"] != gate or not required.issubset(state["evidence"]):
+            raise ValidationError("KV state record must retain its CPU capacity evidence at {}".format(layer))
+    for capability in ("stable_softmax", "batched_matmul"):
+        for layer, gate in BOUNDED_ATTENTION_EVIDENCE_GATES.items():
+            record = matrix["capabilities"][capability][layer]
+            required = {
+                "test/bounded_attention_llvm_test.cpp",
+                "docs/implementation/M3_BOUNDED_ATTENTION_REPORT.md",
+            }
+            if record["gate"] != gate or not required.issubset(record["evidence"]):
+                raise ValidationError("bounded attention record lacks its CPU evidence at {}.{}".format(capability, layer))
+    for layer, gate in NORMALIZATION_EVIDENCE_GATES.items():
+        record = matrix["capabilities"]["normalization"][layer]
+        required = {
+            "test/bounded_projection_llvm_test.cpp",
+            "docs/implementation/M3_WEIGHTED_PROJECTION_REPORT.md",
+        }
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("normalization record lacks its CPU evidence at {}".format(layer))
+    for layer, gate in SLICE_CONCAT_EVIDENCE_GATES.items():
+        record = matrix["capabilities"]["slice_concat"][layer]
+        required = {"test/bounded_rope_llvm_test.cpp", "docs/implementation/M3_ROPE_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("Slice/Concat record lacks its CPU evidence at {}".format(layer))
+
+    for layer, gate in EMBEDDING_EVIDENCE_GATES.items():
+        record = matrix["capabilities"]["embedding_gather"][layer]
+        required = {"test/minimind_bounded_prefill_llvm_test.cpp", "docs/implementation/M3_FULL_PREFILL_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("embedding record lacks its CPU evidence at {}".format(layer))
+
+
+    for layer, gate in DECODE_EVIDENCE_GATES.items():
+        record = matrix["capabilities"]["decode_external_kv"][layer]
+        required = {"test/minimind_bounded_decode_llvm_test.cpp", "docs/implementation/M3_FULL_DECODE_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("decode record lacks its CPU evidence at {}".format(layer))
+
+    for layer, gate in VISION_ENCODER_GATES.items():
+        record = matrix["capabilities"]["vision_encoder"][layer]
+        required = {"test/minimind_vision_llvm_test.cpp", "test/minimind_vlm_bounded_llvm_test.cpp",
+                    "docs/implementation/M9_MINIMIND_V_VISION_REPORT.md",
+                    "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("vision encoder record lacks its CPU evidence at {}".format(layer))
+    for layer, gate in VLM_JOINT_GATES.items():
+        record = matrix["capabilities"]["vlm_joint"][layer]
+        required = {"test/minimind_decode_loop_llvm_test.cpp", "test/minimind_vlm_bounded_llvm_test.cpp",
+                    "docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md",
+                    "docs/implementation/M9_MINIMIND_V_BOUNDED_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("VLM joint record lacks its CPU evidence at {}".format(layer))
+
+    for layer, gate in CAUSAL_MASK_EVIDENCE_GATES.items():
+        record = matrix["capabilities"]["mask_select"][layer]
+        required = {"test/bounded_causal_attention_llvm_test.cpp", "docs/implementation/M3_CAUSAL_ATTENTION_REPORT.md"}
+        if record["gate"] != gate or not required.issubset(record["evidence"]):
+            raise ValidationError("causal mask record lacks its CPU evidence at {}".format(layer))
 
 
 def validate_fixture(fixture):
@@ -267,8 +574,6 @@ def validate_fixture(fixture):
     if kind not in FIXTURE_EXTRA_KEYS:
         raise ValidationError("unknown fixture kind: {}".format(kind))
     required = COMMON_FIXTURE_KEYS | FIXTURE_EXTRA_KEYS[kind]
-    if kind == "stable_softmax" and fixture.get("id") == "masked_softmax_all_masked":
-        required = COMMON_FIXTURE_KEYS | {"logits", "mask"}
     require_keys(fixture, required, "fixture.{}".format(fixture.get("id", "<unknown>")))
     if not isinstance(fixture["id"], str) or not fixture["id"]:
         raise ValidationError("fixture id is invalid")
@@ -284,10 +589,12 @@ def validate_fixture(fixture):
         numeric_tree(fixture["logits"], "fixture logits")
         if not all(isinstance(item, bool) for item in fixture["mask"]):
             raise ValidationError("fixture {} mask must contain booleans".format(fixture["id"]))
-        if any(fixture["mask"]):
-            numeric_tree(fixture["expected"], "fixture expected")
-        elif fixture["expected_gate"] != "reject_unsupported":
-            raise ValidationError("all-masked softmax must fail closed")
+        numeric_tree(fixture["expected"], "fixture expected")
+        if len(fixture["expected"]) != len(fixture["logits"]):
+            raise ValidationError("fixture {} expected extent mismatch".format(fixture["id"]))
+        if not any(fixture["mask"]) and (fixture["expected_gate"] != "cpu_reference" or
+                any(value != 0 for value in fixture["expected"])):
+            raise ValidationError("explicit all-masked softmax reference must return zeros")
     elif kind == "prefill_attention":
         if not isinstance(fixture["causal"], bool):
             raise ValidationError("prefill causal must be boolean")
@@ -383,9 +690,13 @@ def validate_manifests(fixtures, manifests):
 
 
 def stable_softmax(logits, mask):
+    if not logits or len(logits) != len(mask) or not all(isinstance(item, bool) for item in mask):
+        raise ValidationError("masked softmax requires a positive matching extent and bool mask")
     active = [value for value, enabled in zip(logits, mask) if enabled]
     if not active:
-        raise ValidationError("all-masked softmax is unsupported")
+        return [0.0] * len(logits)
+    if not all(math.isfinite(value) for value in active):
+        raise ValidationError("masked softmax reference requires finite active logits")
     maximum = max(active)
     exponentials = [math.exp(value - maximum) if enabled else 0.0 for value, enabled in zip(logits, mask)]
     denominator = sum(exponentials)
@@ -460,8 +771,9 @@ def run_references(fixtures, matrix, manifests):
     assert_close(stable_softmax(stable["logits"], stable["mask"]), stable["expected"], stable["tolerance"], stable["id"])
     print("PASS reference stable_softmax_extreme")
     masked = by_id["masked_softmax_all_masked"]
-    require_rejection(masked["id"], lambda: stable_softmax(masked["logits"], masked["mask"]))
-    print("PASS negative masked_softmax_all_masked")
+    assert_close(stable_softmax(masked["logits"], masked["mask"]), masked["expected"], masked["tolerance"], masked["id"])
+    assert_close(stable_softmax([float("nan"), float("inf")], [False, False]), [0.0, 0.0], 0, "masked nonfinite payload")
+    print("PASS reference masked_softmax_all_masked: exact zeros including masked NaN/Inf")
     prefill = by_id["prefill_exact_attention"]
     assert_close(prefill_attention(prefill), prefill["expected"], prefill["tolerance"], prefill["id"])
     print("PASS reference prefill_exact_attention")
@@ -475,17 +787,19 @@ def run_references(fixtures, matrix, manifests):
     print("PASS reference kv_append_capacity_page_trace")
 
     require_rejection("unknown/symbolic dim", lambda: validate_extents({"logical_extent": "N", "physical_extent": 4, "valid_extent": 1}, "negative"))
-    require_rejection("all-masked softmax", lambda: stable_softmax([1.0], [False]))
+    require_rejection("mask extent mismatch", lambda: stable_softmax([1.0], []))
+    require_rejection("mask dtype", lambda: stable_softmax([1.0], [1]))
+    require_rejection("empty reduction", lambda: stable_softmax([], []))
     if require_valid_context(cache, cache["valid_extent"]) != cache["valid_extent"]:
         raise ValidationError("valid KV context was not preserved")
     require_rejection("capacity used as valid context", lambda: require_valid_context(cache, cache["physical_extent"]))
     probe = cache["capacity_probe"]
     require_rejection("capacity overflow", lambda: kv_trace({**cache, "append_tokens": cache["append_tokens"] + list(range(probe["append_count"]))}))
     require_rejection("fingerprint mismatch", lambda: check_fingerprint({**manifests["workloads"][0], "fingerprint": "0" * 64}, "negative manifest"))
-    cuda = matrix["capabilities"]["stable_softmax"]["cuda"]
-    if cuda["status"] != "unsupported" or cuda["gate"] != "cuda_reduction_unsupported":
-        raise ValidationError("CUDA reduction unsupported gate is open")
-    print("PASS negative gates unknown-symbolic/all-masked/capacity/gather-reduction-CUDA/fingerprint")
+    cuda = matrix["capabilities"]["dynamic_batching"]["cuda"]
+    if cuda["status"] != "implemented" or cuda["gate"] != CUDA_LOCAL_EVIDENCE_GATES["dynamic_batching"]:
+        raise ValidationError("CUDA request batching hardware evidence is missing")
+    print("PASS negative gates unknown-symbolic/mask-contract/capacity/request-batching-CUDA/fingerprint")
 
 
 def main():
@@ -508,7 +822,7 @@ def main():
     validate_manifests(fixture_document["fixtures"], manifests)
     print("PASS schemas, fingerprints, and evidence")
     run_references(fixture_document["fixtures"], matrix, manifests)
-    print("PASS NLP reference/capability gate; injective CUDA local evidence only, gather/reductions closed")
+    print("PASS NLP reference/capability gate; static and bounded model/request-batching CUDA evidence recorded")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 
 #include "kxc/compiler/compiler.h"
 #include "kxc/frontend/onnx_importer.h"
+#include "kxc/relay/op.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/pipeline.h"
 #include "kxc/runtime/session.h"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
@@ -33,6 +35,30 @@
 
 #ifndef KXC_ONNX_TRANSFORMER_PARAMS_PATH
 #define KXC_ONNX_TRANSFORMER_PARAMS_PATH "exact_transformer.params.bin"
+#endif
+
+#ifndef KXC_ONNX_STATIC_S1_JSON_PATH
+#define KXC_ONNX_STATIC_S1_JSON_PATH "static_s1.import.json"
+#endif
+
+#ifndef KXC_ONNX_STATIC_S1_PARAMS_PATH
+#define KXC_ONNX_STATIC_S1_PARAMS_PATH "static_s1.params.bin"
+#endif
+
+#ifndef KXC_ONNX_EQUAL_WHERE_JSON_PATH
+#define KXC_ONNX_EQUAL_WHERE_JSON_PATH "equal_where.import.json"
+#endif
+
+#ifndef KXC_ONNX_EQUAL_WHERE_PARAMS_PATH
+#define KXC_ONNX_EQUAL_WHERE_PARAMS_PATH "equal_where.params.bin"
+#endif
+
+#ifndef KXC_ONNX_M4M5_OPS_JSON_PATH
+#define KXC_ONNX_M4M5_OPS_JSON_PATH "m4m5_ops.import.json"
+#endif
+
+#ifndef KXC_ONNX_M4M5_OPS_PARAMS_PATH
+#define KXC_ONNX_M4M5_OPS_PARAMS_PATH "m4m5_ops.params.bin"
 #endif
 
 #ifndef KXC_USE_LLVM
@@ -247,6 +273,293 @@ bool TestRunExactTransformerProtobufLLVM() {
     return true;
 }
 
+// 静态 S1 组合 fixture：真实 protobuf 导入后必须经过 LLVM Compiler 与
+// RuntimeSession，并与独立手写参考逐元素比较（绝对误差 1e-5）。
+// 图：Mul(x,const[4]) → Sub(-0.25) → Div(/2) → Sqrt → Cast(idx int64→f32)
+//     → Mul(*3) → ReduceMean(axes=[2],keepdims=1) → Reshape([6])。
+bool TestRunStaticS1ProtobufLLVM() {
+    kxc::frontend::ImportedONNXModel imported =
+        kxc::frontend::LoadONNXImportSpec(
+            KXC_ONNX_STATIC_S1_JSON_PATH,
+            KXC_ONNX_STATIC_S1_PARAMS_PATH);
+    TEST_CHECK(imported.function.defined() && imported.function->params.size() == 2 &&
+                   imported.params.size() == 4 &&
+                   imported.input_names.size() == 2 &&
+                   imported.input_names[0] == "x" &&
+                   imported.input_names[1] == "idx" &&
+                   imported.output_names.size() == 1 &&
+                   imported.output_names[0] == "out",
+               "static S1 fixture must preserve importer/reifier bindings");
+    TEST_CHECK(CheckTensor(imported.function->body.checked_type(), {6}, "float32"),
+               "static S1 fixture output contract mismatch");
+#if KXC_USE_LLVM
+    const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
+    const auto compiled = kxc::api::Compiler::Compile(
+        prepared, kxc::api::CompileConfig::Create(
+                      kxc::BuildTarget(kxc::Device::CPU()), 1));
+    TEST_CHECK(compiled.module().IsReady() && compiled.plan().calls().size() == 8,
+               "static S1 fixture must compile to eight LLVM units");
+
+    // 独立参考：不经过 importer/Relay，直接按 ONNX 语义手写计算。
+    const std::vector<float> scale = {1.0f, 2.0f, 0.5f, 4.0f};
+    std::vector<float> x_values(24);
+    for (size_t i = 0; i < x_values.size(); ++i) {
+        x_values[i] = 1.0f + static_cast<float>(i % 7) * 0.25f;
+    }
+    std::vector<float> expected(6, 0.0f);
+    for (int b = 0; b < 2; ++b) {
+        for (int r = 0; r < 3; ++r) {
+            float sum = 0.0f;
+            for (int c = 0; c < 4; ++c) {
+                const size_t index = static_cast<size_t>((b * 3 + r) * 4 + c);
+                sum += std::sqrt((x_values[index] * scale[c] - 0.25f) / 2.0f) * 3.0f;
+            }
+            expected[static_cast<size_t>(b * 3 + r)] = sum / 4.0f;
+        }
+    }
+
+    kxc::runtime::NDArray x = kxc::runtime::NDArray::Empty(
+        {2, 3, 4}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    x.CopyFromBytes(x_values.data(), x.NBytes());
+    const int64_t idx_value = 3;
+    kxc::runtime::NDArray idx = kxc::runtime::NDArray::Empty(
+        {1}, kxc::runtime::DataTypeFromString("int64"), kxc::Device::CPU());
+    idx.CopyFromBytes(&idx_value, idx.NBytes());
+    kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
+    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({x, idx});
+    TEST_CHECK(outputs.size() == 1 && ShapeEquals(outputs[0], {6}),
+               "static S1 RuntimeSession output shape mismatch");
+
+    std::vector<float> actual(6, 0.0f);
+    outputs[0].CopyToBytes(actual.data(), outputs[0].NBytes());
+    float max_abs_error = 0.0f;
+    for (size_t index = 0; index < actual.size(); ++index) {
+        TEST_CHECK(std::isfinite(actual[index]),
+                   "static S1 output must be finite at " + std::to_string(index));
+        max_abs_error = std::max(max_abs_error, std::fabs(actual[index] - expected[index]));
+    }
+    std::cout << "[INFO] static_s1 max_abs_error=" << max_abs_error << "\n";
+    TEST_CHECK(max_abs_error <= 1e-5f,
+               "static S1 RuntimeSession numeric mismatch beyond 1e-5 absolute "
+               "tolerance");
+#endif
+    return true;
+}
+
+// M4 接线验证：真实 protobuf 经 Python importer 序列化后，C++ reifier 重建
+// Equal→Where 组合图（Equal 的 bool 输出直接作 Where condition），通过 LLVM
+// Compiler 与 RuntimeSession 执行，并与独立 NumPy 参考逐元素 bit-exact 比较。
+// 图：Equal(a[2,3], b[3]) → cond[2,3] bool → Where(cond, x[1,3], y[]) → out[2,3]。
+// x/y 是 initializer 常量参数；Where 只做分支选择且比较值均可精确表示，
+// 因此期望结果为 bit-exact（容差 0）。
+bool TestRunEqualWhereProtobufLLVM() {
+    kxc::frontend::ImportedONNXModel imported =
+        kxc::frontend::LoadONNXImportSpec(
+            KXC_ONNX_EQUAL_WHERE_JSON_PATH,
+            KXC_ONNX_EQUAL_WHERE_PARAMS_PATH);
+    TEST_CHECK(imported.function.defined() && imported.function->params.size() == 2 &&
+                   imported.params.size() == 2 &&
+                   imported.input_names.size() == 2 &&
+                   imported.input_names[0] == "a" &&
+                   imported.input_names[1] == "b" &&
+                   imported.output_names.size() == 1 &&
+                   imported.output_names[0] == "out",
+               "Equal-Where fixture must preserve importer/reifier bindings");
+    TEST_CHECK(CheckTensor(imported.function->body.checked_type(), {2, 3}, "float32"),
+               "Equal-Where fixture output contract mismatch");
+#if KXC_USE_LLVM
+    const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
+    const auto compiled = kxc::api::Compiler::Compile(
+        prepared, kxc::api::CompileConfig::Create(
+                      kxc::BuildTarget(kxc::Device::CPU()), 1));
+    TEST_CHECK(compiled.module().IsReady() && compiled.plan().calls().size() == 2,
+               "Equal-Where fixture must compile to two LLVM units");
+
+    const std::vector<float> a_values = {1, 2, 3, 4, 5, 6};
+    const std::vector<float> b_values = {1, 0, 3};
+    // 独立参考：Equal 的 NumPy 多向广播 + Where 逐元素选择，手工展开。
+    const std::vector<float> expected = {10, -1, 30, -1, -1, -1};
+
+    kxc::runtime::NDArray a = kxc::runtime::NDArray::Empty(
+        {2, 3}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    a.CopyFromBytes(a_values.data(), a.NBytes());
+    kxc::runtime::NDArray b = kxc::runtime::NDArray::Empty(
+        {3}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    b.CopyFromBytes(b_values.data(), b.NBytes());
+    kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
+    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({a, b});
+    TEST_CHECK(outputs.size() == 1 && ShapeEquals(outputs[0], {2, 3}),
+               "Equal-Where RuntimeSession output shape mismatch");
+
+    std::vector<float> actual(6, 0.0f);
+    outputs[0].CopyToBytes(actual.data(), outputs[0].NBytes());
+    for (size_t index = 0; index < actual.size(); ++index) {
+        TEST_CHECK(actual[index] == expected[index],
+                   "Equal-Where RuntimeSession must match the NumPy reference "
+                   "bit-exactly at " +
+                       std::to_string(index) + ": got " +
+                       std::to_string(actual[index]));
+    }
+#endif
+    return true;
+}
+
+// M4/M5 五算子接线验证：真实 protobuf 经 Python importer 序列化后，C++
+// reifier 重建 Neg → Pow(x²) → Sigmoid → Unsqueeze(axes=[0]→reshape) →
+// Expand([1,2,4]→[3,2,4]) 图，通过 LLVM Compiler 与 RuntimeSession 执行，
+// 并与独立手写参考逐元素比较（绝对误差 2e-5，覆盖 float32 sigmoid/pow）。
+bool TestRunM4M5OpsProtobufLLVM() {
+    kxc::frontend::ImportedONNXModel imported =
+        kxc::frontend::LoadONNXImportSpec(
+            KXC_ONNX_M4M5_OPS_JSON_PATH,
+            KXC_ONNX_M4M5_OPS_PARAMS_PATH);
+    TEST_CHECK(imported.function.defined() && imported.function->params.size() == 1 &&
+                   imported.params.size() == 3 &&
+                   imported.input_names.size() == 1 &&
+                   imported.input_names[0] == "x" &&
+                   imported.output_names.size() == 1 &&
+                   imported.output_names[0] == "out",
+               "M4/M5 ops fixture must preserve importer/reifier bindings");
+    TEST_CHECK(CheckTensor(imported.function->body.checked_type(), {3, 2, 4}, "float32"),
+               "M4/M5 ops fixture output contract mismatch");
+#if KXC_USE_LLVM
+    const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
+    const auto compiled = kxc::api::Compiler::Compile(
+        prepared, kxc::api::CompileConfig::Create(
+                      kxc::BuildTarget(kxc::Device::CPU()), 1));
+    TEST_CHECK(compiled.module().IsReady() && compiled.plan().calls().size() == 5,
+               "M4/M5 ops fixture must compile to five LLVM units");
+
+    // 独立参考：不经过 importer/Relay，直接按 ONNX 语义手写计算。
+    const float x_values[8] = {1.0f, -2.0f, 0.5f, 3.0f, -0.25f, 2.0f, -4.0f, 0.75f};
+    std::vector<float> expected(24, 0.0f);
+    for (int copy = 0; copy < 3; ++copy) {
+        for (int row = 0; row < 2; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                const double value = static_cast<double>(x_values[row * 4 + column]);
+                const double squared = std::pow(-value, 2.0);
+                expected[static_cast<size_t>((copy * 2 + row) * 4 + column)] =
+                    static_cast<float>(1.0 / (1.0 + std::exp(-squared)));
+            }
+        }
+    }
+
+    kxc::runtime::NDArray x = kxc::runtime::NDArray::Empty(
+        {2, 4}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+    x.CopyFromBytes(x_values, x.NBytes());
+    kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
+    const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({x});
+    TEST_CHECK(outputs.size() == 1 && ShapeEquals(outputs[0], {3, 2, 4}),
+               "M4/M5 ops RuntimeSession output shape mismatch");
+
+    std::vector<float> actual(24, 0.0f);
+    outputs[0].CopyToBytes(actual.data(), outputs[0].NBytes());
+    float max_abs_error = 0.0f;
+    for (size_t index = 0; index < actual.size(); ++index) {
+        TEST_CHECK(std::isfinite(actual[index]),
+                   "M4/M5 ops output must be finite at " + std::to_string(index));
+        max_abs_error = std::max(max_abs_error, std::fabs(actual[index] - expected[index]));
+    }
+    std::cout << "[INFO] m4m5_ops max_abs_error=" << max_abs_error << "\n";
+    TEST_CHECK(max_abs_error <= 2e-5f,
+               "M4/M5 ops RuntimeSession numeric mismatch beyond 2e-5 absolute "
+               "tolerance");
+#endif
+    return true;
+}
+
+// Split 三路 fixture 走完整 JSON spec reifier、Relay/LLVM 编译和 RuntimeSession，
+// 用独立切片参考检查输出顺序与多输出 ABI。fixture 不依赖外部 ONNX/Python 运行时。
+bool TestRunSplitMultiOutputProtobufLLVM() {
+    const std::string json_path = "/tmp/kxc_split_multi_output.import.json";
+    const std::string params_path = "/tmp/kxc_split_multi_output.params.bin";
+    const char* json = R"json({
+  "format": "kxc.onnx_import.v1",
+  "function": {
+    "inputs": [{"name":"data","shape":[2,6],"dtype":"float32"}],
+    "outputs": [
+      {"name":"left","shape":[2,1],"dtype":"float32"},
+      {"name":"middle","shape":[2,3],"dtype":"float32"},
+      {"name":"right","shape":[2,2],"dtype":"float32"}
+    ],
+    "nodes": [{
+      "name":"split",
+      "op_name":"split",
+      "inputs":["data"],
+      "outputs":["left","middle","right"],
+      "attrs":{"axis":1,"sections":[1,3,2]}
+    }]
+  },
+  "params": [],
+  "param_order": []
+})json";
+    {
+        std::ofstream output(json_path, std::ios::trunc);
+        TEST_CHECK(output.good(), "split fixture JSON should be writable");
+        output << json;
+    }
+    {
+        std::ofstream output(params_path, std::ios::binary | std::ios::trunc);
+        TEST_CHECK(output.good(), "split fixture params should be writable");
+    }
+
+    const auto cleanup = [&] {
+        std::remove(json_path.c_str());
+        std::remove(params_path.c_str());
+    };
+    try {
+        kxc::frontend::ImportedONNXModel imported =
+            kxc::frontend::LoadONNXImportSpec(json_path, params_path);
+        TEST_CHECK(imported.function.defined() && imported.function->params.size() == 1 &&
+                       imported.output_names.size() == 3 &&
+                       imported.output_names[0] == "left" &&
+                       imported.output_names[1] == "middle" &&
+                       imported.output_names[2] == "right",
+                   "Split fixture must preserve three output bindings and order");
+        const auto* output_tuple = imported.function->body.checked_type().As<kxc::TupleTypeNode>();
+        TEST_CHECK(output_tuple && output_tuple->fields.size() == 3 &&
+                       CheckTensor(output_tuple->fields[0], {2, 1}, "float32") &&
+                       CheckTensor(output_tuple->fields[1], {2, 3}, "float32") &&
+                       CheckTensor(output_tuple->fields[2], {2, 2}, "float32"),
+                   "Split fixture output tuple type mismatch");
+#if KXC_USE_LLVM
+        const kxc::Function prepared = PrepareJitRelayFunction(imported.function);
+        const auto compiled = kxc::api::Compiler::Compile(
+            prepared, kxc::api::CompileConfig::Create(
+                          kxc::BuildTarget(kxc::Device::CPU()), 1));
+        TEST_CHECK(compiled.module().IsReady() && compiled.plan().calls().size() == 1,
+                   "Split fixture must compile to one LLVM multi-output unit");
+        kxc::runtime::NDArray input = kxc::runtime::NDArray::Empty(
+            {2, 6}, kxc::runtime::DataTypeFromString("float32"), kxc::Device::CPU());
+        const std::vector<float> values{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+        input.CopyFromBytes(values.data(), input.NBytes());
+        kxc::runtime::RuntimeSession session(compiled.module(), compiled.plan());
+        const kxc::Array<kxc::runtime::NDArray> outputs = session.Run({input});
+        TEST_CHECK(outputs.size() == 3 && ShapeEquals(outputs[0], {2, 1}) &&
+                       ShapeEquals(outputs[1], {2, 3}) &&
+                       ShapeEquals(outputs[2], {2, 2}),
+                   "Split RuntimeSession output shapes must preserve order");
+        const std::vector<float> expected_left{0, 6};
+        const std::vector<float> expected_middle{1, 2, 3, 7, 8, 9};
+        const std::vector<float> expected_right{4, 5, 10, 11};
+        std::vector<float> actual_left(expected_left.size());
+        std::vector<float> actual_middle(expected_middle.size());
+        std::vector<float> actual_right(expected_right.size());
+        outputs[0].CopyToBytes(actual_left.data(), outputs[0].NBytes());
+        outputs[1].CopyToBytes(actual_middle.data(), outputs[1].NBytes());
+        outputs[2].CopyToBytes(actual_right.data(), outputs[2].NBytes());
+        TEST_CHECK(actual_left == expected_left && actual_middle == expected_middle &&
+                       actual_right == expected_right,
+                   "Split RuntimeSession values must match independent slicing reference");
+#endif
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+    cleanup();
+    return true;
+}
+
 // 验证导入的 ResNet18 可完成 Relay 到 LLVM 编译。
 bool TestCompileResNet18ToLLVM() {
 #if KXC_USE_LLVM
@@ -344,6 +657,18 @@ int main() {
         if (!TestRunExactTransformerProtobufLLVM()) {
             return 1;
         }
+        if (!TestRunStaticS1ProtobufLLVM()) {
+            return 1;
+        }
+        if (!TestRunEqualWhereProtobufLLVM()) {
+            return 1;
+        }
+        if (!TestRunM4M5OpsProtobufLLVM()) {
+            return 1;
+        }
+        if (!TestRunSplitMultiOutputProtobufLLVM()) {
+            return 1;
+        }
         if (!TestCompileResNet18ToLLVM()) {
             return 1;
         }
@@ -358,12 +683,20 @@ int main() {
     std::cout << "[PASS] onnx_importer_load_resnet18\n";
 #if KXC_USE_LLVM
     std::cout << "[PASS] onnx_transformer_protobuf_reifier_llvm_runtime\n";
+    std::cout << "[PASS] onnx_static_s1_protobuf_reifier_llvm_runtime\n";
+    std::cout << "[PASS] onnx_equal_where_protobuf_reifier_llvm_runtime\n";
+    std::cout << "[PASS] onnx_m4m5_ops_protobuf_reifier_llvm_runtime\n";
+    std::cout << "[PASS] onnx_split_multi_output_protobuf_reifier_llvm_runtime\n";
     std::cout << "[PASS] onnx_importer_compile_resnet18_llvm\n";
     if (ShouldRunResNet18Kernel()) {
         std::cout << "[PASS] onnx_importer_run_resnet18_llvm\n";
     }
 #else
     std::cout << "[SKIP] onnx_transformer_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
+    std::cout << "[SKIP] onnx_static_s1_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
+    std::cout << "[SKIP] onnx_equal_where_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
+    std::cout << "[SKIP] onnx_m4m5_ops_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
+    std::cout << "[SKIP] onnx_split_multi_output_protobuf_reifier_llvm_runtime: KXC_USE_LLVM=0\n";
 #endif
     std::cout << "All available ONNX importer tests passed.\n";
     return 0;

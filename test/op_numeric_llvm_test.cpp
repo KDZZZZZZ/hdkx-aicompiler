@@ -493,6 +493,7 @@ void TestSlice() {
 }
 
 // 验证 ReduceMean 的轴和 keepdims 语义。
+// 三维用例统一使用 data[i][j][k] = i*100 + j*10 + k 的 [2,3,4] 输入。
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("reduce_mean"), {data},
@@ -502,7 +503,76 @@ void TestReduceMean() {
     std::vector<float> data_buf = {1, 2, 3, 4, 5, 6};
     std::vector<float> out(2, 0.0f);
     CompileAndRun("reduce_mean", func, {Input(data_buf), Output(out)});
+    // mean over j: [1,2,3]->2, [4,5,6]->5。
     ExpectNear(out, {2.0f, 5.0f});
+
+    // keepdims=0 且多轴归约：mean over (i,j) 固定 k = 60+k。
+    kxc::Var cube("cube", kxc::TensorType({2, 3, 4}, "float32"));
+    kxc::Call flat_mean(kxc::relay::Op::Get("reduce_mean"), {cube},
+                        kxc::relay::ReduceMeanAttrs::Create({0, 1}, 0));
+    kxc::Function flat_func({cube}, flat_mean);
+
+    std::vector<float> cube_buf(24);
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            for (int k = 0; k < 4; ++k) {
+                cube_buf[static_cast<size_t>(i * 12 + j * 4 + k)] =
+                    static_cast<float>(i * 100 + j * 10 + k);
+            }
+        }
+    }
+    std::vector<float> flat_out(4, 0.0f);
+    CompileAndRun("reduce_mean_keepdims0_multi_axis", flat_func,
+                  {Input(cube_buf), Output(flat_out)});
+    ExpectNear(flat_out, {60.0f, 61.0f, 62.0f, 63.0f});
+
+    // keepdims=1 归约中间轴：mean over j 固定 (i,k) = i*100 + 10 + k，
+    // 输出 [2,1,4]，不得把保留轴之后的列塌缩为首列值。
+    kxc::Call mid_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                       kxc::relay::ReduceMeanAttrs::Create({1}, 1));
+    kxc::Function mid_keep_func({cube}, mid_keep);
+    std::vector<float> mid_keep_out(8, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_axis1", mid_keep_func,
+                  {Input(cube_buf), Output(mid_keep_out)});
+    ExpectNear(mid_keep_out, {10, 11, 12, 13, 110, 111, 112, 113});
+
+    // keepdims=1 归约首轴：mean over i 固定 (j,k) = 50 + j*10 + k，
+    // 输出 [1,3,4]。
+    kxc::Call head_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                        kxc::relay::ReduceMeanAttrs::Create({0}, 1));
+    kxc::Function head_keep_func({cube}, head_keep);
+    std::vector<float> head_keep_out(12, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_axis0", head_keep_func,
+                  {Input(cube_buf), Output(head_keep_out)});
+    ExpectNear(head_keep_out,
+               {50, 51, 52, 53, 60, 61, 62, 63, 70, 71, 72, 73});
+
+    // keepdims=1 同时归约前两轴：mean over (i,j) = 60 + k，输出 [1,1,4]。
+    kxc::Call head2_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                         kxc::relay::ReduceMeanAttrs::Create({0, 1}, 1));
+    kxc::Function head2_keep_func({cube}, head2_keep);
+    std::vector<float> head2_keep_out(4, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_axis01", head2_keep_func,
+                  {Input(cube_buf), Output(head2_keep_out)});
+    ExpectNear(head2_keep_out, {60, 61, 62, 63});
+
+    // keepdims=1 负轴 [-2] 等价于轴 1，输出 [2,1,4]。
+    kxc::Call negative_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                            kxc::relay::ReduceMeanAttrs::Create({-2}, 1));
+    kxc::Function negative_keep_func({cube}, negative_keep);
+    std::vector<float> negative_keep_out(8, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_axis_neg2", negative_keep_func,
+                  {Input(cube_buf), Output(negative_keep_out)});
+    ExpectNear(negative_keep_out, {10, 11, 12, 13, 110, 111, 112, 113});
+
+    // keepdims=1 归约尾轴：mean over k = i*100 + j*10 + 1.5，输出 [2,3,1]。
+    kxc::Call tail_keep(kxc::relay::Op::Get("reduce_mean"), {cube},
+                        kxc::relay::ReduceMeanAttrs::Create({2}, 1));
+    kxc::Function tail_keep_func({cube}, tail_keep);
+    std::vector<float> tail_keep_out(6, 0.0f);
+    CompileAndRun("reduce_mean_keepdims1_tail_axis", tail_keep_func,
+                  {Input(cube_buf), Output(tail_keep_out)});
+    ExpectNear(tail_keep_out, {1.5f, 11.5f, 21.5f, 101.5f, 111.5f, 121.5f});
 }
 
 // 验证 Softmax 通过 max-subtraction 在极大正负 logits 下保持有限。
@@ -593,6 +663,257 @@ void TestWhere() {
                   {Input(bool_x_data), Input(bool_y_data), Output(bool_out)});
     Check(bool_out == std::vector<uint8_t>({1, 0, 1, 1, 1, 1}),
           "Where bool Constant/branch result mismatch");
+}
+
+// 验证 Equal 的 bool 输出、int32/int64/float32 数值语义与合法广播。
+// 首版子集：同 dtype int32/int64/float32；NaN 按数值相等语义（NaN != NaN），不能用位相等。
+void TestEqual() {
+    // M5 文档示例：A=[1,2,3]、B=[1,0,3] → [true,false,true]。
+    kxc::Var a("a", kxc::TensorType({3}, "int32"));
+    kxc::Var b("b", kxc::TensorType({3}, "int32"));
+    kxc::Call call(kxc::relay::Op::Get("equal"), {a, b});
+    kxc::Function func({a, b}, call);
+
+    const std::vector<int32_t> a_data = {1, 2, 3};
+    const std::vector<int32_t> b_data = {1, 0, 3};
+    std::vector<uint8_t> out(3, 0);
+    CompileAndRun("equal", func, {Input(a_data), Input(b_data), Output(out)});
+    Check(out == std::vector<uint8_t>({1, 0, 1}), "equal int32 doc example mismatch");
+
+    // int64 的 trailing-axis 广播。
+    kxc::Var lhs("lhs", kxc::TensorType({2, 3}, "int64"));
+    kxc::Var rhs("rhs", kxc::TensorType({3}, "int64"));
+    kxc::Call broadcast_call(kxc::relay::Op::Get("equal"), {lhs, rhs});
+    kxc::Function broadcast_func({lhs, rhs}, broadcast_call);
+    const std::vector<int64_t> lhs_data = {1, 2, 3, 4, 5, 6};
+    const std::vector<int64_t> rhs_data = {4, 5, 6};
+    std::vector<uint8_t> broadcast_out(6, 1);
+    CompileAndRun("equal_int64_broadcast", broadcast_func,
+                  {Input(lhs_data), Input(rhs_data), Output(broadcast_out)});
+    Check(broadcast_out == std::vector<uint8_t>({0, 0, 0, 1, 1, 1}),
+          "equal int64 broadcast mismatch");
+
+    // float32 数值相等：+0 与 -0 相等；NaN 与任何值（含自身）都不相等。
+    kxc::Var f_lhs("f_lhs", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var f_rhs("f_rhs", kxc::TensorType({3}, "float32"));
+    kxc::Call float_call(kxc::relay::Op::Get("equal"), {f_lhs, f_rhs});
+    kxc::Function float_func({f_lhs, f_rhs}, float_call);
+    const float nan_value = std::numeric_limits<float>::quiet_NaN();
+    const std::vector<float> float_lhs_data = {0.0f, -0.0f, nan_value, 1.0f, 0.0f, 5.0f};
+    const std::vector<float> float_rhs_data = {-0.0f, 0.0f, nan_value};
+    std::vector<uint8_t> float_out(6, 0);
+    CompileAndRun("equal_float32_special_values", float_func,
+                  {Input(float_lhs_data), Input(float_rhs_data), Output(float_out)});
+    // 实际行为：+0 == -0 → true；NaN == NaN → false；数值 == NaN → false。
+    Check(float_out == std::vector<uint8_t>({1, 1, 0, 0, 1, 0}),
+          "equal float32 NaN and signed-zero semantics mismatch");
+
+    // 标量（rank-0）与空张量的真实 buffer 读写。
+    kxc::Var scalar("scalar", kxc::TensorType({}, "float32"));
+    kxc::Var row("row", kxc::TensorType({1, 3}, "float32"));
+    kxc::Call scalar_call(kxc::relay::Op::Get("equal"), {scalar, row});
+    kxc::Function scalar_func({scalar, row}, scalar_call);
+    const std::vector<float> scalar_data = {7.0f};
+    const std::vector<float> row_data = {7.0f, 8.0f, 7.0f};
+    std::vector<uint8_t> scalar_out(3, 0);
+    CompileAndRun("equal_scalar_broadcast", scalar_func,
+                  {Input(scalar_data), Input(row_data), Output(scalar_out)});
+    Check(scalar_out == std::vector<uint8_t>({1, 0, 1}),
+          "equal rank-0 broadcast mismatch");
+
+    kxc::Var empty_a("empty_a", kxc::TensorType({0}, "int32"));
+    kxc::Var empty_b("empty_b", kxc::TensorType({0}, "int32"));
+    kxc::Call empty_call(kxc::relay::Op::Get("equal"), {empty_a, empty_b});
+    kxc::Function empty_func({empty_a, empty_b}, empty_call);
+    std::vector<uint8_t> empty_out;
+    CompileAndRun("equal_empty", empty_func,
+                  {Input(std::vector<int32_t>{}), Input(std::vector<int32_t>{}),
+                   Output(empty_out)});
+    Check(empty_out.empty(), "equal on empty tensors must produce an empty bool buffer");
+}
+
+// 验证 Neg 在 float32 上的 LLVM 数值结果。实现采用既有 TE negative（0 - x）：
+// 非零值与 ±inf 精确取反；-0.0 输入得 +0.0（与严格符号位取反一致），仅 +0.0
+// 输入会得到 +0.0 而非 -0.0（0-x 的 IEEE 语义），边界在算子注释中声明。
+void TestNeg() {
+    kxc::Var x("x", kxc::TensorType({2, 3}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("neg"), {x});
+    kxc::Function func({x}, call);
+
+    const std::vector<float> x_data = {1.5f, -2.25f, 0.25f, -7.0f, 100.0f, -0.75f};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("neg", func, {Input(x_data), Output(out)});
+    ExpectNear(out, {-1.5f, 2.25f, -0.25f, 7.0f, -100.0f, 0.75f}, 0.0f);
+}
+
+// 验证 Sigmoid 在 float32 上的 LLVM 数值结果。选定语义：1/(1+exp(-x))
+// （TE sigmoid_expr 直接调用 exp），与独立 double 参考在测试点对齐到 1e-5。
+void TestSigmoid() {
+    kxc::Var x("x", kxc::TensorType({6}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("sigmoid"), {x});
+    kxc::Function func({x}, call);
+
+    const std::vector<float> x_data = {-3.0f, -0.5f, 0.0f, 0.5f, 3.0f, 8.0f};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("sigmoid", func, {Input(x_data), Output(out)});
+    std::vector<float> expected(6, 0.0f);
+    for (size_t i = 0; i < x_data.size(); ++i) {
+        const double value = 1.0 / (1.0 + std::exp(-static_cast<double>(x_data[i])));
+        expected[i] = static_cast<float>(value);
+    }
+    ExpectNear(out, expected, 1e-5f);
+    // 饱和区行为：大正值单调趋于 1，大负值单调趋于 0，且保持有限。
+    Check(out[5] > 0.999f && out[4] > 0.95f && out[0] < 0.05f,
+          "sigmoid saturation behavior mismatch");
+}
+
+// Full runtime/JIT path: tails, IEEE boundaries, scalar and empty tensors.
+void TestVisionUnaryMath() {
+    for (const std::string name : {"tanh", "erf"}) {
+        const float infinity = std::numeric_limits<float>::infinity();
+        const std::vector<float> input = {-infinity, -100.0f, -3.0f, -0.75f, -0.0f,
+            0.0f, 0.125f, 0.75f, 3.0f, 100.0f, infinity,
+            std::numeric_limits<float>::quiet_NaN(), 1e-30f};
+        kxc::Var x("x", kxc::TensorType({13}, "float32"));
+        std::vector<float> output(input.size());
+        CompileAndRun(name, kxc::Function({x}, kxc::Call(kxc::relay::Op::Get(name), {x})),
+                      {Input(input), Output(output)});
+        for (size_t i = 0; i < input.size(); ++i) {
+            const double expected = name == "tanh" ? std::tanh(double(input[i])) : std::erf(double(input[i]));
+            if (std::isnan(expected)) {
+                Check(std::isnan(output[i]), name + " must propagate NaN");
+            } else {
+                Check(std::isfinite(output[i]) && std::abs(double(output[i]) - expected) <= 1e-7,
+                      name + " libm numeric mismatch");
+                if (input[i] == 0) Check(std::signbit(output[i]) == std::signbit(input[i]),
+                                        name + " must preserve signed zero");
+            }
+        }
+        for (const kxc::Array<int64_t>& shape : {kxc::Array<int64_t>{}, kxc::Array<int64_t>{0, 3}}) {
+            kxc::Var value("value", kxc::TensorType(shape, "float32"));
+            const std::vector<float> data(shape.empty() ? 1 : 0, 0.0f);
+            std::vector<float> result(data.size());
+            CompileAndRun(name, kxc::Function({value}, kxc::Call(kxc::relay::Op::Get(name), {value})),
+                          {Input(data), Output(result)});
+            ExpectNear(result, data, 0);
+        }
+    }
+}
+
+// 验证 Pow 在 float32 上的 LLVM 数值结果（M5 S2 的 backend 调用核实）：
+// TIR "pow" 调用在 codegen 分派处绑定 llvm.pow 声明，libm powf 在 JIT 链接期
+// 由 host 进程符号表解析——下面的真实执行本身就是核实方式：若声明 ABI、
+// 参数数量/类型或 JIT 符号不可解析，verifyFunction 或 LLJIT 链接会在本测试
+// 直接失败，而不是"IR 里出现过 pow 这个名字"。
+// 非零底数整数指数（如 pow(-2,3)=-8）同时证明实现不是 exp(b·log a)：
+// 负底数走 log 会得到 NaN，无法得到 -8。
+void TestPow() {
+    // 合法分数指数 + 尾轴广播：[2,1]^[1,2] → [2,2]。
+    kxc::Var a("a", kxc::TensorType({2, 1}, "float32"));
+    kxc::Var b("b", kxc::TensorType({1, 2}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("pow"), {a, b});
+    kxc::Function func({a, b}, call);
+    const std::vector<float> a_data = {2.0f, 4.0f};
+    const std::vector<float> b_data = {2.0f, 0.5f};
+    std::vector<float> out(4, 0.0f);
+    CompileAndRun("pow", func, {Input(a_data), Input(b_data), Output(out)});
+    ExpectNear(out, {4.0f, 1.4142135f, 16.0f, 2.0f}, 1e-5f);
+
+    // 零指数：任何有限底数（含 0^0）按 C99 pow 声明得 1。
+    kxc::Var base("base", kxc::TensorType({3}, "float32"));
+    kxc::Var zero_exp("zero_exp", kxc::TensorType({3}, "float32"));
+    kxc::Call zero_call(kxc::relay::Op::Get("pow"), {base, zero_exp});
+    kxc::Function zero_func({base, zero_exp}, zero_call);
+    const std::vector<float> base_data = {0.0f, 5.0f, -2.0f};
+    const std::vector<float> zeros(3, 0.0f);
+    std::vector<float> zero_out(3, 0.0f);
+    CompileAndRun("pow_zero_exponent", zero_func,
+                  {Input(base_data), Input(zeros), Output(zero_out)});
+    ExpectNear(zero_out, {1.0f, 1.0f, 1.0f}, 0.0f);
+
+    // 负底数的整数指数：pow(-2,3)=-8、pow(-2,2)=4（按声明精确）。
+    kxc::Var neg_base("neg_base", kxc::TensorType({2}, "float32"));
+    kxc::Var int_exp("int_exp", kxc::TensorType({2}, "float32"));
+    kxc::Call int_call(kxc::relay::Op::Get("pow"), {neg_base, int_exp});
+    kxc::Function int_func({neg_base, int_exp}, int_call);
+    const std::vector<float> neg_base_data = {-2.0f, -2.0f};
+    const std::vector<float> int_exp_data = {3.0f, 2.0f};
+    std::vector<float> int_out(2, 0.0f);
+    CompileAndRun("pow_negative_base_integer_exponent", int_func,
+                  {Input(neg_base_data), Input(int_exp_data), Output(int_out)});
+    ExpectNear(int_out, {-8.0f, 4.0f}, 0.0f);
+
+    // 按声明处理的非有限结果：pow(+0,-1)=+inf；pow(-2,0.5)=NaN（定义域错误）。
+    kxc::Var nf_base("nf_base", kxc::TensorType({2}, "float32"));
+    kxc::Var nf_exp("nf_exp", kxc::TensorType({2}, "float32"));
+    kxc::Call nf_call(kxc::relay::Op::Get("pow"), {nf_base, nf_exp});
+    kxc::Function nf_func({nf_base, nf_exp}, nf_call);
+    const std::vector<float> nf_base_data = {0.0f, -2.0f};
+    const std::vector<float> nf_exp_data = {-1.0f, 0.5f};
+    std::vector<float> nf_out(2, 0.0f);
+    CompileAndRun("pow_nonfinite_by_declaration", nf_func,
+                  {Input(nf_base_data), Input(nf_exp_data), Output(nf_out)});
+    Check(std::isinf(nf_out[0]) && nf_out[0] > 0.0f,
+          "pow(+0,-1) must be +inf per the pow declaration");
+    Check(std::isnan(nf_out[1]),
+          "pow(-2,0.5) must be NaN per the pow declaration domain rule");
+}
+
+// 验证 Expand 在 LLVM 上的真实元素复制结果：dim-1 扩展、rank 提升（前导轴
+// 隐式 1）和原样维度；numpy broadcast_to 语义。
+void TestExpand() {
+    // [2,1] → [2,3]：axis-1 从 1 扩展到 3。
+    kxc::Var data("data", kxc::TensorType({2, 1}, "float32"));
+    kxc::Call call(kxc::relay::Op::Get("expand"), {data},
+                   kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function func({data}, call);
+    const std::vector<float> data_values = {10.0f, 20.0f};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("expand", func, {Input(data_values), Output(out)});
+    ExpectNear(out, {10, 10, 10, 20, 20, 20}, 0.0f);
+
+    // [3] → [2,3]：前导轴隐式 1。
+    kxc::Var vector("vector", kxc::TensorType({3}, "float32"));
+    kxc::Call rank_call(kxc::relay::Op::Get("expand"), {vector},
+                        kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function rank_func({vector}, rank_call);
+    const std::vector<float> vector_values = {1, 2, 3};
+    std::vector<float> rank_out(6, 0.0f);
+    CompileAndRun("expand_rank_raise", rank_func,
+                  {Input(vector_values), Output(rank_out)});
+    ExpectNear(rank_out, {1, 2, 3, 1, 2, 3}, 0.0f);
+
+    // 相等维度保持：[2,3] → [2,3]（恒等扩展）。
+    kxc::Var same("same", kxc::TensorType({2, 3}, "float32"));
+    kxc::Call identity_call(kxc::relay::Op::Get("expand"), {same},
+                            kxc::relay::ExpandAttrs::Create({2, 3}));
+    kxc::Function identity_func({same}, identity_call);
+    const std::vector<float> same_values = {1, 2, 3, 4, 5, 6};
+    std::vector<float> identity_out(6, 0.0f);
+    CompileAndRun("expand_identity", identity_func,
+                  {Input(same_values), Output(identity_out)});
+    ExpectNear(identity_out, {1, 2, 3, 4, 5, 6}, 0.0f);
+}
+
+// 验证 Equal 的 bool 结果直接作为 Where 条件的真实 buffer 消费链。
+void TestEqualWhereComposition() {
+    kxc::Var a("a", kxc::TensorType({2, 3}, "float32"));
+    kxc::Var b("b", kxc::TensorType({3}, "float32"));
+    kxc::Call equal_call(kxc::relay::Op::Get("equal"), {a, b});
+    kxc::Var x("x", kxc::TensorType({1, 3}, "float32"));
+    kxc::Var y("y", kxc::TensorType({}, "float32"));
+    kxc::Call where_call(kxc::relay::Op::Get("where"), {equal_call, x, y});
+    kxc::Function func({a, b, x, y}, where_call);
+
+    const std::vector<float> a_data = {1, 2, 3, 4, 5, 6};
+    const std::vector<float> b_data = {1, 0, 3};
+    const std::vector<float> x_data = {10, 20, 30};
+    const std::vector<float> y_data = {0};
+    std::vector<float> out(6, 0.0f);
+    CompileAndRun("equal_where_composition", func,
+                  {Input(a_data), Input(b_data), Input(x_data), Input(y_data),
+                   Output(out)});
+    ExpectNear(out, {10, 0, 30, 0, 0, 0});
 }
 
 // 验证 LayerNorm 的常量行、微小方差行和仿射参数语义。
@@ -949,6 +1270,13 @@ int main() {
         {"softmax", TestSoftmax},
         {"gather", TestGather},
         {"where", TestWhere},
+        {"equal", TestEqual},
+        {"neg", TestNeg},
+        {"sigmoid", TestSigmoid},
+        {"tanh_erf", TestVisionUnaryMath},
+        {"pow", TestPow},
+        {"expand", TestExpand},
+        {"equal_where_composition", TestEqualWhereComposition},
         {"nn_layer_norm", TestLayerNorm},
         {"cast", TestCast},
         {"model_add_chain", TestModelAddChain},

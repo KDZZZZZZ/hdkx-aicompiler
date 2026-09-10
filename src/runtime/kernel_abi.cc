@@ -100,7 +100,7 @@ const char* RoleName(KernelArgRole role) {
     return "unknown";
 }
 
-// 返回角色的分段序号，签名只能从 input 单向推进到 constant 和 output。
+// 返回角色的分段序号，签名只能按 input/extent/constant/output 推进。
 int RoleOrder(KernelArgRole role) {
     switch (role) {
         case KernelArgRole::kInput:
@@ -219,7 +219,7 @@ void KernelArgSpec::Validate() const {
          node->shape_[0] != 1 || node->mutable_data)) {
         throw std::invalid_argument("Runtime extent KernelArgSpec must be immutable uint64[1]");
     }
-    // 第一阶段 ABI 不支持 in-place input；输出是唯一允许内核写入的角色。
+    // 当前 ABI 不支持 in-place input；输出是唯一允许内核写入的角色。
     if (node->role == KernelArgRole::kOutput && !node->mutable_data) {
         throw std::invalid_argument("Output KernelArgSpec must be mutable");
     }
@@ -232,7 +232,8 @@ void KernelArgSpec::Validate() const {
 
 std::string KernelArgSpec::CanonicalBytes() const {
     const auto* node = operator->();
-    support::CanonicalBytesEncoder bytes("kxc.kernel-arg-spec.v2");
+    support::CanonicalBytesEncoder bytes(
+        "kxc.kernel-arg-spec.v" + std::to_string(kKernelAbiVersion));
     bytes.Field("name", std::string(node->name));
     bytes.IntegerField("role", static_cast<int>(node->role));
     bytes.IntegerField("dtype_code", static_cast<int>(node->dtype.code));
@@ -365,7 +366,8 @@ bool KernelSignature::has_dynamic_input_shape() const {
 
 std::string KernelSignature::CanonicalBytes() const {
     const auto* node = operator->();
-    support::CanonicalBytesEncoder bytes("kxc.kernel-signature.v2");
+    support::CanonicalBytesEncoder bytes(
+        "kxc.kernel-signature.v" + std::to_string(kKernelAbiVersion));
     bytes.Field("symbol", std::string(node->symbol));
     bytes.IntegerField("argument_count", node->arguments_.size());
     for (const auto& argument : node->arguments_) {

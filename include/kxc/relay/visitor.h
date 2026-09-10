@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include "kxc/pass/context.h"
 #include "kxc/relay/op.h"
 #include "kxc/relay/relay.h"
@@ -74,6 +76,19 @@ protected:
 
 private:
     Var MutateToVar(const Var& var);
+
+    // Relay 表达式是 DAG：Transformer 的每个残差都让同一子表达式被多个消费者
+    // 引用。没有记忆时，共享节点每被引用一次就重写一遍，重写代价随共享点数量
+    // 指数增长，且输出会把 DAG 展开成树，把膨胀继续传给下游阶段。
+    //
+    // 因此按节点指针记忆内部节点的重写结果：每个子表达式只重写一次，输出保留
+    // 原有共享。叶子（Var/Constant/Op）不记忆——它们重写代价是 O(1)，而 Var
+    // 还可能在不同作用域下被重命名，记忆会跨作用域串味。
+    //
+    // 记忆只在一次顶层 Mutate 内有效：depth_ 回到 0 时清空，避免节点释放后
+    // 指针复用导致命中陈旧条目。
+    std::unordered_map<const Object*, Expr> memo_;
+    int depth_{0};
 };
 
 namespace relay {

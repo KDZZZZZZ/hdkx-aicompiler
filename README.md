@@ -39,8 +39,22 @@ Relay Function + CompileConfig
 ## 文档
 
 - [文档索引](docs/README.md)
+- [项目目标（唯一目标权威）](docs/PROJECT_GOAL.md)
+- [模块实施总览与 MiniMind-L1 并行计划](docs/implementation/README.md)
 - [架构总览](docs/ARCHITECTURE.md)
-- [TE Program IR 设计提案（尚未实现）](docs/TE_PROGRAM_IR.md)
+- [TE Program 设计与实现边界](docs/TE_PROGRAM_IR.md)；[M8 技术报告](docs/implementation/M8_TE_PROGRAM_REPORT.md)
+- [请求批处理与 KV 槽位技术报告](docs/implementation/M2_REQUEST_BATCHING_REPORT.md)
+- [全 mask 注意力技术报告](docs/implementation/M5_MASKED_SOFTMAX_REPORT.md)
+- [复制完成观测与诊断技术报告](docs/implementation/M1_COPY_EVENT_REPORT.md)
+- [CUDA 模型关联与时钟对齐技术报告](docs/implementation/M1_CUDA_CORRELATION_REPORT.md)
+- [CUDA 复制关联与异步保活技术报告](docs/implementation/M1_CUDA_COPY_REPORT.md)
+- [MiniMind-V 完整视觉链技术报告](docs/implementation/M9_MINIMIND_V_VISION_REPORT.md)
+- [MiniMind-V 图文联合推理技术报告](docs/implementation/M9_MINIMIND_V_JOINT_REPORT.md)
+- [GPU 驱动一致性修复报告](docs/implementation/GPU_DRIVER_REPAIR_REPORT.md)
+- [Windows GPU 与 CUPTI 实测报告](docs/implementation/GPU_WINDOWS_VALIDATION_REPORT.md)
+- [CUDA 多维输出与线程内归约报告](docs/implementation/GPU_OWNED_REDUCTION_REPORT.md)
+- [CUDA 多阶段归一化报告](docs/implementation/GPU_MULTISTAGE_REDUCTION_REPORT.md)
+- [CUDA 同步内存完成语义报告](docs/implementation/GPU_SYNC_MEMORY_REPORT.md)
 - [构建说明](docs/BUILDING.md)
 - [编译器扩展契约](docs/COMPILER_EXTENSION_CONTRACT.md)
 - [Relay 算子支持矩阵](docs/OP_SUPPORT_MATRIX.md)
@@ -51,3 +65,6 @@ Relay Function + CompileConfig
 
 机器可读的算子与 Pass 元数据位于
 `contracts/relay_op_contract.json` 与 `contracts/pass_contract.json`。
+
+- [CUDA Gather/Pow 技术报告](docs/implementation/GPU_GATHER_POW_REPORT.md)
+- [完整 MiniMind 静态 CUDA Prefill 技术报告](docs/implementation/GPU_MINIMIND_PREFILL_REPORT.md)

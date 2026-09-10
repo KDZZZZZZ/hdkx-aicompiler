@@ -96,6 +96,9 @@ public:
         SetDevice(device);
         CheckCUDA(cudaMemset(static_cast<unsigned char*>(ptr) + offset, 0, nbytes),
                   "cudaMemset");
+        // cudaMemset is asynchronous even without the Async suffix. ZeroData
+        // promises completion before callers consume memory on another stream.
+        CheckCUDA(cudaStreamSynchronize(nullptr), "cudaStreamSynchronize(zero)");
     }
 
     // 按 H2D、D2H 或同设备 D2D 方向执行同步复制。
@@ -107,6 +110,10 @@ public:
         const auto* src = static_cast<const unsigned char*>(from_ptr) + from_offset;
         auto* dst = static_cast<unsigned char*>(to_ptr) + to_offset;
         CheckCUDA(cudaMemcpy(dst, src, nbytes, CopyKind(from, to)), "cudaMemcpy");
+        // Pageable H2D may return after staging and D2D has no host-side wait.
+        // Complete the default-stream copy before fulfilling the sync contract;
+        // nonblocking consumer streams do not inherit legacy-stream ordering.
+        CheckCUDA(cudaStreamSynchronize(nullptr), "cudaStreamSynchronize(copy)");
     }
 
     // 将复制提交到给定 CUDA stream；空句柄表示 CUDA 默认流。

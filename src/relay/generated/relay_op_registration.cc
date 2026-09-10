@@ -5,6 +5,22 @@ namespace kxc::relay {
 
 Type AddInferType(const Attrs&, const Array<Type>&);
 te::Tensor AddCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type EqualInferType(const Attrs&, const Array<Type>&);
+te::Tensor EqualCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type ErfInferType(const Attrs&, const Array<Type>&);
+te::Tensor ErfCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type MaskedSoftmaxInferType(const Attrs&, const Array<Type>&);
+te::Tensor MaskedSoftmaxCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type NegInferType(const Attrs&, const Array<Type>&);
+te::Tensor NegCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type PowInferType(const Attrs&, const Array<Type>&);
+te::Tensor PowCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type ShapeOfInferType(const Attrs&, const Array<Type>&);
+te::Tensor ShapeOfCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type SigmoidInferType(const Attrs&, const Array<Type>&);
+te::Tensor SigmoidCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type TanhInferType(const Attrs&, const Array<Type>&);
+te::Tensor TanhCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 
 KXC_REGISTER_OP(add)
     .describe("Element-wise addition.")
@@ -13,6 +29,66 @@ KXC_REGISTER_OP(add)
     .add_argument("rhs", "Tensor", "The right hand side input tensor.")
     .set_attr<FInferType>("FInferType", AddInferType)
     .set_attr<FRelayToTE>("FRelayToTE", AddCompute);
+
+KXC_REGISTER_OP(equal)
+    .describe("Element-wise equality comparison with broadcast.")
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The left hand side input tensor.")
+    .add_argument("rhs", "Tensor", "The right hand side input tensor.")
+    .set_attr<FInferType>("FInferType", EqualInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", EqualCompute);
+
+KXC_REGISTER_OP(erf)
+    .describe("Element-wise erf on float32; CPU LLVM uses the C math library.")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", ErfInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", ErfCompute);
+
+KXC_REGISTER_OP(masked_softmax)
+    .describe("Normalizes finite floating logits over True bool-mask entries; masked entries and all-False rows are exactly zero. The trailing-axis mask may broadcast to, but never expand, the data shape.")
+    .set_num_inputs(2)
+    .add_argument("data", "Tensor", "Floating-point logits.")
+    .add_argument("mask", "Tensor", "True participates in normalization; False contributes zero.")
+    .set_attr<std::string>("TAttrs", "SoftmaxAttrs")
+    .set_attr<FInferType>("FInferType", MaskedSoftmaxInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", MaskedSoftmaxCompute);
+
+KXC_REGISTER_OP(neg)
+    .describe("Element-wise negation on float32.")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", NegInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", NegCompute);
+
+KXC_REGISTER_OP(pow)
+    .describe("Element-wise power with broadcast on float32 (llvm.pow dispatch).")
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The base tensor.")
+    .add_argument("rhs", "Tensor", "The exponent tensor.")
+    .set_attr<FInferType>("FInferType", PowInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", PowCompute);
+
+KXC_REGISTER_OP(shape_of)
+    .describe("Materialize the input tensor dimensions as an int64 rank-1 shape value.")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor whose fixed rank becomes the vector length.")
+    .set_attr<FInferType>("FInferType", ShapeOfInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", ShapeOfCompute);
+
+KXC_REGISTER_OP(sigmoid)
+    .describe("Element-wise logistic sigmoid 1/(1+exp(-x)) on float32.")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", SigmoidInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", SigmoidCompute);
+
+KXC_REGISTER_OP(tanh)
+    .describe("Element-wise tanh on float32; CPU LLVM uses the C math library.")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<FInferType>("FInferType", TanhInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", TanhCompute);
 
 }  // namespace kxc::relay
 

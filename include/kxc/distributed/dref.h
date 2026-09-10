@@ -11,6 +11,7 @@ namespace disco {
 
 class DRefNode : public Object {
 public:
+    ~DRefNode() override;
     int reg_id{-1};
     ObjectRef session;
 

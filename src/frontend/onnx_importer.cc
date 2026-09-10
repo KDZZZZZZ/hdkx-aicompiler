@@ -4,6 +4,7 @@
 
 #include "kxc/frontend/onnx_importer.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -409,8 +410,54 @@ std::string ReadTextFile(const std::string& path) {
 }
 
 // 按算子名称把 JSON 属性转换为对应的强类型 Relay Attrs 对象。
-ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
+// node_name 仅用于诊断：手写非法 spec 的报错必须能定位到具体节点。
+ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs,
+                    const std::string& node_name, bool shape_source = false) {
     RequireKind(attrs, Json::Object, "attrs for " + op_name);
+    if (op_name == "shape_of" ||
+        (shape_source && (op_name == "reshape_dynamic" || op_name == "expand_dynamic" ||
+                          (op_name == "slice" && attrs.o.empty())))) {
+        if (!attrs.o.empty()) {
+            throw std::runtime_error("Shape source controls must arrive without attrs: " + node_name);
+        }
+        return ObjectRef();
+    }
+    if (shape_source && op_name == "constant_of_shape") {
+        if (attrs.o.size() != 2 || !OptionalField(attrs, "dtype_code")) {
+            throw std::runtime_error("Shape source ConstantOfShape requires dtype and one fill payload: " + node_name);
+        }
+        const int dtype = ReadInt(Field(attrs, "dtype_code", node_name), node_name + ".dtype_code");
+        if (dtype == 0) {
+            const int64_t bits = ReadInt64(Field(attrs, "value_bits", node_name), node_name + ".value_bits");
+            if (bits < 0 || bits > std::numeric_limits<uint32_t>::max()) {
+                throw std::runtime_error("Shape source float32 fill bits out of range: " + node_name);
+            }
+            const uint32_t raw = static_cast<uint32_t>(bits);
+            float fill;
+            std::memcpy(&fill, &raw, sizeof(fill));
+            if (std::isnan(fill)) throw std::runtime_error("Shape source fill rejects NaN: " + node_name);
+            return ObjectRef(relay::ConstantOfShapeAttrs::Create({}, 0, fill));
+        }
+        if (dtype != 2) throw std::runtime_error("Shape source fill requires float32 or int64: " + node_name);
+        const int64_t fill = ReadInt64(Field(attrs, "value", node_name), node_name + ".value");
+        if (fill < -(int64_t{1} << 53) || fill > (int64_t{1} << 53)) {
+            throw std::runtime_error("Shape source fill exceeds exact double integer range: " + node_name);
+        }
+        return ObjectRef(relay::ConstantOfShapeAttrs::Create({}, dtype, static_cast<double>(fill)));
+    }
+    if (op_name == "trilu") {
+        if (attrs.o.size() != 2) throw std::runtime_error("Trilu requires upper/k only: " + node_name);
+        return ObjectRef(relay::TriluAttrs::Create(
+            ReadInt(Field(attrs, "upper", node_name), node_name + ".upper"),
+            ReadInt64(Field(attrs, "k", node_name), node_name + ".k")));
+    }
+    if (shape_source && op_name == "unsqueeze") {
+        if (attrs.o.size() != 1 || !OptionalField(attrs, "axes")) {
+            throw std::runtime_error("Shape source Unsqueeze requires exactly axes: " + node_name);
+        }
+        return ObjectRef(relay::UnsqueezeAttrs::Create(
+            ToArray(ReadInt64Vector(Field(attrs, "axes", node_name), node_name + ".axes"))));
+    }
     if (op_name == "nn_conv2d") {
         return ObjectRef(relay::Conv2DAttrs::Create(
             ReadInt64Vector(Field(attrs, "strides", "conv attrs"), "conv attrs.strides"),
@@ -442,8 +489,111 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
         }
         return ObjectRef();
     }
+    if (op_name == "equal") {
+        // ONNX Equal(opset 17) 是 fieldless 算子：两输入一输出、无属性。
+        if (!attrs.o.empty()) {
+            throw std::runtime_error("Node '" + node_name +
+                                     "' (equal) import attrs must be empty");
+        }
+        return ObjectRef();
+    }
     if (op_name == "add" || op_name == "matmul") {
         return ObjectRef();
+    }
+    if (op_name == "mul" || op_name == "subtract" || op_name == "divide" ||
+        op_name == "sqrt") {
+        if (!attrs.o.empty()) {
+            throw std::runtime_error("Node '" + node_name + "' (" + op_name +
+                                     ") import attrs must be empty");
+        }
+        return ObjectRef();
+    }
+    if (op_name == "neg" || op_name == "sigmoid" || op_name == "tanh" || op_name == "erf" || op_name == "pow") {
+        // ONNX Neg/Sigmoid/Pow(opset 13+) 是 fieldless 算子：无属性。
+        if (!attrs.o.empty()) {
+            throw std::runtime_error("Node '" + node_name + "' (" + op_name +
+                                     ") import attrs must be empty");
+        }
+        return ObjectRef();
+    }
+    if (op_name == "cast") {
+        const std::string ctx = "cast attrs";
+        if (attrs.o.size() != 1 || !OptionalField(attrs, "to")) {
+            throw std::runtime_error("Cast import attrs must contain exactly 'to': " +
+                                     node_name);
+        }
+        const int to = ReadInt(Field(attrs, "to", ctx), ctx + ".to");
+        if (to < 0 || to > 6) {
+            throw std::runtime_error("Cast import 'to' dtype code " + std::to_string(to) +
+                                     " is outside the supported Relay codes 0..6: " +
+                                     node_name);
+        }
+        return ObjectRef(relay::CastAttrs::Create(to));
+    }
+    if (op_name == "reduce_mean") {
+        const std::string ctx = "reduce_mean attrs";
+        if (attrs.o.size() != 2 || !OptionalField(attrs, "axes") ||
+            !OptionalField(attrs, "keepdims")) {
+            throw std::runtime_error(
+                "ReduceMean import attrs must contain exactly axes and keepdims: " +
+                node_name);
+        }
+        const int64_t keepdims =
+            ReadInt64(Field(attrs, "keepdims", ctx), ctx + ".keepdims");
+        if (keepdims != 0 && keepdims != 1) {
+            throw std::runtime_error(
+                "ReduceMean import keepdims must be 0 or 1: " + node_name);
+        }
+        return ObjectRef(relay::ReduceMeanAttrs::Create(
+            ToArray(ReadInt64Vector(Field(attrs, "axes", ctx), ctx + ".axes")),
+            keepdims));
+    }
+    if (op_name == "reshape") {
+        const std::string ctx = "reshape attrs";
+        if (attrs.o.size() != 2 || !OptionalField(attrs, "newshape") ||
+            !OptionalField(attrs, "allowzero")) {
+            throw std::runtime_error(
+                "Reshape import attrs must contain exactly newshape and allowzero: " +
+                node_name);
+        }
+        const std::vector<int64_t> newshape =
+            ReadInt64Vector(Field(attrs, "newshape", ctx), ctx + ".newshape");
+        for (size_t axis = 0; axis < newshape.size(); ++axis) {
+            if (newshape[axis] < 0) {
+                throw std::runtime_error(
+                    "Reshape import newshape must be the fully resolved target "
+                    "shape; negative dimensions are rejected: " +
+                    node_name);
+            }
+        }
+        const int64_t allowzero =
+            ReadInt64(Field(attrs, "allowzero", ctx), ctx + ".allowzero");
+        if (allowzero != 0) {
+            throw std::runtime_error(
+                "Reshape import requires allowzero=0 in the static S1 subset: " +
+                node_name);
+        }
+        return ObjectRef(relay::ReshapeAttrs::Create(ToArray(newshape), 0));
+    }
+    if (op_name == "expand") {
+        // Expand 的目标 shape 是导入期已解析的常量控制输入，canonical attrs
+        // 携带完整的非负目标形状；手写 spec 不允许省略或注入负维度。
+        const std::string ctx = "expand attrs";
+        if (attrs.o.size() != 1 || !OptionalField(attrs, "target_shape")) {
+            throw std::runtime_error(
+                "Expand import attrs must contain exactly target_shape: " +
+                node_name);
+        }
+        const std::vector<int64_t> target_shape =
+            ReadInt64Vector(Field(attrs, "target_shape", ctx), ctx + ".target_shape");
+        for (size_t axis = 0; axis < target_shape.size(); ++axis) {
+            if (target_shape[axis] < 0) {
+                throw std::runtime_error(
+                    "Expand import target_shape must be non-negative static "
+                    "dimensions: " + node_name);
+            }
+        }
+        return ObjectRef(relay::ExpandAttrs::Create(ToArray(target_shape)));
     }
     if (op_name == "softmax") {
         return ObjectRef(relay::SoftmaxAttrs::Create(
@@ -495,6 +645,17 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
         return ObjectRef(relay::ConcatenateAttrs::Create(
             ReadInt(Field(attrs, "axis", ctx), ctx + ".axis")));
     }
+    if (op_name == "split") {
+        const std::string ctx = "split attrs";
+        if (attrs.o.size() != 2 || !OptionalField(attrs, "axis") ||
+            !OptionalField(attrs, "sections")) {
+            throw std::runtime_error(
+                "Split import attrs must contain exactly axis and sections: " + node_name);
+        }
+        return ObjectRef(relay::SplitAttrs::Create(
+            ReadInt(Field(attrs, "axis", ctx), ctx + ".axis"),
+            ToArray(ReadInt64Vector(Field(attrs, "sections", ctx), ctx + ".sections"))));
+    }
     if (op_name == "nn_global_avg_pool2d") {
         return ObjectRef(relay::GlobalAvgPool2DAttrs::Create());
     }
@@ -512,21 +673,243 @@ ObjectRef MakeAttrs(const std::string& op_name, const Json& attrs) {
     throw std::runtime_error("Unsupported Relay op in ONNX import spec: " + op_name);
 }
 
-void ValidateGatherConstantIndices(const Array<Expr>& args,
-                                   const ObjectRef& attrs,
-                                   const Array<Var>& function_params,
-                                   const std::string& node_name) {
+// 推导节点实参的静态类型；导入期先于最终 InferType 消费。
+void InferArgTypes(const Array<Expr>& args, const Array<Var>& function_params) {
+    relay::InferTypePass(Function(function_params, Tuple(args)));
+}
+
+// S1 算术/开方节点只接收 float32：手写 spec 不能依赖 Python 已校验的假设。
+void ValidateFloat32Inputs(const std::string& op_name, const Array<Expr>& args,
+                           const Array<Var>& function_params, const std::string& node_name) {
+    InferArgTypes(args, function_params);
+    for (size_t i = 0; i < args.size(); ++i) {
+        const auto* type = args[i].checked_type().As<TensorTypeNode>();
+        if (!type || type->dtype != "float32") {
+            throw std::runtime_error(
+                op_name + " import requires float32 inputs in the static S1 subset: " +
+                node_name);
+        }
+    }
+}
+
+// M4/M5 Neg/Sigmoid/Pow 只开放 float32：手写 spec 不能依赖 Python 已校验的假设，
+// dtype 越界必须携带节点名失败。
+void ValidateFloat32MathInputs(const std::string& op_name, const Array<Expr>& args,
+                               const Array<Var>& function_params,
+                               const std::string& node_name) {
+    InferArgTypes(args, function_params);
+    for (size_t i = 0; i < args.size(); ++i) {
+        const auto* type = args[i].checked_type().As<TensorTypeNode>();
+        if (!type || type->dtype != "float32") {
+            throw std::runtime_error(
+                op_name + " import requires float32 input(s) in the M4/M5 static subset: " +
+                node_name);
+        }
+    }
+}
+
+// M5 S2 Pow 只开放同 dtype float32，且广播必须在 reifier 处以节点名失败：
+// 函数级 InferType 的广播错误不携带节点名，手写 spec 的诊断要求能定位节点。
+void ValidatePowSubset(const Array<Expr>& args, const Array<Var>& function_params,
+                       const std::string& node_name) {
     if (args.size() != 2) {
+        throw std::runtime_error("pow import expects exactly two inputs: " + node_name);
+    }
+    InferArgTypes(args, function_params);
+    const auto* lhs = args[0].checked_type().As<TensorTypeNode>();
+    const auto* rhs = args[1].checked_type().As<TensorTypeNode>();
+    if (!lhs || !rhs || lhs->dtype != "float32" || rhs->dtype != "float32") {
         throw std::runtime_error(
-            "Gather import node must contain exactly data and constant indices: " +
+            "pow import requires same-dtype float32 input(s) in the M4/M5 static "
+            "subset: " + node_name);
+    }
+    const auto format_shape = [](const Array<int64_t>& shape) {
+        std::string text = "[";
+        for (size_t axis = 0; axis < shape.size(); ++axis) {
+            if (axis != 0) text += ", ";
+            text += std::to_string(shape[axis]);
+        }
+        return text + "]";
+    };
+    size_t lhs_axis = lhs->shape.size();
+    size_t rhs_axis = rhs->shape.size();
+    while (lhs_axis > 0 && rhs_axis > 0) {
+        --lhs_axis;
+        --rhs_axis;
+        const int64_t left = lhs->shape[lhs_axis];
+        const int64_t right = rhs->shape[rhs_axis];
+        if (left != right && left != 1 && right != 1) {
+            throw std::runtime_error(
+                "pow import cannot broadcast shapes " + format_shape(lhs->shape) +
+                " and " + format_shape(rhs->shape) + ": " + node_name);
+        }
+    }
+}
+
+// Expand 的 reifier 复校验：不信任 Python。data 维度必须静态非负，且每个
+// 对齐后的 data 维度是 1 或等于目标维度（numpy broadcast_to 规则）。
+void ValidateExpandSubset(const Array<Expr>& args, const ObjectRef& attrs,
+                          const Array<Var>& function_params,
+                          const std::string& node_name) {
+    if (args.size() != 1) {
+        throw std::runtime_error("expand import expects exactly one data input: " +
+                                 node_name);
+    }
+    const auto* expand_attrs = attrs.As<relay::ExpandAttrsNode>();
+    if (!expand_attrs) {
+        throw std::runtime_error("Expand import requires ExpandAttrs: " + node_name);
+    }
+    InferArgTypes(args, function_params);
+    const auto* data = args[0].checked_type().As<TensorTypeNode>();
+    if (!data) {
+        throw std::runtime_error("Expand import expects a TensorType data input: " +
+                                 node_name);
+    }
+    const size_t target_rank = expand_attrs->target_shape.size();
+    if (data->shape.size() > target_rank) {
+        throw std::runtime_error(
+            "Expand import data rank must not exceed the target rank: " + node_name);
+    }
+    const size_t offset = target_rank - data->shape.size();
+    for (size_t axis = 0; axis < data->shape.size(); ++axis) {
+        const int64_t dim = data->shape[axis];
+        if (dim < 0) {
+            throw std::runtime_error(
+                "Expand import requires non-negative static data dimensions: " +
+                node_name);
+        }
+        const int64_t target = expand_attrs->target_shape[axis + offset];
+        if (dim != target && dim != 1) {
+            throw std::runtime_error(
+                "Expand import data dimension " + std::to_string(dim) + " at axis " +
+                std::to_string(axis) + " must be 1 or equal to the target dimension " +
+                std::to_string(target) + ": " + node_name);
+        }
+    }
+}
+
+// S1 Equal 接线只开放同 dtype 的 int32/int64/float32（与 M5 EqualInferType 合同
+// 一致）：手写 spec 不能依赖 Python 已校验的假设。dtype 子集、dtype 一致性和
+// trailing 广播都在此用携带节点名的诊断复校验；输出 bool 由 InferType 与图
+// 输出声明合同共同钉住（Y 声明为非 bool 会在输出契约检查中失败）。
+void ValidateEqualSubset(const Array<Expr>& args, const Array<Var>& function_params,
+                         const std::string& node_name) {
+    if (args.size() != 2) {
+        throw std::runtime_error("equal import expects exactly two inputs: " +
+                                 node_name);
+    }
+    InferArgTypes(args, function_params);
+    const auto* lhs = args[0].checked_type().As<TensorTypeNode>();
+    const auto* rhs = args[1].checked_type().As<TensorTypeNode>();
+    const auto is_supported_dtype = [](const std::string& dtype) {
+        return dtype == "int32" || dtype == "int64" || dtype == "float32";
+    };
+    if (!lhs || !rhs || !is_supported_dtype(lhs->dtype) || !is_supported_dtype(rhs->dtype)) {
+        throw std::runtime_error(
+            "equal import supports same-dtype int32, int64, or float32 inputs: " +
             node_name);
     }
-    const auto* constant = args[1].As<ConstantNode>();
-    const auto* gather_attrs = attrs.As<relay::GatherAttrsNode>();
-    if (!constant || !constant->data.defined() || !gather_attrs) {
+    if (lhs->dtype != rhs->dtype) {
         throw std::runtime_error(
-            "Gather import indices must be a constant initializer payload: " +
+            "equal import requires matching input dtypes: " + node_name);
+    }
+    const auto format_shape = [](const Array<int64_t>& shape) {
+        std::string text = "[";
+        for (size_t axis = 0; axis < shape.size(); ++axis) {
+            if (axis != 0) text += ", ";
+            text += std::to_string(shape[axis]);
+        }
+        return text + "]";
+    };
+    size_t lhs_axis = lhs->shape.size();
+    size_t rhs_axis = rhs->shape.size();
+    while (lhs_axis > 0 && rhs_axis > 0) {
+        --lhs_axis;
+        --rhs_axis;
+        const int64_t left = lhs->shape[lhs_axis];
+        const int64_t right = rhs->shape[rhs_axis];
+        if (left != right && left != 1 && right != 1) {
+            throw std::runtime_error(
+                "equal import cannot broadcast shapes " + format_shape(lhs->shape) +
+                " and " + format_shape(rhs->shape) + ": " + node_name);
+        }
+    }
+}
+
+// S1 Cast 只开放 int32/int64 到 float32；不信任 Python 已校验的手写 spec。
+void ValidateCastSubset(const Array<Expr>& args, const ObjectRef& attrs,
+                        const Array<Var>& function_params, const std::string& node_name) {
+    const auto* cast_attrs = attrs.As<relay::CastAttrsNode>();
+    if (!cast_attrs || cast_attrs->to != 0) {
+        throw std::runtime_error(
+            "Cast import supports only to=float32 (Relay code 0) in the static S1 "
+            "subset: " +
             node_name);
+    }
+    InferArgTypes(args, function_params);
+    const auto* type = args[0].checked_type().As<TensorTypeNode>();
+    // float32 源是恒等转换：MiniMind 的 RMSNorm 用 `.float()` 提升精度，在已是
+    // float32 的图上导出成恒等 Cast。Relay cast 对 dtype 不设限，同 dtype 经
+    // topi 落成一次拷贝。
+    if (!type || (type->dtype != "int32" && type->dtype != "int64" &&
+                  type->dtype != "float32")) {
+        throw std::runtime_error(
+            "Cast import supports only int32/int64/float32 sources in the static S1 "
+            "subset: " +
+            node_name);
+    }
+}
+
+// S1 ReduceMean 只接收 float32，且不得在零尺寸轴上归约（结果未定义）。
+void ValidateReduceMeanSubset(const Array<Expr>& args, const ObjectRef& attrs,
+                              const Array<Var>& function_params,
+                              const std::string& node_name) {
+    InferArgTypes(args, function_params);
+    const auto* type = args[0].checked_type().As<TensorTypeNode>();
+    if (!type || type->dtype != "float32") {
+        throw std::runtime_error(
+            "ReduceMean import requires a float32 input in the static S1 subset: " +
+            node_name);
+    }
+    const auto* reduce_attrs = attrs.As<relay::ReduceMeanAttrsNode>();
+    if (!reduce_attrs) {
+        throw std::runtime_error("ReduceMean import requires ReduceMeanAttrs: " +
+                                 node_name);
+    }
+    const int rank = static_cast<int>(type->shape.size());
+    for (int64_t axis : reduce_attrs->axes) {
+        int64_t normalized = axis < 0 ? axis + rank : axis;
+        if (normalized < 0 || normalized >= rank) {
+            throw std::runtime_error("ReduceMean import axis " + std::to_string(axis) +
+                                     " is out of range for rank " +
+                                     std::to_string(rank) + ": " + node_name);
+        }
+        const int64_t extent = type->shape[static_cast<size_t>(normalized)];
+        if (extent == 0) {
+            throw std::runtime_error(
+                "ReduceMean import reduces over a zero-extent axis, which is "
+                "undefined and rejected in the static S1 subset: " +
+                node_name);
+        }
+    }
+}
+
+// 索引可以是常量，也可以是运行时张量（embedding 查表就是后者）。两条路径都
+// 固定 data rank / axis / extent / 索引 dtype 合同；差别只在值域：常量索引在
+// 导入期逐值证明落在 ONNX 域内，运行时索引的值到 launch 才存在，由 lowering
+// 后的 GatherCompute 守卫承担——负索引按 ONNX 语义折回，越界经 Select 取零
+// 且不形成越界 Load。
+void ValidateGatherIndices(const Array<Expr>& args,
+                           const ObjectRef& attrs,
+                           const Array<Var>& function_params,
+                           const std::string& node_name) {
+    if (args.size() != 2) {
+        throw std::runtime_error(
+            "Gather import node must contain exactly data and indices: " + node_name);
+    }
+    const auto* gather_attrs = attrs.As<relay::GatherAttrsNode>();
+    if (!gather_attrs) {
+        throw std::runtime_error("Gather import requires GatherAttrs: " + node_name);
     }
 
     relay::InferTypePass(Function(function_params, args[0]));
@@ -548,6 +931,22 @@ void ValidateGatherConstantIndices(const Array<Expr>& args,
             node_name);
     }
 
+    const auto* constant = args[1].As<ConstantNode>();
+    if (!constant) {
+        relay::InferTypePass(Function(function_params, args[1]));
+        const auto* index_type = args[1].checked_type().As<TensorTypeNode>();
+        if (!index_type ||
+            (index_type->dtype != "int32" && index_type->dtype != "int64")) {
+            throw std::runtime_error(
+                "Gather import runtime indices must be an int32 or int64 tensor: " +
+                node_name);
+        }
+        return;
+    }
+    if (!constant->data.defined()) {
+        throw std::runtime_error(
+            "Gather import constant indices have no payload: " + node_name);
+    }
     const DLDataType dtype = constant->data.dtype();
     if (dtype.code != kDLInt || dtype.lanes != 1 ||
         (dtype.bits != 32 && dtype.bits != 64)) {
@@ -576,13 +975,15 @@ void ValidateGatherConstantIndices(const Array<Expr>& args,
 
 }  // namespace
 
-// 装载 ONNX 中间规范、参数 Storage 和 Relay 数据流，返回可编译函数及参数表。
-ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
-                                     const std::string& params_path) {
+namespace {
+// Both formats share the parser, constant storage and graph reconstruction.
+// A shape source defers type-dependent validation to the restricted producer.
+ImportedONNXModel LoadSpec(const std::string& json_path,
+                          const std::string& params_path, bool shape_source) {
     Json root = JsonParser(ReadTextFile(json_path)).Parse();
     RequireKind(root, Json::Object, "root");
     std::string format = ReadString(Field(root, "format", "root"), "root.format");
-    if (format != "kxc.onnx_import.v1") {
+    if (format != (shape_source ? "kxc.onnx_shape_source.v1" : "kxc.onnx_import.v1")) {
         throw std::runtime_error("Unsupported ONNX import spec format: " + format);
     }
 
@@ -598,6 +999,8 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
 
     ImportedONNXModel result;
     std::unordered_map<std::string, Expr> values;
+    // 记录每个中间值由哪个节点产出，供图输出契约失配诊断定位到节点。
+    std::unordered_map<std::string, std::string> producer_node_by_value;
     Array<Var> function_params;
 
     for (size_t i = 0; i < inputs_json.a.size(); ++i) {
@@ -632,7 +1035,10 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         array.CopyFromBytes(param_bytes.data() + offset, static_cast<size_t>(nbytes));
         result.params.emplace(name, array);
         result.param_order.push_back(name);
-        values[name] = Constant(array);
+        if (!values.emplace(name, Constant(array)).second) {
+            throw std::runtime_error(
+                "ONNX import param name conflicts with an existing value: " + name);
+        }
     }
 
     const Json* param_order_json = OptionalField(root, "param_order");
@@ -653,9 +1059,15 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             ReadStringVector(Field(node, "inputs", ctx), ctx + ".inputs");
         std::vector<std::string> output_names =
             ReadStringVector(Field(node, "outputs", ctx), ctx + ".outputs");
-        if (output_names.size() != 1 || output_names[0].empty()) {
+        const bool multi_output = op_name == "split";
+        if ((multi_output && output_names.size() < 2) ||
+            (!multi_output && output_names.size() != 1) ||
+            std::any_of(output_names.begin(), output_names.end(),
+                        [](const std::string& name) { return name.empty(); })) {
             throw std::runtime_error(
-                "ONNX import node must have one non-empty output: " + node_name);
+                multi_output
+                    ? "Split import node must have at least two non-empty outputs: " + node_name
+                    : "ONNX import node must have one non-empty output: " + node_name);
         }
 
         Array<Expr> args;
@@ -667,17 +1079,59 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             }
             args.push_back(it->second);
         }
-        ObjectRef attrs = MakeAttrs(op_name, Field(node, "attrs", ctx));
-        if (op_name == "gather") {
-            ValidateGatherConstantIndices(args, attrs, function_params, node_name);
+        ObjectRef attrs = MakeAttrs(op_name, Field(node, "attrs", ctx), node_name, shape_source);
+        if (!shape_source) {
+            if (op_name == "gather") {
+                ValidateGatherIndices(args, attrs, function_params, node_name);
+            }
+            if (op_name == "mul" || op_name == "subtract" || op_name == "divide" ||
+                op_name == "sqrt") {
+                ValidateFloat32Inputs(op_name, args, function_params, node_name);
+            }
+            if (op_name == "neg" || op_name == "sigmoid" || op_name == "tanh" || op_name == "erf") {
+                ValidateFloat32MathInputs(op_name, args, function_params, node_name);
+            }
+            if (op_name == "pow") {
+                ValidatePowSubset(args, function_params, node_name);
+            }
+            if (op_name == "expand") {
+                ValidateExpandSubset(args, attrs, function_params, node_name);
+            }
+            if (op_name == "equal") {
+                ValidateEqualSubset(args, function_params, node_name);
+            }
+            if (op_name == "cast") {
+                ValidateCastSubset(args, attrs, function_params, node_name);
+            }
+            if (op_name == "reduce_mean") {
+                ValidateReduceMeanSubset(args, attrs, function_params, node_name);
+            }
         }
         Call call(relay::Op::Get(op_name), args, attrs);
-        values[output_names[0]] = call;
+        for (size_t output_index = 0; output_index < output_names.size(); ++output_index) {
+            Expr value = multi_output ? Expr(kxc::TupleGetItem(call,
+                                                               static_cast<int>(output_index)))
+                                      : Expr(call);
+            if (!values.emplace(output_names[output_index], value).second) {
+                throw std::runtime_error(
+                    "ONNX import node output name conflicts with an existing value: " +
+                    node_name);
+            }
+            producer_node_by_value.emplace(output_names[output_index], node_name);
+        }
     }
 
     Array<Expr> output_exprs;
     std::vector<std::vector<int64_t>> declared_output_shapes;
     std::vector<std::string> declared_output_dtypes;
+    const auto output_contract_error = [&](const std::string& name) {
+        std::string message = "ONNX import output contract mismatch for '" + name + "'";
+        const auto producer = producer_node_by_value.find(name);
+        if (producer != producer_node_by_value.end()) {
+            message += " (produced by node '" + producer->second + "')";
+        }
+        return message;
+    };
     for (size_t i = 0; i < outputs_json.a.size(); ++i) {
         const Json& output = outputs_json.a[i];
         std::string ctx = "function.outputs[" + std::to_string(i) + "]";
@@ -686,6 +1140,8 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
             ReadStaticShape(Field(output, "shape", ctx), ctx + ".shape"));
         declared_output_dtypes.push_back(
             ReadString(Field(output, "dtype", ctx), ctx + ".dtype"));
+        result.declared_output_types.emplace_back(ToArray(declared_output_shapes.back()),
+                                                  declared_output_dtypes.back());
         auto it = values.find(name);
         if (it == values.end()) {
             throw std::runtime_error("Missing graph output value in ONNX import spec: " + name);
@@ -697,22 +1153,35 @@ ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
         throw std::runtime_error("ONNX import spec has no graph outputs");
     }
     Expr body = output_exprs.size() == 1 ? output_exprs[0] : Expr(Tuple(output_exprs));
+    if (shape_source) {
+        result.function = Function(function_params, body);
+        return result;
+    }
     result.function = relay::InferTypePass(Function(function_params, body));
     for (size_t i = 0; i < output_exprs.size(); ++i) {
         const auto* inferred = output_exprs[i].checked_type().As<TensorTypeNode>();
         if (!inferred || inferred->dtype != declared_output_dtypes[i] ||
             inferred->shape.size() != declared_output_shapes[i].size()) {
-            throw std::runtime_error("ONNX import output contract mismatch for '" +
-                                     result.output_names[i] + "'");
+            throw std::runtime_error(output_contract_error(result.output_names[i]));
         }
         for (size_t axis = 0; axis < declared_output_shapes[i].size(); ++axis) {
             if (inferred->shape[axis] != declared_output_shapes[i][axis]) {
-                throw std::runtime_error("ONNX import output contract mismatch for '" +
-                                         result.output_names[i] + "'");
+                throw std::runtime_error(output_contract_error(result.output_names[i]));
             }
         }
     }
     return result;
+}
+}  // namespace
+
+ImportedONNXModel LoadONNXImportSpec(const std::string& json_path,
+                                    const std::string& params_path) {
+    return LoadSpec(json_path, params_path, false);
+}
+
+ImportedONNXModel LoadONNXShapeSource(const std::string& json_path,
+                                    const std::string& params_path) {
+    return LoadSpec(json_path, params_path, true);
 }
 
 }  // namespace frontend

@@ -83,7 +83,8 @@ class ProfileContext;
 class ActivationScope {
 public:
     /*! \brief 保存旧线程状态并激活新的 profiling 上下文。 */
-    ActivationScope(std::shared_ptr<ProfileContext> ctx, std::string run_id);
+    ActivationScope(std::shared_ptr<ProfileContext> ctx, std::string run_id,
+                    std::string parent_span_id = {});
     ~ActivationScope();
 
     ActivationScope(const ActivationScope&) = delete;
@@ -93,8 +94,10 @@ private:
     std::shared_ptr<ProfileContext> previous_ctx_;
     std::string previous_run_id_;
     std::vector<std::string> previous_span_stack_;
+    void* cupti_adapter_{nullptr};
     bool active_{false};
     bool pushed_cupti_run_{false};
+    bool pushed_cupti_span_{false};
 };
 
 /*! \brief RAII 形式的耗时事件，析构时写入当前 ProfileContext。 */
@@ -124,7 +127,7 @@ public:
     const std::string& span_id() const { return span_id_; }
 
 private:
-    void Close();
+    void Close() noexcept;
 
     std::shared_ptr<ProfileContext> ctx_;
     EventSpec spec_;
@@ -153,6 +156,9 @@ public:
     std::string NextRunId(const std::string& prefix);
     /*! \brief 生成下一个 span id。 */
     std::string NextSpanId();
+    /*! \brief 当前单调时钟相对 bundle 起点的纳秒值；供跨线程补记 span
+     *  时与 RecordCompletedSpan 的相对时间轴保持一致。 */
+    std::int64_t ElapsedMonotonicNs() const;
 
     /*! \brief 记录一个已完成的耗时 span。 */
     void RecordCompletedSpan(const EventSpec& spec, const std::string& run_id,
