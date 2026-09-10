@@ -13,6 +13,7 @@
 #include "kxc/relay/printer/print_ir.h"
 #include "kxc/relay/transforms/infer_type.h"
 #include "kxc/relay/transforms/normalize_to_anf.h"
+#include "kxc/relay/pass_utils.h"
 #include "kxc/relay/visitor.h"
 
 namespace {
@@ -230,6 +231,60 @@ bool TestMutatorRewritesEachSharedNodeOnce() {
     return true;
 }
 
+bool TestInlineFunctionParameters() {
+    using namespace kxc;
+    const TensorType type({2, 2}, "float32");
+    const Var x("x", type), y("y", type), z("z", type);
+    // body = (x + y) * (x + y): shared subexpression, both params used twice.
+    const Expr shared = Add(x, y);
+    const Function function({x, y}, Multiply(shared, shared));
+
+    // Substitute z for x and (z + z) for y. Simultaneous substitution means the
+    // inner (z + z) is not rewritten again into ((a)+(a)) style.
+    const Expr inlined =
+        relay::pass_utils::InlineFunctionParameters(function, {z, Add(z, z)});
+    TEST_CHECK(inlined.defined(), "inlining must produce a body");
+    const auto* top = inlined.As<CallNode>();
+    TEST_CHECK(top && top->args.size() == 2, "top-level multiply must be preserved");
+    TEST_CHECK(top->args[0].get() == top->args[1].get(),
+               "shared subexpression must stay shared after substitution");
+    const auto* sum = top->args[0].As<CallNode>();
+    TEST_CHECK(sum && sum->args.size() == 2, "sum shape preserved");
+    TEST_CHECK(sum->args[0].get() == z.get(), "x must be replaced by z");
+    const auto* rhs = sum->args[1].As<CallNode>();
+    TEST_CHECK(rhs && rhs->args.size() == 2 &&
+                   rhs->args[0].get() == z.get() && rhs->args[1].get() == z.get(),
+               "y must be replaced by (z + z) without cascading into x");
+
+    // Arity must fail closed.
+    bool threw = false;
+    try {
+        (void)relay::pass_utils::InlineFunctionParameters(function, {z});
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    TEST_CHECK(threw, "mismatched argument count must be rejected");
+
+    // Lexical scope: a Let-bound variable shadowing a parameter must not be
+    // rewritten outside its binder.
+    const Var binder("binder", type);
+    const Function scoped({x}, Let(binder, Add(x, x), Add(binder, x)));
+    const Expr scoped_inlined =
+        relay::pass_utils::InlineFunctionParameters(scoped, {z});
+    const auto* scoped_let = scoped_inlined.As<LetNode>();
+    TEST_CHECK(scoped_let && scoped_let->var.get() == binder.get(),
+               "let binder must be preserved");
+    const auto* scoped_body = scoped_let->body.As<CallNode>();
+    TEST_CHECK(scoped_body && scoped_body->args[0].get() == binder.get() &&
+                   scoped_body->args[1].get() == z.get(),
+               "let shadowing must scope the substitution correctly");
+    const auto* scoped_value = scoped_let->value.As<CallNode>();
+    TEST_CHECK(scoped_value && scoped_value->args[0].get() == z.get() &&
+                   scoped_value->args[1].get() == z.get(),
+               "let value's use of the parameter must be substituted");
+    return true;
+}
+
 int main() {
     const std::vector<std::pair<const char*, bool (*)()>> tests = {
         {"nested_shared_tuple_deterministic_idempotent",
@@ -241,6 +296,7 @@ int main() {
          TestPrinterKeepsSharedSubexpressionsLinear},
         {"mutator_rewrites_each_shared_node_once",
          TestMutatorRewritesEachSharedNodeOnce},
+        {"inline_function_parameters", TestInlineFunctionParameters},
     };
     for (const auto& test : tests) {
         try {
