@@ -108,6 +108,7 @@ ONNX_TO_RELAY = {
     "ReduceMean": "reduce_mean",
     "ReduceMax": "reduce_max",
     "ReduceMin": "reduce_min",
+    "ArgMax": "argmax",
     "Reshape": "reshape",
     "Neg": "neg",
     "Sigmoid": "sigmoid",
@@ -486,6 +487,12 @@ def import_onnx_model(
             inferred_static_specs[node.output[0]] = _infer_cast_spec(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch, allow_shape_control=preserve_shape_values,
+            )
+        if node.op_type == "ArgMax" and not deferred_shape:
+            inferred_static_specs[node.output[0]] = _infer_argmax_spec(
+                node, input_specs, params, inferred_static_specs,
+                value_info_by_name, output_declarations, default_batch,
+                opset_version,
             )
         if node.op_type in {"ReduceMean", "ReduceMax", "ReduceMin"} and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_reduce_spec(
@@ -1167,6 +1174,81 @@ def _reduce_attrs(op_type: str, node: onnx.NodeProto, opset_version: int) -> dic
             f"{op_type} node '{node_name}' axes must not contain duplicates"
         )
     return {"axes": axes, "keepdims": keepdims}
+
+
+def _argmax_attrs(node: onnx.NodeProto, opset_version: int) -> dict[str, Any]:
+    """Validate ONNX ArgMax attributes for the opset-17 static subset."""
+    node_name = node.name or "<unnamed>"
+    if opset_version < 12:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX ArgMax opset {opset_version} in node '{node_name}': "
+            "the select_last_index attribute requires opset >= 12"
+        )
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(
+            f"ArgMax node '{node_name}' requires exactly one non-empty input"
+        )
+    attrs = _attrs_by_name(node)
+    unsupported = set(attrs) - {"axis", "keepdims", "select_last_index"}
+    if unsupported:
+        raise ValueError(
+            f"ArgMax node '{node_name}' has unsupported attribute(s): "
+            f"{sorted(unsupported)}"
+        )
+    axis = _int_attr(attrs, "axis", 0)
+    keepdims = _int_attr(attrs, "keepdims", 1)
+    select_last_index = _int_attr(attrs, "select_last_index", 0)
+    if keepdims not in (0, 1) or select_last_index not in (0, 1):
+        raise ValueError(
+            f"ArgMax node '{node_name}' keepdims/select_last_index must be 0 or 1"
+        )
+    return {"axis": axis, "keepdims": keepdims,
+            "select_last_index": select_last_index}
+
+
+def _infer_argmax_spec(
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    attrs = _argmax_attrs(node, opset_version)
+    data = _resolve_static_input("ArgMax", node_name, node.input[0], input_specs,
+                                 params, inferred_specs, value_info_by_name, default_batch)
+    if data.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"ArgMax node '{node_name}' requires float32 input in the static S1 "
+            f"subset; got {data.dtype}"
+        )
+    if any(dim < 0 for dim in data.shape):
+        raise ValueError(
+            f"ArgMax node '{node_name}' requires non-negative static dimensions"
+        )
+    rank = len(data.shape)
+    axis = attrs["axis"]
+    if axis < 0:
+        axis += rank
+    if axis < 0 or axis >= rank:
+        raise ValueError(
+            f"ArgMax node '{node_name}' axis {attrs['axis']} is out of range for rank {rank}"
+        )
+    output_shape: list[int] = []
+    for index, dim in enumerate(data.shape):
+        if index == axis:
+            if attrs["keepdims"]:
+                output_shape.append(1)
+        else:
+            output_shape.append(dim)
+    result = TensorSpec(name=node.output[0], shape=output_shape, dtype="int64")
+    _validate_declared_output(
+        "ArgMax", node_name, result, output_declarations, default_batch
+    )
+    return result
 
 
 def _infer_reduce_spec(
@@ -2397,6 +2479,8 @@ def _convert_attrs(
         return {"to": RELAY_CAST_DTYPE_CODES[target]}
     if node.op_type in {"ReduceMean", "ReduceMax", "ReduceMin"}:
         return _reduce_attrs(node.op_type, node, opset_version)
+    if node.op_type == "ArgMax":
+        return _argmax_attrs(node, opset_version)
     if node.op_type == "Reshape":
         data = _resolve_static_input("Reshape", node.name or "<unnamed>", node.input[0],
                                      input_specs, params, inferred_specs,

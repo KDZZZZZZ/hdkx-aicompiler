@@ -88,6 +88,7 @@ KXC_OBJECT_DEFINE(CastAttrsNode)
 KXC_OBJECT_DEFINE(ReduceMeanAttrsNode)
 KXC_OBJECT_DEFINE(ReduceMaxAttrsNode)
 KXC_OBJECT_DEFINE(ReduceMinAttrsNode)
+KXC_OBJECT_DEFINE(ArgMaxAttrsNode)
 KXC_OBJECT_DEFINE(ReshapeAttrsNode)
 KXC_OBJECT_DEFINE(ExpandAttrsNode)
 KXC_OBJECT_DEFINE(TransposeAttrsNode)
@@ -292,6 +293,12 @@ void ReduceMinAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("keepdims", keepdims);
 }
 
+void ArgMaxAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
+    writer.Add("axis", axis);
+    writer.Add("keepdims", keepdims);
+    writer.Add("select_last_index", select_last_index);
+}
+
 void ReshapeAttrsNode::SerializeCanonical(CanonicalAttrWriter& writer) const {
     writer.Add("newshape", newshape);
     writer.Add("allowzero", allowzero);
@@ -488,6 +495,15 @@ ReduceMinAttrs ReduceMinAttrs::Create(Array<int64_t> axes, int64_t keepdims) {
     auto* node = new ReduceMinAttrsNode();
     node->axes = std::move(axes);
     node->keepdims = keepdims;
+    return InternalCreate(node);
+}
+
+ArgMaxAttrs ArgMaxAttrs::Create(int64_t axis, int64_t keepdims,
+                                int64_t select_last_index) {
+    auto* node = new ArgMaxAttrsNode();
+    node->axis = axis;
+    node->keepdims = keepdims;
+    node->select_last_index = select_last_index;
     return InternalCreate(node);
 }
 

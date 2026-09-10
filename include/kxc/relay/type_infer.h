@@ -48,6 +48,7 @@ Type SliceInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReduceMaxInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type ReduceMinInferType(const Attrs& attrs, const Array<Type>& input_types);
+Type ArgMaxInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type MaskedSoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types);
 Type LayerNormInferType(const Attrs& attrs, const Array<Type>& input_types);

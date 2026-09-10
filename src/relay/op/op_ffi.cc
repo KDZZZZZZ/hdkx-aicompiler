@@ -102,6 +102,13 @@ Call MakeReduceMin(Expr data, Array<int64_t> axes, int64_t keepdims) {
     return Call(GetOp("reduce_min"), {data}, ReduceMinAttrs::Create(std::move(axes), keepdims));
 }
 
+// 构造 argmax 调用。
+Call MakeArgMax(Expr data, int64_t axis, int64_t keepdims,
+                int64_t select_last_index) {
+    return Call(GetOp("argmax"), {data},
+                ArgMaxAttrs::Create(axis, keepdims, select_last_index));
+}
+
 // 构造 reshape 调用，并保留有符号目标维度。
 Call MakeReshape(Expr data, Array<int64_t> newshape, int allowzero) {
     return Call(GetOp("reshape"), {data}, ReshapeAttrs::Create(std::move(newshape), allowzero));
@@ -285,6 +292,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.cast").set_body(ToPackedFunc(MakeCast));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_mean").set_body(ToPackedFunc(MakeReduceMean));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_max").set_body(ToPackedFunc(MakeReduceMax));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_min").set_body(ToPackedFunc(MakeReduceMin));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.argmax").set_body(ToPackedFunc(MakeArgMax));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape").set_body(ToPackedFunc(MakeReshape));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.shape_of").set_body(ToPackedFunc(MakeShapeOf));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.shape_expr")

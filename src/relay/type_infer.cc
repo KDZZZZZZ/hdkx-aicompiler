@@ -1308,6 +1308,36 @@ Type ReduceMinInferType(const Attrs& attrs, const Array<Type>& input_types) {
         reduce_attrs ? reduce_attrs->keepdims : 1, input_types);
 }
 
+// argmax 在单个轴上归约，输出 int64（与 ONNX ArgMax 一致）。
+Type ArgMaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("argmax", input_types, 1);
+    const auto* data = RequireTensor("argmax", input_types[0], "data");
+    if (data->dtype != "float32") {
+        throw std::runtime_error("argmax requires float32 input, got " + data->dtype);
+    }
+    const auto* arg_attrs = attrs.As<ArgMaxAttrsNode>();
+    const int64_t rank = static_cast<int64_t>(data->shape.size());
+    if (rank < 1) {
+        throw std::runtime_error("argmax requires rank at least 1");
+    }
+    int64_t axis = arg_attrs ? arg_attrs->axis : -1;
+    if (axis < 0) axis += rank;
+    if (axis < 0 || axis >= rank) {
+        throw std::runtime_error("argmax axis out of range");
+    }
+    const bool keepdims =
+        (arg_attrs ? arg_attrs->keepdims : 0) != 0;
+    std::vector<int64_t> out;
+    for (int64_t index = 0; index < rank; ++index) {
+        if (index == axis) {
+            if (keepdims) out.push_back(1);
+        } else {
+            out.push_back(data->shape[static_cast<size_t>(index)]);
+        }
+    }
+    return MakeTensorType(out, "int64");
+}
+
 // 校验 softmax 轴并保持输入类型。
 Type SoftmaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
     RequireArity("softmax", input_types, 1);

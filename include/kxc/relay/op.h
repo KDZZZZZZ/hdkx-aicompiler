@@ -348,6 +348,25 @@ public:
     static ReduceMinAttrs Create(Array<int64_t> axes, int64_t keepdims = 1);
 };
 
+/*! \brief argmax 的归约轴、keepdims 与 tie-breaking 选择属性。 */
+class ArgMaxAttrsNode : public BaseAttrsNode {
+public:
+    int64_t axis = -1;
+    int64_t keepdims = 0;
+    /*! \brief 0 selects the first occurrence of the maximum (ONNX default),
+     *  1 selects the last. */
+    int64_t select_last_index = 0;
+    void SerializeCanonical(CanonicalAttrWriter& writer) const override;
+    KXC_DECLARE_ATTRS_NODE
+};
+class ArgMaxAttrs : public Attrs {
+    KXC_DECLARE_ATTRS_REF(ArgMaxAttrs, ArgMaxAttrsNode)
+
+public:
+    static ArgMaxAttrs Create(int64_t axis = -1, int64_t keepdims = 0,
+                              int64_t select_last_index = 0);
+};
+
 /*! \brief reshape 的目标形状和 allowzero 语义属性。 */
 class ReshapeAttrsNode : public BaseAttrsNode {
 public:

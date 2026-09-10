@@ -5,10 +5,12 @@
 #include "kxc/relay/op_attr_types.h"
 #include "kxc/relay/op_macros.h"
 #include "kxc/relay/type_infer.h"
+#include "kxc/te/topi/elemwise.h"
 #include "kxc/te/topi/reduction.h"
 #include "kxc/te/topi/utils.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -153,6 +155,80 @@ KXC_REGISTER_OP(reduce_min)
     .set_attr<std::string>("TAttrs", "ReduceMinAttrs")
     .set_attr<FInferType>("FInferType", ReduceMinInferType)
     .set_attr<FRelayToTE>("FRelayToTE", ReduceMinCompute);
+
+// 图内 argmax：先在归约轴上求最大值，再对"等于最大值处取轴下标、否则取哨兵"
+// 的 int64 张量做 min（select_last_index=0，默认）或 max（=1）。同值时
+// select_min 取最小下标即 ONNX 的 first-occurrence 语义，select_max 取最大
+// 下标即 last-occurrence。输出 int64。
+te::Tensor ArgMaxCompute(const Attrs& attrs, const Array<te::Tensor>& inputs,
+                         const kxc::Type& out_type) {
+    RequireInputCount("argmax", inputs, 1);
+    RequireTensorOutput("argmax", out_type);
+    const auto* arg_attrs = attrs.As<ArgMaxAttrsNode>();
+    const auto* input = inputs[0].operator->();
+    const int rank = static_cast<int>(input->shape.size());
+    if (rank < 1) {
+        throw std::runtime_error("argmax requires rank at least 1");
+    }
+    int axis = static_cast<int>(arg_attrs ? arg_attrs->axis : -1);
+    if (axis < 0) axis += rank;
+    if (axis < 0 || axis >= rank) {
+        throw std::runtime_error("argmax axis out of range");
+    }
+    const bool keepdims = !arg_attrs || arg_attrs->keepdims != 0;
+    const bool select_last = arg_attrs && arg_attrs->select_last_index != 0;
+    int64_t axis_extent = 0;
+    if (!te::topi::GetConstInt(input->shape[static_cast<size_t>(axis)],
+                               &axis_extent) ||
+        axis_extent <= 0) {
+        throw std::runtime_error("argmax reduction axis must be a positive static extent");
+    }
+
+    // Max value on the axis, kept so it can be broadcast back by indexing axis 0.
+    te::Tensor max_value = te::topi::max(
+        inputs[0], Array<int>{axis}, /*keepdims=*/true, "T_argmax_max");
+
+    // selected[i] = axis index when data[i] equals the axis maximum, else the
+    // reduction identity so it never wins the index reduction.
+    const tir::DataType index_dtype = tir::DataType::Int(64);
+    const int64_t identity =
+        select_last ? std::numeric_limits<int64_t>::min()
+                    : std::numeric_limits<int64_t>::max();
+    te::Tensor selected = te::compute(
+        input->shape,
+        [input_tensor = inputs[0], max_value, axis, index_dtype, identity](
+            const Array<tir::Var>& indices) {
+            Array<tir::PrimExpr> reduced_indices;
+            for (size_t i = 0; i < indices.size(); ++i) {
+                if (static_cast<int>(i) == axis) {
+                    reduced_indices.push_back(
+                        tir::IntImm(0, tir::DataType::Int(32)));
+                } else {
+                    reduced_indices.push_back(te::AsPrimExpr(indices[i]));
+                }
+            }
+            const tir::PrimExpr is_max =
+                input_tensor(indices) == max_value(reduced_indices);
+            Array<tir::PrimExpr> cast_arg;
+            cast_arg.push_back(te::AsPrimExpr(indices[static_cast<size_t>(axis)]));
+            const tir::PrimExpr index =
+                tir::Call(index_dtype, "cast", std::move(cast_arg));
+            return tir::Select(is_max, index,
+                               tir::IntImm(identity, index_dtype));
+        },
+        "T_argmax_selected");
+    return select_last
+               ? te::topi::max(selected, Array<int>{axis}, keepdims, "T_argmax")
+               : te::topi::min(selected, Array<int>{axis}, keepdims, "T_argmax");
+}
+
+KXC_REGISTER_OP(argmax)
+    .describe(R"doc(Returns the indices of the maximum values along an axis.)doc")
+    .set_num_inputs(1)
+    .add_argument("data", "Tensor", "The input tensor.")
+    .set_attr<std::string>("TAttrs", "ArgMaxAttrs")
+    .set_attr<FInferType>("FInferType", ArgMaxInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", ArgMaxCompute);
 
 }  // namespace relay
 }  // namespace kxc

@@ -555,6 +555,45 @@ void TestReduceMaxMin() {
 
 // 验证 ReduceMean 的轴和 keepdims 语义。
 // 三维用例统一使用 data[i][j][k] = i*100 + j*10 + k 的 [2,3,4] 输入。
+void TestArgMax() {
+    // data[i][j] = row 0 {1,5,5,2}, row 1 {9,3,9,9}. With axis=1 the first
+    // occurrence wins by default; select_last_index=1 picks the last.
+    kxc::Var data("data", kxc::TensorType({2, 4}, "float32"));
+    std::vector<float> data_buf = {1, 5, 5, 2, 9, 3, 9, 9};
+
+    kxc::Call first(kxc::relay::Op::Get("argmax"), {data},
+                    kxc::relay::ArgMaxAttrs::Create(1, 0, 0));
+    kxc::Function first_func({data}, first);
+    std::vector<int64_t> first_out(2, 0);
+    CompileAndRun("argmax_first", first_func, {Input(data_buf), Output(first_out)});
+    {
+        std::vector<int64_t> expected{1, 0};
+        if (first_out != expected) {
+            throw std::runtime_error("argmax first-occurrence mismatch");
+        }
+    }
+
+    kxc::Call last(kxc::relay::Op::Get("argmax"), {data},
+                   kxc::relay::ArgMaxAttrs::Create(1, 0, 1));
+    kxc::Function last_func({data}, last);
+    std::vector<int64_t> last_out(2, 0);
+    CompileAndRun("argmax_last", last_func, {Input(data_buf), Output(last_out)});
+    {
+        std::vector<int64_t> expected{2, 3};
+        if (last_out != expected) {
+            throw std::runtime_error("argmax last-occurrence mismatch");
+        }
+    }
+
+    // Production per-primitive lowering must accept the op.
+    const auto units = kxc::test_support::LowerPrimitiveUnits(kxc::Function(
+        {data}, kxc::Call(kxc::relay::Op::Get("argmax"), {data},
+                          kxc::relay::ArgMaxAttrs::Create(1, 0, 0))));
+    if (units.size() != 1) {
+        throw std::runtime_error("argmax lowering arity mismatch");
+    }
+}
+
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("reduce_mean"), {data},
@@ -1329,6 +1368,7 @@ int main() {
         {"slice", TestSlice},
         {"reduce_mean", TestReduceMean},
         {"reduce_max_min", TestReduceMaxMin},
+        {"argmax", TestArgMax},
         {"softmax", TestSoftmax},
         {"gather", TestGather},
         {"where", TestWhere},
