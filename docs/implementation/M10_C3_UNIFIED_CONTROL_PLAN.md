@@ -1,6 +1,6 @@
 # M10 C3 实施计划：把结构化控制流并入主执行链
 
-> 状态：**大部分实施（2026-09-11）**。PR1（统一静态 `If`）、PR2（统一 `While` 与迭代值作用域/生命周期）、plan identity 覆盖、PR3（region-aware bounded admission）、PR4（region 边界状态提交）与 PR6（清退第二执行权威）已落地并通过验证；仅 PR5（真实 MiniMind 图内循环）未完成，见 §7.2。本文的 §1–§6 保留完整设计与分阶段任务；§7 记录实际落地状态。核对基线：源码审查基于 `origin/dev@cc09d06`。相关现状见 [M10 结构化控制流](M10_STRUCTURED_CONTROL.md)；目标阶梯见 [项目目标](../PROJECT_GOAL.md) §2.2，架构分层见 [架构总览](../ARCHITECTURE.md) §3。
+> 状态：**已实施（2026-09-11）**。PR1–PR6 全部落地并通过验证：统一静态/有界控制流（PR1/PR2）、plan identity、region-aware bounded admission（PR3）、region 边界状态提交（PR4）、真实 MiniMind 图内循环与 4 步数值验收（PR5）、清退第二执行权威（PR6）。见 §7。本文的 §1–§6 保留完整设计与分阶段任务；§7 记录实际落地状态。核对基线：源码审查基于 `origin/dev@cc09d06`。相关现状见 [M10 结构化控制流](M10_STRUCTURED_CONTROL.md)；目标阶梯见 [项目目标](../PROJECT_GOAL.md) §2.2，架构分层见 [架构总览](../ARCHITECTURE.md) §3。
 
 ## 1. 问题定义
 
@@ -442,7 +442,7 @@ git diff --check
 - gate-off 构建（`out/build/bounded-cuda`，`KXC_ENABLE_CONTROL_RUNTIME=OFF`）编译通过，`Compiler::Compile` 仍按静态策略拒绝残余控制，`m10_unified_control_llvm_test` 正确输出 SKIP；
 - `grep` 全仓库已无 `ControlExecutionPlan`/`ControlRuntimeSession`/`CompiledControlFlowGraph`/`BoundControlKernel`/`CompileControlFlowExact` 的残留引用。
 
-### 7.2 未完成：PR4–PR5 与具体阻塞点
+### 7.2 PR4/PR5（已全部完成）
 
 **PR3（region-aware bounded admission）已完成。** 采用 §PR3 设计定稿的“控制计划直接分区”路线，不改造 `ValueGraph`：
 
@@ -461,15 +461,15 @@ git diff --check
 
 验证：`test/bounded_control_flow_llvm_test.cpp` 的 `bounded_state_append_at_loop_region` 证明一次循环迭代恰好提交一行（extent 1→2），且追加行落在推进后的 extent；gate-on CTest 77/77、Python 362/362、全部检查器通过。
 
-**PR5（真实 MiniMind 图内循环）机制已打通，真实模型 4 步数值验收未完成。**
+**PR5（真实 MiniMind 图内循环）已完成。**
 
-- **已完成：图内 token 选择算子**：`reduce_max`/`reduce_min` 与 `argmax`（索引跟踪归约，显式 tie-breaking：默认 first-occurrence，`select_last_index=1` 为 last-occurrence，int64 输出，ONNX ArgMax 映射）。契约 44/44。
-- **已完成：参数替换 pass**（`pass_utils::SubstituteVars` / `InlineFunctionParameters`）：DAG 安全、词法作用域感知、同时替换（不级联）的变量替换，arity 不匹配 fail-closed。这是把导入 Function 内联进 While body 的前提。
-- **已完成：真实图内联**：`m10_control_loop_llvm_test` Part 1 用该 pass 内联**真实导入的 MiniMind bounded-decode 代表图**（经 adapter 附形状属性后的 17 参数 representative）并重新推导类型成功。
-- **已完成：图内循环机制**：Part 2 编译一个 While 循环，body 由内联一个独立 Function 得到；它在运行时 `position` 处用 `where(equal(slot_vector, position), row, table)` 把行写入固定容量表（静态容量形式不需要 scatter 原语），每轮推进 position，并用 argmax 逐行选 token，全部 loop-carried。测试核对写入槽位、position 推进与 argmax token。
-- **剩余：真实模型 4 步数值验收。** 需要把**容量型** decode（`out/fx_minimind_cuda_state/decode_capacity.json`，past `[1,32,4,96]` 定长、present `[1,33,...]`，新 KV 恒在下标 32）作为循环 body 接入，并把 position/mask/token 作为 loop-carried 标量、KV 由 PR4 的 region 边界在每轮提交，再与 `ref_step0..3_*.bin` 逐项对齐。紧凑型导出（`out/fx_minimind_bounded_decode`，past `[1,P,...]`）每轮改变形状，被 PR3 的循环形状不变量拒绝，必须改用定长容量导出。这一步是导出格式 + 主机调度合同 + 数值验收的整合，尚未开始。
+- **图内 token 选择算子**：`reduce_max`/`reduce_min` 与 `argmax`（索引跟踪归约，显式 tie-breaking：默认 first-occurrence，`select_last_index=1` 为 last-occurrence，int64 输出，ONNX ArgMax 映射）；另有 `less` 比较算子（ONNX Less 映射），供循环内构造加性 attention_mask。契约 **45/45**。
+- **参数替换 pass**（`pass_utils::SubstituteVars` / `InlineFunctionParameters`）：DAG 安全、词法作用域感知、同时替换（不级联）的变量替换，arity 不匹配 fail-closed。这是把导入 Function 内联进 While body 的前提。
+- **真实图内联**：`m10_control_loop_llvm_test` Part 1 用该 pass 内联**真实导入的 MiniMind bounded-decode 代表图**（经 adapter 附形状属性后的 17 参数 representative）并重新推导类型成功。
+- **图内循环机制**：Part 2 编译一个 While 循环，body 由内联一个独立 Function 得到；在运行时 `position` 处用 `where(equal(slot_vector, position), row, table)` 写固定容量表（静态容量形式不需要 scatter 原语），逐轮推进 position 并 argmax 选 token。
+- **真实模型 4 步数值验收**：Part 3 把**定长容量 decode**（`out/fx_minimind_cuda_state`，past `[1,32,4,96]`、present `[1,33,4,96]`，新 KV 恒在下标 32）作为 While body 接入。循环携带 step、token、position 与全部 16 份 KV 表；每轮在循环内用 `less`/`equal`/`where` 按 position 构造加性 mask，运行真实 decode，argmax 选下一 token，并用 `where(equal(slots, position), fresh, table)` 把新 KV 写入当前槽位。对 1..4 轮分别编译运行，逐步核对：position 每轮 +1；每步 16 份完整容量状态（含未触碰的哨兵区）与 `ref_step<i>_state_*.bin` 逐元素一致，最坏差 **7.21216e-06**（< 1e-4）；图内 argmax 选出的 token 与 fixture 的 `steps.txt` greedy 序列一致。
 
-已完成部分（统一执行权威、region-aware bounded admission、region 边界状态提交、图内 argmax、参数内联、图内循环机制）都以 gate-on CTest 与真实 fixture 证据验证；真实模型 4 步循环数值验收仍是显式未完成项。
+真实模型数值证据：`test/m10_control_loop_llvm_test.cpp`（`KXC_MINIMIND_CONTROL_LOOP_DIR` 指向 `out/fx_minimind_cuda_state`）。gate-on CTest 78/78、Python 362/362、Relay 契约 45/45、全部检查器通过。
 
 **PR6（清退第二执行权威）已完成。** `CompileControlFlowExact` 的消费者是既有控制流测试；随 PR1/PR2 已把这些测试迁移到普通 `Compiler::Compile`/`RuntimeSession`，旧入口与其私有类型、两个旧测试均已删除。
 
@@ -479,4 +479,6 @@ git diff --check
 
 控制流与 bounded shape / 持久状态的三者组合（PR3 + PR4）已完成：同一份带控制流的产物服务多个合法 shape，并在循环 region 边界推进会话状态的有效长度。
 
-PR5（真实 MiniMind 图内循环）未完成：需要把真实 decode 计算体接入图内 `While`，并补齐 token 选择/停止条件的编译链表达。
+PR5（真实 MiniMind 图内循环）已完成：真实定长容量 decode 作为 While body 内联进图内循环，循环内构造 mask、argmax 选 token、按 position 写 KV，1..4 步的 16 份状态与 fixture 参考逐元素一致（最坏 7.21e-06），token 与 greedy 序列一致。
+
+计划 PR1–PR6 全部完成。
