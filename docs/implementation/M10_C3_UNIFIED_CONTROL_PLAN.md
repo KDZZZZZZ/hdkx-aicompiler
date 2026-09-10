@@ -1,6 +1,6 @@
 # M10 C3 实施计划：把结构化控制流并入主执行链
 
-> 状态：**部分实施（2026-09-11）**。PR1（统一静态 `If`）、PR2（统一 `While` 与迭代值作用域/生命周期）、plan identity 覆盖、PR3（region-aware bounded admission）与 PR6（清退第二执行权威）已落地并通过验证；PR4–PR5（控制流 × 持久状态的 region 边界更新、真实 MiniMind 图内循环）未完成，见 §7.2。本文的 §1–§6 保留完整设计与分阶段任务；§7 记录实际落地状态。核对基线：源码审查基于 `origin/dev@cc09d06`。相关现状见 [M10 结构化控制流](M10_STRUCTURED_CONTROL.md)；目标阶梯见 [项目目标](../PROJECT_GOAL.md) §2.2，架构分层见 [架构总览](../ARCHITECTURE.md) §3。
+> 状态：**大部分实施（2026-09-11）**。PR1（统一静态 `If`）、PR2（统一 `While` 与迭代值作用域/生命周期）、plan identity 覆盖、PR3（region-aware bounded admission）、PR4（region 边界状态提交）与 PR6（清退第二执行权威）已落地并通过验证；仅 PR5（真实 MiniMind 图内循环）未完成，见 §7.2。本文的 §1–§6 保留完整设计与分阶段任务；§7 记录实际落地状态。核对基线：源码审查基于 `origin/dev@cc09d06`。相关现状见 [M10 结构化控制流](M10_STRUCTURED_CONTROL.md)；目标阶梯见 [项目目标](../PROJECT_GOAL.md) §2.2，架构分层见 [架构总览](../ARCHITECTURE.md) §3。
 
 ## 1. 问题定义
 
@@ -248,6 +248,17 @@ PR4 给状态绑定增加“所属状态更新 region”。该字段**必须在 
 - **状态声明必须在循环形状证明前可见**：对结构化 bounded 请求，在现有准备阶段提供可选状态绑定声明，使循环证明知道哪些长度是受容量限制的 state extent。该声明随后生成 plan 合同；编译阶段不分配状态，也不建立第二个状态 owner。现有平面图的编译后绑定 API 可保留。
 - 按 §2.3-C，本字段随合同一起版本化并进 identity。
 
+> **§2.3-C state-extent ABI 定稿（2026-09-11，PR4 实现前置）**
+>
+> 问题：循环迭代时状态的**有效长度**推进，但图内 tensor 的 rank 与符号 shape 不得改变（否则违反 PR3 的循环形状不变量）。定稿如下。
+>
+> 1. **状态容量与有效长度是两个不同的量。** 容量是 `ValueSpec.state_capacity` / `state_extent_axis`，进 plan 合同与 identity；有效长度是运行时数据，由会话 `length_book` 持有，结构化执行期间由 walker 的临时 `working_extent` 推进。二者都不进 kernel ABI。
+> 2. **kernel 永远看到同一符号 rank/shape；只有运行时 extent 变。** 状态输入在逻辑边界上把 extent 轴表示为 `-1`（PR3 已如此）。每个 kernel 的 runtime extent 由 `ModuleInvocationContract` 从**该次调用的输入轴**解析，不是编译期常量。因此一次迭代读取 `[B, P_t, F]`、下一次读取 `[B, P_{t+1}, F]` 是同一条已编译调用点，无需重编译、无隐式 shape 求值。
+> 3. **提交发生在明确的 region 边界。** `StateOutputBinding` 增加 `update_region`（-1 = 线性整图末尾提交，保持旧行为）。结构化模式下每一轮 body region 正常结束后：把该 region 产生的 append source 复制到 `state[working_extent : working_extent+append_count]`，推进 `working_extent`，并用新长度重铺 prefix 视图，供下一轮读取。condition region 只读状态、不提交。
+> 4. **对外提交边界不变。** 一次 `Run` 失败则不提交并 poison；成功完成后 `length_book` 一次落定最终长度。`working_extent` 只是本次执行的临时进度，不是第二套权威。
+> 5. **identity 覆盖 `update_region`**：它改变行为（何时提交），必须随 plan ABI 版本进入 identity。
+> 6. **本步边界**：固定容量、固定 batch、每次追加 `C=1`；backedge 不改变 tensor shape（状态增长只体现在 extent 与 prefix 长度上）；条件写入、多重写入、别名拒绝；CUDA 与请求批处理不放开。
+
 **4.2 KV 与长度继续只归现有 session 所有**
 
 复用 `RuntimeSessionNode::states_by_value`、`state_prefixes_by_value`、`length_book`、`state_mutex`、`state_completion`（`src/runtime/internal/session_node.h`）。这些已承担容量存储、prefix 工作区、已提交长度与失败标记，不复制成 `ControlStateStore` 或另一组 cursor。loop-carried 状态引用最终指向现有 state id，不每轮把整份 KV 当普通 tensor 重新分配传递。
@@ -441,9 +452,16 @@ git diff --check
 - 运行时：`ExecutablePlanMode::kDynamicFreshOutputV1` 现可携带 `structured_schedule`；`RuntimeSession` 结构化路径在动态模式下对 region kernel 走 `InvokeDynamicCall`，并使拓扑产生的值在计划校验中可用。
 - `Compiler::CompileBoundedStructured` 发布普通 `CompiledGraph`；`test/bounded_control_flow_llvm_test.cpp` 验证同一 artifact 服务 N=1/3/5/8 的 bounded `If` 与 bounded `While`，以及越界形状在 launch 前拒绝。gate-on CTest 77/77、Python 362/362、检查器通过。
 
-**PR4（region 边界状态更新）未完成**：需要 `StateOutputBinding` 增加状态更新 region 字段并随合同版本化（计划 §2.3-C），并让结构化 bounded walker 在 region 边界提交状态；当前结构化路径显式拒绝持久 state。
+**PR4（region 边界状态更新）已完成。** 按上方 §2.3-C 定稿实现：
 
-**PR5（真实 MiniMind 图内循环）未完成**，依赖 PR4；其独立前置（argmax/EOS 编译链表达）尚未开始。
+- `StateOutputBinding` 增加 `update_region`（-1 = 线性末尾提交）；结构化 bounded 计划要求它指向 schedule 中的真实 region，并随 plan ABI identity 版本化。
+- `RuntimeSession` 的结构化 walker 在 `body` region 正常结束后提交该 region 的 append：把 append source 复制到 `state[working_extent : working_extent+C]`，推进 `working_extent`，重铺 prefix 视图；动态 kernel 调用用会话持有的 live prefix 替换状态输入，使下一轮读到新长度。condition region 只读、不提交；`Run` 失败不提交并 poison。
+- `BindBoundedStateOutputs` 在结构化计划下允许 append source 是拓扑产生的 loop 值（无单一 kernel 产生者）。
+- 支撑改动：`CloneRelaySnapshot` 支持 `While` 深拷贝；控制 lowering 增加有界入口（接受 `-1` 轴）；`ControlPlan::ValidateBounded` 与 `LeafTypes` 在 admission 下接受 fixed-rank 通配轴；`FlattenLogicalTensorTypes` 的 admission 重载被结构化路径使用。
+
+验证：`test/bounded_control_flow_llvm_test.cpp` 的 `bounded_state_append_at_loop_region` 证明一次循环迭代恰好提交一行（extent 1→2），且追加行落在推进后的 extent；gate-on CTest 77/77、Python 362/362、全部检查器通过。
+
+**PR5（真实 MiniMind 图内循环）未完成**，依赖 PR4（已完成）；其独立前置（argmax/EOS 编译链表达）尚未开始。
 
 **PR6（清退第二执行权威）已完成。** `CompileControlFlowExact` 的消费者是既有控制流测试；随 PR1/PR2 已把这些测试迁移到普通 `Compiler::Compile`/`RuntimeSession`，旧入口与其私有类型、两个旧测试均已删除。
 
@@ -451,4 +469,6 @@ git diff --check
 
 唯一执行权威的统一**已完成**：`Compiler::Compile` 现在把带 `If`/有界 `While` 的图发布成普通 `CompiledGraph`，由普通 `RuntimeSession` 执行，无第二 allocator/launch/state owner，拓扑进入 identity，且第二套产物与执行权威（PR6）已删除。计划 §3 的决策门（PR2 后确认统一路线成立）已通过。
 
-PR3–PR5 未完成，即控制流尚未与 bounded shape 和持久状态组合。计划恢复推进时，应先做 §2.3-A 的 region × 分区设计定稿，并据本次核查把范围上调为“region 感知的 ValueGraph/GraphTemplate”，而非仅拆分 shape 校验分支。
+控制流与 bounded shape / 持久状态的三者组合（PR3 + PR4）已完成：同一份带控制流的产物服务多个合法 shape，并在循环 region 边界推进会话状态的有效长度。
+
+PR5（真实 MiniMind 图内循环）未完成：需要把真实 decode 计算体接入图内 `While`，并补齐 token 选择/停止条件的编译链表达。

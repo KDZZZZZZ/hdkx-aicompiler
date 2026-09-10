@@ -23,6 +23,14 @@ struct ControlPlanLowering final {
 ControlPlanLowering LowerRelayToControlPlanWithSidecar(Function function);
 ControlPlanLowering LowerPreparedRelayToControlPlanWithSidecar(
     const PreparedRelayProgram& program);
+/*! \brief Lower a control function admitting fixed-rank dynamic (-1) axes.
+ *
+ *  The region-aware bounded path lowers a graph whose symbolic axes are
+ *  represented as -1; this overload threads the bounded logical-shape
+ *  admission so LogicalValueContract accepts those wildcard axes. */
+ControlPlanLowering LowerRelayToControlPlanBounded(
+    Function function,
+    const class BoundedLogicalShapeAdmission& admission);
 
 /*! \brief Convert ControlPlan v2 into a normal ExecutablePlan with an optional
  *  structured schedule.

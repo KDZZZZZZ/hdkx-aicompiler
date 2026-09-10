@@ -697,6 +697,10 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
                           binding.source_extent_axis);
             AppendInteger(&canonical, "state_output_slot", binding.source_slot);
             AppendInteger(&canonical, "state_output_append_count", binding.append_count);
+            // The update region changes when the append commits, so it is
+            // identity; -1 keeps the linear end-of-run commit.
+            AppendInteger(&canonical, "state_output_update_region",
+                          binding.update_region);
             if (bounded_stateful) {
                 AppendInteger(&canonical, "state_prefix_input_ordinal",
                               value_ordinals.at(binding.input_value_id));

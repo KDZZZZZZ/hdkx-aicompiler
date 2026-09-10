@@ -19,6 +19,11 @@ class ModuleInvocationContract;
 
 namespace kxc::api::internal {
 
+class BoundedLogicalShapeAdmission;
+
+/*! \brief Mint the one bounded logical-shape admission capability token. */
+[[nodiscard]] BoundedLogicalShapeAdmission MintBoundedLogicalShapeAdmission();
+
 namespace restricted =
     kxc::api::experimental::restricted_symbolic_shape::v1;
 namespace specialization =

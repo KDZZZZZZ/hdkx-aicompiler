@@ -28,6 +28,7 @@
 
 #include "../control_flow/internal_lowering.h"
 #include "../internal/relay_program.h"
+#include "../internal/relay_snapshot.h"
 #include "shape_value_resolver.h"
 #include "kxc/relay/transforms/infer_type.h"
 
@@ -132,10 +133,34 @@ StructuredBoundedCompilation PrepareStructuredBoundedCompile(
         Reject("the representative has no resolved compute units");
     }
 
-    // 3. Lower the resolver's rewritten program to a ControlPlan. Its units must
-    //    align with the resolver's post-order unit sequence; fail closed.
+    // 3. Lower a logical-boundary copy of the rewritten program to a ControlPlan.
+    //    Symbolic axes are represented as -1 exactly as the linear bounded path
+    //    does, so bounded unit lowering sees the same contract. Admission lets
+    //    LogicalValueContract accept those wildcard axes.
+    Function boundary = internal::CloneRelaySnapshot(resolution.rewritten);
+    {
+        std::map<size_t, std::map<size_t, bool>> symbolic_axis;
+        for (const auto& symbol : input_axis_symbols) {
+            symbolic_axis[symbol.parameter_index][symbol.axis] = true;
+        }
+        for (size_t parameter = 0; parameter < boundary->params.size(); ++parameter) {
+            auto* node = const_cast<VarNode*>(boundary->params[parameter].operator->());
+            const auto* type = node->type_annotation.As<TensorTypeNode>();
+            if (!type) Reject("representative parameter lacks a TensorType");
+            std::vector<int64_t> shape;
+            const auto by_axis = symbolic_axis.find(parameter);
+            for (size_t axis = 0; axis < type->shape.size(); ++axis) {
+                const bool symbolic =
+                    by_axis != symbolic_axis.end() && by_axis->second.count(axis) != 0;
+                shape.push_back(symbolic ? -1 : type->shape[axis]);
+            }
+            node->type_annotation = TensorType(shape, type->dtype);
+        }
+        boundary = relay::InferTypePass(boundary);
+    }
+    const BoundedLogicalShapeAdmission admission = MintBoundedLogicalShapeAdmission();
     ControlPlanLowering lowered =
-        LowerRelayToControlPlanWithSidecar(resolution.rewritten);
+        LowerRelayToControlPlanBounded(boundary, admission);
     const ControlPlan& plan = lowered.plan;
     const std::vector<PrimitiveUnit>& units = lowered.primitive_units;
     if (units.size() != operations.size() ||

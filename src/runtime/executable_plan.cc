@@ -500,6 +500,10 @@ ExecutablePlan ExecutablePlan::BindBoundedStateOutputs(
     std::unordered_set<int64_t> append_sources;
     Array<ValueSpec> bound_values;
     Array<int64_t> bound_states;
+    // A structured plan commits state at a region boundary, so the append
+    // source is a topology-produced value (a loop body value) that may not be a
+    // graph output. Linear plans keep the original graph-output requirement.
+    const bool structured_plan = structured_schedule().has_value();
     for (size_t index = 0; index < bindings.size(); ++index) {
         auto& binding = bindings[index];
         const auto input = by_id.find(binding.state_value_id);
@@ -507,7 +511,8 @@ ExecutablePlan ExecutablePlan::BindBoundedStateOutputs(
         const int64_t axis = binding.source_extent_axis;
         if (input == by_id.end() || source == by_id.end() ||
             !input->second->is_input || input->second->is_output ||
-            !source->second->is_output || source->second->is_input ||
+            source->second->is_input ||
+            (structured_plan ? false : !source->second->is_output) ||
             binding.input_value_id != -1 || binding.source_slot != -1 ||
             axis < 0 || axis >= static_cast<int64_t>(physical_shapes[index].size()) ||
             physical_shapes[index].size() != input->second.shape().size() ||
@@ -562,7 +567,8 @@ ExecutablePlan ExecutablePlan::BindBoundedStateOutputs(
     return ExecutablePlan(std::move(bound_values), std::move(bound_calls),
         std::move(bound_inputs), constant_value_ids(), std::move(bound_outputs),
         std::move(bound_states), ExecutablePlanMode::kBoundedStatefulExternalV1,
-        graph_input_guards(), {}, -1, std::move(bindings));
+        graph_input_guards(), {}, -1, std::move(bindings),
+        std::optional<RequestBatchingContract>{}, structured_schedule());
 }
 
 void ExecutablePlan::Validate() const {
@@ -1177,6 +1183,22 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
         // Topology-produced values (Phi results, loop carried values) are
         // available to region tasks before any call runs.
         for (int64_t id : structured_produced) available.insert(id);
+        // Structured state updates must name a region in this schedule; the
+        // session commits each append when that region completes.
+        if (bounded_stateful) {
+            std::unordered_set<int64_t> region_ids;
+            for (const auto& region : structured->regions) {
+                region_ids.insert(region.id);
+            }
+            for (const auto& binding : plan.state_output_bindings()) {
+                if (binding.update_region < 0 ||
+                    region_ids.count(binding.update_region) == 0) {
+                    throw std::invalid_argument(
+                        "structured bounded state binding requires an existing "
+                        "update region");
+                }
+            }
+        }
     }
 
     std::unordered_map<int64_t, int> producer_counts;
@@ -1228,7 +1250,31 @@ void ValidateExecutablePlan(const ExecutablePlan& plan) {
         }
     }
     for (const auto& binding : plan.state_output_bindings()) {
-        const auto& call = calls[static_cast<size_t>(producer_index.at(binding.source_value_id))];
+        const auto call_it = producer_index.find(binding.source_value_id);
+        const bool topology_produced =
+            structured && structured_produced.count(binding.source_value_id) != 0;
+        if (call_it == producer_index.end() && !topology_produced) {
+            throw std::invalid_argument(
+                "state output binding source has no producer");
+        }
+        if (call_it == producer_index.end()) {
+            // Structured bounded: the append source is produced by the control
+            // topology (a loop body value), so it has no single kernel call.
+            // Require the state input to appear in the plan so the append is
+            // not detached from any consumed state.
+            bool state_consumed = false;
+            for (const auto& call : calls) {
+                for (int64_t input_id : call.input_value_ids()) {
+                    if (input_id == binding.input_value_id) state_consumed = true;
+                }
+            }
+            if (!state_consumed) {
+                throw std::invalid_argument(
+                    "structured bounded append does not consume its state input");
+            }
+            continue;
+        }
+        const auto& call = calls[static_cast<size_t>(call_it->second)];
         bool consumes_state = false;
         for (int64_t input_id : call.input_value_ids()) {
             consumes_state = consumes_state || input_id ==

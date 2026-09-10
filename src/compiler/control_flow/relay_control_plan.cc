@@ -35,8 +35,11 @@ struct RegionState {
 
 class ControlPlanBuilder final {
 public:
-    explicit ControlPlanBuilder(Function function, bool prepared = false)
-        : function_(std::move(function)), prepared_(prepared) {}
+    explicit ControlPlanBuilder(
+        Function function, bool prepared = false,
+        const internal::BoundedLogicalShapeAdmission* admission = nullptr)
+        : function_(std::move(function)), prepared_(prepared),
+          admission_(admission) {}
 
     internal::ControlPlanLowering BuildWithSidecar() {
         if (!function_.defined()) {
@@ -49,7 +52,6 @@ public:
         } else {
             relay::VerifyANF(function_);
         }
-
         if (!function_->body.defined()) {
             Fail("function", "capability=defined_typed_relay; Function has no body");
         }
@@ -97,7 +99,11 @@ public:
                               plan_.constant_values.end());
         entry.live_outs = outputs;
         FinalizeRegions();
-        plan_.ValidateStaticExact();
+        if (admission_ != nullptr) {
+            plan_.ValidateBounded();
+        } else {
+            plan_.ValidateStaticExact();
+        }
         return internal::ControlPlanLowering{std::move(plan_),
                                               std::move(primitive_units_)};
     }
@@ -105,8 +111,17 @@ public:
 private:
     using Env = std::unordered_map<const Object*, Leaves>;
 
+    /*! \brief Flatten a checked type to tensor leaves, admitting bounded
+     *  wildcard axes only when this builder was given the admission. */
+    std::vector<Type> LeafTypes(const Type& type, const std::string& path) const {
+        return admission_ != nullptr
+                   ? internal::FlattenLogicalTensorTypes(type, path, *admission_)
+                   : internal::FlattenLogicalTensorTypes(type, path);
+    }
+
     Function function_;
     bool prepared_{false};
+    const internal::BoundedLogicalShapeAdmission* admission_{nullptr};
     internal::ControlPlan plan_;
     internal::ValueId next_value_{0};
     internal::RegionId next_region_{0};
@@ -172,8 +187,12 @@ private:
                      internal::LogicalValueOrigin origin,
                      const std::string& path) {
         std::vector<internal::LogicalValueContract> values =
-            internal::MakeLogicalValueLeaves(
-                source, type, origin, next_value_, Device::CPU(), path);
+            admission_ != nullptr
+                ? internal::MakeLogicalValueLeaves(
+                      source, type, origin, next_value_, Device::CPU(), path,
+                      *admission_)
+                : internal::MakeLogicalValueLeaves(
+                      source, type, origin, next_value_, Device::CPU(), path);
         Leaves ids;
         ids.reserve(values.size());
         for (auto& value : values) {
@@ -323,15 +342,13 @@ private:
         }
         std::size_t begin = 0;
         for (int i = 0; i < get_item->index; ++i) {
-            begin += internal::FlattenLogicalTensorTypes(
-                         tuple_type->fields[static_cast<std::size_t>(i)],
-                         path + ".tuple.checked_type")
+            begin += LeafTypes(tuple_type->fields[static_cast<std::size_t>(i)],
+                               path + ".tuple.checked_type")
                          .size();
         }
         const std::vector<Type> selected_types =
-            internal::FlattenLogicalTensorTypes(
-                tuple_type->fields[static_cast<std::size_t>(get_item->index)],
-                path + ".checked_type");
+            LeafTypes(tuple_type->fields[static_cast<std::size_t>(get_item->index)],
+                      path + ".checked_type");
         if (begin + selected_types.size() > tuple.size()) {
             Fail(path, "capability=well_typed_tuple_get_item; TupleGetItem flattening is inconsistent with its checked TupleType");
         }
@@ -572,6 +589,12 @@ private:
 namespace internal {
 ControlPlanLowering LowerRelayToControlPlanWithSidecar(Function function) {
     return ControlPlanBuilder(std::move(function)).BuildWithSidecar();
+}
+
+ControlPlanLowering LowerRelayToControlPlanBounded(
+    Function function, const BoundedLogicalShapeAdmission& admission) {
+    return ControlPlanBuilder(std::move(function), false, &admission)
+        .BuildWithSidecar();
 }
 
 ControlPlanLowering LowerPreparedRelayToControlPlanWithSidecar(

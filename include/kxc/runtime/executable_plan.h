@@ -144,6 +144,11 @@ struct StateOutputBinding final {
      *  -1 in the static mode. Bounded source_slot is -1 and means the
      *  committed extent; input_value_id is assigned by BindBoundedStateOutputs. */
     int64_t input_value_id{-1};
+    /*! \brief Structured bounded mode only: the region whose successful
+     *  completion commits this append. -1 keeps the linear end-of-run commit.
+     *  A loop body region commits once per iteration so the next iteration
+     *  reads the advanced extent. */
+    int64_t update_region{-1};
 };
 
 /*! \brief Explicit serving ABI for independent requests along leading axis 0.

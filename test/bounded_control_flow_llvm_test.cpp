@@ -190,6 +190,101 @@ bool TestBoundedWhileServesShapeRange() {
     return true;
 }
 
+/*! \brief Bounded loop that appends one row to a session-owned state each
+ *  iteration. params {go, stop, token[1,F], prefix[S,F]}; the loop carries the
+ *  scalar condition and concat(prefix, token) whose extent axis is symbolic. */
+Function StateAppendWhileFunction() {
+    const TensorType f32({4, 4}, "float32");
+    const TensorType row({1, 4}, "float32");
+    const TensorType boolean({}, "bool");
+    Var go("go", boolean), stop("stop", boolean), token("token", row),
+        prefix("prefix", f32);
+    Var state("state");
+    const Expr appended = kxc::Call(
+        kxc::relay::Op::Get("concatenate"), {prefix, token},
+        kxc::relay::Attrs(kxc::relay::ConcatenateAttrs::Create(0)));
+    const Expr initial = kxc::Tuple({go, appended});
+    const Expr condition = kxc::TupleGetItem(state, 0);
+    const Expr body = kxc::Tuple({stop, appended});
+    return Function({go, stop, token, prefix},
+                    kxc::While(initial, state, condition, body, 4));
+}
+
+bool TestBoundedStateAppendAtLoopRegion() {
+#if KXC_ENABLE_BOUNDED_DYNAMIC_GRAPH && KXC_ENABLE_CONTROL_RUNTIME && KXC_USE_LLVM
+    const auto config = CompileConfig::Create(kxc::BuildTarget(Device::CPU()));
+    // prefix is parameter 3; its axis 0 is the symbolic state extent S.
+    const std::vector<restricted::InputAxisSymbol> symbols = {
+        {3, 0, "S", 1, 8, 1}};
+    CompiledGraph compiled = Compiler::CompileBoundedStructured(
+        StateAppendWhileFunction(), config, symbols);
+    CHECK(compiled.defined() && compiled.plan().structured_schedule().has_value(),
+          "state append loop must publish a structured plan");
+
+    const auto& plan = compiled.plan();
+    int64_t prefix_id = -1;
+    for (const auto& value : plan.values()) {
+        if (value->is_input && value.shape().size() == 2 && value.shape()[0] == -1) {
+            prefix_id = value->value_id;
+        }
+    }
+    CHECK(prefix_id >= 0, "the prefix state input must be a bounded graph input");
+    const std::optional<StructuredSchedule> schedule_opt =
+        plan.structured_schedule();
+    const StructuredSchedule& schedule = *schedule_opt;
+    // The append source is the loop body's produced value (the backedge), not
+    // the loop result, because the commit happens when the body region
+    // completes. Select the rank-2 carried binding.
+    int64_t append_source = -1;
+    int64_t body_region = -1;
+    for (const auto& region : schedule.regions) {
+        for (const auto& task : region.tasks) {
+            if (task.kind != StructuredTaskKind::kLoop) continue;
+            body_region = task.loop.body_region;
+            for (const auto& carried : task.loop.carried) {
+                int64_t rank = -1;
+                for (const auto& candidate : plan.values()) {
+                    if (candidate->value_id == carried.backedge) {
+                        rank = static_cast<int64_t>(candidate.shape().size());
+                    }
+                }
+                if (rank == 2) append_source = carried.backedge;
+            }
+        }
+    }
+    CHECK(append_source >= 0, "the loop must carry the appended table");
+    CHECK(body_region >= 0, "the loop must declare a body region");
+
+    kxc::runtime::StateOutputBinding binding;
+    binding.state_value_id = prefix_id;
+    binding.source_value_id = append_source;
+    binding.source_extent_axis = 0;
+    binding.source_slot = -1;
+    binding.append_count = 1;
+    binding.update_region = body_region;
+
+    compiled = compiled.BindBoundedStateOutputs({binding}, {{8, 4}}, -1234.5);
+    CHECK(compiled.plan().mode() == ExecutablePlanMode::kBoundedStatefulExternalV1,
+          "state binding must produce a bounded stateful plan");
+
+    RuntimeSession session(compiled.module(), compiled.plan());
+    session.InitializeState(prefix_id, Filled({1, 4}, 5.0f), 1);
+    // go=true, stop=false -> exactly one iteration commits one appended row.
+    const Array<NDArray> inputs = {BoolScalar(true), BoolScalar(false),
+                                   Filled({1, 4}, 7.0f)};
+    (void)session.Run(inputs);
+    CHECK(session.StateExtent(prefix_id) == 2,
+          "one loop iteration must commit exactly one appended row");
+    const std::vector<float> values = ReadFloats(session.StateValue(prefix_id));
+    CHECK(values.size() >= 8, "committed state must expose at least two rows");
+    CHECK(values[0] == 5.0f && values[4] == 7.0f,
+          "the appended row must land at the advanced extent");
+#else
+    std::cout << "[SKIP] bounded structured state needs gate-on LLVM build\n";
+#endif
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -198,6 +293,7 @@ int main() {
         {"bounded_if_serves_shape_range", TestBoundedIfServesShapeRange},
         {"bounded_if_rejects_out_of_range", TestBoundedIfRejectsOutOfRange},
         {"bounded_while_serves_shape_range", TestBoundedWhileServesShapeRange},
+        {"bounded_state_append_at_loop_region", TestBoundedStateAppendAtLoopRegion},
     };
     int failures = 0;
     for (const Test& test : tests) {

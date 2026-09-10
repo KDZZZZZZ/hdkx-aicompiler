@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -867,6 +868,48 @@ AsyncOperation InvokeDynamicCall(
     return std::move(invoked.operation);
 }
 
+/*! \brief InvokeDynamicCall variant that substitutes caller-supplied live
+ *  prefix views for named state inputs, so a structured bounded loop reads the
+ *  advanced extent each iteration. */
+AsyncOperation InvokeDynamicCallWithLivePrefixes(
+    const api::CompiledModule& module, const KernelCall& call,
+    const std::unordered_map<int64_t, ValueSpec>& values,
+    const std::shared_ptr<internal::ValueTable>& table,
+    const std::map<int64_t, NDArray>& live_prefixes,
+    const DeviceStream& stream) {
+    Array<NDArray> inputs;
+    for (int64_t value_id : call.input_value_ids()) {
+        const ValueSpec& value =
+            FindValue(values, value_id, "RuntimeSession dynamic execution");
+        if (value->is_constant) continue;
+        const auto prefix = live_prefixes.find(value_id);
+        inputs.push_back(prefix == live_prefixes.end() ? table->Get(value_id)
+                                                       : prefix->second);
+    }
+    api::ModuleInvocationResult invoked =
+        module.Invoke(call->symbol, inputs, stream);
+    const Array<int64_t> output_ids = call.output_value_ids();
+    if (invoked.outputs.size() != output_ids.size()) {
+        throw std::logic_error(
+            "RuntimeSession dynamic invocation returned the wrong output count");
+    }
+    for (size_t index = 0; index < output_ids.size(); ++index) {
+        const api::ModuleInvocationOutput& output = invoked.outputs[index];
+        if (output.logical != output.physical || output.logical != output.valid) {
+            throw std::logic_error(
+                "RuntimeSession dynamic invocation returned non-logical extents");
+        }
+        const ValueSpec& spec = FindValue(
+            values, output_ids[index], "RuntimeSession dynamic output");
+        ValidateRuntimeValue(
+            spec, output.storage,
+            "RuntimeSession dynamic output " + std::to_string(spec->value_id),
+            true);
+        table->Bind(spec, output.storage);
+    }
+    return std::move(invoked.operation);
+}
+
 }  // namespace
 
 namespace {
@@ -887,6 +930,18 @@ const StructuredRegion& FindStructuredRegion(
     return *found->second;
 }
 
+void CopyStateRange(const NDArray& source, int64_t source_index,
+                    const NDArray& destination, int64_t destination_index,
+                    int64_t count, int64_t axis);
+
+/*! \brief One session-owned bounded state advanced at a structured region. */
+struct StructuredWalkerState final {
+    StateOutputBinding binding;
+    NDArray state;
+    NDArray prefix_storage;
+    int64_t working_extent{0};
+};
+
 /*! \brief Walk a structured schedule on the main session machinery.
  *
  *  Each kernel task reuses the plan's own KernelCall, argument preparation and
@@ -905,16 +960,22 @@ public:
                      Array<AsyncOperation>* operations,
                      ExecutionObserver* observer,
                      const ExecutionRunCorrelation& correlation,
-                     bool dynamic)
+                     bool dynamic,
+                     std::vector<StructuredWalkerState>* states)
         : module_(module), schedule_(schedule), values_(values),
           alignments_(alignments), table_(table), stream_(stream),
           operations_(operations), observer_(observer), correlation_(correlation),
-          device_(stream.device()), dynamic_(dynamic) {
+          device_(stream.device()), dynamic_(dynamic), states_(states) {
         const Array<KernelCall> calls = plan.calls();
         for (const auto& region : schedule_.regions) {
             regions_.emplace(region.id, &region);
         }
         calls_.assign(calls.begin(), calls.end());
+        // Seed each bounded state's live prefix at its committed extent so the
+        // first activation reads the same view the linear path would.
+        if (states_ != nullptr) {
+            for (auto& entry : *states_) ReopenPrefix(entry);
+        }
     }
 
     void Run() {
@@ -950,8 +1011,14 @@ private:
         if (dynamic_) {
             // Dynamic region kernels resolve their own runtime extents through
             // the module invocation contract, exactly like the linear path.
+            // When bounded state is bound, the session-owned live prefix view
+            // substitutes for the state input so each iteration reads the
+            // advanced extent.
             operations_->push_back(
-                InvokeDynamicCall(module_, call, values_, table_, stream_));
+                live_prefix_.empty()
+                    ? InvokeDynamicCall(module_, call, values_, table_, stream_)
+                    : InvokeDynamicCallWithLivePrefixes(
+                          module_, call, values_, table_, live_prefix_, stream_));
         } else {
             Array<NDArray> arguments =
                 PrepareCallArguments(module_, call, values_, alignments_, table_);
@@ -1052,6 +1119,50 @@ private:
                     break;
             }
         }
+        // An append whose update region just completed commits here, so the
+        // next activation (for example the next loop iteration) reads the
+        // advanced extent through the reopened prefix.
+        CommitRegionState(region.id);
+    }
+
+    /*! \brief Commit bounded state appends whose update region is `region_id`.
+     *
+     *  Each append copies its produced segment into the session state at the
+     *  current working extent and advances that extent, so a following
+     *  activation (for example the next loop iteration) reads the new length
+     *  through the reopened prefix view. */
+    void CommitRegionState(int64_t region_id) {
+        if (states_ == nullptr || states_->empty()) return;
+        for (auto& entry : *states_) {
+            if (entry.binding.update_region != region_id) continue;
+            WaitLast();
+            const NDArray source = table_->Get(entry.binding.source_value_id);
+            CopyStateRange(source, entry.working_extent, entry.state,
+                           entry.working_extent, entry.binding.append_count,
+                           entry.binding.source_extent_axis);
+            entry.working_extent += entry.binding.append_count;
+            ReopenPrefix(entry);
+        }
+    }
+
+    /*! \brief Re-lay one state's live prefix view to its working extent. */
+    void ReopenPrefix(StructuredWalkerState& entry) {
+        const ValueSpec& spec =
+            FindValue(values_, entry.binding.state_value_id,
+                      "structured bounded state");
+        Array<int64_t> shape;
+        const Array<int64_t> physical = spec.shape();
+        for (int64_t dimension : physical) shape.push_back(dimension);
+        if (spec->state_extent_axis < 0 ||
+            spec->state_extent_axis >= static_cast<int64_t>(shape.size())) {
+            throw std::logic_error(
+                "structured bounded state has no extent axis");
+        }
+        shape[spec->state_extent_axis] = entry.working_extent;
+        NDArray prefix = entry.prefix_storage.CreateView(shape, {}, 0);
+        CopyStateRange(entry.state, 0, prefix, 0, entry.working_extent,
+                       entry.binding.source_extent_axis);
+        live_prefix_[entry.binding.input_value_id] = prefix;
     }
 
     /*! \brief Materialize a topology-produced value (Phi result or loop result)
@@ -1078,6 +1189,10 @@ private:
     std::unordered_map<int64_t, const StructuredRegion*> regions_;
     std::size_t submit_count_{0};
     bool dynamic_{false};
+    std::vector<StructuredWalkerState>* states_{nullptr};
+    /*! \brief Current session-owned prefix view per bounded state input, keyed
+     *  by the state's logical input value id. */
+    std::map<int64_t, NDArray> live_prefix_;
 };
 
 }  // namespace
@@ -1436,10 +1551,20 @@ RunAsyncResult RuntimeSession::RunAsyncImpl(const api::CompiledModule& module,
                 graph_inputs.push_back(value);
             }
             if (structured) {
-                if (stateful) {
+                if (stateful && !bounded_stateful) {
                     throw std::invalid_argument(
-                        "RuntimeSession structured schedule does not combine with "
-                        "persistent state");
+                        "RuntimeSession structured schedule combines only with "
+                        "bounded external state");
+                }
+                std::vector<StructuredWalkerState> walker_states;
+                if (bounded_stateful) {
+                    for (const auto& update : pending_state_updates) {
+                        walker_states.push_back(StructuredWalkerState{
+                            update.binding, update.state,
+                            node->state_prefixes_by_value.at(
+                                update.binding.input_value_id),
+                            update.prior_extent});
+                    }
                 }
                 if (dynamic) PreflightDynamicGraphInputs(node->plan, graph_inputs);
                 const Map<String, NDArray>& constants =
@@ -1459,9 +1584,16 @@ RunAsyncResult RuntimeSession::RunAsyncImpl(const api::CompiledModule& module,
                 StructuredWalker walker(module, node->plan, *structured, values,
                                         node->required_alignment_by_storage,
                                         table, stream, &operations, observer,
-                                        correlation, dynamic);
+                                        correlation, dynamic, &walker_states);
                 walker.Run();
                 submit_count += walker.submit_count();
+                if (bounded_stateful) {
+                    std::lock_guard<std::mutex> book_lock(node->length_book->mutex);
+                    for (const auto& state : walker_states) {
+                        node->length_book->lengths[state.binding.state_value_id] =
+                            state.working_extent;
+                    }
+                }
             } else if (dynamic) {
                 PreflightDynamicGraphInputs(node->plan, graph_inputs);
                 // All caller shapes, shared B/P guards and capacities pass
@@ -1789,10 +1921,12 @@ RunAsyncResult RuntimeSession::RunAsyncImpl(const api::CompiledModule& module,
             auto state = std::make_shared<RuntimeExecutionState>(RuntimeExecutionState{
                 module, node->plan, table, std::move(prior_operations)});
             completion.RetainDependencies(table->RetainedStorage(), std::move(state));
-            if (external_stateful) {
+            if (external_stateful && !structured) {
                 // External stateful graphs finish their state commit before
                 // RunAsync returns.  Unlike observation callbacks this path
                 // propagates copy failures to the caller and run receipt.
+                // A structured schedule commits at its own region boundaries
+                // (see StructuredWalker), so this linear block is skipped.
                 completion.Wait();
                 for (const auto& update : pending_state_updates) {
                     if (request_slots) {

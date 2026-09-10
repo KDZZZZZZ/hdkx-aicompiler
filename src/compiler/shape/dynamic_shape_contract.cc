@@ -28,6 +28,10 @@ public:
     }
 };
 
+BoundedLogicalShapeAdmission MintBoundedLogicalShapeAdmission() {
+    return BoundedCompilePreparationAccess::MintLogicalShapeAdmission();
+}
+
 namespace {
 
 using DimExpr = specialization::DimExpr;
