@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -54,6 +55,11 @@ struct Resolution final {
     // 既有 ValueGraph 分配，准备阶段按 frozen unit 顺序挂接这些证明。
     std::vector<std::vector<kxc::shape::experimental::v1::DimExpr>>
         unit_output_dimensions;
+    // 每个 rewritten Relay 节点 → 其每个 tensor 叶的符号维证明（key 为
+    // rewritten Expr 的 Object 指针）。结构化 bounded 路径按控制计划的
+    // value.source 指针查表，避免依赖两条遍历顺序一致。
+    std::map<const Object*, std::vector<std::vector<
+        kxc::shape::experimental::v1::DimExpr>>> node_leaf_dims;
 };
 
 /*! \brief 解析并重写受限形状值子图。

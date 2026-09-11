@@ -9,6 +9,8 @@ Type EqualInferType(const Attrs&, const Array<Type>&);
 te::Tensor EqualCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 Type ErfInferType(const Attrs&, const Array<Type>&);
 te::Tensor ErfCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
+Type LessInferType(const Attrs&, const Array<Type>&);
+te::Tensor LessCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 Type MaskedSoftmaxInferType(const Attrs&, const Array<Type>&);
 te::Tensor MaskedSoftmaxCompute(const Attrs&, const Array<te::Tensor>&, const kxc::Type&);
 Type NegInferType(const Attrs&, const Array<Type>&);
@@ -44,6 +46,14 @@ KXC_REGISTER_OP(erf)
     .add_argument("data", "Tensor", "The input tensor.")
     .set_attr<FInferType>("FInferType", ErfInferType)
     .set_attr<FRelayToTE>("FRelayToTE", ErfCompute);
+
+KXC_REGISTER_OP(less)
+    .describe("Element-wise less-than comparison with broadcast.")
+    .set_num_inputs(2)
+    .add_argument("lhs", "Tensor", "The left hand side input tensor.")
+    .add_argument("rhs", "Tensor", "The right hand side input tensor.")
+    .set_attr<FInferType>("FInferType", LessInferType)
+    .set_attr<FRelayToTE>("FRelayToTE", LessCompute);
 
 KXC_REGISTER_OP(masked_softmax)
     .describe("Normalizes finite floating logits over True bool-mask entries; masked entries and all-False rows are exactly zero. The trailing-axis mask may broadcast to, but never expand, the data shape.")

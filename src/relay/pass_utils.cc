@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 
@@ -459,6 +460,107 @@ VirtualDevice WithMemoryScope(const VirtualDevice& virtual_device,
     node->memory_scope = memory_scope;
     node->virtual_device_id = virtual_device->virtual_device_id;
     return VirtualDevice(ObjectRef(node));
+}
+
+
+// 一次性把若干变量替换为对应表达式（同时替换，不级联）。
+Expr SubstituteVars(const Expr& expr, const Array<Var>& targets,
+                    const Array<Expr>& replacements) {
+    if (!expr.defined()) {
+        throw std::invalid_argument("SubstituteVars requires a defined expression");
+    }
+    if (targets.size() != replacements.size() || targets.empty()) {
+        throw std::invalid_argument(
+            "SubstituteVars requires nonempty equal-length targets and replacements");
+    }
+    std::unordered_map<const Object*, Expr> by_target;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        if (!targets[i].defined() || !replacements[i].defined()) {
+            throw std::invalid_argument(
+                "SubstituteVars requires defined targets and replacements");
+        }
+        if (!by_target.emplace(targets[i].get(), replacements[i]).second) {
+            throw std::invalid_argument("SubstituteVars has a duplicate target");
+        }
+    }
+
+    // 单次 DAG 安全遍历，按对象身份同时替换；replacement 内部对其余 target
+    // 的引用不会被再替换，因此形参到实参是一次性映射而非级联改写。
+    class MultiVarSubstituter : public RelayPass {
+    public:
+        explicit MultiVarSubstituter(
+            std::unordered_map<const Object*, Expr> by_target)
+            : by_target_(std::move(by_target)) {}
+
+    protected:
+        Expr VisitVar(const VarNode* op, const Expr& ref) override {
+            (void)op;
+            const auto found = by_target_.find(ref.get());
+            return found == by_target_.end() ? ref : found->second;
+        }
+
+        Expr VisitFunction(const FunctionNode* op, const Expr& ref) override {
+            for (const auto& param : op->params) {
+                if (by_target_.count(param.get()) != 0) return ref;
+            }
+            return RelayPass::VisitFunction(op, ref);
+        }
+
+        Expr VisitWhile(const WhileNode* op, const Expr& ref) override {
+            Expr initial = Mutate(op->initial_state);
+            if (by_target_.count(op->loop_var.get()) != 0) {
+                if (initial.get() == op->initial_state.get()) return ref;
+                return CopyVirtualDevice(ref, While(initial, op->loop_var, op->condition,
+                                                    op->body, op->max_trip_count));
+            }
+            Expr condition = Mutate(op->condition);
+            Expr body = Mutate(op->body);
+            if (initial.get() == op->initial_state.get() &&
+                condition.get() == op->condition.get() &&
+                body.get() == op->body.get()) {
+                return ref;
+            }
+            return CopyVirtualDevice(ref, While(initial, op->loop_var, condition, body,
+                                                op->max_trip_count));
+        }
+
+        Expr VisitLet(const LetNode* op, const Expr& ref) override {
+            Expr new_value = Mutate(op->value);
+            if (by_target_.count(op->var.get()) != 0) {
+                if (new_value.get() == op->value.get()) return ref;
+                return CopyVirtualDevice(ref, Let(op->var, new_value, op->body));
+            }
+            Expr new_body = Mutate(op->body);
+            if (new_value.get() == op->value.get() && new_body.get() == op->body.get()) {
+                return ref;
+            }
+            return CopyVirtualDevice(ref, Let(op->var, new_value, new_body));
+        }
+
+    private:
+        std::unordered_map<const Object*, Expr> by_target_;
+    };
+
+    MultiVarSubstituter substituter(std::move(by_target));
+    return substituter.Mutate(expr);
+}
+
+// 把函数形参替换为实参，返回函数体表达式（内联前提）。
+Expr InlineFunctionParameters(const Function& function,
+                              const Array<Expr>& arguments) {
+    if (!function.defined()) {
+        throw std::invalid_argument(
+            "InlineFunctionParameters requires a defined Function");
+    }
+    if (function->params.size() != arguments.size()) {
+        throw std::invalid_argument(
+            "InlineFunctionParameters argument count differs from the parameters");
+    }
+    Array<Var> targets;
+    for (const auto& parameter : function->params) {
+        targets.push_back(parameter);
+    }
+    return SubstituteVars(function->body, targets, arguments);
 }
 
 }  // namespace pass_utils

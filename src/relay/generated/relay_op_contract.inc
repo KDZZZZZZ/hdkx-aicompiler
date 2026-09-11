@@ -29,6 +29,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.lowering_key = "FRelayToTE";
         return spec;
     }
+    if (name == "argmax") {
+        OperatorSpec spec;
+        spec.name = "argmax";
+        spec.schema_version = 1;
+        spec.category = "tensor.reduce";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "ArgMaxAttrs";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
     if (name == "cast") {
         OperatorSpec spec;
         spec.name = "cast";
@@ -182,6 +200,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.input_arity.min_inputs = -1;
         spec.input_arity.max_inputs = -1;
         spec.attrs_type_key = "GatherAttrs";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
+    if (name == "less") {
+        OperatorSpec spec;
+        spec.name = "less";
+        spec.schema_version = 1;
+        spec.category = "tensor.math";
+        spec.input_arity.num_inputs = 2;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "";
         spec.output_arity = 1;
         spec.type_relation_key = "FInferType";
         spec.effect = OperatorEffectKind::kPure;
@@ -443,6 +479,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.lowering_key = "FRelayToTE";
         return spec;
     }
+    if (name == "reduce_max") {
+        OperatorSpec spec;
+        spec.name = "reduce_max";
+        spec.schema_version = 1;
+        spec.category = "tensor.reduce";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "ReduceMaxAttrs";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
     if (name == "reduce_mean") {
         OperatorSpec spec;
         spec.name = "reduce_mean";
@@ -452,6 +506,24 @@ inline OperatorSpec Spec(const std::string& name) {
         spec.input_arity.min_inputs = -1;
         spec.input_arity.max_inputs = -1;
         spec.attrs_type_key = "ReduceMeanAttrs";
+        spec.output_arity = 1;
+        spec.type_relation_key = "FInferType";
+        spec.effect = OperatorEffectKind::kPure;
+        spec.deterministic = true;
+        spec.alias_contract = "none";
+        spec.lowering_kind = OperatorLoweringKind::kSingleTE;
+        spec.lowering_key = "FRelayToTE";
+        return spec;
+    }
+    if (name == "reduce_min") {
+        OperatorSpec spec;
+        spec.name = "reduce_min";
+        spec.schema_version = 1;
+        spec.category = "tensor.reduce";
+        spec.input_arity.num_inputs = 1;
+        spec.input_arity.min_inputs = -1;
+        spec.input_arity.max_inputs = -1;
+        spec.attrs_type_key = "ReduceMinAttrs";
         spec.output_arity = 1;
         spec.type_relation_key = "FInferType";
         spec.effect = OperatorEffectKind::kPure;

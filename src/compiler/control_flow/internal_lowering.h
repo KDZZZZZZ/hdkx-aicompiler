@@ -8,7 +8,7 @@
 
 #include "kxc/relay/relay.h"
 #include "kxc/runtime/compiled_module.h"
-#include "kxc/runtime/control_execution_plan.h"
+#include "kxc/runtime/executable_plan.h"
 #include "../internal/relay_program.h"
 #include "control_plan.h"
 
@@ -23,17 +23,29 @@ struct ControlPlanLowering final {
 ControlPlanLowering LowerRelayToControlPlanWithSidecar(Function function);
 ControlPlanLowering LowerPreparedRelayToControlPlanWithSidecar(
     const PreparedRelayProgram& program);
+/*! \brief Lower a control function admitting fixed-rank dynamic (-1) axes.
+ *
+ *  The region-aware bounded path lowers a graph whose symbolic axes are
+ *  represented as -1; this overload threads the bounded logical-shape
+ *  admission so LogicalValueContract accepts those wildcard axes. */
+ControlPlanLowering LowerRelayToControlPlanBounded(
+    Function function,
+    const class BoundedLogicalShapeAdmission& admission);
 
-struct ControlKernelBinding final {
-    PrimitiveUnitId primitive_unit_id{-1};
-    CompiledModule module;
-    String entry_symbol;
-    std::vector<ValueId> abi_non_output_value_ids;
-    std::shared_ptr<const void> retention_owner;
-};
+/*! \brief Convert ControlPlan v2 into a normal ExecutablePlan with an optional
+ *  structured schedule.
+ *
+ *  Kernel tasks reference the plan's own `calls()` by PrimitiveUnitId, so the
+ *  runtime executes them through the ordinary module/ValueTable machinery. The
+ *  returned plan uses ExecutablePlanMode::kStatic. */
+runtime::ExecutablePlan BuildStructuredExecutablePlan(
+    const ControlPlan& plan, const std::vector<PrimitiveUnit>& units);
 
-runtime::ControlExecutionPlan BindControlPlanForRuntime(
-    const ControlPlan& plan,
-    const std::vector<ControlKernelBinding>& bindings);
+/*! \brief Compile a Relay function with residual control topology into an
+ *  ordinary CompiledGraph carrying an optional structured schedule.
+ *
+ *  Reuses the production primitive compiler and module assembly; only the
+ *  published plan differs from the linear static path. LLVM CPU:0 only. */
+CompiledGraph CompileStructuredPipeline(Function function, CompileConfig config);
 
 }  // namespace kxc::api::internal

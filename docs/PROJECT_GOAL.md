@@ -91,11 +91,11 @@
 
 #### 结构化控制流能力边界（横向能力）
 
-Transformer 图中可能出现条件分支和生成循环，仓库已有一条独立的结构化控制流实现，但它不是普通 `Compiler::Compile` 的默认能力。`KXC_ENABLE_CONTROL_RUNTIME` 默认关闭；开启后，`Compiler::CompileControlFlowExact` 可把静态精确的 Relay `If` 和有界、条件先于循环体执行的 `While` 编译成真实 LLVM 原语，再由 `ControlRuntimeSession` 在 CPU:0、默认流上执行。控制计划已经有 branch/loop region、Phi 绑定、循环携带值、`max_trip_count` 和严格校验，相关 schema、lowering、运行时与 CTest 也已经存在。
+Transformer 图中可能出现条件分支和生成循环，仓库已把结构化控制流并入主编译/执行链。`KXC_ENABLE_CONTROL_RUNTIME` 默认关闭；开启后，普通 `Compiler::Compile` 可把静态精确的 Relay `If` 和有界、条件先于循环体执行的 `While` 编译成携带 `structured_schedule` 的普通 `CompiledGraph`，由普通 `RuntimeSession` 在 CPU:0、默认流上执行。控制拓扑已经有 branch/loop region、Phi 绑定、循环携带值、`max_trip_count` 和严格校验，并且是 `ExecutablePlan` 的正交方面——不存在第二个 compiler 入口、plan 类型或执行会话。这消除了此前 `Compiler::CompileControlFlowExact` / `ControlRuntimeSession` 的第二执行权威。
 
 这条路径当前的边界必须进入目标定义：固定 rank/shape 和静态 kernel 签名；CPU/LLVM 与默认流；CPU 标量布尔谓词；非负的循环上限；fresh-output kernel effect。它明确拒绝 CUDA、非默认设备或异步流、运行时 extent、KV/持久状态、alias/donation/storage reuse，以及任意数据相关形状。关闭门禁时的“明确拒绝”测试不等于生产能力，reference executor 也不等于 LLVM 证据。
 
-对 MiniMind 的关系分两步处理：L1a 静态 prefill 不依赖控制流路径，L1b 的首个生成循环先由 host driver 明确编排；随后用 M10 评估固定步数或导出图中的 `While` 是否值得接入。若要让控制流承载真实 decode，必须先由 M2/M3 为同一运行时 owner 定义 KV 状态和 extent ABI，不能在 `ControlRuntimeSession` 旁边再造一套模型专用状态引擎。MiniMind-O 的双自回归、80 ms 帧预算和多流近双工也不由现有控制流合同自动获得。
+对 MiniMind 的关系分两步处理：L1a 静态 prefill 不依赖控制流路径，L1b 的首个生成循环先由 host driver 明确编排；随后用 M10 评估固定步数或导出图中的 `While` 是否值得接入。若要让控制流承载真实 decode，必须先由 M2/M3 为同一运行时 owner 定义 KV 状态和 extent ABI，且控制流必须与既有 `ExecutablePlan`/`RuntimeSession` 共用同一状态权威——不能在结构化 walker 旁再造一套模型专用状态引擎。把控制流接入 bounded shape 与持久状态的组合（region-aware shape 证明、region 边界的状态更新）仍未实现，见 [M10 C3 计划](implementation/M10_C3_UNIFIED_CONTROL_PLAN.md) §7。MiniMind-O 的双自回归、80 ms 帧预算和多流近双工也不由现有控制流合同自动获得。
 
 **控制流验收**：在 gate-on LLVM 构建中分别证明 `If` 两个分支、`While` 的 0/1/多次迭代和上限拒绝，并与 reference 结果对齐；在 gate-off 构建中证明入口在执行前拒绝。每个结果单独记录到能力矩阵和 profile receipt，不能把“源码已存在”写成“MiniMind 已支持”。
 

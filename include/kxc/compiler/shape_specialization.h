@@ -90,10 +90,19 @@ class GraphTemplate {
  public:
   GraphTemplate(GraphSemanticKey key, ShapeProgram shape_program,
                 std::vector<UnitSkeleton> ordered_units);
+  /*! \brief Structured form: some values are produced by control topology
+   *  (Phi results, loop results) rather than by a unit. Names listed here are
+   *  exempt from the linear "each output has a unit producer" rule; the
+   *  default empty vector keeps linear templates byte-identical. */
+  GraphTemplate(GraphSemanticKey key, ShapeProgram shape_program,
+                std::vector<UnitSkeleton> ordered_units,
+                std::vector<std::string> synthesized_value_names);
 
   [[nodiscard]] const GraphSemanticKey& key() const noexcept;
   [[nodiscard]] const ShapeProgram& shape_program() const noexcept;
   [[nodiscard]] const std::vector<UnitSkeleton>& ordered_units() const noexcept;
+  [[nodiscard]] const std::vector<std::string>& synthesized_value_names()
+      const noexcept;
   [[nodiscard]] std::string CanonicalBytes() const;
   void Verify() const;  // 结构非法则抛错
 
@@ -101,6 +110,7 @@ class GraphTemplate {
   GraphSemanticKey key_;
   ShapeProgram shape_program_;
   std::vector<UnitSkeleton> ordered_units_;
+  std::vector<std::string> synthesized_value_names_;
 };
 
 // ---------------------------------------------------------------------------

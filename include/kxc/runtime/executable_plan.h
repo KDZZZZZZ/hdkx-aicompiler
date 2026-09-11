@@ -50,6 +50,86 @@ enum class ExecutablePlanMode : uint8_t {
     kBoundedStatefulExternalV1 = 4,
 };
 
+/*! \brief One structured-control task kind in an optional structured schedule.
+ *
+ *  A structured schedule is an orthogonal aspect of an ExecutablePlan: it
+ *  selects which static kernel call points run and in what order, but it never
+ *  owns storage, state, or a second kernel-launch channel. Kernel tasks
+ *  reference calls by index into the plan's `calls()` list; the plan's mode
+ *  still owns allocation and state, and the plan's calls still have exactly one
+ *  module entry and artifact pin each. */
+enum class StructuredTaskKind : uint8_t {
+    kKernel = 0,
+    kBranch = 1,
+    kLoop = 2,
+};
+
+/*! \brief One branch Phi: result takes then_value or else_value at runtime. */
+struct StructuredPhiBinding final {
+    int64_t result{-1};
+    int64_t then_value{-1};
+    int64_t else_value{-1};
+};
+
+/*! \brief A static branch over a CPU scalar bool predicate value. */
+struct StructuredBranchSpec final {
+    int64_t predicate{-1};
+    int64_t then_region{-1};
+    int64_t else_region{-1};
+    std::vector<StructuredPhiBinding> phis;
+};
+
+/*! \brief One loop-carried value bound across condition/body iterations. */
+struct StructuredLoopCarriedBinding final {
+    int64_t result{-1};
+    int64_t initial{-1};
+    int64_t body_argument{-1};
+    int64_t backedge{-1};
+};
+
+/*! \brief A condition-before-body bounded loop. */
+struct StructuredLoopSpec final {
+    int64_t condition_region{-1};
+    int64_t body_region{-1};
+    int64_t condition_value{-1};
+    std::vector<StructuredLoopCarriedBinding> carried;
+    int64_t max_trip_count{-1};
+};
+
+/*! \brief One task in a structured region. Kernel tasks reference a call index. */
+struct StructuredTask final {
+    int64_t id{-1};
+    StructuredTaskKind kind{StructuredTaskKind::kKernel};
+    /*! \brief Index into the plan's calls() list; -1 for branch/loop tasks. */
+    int64_t call_index{-1};
+    /*! \brief Unique task boundary values (for scope validation). */
+    std::vector<int64_t> inputs;
+    /*! \brief Values this task produces (kernel outputs). */
+    std::vector<int64_t> outputs;
+    StructuredBranchSpec branch;
+    StructuredLoopSpec loop;
+};
+
+/*! \brief One structured region: an ordered task list with explicit liveness. */
+struct StructuredRegion final {
+    int64_t id{-1};
+    std::vector<int64_t> live_ins;
+    std::vector<int64_t> live_outs;
+    std::vector<StructuredTask> tasks;
+};
+
+/*! \brief Optional structured execution topology layered on one ExecutablePlan.
+ *
+ *  When absent the plan executes its `calls()` linearly. When present the
+ *  session walks regions and executes only the selected call points. */
+struct StructuredSchedule final {
+    static constexpr int64_t kSchemaVersion = 1;
+    int64_t schema_version{kSchemaVersion};
+    int64_t entry_region{-1};
+    std::vector<int64_t> region_order;
+    std::vector<StructuredRegion> regions;
+};
+
 /*! \brief One produced tensor segment appended to session-owned state.
  *  Static mode reads source_slot == capacity from a capacity-padded source.
  *  Bounded mode reads the committed cursor from a valid-prefix source whose
@@ -64,6 +144,11 @@ struct StateOutputBinding final {
      *  -1 in the static mode. Bounded source_slot is -1 and means the
      *  committed extent; input_value_id is assigned by BindBoundedStateOutputs. */
     int64_t input_value_id{-1};
+    /*! \brief Structured bounded mode only: the region whose successful
+     *  completion commits this append. -1 keeps the linear end-of-run commit.
+     *  A loop body region commits once per iteration so the next iteration
+     *  reads the advanced extent. */
+    int64_t update_region{-1};
 };
 
 /*! \brief Explicit serving ABI for independent requests along leading axis 0.
@@ -192,6 +277,8 @@ private:
     int64_t state_count_input_value_id_{-1};
     std::vector<StateOutputBinding> state_output_bindings_;
     std::optional<RequestBatchingContract> request_batching_;
+    /*! \brief Optional structured execution topology. Absent means linear. */
+    std::optional<StructuredSchedule> structured_schedule_;
 };
 
 /*! \brief Validated immutable graph ABI and kernel call order. */
@@ -208,7 +295,8 @@ public:
                    std::vector<std::vector<int64_t>> state_extent_bindings = {},
                    int64_t state_count_input_value_id = -1,
                    std::vector<StateOutputBinding> state_output_bindings = {},
-                   std::optional<RequestBatchingContract> request_batching = std::nullopt);
+                   std::optional<RequestBatchingContract> request_batching = std::nullopt,
+                   std::optional<StructuredSchedule> structured_schedule = std::nullopt);
     explicit ExecutablePlan(const ObjectRef& ref);
 
     Array<ValueSpec> values() const;
@@ -223,6 +311,8 @@ public:
     int64_t state_count_input_value_id() const;
     std::vector<StateOutputBinding> state_output_bindings() const;
     std::optional<RequestBatchingContract> request_batching() const;
+    /*! \brief Optional structured execution topology; nullopt means linear. */
+    std::optional<StructuredSchedule> structured_schedule() const;
     /*! \brief Declare the leading-axis independent-request ABI on an already
      *  bound bounded-state plan. Physical slot capacity may exceed max_batch_size
      *  but must fit the compiled batch bounds. No compilation occurs here. */

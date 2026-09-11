@@ -51,20 +51,22 @@ Relay Function + 不可变 CompileConfig
 
 静态单 Call 与首个融合 region 均经 `te::Program` 冻结完整 DAG、调度、边界、Target 和规范 TIR pipeline。优化等级 3 在 CPU:0 对相邻、纯、同形 float32/float64 的 `add → sqrt` 选择一个 PrimitiveUnit；内部 add 结果必须没有外部消费者。默认等级 2 保留独立单元。Program v1 字节替代静态 schedule-only 候选身份并进入 artifact key v4，compiler execution contract 为 v5；TE→TIR、cache、后端与 RuntimeSession owner 保持原路径。metadata-only 形状控制输入仍保留 ABI；exact-profile 与普通编译共用同一可见计划边界。实际 kernel 数从 2 到 1、数值、缓存和寿命证据见 [M8 报告](implementation/M8_TE_PROGRAM_REPORT.md)。现有内部 Allocate 仍可能存在，尚未证明模型级加速。
 
-可选的结构化控制流路径复用准备、原语编译、签名、编译产物与所有权逻辑：
+结构化控制流已并入主编译/执行链，不再有独立的产物与执行权威。同一入口按输入图选择拓扑：
 
 ```text
-PrepareRelayProgram
-  -> LowerPreparedRelayToControlPlanWithSidecar
-  -> CompilePrimitiveUnits
-  -> BindControlPlanForRuntime
-  -> CompiledControlFlowGraph
-  -> ControlRuntimeSession
+Compiler::Compile
+  -> PrepareRelayProgram（按残余控制能力选择 StaticOnly / NativeExact）
+     ├─ 无控制拓扑 -> PrepareCompilerGraph -> AssembleCompiledGraph（线性 ExecutablePlan）
+     └─ 有控制拓扑 -> LowerPreparedRelayToControlPlanWithSidecar
+                       -> CompilePrimitiveUnits -> AssemblePrimitiveModule
+                       -> BuildStructuredExecutablePlan（ExecutablePlan + structured_schedule）
+  -> CompiledGraph（两条路径共用产物/执行权威）
+  -> RuntimeSession（线性 walker 或 structured region walker）
 ```
 
-`Compiler::Compile` 会拒绝残留控制拓扑。独立的
-`Compiler::CompileControlFlowExact` 入口仅在 `KXC_ENABLE_CONTROL_RUNTIME=ON` 时可用，
-当前要求使用受支持的精确 CPU 控制子集和真实 LLVM 编译产物。
+`Compiler::Compile` 在 `KXC_ENABLE_CONTROL_RUNTIME=ON` 时发布携带
+`structured_schedule` 的普通 `CompiledGraph`；关闭时按静态策略在准备阶段拒绝控制流。
+不存在第二个 compiler 入口、plan 类型或执行会话。
 
 受限 bounded 生产路径为：
 
@@ -269,6 +271,10 @@ MatMul 基础见 [输出归约报告](implementation/GPU_OWNED_REDUCTION_REPORT.
 
 `ExecutablePlan` 与具体运行时实现无关。其 `ValueSpec` 条目描述逻辑值 ID、物理存储 ID、形状、数据类型、设备、输入/常量/输出角色、别名、状态、写模式、活跃区间和 `valid_bytes`；
 `KernelCall` 条目描述符号及有序的逻辑输入输出。
+
+`ExecutablePlan` 还可选携带 `structured_schedule`：一组结构化 region，其 task 只能是 kernel（按 `call_index` 引用本计划的调用点）、branch（CPU 标量 bool 谓词 + 独立 then/else region + Phi 绑定）或 loop（condition-before-body、carried 绑定、`max_trip_count`）。它是**正交方面**而非新的 `ExecutablePlanMode`：`mode` 仍决定分配与状态合同，`calls()` 仍是每个调用点恰好一个模块入口和一个 artifact pin，拓扑只决定“执行哪些调用点、以什么顺序”。没有 schedule 时按线性路径执行；有 schedule 时由同一 `RuntimeSession` 遍历 region，复用同一参数准备、模块调用和完成管理，不新增 allocator、launch 通道或 state owner。结构化拓扑进入 plan ABI identity；region/task id 是本地定位符，实际谓词值与迭代次数是运行时数据，不进身份。
+
+结构化计划当前仍限定静态模式：与 bounded/state 的组合（region 边界的状态更新、region-aware shape 证明）尚未实现，见 [M10 C3 计划](implementation/M10_C3_UNIFIED_CONTROL_PLAN.md) §7。
 
 `RuntimeSession` 在执行前校验模块与计划的边界：
 

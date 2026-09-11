@@ -111,6 +111,12 @@ struct ControlPlan {
 
     /*! \throws std::invalid_argument if this is not a static-exact v2 plan. */
     void ValidateStaticExact() const;
+    /*! \brief Validate structure while admitting fixed-rank -1 axis values.
+     *
+     *  Used only by the region-aware bounded path: a symbolic axis is
+     *  represented as -1 and its runtime extent is resolved by the module
+     *  invocation contract, so the plan itself carries wildcard dimensions. */
+    void ValidateBounded() const;
     /*! \brief Stable text for diagnostics; locators are rendered, never interpreted. */
     std::string CanonicalText() const;
 };

@@ -5,6 +5,7 @@
 #include "kxc/compiler/compiler.h"
 #include "kxc/relay/op.h"
 #include "kxc/runtime/session.h"
+#include "support/primitive_lowering.h"
 
 #include <algorithm>
 #include <cmath>
@@ -492,8 +493,140 @@ void TestSlice() {
     CompileAndRun("slice_empty", empty_function, {Input(source), Output(empty_output)});
 }
 
+// 验证 ReduceMax / ReduceMin 的轴和 keepdims 语义。
+// 复用 data[i][j][k] = i*100 + j*10 + k 的 [2,3,4] 输入。
+void TestReduceMaxMin() {
+    kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
+    std::vector<float> data_buf = {1, 5, 3, 4, 2, 6};
+
+    kxc::Call max_call(kxc::relay::Op::Get("reduce_max"), {data},
+                       kxc::relay::ReduceMaxAttrs::Create({1}, 0));
+    kxc::Function max_func({data}, max_call);
+    std::vector<float> max_out(2, 0.0f);
+    CompileAndRun("reduce_max", max_func, {Input(data_buf), Output(max_out)});
+    ExpectNear(max_out, {5.0f, 6.0f});
+
+    kxc::Call min_call(kxc::relay::Op::Get("reduce_min"), {data},
+                       kxc::relay::ReduceMinAttrs::Create({1}, 0));
+    kxc::Function min_func({data}, min_call);
+    std::vector<float> min_out(2, 0.0f);
+    CompileAndRun("reduce_min", min_func, {Input(data_buf), Output(min_out)});
+    ExpectNear(min_out, {1.0f, 2.0f});
+
+    // keepdims=1 over the middle axis of a [2,3,4] cube.
+    kxc::Var cube("cube", kxc::TensorType({2, 3, 4}, "float32"));
+    std::vector<float> cube_buf(24);
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            for (int k = 0; k < 4; ++k) {
+                cube_buf[static_cast<size_t>(i * 12 + j * 4 + k)] =
+                    static_cast<float>(i * 100 + j * 10 + k);
+            }
+        }
+    }
+    kxc::Call cube_max(kxc::relay::Op::Get("reduce_max"), {cube},
+                       kxc::relay::ReduceMaxAttrs::Create({1}, 1));
+    kxc::Function cube_max_func({cube}, cube_max);
+    std::vector<float> cube_max_out(8, 0.0f);
+    CompileAndRun("reduce_max_keepdims1_axis1", cube_max_func,
+                  {Input(cube_buf), Output(cube_max_out)});
+    ExpectNear(cube_max_out, {20, 21, 22, 23, 120, 121, 122, 123});
+
+    kxc::Call cube_min(kxc::relay::Op::Get("reduce_min"), {cube},
+                       kxc::relay::ReduceMinAttrs::Create({0, 1}, 1));
+    kxc::Function cube_min_func({cube}, cube_min);
+    std::vector<float> cube_min_out(4, 0.0f);
+    CompileAndRun("reduce_min_keepdims1_axis01", cube_min_func,
+                  {Input(cube_buf), Output(cube_min_out)});
+    ExpectNear(cube_min_out, {0, 1, 2, 3});
+
+    // Production per-primitive lowering must accept both ops on their own.
+    kxc::Var direct("direct", kxc::TensorType({2, 3}, "float32"));
+    const auto max_units = kxc::test_support::LowerPrimitiveUnits(kxc::Function(
+        {direct}, kxc::Call(kxc::relay::Op::Get("reduce_max"), {direct},
+                            kxc::relay::ReduceMaxAttrs::Create({1}, 0))));
+    const auto min_units = kxc::test_support::LowerPrimitiveUnits(kxc::Function(
+        {direct}, kxc::Call(kxc::relay::Op::Get("reduce_min"), {direct},
+                            kxc::relay::ReduceMinAttrs::Create({1}, 0))));
+    if (max_units.size() != 1 || min_units.size() != 1) {
+        throw std::runtime_error("reduce_max/reduce_min lowering arity mismatch");
+    }
+}
+
 // 验证 ReduceMean 的轴和 keepdims 语义。
 // 三维用例统一使用 data[i][j][k] = i*100 + j*10 + k 的 [2,3,4] 输入。
+void TestArgMax() {
+    // data[i][j] = row 0 {1,5,5,2}, row 1 {9,3,9,9}. With axis=1 the first
+    // occurrence wins by default; select_last_index=1 picks the last.
+    kxc::Var data("data", kxc::TensorType({2, 4}, "float32"));
+    std::vector<float> data_buf = {1, 5, 5, 2, 9, 3, 9, 9};
+
+    kxc::Call first(kxc::relay::Op::Get("argmax"), {data},
+                    kxc::relay::ArgMaxAttrs::Create(1, 0, 0));
+    kxc::Function first_func({data}, first);
+    std::vector<int64_t> first_out(2, 0);
+    CompileAndRun("argmax_first", first_func, {Input(data_buf), Output(first_out)});
+    {
+        std::vector<int64_t> expected{1, 0};
+        if (first_out != expected) {
+            throw std::runtime_error("argmax first-occurrence mismatch");
+        }
+    }
+
+    kxc::Call last(kxc::relay::Op::Get("argmax"), {data},
+                   kxc::relay::ArgMaxAttrs::Create(1, 0, 1));
+    kxc::Function last_func({data}, last);
+    std::vector<int64_t> last_out(2, 0);
+    CompileAndRun("argmax_last", last_func, {Input(data_buf), Output(last_out)});
+    {
+        std::vector<int64_t> expected{2, 3};
+        if (last_out != expected) {
+            throw std::runtime_error("argmax last-occurrence mismatch");
+        }
+    }
+
+    // Production per-primitive lowering must accept the op.
+    const auto units = kxc::test_support::LowerPrimitiveUnits(kxc::Function(
+        {data}, kxc::Call(kxc::relay::Op::Get("argmax"), {data},
+                          kxc::relay::ArgMaxAttrs::Create(1, 0, 0))));
+    if (units.size() != 1) {
+        throw std::runtime_error("argmax lowering arity mismatch");
+    }
+}
+
+void TestLess() {
+    // int32: a < b; strict, so equal elements are false.
+    kxc::Var a("a", kxc::TensorType({3}, "int32"));
+    kxc::Var b("b", kxc::TensorType({3}, "int32"));
+    kxc::Call call(kxc::relay::Op::Get("less"), {a, b});
+    kxc::Function func({a, b}, call);
+    const std::vector<int32_t> a_data = {1, 2, 3};
+    const std::vector<int32_t> b_data = {1, 0, 5};
+    std::vector<uint8_t> out(3, 1);
+    CompileAndRun("less", func, {Input(a_data), Input(b_data), Output(out)});
+    Check(out == std::vector<uint8_t>({0, 0, 1}), "less int32 mismatch");
+
+    // int64 trailing-axis broadcast, matching the attention-mask use.
+    kxc::Var lhs("lhs", kxc::TensorType({2, 3}, "int64"));
+    kxc::Var rhs("rhs", kxc::TensorType({3}, "int64"));
+    kxc::Call broadcast_call(kxc::relay::Op::Get("less"), {lhs, rhs});
+    kxc::Function broadcast_func({lhs, rhs}, broadcast_call);
+    const std::vector<int64_t> lhs_data = {0, 1, 2, 3, 4, 5};
+    const std::vector<int64_t> rhs_data = {3, 3, 3};
+    std::vector<uint8_t> broadcast_out(6, 0);
+    CompileAndRun("less_int64_broadcast", broadcast_func,
+                  {Input(lhs_data), Input(rhs_data), Output(broadcast_out)});
+    Check(broadcast_out == std::vector<uint8_t>({1, 1, 1, 0, 0, 0}),
+          "less int64 broadcast mismatch");
+
+    // Production per-primitive lowering must accept the op.
+    const auto units = kxc::test_support::LowerPrimitiveUnits(
+        kxc::Function({a, b}, call));
+    if (units.size() != 1) {
+        throw std::runtime_error("less lowering arity mismatch");
+    }
+}
+
 void TestReduceMean() {
     kxc::Var data("data", kxc::TensorType({2, 3}, "float32"));
     kxc::Call call(kxc::relay::Op::Get("reduce_mean"), {data},
@@ -1267,10 +1400,13 @@ int main() {
         {"concatenate", TestConcatenate},
         {"slice", TestSlice},
         {"reduce_mean", TestReduceMean},
+        {"reduce_max_min", TestReduceMaxMin},
+        {"argmax", TestArgMax},
         {"softmax", TestSoftmax},
         {"gather", TestGather},
         {"where", TestWhere},
         {"equal", TestEqual},
+        {"less", TestLess},
         {"neg", TestNeg},
         {"sigmoid", TestSigmoid},
         {"tanh_erf", TestVisionUnaryMath},

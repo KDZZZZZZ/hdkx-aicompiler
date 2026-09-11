@@ -73,6 +73,24 @@
         "relay_to_te_symbol": "AddCompute"
       }
     },
+    "argmax": {
+      "schema_version": 1,
+      "category": "tensor.reduce",
+      "num_inputs": 1,
+      "attrs": "ArgMaxAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "ArgMax"
+      ]
+    },
     "cast": {
       "schema_version": 1,
       "category": "tensor.transform",
@@ -263,6 +281,41 @@
       "onnx_ops": [
         "Gather"
       ]
+    },
+    "less": {
+      "schema_version": 1,
+      "category": "tensor.math",
+      "num_inputs": 2,
+      "attrs": null,
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "Less"
+      ],
+      "registration": {
+        "description": "Element-wise less-than comparison with broadcast.",
+        "arguments": [
+          {
+            "name": "lhs",
+            "type": "Tensor",
+            "description": "The left hand side input tensor."
+          },
+          {
+            "name": "rhs",
+            "type": "Tensor",
+            "description": "The right hand side input tensor."
+          }
+        ],
+        "type_infer_symbol": "LessInferType",
+        "relay_to_te_symbol": "LessCompute"
+      }
     },
     "masked_softmax": {
       "schema_version": 1,
@@ -558,6 +611,24 @@
         "relay_to_te_symbol": "PowCompute"
       }
     },
+    "reduce_max": {
+      "schema_version": 1,
+      "category": "tensor.reduce",
+      "num_inputs": 1,
+      "attrs": "ReduceMaxAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "ReduceMax"
+      ]
+    },
     "reduce_mean": {
       "schema_version": 1,
       "category": "tensor.reduce",
@@ -574,6 +645,24 @@
       "tests": true,
       "onnx_ops": [
         "ReduceMean"
+      ]
+    },
+    "reduce_min": {
+      "schema_version": 1,
+      "category": "tensor.reduce",
+      "num_inputs": 1,
+      "attrs": "ReduceMinAttrs",
+      "output_arity": 1,
+      "type_relation_key": "FInferType",
+      "effect": "pure",
+      "deterministic": true,
+      "alias": "none",
+      "lowering": "single",
+      "lowering_key": "FRelayToTE",
+      "ffi": true,
+      "tests": true,
+      "onnx_ops": [
+        "ReduceMin"
       ]
     },
     "reshape": {

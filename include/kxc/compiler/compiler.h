@@ -12,14 +12,14 @@
 #include "kxc/compiler/compile_config.h"
 #include "kxc/compiler/artifact.h"
 #include "kxc/runtime/compiled_module.h"
-#include "kxc/runtime/control_execution_plan.h"
 #include "kxc/runtime/executable_plan.h"
 #include "kxc/support/container.h"
 #include "kxc/relay/relay.h"
 
 namespace kxc::api::experimental::restricted_symbolic_shape::v1 {
 class BoundedCompileRequest;
-}
+struct InputAxisSymbol;
+}  // namespace kxc::api::experimental::restricted_symbolic_shape::v1
 
 namespace kxc {
 namespace api {
@@ -59,26 +59,6 @@ private:
 static_assert(std::is_copy_constructible_v<CompiledGraph>);
 static_assert(std::is_copy_assignable_v<CompiledGraph>);
 
-/*! \brief Immutable compiler result for one resolved control execution plan.
- *
- * Bound kernels privately retain the same process-local pin owner. The result
- * contains no Relay, TE, cache lookup, or compiler callback.
- */
-class CompiledControlFlowGraph final {
-public:
-    bool defined() const noexcept;
-    const runtime::ControlExecutionPlan& plan() const;
-
-private:
-    struct State;
-    explicit CompiledControlFlowGraph(std::shared_ptr<const State> state);
-    friend class Compiler;
-    std::shared_ptr<const State> state_;
-};
-
-static_assert(std::is_copy_constructible_v<CompiledControlFlowGraph>);
-static_assert(std::is_copy_assignable_v<CompiledControlFlowGraph>);
-
 /*!
  * \brief Relay Function 到可执行模块的统一编译入口。
  *
@@ -89,6 +69,10 @@ class Compiler {
 public:
     /*!
      * \brief 从 Relay Function 编译出 CompiledModule。
+     *
+     * 当输入图残留结构化控制拓扑且 `KXC_ENABLE_CONTROL_RUNTIME` 打开时，
+     * 该入口发布携带 `structured_schedule` 的普通 `CompiledGraph`，由普通
+     * `RuntimeSession` 执行；否则走静态数据流路径并在准备阶段拒绝控制流。
      * \param func 输入 Relay 函数。
      * \param config 编译配置。
      * \return 可运行的编译模块。
@@ -100,16 +84,17 @@ public:
         const experimental::restricted_symbolic_shape::v1::BoundedCompileRequest&
             request);
 
-    /*! \brief Explicit default-OFF production path for static CPU Relay control.
+    /*! \brief Compiles a bounded graph that contains structured control flow.
      *
-     * Supports static If and bounded condition-before-body While on CPU:0/default
-     * stream with real available backend artifacts. Bound kernels privately
-     * retain one process-local pin owner; it is not authentication or external
-     * provenance. Compiler::Compile remains the static-dataflow
-     * API and continues to reject Relay control flow.
-     */
-    static CompiledControlFlowGraph CompileControlFlowExact(
-        Function func, CompileConfig config);
+     * Same one-artifact-serves-many-shapes contract as CompileBounded, but the
+     * representative may contain Relay If / bounded While. The result is a
+     * normal CompiledGraph whose ExecutablePlan is a dynamic fresh-output plan
+     * carrying an optional structured_schedule. CPU:0/LLVM only. */
+    static CompiledGraph CompileBoundedStructured(
+        Function representative, CompileConfig config,
+        const std::vector<
+            experimental::restricted_symbolic_shape::v1::InputAxisSymbol>&
+            input_axis_symbols);
 
     /*! \brief Builds whole-graph Relay semantics without target/compiler policy. */
     static GraphSemanticKey BuildGraphSemanticKey(const Function& func);

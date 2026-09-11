@@ -272,6 +272,20 @@ Type EqualInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(BroadcastShape("equal", ShapeVector(lhs), ShapeVector(rhs)), "bool");
 }
 
+// 推导 less 的广播结果类型；数值小于输出 bool。
+Type LessInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    (void)attrs;
+    RequireArity("less", input_types, 2);
+    const auto* lhs = RequireTensor("less", input_types[0], "lhs");
+    const auto* rhs = RequireTensor("less", input_types[1], "rhs");
+    RequireSameDType("less", lhs, rhs);
+    if (!IsEqualInputDType(lhs->dtype)) {
+        throw std::runtime_error(
+            "less supports same-dtype int32, int64, or float32 inputs, got " + lhs->dtype);
+    }
+    return MakeTensorType(BroadcastShape("less", ShapeVector(lhs), ShapeVector(rhs)), "bool");
+}
+
 // M4/M5 静态子集共享：Neg/Sigmoid 是 float32-only 的 fieldless 一元算子，
 // shape 与 dtype 原样保持；其余 dtype 必须在类型推导处立即失败。
 Type UnaryFloat32InferType(const std::string& op_name, const Array<Type>& input_types) {
@@ -1259,15 +1273,14 @@ Type SliceInferType(const Attrs& attrs, const Array<Type>& input_types) {
     return MakeTensorType(out, data->dtype);
 }
 
-// 按 axes 与 keepdims 推导 reduce_mean 结果 shape。
-Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
-    RequireArity("reduce_mean", input_types, 1);
-    const auto* data = RequireTensor("reduce_mean", input_types[0], "data");
-    const auto* reduce_attrs = attrs.As<ReduceMeanAttrsNode>();
+// 按 axes 与 keepdims 推导 reduce 结果 shape（mean/max/min 共用）。
+Type ReduceInferTypeImpl(const char* op, const Array<int64_t>& raw_axes,
+                         int64_t raw_keepdims, const Array<Type>& input_types) {
+    RequireArity(op, input_types, 1);
+    const auto* data = RequireTensor(op, input_types[0], "data");
     const std::vector<int> axes =
-        NormalizeAxes("reduce_mean", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{},
-                      static_cast<int>(data->shape.size()));
-    const bool keepdims = !reduce_attrs || reduce_attrs->keepdims != 0;
+        NormalizeAxes(op, raw_axes, static_cast<int>(data->shape.size()));
+    const bool keepdims = raw_keepdims != 0;
 
     std::vector<bool> reduce_axis(data->shape.size(), false);
     for (int axis : axes) {
@@ -1285,6 +1298,58 @@ Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
         }
     }
     return MakeTensorType(out, data->dtype);
+}
+
+// 按 axes 与 keepdims 推导 reduce_mean 结果 shape。
+Type ReduceMeanInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    const auto* reduce_attrs = attrs.As<ReduceMeanAttrsNode>();
+    return ReduceInferTypeImpl(
+        "reduce_mean", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{},
+        reduce_attrs ? reduce_attrs->keepdims : 1, input_types);
+}
+
+Type ReduceMaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    const auto* reduce_attrs = attrs.As<ReduceMaxAttrsNode>();
+    return ReduceInferTypeImpl(
+        "reduce_max", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{},
+        reduce_attrs ? reduce_attrs->keepdims : 1, input_types);
+}
+
+Type ReduceMinInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    const auto* reduce_attrs = attrs.As<ReduceMinAttrsNode>();
+    return ReduceInferTypeImpl(
+        "reduce_min", reduce_attrs ? reduce_attrs->axes : Array<int64_t>{},
+        reduce_attrs ? reduce_attrs->keepdims : 1, input_types);
+}
+
+// argmax 在单个轴上归约，输出 int64（与 ONNX ArgMax 一致）。
+Type ArgMaxInferType(const Attrs& attrs, const Array<Type>& input_types) {
+    RequireArity("argmax", input_types, 1);
+    const auto* data = RequireTensor("argmax", input_types[0], "data");
+    if (data->dtype != "float32") {
+        throw std::runtime_error("argmax requires float32 input, got " + data->dtype);
+    }
+    const auto* arg_attrs = attrs.As<ArgMaxAttrsNode>();
+    const int64_t rank = static_cast<int64_t>(data->shape.size());
+    if (rank < 1) {
+        throw std::runtime_error("argmax requires rank at least 1");
+    }
+    int64_t axis = arg_attrs ? arg_attrs->axis : -1;
+    if (axis < 0) axis += rank;
+    if (axis < 0 || axis >= rank) {
+        throw std::runtime_error("argmax axis out of range");
+    }
+    const bool keepdims =
+        (arg_attrs ? arg_attrs->keepdims : 0) != 0;
+    std::vector<int64_t> out;
+    for (int64_t index = 0; index < rank; ++index) {
+        if (index == axis) {
+            if (keepdims) out.push_back(1);
+        } else {
+            out.push_back(data->shape[static_cast<size_t>(index)]);
+        }
+    }
+    return MakeTensorType(out, "int64");
 }
 
 // 校验 softmax 轴并保持输入类型。

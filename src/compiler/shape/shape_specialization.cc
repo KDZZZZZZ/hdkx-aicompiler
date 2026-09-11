@@ -125,6 +125,17 @@ GraphTemplate::GraphTemplate(GraphSemanticKey key, ShapeProgram shape_program,
     : key_(std::move(key)), shape_program_(std::move(shape_program)), ordered_units_(std::move(ordered_units)) {
   Verify();
 }
+GraphTemplate::GraphTemplate(GraphSemanticKey key, ShapeProgram shape_program,
+                             std::vector<UnitSkeleton> ordered_units,
+                             std::vector<std::string> synthesized_value_names)
+    : key_(std::move(key)), shape_program_(std::move(shape_program)),
+      ordered_units_(std::move(ordered_units)),
+      synthesized_value_names_(std::move(synthesized_value_names)) {
+  Verify();
+}
+const std::vector<std::string>& GraphTemplate::synthesized_value_names() const noexcept {
+  return synthesized_value_names_;
+}
 const GraphSemanticKey& GraphTemplate::key() const noexcept { return key_; }
 const ShapeProgram& GraphTemplate::shape_program() const noexcept { return shape_program_; }
 const std::vector<UnitSkeleton>& GraphTemplate::ordered_units() const noexcept { return ordered_units_; }
@@ -141,6 +152,11 @@ std::string GraphTemplate::CanonicalBytes() const {
     AppendU64(&bytes, unit.output_value_names.size());
     for (const std::string& name : unit.output_value_names) AppendField(&bytes, name);
   }
+  // Appended only when non-empty so linear templates keep v2 bytes exactly.
+  if (!synthesized_value_names_.empty()) {
+    AppendU64(&bytes, synthesized_value_names_.size());
+    for (const std::string& name : synthesized_value_names_) AppendField(&bytes, name);
+  }
   return bytes;
 }
 void GraphTemplate::Verify() const {
@@ -153,6 +169,21 @@ void GraphTemplate::Verify() const {
     available_values.insert(value.name);
   }
   for (const NamedTensorContract& value : shape_program_.outputs()) declared_values.insert(value.name);
+  // Topology-produced values (Phi results, loop carried values) are materialized
+  // by the structured schedule rather than a unit, so they are available before
+  // the first unit runs. Validate them here so the per-unit routing check below
+  // can accept a body argument that is produced by the loop topology.
+  std::set<std::string> synthesized;
+  for (const std::string& value_name : synthesized_value_names_) {
+    CheckName(value_name, "synthesized value name");
+    if (declared_values.count(value_name) == 0) {
+      Invalid("synthesized value '" + value_name + "' has no shape contract");
+    }
+    if (!synthesized.insert(value_name).second) {
+      Invalid("synthesized value '" + value_name + "' is declared twice");
+    }
+    available_values.insert(value_name);
+  }
 
   std::set<std::string> locators;
   std::set<std::string> produced_values;
@@ -184,6 +215,12 @@ void GraphTemplate::Verify() const {
       }
     }
     available_values.insert(unit.output_value_names.begin(), unit.output_value_names.end());
+  }
+  // A synthesized value must not also be produced by a unit.
+  for (const std::string& value_name : synthesized) {
+    if (produced_values.count(value_name) != 0) {
+      Invalid("synthesized value '" + value_name + "' conflicts with a produced value");
+    }
   }
   for (const NamedTensorContract& value : shape_program_.outputs()) {
     if (available_values.count(value.name) == 0) {

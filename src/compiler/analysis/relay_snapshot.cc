@@ -289,8 +289,14 @@ private:
             result = If(CloneExpr(node->cond), CloneExpr(node->true_branch),
                         CloneExpr(node->false_branch));
             expressions_.emplace(source.get(), result);
-        } else if (source.As<WhileNode>()) {
-            Reject("While is rejected by the static preparation snapshot; use CompileControlFlowExact");
+        } else if (const auto* node = source.As<WhileNode>()) {
+            // Mechanical deep copy; the clone is a value, not a policy decision.
+            const Var loop_var(CloneExpr(Expr(ObjectRef(node->loop_var))));
+            expressions_.emplace(node->loop_var.get(), Expr(ObjectRef(loop_var)));
+            result = While(CloneExpr(node->initial_state), loop_var,
+                           CloneExpr(node->condition), CloneExpr(node->body),
+                           node->max_trip_count);
+            expressions_.emplace(source.get(), result);
         } else {
             Reject("unsupported Relay node in preparation snapshot: " +
                    std::string(source->GetTypeKey()));

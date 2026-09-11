@@ -345,7 +345,7 @@ void PrintAlias(std::ostringstream& out, const AliasSummary& alias) {
 
 }  // namespace
 
-void VerifyControlPlan(const ControlPlan& plan) {
+void VerifyControlPlanImpl(const ControlPlan& plan, bool allow_dynamic_axes) {
     if (plan.schema_version != ControlPlan::kSchemaVersion) {
         Fail("schema_version must be 2");
     }
@@ -367,7 +367,11 @@ void VerifyControlPlan(const ControlPlan& plan) {
         }
         if (value.source_locator.empty()) Fail("value source_locator is required");
         for (const std::int64_t dim : tensor.shape) {
-            if (dim < 0) Fail("value shape must be static and non-negative");
+            // A bounded plan admits -1 as a fixed-rank symbolic axis; its runtime
+            // extent comes from the module invocation contract, not the plan.
+            if (dim < 0 && !(allow_dynamic_axes && dim == -1)) {
+                Fail("value shape must be static and non-negative");
+            }
         }
     }
     RequireUnique(plan.graph_inputs, "graph inputs");
@@ -440,7 +444,13 @@ void VerifyControlPlan(const ControlPlan& plan) {
     }
 }
 
+void VerifyControlPlan(const ControlPlan& plan) {
+    VerifyControlPlanImpl(plan, false);
+}
+
 void ControlPlan::ValidateStaticExact() const { VerifyControlPlan(*this); }
+
+void ControlPlan::ValidateBounded() const { VerifyControlPlanImpl(*this, true); }
 
 std::string ControlPlan::CanonicalText() const {
     ValidateStaticExact();

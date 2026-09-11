@@ -578,6 +578,115 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
         AppendInteger(&canonical, "state_ordinal", value_ordinals.at(id));
     }
     AppendField(&canonical, "states_end", "v1");
+    // Structured topology is behavior: schedule shape, Phi/backedge wiring,
+    // trip bounds, and call-point selection are identity. Region/task ids are
+    // local locators, so they are renumbered by first appearance; value ids are
+    // rendered as value ordinals. Actual predicates and iteration counts are
+    // runtime data and never appear here.
+    if (const auto schedule = plan.structured_schedule()) {
+        AppendField(&canonical, "structured_schedule_begin", "v1");
+        AppendInteger(&canonical, "structured_schema_version",
+                      schedule->schema_version);
+        std::unordered_map<int64_t, int64_t> region_ordinals;
+        int64_t next_region = 0;
+        for (int64_t region_id : schedule->region_order) {
+            region_ordinals.emplace(region_id, next_region++);
+        }
+        const auto region_ordinal = [&](int64_t id) {
+            const auto found = region_ordinals.find(id);
+            if (found == region_ordinals.end()) {
+                throw std::invalid_argument(
+                    "structured region order omits a referenced region");
+            }
+            return found->second;
+        };
+        AppendInteger(&canonical, "structured_entry_region",
+                      region_ordinal(schedule->entry_region));
+        for (const auto& region : schedule->regions) {
+            AppendInteger(&canonical, "structured_region_ordinal",
+                          region_ordinal(region.id));
+            for (int64_t id : region.live_ins) {
+                AppendInteger(&canonical, "structured_live_in",
+                              value_ordinals.at(id));
+            }
+            for (int64_t id : region.live_outs) {
+                AppendInteger(&canonical, "structured_live_out",
+                              value_ordinals.at(id));
+            }
+            std::unordered_map<int64_t, int64_t> task_ordinals;
+            int64_t next_task = 0;
+            for (const auto& task : region.tasks) {
+                task_ordinals.emplace(task.id, next_task++);
+            }
+            const auto task_ordinal = [&](int64_t id) {
+                const auto found = task_ordinals.find(id);
+                if (found == task_ordinals.end()) {
+                    throw std::invalid_argument(
+                        "structured task id is not local to its region");
+                }
+                return found->second;
+            };
+            for (const auto& task : region.tasks) {
+                AppendField(&canonical, "structured_task_begin", "v1");
+                AppendInteger(&canonical, "structured_task_id",
+                              task_ordinal(task.id));
+                AppendInteger(&canonical, "structured_task_kind",
+                              static_cast<int64_t>(task.kind));
+                for (int64_t id : task.inputs) {
+                    AppendInteger(&canonical, "structured_task_input",
+                                  value_ordinals.at(id));
+                }
+                for (int64_t id : task.outputs) {
+                    AppendInteger(&canonical, "structured_task_output",
+                                  value_ordinals.at(id));
+                }
+                switch (task.kind) {
+                    case runtime::StructuredTaskKind::kKernel:
+                        AppendInteger(&canonical, "structured_call_index",
+                                      task.call_index);
+                        break;
+                    case runtime::StructuredTaskKind::kBranch:
+                        AppendInteger(&canonical, "structured_predicate",
+                                      value_ordinals.at(task.branch.predicate));
+                        AppendInteger(&canonical, "structured_then_region",
+                                      region_ordinal(task.branch.then_region));
+                        AppendInteger(&canonical, "structured_else_region",
+                                      region_ordinal(task.branch.else_region));
+                        for (const auto& phi : task.branch.phis) {
+                            AppendInteger(&canonical, "structured_phi_result",
+                                          value_ordinals.at(phi.result));
+                            AppendInteger(&canonical, "structured_phi_then",
+                                          value_ordinals.at(phi.then_value));
+                            AppendInteger(&canonical, "structured_phi_else",
+                                          value_ordinals.at(phi.else_value));
+                        }
+                        break;
+                    case runtime::StructuredTaskKind::kLoop:
+                        AppendInteger(&canonical, "structured_condition_region",
+                                      region_ordinal(task.loop.condition_region));
+                        AppendInteger(&canonical, "structured_body_region",
+                                      region_ordinal(task.loop.body_region));
+                        AppendInteger(&canonical, "structured_condition_value",
+                                      value_ordinals.at(task.loop.condition_value));
+                        AppendInteger(&canonical, "structured_max_trip_count",
+                                      task.loop.max_trip_count);
+                        for (const auto& carried : task.loop.carried) {
+                            AppendInteger(&canonical, "structured_carried_result",
+                                          value_ordinals.at(carried.result));
+                            AppendInteger(&canonical, "structured_carried_initial",
+                                          value_ordinals.at(carried.initial));
+                            AppendInteger(&canonical, "structured_carried_argument",
+                                          value_ordinals.at(carried.body_argument));
+                            AppendInteger(&canonical, "structured_carried_backedge",
+                                          value_ordinals.at(carried.backedge));
+                        }
+                        break;
+                }
+                AppendField(&canonical, "structured_task_end", "v1");
+            }
+        }
+        AppendField(&canonical, "structured_schedule_end", "v1");
+    }
     if (external_stateful) {
         for (const auto& binding : plan.state_output_bindings()) {
             AppendInteger(&canonical, "state_output_state_ordinal",
@@ -588,6 +697,10 @@ PlanAbiFingerprint BuildPlanAbiFingerprint(
                           binding.source_extent_axis);
             AppendInteger(&canonical, "state_output_slot", binding.source_slot);
             AppendInteger(&canonical, "state_output_append_count", binding.append_count);
+            // The update region changes when the append commits, so it is
+            // identity; -1 keeps the linear end-of-run commit.
+            AppendInteger(&canonical, "state_output_update_region",
+                          binding.update_region);
             if (bounded_stateful) {
                 AppendInteger(&canonical, "state_prefix_input_ordinal",
                               value_ordinals.at(binding.input_value_id));

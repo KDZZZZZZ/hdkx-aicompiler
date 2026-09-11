@@ -143,9 +143,9 @@ bool TestRelayOperatorRegistryLookupAndSpecs() {
 
     const kxc::relay::Op& slice = kxc::relay::Op::Get("slice");
     TEST_CHECK(slice->name == "slice" && slice.spec().attrs_type_key == "SliceAttrs" &&
-                   slice.spec().schema_version == 4 && slice.spec().input_arity.num_inputs == -1 &&
+                   slice.spec().schema_version == 5 && slice.spec().input_arity.num_inputs == -1 &&
                    slice.spec().input_arity.min_inputs == 1 && slice.spec().input_arity.max_inputs == 5,
-               "slice v4 should declare static, prepared prefix/window, and source forms");
+               "slice v5 should declare static, prepared prefix/window, and source forms");
     const kxc::PackedFunc make_slice =
         kxc::Registry::Global().Get("kxc.relay.op._make.slice");
     TEST_CHECK(make_slice.defined(),

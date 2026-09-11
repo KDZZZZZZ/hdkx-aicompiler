@@ -614,16 +614,30 @@ bool TestRelayProgramTopologyCapabilities() {
                 RelayControlCapability::kBoundedPreTestLoop),
         "residual profiling must retain every nested control capability");
 
+    // The default entry policy is now gate-dependent: with the control runtime
+    // disabled Compiler::Compile rejects residual control through StaticOnly;
+    // with it enabled the same call publishes a structured CompiledGraph.
+#if KXC_ENABLE_CONTROL_RUNTIME
+    const auto static_if = Compiler::Compile(conditional, config);
+    TEST_CHECK(static_if.defined() && static_if.plan().defined() &&
+                   static_if.plan().structured_schedule().has_value(),
+               "gate-on Compiler::Compile must publish residual If as a structured plan");
+    // A control flow with no real kernel body has no PrimitiveUnit, so it is
+    // rejected on the unified path exactly like a passthrough If.
+    TEST_CHECK(!ErrorText([&] { (void)Compiler::Compile(bounded_loop, config); }).empty(),
+               "gate-on Compiler::Compile must reject a kernel-free structured loop");
+#else
     const std::string static_if_error = ErrorText([&] {
         (void)Compiler::Compile(conditional, config);
     });
     TEST_CHECK(static_if_error.find("conditional_branch") != std::string::npos,
-               "Compiler::Compile must reject residual If through its static policy");
+               "gate-off Compiler::Compile must reject residual If through its static policy");
     const std::string static_while_error = ErrorText([&] {
         (void)Compiler::Compile(bounded_loop, config);
     });
     TEST_CHECK(static_while_error.find("bounded_pre_test_loop") != std::string::npos,
-               "Compiler::Compile must reject residual While through its static policy");
+               "gate-off Compiler::Compile must reject residual While through its static policy");
+#endif
     return true;
 }
 

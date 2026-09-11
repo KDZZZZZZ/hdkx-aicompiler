@@ -99,6 +99,7 @@
 - [M9 E2 decode 签名审计](implementation/M9_E2_SIGNATURE.md) — past/present 签名与 M2 绑定要求。
 - [M10：结构化控制流（If / 有界 While）](implementation/M10_STRUCTURED_CONTROL.md)
 - [M10 控制流 receipt](implementation/M10_CONTROL_RECEIPT.md) — C0 审计、C1 gate-on 证据与 L1b 循环选择。
+- [M10 C3 实施计划：把结构化控制流并入主执行链](implementation/M10_C3_UNIFIED_CONTROL_PLAN.md) — 取消第二套产物与执行权威、region-aware bounded admission、region 边界状态提交与真实模型图内循环；PR1–PR6 已实施。
 
 ## 工具文档
 

@@ -215,6 +215,14 @@ size_t PreparedRelayProgram::capability_boundary_checks() const noexcept {
     return capability_boundary_checks_;
 }
 
+RelayProgramProfile ProfileRelayControlCapabilities(const Function& function) {
+    if (!function.defined()) {
+        throw std::invalid_argument(
+            "ProfileRelayControlCapabilities requires a defined Function");
+    }
+    return RelayProgramProfile(AnalyzeRelayControlCapabilities(function));
+}
+
 PreparedRelayProgram PrepareRelayProgram(
     Function function, const CompileConfig& config,
     const ControlFlowPolicy& policy) {

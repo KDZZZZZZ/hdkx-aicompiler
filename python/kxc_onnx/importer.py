@@ -97,6 +97,7 @@ ONNX_TO_RELAY = {
     "Gather": "gather",
     "Where": "where",
     "Equal": "equal",
+    "Less": "less",
     "LayerNormalization": "nn_layer_norm",
     "Slice": "slice",
     "Split": "split",
@@ -106,6 +107,9 @@ ONNX_TO_RELAY = {
     "Sqrt": "sqrt",
     "Cast": "cast",
     "ReduceMean": "reduce_mean",
+    "ReduceMax": "reduce_max",
+    "ReduceMin": "reduce_min",
+    "ArgMax": "argmax",
     "Reshape": "reshape",
     "Neg": "neg",
     "Sigmoid": "sigmoid",
@@ -330,7 +334,7 @@ def import_onnx_model(
             name in value_info_by_name and any(not dim.HasField("dim_value")
                 for dim in value_info_by_name[name].type.tensor_type.shape.dim)
             for name in node.input if name)
-        if deferred_shape and node.op_type in {"Neg", "Sigmoid", "Pow", "Sqrt", "ReduceMean"}:
+        if deferred_shape and node.op_type in {"Neg", "Sigmoid", "Pow", "Sqrt", "ReduceMean", "ReduceMax", "ReduceMin"}:
             arity = 2 if node.op_type == "Pow" else 1
             if len(node.input) != arity or not all(node.input):
                 raise ValueError(f"Shape-source {node.op_type} requires {arity} nonempty inputs")
@@ -485,10 +489,17 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch, allow_shape_control=preserve_shape_values,
             )
-        if node.op_type == "ReduceMean" and not deferred_shape:
-            inferred_static_specs[node.output[0]] = _infer_reduce_mean_spec(
-                node, input_specs, params, inferred_static_specs, value_info_by_name,
-                output_declarations, default_batch, opset_version,
+        if node.op_type == "ArgMax" and not deferred_shape:
+            inferred_static_specs[node.output[0]] = _infer_argmax_spec(
+                node, input_specs, params, inferred_static_specs,
+                value_info_by_name, output_declarations, default_batch,
+                opset_version,
+            )
+        if node.op_type in {"ReduceMean", "ReduceMax", "ReduceMin"} and not deferred_shape:
+            inferred_static_specs[node.output[0]] = _infer_reduce_spec(
+                node.op_type, node, input_specs, params, inferred_static_specs,
+                value_info_by_name, output_declarations, default_batch,
+                opset_version,
             )
         if node.op_type == "Reshape":
             if preserve_shape_values:
@@ -519,10 +530,10 @@ def import_onnx_model(
                 node, input_specs, params, inferred_static_specs, value_info_by_name,
                 output_declarations, default_batch,
             )
-        if node.op_type == "Equal":
+        if node.op_type in {"Equal", "Less"}:
             inferred_static_specs[node.output[0]] = _infer_equal_spec(
-                node, input_specs, params, inferred_static_specs, value_info_by_name,
-                output_declarations, default_batch,
+                node.op_type, node, input_specs, params, inferred_static_specs,
+                value_info_by_name, output_declarations, default_batch,
             )
         if node.op_type in {"Neg", "Sigmoid", "Tanh", "Erf"} and not deferred_shape:
             inferred_static_specs[node.output[0]] = _infer_unary_math_spec(
@@ -1133,8 +1144,8 @@ def _infer_cast_spec(
     return result
 
 
-def _reduce_mean_attrs(node: onnx.NodeProto, opset_version: int) -> dict[str, Any]:
-    """Validate ReduceMean attributes for the opset-17 static subset.
+def _reduce_attrs(op_type: str, node: onnx.NodeProto, opset_version: int) -> dict[str, Any]:
+    """Validate ReduceMean/ReduceMax/ReduceMin attributes for the opset-17 subset.
 
     The axes-attribute form (opset <= 17) is required; the opset-18 input form
     is never opened. Absent or empty axes mean "reduce all axes".
@@ -1142,7 +1153,7 @@ def _reduce_mean_attrs(node: onnx.NodeProto, opset_version: int) -> dict[str, An
     node_name = node.name or "<unnamed>"
     if opset_version >= 18:
         raise UnsupportedONNXOpError(
-            f"Unsupported ONNX ReduceMean opset {opset_version} in node "
+            f"Unsupported ONNX {op_type} opset {opset_version} in node "
             f"'{node_name}': the input-form opset >= 18 is not supported; "
             "the static axes-attribute form (opset <= 17) is required"
         )
@@ -1150,23 +1161,53 @@ def _reduce_mean_attrs(node: onnx.NodeProto, opset_version: int) -> dict[str, An
     unsupported = set(attrs) - {"axes", "keepdims"}
     if unsupported:
         raise ValueError(
-            f"ReduceMean node '{node_name}' has unsupported attribute(s): "
+            f"{op_type} node '{node_name}' has unsupported attribute(s): "
             f"{sorted(unsupported)}"
         )
     axes = _list_attr(attrs, "axes", [])
     keepdims = _int_attr(attrs, "keepdims", 1)
     if keepdims not in (0, 1):
         raise ValueError(
-            f"ReduceMean node '{node_name}' keepdims must be 0 or 1; got {keepdims}"
+            f"{op_type} node '{node_name}' keepdims must be 0 or 1; got {keepdims}"
         )
     if len(axes) != len(set(axes)):
         raise ValueError(
-            f"ReduceMean node '{node_name}' axes must not contain duplicates"
+            f"{op_type} node '{node_name}' axes must not contain duplicates"
         )
     return {"axes": axes, "keepdims": keepdims}
 
 
-def _infer_reduce_mean_spec(
+def _argmax_attrs(node: onnx.NodeProto, opset_version: int) -> dict[str, Any]:
+    """Validate ONNX ArgMax attributes for the opset-17 static subset."""
+    node_name = node.name or "<unnamed>"
+    if opset_version < 12:
+        raise UnsupportedONNXOpError(
+            f"Unsupported ONNX ArgMax opset {opset_version} in node '{node_name}': "
+            "the select_last_index attribute requires opset >= 12"
+        )
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(
+            f"ArgMax node '{node_name}' requires exactly one non-empty input"
+        )
+    attrs = _attrs_by_name(node)
+    unsupported = set(attrs) - {"axis", "keepdims", "select_last_index"}
+    if unsupported:
+        raise ValueError(
+            f"ArgMax node '{node_name}' has unsupported attribute(s): "
+            f"{sorted(unsupported)}"
+        )
+    axis = _int_attr(attrs, "axis", 0)
+    keepdims = _int_attr(attrs, "keepdims", 1)
+    select_last_index = _int_attr(attrs, "select_last_index", 0)
+    if keepdims not in (0, 1) or select_last_index not in (0, 1):
+        raise ValueError(
+            f"ArgMax node '{node_name}' keepdims/select_last_index must be 0 or 1"
+        )
+    return {"axis": axis, "keepdims": keepdims,
+            "select_last_index": select_last_index}
+
+
+def _infer_argmax_spec(
     node: onnx.NodeProto,
     input_specs: dict[str, TensorSpec],
     params: dict[str, ParamTensor],
@@ -1177,21 +1218,67 @@ def _infer_reduce_mean_spec(
     opset_version: int,
 ) -> TensorSpec:
     node_name = node.name or "<unnamed>"
-    attrs = _reduce_mean_attrs(node, opset_version)
-    if len(node.input) != 1 or not node.input[0]:
-        raise ValueError(
-            f"ReduceMean node '{node_name}' requires exactly one non-empty input"
-        )
-    data = _resolve_static_input("ReduceMean", node_name, node.input[0], input_specs,
+    attrs = _argmax_attrs(node, opset_version)
+    data = _resolve_static_input("ArgMax", node_name, node.input[0], input_specs,
                                  params, inferred_specs, value_info_by_name, default_batch)
     if data.dtype not in ARITHMETIC_DTYPES:
         raise ValueError(
-            f"ReduceMean node '{node_name}' requires float32 input in the static "
+            f"ArgMax node '{node_name}' requires float32 input in the static S1 "
+            f"subset; got {data.dtype}"
+        )
+    if any(dim < 0 for dim in data.shape):
+        raise ValueError(
+            f"ArgMax node '{node_name}' requires non-negative static dimensions"
+        )
+    rank = len(data.shape)
+    axis = attrs["axis"]
+    if axis < 0:
+        axis += rank
+    if axis < 0 or axis >= rank:
+        raise ValueError(
+            f"ArgMax node '{node_name}' axis {attrs['axis']} is out of range for rank {rank}"
+        )
+    output_shape: list[int] = []
+    for index, dim in enumerate(data.shape):
+        if index == axis:
+            if attrs["keepdims"]:
+                output_shape.append(1)
+        else:
+            output_shape.append(dim)
+    result = TensorSpec(name=node.output[0], shape=output_shape, dtype="int64")
+    _validate_declared_output(
+        "ArgMax", node_name, result, output_declarations, default_batch
+    )
+    return result
+
+
+def _infer_reduce_spec(
+    op_type: str,
+    node: onnx.NodeProto,
+    input_specs: dict[str, TensorSpec],
+    params: dict[str, ParamTensor],
+    inferred_specs: dict[str, TensorSpec],
+    value_info_by_name: dict[str, onnx.ValueInfoProto],
+    output_declarations: dict[str, list[onnx.ValueInfoProto]],
+    default_batch: int | None,
+    opset_version: int,
+) -> TensorSpec:
+    node_name = node.name or "<unnamed>"
+    attrs = _reduce_attrs(op_type, node, opset_version)
+    if len(node.input) != 1 or not node.input[0]:
+        raise ValueError(
+            f"{op_type} node '{node_name}' requires exactly one non-empty input"
+        )
+    data = _resolve_static_input(op_type, node_name, node.input[0], input_specs,
+                                 params, inferred_specs, value_info_by_name, default_batch)
+    if data.dtype not in ARITHMETIC_DTYPES:
+        raise ValueError(
+            f"{op_type} node '{node_name}' requires float32 input in the static "
             f"S1 subset; got {data.dtype}"
         )
     if any(dim < 0 for dim in data.shape):
         raise ValueError(
-            f"ReduceMean node '{node_name}' requires non-negative static dimensions"
+            f"{op_type} node '{node_name}' requires non-negative static dimensions"
         )
     rank = len(data.shape)
     normalized: list[int] = []
@@ -1199,7 +1286,7 @@ def _infer_reduce_mean_spec(
         resolved = axis + rank if axis < 0 else axis
         if resolved < 0 or resolved >= rank:
             raise ValueError(
-                f"ReduceMean node '{node_name}' axis {axis} is out of range for rank {rank}"
+                f"{op_type} node '{node_name}' axis {axis} is out of range for rank {rank}"
             )
         normalized.append(resolved)
     if not normalized:
@@ -1208,7 +1295,7 @@ def _infer_reduce_mean_spec(
     for axis in set(normalized):
         if data.shape[axis] == 0:
             raise ValueError(
-                f"ReduceMean node '{node_name}' reduces over zero-extent axis {axis}; "
+                f"{op_type} node '{node_name}' reduces over zero-extent axis {axis}; "
                 "the result is undefined and is rejected in the static S1 subset"
             )
     output_shape: list[int] = []
@@ -1222,7 +1309,7 @@ def _infer_reduce_mean_spec(
         name=node.output[0], shape=output_shape, dtype="float32",
     )
     _validate_declared_output(
-        "ReduceMean", node_name, result, output_declarations, default_batch
+        op_type, node_name, result, output_declarations, default_batch
     )
     return result
 
@@ -1865,6 +1952,7 @@ def _infer_where_spec(
 
 
 def _infer_equal_spec(
+    op_type: str,
     node: onnx.NodeProto,
     input_specs: dict[str, TensorSpec],
     params: dict[str, ParamTensor],
@@ -1873,39 +1961,39 @@ def _infer_equal_spec(
     output_declarations: dict[str, list[onnx.ValueInfoProto]],
     default_batch: int | None,
 ) -> TensorSpec:
-    """Infer the static bool output of an opset-17 Equal node.
+    """Infer the static bool output of an opset-17 Equal/Less node.
 
-    ONNX Equal is fieldless: two inputs, one output, no attributes. Both inputs
-    must carry the same dtype from the C-line verified subset (int32, int64,
+    Both operators are fieldless: two inputs, one output, no attributes. Both
+    inputs must carry the same dtype from the verified subset (int32, int64,
     float32); the NumPy multidirectional broadcast shape is proven here so the
     result can feed Where as a condition.
     """
     node_name = node.name or "<unnamed>"
     if len(node.input) != 2 or not all(node.input):
         raise ValueError(
-            f"Equal node '{node_name}' requires exactly two non-empty inputs"
+            f"{op_type} node '{node_name}' requires exactly two non-empty inputs"
         )
     lhs, rhs = (
-        _resolve_static_input("Equal", node_name, name, input_specs, params,
+        _resolve_static_input(op_type, node_name, name, input_specs, params,
                               inferred_specs, value_info_by_name, default_batch)
         for name in node.input
     )
     if lhs.dtype not in EQUAL_DTYPES or rhs.dtype not in EQUAL_DTYPES:
         raise ValueError(
-            f"Equal node '{node_name}' requires same-dtype int32, int64, or "
+            f"{op_type} node '{node_name}' requires same-dtype int32, int64, or "
             f"float32 inputs; got {lhs.dtype} and {rhs.dtype}"
         )
     if lhs.dtype != rhs.dtype:
         raise ValueError(
-            f"Equal node '{node_name}' requires matching input dtypes; "
+            f"{op_type} node '{node_name}' requires matching input dtypes; "
             f"got {lhs.dtype} and {rhs.dtype}"
         )
     result = TensorSpec(
         name=node.output[0],
-        shape=_broadcast_shapes("Equal", node_name, lhs.shape, rhs.shape),
+        shape=_broadcast_shapes(op_type, node_name, lhs.shape, rhs.shape),
         dtype="bool",
     )
-    _validate_declared_output("Equal", node_name, result, output_declarations, default_batch)
+    _validate_declared_output(op_type, node_name, result, output_declarations, default_batch)
     return result
 
 
@@ -2370,10 +2458,10 @@ def _convert_attrs(
                 f"Where node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
-    if node.op_type == "Equal":
+    if node.op_type in {"Equal", "Less"}:
         if attrs:
             raise ValueError(
-                f"Equal node '{node.name or '<unnamed>'}' does not support attributes"
+                f"{node.op_type} node '{node.name or '<unnamed>'}' does not support attributes"
             )
         return {}
     if node.op_type in {"Add", "Mul", "Sub", "Div", "Sqrt"}:
@@ -2391,8 +2479,10 @@ def _convert_attrs(
     if node.op_type == "Cast":
         target = _cast_target_dtype(node)
         return {"to": RELAY_CAST_DTYPE_CODES[target]}
-    if node.op_type == "ReduceMean":
-        return _reduce_mean_attrs(node, opset_version)
+    if node.op_type in {"ReduceMean", "ReduceMax", "ReduceMin"}:
+        return _reduce_attrs(node.op_type, node, opset_version)
+    if node.op_type == "ArgMax":
+        return _argmax_attrs(node, opset_version)
     if node.op_type == "Reshape":
         data = _resolve_static_input("Reshape", node.name or "<unnamed>", node.input[0],
                                      input_specs, params, inferred_specs,

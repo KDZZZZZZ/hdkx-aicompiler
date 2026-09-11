@@ -45,6 +45,10 @@ Call MakeEqual(Expr lhs, Expr rhs) {
     return Call(GetOp("equal"), {lhs, rhs});
 }
 
+Call MakeLess(Expr lhs, Expr rhs) {
+    return Call(GetOp("less"), {lhs, rhs});
+}
+
 // 构造一元逐元素取负调用。
 Call MakeNeg(Expr data) {
     return Call(GetOp("neg"), {data});
@@ -91,6 +95,22 @@ Call MakeCast(Expr data, int dtype) {
 // 构造均值归约调用，并保留对象容器中的轴列表。
 Call MakeReduceMean(Expr data, Array<int64_t> axes, int64_t keepdims) {
     return Call(GetOp("reduce_mean"), {data}, ReduceMeanAttrs::Create(std::move(axes), keepdims));
+}
+
+// 构造最大/最小归约调用。
+Call MakeReduceMax(Expr data, Array<int64_t> axes, int64_t keepdims) {
+    return Call(GetOp("reduce_max"), {data}, ReduceMaxAttrs::Create(std::move(axes), keepdims));
+}
+
+Call MakeReduceMin(Expr data, Array<int64_t> axes, int64_t keepdims) {
+    return Call(GetOp("reduce_min"), {data}, ReduceMinAttrs::Create(std::move(axes), keepdims));
+}
+
+// 构造 argmax 调用。
+Call MakeArgMax(Expr data, int64_t axis, int64_t keepdims,
+                int64_t select_last_index) {
+    return Call(GetOp("argmax"), {data},
+                ArgMaxAttrs::Create(axis, keepdims, select_last_index));
 }
 
 // 构造 reshape 调用，并保留有符号目标维度。
@@ -263,6 +283,7 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.subtract").set_body(ToPackedFunc(MakeSub
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.mul").set_body(ToPackedFunc(MakeMul));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.divide").set_body(ToPackedFunc(MakeDivide));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.equal").set_body(ToPackedFunc(MakeEqual));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.less").set_body(ToPackedFunc(MakeLess));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.neg").set_body(ToPackedFunc(MakeNeg));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.sigmoid").set_body(ToPackedFunc(MakeSigmoid));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.tanh").set_body(ToPackedFunc(MakeTanh));
@@ -274,6 +295,9 @@ KXC_REGISTER_GLOBAL("kxc.relay.op._make.sqrt").set_body(ToPackedFunc(MakeSqrt));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.matmul").set_body(ToPackedFunc(MakeMatmul));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.cast").set_body(ToPackedFunc(MakeCast));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_mean").set_body(ToPackedFunc(MakeReduceMean));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_max").set_body(ToPackedFunc(MakeReduceMax));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.reduce_min").set_body(ToPackedFunc(MakeReduceMin));
+KXC_REGISTER_GLOBAL("kxc.relay.op._make.argmax").set_body(ToPackedFunc(MakeArgMax));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.reshape").set_body(ToPackedFunc(MakeReshape));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.shape_of").set_body(ToPackedFunc(MakeShapeOf));
 KXC_REGISTER_GLOBAL("kxc.relay.op._make.shape_expr")
